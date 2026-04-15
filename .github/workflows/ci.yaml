@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524ee3024772badf8e19a689d0d7dd3f14a # v5.6.1
+        with:
+          python-version: '3.x'
+
+      - name: Validate action metadata YAML
+        run: ruby -e 'require "yaml"; YAML.load_file("action.yml")'
+
+      - name: Validate example workflow YAML
+        run: ruby -e 'require "yaml"; YAML.load_file("examples/workflow-self-hosted.yml"); YAML.load_file("examples/workflow-cloud.yml")'
+
+      - name: Check shell scripts
+        run: bash -n scripts/check_review_needed.sh && bash -n scripts/run_review.sh && bash -n tests/smoke_test.sh
+
+      - name: Check Python scripts
+        run: python3 -m py_compile scripts/image_digest_analysis.py tests/mock_openai_server.py
+
+      - name: Verify smoke test helper is executable
+        run: test -x tests/smoke_test.sh
