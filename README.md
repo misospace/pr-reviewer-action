@@ -2,6 +2,8 @@
 
 Analyze pull requests with a self-hosted or cloud OpenAI-compatible model.
 
+[![CI](https://github.com/joryirving/pr-reviewer-action/actions/workflows/ci.yaml/badge.svg)](https://github.com/joryirving/pr-reviewer-action/actions/workflows/ci.yaml)
+
 The action gathers PR metadata, diff context, linked sources, image digest provenance, basic repository impact/history, and an optional standards file such as `CLAUDE.md`. It returns a structured verdict and markdown review body, and it can also publish or update a sticky PR comment.
 
 ## What it supports
@@ -213,3 +215,7 @@ Copyable workflows are included here:
 
 - `examples/workflow-self-hosted.yml`
 - `examples/workflow-cloud.yml`
+
+## License
+
+MIT

@@ -108,7 +108,39 @@ curl_model() {
 parse_and_validate() {
   local response_file="$1"
   jq -r '.choices[0].message.content // empty' "$response_file" > ai-output.raw
-  sed -e 's/^```json$//' -e 's/^```$//' ai-output.raw | sed '/^$/d' > ai-output.json
+  python3 - <<'PY' > ai-output.json
+import json
+from pathlib import Path
+
+raw = Path("ai-output.raw").read_text(encoding="utf-8", errors="replace")
+text = raw.strip()
+
+if text.startswith("```"):
+    lines = text.splitlines()
+    if lines:
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    text = "\n".join(lines).strip()
+
+decoder = json.JSONDecoder()
+parsed = None
+
+for start in range(len(text)):
+    if text[start] not in "[{":
+        continue
+    try:
+        candidate, end = decoder.raw_decode(text[start:])
+        parsed = candidate
+        break
+    except json.JSONDecodeError:
+        continue
+
+if parsed is None:
+    raise SystemExit("Could not extract JSON object from model response")
+
+print(json.dumps(parsed))
+PY
   jq . ai-output.json > /dev/null
   jq -e '.verdict == "approve" or .verdict == "request_changes"' ai-output.json > /dev/null
   jq -e '.review_markdown and (.review_markdown | length > 0)' ai-output.json > /dev/null
