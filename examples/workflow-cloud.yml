@@ -20,7 +20,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Review PR with cloud model
-        uses: joryirving/pr-reviewer-action@v1
+        uses: misospace/pr-reviewer-action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: https://api.openai.com/v1
