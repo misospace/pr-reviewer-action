@@ -182,6 +182,11 @@ cat pr-body.txt pr.diff.truncated \
 grep -E '^[+-].*(image:|tag:|version:|chart:|appVersion:|digest:)' pr.diff.truncated > version-hints.txt || true
 head -n 180 version-hints.txt > version-hints.truncated.txt || true
 
+grep -Eo 'ghcr\.io/[^/]+/[^:"@ ]+' version-hints.txt | sort -u > ghcr-images.txt || true
+sed -i 's#ghcr\.io/##' ghcr-images.txt
+sed -i 's#:.*##' ghcr-images.txt
+sort -u ghcr-images.txt -o ghcr-images.txt
+
 log "Gathering changed manifest context..."
 CHANGED_MANIFESTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[] | select(.filename | test("(helmrelease|deployment|statefulset|daemonset|kustomization)\\.ya?ml$"; "i")) | .filename' 2>/dev/null || true)
 
@@ -394,6 +399,45 @@ if [ -s urls.txt ]; then
       fi
     fi
   done < repo-candidates.txt
+
+  log "Probing ghcr.io image paths for upstream GitHub release notes..."
+  if [ -s ghcr-images.txt ]; then
+    while IFS= read -r img_repo; do
+      [ -z "$img_repo" ] && continue
+
+      if grep -qx "$img_repo" seen-repos.txt 2>/dev/null; then
+        continue
+      fi
+
+      owner="${img_repo%/*}"
+      repo="${img_repo#*/}"
+      if [ -z "$owner" ] || [ -z "$repo" ] || [[ "$owner" == *"/"* ]]; then
+        continue
+      fi
+
+      echo >> linked-sources.md
+      echo "### GitHub Release Lookup via ghcr.io Path: $owner/$repo" >> linked-sources.md
+
+      if [ -n "$TARGET_VERSION" ]; then
+        for tag_prefix in "v$TARGET_VERSION" "$TARGET_VERSION"; do
+          if gh api "repos/$owner/$repo/releases/tags/$tag_prefix" > ghcr-release.json 2>/dev/null; then
+            echo "#### Matched via ghcr.io path: $owner/$repo@$tag_prefix" >> linked-sources.md
+            jq '{tag_name,name,published_at,html_url,body}' ghcr-release.json > ghcr-release.filtered.json
+            echo '```json' >> linked-sources.md
+            head -c 8000 ghcr-release.filtered.json >> linked-sources.md
+            echo >> linked-sources.md
+            echo '```' >> linked-sources.md
+            break
+          fi
+        done
+        if [ ! -s ghcr-release.json ] || [ ! -s ghcr-release.filtered.json ]; then
+          echo "(No release found for $owner/$repo at version $TARGET_VERSION via ghcr.io path inference)" >> linked-sources.md
+        fi
+      else
+        echo "(TARGET_VERSION not set; skipping release lookup for $owner/$repo)" >> linked-sources.md
+      fi
+    done < ghcr-images.txt
+  fi
 fi
 
 log "Gathering image digest provenance..."
