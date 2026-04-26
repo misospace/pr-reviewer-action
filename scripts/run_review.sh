@@ -807,12 +807,13 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
     mv ai-output.enforced.json ai-output.json
     log "Enforced request_changes due to tool harness failure"
   elif [[ "$TOOL_MIN_SUCCESSFUL_REQUESTS" -gt 0 ]]; then
+    TOOL_REQUESTS_ATTEMPTED="$(jq -r 'if ((.planned_request_count // 0) > 0) or ((.executed_request_count // 0) > 0) then "true" else "false" end' tool-harness.json 2>/dev/null || echo false)"
     SUCCESSFUL_TOOL_REQUESTS="$(jq -r '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length' tool-harness.json 2>/dev/null || echo 0)"
     if [[ ! "$SUCCESSFUL_TOOL_REQUESTS" =~ ^[0-9]+$ ]]; then
       SUCCESSFUL_TOOL_REQUESTS=0
     fi
 
-    if [[ "$SUCCESSFUL_TOOL_REQUESTS" -lt "$TOOL_MIN_SUCCESSFUL_REQUESTS" ]]; then
+    if [[ "$TOOL_REQUESTS_ATTEMPTED" == "true" ]] && [[ "$SUCCESSFUL_TOOL_REQUESTS" -lt "$TOOL_MIN_SUCCESSFUL_REQUESTS" ]]; then
       jq --arg min "$TOOL_MIN_SUCCESSFUL_REQUESTS" --arg got "$SUCCESSFUL_TOOL_REQUESTS" '
         .verdict = "request_changes"
         | .review_markdown = (
@@ -827,6 +828,8 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
       ' ai-output.json > ai-output.enforced.json
       mv ai-output.enforced.json ai-output.json
       log "Enforced request_changes due to insufficient successful tool requests"
+    elif [[ "$TOOL_REQUESTS_ATTEMPTED" != "true" ]]; then
+      log "Skipping minimum successful tool request enforcement because planner requested no tools"
     fi
   fi
 fi

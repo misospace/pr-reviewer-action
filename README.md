@@ -280,7 +280,7 @@ If a repo wants more than policy context and needs to fully control the reviewer
 - `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos.
 - For local models, reduce `tool_planning_max_context_bytes` and `tool_planning_max_tokens`, and increase `tool_planning_timeout_sec` as needed.
 - Set `tool_failure_enforcement=true` to fail closed when tool harness planning fails or when every tool request fails.
-- Use `tool_min_successful_requests` (for example `1`) to enforce a minimum successful tool-evidence threshold.
+- Use `tool_min_successful_requests` (for example `1`) to enforce a minimum successful tool-evidence threshold when the planner attempted tool requests.
 - Model requests use `curl -q` so user-level `.curlrc` timeouts do not unexpectedly cancel long-running local model calls.
 
 ## Validation
