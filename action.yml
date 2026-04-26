@@ -99,10 +99,34 @@ inputs:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
     default: "4"
+  tool_planning_timeout_sec:
+    description: Timeout in seconds for the model planning call used by tool harness
+    required: false
+    default: "30"
+  tool_planning_max_context_bytes:
+    description: Maximum corpus bytes passed to the planning model
+    required: false
+    default: "50000"
   tool_max_response_bytes:
     description: Maximum bytes captured from each tool execution result
     required: false
     default: "12000"
+  tool_allowed_gh_api_repos:
+    description: Comma-separated owner/repo list allowed for gh_api tool requests (empty means current repo only)
+    required: false
+    default: ""
+  tool_request_timeout_sec:
+    description: Timeout in seconds for each tool request execution
+    required: false
+    default: "20"
+  tool_failure_enforcement:
+    description: If true, force request_changes when tool harness planning fails
+    required: false
+    default: "false"
+  tool_min_successful_requests:
+    description: Minimum number of successful tool requests required when tool failure enforcement is enabled
+    required: false
+    default: "0"
   tool_enable_for_forks:
     description: If true, allow the tool harness to run on cross-repository pull requests
     required: false
@@ -189,7 +213,13 @@ runs:
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
+        TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
+        TOOL_PLANNING_MAX_CONTEXT_BYTES: ${{ inputs.tool_planning_max_context_bytes }}
         TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
+        TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
+        TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
+        TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool_failure_enforcement }}
+        TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool_min_successful_requests }}
         TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool_enable_for_forks }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 

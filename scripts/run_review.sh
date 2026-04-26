@@ -9,6 +9,16 @@ error() {
   log "ERROR: $1" >&2
 }
 
+sedi() {
+  local expr="$1"
+  local target="$2"
+  if sed --version >/dev/null 2>&1; then
+    sed -i "$expr" "$target"
+  else
+    sed -i '' "$expr" "$target"
+  fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 PR_NUMBER="${PR_NUMBER:-}"
@@ -35,7 +45,12 @@ EVIDENCE_ENABLE_FOR_FORKS="${EVIDENCE_ENABLE_FOR_FORKS:-false}"
 TOOL_MODE="${TOOL_MODE:-off}"
 TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-4}"
 TOOL_MAX_RESPONSE_BYTES="${TOOL_MAX_RESPONSE_BYTES:-12000}"
-TOOL_PLANNING_MAX_CONTEXT_BYTES="${TOOL_PLANNING_MAX_CONTEXT_BYTES:-90000}"
+TOOL_PLANNING_TIMEOUT_SEC="${TOOL_PLANNING_TIMEOUT_SEC:-30}"
+TOOL_PLANNING_MAX_CONTEXT_BYTES="${TOOL_PLANNING_MAX_CONTEXT_BYTES:-50000}"
+TOOL_REQUEST_TIMEOUT_SEC="${TOOL_REQUEST_TIMEOUT_SEC:-20}"
+TOOL_ALLOWED_GH_API_REPOS="${TOOL_ALLOWED_GH_API_REPOS:-}"
+TOOL_FAILURE_ENFORCEMENT="${TOOL_FAILURE_ENFORCEMENT:-false}"
+TOOL_MIN_SUCCESSFUL_REQUESTS="${TOOL_MIN_SUCCESSFUL_REQUESTS:-0}"
 TOOL_ENABLE_FOR_FORKS="${TOOL_ENABLE_FOR_FORKS:-false}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 
@@ -115,6 +130,11 @@ case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
     TOOL_MODE="off"
     ;;
 esac
+
+if [[ ! "$TOOL_MIN_SUCCESSFUL_REQUESTS" =~ ^[0-9]+$ ]]; then
+  error "Invalid TOOL_MIN_SUCCESSFUL_REQUESTS '$TOOL_MIN_SUCCESSFUL_REQUESTS'; defaulting to 0"
+  TOOL_MIN_SUCCESSFUL_REQUESTS=0
+fi
 
 curl_model() {
   local base_url="$1"
@@ -256,8 +276,8 @@ grep -E '^[+-].*(image:|tag:|version:|chart:|appVersion:|digest:)' pr.diff.trunc
 head -n 180 version-hints.txt > version-hints.truncated.txt || true
 
 grep -Eo 'ghcr\.io/[^/]+/[^:"@ ]+' version-hints.txt | sort -u > ghcr-images.txt || true
-sed -i 's#ghcr\.io/##' ghcr-images.txt
-sed -i 's#:.*##' ghcr-images.txt
+sedi 's#ghcr\.io/##' ghcr-images.txt
+sedi 's#:.*##' ghcr-images.txt
 sort -u ghcr-images.txt -o ghcr-images.txt
 
 log "Gathering changed manifest context..."
@@ -755,6 +775,58 @@ if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]
   ' ai-output.json > ai-output.enforced.json
   mv ai-output.enforced.json ai-output.json
   log "Enforced request_changes due to blocker evidence provider findings"
+fi
+
+if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]] && \
+  [[ "$(printf '%s' "$TOOL_FAILURE_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+  TOOL_FAILURE_REASON="$(jq -r '
+    if .planning_error? != null then
+      .planning_error
+    elif .error? != null then
+      .error
+    elif ((.executed_request_count // 0) > 0) and ((([.tool_results[]?.result.status == "ok"] | any) | not)) then
+      "all tool requests failed"
+    else
+      ""
+    end
+  ' tool-harness.json 2>/dev/null || true)"
+
+  if [[ -n "$TOOL_FAILURE_REASON" ]]; then
+    jq --arg reason "$TOOL_FAILURE_REASON" '
+    .verdict = "request_changes"
+    | .review_markdown = (
+      (.review_markdown // "")
+      + "\n\n## Tool Harness Failure\n"
+      + "The tool harness failed during planning or execution ("
+      + $reason
+      + "). This workflow is configured fail-closed for tool harness failures; rerun after reducing tool planning context or fixing connectivity."
+    )
+  ' ai-output.json > ai-output.enforced.json
+    mv ai-output.enforced.json ai-output.json
+    log "Enforced request_changes due to tool harness failure"
+  elif [[ "$TOOL_MIN_SUCCESSFUL_REQUESTS" -gt 0 ]]; then
+    SUCCESSFUL_TOOL_REQUESTS="$(jq -r '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length' tool-harness.json 2>/dev/null || echo 0)"
+    if [[ ! "$SUCCESSFUL_TOOL_REQUESTS" =~ ^[0-9]+$ ]]; then
+      SUCCESSFUL_TOOL_REQUESTS=0
+    fi
+
+    if [[ "$SUCCESSFUL_TOOL_REQUESTS" -lt "$TOOL_MIN_SUCCESSFUL_REQUESTS" ]]; then
+      jq --arg min "$TOOL_MIN_SUCCESSFUL_REQUESTS" --arg got "$SUCCESSFUL_TOOL_REQUESTS" '
+        .verdict = "request_changes"
+        | .review_markdown = (
+          (.review_markdown // "")
+          + "\n\n## Tool Harness Insufficient Evidence\n"
+          + "This workflow requires at least "
+          + $min
+          + " successful tool requests, but only "
+          + $got
+          + " succeeded. Rerun after adjusting tool planning settings."
+        )
+      ' ai-output.json > ai-output.enforced.json
+      mv ai-output.enforced.json ai-output.json
+      log "Enforced request_changes due to insufficient successful tool requests"
+    fi
+  fi
 fi
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"

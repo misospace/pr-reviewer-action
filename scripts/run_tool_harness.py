@@ -22,6 +22,19 @@ GH_DENY_SUBSTRINGS = (
 )
 
 
+def normalize_repo_name(value):
+    text = (value or "").strip().strip("/")
+    parts = [item for item in text.split("/") if item]
+    if len(parts) != 2:
+        return ""
+    owner, repo = parts
+    if not re.match(r"^[A-Za-z0-9_.-]+$", owner):
+        return ""
+    if not re.match(r"^[A-Za-z0-9_.-]+$", repo):
+        return ""
+    return f"{owner}/{repo}"
+
+
 def env_int(name, default_value, min_value):
     raw = os.getenv(name, str(default_value)).strip()
     try:
@@ -107,7 +120,9 @@ def safe_run(args, timeout_sec):
         }
 
 
-def run_chat_completion(base_url, model, api_key, system_prompt, user_prompt):
+def run_chat_completion(
+    base_url, model, api_key, system_prompt, user_prompt, timeout_sec
+):
     payload = {
         "model": model,
         "messages": [
@@ -123,14 +138,14 @@ def run_chat_completion(base_url, model, api_key, system_prompt, user_prompt):
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
 
-    with urllib.request.urlopen(request, timeout=45) as response:
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
         response_body = response.read().decode("utf-8", errors="replace")
     parsed = json.loads(response_body)
     return parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
-def run_gh_api(path, max_bytes, repo, timeout_sec):
-    path_value = str(path or "").strip()
+def run_gh_api(path, max_bytes, allowed_repos, timeout_sec):
+    path_value = str(path or "").strip().lstrip("/")
     if not path_value:
         return {"status": "error", "error": "Missing path"}
     if "\n" in path_value or "\r" in path_value or " " in path_value:
@@ -138,18 +153,32 @@ def run_gh_api(path, max_bytes, repo, timeout_sec):
     if not GH_SAFE_PATH_RE.match(path_value):
         return {"status": "error", "error": "Path contains unsafe characters"}
 
-    expected_prefix = f"repos/{repo}/"
+    parts = path_value.split("/")
+    if len(parts) < 4 or parts[0] != "repos":
+        return {"status": "error", "error": "Path must match repos/{owner}/{repo}/..."}
+
+    target_repo = normalize_repo_name(f"{parts[1]}/{parts[2]}")
+    if not target_repo:
+        return {"status": "error", "error": "Invalid owner/repo in path"}
+
+    if target_repo not in allowed_repos:
+        return {
+            "status": "error",
+            "error": f"Repository not allowlisted for gh_api: {target_repo}",
+        }
+
+    expected_prefix = f"repos/{target_repo}/"
     if not path_value.startswith(expected_prefix):
         return {"status": "error", "error": f"Path must start with {expected_prefix}"}
 
     if not (
-        path_value.startswith(f"repos/{repo}/pulls/")
-        or path_value.startswith(f"repos/{repo}/issues/")
-        or path_value.startswith(f"repos/{repo}/contents/")
-        or path_value.startswith(f"repos/{repo}/compare/")
-        or path_value.startswith(f"repos/{repo}/commits")
-        or path_value.startswith(f"repos/{repo}/releases")
-        or path_value.startswith(f"repos/{repo}/tags")
+        path_value.startswith(f"repos/{target_repo}/pulls/")
+        or path_value.startswith(f"repos/{target_repo}/issues/")
+        or path_value.startswith(f"repos/{target_repo}/contents/")
+        or path_value.startswith(f"repos/{target_repo}/compare/")
+        or path_value.startswith(f"repos/{target_repo}/commits")
+        or path_value.startswith(f"repos/{target_repo}/releases")
+        or path_value.startswith(f"repos/{target_repo}/tags")
     ):
         return {"status": "error", "error": "Path not in gh_api allowlist"}
 
@@ -275,7 +304,14 @@ def run_git_grep(pattern, max_bytes, timeout_sec):
     }
 
 
-def execute_request(item, max_bytes, repo, workspace_root, allowlist, timeout_sec):
+def execute_request(
+    item,
+    max_bytes,
+    allowed_gh_api_repos,
+    workspace_root,
+    allowlist,
+    timeout_sec,
+):
     if not isinstance(item, dict):
         return {"status": "error", "error": "Request must be an object"}
 
@@ -284,7 +320,9 @@ def execute_request(item, max_bytes, repo, workspace_root, allowlist, timeout_se
         return {"status": "error", "error": "Missing tool"}
 
     if tool == "gh_api":
-        return run_gh_api(item.get("path"), max_bytes, repo, timeout_sec)
+        return run_gh_api(
+            item.get("path"), max_bytes, allowed_gh_api_repos, timeout_sec
+        )
     if tool == "read_file":
         return run_read_file(item.get("path"), max_bytes, workspace_root)
     if tool == "web_fetch":
@@ -343,13 +381,24 @@ def main():
     api_key = os.getenv("AI_API_KEY", "").strip()
     max_requests = env_int("TOOL_MAX_REQUESTS", 4, 1)
     max_bytes = env_int("TOOL_MAX_RESPONSE_BYTES", 12000, 1000)
-    max_context = env_int("TOOL_PLANNING_MAX_CONTEXT_BYTES", 90000, 5000)
+    max_context = env_int("TOOL_PLANNING_MAX_CONTEXT_BYTES", 50000, 5000)
+    planning_timeout_sec = env_int("TOOL_PLANNING_TIMEOUT_SEC", 45, 1)
     request_timeout_sec = env_int("TOOL_REQUEST_TIMEOUT_SEC", 20, 1)
     allowlist = [
         normalize_host(item)
         for item in os.getenv("ALLOWED_SOURCE_HOSTS", "").split(",")
         if normalize_host(item)
     ]
+
+    allowed_gh_api_repos = set()
+    current_repo = normalize_repo_name(repo)
+    if current_repo:
+        allowed_gh_api_repos.add(current_repo)
+    for item in os.getenv("TOOL_ALLOWED_GH_API_REPOS", "").split(","):
+        normalized = normalize_repo_name(item)
+        if normalized:
+            allowed_gh_api_repos.add(normalized)
+
     workspace_root = Path.cwd().resolve()
 
     summary = {
@@ -379,12 +428,14 @@ def main():
         "Return STRICT JSON only with one top-level key requests (array). "
         "Each request must include tool and the minimal required fields. "
         "Allowed tools: gh_api(path), read_file(path), web_fetch(url), git_grep(pattern). "
+        "For gh_api, path must be like repos/owner/repo/... and repository must be allowlisted. "
         "Never request secrets, credentials, keys, or environment files. "
         "Use at most the requested number of requests and prefer high-value evidence gaps."
     )
     planning_user = (
         f"Repository: {repo}\n"
         f"Max requests: {max_requests}\n"
+        f"Allowed repos for gh_api: {', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: {', '.join(allowlist) if allowlist else '(none)'}\n"
         f"Corpus truncated for planning: {corpus_truncated}\n\n"
         "Analyze this PR corpus and request extra evidence only if needed:\n\n"
@@ -395,7 +446,12 @@ def main():
     planning_response = ""
     try:
         planning_response = run_chat_completion(
-            base_url, model, api_key, planning_system, planning_user
+            base_url,
+            model,
+            api_key,
+            planning_system,
+            planning_user,
+            planning_timeout_sec,
         )
     except Exception as exc:  # noqa: BLE001
         planning_error = str(exc)
@@ -427,7 +483,7 @@ def main():
         result = execute_request(
             request_obj,
             max_bytes,
-            repo,
+            allowed_gh_api_repos,
             workspace_root,
             allowlist,
             request_timeout_sec,
