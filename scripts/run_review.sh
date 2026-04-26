@@ -27,6 +27,10 @@ SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-}"
 STANDARDS_FILE="${STANDARDS_FILE:-CLAUDE.md}"
 STANDARDS_FILE_CANDIDATES="${STANDARDS_FILE_CANDIDATES:-CLAUDE.md,claude.md,AGENTS.md,agents.md,.github/ai-review-rules.md,.github/ai-review-rules.txt}"
 CONTEXT_LIMIT_MODE="${CONTEXT_LIMIT_MODE:-normal}"
+EVIDENCE_PROVIDERS_FILE="${EVIDENCE_PROVIDERS_FILE:-}"
+EVIDENCE_PROVIDER_TIMEOUT_SEC="${EVIDENCE_PROVIDER_TIMEOUT_SEC:-30}"
+EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES="${EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES:-20000}"
+EVIDENCE_BLOCKER_ENFORCEMENT="${EVIDENCE_BLOCKER_ENFORCEMENT:-false}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 
 apply_context_limits() {
@@ -544,6 +548,17 @@ else
   cp repo-history.md repo-history.truncated.md
 fi
 
+log "Running optional evidence providers..."
+if ! python3 "$SCRIPT_DIR/run_evidence_providers.py"; then
+  error "Evidence provider execution failed"
+  cat > evidence-providers.md <<'EOF'
+Evidence providers failed to run in this review.
+EOF
+  cat > evidence-providers.json <<'EOF'
+{"configured": false, "has_blocker": false, "providers": [], "error": "execution failed"}
+EOF
+fi
+
 log "Building review corpus..."
 : > standards-context.md
 if [ -f "$STANDARDS_FILE" ]; then
@@ -584,6 +599,9 @@ fi
   echo
   echo "# Linked Sources"
   cat linked-sources.md
+  echo
+  echo "# Evidence Providers"
+  cat evidence-providers.md
   echo
   echo "# Image Digest Provenance"
   cat image-digest-context.md
@@ -650,6 +668,23 @@ else
     error "Fallback model failed"
     exit 1
   fi
+fi
+
+if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]] && \
+  jq -e '.has_blocker == true' evidence-providers.json >/dev/null 2>&1; then
+  BLOCKER_PROVIDER_IDS="$(jq -r '.providers[]? | select((.provider_severity // "") == "blocker") | .id' evidence-providers.json | paste -sd ', ' -)"
+  jq --arg ids "$BLOCKER_PROVIDER_IDS" '
+    .verdict = "request_changes"
+    | .review_markdown = (
+      (.review_markdown // "")
+      + "\n\n## Evidence Provider Blockers\n"
+      + "One or more configured evidence providers reported blocker-level findings"
+      + (if $ids != "" then " (" + $ids + ")" else "" end)
+      + ". Resolve blocker findings before approval."
+    )
+  ' ai-output.json > ai-output.enforced.json
+  mv ai-output.enforced.json ai-output.json
+  log "Enforced request_changes due to blocker evidence provider findings"
 fi
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"

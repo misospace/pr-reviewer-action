@@ -71,6 +71,22 @@ inputs:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
     default: normal
+  evidence_providers_file:
+    description: Optional JSON file in the reviewed repository that defines evidence providers to run before review
+    required: false
+    default: ""
+  evidence_provider_timeout_sec:
+    description: Default timeout in seconds for each evidence provider command
+    required: false
+    default: "30"
+  evidence_provider_max_output_bytes:
+    description: Maximum stdout or stderr bytes captured per evidence provider command
+    required: false
+    default: "20000"
+  evidence_blocker_enforcement:
+    description: If true, force request_changes when any evidence provider reports blocker severity
+    required: false
+    default: "false"
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
@@ -146,6 +162,10 @@ runs:
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
+        EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
+        EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
+        EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
+        EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
     - name: Publish review comment

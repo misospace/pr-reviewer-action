@@ -49,6 +49,27 @@ trap 'rm -rf "$TMPDIR"; cleanup' EXIT
 cp "$ROOT_DIR/scripts/run_review.sh" "$TMPDIR/run_review.sh"
 cp "$ROOT_DIR/scripts/default_system_prompt.txt" "$TMPDIR/default_system_prompt.txt"
 cp "$ROOT_DIR/scripts/image_digest_analysis.py" "$TMPDIR/image_digest_analysis.py"
+cp "$ROOT_DIR/scripts/run_evidence_providers.py" "$TMPDIR/run_evidence_providers.py"
+
+cat > "$TMPDIR/provider-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"severity":"info","findings":[{"severity":"info","message":"smoke provider executed"}]}
+JSON
+EOF
+chmod +x "$TMPDIR/provider-smoke.sh"
+
+cat > "$TMPDIR/evidence-providers.json" <<EOF
+{
+  "providers": [
+    {
+      "id": "smoke-provider",
+      "command": ["$TMPDIR/provider-smoke.sh"]
+    }
+  ]
+}
+EOF
 
 pushd /Users/joryirving/git/home-ops >/dev/null
 
@@ -59,6 +80,7 @@ PR_NUMBER="$PR_NUMBER" \
 AI_BASE_URL="http://127.0.0.1:18080/v1" \
 AI_MODEL="mock-model" \
 SYSTEM_PROMPT="You are a smoke test reviewer. Return valid JSON only." \
+EVIDENCE_PROVIDERS_FILE="$TMPDIR/evidence-providers.json" \
 bash "$TMPDIR/run_review.sh"
 
 popd >/dev/null
