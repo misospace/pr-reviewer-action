@@ -160,13 +160,32 @@ curl_model() {
 
 parse_and_validate() {
   local response_file="$1"
-  jq -r '.choices[0].message.content // empty' "$response_file" > ai-output.raw
-  python3 - <<'PY' > ai-output.json
+  python3 - "$response_file" <<'PY' > ai-output.json
+import sys
 import json
 from pathlib import Path
 
-raw = Path("ai-output.raw").read_text(encoding="utf-8", errors="replace")
-text = raw.strip()
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"))
+content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
+
+if isinstance(content, str):
+    text = content.strip()
+elif isinstance(content, list):
+    parts = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type in (None, "text"):
+                text_part = item.get("text")
+                if isinstance(text_part, str):
+                    parts.append(text_part)
+    text = "".join(parts).strip()
+elif content is None:
+    text = ""
+else:
+    text = str(content).strip()
 
 if text.startswith("```"):
     lines = text.splitlines()
@@ -191,6 +210,9 @@ for start in range(len(text)):
 
 if parsed is None:
     raise SystemExit("Could not extract JSON object from model response")
+
+if not isinstance(parsed, dict):
+    raise SystemExit(f"Expected JSON object but got {type(parsed).__name__}")
 
 print(json.dumps(parsed))
 PY
