@@ -58,7 +58,7 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 | `tool_planning_max_context_bytes` | Maximum corpus bytes passed to planning | No | `50000` |
 | `tool_planning_max_tokens` | Maximum completion tokens for tool harness planning call | No | `400` |
 | `tool_max_response_bytes` | Maximum bytes captured from each tool response | No | `12000` |
-| `tool_allowed_gh_api_repos` | Comma-separated owner/repo allowlist for `gh_api` (empty = current repo only) | No | `""` |
+| `tool_allowed_gh_api_repos` | Comma-separated owner/repo allowlist for `gh_api`; use `*` to allow any repo endpoint still permitted by the tool path allowlist (empty = current repo only) | No | `""` |
 | `tool_request_timeout_sec` | Timeout in seconds for each tool execution request | No | `20` |
 | `tool_failure_enforcement` | Force `request_changes` when tool harness planning fails | No | `false` |
 | `tool_min_successful_requests` | Minimum successful tool requests required when `tool_failure_enforcement=true` | No | `0` |
@@ -277,7 +277,7 @@ If a repo wants more than policy context and needs to fully control the reviewer
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.
 - Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).
-- `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos.
+- `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos, or `*` to allow any repository while keeping the path denylist and endpoint allowlist active.
 - For local models, reduce `tool_planning_max_context_bytes` and `tool_planning_max_tokens`, and increase `tool_planning_timeout_sec` as needed.
 - Set `tool_failure_enforcement=true` to fail closed when tool harness planning fails or when every tool request fails.
 - Use `tool_min_successful_requests` (for example `1`) to enforce a minimum successful tool-evidence threshold when the planner attempted tool requests.

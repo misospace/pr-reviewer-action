@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -144,14 +145,43 @@ def run_chat_completion(
         "max_tokens": max_tokens,
     }
     endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(endpoint, data=body, method="POST")
-    request.add_header("Content-Type", "application/json")
+    args = [
+        "curl",
+        "-q",
+        "-fsSL",
+        "--max-time",
+        str(timeout_sec),
+        endpoint,
+        "-H",
+        "Content-Type: application/json",
+    ]
     if api_key:
-        request.add_header("Authorization", f"Bearer {api_key}")
+        args.extend(["-H", f"Authorization: Bearer {api_key}"])
 
-    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-        response_body = response.read().decode("utf-8", errors="replace")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as payload_file:
+        json.dump(payload, payload_file)
+        payload_path = payload_file.name
+
+    try:
+        completed = safe_run(args + ["--data", f"@{payload_path}"], timeout_sec + 5)
+    finally:
+        try:
+            os.unlink(payload_path)
+        except OSError:
+            pass
+
+    if isinstance(completed, dict) and completed.get("timeout"):
+        raise RuntimeError("planner model request timed out")
+    if completed.returncode != 0:
+        stderr = mask_secrets((completed.stderr or "").strip())
+        if len(stderr) > 500:
+            stderr = stderr[:500] + "...[truncated]"
+        raise RuntimeError(
+            f"planner model request failed with exit code {completed.returncode}"
+            + (f": {stderr}" if stderr else "")
+        )
+
+    response_body = completed.stdout
     parsed = json.loads(response_body)
     return parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
 
@@ -173,7 +203,7 @@ def run_gh_api(path, max_bytes, allowed_repos, timeout_sec):
     if not target_repo:
         return {"status": "error", "error": "Invalid owner/repo in path"}
 
-    if target_repo not in allowed_repos:
+    if "*" not in allowed_repos and target_repo not in allowed_repos:
         return {
             "status": "error",
             "error": f"Repository not allowlisted for gh_api: {target_repo}",
@@ -408,6 +438,9 @@ def main():
     if current_repo:
         allowed_gh_api_repos.add(current_repo)
     for item in os.getenv("TOOL_ALLOWED_GH_API_REPOS", "").split(","):
+        if item.strip() == "*":
+            allowed_gh_api_repos.add("*")
+            continue
         normalized = normalize_repo_name(item)
         if normalized:
             allowed_gh_api_repos.add(normalized)

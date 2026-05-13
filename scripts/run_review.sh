@@ -224,6 +224,36 @@ PY
   jq -e '.review_markdown and (.review_markdown | length > 0)' ai-output.json > /dev/null
 }
 
+normalize_enforced_review_markdown() {
+  python3 - <<'PY'
+import json
+import re
+from pathlib import Path
+
+path = Path("ai-output.json")
+data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+verdict = data.get("verdict")
+markdown = str(data.get("review_markdown") or "")
+
+if verdict == "request_changes":
+    markdown = re.sub(
+        r"(?im)^(#{1,6}\s*)?Recommendation:\s*Approve\s*$",
+        r"\1Model recommendation before enforcement: Approve",
+        markdown,
+    )
+    if not markdown.lstrip().startswith("## Final Recommendation"):
+        markdown = (
+            "## Final Recommendation\n"
+            "Request changes. One or more configured enforcement checks require this PR "
+            "to be treated as blocking even if the model's initial review text was approving.\n\n"
+            + markdown.lstrip()
+        )
+
+data["review_markdown"] = markdown
+path.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+PY
+}
+
 log "Collecting PR context for #$PR_NUMBER in $REPO..."
 
 gh pr view "$PR_NUMBER" --repo "$REPO" \
@@ -296,8 +326,8 @@ fi
 cat pr-body.txt pr.diff.truncated \
   | grep -Eo 'https?://[^ )]+' \
   | sed 's/[",.;]$//' \
-  | sort -u \
-  | head -n 25 > urls.txt || true
+  | sort -u > urls.all.txt || true
+head -n 25 urls.all.txt > urls.txt || true
 
 grep -E '^[+-].*(image:|tag:|version:|chart:|appVersion:|digest:)' pr.diff.truncated > version-hints.txt || true
 head -n 180 version-hints.txt > version-hints.truncated.txt || true
@@ -574,8 +604,8 @@ log "Gathering repository impact and history..."
   | tr '[:upper:]' '[:lower:]' \
   | grep -Eo '[a-z0-9][a-z0-9._/-]{2,}' \
   | grep -Ev '^(https?|from|into|that|this|with|without|renovate|pull|request|release|notes|digest|sha|main|chart|image|version|github|com|www|docker|ghcr|io)$' \
-  | sort -u \
-  | head -n 14 > terms.txt || true
+  | sort -u > terms.all.txt || true
+head -n 14 terms.all.txt > terms.txt || true
 
 : > repo-impact.md
 : > repo-history.md
@@ -787,6 +817,8 @@ else
   fi
 fi
 
+ENFORCED_REQUEST_CHANGES=0
+
 if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]] && \
   jq -e '.has_blocker == true' evidence-providers.json >/dev/null 2>&1; then
   BLOCKER_PROVIDER_IDS="$(jq -r '.providers[]? | select((.provider_severity // "") == "blocker") | .id' evidence-providers.json | paste -sd ', ' -)"
@@ -801,6 +833,7 @@ if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]
     )
   ' ai-output.json > ai-output.enforced.json
   mv ai-output.enforced.json ai-output.json
+  ENFORCED_REQUEST_CHANGES=1
   log "Enforced request_changes due to blocker evidence provider findings"
 fi
 
@@ -830,6 +863,7 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
     )
   ' ai-output.json > ai-output.enforced.json
     mv ai-output.enforced.json ai-output.json
+    ENFORCED_REQUEST_CHANGES=1
     log "Enforced request_changes due to tool harness failure"
   elif [[ "$TOOL_MIN_SUCCESSFUL_REQUESTS" -gt 0 ]]; then
     TOOL_REQUESTS_ATTEMPTED="$(jq -r 'if ((.planned_request_count // 0) > 0) or ((.executed_request_count // 0) > 0) then "true" else "false" end' tool-harness.json 2>/dev/null || echo false)"
@@ -852,11 +886,16 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
         )
       ' ai-output.json > ai-output.enforced.json
       mv ai-output.enforced.json ai-output.json
+      ENFORCED_REQUEST_CHANGES=1
       log "Enforced request_changes due to insufficient successful tool requests"
     elif [[ "$TOOL_REQUESTS_ATTEMPTED" != "true" ]]; then
       log "Skipping minimum successful tool request enforcement because planner requested no tools"
     fi
   fi
+fi
+
+if [[ "$ENFORCED_REQUEST_CHANGES" -eq 1 ]]; then
+  normalize_enforced_review_markdown
 fi
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"

@@ -116,7 +116,7 @@ inputs:
     required: false
     default: "12000"
   tool_allowed_gh_api_repos:
-    description: Comma-separated owner/repo list allowed for gh_api tool requests (empty means current repo only)
+    description: Comma-separated owner/repo list allowed for gh_api tool requests; use * to allow any repo still permitted by the path allowlist (empty means current repo only)
     required: false
     default: ""
   tool_request_timeout_sec:
