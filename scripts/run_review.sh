@@ -282,8 +282,12 @@ for line in lines:
         output_tokens = event.get("message", {}).get("usage", {}).get("output_tokens", 0)
     elif etype == "content_block_delta":
         delta = event.get("delta", {})
-        if delta.get("type") == "text":
-            content_parts.append(delta.get("text", ""))
+        # Anthropic streaming spec uses delta.type == "text_delta"; accept "text" as well for
+        # non-conforming proxies. Thinking/tool_use deltas are intentionally ignored.
+        if delta.get("type") in ("text_delta", "text"):
+            text_chunk = delta.get("text", "")
+            if isinstance(text_chunk, str):
+                content_parts.append(text_chunk)
     elif etype == "message_delta":
         delta = event.get("delta", {})
         stop_reason = delta.get("stop_reason")
@@ -1018,7 +1022,7 @@ ATTEMPT=1
 while [ "$ATTEMPT" -le "$AI_PRIMARY_RETRIES" ]; do
   echo "Primary model attempt ${ATTEMPT}/${AI_PRIMARY_RETRIES}: $AI_MODEL @ $AI_BASE_URL ($AI_API_FORMAT)"
   if curl_model "$AI_BASE_URL" "$AI_API_KEY" "$AI_API_FORMAT" ai-request.primary.json ai-response.primary.json "$STREAM_BOOL" && \
-    [[ "$STREAM_BOOL" == "true" ]] && reassemble_sse_response ai-response.primary.json "$AI_API_FORMAT" && \
+    { [[ "$STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.primary.json "$AI_API_FORMAT"; } && \
     parse_and_validate ai-response.primary.json; then
     PRIMARY_OK=1
     break
@@ -1056,7 +1060,7 @@ else
     "$FALLBACK_STREAM_BOOL"
 
   if curl_model "$AI_FALLBACK_BASE_URL" "$AI_FALLBACK_API_KEY" "$AI_FALLBACK_API_FORMAT" ai-request.fallback.json ai-response.fallback.json "$FALLBACK_STREAM_BOOL" && \
-    [[ "$FALLBACK_STREAM_BOOL" == "true" ]] && reassemble_sse_response ai-response.fallback.json "$AI_FALLBACK_API_FORMAT" && \
+    { [[ "$FALLBACK_STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.fallback.json "$AI_FALLBACK_API_FORMAT"; } && \
     parse_and_validate ai-response.fallback.json; then
     ANALYSIS_ENGINE="$AI_FALLBACK_MODEL@$AI_FALLBACK_BASE_URL ($AI_FALLBACK_API_FORMAT)"
     echo "Fallback model succeeded" >&2

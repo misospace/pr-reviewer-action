@@ -120,6 +120,67 @@ $PARSE_PY
 PYEOF
 }
 
+# Shared Python code for reassemble_sse_response (must match run_review.sh anthropic branch).
+REASSEMBLE_ANTHROPIC_PY='
+import sys, json
+from pathlib import Path
+
+response_file = sys.argv[1]
+lines = Path(response_file).read_text(encoding="utf-8", errors="replace").splitlines()
+
+content_parts = []
+stop_reason = None
+model = None
+message_id = None
+input_tokens = 0
+output_tokens = 0
+
+for line in lines:
+    line = line.strip()
+    if not line.startswith("data:"):
+        continue
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        continue
+    try:
+        event = json.loads(data)
+    except json.JSONDecodeError:
+        continue
+
+    etype = event.get("type", "")
+    if etype == "message_start":
+        message_id = event.get("message", {}).get("id")
+        model = event.get("message", {}).get("model")
+    elif etype == "content_block_delta":
+        delta = event.get("delta", {})
+        if delta.get("type") in ("text_delta", "text"):
+            text_chunk = delta.get("text", "")
+            if isinstance(text_chunk, str):
+                content_parts.append(text_chunk)
+    elif etype == "message_delta":
+        delta = event.get("delta", {})
+        stop_reason = delta.get("stop_reason")
+
+content_text = "".join(content_parts)
+result = {
+    "id": message_id or "",
+    "object": "chat.completion",
+    "model": model or "",
+    "choices": [{
+        "index": 0,
+        "message": {"role": "assistant", "content": content_text},
+        "finish_reason": stop_reason or "stop"
+    }],
+}
+Path(response_file).write_text(json.dumps(result) + "\n", encoding="utf-8")
+'
+
+run_reassemble_anthropic() {
+  python3 - "$1" <<PYEOF
+$REASSEMBLE_ANTHROPIC_PY
+PYEOF
+}
+
 echo "=== parse_and_validate: standard object response ==="
 cat > "$TMPDIR/resp-object.json" <<'EOF'
 {"id":"chatcmpl-test","choices":[{"message":{"content":"{\"verdict\":\"approve\",\"review_markdown\":\"Looks good.\"}"}}]}
@@ -175,6 +236,75 @@ EOF
 run_parse "$TMPDIR/resp-anthropic.json"
 check "anthropic verdict=approve" "$(jq -r '.verdict' "$TMPDIR/out.json")" "approve"
 check "anthropic ignores thinking" "$(jq -r '.review_markdown' "$TMPDIR/out.json")" "Anthropic clean."
+
+echo ""
+echo "=== reassemble_sse_response: Anthropic text_delta stream ==="
+cat > "$TMPDIR/stream-anthropic.sse" <<'EOF'
+data: {"type":"message_start","message":{"id":"msg_smoke","model":"anthropic/test","usage":{"input_tokens":10,"output_tokens":0}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"verdict\":\"approve\","}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\"review_markdown\":\"Streamed clean.\"}"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}
+
+EOF
+run_reassemble_anthropic "$TMPDIR/stream-anthropic.sse"
+run_parse "$TMPDIR/stream-anthropic.sse"
+check "anthropic stream verdict=approve" "$(jq -r '.verdict' "$TMPDIR/out.json")" "approve"
+check "anthropic stream review_markdown" "$(jq -r '.review_markdown' "$TMPDIR/out.json")" "Streamed clean."
+
+echo ""
+echo "=== reassemble_sse_response: Anthropic thinking_delta is ignored ==="
+cat > "$TMPDIR/stream-anthropic-thinking.sse" <<'EOF'
+data: {"type":"message_start","message":{"id":"msg_smoke","model":"anthropic/test"}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private reasoning that must not leak"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"{\"verdict\":\"request_changes\",\"review_markdown\":\"After thinking.\"}"}}
+
+data: {"type":"content_block_stop","index":1}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}
+
+EOF
+run_reassemble_anthropic "$TMPDIR/stream-anthropic-thinking.sse"
+run_parse "$TMPDIR/stream-anthropic-thinking.sse"
+check "thinking-only stream verdict" "$(jq -r '.verdict' "$TMPDIR/out.json")" "request_changes"
+check "thinking content excluded" "$(jq -r '.review_markdown' "$TMPDIR/out.json")" "After thinking."
+
+echo ""
+echo "=== reassemble_sse_response: Anthropic stream with no text deltas fails parse ==="
+cat > "$TMPDIR/stream-anthropic-empty.sse" <<'EOF'
+data: {"type":"message_start","message":{"id":"msg_smoke","model":"anthropic/test"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"only thinking, no text"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}
+
+EOF
+run_reassemble_anthropic "$TMPDIR/stream-anthropic-empty.sse"
+if run_parse "$TMPDIR/stream-anthropic-empty.sse"; then
+  check "empty stream rejected" "no" "yes"
+else
+  check "empty stream rejected" "yes" "yes"
+fi
 
 echo ""
 echo "=== Tool harness: Anthropic planner request ==="
