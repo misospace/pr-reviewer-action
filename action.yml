@@ -320,6 +320,11 @@ runs:
         COMMENT_MARKER: ${{ inputs.comment_marker }}
       run: |
         set -euo pipefail
+        # Sanitize model output: strip internal metadata markers that the model
+        # might have generated, preventing fake markers from interfering with precheck.
+        printf '%s\n' "$REVIEW_MARKDOWN" > review-markdown.raw.md
+        python3 "${{ github.action_path }}/scripts/strip_metadata_markers.py" review-markdown.raw.md
+
 
         if [ -z "${PR_NUMBER:-}" ]; then
           echo "publish_review_comment=true requires a pull_request event or explicit pr_number" >&2
@@ -344,7 +349,7 @@ runs:
           echo
           echo "_Analysis engine: ${ANALYSIS_ENGINE}_"
           echo
-          printf '%s\n' "$REVIEW_MARKDOWN"
+          cat review-markdown.raw.md
         } > review-comment.md
 
         gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file review-comment.md
@@ -363,6 +368,11 @@ runs:
         APPROVE_FORKS: ${{ inputs.approve_forks }}
       run: |
         set -euo pipefail
+        # Sanitize model output: strip internal metadata markers that the model
+        # might have generated, preventing fake markers from interfering with precheck.
+        printf '%s\n' "$REVIEW_MARKDOWN" > review-verdict-markdown.raw.md
+        python3 "${{ github.action_path }}/scripts/strip_metadata_markers.py" review-verdict-markdown.raw.md
+
 
         if [ -z "${PR_NUMBER:-}" ]; then
           echo "publish_mode=review_verdict requires a pull_request event or explicit pr_number" >&2
@@ -394,7 +404,7 @@ runs:
           echo
           echo "_Analysis engine: ${ANALYSIS_ENGINE}_"
           echo
-          printf '%s\n' "$REVIEW_MARKDOWN"
+          cat review-verdict-markdown.raw.md
         } > "$BODY_FILE"
 
         if [ "$CAN_APPROVE" = true ]; then

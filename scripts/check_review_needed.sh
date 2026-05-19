@@ -160,9 +160,11 @@ last_comment_body="$({
     '
 } || true)"
 
-# Extract the broad fingerprint (the full pipe-delimited value)
-last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | tail -n 1)"
-
+# Extract the PR head SHA and broad fingerprint from the last published comment.
+# ai-pr-review-sha: stored for future out-of-date detection (not yet used in skip logic).
+# ai-pr-review-fingerprint: stable patch+config fingerprint used for skip-on-unchanged-diff.
+last_pr_sha="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-sha:\([^>]*\) -->$/\1/p' | head -n 1)"
+last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | head -n 1)"
 should_review=true
 skip_reason=""
 
@@ -174,3 +176,4 @@ fi
 echo "diff_fingerprint=$broad_fingerprint" >> "$OUTPUT_FILE"
 echo "should_review=$should_review" >> "$OUTPUT_FILE"
 echo "skip_reason=$skip_reason" >> "$OUTPUT_FILE"
+
