@@ -319,6 +319,11 @@ If a repo wants more than policy context and needs to fully control the reviewer
 ```
 
 ## Notes
+- **Reserved comment markers**: The managed PR comment uses HTML comment markers for internal metadata. These are reserved and must not appear in model-generated review markdown:
+  - `<!-- ai-pr-review-fingerprint:<value> -->` — stable patch + config fingerprint used by the precheck to skip unchanged diffs.
+  - `<!-- ai-pr-review-sha:<sha> -->` — PR head SHA used to detect out-of-date reviews.
+  The action strips any matching markers from model output before publishing (see `scripts/strip_metadata_markers.py`). The precheck parser reads only the **first** occurrence of each marker for defense in depth.
+
 
 - `ai_api_format=openai` posts to `/chat/completions` and parses `choices[0].message.content`.
 - `ai_api_format=anthropic` posts to `/messages` and parses only `content[]` blocks where `type == "text"`.

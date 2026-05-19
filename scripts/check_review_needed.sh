@@ -161,7 +161,7 @@ last_comment_body="$({
 } || true)"
 
 # Extract the broad fingerprint (the full pipe-delimited value)
-last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | tail -n 1)"
+last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | head -n 1)"
 
 should_review=true
 skip_reason=""
