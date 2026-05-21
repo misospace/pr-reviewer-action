@@ -306,11 +306,16 @@ def gh_api(endpoint, allowed_repos, current_repo):
         return {"error": "Missing GH_TOKEN"}
 
     # Parse endpoint to extract repo and path
+    # Support both "repos/owner/repo/..." (prompt format) and "owner/repo/..." (direct)
     parts = endpoint.strip("/").split("/")
     if len(parts) < 2:
         return {"error": "Invalid endpoint format: expected owner/repo/..."}
 
-    repo_key = f"{parts[0]}/{parts[1]}"
+    # If the first segment is "repos", skip it and use the next two segments
+    if parts[0] == "repos" and len(parts) >= 3:
+        repo_key = f"{parts[1]}/{parts[2]}"
+    else:
+        repo_key = f"{parts[0]}/{parts[1]}"
 
     # Validate repo is allowed
     allowed = False
