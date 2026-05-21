@@ -1097,7 +1097,7 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
       .planning_error
     elif .error? != null then
       .error
-    elif ((.executed_request_count // 0) > 0) and ((([.tool_results[]?.result.status == "ok"] | any) | not)) then
+    elif ((.executed_request_count // 0) > 0) and ((([.tool_results[]?.status == "ok"] | any) | not)) then
       "all tool requests failed"
     else
       ""
@@ -1120,7 +1120,7 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execut
     log "Enforced request_changes due to tool harness failure"
   elif [[ "$TOOL_MIN_SUCCESSFUL_REQUESTS" -gt 0 ]]; then
     TOOL_REQUESTS_ATTEMPTED="$(jq -r 'if ((.planned_request_count // 0) > 0) or ((.executed_request_count // 0) > 0) then "true" else "false" end' tool-harness.json 2>/dev/null || echo false)"
-    SUCCESSFUL_TOOL_REQUESTS="$(jq -r '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length' tool-harness.json 2>/dev/null || echo 0)"
+    SUCCESSFUL_TOOL_REQUESTS="$(jq -r '[.tool_results[]?.status == "ok"] | map(select(. == true)) | length' tool-harness.json 2>/dev/null || echo 0)"
     if [[ ! "$SUCCESSFUL_TOOL_REQUESTS" =~ ^[0-9]+$ ]]; then
       SUCCESSFUL_TOOL_REQUESTS=0
     fi
