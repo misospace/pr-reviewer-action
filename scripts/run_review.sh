@@ -385,80 +385,14 @@ PY
 
 parse_and_validate() {
   local response_file="$1"
-  python3 - "$response_file" <<'PY' > ai-output.json
-import sys
-import json
+  PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
+import json, sys
 from pathlib import Path
+from pr_reviewer.response_parser import parse_response_file
 
-response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"))
-
-content = None
-if isinstance(response.get("choices"), list):
-    content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content")
-elif isinstance(response.get("content"), list):
-    # Anthropic message responses may include thinking/tool blocks. Only text blocks are review content.
-    parts = []
-    for item in response.get("content") or []:
-        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    content = "".join(parts)
-elif isinstance(response.get("content"), str):
-    content = response.get("content")
-
-if isinstance(content, str):
-    text = content.strip()
-elif isinstance(content, list):
-    parts = []
-    for item in content:
-        if isinstance(item, str):
-            parts.append(item)
-        elif isinstance(item, dict):
-            item_type = item.get("type")
-            if item_type in (None, "text"):
-                text_part = item.get("text")
-                if isinstance(text_part, str):
-                    parts.append(text_part)
-    text = "".join(parts).strip()
-elif content is None:
-    text = ""
-else:
-    text = str(content).strip()
-
-if text.startswith("```"):
-    lines = text.splitlines()
-    if lines:
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    text = "\n".join(lines).strip()
-
-decoder = json.JSONDecoder()
-parsed = None
-
-for start in range(len(text)):
-    if text[start] not in "[{":
-        continue
-    try:
-        candidate, end = decoder.raw_decode(text[start:])
-        parsed = candidate
-        break
-    except json.JSONDecodeError:
-        continue
-
-if parsed is None:
-    raise SystemExit("Could not extract JSON object from model response")
-
-if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
-    parsed = parsed[0]
-
-if not isinstance(parsed, dict):
-    raise SystemExit(f"Expected JSON object but got {type(parsed).__name__}")
-
-print(json.dumps(parsed))
-PY
-  jq . ai-output.json > /dev/null
-  jq -e '.verdict == "approve" or .verdict == "request_changes"' ai-output.json > /dev/null
-  jq -e '.review_markdown and (.review_markdown | length > 0)' ai-output.json > /dev/null
+result = parse_response_file('$response_file')
+Path('ai-output.json').write_text(json.dumps(result, ensure_ascii=False) + '\n', encoding='utf-8')
+" || return 1
 }
 
 normalize_enforced_review_markdown() {
