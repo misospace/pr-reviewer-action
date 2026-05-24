@@ -40,7 +40,7 @@ inputs:
     required: false
     default: ""
   ai_fallback_api_format:
-    description: API request/response format for the fallback endpoint; defaults to ai_api_format when blank
+    description: Fallback API request/response format; defaults to ai_api_format when blank
     required: false
     default: ""
   ai_fallback_model:
@@ -94,8 +94,9 @@ inputs:
   publish_mode:
     description: >-
       Publish mode for the review verdict. 'comment' publishes a sticky PR comment (default).
+      'review_comment' uses GitHub's native PR review API to submit a non-blocking review comment.
       'review_verdict' uses GitHub's native PR review API to submit approve/request_changes.
-      Requires permissions: pull-requests: write.
+      Requires permissions: pull-requests: write for review_comment and review_verdict modes.
     required: false
     default: "comment"
   allow_approve:
@@ -353,6 +354,47 @@ runs:
         } > review-comment.md
 
         gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file review-comment.md
+
+    - name: Publish review comment (non-blocking)
+      if: inputs.publish_mode == 'review_comment' && steps.precheck.outputs.should_review == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ inputs.repo || github.repository }}
+        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        VERDICT: ${{ steps.review.outputs.verdict }}
+        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
+        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
+      run: |
+        set -euo pipefail
+        # Sanitize model output: strip internal metadata markers that the model
+        # might have generated, preventing fake markers from interfering with precheck.
+        printf '%s\n' "$REVIEW_MARKDOWN" > review-comment-markdown.raw.md
+        python3 "${{ github.action_path }}/scripts/strip_metadata_markers.py" review-comment-markdown.raw.md
+
+
+        if [ -z "${PR_NUMBER:-}" ]; then
+          echo "publish_mode=review_comment requires a pull_request event or explicit pr_number" >&2
+          exit 1
+        fi
+
+        # Build the review body
+        BODY_FILE="review-comment-body.md"
+        {
+          echo "# AI Automated Review"
+          echo
+          echo "_Analysis engine: ${ANALYSIS_ENGINE}_"
+          echo
+          cat review-comment-markdown.raw.md
+        } > "$BODY_FILE"
+
+        if [ "$VERDICT" = "request_changes" ]; then
+          echo "Submitting non-blocking review comment (request_changes) for #$PR_NUMBER"
+        else
+          echo "Submitting non-blocking review comment (approve) for #$PR_NUMBER"
+        fi
+
+        gh pr review "$PR_NUMBER" --repo "$REPO" --comment --body-file "$BODY_FILE"
 
     - name: Publish review verdict (native PR review)
       if: inputs.publish_mode == 'review_verdict' && steps.precheck.outputs.should_review == 'true'

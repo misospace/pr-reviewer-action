@@ -2,7 +2,7 @@
 
 Analyze pull requests with a self-hosted or cloud OpenAI-compatible or Anthropic-compatible model.
 
-[![CI](https://github.com/joryirving/pr-reviewer-action/actions/workflows/ci.yaml/badge.svg)](https://github.com/joryirving/pr-reviewer-action/actions/workflows/ci.yaml)
+[![CI](https://github.com/misospace/pr-reviewer-action/actions/workflows/ci.yaml/badge.svg)](https://github.com/misospace/pr-reviewer-action/actions/workflows/ci.yaml)
 
 The action gathers PR metadata, diff context, linked issue context from PR-closing references, linked sources, optional evidence provider output, optional tool harness output, image digest provenance, basic repository impact/history, and an optional standards file such as `CLAUDE.md`. It returns a structured verdict and markdown review body, and it can also publish or update a sticky PR comment.
 
@@ -18,7 +18,6 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 - automatic skip when the effective PR diff is unchanged since the last managed review
 - linked issue body ingestion from `Fixes #123`, `Closes owner/repo#456`, and similar PR-body references
 - repo-provided rules via `CLAUDE.md`, `AGENTS.md`, or a custom file
-- full prompt override via inline text or a file in the destination repo
 
 ## Requirements
 
@@ -51,6 +50,9 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 | `standards_file` | Explicit standards file path; takes priority over candidates | No | `""` |
 | `standards_file_candidates` | Candidate files checked in order; first found is used | No | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` |
 | `publish_review_comment` | Publish or update a managed PR comment | No | `false` |
+| `publish_mode` | Publish mode for the review verdict: `comment` (sticky PR comment, default), `review_comment` (non-blocking native PR review comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `comment` |
+| `allow_approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
+| `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
 | `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
 | `evidence_providers_file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
 | `evidence_provider_timeout_sec` | Default timeout in seconds for each evidence provider command | No | `30` |
@@ -107,7 +109,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: joryirving/pr-reviewer-action@v1
+      - uses: misospace/pr-reviewer-action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: http://llama-server.internal:8080/v1
@@ -138,7 +140,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: joryirving/pr-reviewer-action@v1
+      - uses: misospace/pr-reviewer-action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: https://api.openai.com/v1
@@ -151,7 +153,7 @@ jobs:
 ### Native Anthropic-compatible endpoint
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.anthropic.com/v1
@@ -167,7 +169,7 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 ### With a fallback model
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   id: review
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -182,7 +184,7 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 ### With evidence providers
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -210,6 +212,16 @@ Example provider config (`.github/pr-review-providers.json`):
 
 Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence_blocker_enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict.
 
+### Publish modes
+
+The action supports three publish modes via the `publish_mode` input:
+
+| Mode | Behavior | Branch protection impact |
+|------|----------|------------------------|
+| `comment` | Posts a sticky PR comment with `<!-- ai-pr-reviewer -->` markers. The default mode. | None — comments are advisory only |
+| `review_comment` | Submits a non-blocking native PR review comment via `gh pr review --comment`. | None — review comments don't affect status checks |
+| `review_verdict` | Submits a native PR review verdict (`approve` or `request_changes`) via `gh pr review`. Affects branch protection and status checks. | Yes — counts as a real review |
+
 ### Native PR review verdicts
 
 When `publish_mode=review_verdict` is set, the action submits a native GitHub PR review
@@ -231,7 +243,7 @@ Enable `allow_approve` only when you understand the implications for your reposi
 merge policy.
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -244,11 +256,25 @@ merge policy.
 This configuration allows the AI to submit native approvals when its verdict is `approve`.
 Fork PRs are still blocked from approval unless `approve_forks` is also set to `"true"`.
 
+### Non-blocking review comments
+
+When `publish_mode=review_comment` is set, the action submits a non-blocking native PR review comment via `gh pr review --comment`. This gives you a GitHub-native review entry in the PR's conversation thread without affecting branch protection or status checks.
+
+```yaml
+- uses: misospace/pr-reviewer-action@v1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    ai_base_url: https://api.openai.com/v1
+    ai_model: gpt-4.1
+    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
+    publish_mode: review_comment
+```
+
 ### With tool harness planning
 
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -279,7 +305,7 @@ By default, tool harness execution is skipped on cross-repository PRs unless `to
 If the destination repo has a `CLAUDE.md`, `claude.md`, `AGENTS.md`, or `.github/ai-review-rules.md`, the action can use that as review policy context.
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -291,7 +317,7 @@ If the destination repo has a `CLAUDE.md`, `claude.md`, `AGENTS.md`, or `.github
 You can also pin a specific rules file:
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -309,7 +335,7 @@ If PRs are driven by detailed GitHub issues, include closing references such as 
 If a repo wants more than policy context and needs to fully control the reviewer behavior, it can provide a prompt file:
 
 ```yaml
-- uses: joryirving/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -357,7 +383,7 @@ Run it with a specific PR:
 PR_NUMBER=6757 tests/smoke_test.sh
 ```
 
-Or let it pick the most recent open PR in `joryirving/home-ops`:
+Or let it pick the most recent open PR in `misospace/home-ops`:
 
 ```bash
 tests/smoke_test.sh
