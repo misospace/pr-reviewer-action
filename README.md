@@ -365,7 +365,7 @@ If a repo wants more than policy context and needs to fully control the reviewer
 - Provider output is appended to the review corpus under an `Evidence Providers` section.
 - `tool_mode=plan_execute_once` adds a single planning-and-execution tool round before final review synthesis.
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.
-- Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction.
+- Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction. The `run_command` tool does not execute arbitrary shell text; it accepts only named read-only command definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`) and runs them argv-only without `bash -lc`.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).
 - `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos, or `*` to allow any repository while keeping the path denylist and endpoint allowlist active.
 - For local models, reduce `tool_planning_max_context_bytes` and `tool_planning_max_tokens`, and increase `tool_planning_timeout_sec` as needed.

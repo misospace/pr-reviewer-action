@@ -14,12 +14,13 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 
 - Tool harness defaults to `off` (`tool_mode=off`)
 - Tool harness treats corpus text as untrusted and does not follow corpus instructions
-- Tool harness uses a strict read-only allowlist (`gh_api`, `read_file`, `web_fetch`, `git_grep`)
+- Tool harness uses a strict read-only allowlist (`gh_api`, `read_file`, `web_fetch`, `git_grep`, and named-only `run_command`)
 - `gh_api` is constrained to a same-repo path prefix and endpoint allowlist
 - `gh_api` can optionally include specific upstream repos via explicit allowlist (`tool_allowed_gh_api_repos`) or all repos via `*` while preserving endpoint/path denylist checks
 - Anthropic responses are parsed from `text` blocks only; non-text blocks such as `thinking` are not added to review output
 - `read_file` is constrained to workspace-relative paths and blocks sensitive path patterns
 - `web_fetch` is constrained to `allowed_source_hosts`
+- `run_command` rejects raw shell text and permits only named read-only argv definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`)
 - Tool outputs are size-limited and pass through shared secret redaction before corpus inclusion
 - Evidence provider stdout and stderr are passed through the same secret-redaction pipeline before being written to JSON summaries or markdown output
 - Tool and evidence-provider enrichment are skipped on cross-repository PRs by default (`tool_enable_for_forks=false`, `evidence_enable_for_forks=false`)
@@ -65,6 +66,7 @@ See `scripts/strip_metadata_markers.py` for the implementation and `tests/test_s
 - Prefer `tool_mode=off` for public repositories unless you need tool planning
 - Keep `allowed_source_hosts` narrow
 - Treat evidence provider scripts as trusted code and review changes carefully
+- Treat additions to the named tool command catalog as security-sensitive changes; keep them read-only and avoid shells, package managers, network clients, or repo mutation
 
 ## Known Limitations
 
