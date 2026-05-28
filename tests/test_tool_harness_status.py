@@ -194,22 +194,22 @@ def test_all_fail_fixture():
 
 
 # ---------------------------------------------------------------------------
-# Test: Verify run_review.sh source code uses the corrected path
+# Test: Verify run_review.sh delegates enforcement to Python module
 # ---------------------------------------------------------------------------
 
 def test_run_review_uses_correct_path():
-    """Confirm run_review.sh references .tool_results[].status (not .result.status)."""
+    """Confirm run_review.sh delegates enforcement to pr_reviewer.enforcement."""
     script = Path(__file__).resolve().parent.parent / "scripts" / "run_review.sh"
     content = script.read_text(encoding="utf-8", errors="replace")
 
-    # The buggy pattern should NOT be present:
+    # The buggy pattern should NOT be present anywhere:
     assert ".tool_results[]?.result.status" not in content, (
         "run_review.sh still references the buggy .result.status path"
     )
 
-    # The corrected pattern SHOULD be present at least once:
-    assert '.tool_results[]?.status == "ok"' in content, (
-        "run_review.sh should reference the corrected .status path"
+    # run_review.sh should delegate to the Python enforcement module:
+    assert "apply_all_enforcement_wrapper" in content, (
+        "run_review.sh should call apply_all_enforcement_wrapper to delegate enforcement"
     )
 
 

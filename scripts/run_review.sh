@@ -271,10 +271,17 @@ Path('ai-output.json').write_text(json.dumps(result, ensure_ascii=False) + '\n',
 " || return 1
 }
 
-normalize_enforced_review_markdown() {
+apply_all_enforcement_wrapper() {
+  local evidence_blocker_enabled="$1"
+  local tool_failure_enabled="$2"
+  local tool_min_successful="$3"
   PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
-from pr_reviewer.enforcement import normalize_enforced_review_markdown
-normalize_enforced_review_markdown()
+from pr_reviewer.enforcement import apply_all_enforcement
+apply_all_enforcement(
+  evidence_blocker_enabled=$evidence_blocker_enabled,
+  tool_failure_enabled=$tool_failure_enabled,
+  tool_min_successful=$tool_min_successful
+)
 "
 }
 
@@ -846,86 +853,18 @@ else
   fi
 fi
 
-ENFORCED_REQUEST_CHANGES=0
-
-if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]] && \
-  jq -e '.has_blocker == true' evidence-providers.json >/dev/null 2>&1; then
-  BLOCKER_PROVIDER_IDS="$(jq -r '.providers[]? | select((.provider_severity // "") == "blocker") | .id' evidence-providers.json | paste -sd ', ' -)"
-  jq --arg ids "$BLOCKER_PROVIDER_IDS" '
-    .verdict = "request_changes"
-    | .review_markdown = (
-      (.review_markdown // "")
-      + "\n\n## Evidence Provider Blockers\n"
-      + "One or more configured evidence providers reported blocker-level findings"
-      + (if $ids != "" then " (" + $ids + ")" else "" end)
-      + ". Resolve blocker findings before approval."
-    )
-  ' ai-output.json > ai-output.enforced.json
-  mv ai-output.enforced.json ai-output.json
-  ENFORCED_REQUEST_CHANGES=1
-  log "Enforced request_changes due to blocker evidence provider findings"
+EVIDENCE_BLOCKER_ENABLED="false"
+if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+  EVIDENCE_BLOCKER_ENABLED="true"
 fi
 
+TOOL_FAILURE_ENABLED="false"
 if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]] && \
   [[ "$(printf '%s' "$TOOL_FAILURE_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-  TOOL_FAILURE_REASON="$(jq -r '
-    if .planning_error? != null then
-      .planning_error
-    elif .error? != null then
-      .error
-    elif ((.executed_request_count // 0) > 0) and ((([.tool_results[]?.status == "ok"] | any) | not)) then
-      "all tool requests failed"
-    else
-      ""
-    end
-  ' tool-harness.json 2>/dev/null || true)"
-
-  if [[ -n "$TOOL_FAILURE_REASON" ]]; then
-    jq --arg reason "$TOOL_FAILURE_REASON" '
-    .verdict = "request_changes"
-    | .review_markdown = (
-      (.review_markdown // "")
-      + "\n\n## Tool Harness Failure\n"
-      + "The tool harness failed during planning or execution ("
-      + $reason
-      + "). This workflow is configured fail-closed for tool harness failures; rerun after reducing tool planning context or fixing connectivity."
-    )
-  ' ai-output.json > ai-output.enforced.json
-    mv ai-output.enforced.json ai-output.json
-    ENFORCED_REQUEST_CHANGES=1
-    log "Enforced request_changes due to tool harness failure"
-  elif [[ "$TOOL_MIN_SUCCESSFUL_REQUESTS" -gt 0 ]]; then
-    TOOL_REQUESTS_ATTEMPTED="$(jq -r 'if ((.planned_request_count // 0) > 0) or ((.executed_request_count // 0) > 0) then "true" else "false" end' tool-harness.json 2>/dev/null || echo false)"
-    SUCCESSFUL_TOOL_REQUESTS="$(jq -r '[.tool_results[]?.status == "ok"] | map(select(. == true)) | length' tool-harness.json 2>/dev/null || echo 0)"
-    if [[ ! "$SUCCESSFUL_TOOL_REQUESTS" =~ ^[0-9]+$ ]]; then
-      SUCCESSFUL_TOOL_REQUESTS=0
-    fi
-
-    if [[ "$TOOL_REQUESTS_ATTEMPTED" == "true" ]] && [[ "$SUCCESSFUL_TOOL_REQUESTS" -lt "$TOOL_MIN_SUCCESSFUL_REQUESTS" ]]; then
-      jq --arg min "$TOOL_MIN_SUCCESSFUL_REQUESTS" --arg got "$SUCCESSFUL_TOOL_REQUESTS" '
-        .verdict = "request_changes"
-        | .review_markdown = (
-          (.review_markdown // "")
-          + "\n\n## Tool Harness Insufficient Evidence\n"
-          + "This workflow requires at least "
-          + $min
-          + " successful tool requests, but only "
-          + $got
-          + " succeeded. Rerun after adjusting tool planning settings."
-        )
-      ' ai-output.json > ai-output.enforced.json
-      mv ai-output.enforced.json ai-output.json
-      ENFORCED_REQUEST_CHANGES=1
-      log "Enforced request_changes due to insufficient successful tool requests"
-    elif [[ "$TOOL_REQUESTS_ATTEMPTED" != "true" ]]; then
-      log "Skipping minimum successful tool request enforcement because planner requested no tools"
-    fi
-  fi
+  TOOL_FAILURE_ENABLED="true"
 fi
 
-if [[ "$ENFORCED_REQUEST_CHANGES" -eq 1 ]]; then
-  normalize_enforced_review_markdown
-fi
+apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS"
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
