@@ -33,7 +33,7 @@ class TestApplyEvidenceBlockerEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_evidence_blocker_enforcement(str(evidence_path), str(output_path))
-        assert result is False
+        assert result == (False, "")
         assert json.loads(output_path.read_text())["verdict"] == "approve"
 
     def test_enforces_request_changes_with_blocker(self, tmp_path):
@@ -51,7 +51,8 @@ class TestApplyEvidenceBlockerEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_evidence_blocker_enforcement(str(evidence_path), str(output_path))
-        assert result is True
+        assert result[0] is True
+        assert "secret-scanner" in result[1]
         updated = json.loads(output_path.read_text())
         assert updated["verdict"] == "request_changes"
         assert "blocker-level findings" in updated["review_markdown"]
@@ -61,7 +62,7 @@ class TestApplyEvidenceBlockerEnforcement:
         output_path = tmp_path / "ai-output.json"
         output_path.write_text(json.dumps({"verdict": "approve", "review_markdown": "ok"}))
         result = apply_evidence_blocker_enforcement(str(tmp_path / "missing.json"), str(output_path))
-        assert result is False
+        assert result == (False, "")
 
     def test_invalid_json_evidence(self, tmp_path):
         evidence_path = tmp_path / "evidence.json"
@@ -69,7 +70,7 @@ class TestApplyEvidenceBlockerEnforcement:
         evidence_path.write_text("not json")
         output_path.write_text(json.dumps({"verdict": "approve", "review_markdown": "ok"}))
         result = apply_evidence_blocker_enforcement(str(evidence_path), str(output_path))
-        assert result is False
+        assert result == (False, "")
 
 
 class TestToolHarnessFailure:
@@ -169,7 +170,8 @@ class TestApplyToolHarnessFailureEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_tool_harness_failure_enforcement(str(harness_path), str(output_path))
-        assert result is True
+        assert result[0] is True
+        assert "context limit exceeded" in result[1]
         updated = json.loads(output_path.read_text())
         assert updated["verdict"] == "request_changes"
         assert "context limit exceeded" in updated["review_markdown"]
@@ -184,7 +186,7 @@ class TestApplyToolHarnessFailureEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_tool_harness_failure_enforcement(str(harness_path), str(output_path))
-        assert result is False
+        assert result == (False, "")
 
 
 class TestApplyToolMinSuccessfulEnforcement:
@@ -202,7 +204,8 @@ class TestApplyToolMinSuccessfulEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_tool_min_successful_enforcement(3, str(harness_path), str(output_path))
-        assert result is True
+        assert result[0] is True
+        assert "insufficient evidence" in result[1]
         updated = json.loads(output_path.read_text())
         assert updated["verdict"] == "request_changes"
         assert "only 1 succeeded" in updated["review_markdown"]
@@ -220,7 +223,7 @@ class TestApplyToolMinSuccessfulEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_tool_min_successful_enforcement(2, str(harness_path), str(output_path))
-        assert result is False
+        assert result == (False, "")
 
     def test_no_op_when_no_tools_requested(self, tmp_path):
         harness = {"planned_request_count": 0, "executed_request_count": 0}
@@ -232,7 +235,7 @@ class TestApplyToolMinSuccessfulEnforcement:
         output_path.write_text(json.dumps(output))
 
         result = apply_tool_min_successful_enforcement(2, str(harness_path), str(output_path))
-        assert result is False
+        assert result == (False, "")
 
 
 class TestNormalizeEnforcedReviewMarkdown:
@@ -263,6 +266,41 @@ class TestNormalizeEnforcedReviewMarkdown:
         normalize_enforced_review_markdown(str(path))
         assert path.read_text() == original
 
+    def test_banner_includes_specific_reasons(self, tmp_path):
+        data = {
+            "verdict": "request_changes",
+            "review_markdown": "Recommendation: Approve\n\nLGTM.",
+        }
+        path = tmp_path / "ai-output.json"
+        path.write_text(json.dumps(data))
+        reasons = [
+            "Tool harness gathered insufficient evidence. Requires 3 but only 1 succeeded.",
+            "Evidence provider blocker detected: secret-scanner.",
+        ]
+        normalize_enforced_review_markdown(str(path), reasons)
+        updated = json.loads(path.read_text())
+        assert "## Final Recommendation" in updated["review_markdown"]
+        assert "insufficient evidence" in updated["review_markdown"]
+        assert "Requires 3 but only 1 succeeded" in updated["review_markdown"]
+        assert "secret-scanner" in updated["review_markdown"]
+        assert "Model recommendation before enforcement: Approve" in updated["review_markdown"]
+
+    def test_banner_uses_generic_when_no_reasons(self, tmp_path):
+        data = {"verdict": "request_changes", "review_markdown": "Please fix this."}
+        path = tmp_path / "ai-output.json"
+        path.write_text(json.dumps(data))
+        normalize_enforced_review_markdown(str(path), [])
+        updated = json.loads(path.read_text())
+        assert "One or more configured enforcement checks" in updated["review_markdown"]
+
+    def test_banner_includes_reasons_when_list_provided(self, tmp_path):
+        data = {"verdict": "request_changes", "review_markdown": "Please fix this."}
+        path = tmp_path / "ai-output.json"
+        path.write_text(json.dumps(data))
+        normalize_enforced_review_markdown(str(path), ["specific reason here"])
+        updated = json.loads(path.read_text())
+        assert "specific reason here" in updated["review_markdown"]
+
 
 class TestApplyAllEnforcement:
     def test_evidence_blocker_applied(self, tmp_path):
@@ -284,7 +322,61 @@ class TestApplyAllEnforcement:
             output_path=str(out),
         )
         assert applied == 1
-        assert json.loads(out.read_text())["verdict"] == "request_changes"
+        updated = json.loads(out.read_text())
+        assert updated["verdict"] == "request_changes"
+        assert "evidence provider blocker" in updated["review_markdown"].lower()
+
+    def test_tool_harness_failure_includes_reason_in_banner(self, tmp_path):
+        harness = {"planning_error": "context limit exceeded"}
+        output = {"verdict": "approve", "review_markdown": "Recommendation: Approve\n\nOK"}
+
+        ep = tmp_path / "evidence-providers.json"
+        th = tmp_path / "tool-harness.json"
+        out = tmp_path / "ai-output.json"
+        th.write_text(json.dumps(harness))
+        out.write_text(json.dumps(output))
+
+        applied = apply_all_enforcement(
+            evidence_blocker_enabled=False,
+            tool_failure_enabled=True,
+            tool_min_successful=0,
+            evidence_path=str(ep),
+            tool_harness_path=str(th),
+            output_path=str(out),
+        )
+        assert applied == 1
+        updated = json.loads(out.read_text())
+        assert updated["verdict"] == "request_changes"
+        assert "context limit exceeded" in updated["review_markdown"]
+        assert "Model recommendation before enforcement: Approve" in updated["review_markdown"]
+
+    def test_tool_min_successful_includes_reason_in_banner(self, tmp_path):
+        harness = {
+            "planned_request_count": 3,
+            "executed_request_count": 3,
+            "tool_results": [{"status": "ok"}, {"status": "error"}, {"status": "error"}],
+        }
+        output = {"verdict": "approve", "review_markdown": "Recommendation: Approve\n\nOK"}
+
+        ep = tmp_path / "evidence-providers.json"
+        th = tmp_path / "tool-harness.json"
+        out = tmp_path / "ai-output.json"
+        th.write_text(json.dumps(harness))
+        out.write_text(json.dumps(output))
+
+        applied = apply_all_enforcement(
+            evidence_blocker_enabled=False,
+            tool_failure_enabled=True,
+            tool_min_successful=3,
+            evidence_path=str(ep),
+            tool_harness_path=str(th),
+            output_path=str(out),
+        )
+        assert applied == 1
+        updated = json.loads(out.read_text())
+        assert updated["verdict"] == "request_changes"
+        assert "insufficient evidence" in updated["review_markdown"].lower()
+        assert "requires at least 3" in updated["review_markdown"].lower()
 
 
 if __name__ == "__main__":

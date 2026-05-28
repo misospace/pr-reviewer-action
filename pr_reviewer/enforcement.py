@@ -31,14 +31,14 @@ def apply_evidence_blocker_enforcement(
         True if enforcement was applied, False otherwise.
     """
     if not Path(evidence_path).exists():
-        return False
+        return False, ""
     try:
         evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError):
-        return False
+        return False, ""
 
     if not evidence.get("has_blocker"):
-        return False
+        return False, ""
 
     blocker_ids = [
         p["id"]
@@ -60,8 +60,13 @@ def apply_evidence_blocker_enforcement(
 
     data["verdict"] = "request_changes"
     data["review_markdown"] = markdown
+    reason = (
+        f"Evidence provider blocker detected"
+        + (f": {ids_str}" if ids_str else "")
+        + ". One or more configured evidence providers reported blocker-level findings."
+    )
     Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True
+    return True, reason
 
 
 def _get_tool_harness_failure_reason(tool_harness_path: str = "tool-harness.json") -> str | None:
@@ -130,7 +135,7 @@ def apply_tool_harness_failure_enforcement(
     """
     reason = _get_tool_harness_failure_reason(tool_harness_path)
     if not reason:
-        return False
+        return False, ""
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
     markdown = str(data.get("review_markdown") or "")
@@ -145,8 +150,13 @@ def apply_tool_harness_failure_enforcement(
 
     data["verdict"] = "request_changes"
     data["review_markdown"] = markdown
+    reason = (
+        f"Tool harness failure detected ({reason}). "
+        + "The tool harness failed during planning or execution; "
+        + "this workflow is configured fail-closed for tool harness failures."
+    )
     Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True
+    return True, reason
 
 
 def apply_tool_min_successful_enforcement(
@@ -171,11 +181,11 @@ def apply_tool_min_successful_enforcement(
         True if enforcement was applied, False otherwise.
     """
     if not _harness_requested_tools(tool_harness_path):
-        return False
+        return False, ""
 
     successful = _count_successful_requests(tool_harness_path)
     if successful >= min_required:
-        return False
+        return False, ""
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
     markdown = str(data.get("review_markdown") or "")
@@ -189,12 +199,18 @@ def apply_tool_min_successful_enforcement(
 
     data["verdict"] = "request_changes"
     data["review_markdown"] = markdown
+    reason = (
+        f"Tool harness gathered insufficient evidence. "
+        + f"This workflow requires at least {min_required} successful tool requests, "
+        + f"but only {successful} succeeded."
+    )
     Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True
+    return True, reason
 
 
 def normalize_enforced_review_markdown(
     output_path: str = "ai-output.json",
+    reasons: list[str] | None = None,
 ) -> None:
     """Add 'Final Recommendation: Request changes' banner when enforcement forced request_changes.
 
@@ -202,6 +218,8 @@ def normalize_enforced_review_markdown(
     ----------
     output_path : str
         Path to ``ai-output.json``.
+    reasons : list[str] | None
+        Specific enforcement reason strings to include in the banner.
     """
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
     verdict = data.get("verdict")
@@ -214,12 +232,23 @@ def normalize_enforced_review_markdown(
             markdown,
         )
         if not markdown.lstrip().startswith("## Final Recommendation"):
-            markdown = (
-                "## Final Recommendation\n"
-                "Request changes. One or more configured enforcement checks require this PR "
-                "to be treated as blocking even if the model's initial review text was approving.\n\n"
-                + markdown.lstrip()
-            )
+            if reasons:
+                reasons_bullet = "\n".join(f"- {r}" for r in reasons)
+                banner = (
+                    "## Final Recommendation\n"
+                    "Request changes. The following enforcement check(s) require this PR "
+                    "to be treated as blocking even if the model's initial review text was approving:\n\n"
+                    f"{reasons_bullet}\n\n"
+                    + markdown.lstrip()
+                )
+            else:
+                banner = (
+                    "## Final Recommendation\n"
+                    "Request changes. One or more configured enforcement checks require this PR "
+                    "to be treated as blocking even if the model's initial review text was approving.\n\n"
+                    + markdown.lstrip()
+                )
+            markdown = banner
 
         data["review_markdown"] = markdown
         Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -252,21 +281,28 @@ def apply_all_enforcement(
         Number of enforcement actions applied (0, 1, or 2).
     """
     applied = 0
+    reasons: list[str] = []
 
     if evidence_blocker_enabled:
-        if apply_evidence_blocker_enforcement(evidence_path, output_path):
+        ok, reason = apply_evidence_blocker_enforcement(evidence_path, output_path)
+        if ok:
             applied += 1
+            reasons.append(reason)
 
     if tool_failure_enabled:
-        if apply_tool_harness_failure_enforcement(tool_harness_path, output_path):
+        ok, reason = apply_tool_harness_failure_enforcement(tool_harness_path, output_path)
+        if ok:
             applied += 1
+            reasons.append(reason)
         elif tool_min_successful > 0:
-            if apply_tool_min_successful_enforcement(
+            ok, reason = apply_tool_min_successful_enforcement(
                 tool_min_successful, tool_harness_path, output_path
-            ):
+            )
+            if ok:
                 applied += 1
+                reasons.append(reason)
 
     if applied > 0:
-        normalize_enforced_review_markdown(output_path)
+        normalize_enforced_review_markdown(output_path, reasons if reasons else None)
 
     return applied
