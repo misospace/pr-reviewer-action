@@ -1,5 +1,5 @@
-name: AI PR Reviewer
-description: Analyze a pull request with a self-hosted or cloud OpenAI-compatible or Anthropic-compatible model and optionally publish a sticky PR comment.
+name: Miso PR Review
+description: Review pull requests with OpenAI- or Anthropic-compatible models and post an optional sticky comment.
 
 inputs:
   github_token:
