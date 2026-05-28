@@ -60,4 +60,5 @@ jobs:
           tool_failure_enforcement: 'true'
           tool_min_successful_requests: '1'
           tool_enable_for_forks: 'false'
-          publish_mode: native_review
+          publish_mode: review_verdict
+          allow_approve: 'true'
