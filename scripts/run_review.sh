@@ -278,8 +278,8 @@ apply_all_enforcement_wrapper() {
   PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
 from pr_reviewer.enforcement import apply_all_enforcement
 apply_all_enforcement(
-  evidence_blocker_enabled=$evidence_blocker_enabled,
-  tool_failure_enabled=$tool_failure_enabled,
+  evidence_blocker_enabled=('$evidence_blocker_enabled' == 'true'),
+  tool_failure_enabled=('$tool_failure_enabled' == 'true'),
   tool_min_successful=$tool_min_successful
 )
 "
