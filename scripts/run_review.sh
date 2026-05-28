@@ -305,7 +305,7 @@ head -c "$MAX_FILES" pr-files.json > pr-files.truncated.json
 jq -r '.body // ""' pr.json > pr-body.txt
 
 log "Gathering linked issue context..."
-REPO="$REPO" python3 - <<'PY' > linked-issues.json
+PYTHONPATH="${SCRIPT_DIR}/.." REPO="$REPO" python3 - <<'PY' > linked-issues.json
 import json
 import os
 from pathlib import Path
