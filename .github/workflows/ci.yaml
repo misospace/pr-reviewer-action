@@ -41,17 +41,8 @@ jobs:
       - name: Run smoke test
         run: tests/smoke_test.sh
 
-      - name: Run model parsing tests
-        run: python3 tests/test_model_parsing.py
-
-      - name: Run redaction tests
-        run: pytest tests/test_redact.py -v
-
-      - name: Run metadata marker stripping tests
-        run: pytest tests/test_strip_metadata_markers.py -v
-
-      - name: Run evidence provider tests
-        run: pytest tests/test_evidence_providers.py -v
+      - name: Run Python tests (auto-discover all 215)
+        run: pytest tests/ -v --tb=short
 
       - name: Run precheck guardrails tests
         run: bash tests/test_check_review_needed.sh
