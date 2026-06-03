@@ -695,9 +695,18 @@ else
 fi
 
 if [ ! -f tool-harness.md ]; then
-  cat > tool-harness.md <<'EOF'
+  case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
+    plan_execute_once)
+      cat > tool-harness.md <<'EOF'
+Tool harness planning pending.
+EOF
+      ;;
+    *)
+      cat > tool-harness.md <<'EOF'
 Tool harness disabled.
 EOF
+      ;;
+  esac
 fi
 
 if [ ! -f tool-harness.json ]; then

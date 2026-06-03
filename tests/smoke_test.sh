@@ -540,6 +540,37 @@ else
 fi
 
 echo ""
+echo "=== Tool harness planning corpus: plan_execute_once uses neutral text ==="
+
+# Simulate the initial tool-harness.md creation logic from run_review.sh
+create_default_tool_harness() {
+  local tool_mode="$1"
+  local output_file="$2"
+
+  case "$(printf '%s' "$tool_mode" | tr '[:upper:]' '[:lower:]')" in
+    plan_execute_once)
+      cat > "$output_file" <<'EOF'
+Tool harness planning pending.
+EOF
+      ;;
+    *)
+      cat > "$output_file" <<'EOF'
+Tool harness disabled.
+EOF
+      ;;
+  esac
+}
+
+# Test: plan_execute_once should NOT contain "disabled"
+create_default_tool_harness "plan_execute_once" "$TMPDIR/th-planning.md"
+check "planning mode has neutral text" "$(cat "$TMPDIR/th-planning.md")" "Tool harness planning pending."
+check "planning mode does not say disabled" "$(grep -c 'disabled' "$TMPDIR/th-planning.md" || true)" "0"
+
+# Test: off mode should still contain "disabled"
+create_default_tool_harness "off" "$TMPDIR/th-disabled.md"
+check "off mode has disabled text" "$(cat "$TMPDIR/th-disabled.md")" "Tool harness disabled."
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ "$FAIL" -gt 0 ]]; then
