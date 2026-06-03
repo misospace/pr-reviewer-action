@@ -113,6 +113,15 @@ inputs:
       approval even when allow_approve is set.
     required: false
     default: "false"
+  cleanup_previous_native_reviews:
+    description: >-
+      Mark previous managed native PR reviews as outdated/superseded before publishing a new
+      native review. Accepted values: `auto` (default, enables cleanup for review_comment and
+      review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this
+      action and carrying the managed marker. Dismissal of old approval/request-changes reviews
+      is attempted when permissions allow but is secondary to visual cleanup.
+    required: false
+    default: "auto"
   context_limit_mode:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
@@ -424,6 +433,7 @@ runs:
         VERDICT: ${{ steps.review.outputs.verdict }}
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
+        CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
       run: |
         set -euo pipefail
         # Sanitize model output: strip internal metadata markers that the model
@@ -437,9 +447,53 @@ runs:
           exit 1
         fi
 
-        # Build the review body
+        # Resolve cleanup flag: auto enables for review_comment mode
+        CLEANUP_NATIVE_REVIEWS=false
+        case "$(printf '%s' "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" | tr '[:upper:]' '[:lower:]')" in
+          true) CLEANUP_NATIVE_REVIEWS=true ;;
+          false) CLEANUP_NATIVE_REVIEWS=false ;;
+          auto|"") CLEANUP_NATIVE_REVIEWS=true ;;
+          *) echo "Invalid cleanup_previous_native_reviews value; expected auto, true, or false" >&2; exit 1 ;;
+        esac
+
+        # Cleanup previous managed native reviews if enabled
+        if [ "$CLEANUP_NATIVE_REVIEWS" = "true" ]; then
+          echo "Cleaning up previous managed native reviews for #$PR_NUMBER"
+          CURRENT_ACTOR="$(gh api user --jq .login 2>/dev/null || echo "")"
+          if [ -n "$CURRENT_ACTOR" ]; then
+            PREV_REVIEWS="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[] | select(.user.login == "'"$CURRENT_ACTOR"'" and (.body | contains("<!-- ai-pr-reviewer -->"))) | .id' 2>/dev/null || echo "")"
+            if [ -n "$PREV_REVIEWS" ]; then
+              while IFS= read -r REVIEW_ID; do
+                if [ -z "$REVIEW_ID" ]; then continue; fi
+                # Dismiss approval/request-changes reviews to stop stale verdicts from counting
+                REVIEW_STATE="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID" --jq '.state // ""' 2>/dev/null || echo "")"
+                if [ "$REVIEW_STATE" = "APPROVED" ] || [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+                  if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" --method PUT -f message="Superseded by a newer automated review for this pull request." --jq '.id' >/dev/null 2>&1; then
+                    echo "  Dismissed outdated managed review #$REVIEW_ID ($REVIEW_STATE)"
+                  else
+                    echo "  WARN: Could not dismiss review #$REVIEW_ID (may require additional permissions)" >&2
+                  fi
+                fi
+                # Update body to compact outdated stub (best-effort)
+                OUTDATED_BODY="$(printf '<!-- ai-pr-reviewer -->\n_Outdated: superseded by a newer automated review._')"
+                if ! gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID" --method PATCH -f body="$OUTDATED_BODY" >/dev/null 2>&1; then
+                  echo "  WARN: Could not update review #$REVIEW_ID body (submitted reviews may be read-only)" >&2
+                else
+                  echo "  Marked review #$REVIEW_ID as outdated/superseded"
+                fi
+              done <<< "$PREV_REVIEWS"
+            else
+              echo "  No previous managed native reviews found for #$PR_NUMBER"
+            fi
+          else
+            echo "  WARN: Could not determine current actor; skipping cleanup" >&2
+          fi
+        fi
+
+        # Build the review body with managed marker
         BODY_FILE="review-comment-body.md"
         {
+          echo "<!-- ai-pr-reviewer -->"
           echo "# AI Automated Review"
           echo
           echo "_Analysis engine: ${ANALYSIS_ENGINE}_"
@@ -467,6 +521,7 @@ runs:
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
+        CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
       run: |
         set -euo pipefail
         # Sanitize model output: strip internal metadata markers that the model
@@ -478,6 +533,49 @@ runs:
         if [ -z "${PR_NUMBER:-}" ]; then
           echo "publish_mode=review_verdict requires a pull_request event or explicit pr_number" >&2
           exit 1
+        fi
+
+        # Resolve cleanup flag: auto enables for review_verdict mode
+        CLEANUP_NATIVE_REVIEWS=false
+        case "$(printf '%s' "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" | tr '[:upper:]' '[:lower:]')" in
+          true) CLEANUP_NATIVE_REVIEWS=true ;;
+          false) CLEANUP_NATIVE_REVIEWS=false ;;
+          auto|"") CLEANUP_NATIVE_REVIEWS=true ;;
+          *) echo "Invalid cleanup_previous_native_reviews value; expected auto, true, or false" >&2; exit 1 ;;
+        esac
+
+        # Cleanup previous managed native reviews if enabled
+        if [ "$CLEANUP_NATIVE_REVIEWS" = "true" ]; then
+          echo "Cleaning up previous managed native reviews for #$PR_NUMBER"
+          CURRENT_ACTOR="$(gh api user --jq .login 2>/dev/null || echo "")"
+          if [ -n "$CURRENT_ACTOR" ]; then
+            PREV_REVIEWS="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[] | select(.user.login == "'"$CURRENT_ACTOR"'" and (.body | contains("<!-- ai-pr-reviewer -->"))) | .id' 2>/dev/null || echo "")"
+            if [ -n "$PREV_REVIEWS" ]; then
+              while IFS= read -r REVIEW_ID; do
+                if [ -z "$REVIEW_ID" ]; then continue; fi
+                # Dismiss approval/request-changes reviews to stop stale verdicts from counting
+                REVIEW_STATE="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID" --jq '.state // ""' 2>/dev/null || echo "")"
+                if [ "$REVIEW_STATE" = "APPROVED" ] || [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+                  if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" --method PUT -f message="Superseded by a newer automated review for this pull request." --jq '.id' >/dev/null 2>&1; then
+                    echo "  Dismissed outdated managed review #$REVIEW_ID ($REVIEW_STATE)"
+                  else
+                    echo "  WARN: Could not dismiss review #$REVIEW_ID (may require additional permissions)" >&2
+                  fi
+                fi
+                # Update body to compact outdated stub (best-effort)
+                OUTDATED_BODY="$(printf '<!-- ai-pr-reviewer -->\n_Outdated: superseded by a newer automated review._')"
+                if ! gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID" --method PATCH -f body="$OUTDATED_BODY" >/dev/null 2>&1; then
+                  echo "  WARN: Could not update review #$REVIEW_ID body (submitted reviews may be read-only)" >&2
+                else
+                  echo "  Marked review #$REVIEW_ID as outdated/superseded"
+                fi
+              done <<< "$PREV_REVIEWS"
+            else
+              echo "  No previous managed native reviews found for #$PR_NUMBER"
+            fi
+          else
+            echo "  WARN: Could not determine current actor; skipping cleanup" >&2
+          fi
         fi
 
         # Determine if the PR is from a fork
@@ -498,9 +596,10 @@ runs:
           fi
         fi
 
-        # Build the review body
+        # Build the review body with managed marker
         BODY_FILE="review-verdict-body.md"
         {
+          echo "<!-- ai-pr-reviewer -->"
           echo "# AI Automated Review"
           echo
           echo "_Analysis engine: ${ANALYSIS_ENGINE}_"

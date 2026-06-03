@@ -53,6 +53,7 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 | `publish_mode` | Publish mode for the review verdict: `comment` (sticky PR comment, default), `review_comment` (non-blocking native PR review comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `comment` |
 | `allow_approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
 | `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
+| `cleanup_previous_native_reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
 | `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
 | `evidence_providers_file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
 | `evidence_provider_timeout_sec` | Default timeout in seconds for each evidence provider command | No | `30` |
@@ -340,6 +341,34 @@ When `publish_mode=review_comment` is set, the action submits a non-blocking nat
     ai_api_key: ${{ secrets.OPENAI_API_KEY }}
     publish_mode: review_comment
 ```
+
+### Native review cleanup
+
+When `publish_mode` is set to `review_comment` or `review_verdict`, the action creates a new submitted native PR review on every run. Without cleanup, old AI reviews pile up in the PR timeline and make the conversation noisy.
+
+By default, the action automatically cleans up previous managed native reviews for `review_comment` and `review_verdict` modes. The `cleanup_previous_native_reviews` input controls this behavior:
+
+- `auto` (default): enables cleanup for `review_comment` and `review_verdict` modes, disabled for `comment` mode (which already edits one sticky comment in place).
+- `true`: always enable cleanup regardless of publish mode.
+- `false`: disable cleanup entirely.
+
+The cleanup process:
+
+1. Identifies previous managed AI reviews from the current authenticated actor that carry the `<!-- ai-pr-reviewer -->` marker.
+2. Dismisses old approval or request-changes verdict reviews when permissions allow, so stale verdicts stop counting toward branch protection.
+3. Updates the body of old managed reviews to a compact "Outdated: superseded by a newer automated review." stub.
+
+Old reviews may still exist in the PR timeline, but they are visually minimized and explicitly marked as outdated. Human reviews and unmarked bot reviews are never modified.
+
+Cleanup and dismissal failures produce warnings but do not prevent posting the new review. If you need to grant additional permissions for dismissal:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+The `pull-requests: write` permission is required for both posting reviews and dismissing them. On protected branches or stricter repositories, GitHub may require repository admin permissions or explicit review-dismissal settings to be enabled for the app/token.
 
 ### With tool harness planning
 
