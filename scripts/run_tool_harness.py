@@ -649,6 +649,8 @@ def main():
                     if not path:
                         raise ValueError("Missing 'path' argument")
                     res = read_file(path, workspace_root)
+                    if res.get("error"):
+                        raise ValueError(res["error"])
                     text = mask_secrets(res.get("content", ""))
                     text, _ = mask_and_truncate(text, max_response_bytes)
                     tool_result["result"] = {"content": text}
@@ -658,6 +660,8 @@ def main():
                     if not pattern:
                         raise ValueError("Missing 'pattern' argument")
                     res = git_grep(pattern, workspace_root)
+                    if res.get("error"):
+                        raise ValueError(res["error"])
                     matches = res.get("matches", [])
                     text = "\n".join(matches)
                     text, _ = mask_and_truncate(text, max_response_bytes)
@@ -668,6 +672,8 @@ def main():
                     if not endpoint:
                         raise ValueError("Missing 'endpoint' argument")
                     res = gh_api(endpoint, allowed_gh_repos, current_repo)
+                    if res.get("error"):
+                        raise ValueError(res["error"])
                     data = res.get("data")
                     text = ""
                     if isinstance(data, (dict, list)):
@@ -679,6 +685,8 @@ def main():
                     if not url:
                         raise ValueError("Missing 'url' argument")
                     res = web_fetch(url, allowed_hosts)
+                    if res.get("error"):
+                        raise ValueError(res["error"])
                     content_text = res.get("content", "")
                     text, _ = mask_and_truncate(content_text, max_response_bytes)
                     tool_result["result"] = {"content": text}
@@ -708,6 +716,10 @@ def main():
                 result["executed_request_count"] += 1
 
             except Exception as exc:
+                # Error messages from raised ValueError (from res["error"] checks
+                # above) are masked by mask_secrets() in write_outputs(), which
+                # processes the markdown output. This is consistent with how
+                # run_command error messages are redacted.
                 tool_result["result"] = {"error": str(exc)}
 
             result["tool_results"].append(tool_result)
@@ -781,6 +793,8 @@ def main():
                 if not path:
                     raise ValueError("Missing 'path' argument")
                 res = read_file(path, workspace_root)
+                if res.get("error"):
+                    raise ValueError(res["error"])
                 text = mask_secrets(res.get("content", ""))
                 text, _ = mask_and_truncate(text, max_response_bytes)
                 tool_result["result"] = {"content": text}
@@ -790,6 +804,8 @@ def main():
                 if not pattern:
                     raise ValueError("Missing 'pattern' argument")
                 res = git_grep(pattern, workspace_root)
+                if res.get("error"):
+                    raise ValueError(res["error"])
                 matches = res.get("matches", [])
                 text = "\n".join(matches)
                 text, _ = mask_and_truncate(text, max_response_bytes)
@@ -800,6 +816,8 @@ def main():
                 if not endpoint:
                     raise ValueError("Missing 'endpoint' argument")
                 res = gh_api(endpoint, allowed_gh_repos, current_repo)
+                if res.get("error"):
+                    raise ValueError(res["error"])
                 data = res.get("data")
                 text = ""
                 if isinstance(data, (dict, list)):
@@ -811,6 +829,8 @@ def main():
                 if not url:
                     raise ValueError("Missing 'url' argument")
                 res = web_fetch(url, allowed_hosts)
+                if res.get("error"):
+                    raise ValueError(res["error"])
                 content_text = res.get("content", "")
                 text, _ = mask_and_truncate(content_text, max_response_bytes)
                 tool_result["result"] = {"content": text}
@@ -840,6 +860,10 @@ def main():
             result["executed_request_count"] += 1
 
         except Exception as exc:
+            # Error messages from raised ValueError (from res["error"] checks
+            # above) are masked by mask_secrets() in write_outputs(), which
+            # processes the markdown output. This is consistent with how
+            # run_command error messages are redacted.
             tool_result["result"] = {"error": str(exc)}
 
         result["tool_results"].append(tool_result)

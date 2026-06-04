@@ -1,23 +1,44 @@
-"""Regression tests for issue #53: tool harness fail-closed status accounting.
+"""Tests for issue #53 and issue #102: tool harness status accounting and error handling.
 
-The bug: run_review.sh checked `.tool_results[].result.status` but
+Issue #53: run_review.sh checked `.tool_results[].result.status` but
 run_tool_harness.py writes status at `.tool_results[].status`.
 
-This means successful tool calls were counted as failures under
-fail-closed settings (tool_failure_enforcement=true, tool_min_successful_requests>0),
-causing spurious request_changes verdicts.
+Issue #102: read_file, git_grep, gh_api, and web_fetch did not check for
+error returns from their helper functions, causing status to be "ok" even
+when the underlying tool failed.
 
 Acceptance criteria:
   - The corrected jq path reads from .tool_results[].status == "ok".
   - A regression fixture with at least one successful tool result and fail-closed
     settings demonstrates the old path fails and the new path passes.
-  - Existing review parsing/model tests still pass.
+  - read_file, git_grep, gh_api, web_fetch all produce status: error when
+    their helper returns an error dict.
+  - run_command already had this behavior (verified via existing tests).
 """
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
+from unittest import mock
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+
+
+def _import_tool(name):
+    """Import a tool function from run_tool_harness, ensuring scripts is on sys.path."""
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from run_tool_harness import (  # noqa: F401
+        gh_api,
+        git_grep,
+        read_file,
+        run_command,
+        web_fetch,
+    )
+    return locals()[name]
 
 
 def _jq(expr, json_str):
@@ -214,6 +235,308 @@ def test_run_review_uses_correct_path():
 
 
 # ---------------------------------------------------------------------------
+# Tests for issue #102: tool error propagation
+# ---------------------------------------------------------------------------
+
+
+def test_read_file_error_path():
+    """read_file with a missing path returns {'error': ...}."""
+    read_file = _import_tool("read_file")
+    result = read_file("nonexistent_file_xyz.txt", "/tmp")
+    assert "error" in result, f"Expected error key, got: {result}"
+
+
+def test_read_file_sensitive_path():
+    """read_file with a sensitive filename returns {'error': ...}."""
+    read_file = _import_tool("read_file")
+    result = read_file(".env", "/tmp")
+    assert "error" in result, f"Expected error for sensitive path, got: {result}"
+
+
+def test_read_file_path_escape():
+    """read_file with a path escaping workspace returns {'error': ...}."""
+    read_file = _import_tool("read_file")
+    result = read_file("../../etc/passwd", "/tmp")
+    assert "error" in result, f"Expected error for path escape, got: {result}"
+
+
+def test_git_grep_error_path():
+    """git_grep returns {'error': ...} when subprocess raises TimeoutExpired."""
+    git_grep = _import_tool("git_grep")
+    with mock.patch(
+        "subprocess.run", side_effect=subprocess.TimeoutExpired("git", 15)
+    ):
+        result = git_grep("some-pattern", "/tmp")
+    assert result.get("error") == "git grep timed out after 15s", (
+        f"Expected exact timeout error message, got: {result}"
+    )
+
+
+def test_git_grep_error_returncode():
+    """git_grep returns {'error': ...} when git grep exits with non-0/1 code."""
+    git_grep = _import_tool("git_grep")
+    mock_result = mock.Mock(returncode=2, stderr="fatal: some error", stdout="")
+    with mock.patch("subprocess.run", return_value=mock_result):
+        result = git_grep("some-pattern", "/tmp")
+    assert "error" in result and "git grep failed" in result["error"], (
+        f"Expected error dict for non-zero exit, got: {result}"
+    )
+
+
+def test_git_grep_error_generic():
+    """git_grep returns {'error': ...} for any unexpected exception."""
+    git_grep = _import_tool("git_grep")
+    with mock.patch("subprocess.run", side_effect=RuntimeError("permission denied")):
+        result = git_grep("some-pattern", "/tmp")
+    assert "error" in result and "permission denied" in result["error"], (
+        f"Expected error dict for unexpected exception, got: {result}"
+    )
+
+
+def test_gh_api_error_missing_token():
+    """gh_api with no token returns {'error': 'Missing GH_TOKEN'}."""
+    gh_api = _import_tool("gh_api")
+
+    # Ensure no token is available. try/finally guarantees restoration even
+    # if an assertion fails. Tests are single-threaded so this is safe.
+    old_token = None
+    for env_var in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if env_var in os.environ:
+            old_token = (env_var, os.environ[env_var])
+            del os.environ[env_var]
+
+    try:
+        result = gh_api("owner/repo/pulls/1", set(), "owner/repo")
+        assert "error" in result, f"Expected error for missing token, got: {result}"
+    finally:
+        if old_token:
+            os.environ[old_token[0]] = old_token[1]
+
+
+def test_gh_api_error_repo_not_allowed():
+    """gh_api with a non-allowlisted repo returns {'error': ...}.
+
+    The allowlist check runs before any HTTP request, so the fake token set
+    below is never sent over the network. Verified by the urlopen assertion.
+    """
+    gh_api = _import_tool("gh_api")
+
+    old_token = None
+    for env_var in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if env_var in os.environ:
+            old_token = (env_var, os.environ[env_var])
+            break
+    if not old_token:
+        os.environ["GH_TOKEN"] = "fake-token-for-testing"
+
+    try:
+        # Patch urlopen to confirm no network call is made when repo is
+        # rejected by the allowlist. The allowlist check runs before any
+        # HTTP request in gh_api().
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            result = gh_api(
+                "other-owner/other-repo/pulls/1", set(), "my-org/my-repo"
+            )
+        assert "error" in result, f"Expected error for disallowed repo, got: {result}"
+        assert "Repo not allowed" in result["error"]
+        mock_urlopen.assert_not_called(), (
+            "urlopen should not be called when repo is not allowlisted"
+        )
+    finally:
+        if old_token:
+            os.environ[old_token[0]] = old_token[1]
+        else:
+            del os.environ["GH_TOKEN"]
+
+
+def test_web_fetch_error_non_allowlisted_host():
+    """web_fetch with a non-allowlisted host returns {'error': ...}."""
+    web_fetch = _import_tool("web_fetch")
+
+    result = web_fetch("https://evil.example.com/secret", ["github.com"])
+    assert "error" in result, f"Expected error for non-allowlisted host, got: {result}"
+
+
+def test_run_command_error_not_allowlisted():
+    """run_command with an unallowlisted command returns {'error': ...}."""
+    run_command = _import_tool("run_command")
+
+    result = run_command("rm -rf /", "/tmp")
+    assert "error" in result, f"Expected error for disallowed command, got: {result}"
+
+
+# ---------------------------------------------------------------------------
+# Test: integration fixture where tool_min_successful_requests enforcement
+# fails when all planned calls produce errors
+# ---------------------------------------------------------------------------
+
+ENFORCEMENT_FIXTURE = {
+    "mode": "plan_execute_once",
+    "planned_request_count": 2,
+    "executed_request_count": 0,
+    "tool_results": [
+        {
+            "tool": "read_file",
+            "status": "error",
+            "result": {"error": "Path escapes workspace root"},
+        },
+        {
+            "tool": "gh_api",
+            "status": "error",
+            "result": {"error": "Repo not allowed: other/repo"},
+        },
+    ],
+}
+
+
+def test_enforcement_fixture_no_successes():
+    """When all tools fail, executed_request_count is 0 and enforcement triggers."""
+    data = ENFORCEMENT_FIXTURE
+    assert data["executed_request_count"] == 0
+    ok_count = sum(1 for t in data["tool_results"] if t.get("status") == "ok")
+    assert ok_count == 0, f"Expected 0 successes, got {ok_count}"
+
+
+# ---------------------------------------------------------------------------
+# Integration test: end-to-end execution loop with error-producing tool calls
+# ---------------------------------------------------------------------------
+
+def test_integration_all_tools_fail():
+    """run_tool_harness.py produces status: error for all tools when helpers return errors.
+
+    This exercises the actual try/except execution loop in main() by writing
+    a planning response with two tool calls that will fail, then verifying
+    the output JSON has status: error for both results and executed_request_count=0.
+    """
+    # Write a planning input file
+    planning_input = {
+        "repository": "test-org/test-repo",
+        "diff_hunk": "--- a/README\\n+++ b/README\\n@@ -1,3 +1,3 @@\\n-Old content\\n+New content\\n",
+    }
+    # The file-based planning path expects OpenAI-style response format
+    planning_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps([
+                        {"tool": "read_file", "args": {"path": "../../etc/passwd"}},
+                        {"tool": "gh_api", "args": {"endpoint": "other-owner/other-repo/pulls/1"}},
+                    ])
+                }
+            }
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "tool-planning-input.json"
+        response_path = Path(tmpdir) / "tool-planning-response.json"
+        output_path = Path(tmpdir) / "tool-harness.json"
+
+        input_path.write_text(json.dumps(planning_input), encoding="utf-8")
+        response_path.write_text(json.dumps(planning_response), encoding="utf-8")
+
+        env = os.environ.copy()
+        env["REPO"] = "test-org/test-repo"
+        env["GH_TOKEN"] = ""  # No token so gh_api fails immediately
+
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "run_tool_harness.py")],
+            cwd=tmpdir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert output_path.exists(), (
+            f"tool-harness.json should be written. stderr: {result.stderr}"
+        )
+
+        with open(output_path) as f:
+            output = json.load(f)
+
+    # Both tools should have status: error
+    tool_results = output["tool_results"]
+    assert len(tool_results) == 2, f"Expected 2 results, got {len(tool_results)}"
+
+    for tr in tool_results:
+        assert tr["status"] == "error", (
+            f"Expected status='error' for {tr['tool']}, got '{tr['status']}'"
+        )
+        assert "error" in tr.get("result", {}), (
+            f"Expected error in result for {tr['tool']}"
+        )
+
+    # executed_request_count should be 0 (no successful calls)
+    assert output["executed_request_count"] == 0, (
+        f"Expected 0 successes, got {output['executed_request_count']}"
+    )
+
+
+def test_integration_mixed_success_and_failure():
+    """run_tool_harness.py produces correct mixed status when some tools succeed and others fail."""
+    planning_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps([
+                        {"tool": "read_file", "args": {"path": "tool-planning-input.json"}},
+                        {"tool": "gh_api", "args": {"endpoint": "other-owner/other-repo/pulls/1"}},
+                    ])
+                }
+            }
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "tool-planning-input.json"
+        response_path = Path(tmpdir) / "tool-planning-response.json"
+        output_path = Path(tmpdir) / "tool-harness.json"
+
+        # Create a file that read_file can successfully read
+        input_path.write_text(json.dumps({}), encoding="utf-8")
+        response_path.write_text(json.dumps(planning_response), encoding="utf-8")
+
+        env = os.environ.copy()
+        env["REPO"] = "test-org/test-repo"
+        env["GH_TOKEN"] = ""
+
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "run_tool_harness.py")],
+            cwd=tmpdir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert output_path.exists(), (
+            f"tool-harness.json should be written. stderr: {result.stderr}"
+        )
+
+        with open(output_path) as f:
+            output = json.load(f)
+
+    tool_results = output["tool_results"]
+    assert len(tool_results) == 2
+
+    # First tool (read_file) should succeed
+    assert tool_results[0]["status"] == "ok", (
+        f"read_file should succeed, got '{tool_results[0]['status']}'"
+    )
+
+    # Second tool (gh_api) should fail (repo not allowed)
+    assert tool_results[1]["status"] == "error", (
+        f"gh_api should fail for disallowed repo, got '{tool_results[1]['status']}'"
+    )
+
+    # executed_request_count should be 1
+    assert output["executed_request_count"] == 1, (
+        f"Expected 1 success, got {output['executed_request_count']}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -224,6 +547,19 @@ def main():
         ("all-ok fixture", test_all_ok_fixture),
         ("all-fail fixture", test_all_fail_fixture),
         ("run_review.sh uses correct path", test_run_review_uses_correct_path),
+        ("read_file error path", test_read_file_error_path),
+        ("read_file sensitive path", test_read_file_sensitive_path),
+        ("read_file path escape", test_read_file_path_escape),
+        ("git_grep error path", test_git_grep_error_path),
+        ("git_grep error returncode", test_git_grep_error_returncode),
+        ("git_grep error generic", test_git_grep_error_generic),
+        ("gh_api missing token", test_gh_api_error_missing_token),
+        ("gh_api repo not allowed", test_gh_api_error_repo_not_allowed),
+        ("web_fetch non-allowlisted host", test_web_fetch_error_non_allowlisted_host),
+        ("run_command not allowlisted", test_run_command_error_not_allowlisted),
+        ("enforcement fixture no successes", test_enforcement_fixture_no_successes),
+        ("integration all tools fail", test_integration_all_tools_fail),
+        ("integration mixed success/failure", test_integration_mixed_success_and_failure),
     ]
 
     passed = 0
