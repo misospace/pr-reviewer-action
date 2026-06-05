@@ -225,6 +225,22 @@ class TestApplyToolMinSuccessfulEnforcement:
         result = apply_tool_min_successful_enforcement(2, str(harness_path), str(output_path))
         assert result == (False, "")
 
+    def test_one_successful_tool_at_minimum(self, tmp_path):
+        """Explicit symmetry: 1 successful tool with min=1 should pass."""
+        harness = {
+            "planned_request_count": 1,
+            "tool_results": [{"status": "ok"}],
+        }
+        output = {"verdict": "approve", "review_markdown": "OK"}
+
+        harness_path = tmp_path / "tool-harness.json"
+        output_path = tmp_path / "ai-output.json"
+        harness_path.write_text(json.dumps(harness))
+        output_path.write_text(json.dumps(output))
+
+        result = apply_tool_min_successful_enforcement(1, str(harness_path), str(output_path))
+        assert result == (False, "")
+
     def test_enforces_when_zero_tools_requested_and_min_gt_zero(self, tmp_path):
         harness = {"planned_request_count": 0, "executed_request_count": 0}
         output = {"verdict": "approve", "review_markdown": "OK"}
