@@ -64,6 +64,9 @@ AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"
 AI_FALLBACK_CONNECT_TIMEOUT_SEC="${AI_FALLBACK_CONNECT_TIMEOUT_SEC:-${AI_CONNECT_TIMEOUT_SEC}}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
+REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
+EFFECTIVE_SCOPE="${EFFECTIVE_SCOPE:-full}"
+PREVIOUS_HEAD_SHA="${PREVIOUS_HEAD_SHA:-}"
 
 apply_context_limits() {
   case "${CONTEXT_LIMIT_MODE:-normal}" in
@@ -76,6 +79,29 @@ apply_context_limits() {
   esac
 }
 apply_context_limits
+
+fetch_incremental_patch() {
+  local previous_head="$1"
+  local current_head="$2"
+  local output_file="$3"
+
+  echo "Fetching incremental diff: $previous_head...$current_head" >&2
+
+  # Get the compare API URL and fetch the raw diff
+  local compare_url
+  compare_url="$(gh api "repos/$REPO/compare/${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
+
+  if [[ -n "$compare_url" ]]; then
+    curl -q -fsSL -H "Authorization: token $GH_TOKEN" \
+      -H "Accept: application/vnd.github.v3.diff" \
+      "$compare_url" > "$output_file" 2>/dev/null || true
+  fi
+
+  if [[ ! -s "$output_file" ]]; then
+    echo "Compare API returned empty or failed; falling back to full PR diff" >&2
+    gh pr diff "$PR_NUMBER" --repo "$REPO" > "$output_file"
+  fi
+}
 
 if [[ -z "$REPO" || -z "$PR_NUMBER" || -z "$AI_BASE_URL" || -z "$AI_MODEL" ]]; then
   error "Missing required environment variables: REPO, PR_NUMBER, AI_BASE_URL, or AI_MODEL"
@@ -716,6 +742,8 @@ EOF
 fi
 
 build_review_corpus() {
+  local corpus_type="${1:-full}"  # 'full' or 'incremental'
+
   {
     echo "# Changed Manifest Context"
     cat manifest-context.md
@@ -725,31 +753,54 @@ build_review_corpus() {
     jq . pr.json
     echo '```'
     echo
-    echo "# Linked Issue Context"
-    cat linked-issues.md
-    echo
-    echo "# PR Files (truncated)"
-    echo '```json'
-    cat pr-files.truncated.json
-    echo '```'
-    echo
-    echo "# Version Hints from Diff"
-    echo '```text'
-    cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
-    echo '```'
-    echo
-    echo "# PR Diff (truncated)"
-    echo '```diff'
-    cat pr.diff.truncated
-    echo '```'
-    echo
+
+    if [[ "$corpus_type" == "incremental" ]]; then
+      local head_sha
+      head_sha="$(jq -r '.headRefOid' pr.json 2>/dev/null || echo 'unknown')"
+      echo "# Incremental Review Delta"
+      echo "_Reviewing changes from $PREVIOUS_HEAD_SHA to $head_sha. This is not a full re-review of the entire PR._"
+      echo
+      if [ -f incremental.diff ]; then
+        echo '```diff'
+        head -c "$MAX_DIFF" incremental.diff
+        echo '```'
+      else
+        echo "(No incremental diff available)"
+      fi
+    else
+      echo "# Linked Issue Context"
+      cat linked-issues.md
+      echo
+      echo "# PR Files (truncated)"
+      echo '```json'
+      cat pr-files.truncated.json
+      echo '```'
+      echo
+      echo "# Version Hints from Diff"
+      echo '```text'
+      cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
+      echo '```'
+      echo
+      echo "# PR Diff (truncated)"
+      echo '```diff'
+      cat pr.diff.truncated
+      echo '```'
+      echo
+    fi
+
     echo "# Linked Sources"
     cat linked-sources.md
     echo
     echo "# Evidence Providers"
     cat evidence-providers.md
     echo
-    echo "# Tool Harness Findings"
+
+    # Tool harness section — label based on scope
+    if [[ "$corpus_type" == "incremental" ]]; then
+      echo "# Tool Harness Findings (incremental review)"
+    else
+      echo "# Tool Harness Findings"
+    fi
     cat tool-harness.md
     echo
     echo "# Image Digest Provenance"
@@ -766,7 +817,14 @@ build_review_corpus() {
   } > review-corpus.md
 }
 
-build_review_corpus
+log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
+
+if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
+  fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
+  build_review_corpus "incremental"
+else
+  build_review_corpus "full"
+fi
 head -c "$MAX_CORPUS" review-corpus.md > review-corpus.truncated.md
 
 if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]]; then
@@ -888,5 +946,10 @@ log "Analysis complete. Writing outputs..."
 jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
 echo "$ANALYSIS_ENGINE" > analysis_engine.txt
+
+echo "effective_review_scope=$EFFECTIVE_SCOPE" >> "$OUTPUT_FILE"
+if [[ -n "$PREVIOUS_HEAD_SHA" ]]; then
+  echo "previous_head_sha=$PREVIOUS_HEAD_SHA" >> "$OUTPUT_FILE"
+fi
 
 log "Done."
