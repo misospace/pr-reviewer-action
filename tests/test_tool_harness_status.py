@@ -32,6 +32,7 @@ def _import_tool(name):
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
     from run_tool_harness import (  # noqa: F401
+        fetch_url,
         gh_api,
         git_grep,
         read_file,
@@ -453,6 +454,36 @@ def test_web_fetch_uses_custom_timeout():
     )
 
 
+def test_fetch_url_uses_custom_timeout():
+    """fetch_url passes the timeout value to urllib.request.urlopen."""
+    fetch_url = _import_tool("fetch_url")
+
+    fake_response = mock.Mock()
+    fake_response.read.return_value = b"content"
+    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+        result = fetch_url("https://github.com/test", ["github.com"], request_timeout=35)
+    mock_urlopen.assert_called_once()
+    args, kwargs = mock_urlopen.call_args
+    assert kwargs.get("timeout") == 35, (
+        f"Expected timeout=35, got {kwargs}"
+    )
+
+
+def test_fetch_url_default_timeout():
+    """fetch_url uses 25s default when no timeout is specified."""
+    fetch_url = _import_tool("fetch_url")
+
+    fake_response = mock.Mock()
+    fake_response.read.return_value = b"content"
+    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+        result = fetch_url("https://github.com/test", ["github.com"])
+    mock_urlopen.assert_called_once()
+    args, kwargs = mock_urlopen.call_args
+    assert kwargs.get("timeout") == 25, (
+        f"Expected timeout=25, got {kwargs}"
+    )
+
+
 def test_run_command_uses_custom_timeout():
     """run_command passes the timeout value to subprocess.run."""
     run_command = _import_tool("run_command")
@@ -730,6 +761,8 @@ def main():
         ("git_grep timeout error message", test_git_grep_timeout_error_message),
         ("gh_api uses custom timeout", test_gh_api_uses_custom_timeout),
         ("web_fetch uses custom timeout", test_web_fetch_uses_custom_timeout),
+        ("fetch_url uses custom timeout", test_fetch_url_uses_custom_timeout),
+        ("fetch_url default timeout", test_fetch_url_default_timeout),
         ("run_command uses custom timeout", test_run_command_uses_custom_timeout),
         ("run_command timeout error message", test_run_command_timeout_error_message),
         ("env_int_bounded defaults", test_env_int_bounded_defaults),
