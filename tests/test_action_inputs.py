@@ -72,10 +72,12 @@ def test_action_inputs_in_readme():
     action_inputs = parse_action_inputs()
     readme_inputs = parse_readme_inputs()
 
-    # Some inputs are internal/advanced and may not need README docs,
-    # but we flag them for review. Skip known internal inputs.
+    # Inputs that are implementation details or only relevant when using a
+    # specific API format — not user-facing configuration, so README docs
+    # are not required. When adding to this set, include a comment explaining
+    # why the input doesn't need documentation.
     skip_internal = {
-        "anthropic_version",  # Implementation detail
+        "anthropic_version",  # Only used when ai_api_format=anthropic; version header is an implementation detail
     }
     undocumented = (action_inputs - readme_inputs) - skip_internal
     assert not undocumented, (
