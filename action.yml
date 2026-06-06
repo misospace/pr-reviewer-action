@@ -210,6 +210,10 @@ inputs:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
     default: "true"
+  comment_marker:
+    description: HTML marker for the managed PR comment
+    required: false
+    default: "<!-- ai-pr-reviewer -->"
   ci_status_check:
     description: If true, wait for all CI checks to reach a terminal state before starting the AI review. Polls commit-status API for the PR head SHA. Default false — immediate review (original behavior).
     required: false

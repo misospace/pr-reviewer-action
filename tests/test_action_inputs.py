@@ -1,0 +1,102 @@
+"""Tests for action.yml / README input consistency."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def parse_action_inputs():
+    """Parse declared input names from action.yml."""
+    action_yml = _REPO_ROOT / "action.yml"
+    content = action_yml.read_text()
+
+    inputs = set()
+    in_inputs_section = False
+    for line in content.splitlines():
+        # Detect the start of the inputs section
+        if re.match(r"^inputs:\s*$", line):
+            in_inputs_section = True
+            continue
+        # Detect end of inputs section (outputs, runs, etc.)
+        if in_inputs_section and re.match(r"^(outputs|runs):\s*$", line):
+            break
+        # Match input name definitions (top-level keys under inputs:)
+        if in_inputs_section:
+            m = re.match(r"^  (\w+):\s*$", line)
+            if m:
+                inputs.add(m.group(1))
+    return inputs
+
+
+def parse_readme_inputs():
+    """Parse documented input names from the README inputs table."""
+    readme = _REPO_ROOT / "README.md"
+    content = readme.read_text()
+
+    inputs = set()
+    in_table = False
+    for line in content.splitlines():
+        # Detect start of inputs table (first pipe row with Input header)
+        if "| Input |" in line:
+            in_table = True
+            continue
+        # Detect end of table (next section header or non-table line)
+        if in_table:
+            if line.startswith("## ") or (line.strip() and not line.startswith("|")):
+                in_table = False
+                break
+            # Match input name in backticks: | `input_name` |
+            m = re.search(r"\| \s*`(\w+)`\s*\|", line)
+            if m:
+                inputs.add(m.group(1))
+    return inputs
+
+
+def test_readme_inputs_in_action():
+    """Every input documented in README must be declared in action.yml."""
+    action_inputs = parse_action_inputs()
+    readme_inputs = parse_readme_inputs()
+
+    missing = readme_inputs - action_inputs
+    assert not missing, (
+        f"README documents inputs not declared in action.yml: {sorted(missing)}. "
+        f"Add them to the inputs: section of action.yml."
+    )
+
+
+def test_action_inputs_in_readme():
+    """Every input declared in action.yml should be documented in README."""
+    action_inputs = parse_action_inputs()
+    readme_inputs = parse_readme_inputs()
+
+    # Inputs that are implementation details or only relevant when using a
+    # specific API format — not user-facing configuration, so README docs
+    # are not required. When adding to this set, include a comment explaining
+    # why the input doesn't need documentation.
+    skip_internal = {
+        "anthropic_version",  # Only used when ai_api_format=anthropic; version header is an implementation detail
+    }
+    undocumented = (action_inputs - readme_inputs) - skip_internal
+    assert not undocumented, (
+        f"action.yml declares inputs not documented in README: {sorted(undocumented)}. "
+        f"Add them to the Inputs table in README.md."
+    )
+
+
+def test_comment_marker_input_exists():
+    """Verify comment_marker input is declared (regression test for #113)."""
+    action_inputs = parse_action_inputs()
+    assert "comment_marker" in action_inputs, (
+        "comment_marker is documented in README and referenced in action.yml steps, "
+        "but is not declared as an input in action.yml."
+    )
+
+
+if __name__ == "__main__":
+    test_readme_inputs_in_action()
+    test_action_inputs_in_readme()
+    test_comment_marker_input_exists()
+    print("All action inputs tests passed!")

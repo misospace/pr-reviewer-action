@@ -83,10 +83,13 @@ Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the 
 | `ai_fallback_connect_timeout_sec` | Timeout in seconds for the fallback model API connection (`curl --connect-timeout`). Defaults to `ai_connect_timeout_sec` when blank. | No | `""` |
 | `ai_stream` | If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer) | No | `"true"` |
 | `ai_fallback_stream` | If set, overrides ai_stream for the fallback model; defaults to ai_stream value when blank | No | `""` |
-
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
-| `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `comment_marker` | HTML marker for the managed PR comment | No | `<!-- ai-pr-reviewer -->` |
+| `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
+| `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
+| `ci_timeout_sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
+| `ci_interval_sec` | Seconds between CI status polls when ci_status_check=true. | No | `15` |
+| `ci_skip_on_timeout` | If true, proceed with review after timeout instead of failing. | No | `true` |
 
 ## Outputs
 
