@@ -7,6 +7,14 @@
 
 set -euo pipefail
 
+# Dependency preflight
+for dep in jq; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_tool_harness_enforcement.sh" >&2
+    exit 0
+  fi
+done
+
 PASS=0
 FAIL=0
 

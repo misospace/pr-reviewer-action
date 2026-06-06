@@ -42,26 +42,45 @@ def _import_tool(name):
     return locals()[name]
 
 
-def _jq(expr, json_str):
-    """Run a jq expression against a JSON string and return stdout."""
-    result = subprocess.run(
-        ["jq", "-r", expr],
-        input=json_str,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"jq failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+def _count_ok_by_path(data, status_path):
+    """Count tool results where the given nested path equals 'ok'.
+
+    Replaces jq expression like:
+      [.tool_results[]?.<path> == "ok"] | map(select(. == true)) | length
+    """
+    tool_results = data.get("tool_results", [])
+    count = 0
+    for tr in tool_results:
+        obj = tr
+        for key in status_path:
+            if isinstance(obj, dict):
+                obj = obj.get(key)
+            else:
+                obj = None
+                break
+        if obj == "ok":
+            count += 1
+    return count
 
 
-def _jq_count(expr, json_str):
-    """Run a jq expression that returns a number."""
-    raw = _jq(expr, json_str)
-    try:
-        return int(raw)
-    except ValueError:
-        return 0
+def _any_ok_by_path(data, status_path):
+    """Check if any tool result has the given nested path equal to 'ok'.
+
+    Replaces jq expression like:
+      ([.tool_results[]?.<path> == "ok"] | any)
+    """
+    tool_results = data.get("tool_results", [])
+    for tr in tool_results:
+        obj = tr
+        for key in status_path:
+            if isinstance(obj, dict):
+                obj = obj.get(key)
+            else:
+                obj = None
+                break
+        if obj == "ok":
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -94,24 +113,18 @@ FIXTURE_TOOL_HARNESS = {
 
 def test_old_path_counts_zero():
     """The old jq expression `.tool_results[].result.status` finds nothing."""
-    data = json.dumps(FIXTURE_TOOL_HARNESS)
+    data = FIXTURE_TOOL_HARNESS
 
-    # This is the OLD buggy expression from run_review.sh line ~1123:
-    successful = _jq_count(
-        '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
+    # This is the OLD buggy path: .result.status (which doesn't exist)
+    successful = _count_ok_by_path(data, ["result", "status"])
     assert successful == 0, (
         f"Old path should count 0 successes for tool results with .status field, "
         f"got {successful}"
     )
 
     # The old path also fails the "any ok" check used in TOOL_FAILURE_REASON:
-    any_ok_old = _jq(
-        '([.tool_results[]?.result.status == "ok"] | any)',
-        data,
-    )
-    assert any_ok_old == "false", (
+    any_ok_old = _any_ok_by_path(data, ["result", "status"])
+    assert any_ok_old is False, (
         f"Old path should find no 'ok' results, got {any_ok_old}"
     )
 
@@ -122,24 +135,18 @@ def test_old_path_counts_zero():
 
 def test_new_path_counts_one():
     """The fixed jq expression `.tool_results[].status` finds the correct count."""
-    data = json.dumps(FIXTURE_TOOL_HARNESS)
+    data = FIXTURE_TOOL_HARNESS
 
-    # This is the FIXED expression:
-    successful = _jq_count(
-        '[.tool_results[]?.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
+    # This is the FIXED path: .status
+    successful = _count_ok_by_path(data, ["status"])
     assert successful == 1, (
         f"New path should count 1 success for tool results with .status='ok', "
         f"got {successful}"
     )
 
     # The new path finds at least one 'ok' in the any check:
-    any_ok_new = _jq(
-        '([.tool_results[]?.status == "ok"] | any)',
-        data,
-    )
-    assert any_ok_new == "true", (
+    any_ok_new = _any_ok_by_path(data, ["status"])
+    assert any_ok_new is True, (
         f"New path should find at least one 'ok' result, got {any_ok_new}"
     )
 
@@ -165,16 +172,10 @@ ALL_OK_FIXTURE = {
 
 def test_all_ok_fixture():
     """When all tools succeed, both paths agree on 1 success."""
-    data = json.dumps(ALL_OK_FIXTURE)
+    data = ALL_OK_FIXTURE
 
-    old_count = _jq_count(
-        '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
-    new_count = _jq_count(
-        '[.tool_results[]?.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
+    old_count = _count_ok_by_path(data, ["result", "status"])
+    new_count = _count_ok_by_path(data, ["status"])
     # New path correctly finds 1 success
     assert new_count == 1, f"New path should count 1, got {new_count}"
     # Old path finds 0 (because result.status doesn't exist, only result.content)
@@ -201,16 +202,10 @@ ALL_FAIL_FIXTURE = {
 
 def test_all_fail_fixture():
     """When all tools fail, both paths agree on 0 successes."""
-    data = json.dumps(ALL_FAIL_FIXTURE)
+    data = ALL_FAIL_FIXTURE
 
-    old_count = _jq_count(
-        '[.tool_results[]?.result.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
-    new_count = _jq_count(
-        '[.tool_results[]?.status == "ok"] | map(select(. == true)) | length',
-        data,
-    )
+    old_count = _count_ok_by_path(data, ["result", "status"])
+    new_count = _count_ok_by_path(data, ["status"])
     assert old_count == 0, f"Old path should count 0, got {old_count}"
     assert new_count == 0, f"New path should count 0, got {new_count}"
 

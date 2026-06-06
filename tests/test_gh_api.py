@@ -128,17 +128,24 @@ class TestGhApiRepoParsing:
         )
 
     def test_no_token_returns_error(self):
-        """Missing GH_TOKEN should return an error."""
-        if "GH_TOKEN" in os.environ:
-            del os.environ["GH_TOKEN"]
-        result = gh_api(
-            "misospace/pr-reviewer-action/pulls/1",
-            allowed_repos=set(),
-            current_repo="misospace/pr-reviewer-action",
-        )
-        assert "Missing GH_TOKEN" in (result.get("error") or ""), (
-            f"Missing token should return error: {result}"
-        )
+        """Missing GH_TOKEN and GITHUB_TOKEN should return an error."""
+        saved = {}
+        for var in ("GH_TOKEN", "GITHUB_TOKEN"):
+            if var in os.environ:
+                saved[var] = os.environ[var]
+                del os.environ[var]
+        try:
+            result = gh_api(
+                "misospace/pr-reviewer-action/pulls/1",
+                allowed_repos=set(),
+                current_repo="misospace/pr-reviewer-action",
+            )
+            assert "Missing GH_TOKEN" in (result.get("error") or ""), (
+                f"Missing token should return error: {result}"
+            )
+        finally:
+            for var, val in saved.items():
+                os.environ[var] = val
 
     def test_short_endpoint_returns_error(self):
         """Endpoints with fewer than 2 path segments should return an error."""
