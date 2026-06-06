@@ -90,6 +90,35 @@ class TestSanitizeCrossRepoRef:
         assert "itzg/mc-router PR 542" in result
 
 
+class TestSanitizeCurrentRepoRef:
+    """Test cross-repo reference sanitization for the current repository."""
+
+    def test_current_repo_cross_repo_ref(self):
+        """References to misospace/pr-reviewer-action#123 should be sanitized like any other cross-repo ref."""
+        text = "This is tracked in misospace/pr-reviewer-action#42."
+        result = sanitize_markdown(text)
+        assert "misospace/pr-reviewer-action PR 42" in result
+        assert "misospace/pr-reviewer-action#42" not in result
+
+    def test_current_repo_current_proj_backlog(self):
+        """References to the current repo should be sanitized uniformly, not special-cased."""
+        text = "See misospace/pr-reviewer-action#132 for the original feature request."
+        result = sanitize_markdown(text)
+        assert "misospace/pr-reviewer-action PR 132" in result
+        assert "misospace/pr-reviewer-action#132" not in result
+
+    def test_current_repo_mixed_with_upstream(self):
+        """Current-repo refs should be sanitized the same way as upstream refs."""
+        text = (
+            "Upstream bug itzg/mc-router#552 was resolved. "
+            "Tracked in misospace/pr-reviewer-action#42."
+        )
+        result = sanitize_markdown(text)
+        assert "itzg/mc-router PR 552" in result
+        assert "misospace/pr-reviewer-action PR 42" in result
+        assert "misospace/pr-reviewer-action#42" not in result
+
+
 class TestSanitizeBareRef:
     """Test bare reference sanitization (#123)."""
 
@@ -125,6 +154,18 @@ class TestReleaseUrlPreservation:
         text = "See https://github.com/itzg/mc-router/releases/tag/v1.43.0 for the full release."
         result = sanitize_markdown(text)
         assert "https://github.com/itzg/mc-router/releases/tag/v1.43.0" in result
+
+    def test_release_url_with_embedded_pr(self):
+        """A release URL whose tag name contains a PR number should stay intact."""
+        text = "See https://github.com/itzg/mc-router/releases/tag/v1.43.0-prerelease for notes."
+        result = sanitize_markdown(text)
+        assert "https://github.com/itzg/mc-router/releases/tag/v1.43.0-prerelease" in result
+
+    def test_release_url_without_tag(self):
+        """A releases listing page URL should be preserved."""
+        text = "See https://github.com/itzg/mc-router/releases for the full list."
+        result = sanitize_markdown(text)
+        assert "https://github.com/itzg/mc-router/releases" in result
 
 
 class TestMarkdownPreservation:
