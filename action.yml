@@ -437,7 +437,7 @@ runs:
         fi
 
         # Build metadata marker
-        METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || '' }}" "${{ steps.precheck.outputs.previous_head_sha:-}}")"
+        METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || '' }}" "${{ steps.precheck.outputs.previous_head_sha || '' }}")"
 
         if [ "$VERDICT" = "request_changes" ]; then
           VERDICT_PREFIX="⚠️ **Automated recommendation: REQUEST CHANGES**"
@@ -552,8 +552,8 @@ runs:
 
         # Resolve effective scope and review result
         EFFECTIVE_SCOPE="${{ steps.precheck.outputs.effective_review_scope || 'full' }}"
-        PREVIOUS_HEAD_SHA="${{ steps.precheck.outputs.previous_head_sha:-}}"
-        BASELINE_CLEAN="${{ steps.precheck.outputs.baseline_clean:-false }}"
+        PREVIOUS_HEAD_SHA="${{ steps.precheck.outputs.previous_head_sha || '' }}"
+        BASELINE_CLEAN="${{ steps.precheck.outputs.baseline_clean || 'false' }}"
         REVIEW_RESULT="clean"
         if [ "$VERDICT" = "request_changes" ]; then
           REVIEW_RESULT="issues"
