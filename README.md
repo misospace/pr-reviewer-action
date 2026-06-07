@@ -101,6 +101,11 @@ Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the 
 | `should_review` | `true` when a new LLM review was run |
 | `skip_reason` | Skip reason such as `diff-unchanged` |
 | `diff_fingerprint` | Stable fingerprint of the current PR patch |
+| `ci_status_skipped` | `true` if CI status check was skipped, `false` if it completed |
+| `ci_status_final` | Final CI state (`success`/`failure`) when `ci_status_check` completed |
+| `effective_review_scope` | Effective scope used: `full` or `incremental` |
+| `previous_head_sha` | Previous head SHA when scope is `incremental` |
+| `baseline_clean` | Whether the full-review baseline was clean (for verdict safety) |
 
 ## Usage
 
@@ -198,6 +203,25 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
     ai_fallback_model: gpt-4.1-mini
     ai_fallback_api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
+
+### Waiting for CI checks
+
+Set `ci_status_check: true` to wait for all CI checks to reach a terminal state before starting the AI review. This ensures the review considers the final CI results rather than running against in-progress checks.
+
+```yaml
+- uses: misospace/pr-reviewer-action@v1
+  id: review
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    ai_base_url: http://llama-server.internal:8080/v1
+    ai_model: qwen3-32b
+    ci_status_check: "true"
+    ci_timeout_sec: "300"
+    ci_interval_sec: "15"
+    ci_skip_on_timeout: "true"
+```
+
+When `ci_skip_on_timeout: true` (the default), the action proceeds with the review after `ci_timeout_sec` even if checks are still running. Set it to `false` to fail the action on timeout instead. The `ci_status_skipped` and `ci_status_final` outputs indicate whether the CI wait completed and what the final state was.
 
 ### With evidence providers
 
@@ -535,6 +559,31 @@ Copyable workflows are included here:
 
 - `examples/workflow-self-hosted.yml`
 - `examples/workflow-cloud.yml`
+
+## Version pinning and releases
+
+The action is versioned via Git tags (e.g., `v1.0.18`). The examples in this README use `@v1` as a shorthand; in production workflows, pin to a specific version tag or commit SHA for reproducible runs:
+
+```yaml
+# Pin to a specific release tag (recommended)
+- uses: misospace/pr-reviewer-action@v1.0.18
+
+# Pin to a specific commit (most stable during development)
+- uses: misospace/pr-reviewer-action@f838c5b49d72d11dd33cfee6e29b85a28b5aa8df # v1.0.18
+```
+
+### Self-review version pinning
+
+This repository's own self-review workflow (`.github/workflows/ai-pr-review.yaml`) pins the action to a specific commit SHA rather than `@v1` or `@main`. This ensures the self-review process uses a known-good, tested version while new changes are developed on `main`. After a release is cut and tagged, the self-review workflow is updated to pin the new tag.
+
+### Release cadence
+
+Releases are cut when features or fixes are ready. The `v1.x.y` scheme follows semver:
+- **Patch** (`y`): bug fixes and minor improvements
+- **Minor** (`x`): new features, backward-compatible changes
+- **Major** (`v1` → `v2`): breaking changes to inputs/outputs or behavior
+
+To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-reviewer-action/releases) or enable Renovate to track the `misospace/pr-reviewer-action` dependency.
 
 ## License
 
