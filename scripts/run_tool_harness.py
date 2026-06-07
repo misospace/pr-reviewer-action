@@ -464,6 +464,121 @@ def run_command(command, workspace_root, request_timeout=30):
         }
 
 
+def execute_tool_request(
+    tool_name,
+    args,
+    workspace_root,
+    allowed_gh_repos,
+    current_repo,
+    allowed_hosts,
+    max_response_bytes,
+    request_timeout,
+):
+    """Execute a single tool request and return the result dict.
+
+    Shared by both file-based and direct planning paths to avoid duplication
+    of validation, execution, truncation, and error-handling logic.
+    """
+    tool_result = {"tool": tool_name, "status": "error", "result": {}}
+
+    try:
+        if tool_name == "read_file":
+            path = args.get("path", "")
+            if not path:
+                raise ValueError("Missing 'path' argument")
+            res = read_file(path, workspace_root)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            text = mask_secrets(res.get("content", ""))
+            text, _ = mask_and_truncate(text, max_response_bytes)
+            tool_result["result"] = {"content": text}
+
+        elif tool_name == "git_grep":
+            pattern = args.get("pattern", "")
+            if not pattern:
+                raise ValueError("Missing 'pattern' argument")
+            res = git_grep(pattern, workspace_root, request_timeout)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            matches = res.get("matches", [])
+            text = "\n".join(matches)
+            text, _ = mask_and_truncate(text, max_response_bytes)
+            tool_result["result"] = {"matches": matches[:60]}
+
+        elif tool_name == "gh_api":
+            endpoint = args.get("endpoint", "")
+            if not endpoint:
+                raise ValueError("Missing 'endpoint' argument")
+            res = gh_api(endpoint, allowed_gh_repos, current_repo, request_timeout)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            data = res.get("data")
+            text = ""
+            if isinstance(data, (dict, list)):
+                text = json.dumps(data, indent=2)[:max_response_bytes]
+            tool_result["result"] = {"response": text}
+
+        elif tool_name == "web_fetch":
+            url = args.get("url", "")
+            if not url:
+                raise ValueError("Missing 'url' argument")
+            res = web_fetch(url, allowed_hosts, request_timeout)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            content_text = res.get("content", "")
+            text, _ = mask_and_truncate(content_text, max_response_bytes)
+            tool_result["result"] = {"content": text}
+
+        elif tool_name == "run_command":
+            command = args.get("command", "")
+            if not command:
+                raise ValueError("Missing 'command' argument")
+            res = run_command(command, workspace_root, request_timeout)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            stdout_text = res.get("stdout", "")
+            stderr_text = res.get("stderr", "")
+            stdout_text, _ = mask_and_truncate(stdout_text, max_response_bytes)
+            stderr_text, _ = mask_and_truncate(stderr_text, max_response_bytes)
+            tool_result["result"] = {
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "exit_code": res.get("exit_code"),
+                "command": res.get("command"),
+            }
+
+        else:
+            raise ValueError(f"Unknown tool: {tool_name}")
+
+        tool_result["status"] = "ok"
+    except Exception as exc:
+        # Error messages from raised ValueError (from res["error"] checks
+        # above) are masked by mask_secrets() in write_outputs(), which
+        # processes the markdown output. This is consistent with how
+        # run_command error messages are redacted.
+        tool_result["result"] = {"error": str(exc)}
+
+    return tool_result
+
+
+def tool_result_md_lines(index, tool_name, args, tool_result):
+    """Generate markdown lines for a single tool result.
+
+    Shared by both file-based and direct planning paths.
+    """
+    lines = []
+    lines.append(f"## Tool {index}: {tool_name}")
+    lines.append(f"**Status:** {tool_result['status']}")
+    lines.append(f"**Arguments:** {json.dumps(args)}")
+    if tool_result.get("result"):
+        lines.append("")
+        lines.append("```text")
+        lines.append(json.dumps(tool_result["result"], indent=2)[:3000])
+        lines.append("```")
+    lines.append("")
+    return lines
+
+
 def write_outputs(summary, markdown):
     """Write JSON and markdown outputs from the tool harness."""
     Path("tool-harness.json").write_text(
@@ -691,98 +806,22 @@ def main():
             if not isinstance(args, dict):
                 args = {}
 
-            tool_result = {"tool": tool_name, "status": "error", "result": {}}
+            tool_result = execute_tool_request(
+                tool_name,
+                args,
+                workspace_root,
+                allowed_gh_repos,
+                current_repo,
+                allowed_hosts,
+                max_response_bytes,
+                request_timeout,
+            )
 
-            try:
-                if tool_name == "read_file":
-                    path = args.get("path", "")
-                    if not path:
-                        raise ValueError("Missing 'path' argument")
-                    res = read_file(path, workspace_root)
-                    if res.get("error"):
-                        raise ValueError(res["error"])
-                    text = mask_secrets(res.get("content", ""))
-                    text, _ = mask_and_truncate(text, max_response_bytes)
-                    tool_result["result"] = {"content": text}
-
-                elif tool_name == "git_grep":
-                    pattern = args.get("pattern", "")
-                    if not pattern:
-                        raise ValueError("Missing 'pattern' argument")
-                    res = git_grep(pattern, workspace_root, request_timeout)
-                    if res.get("error"):
-                        raise ValueError(res["error"])
-                    matches = res.get("matches", [])
-                    text = "\n".join(matches)
-                    text, _ = mask_and_truncate(text, max_response_bytes)
-                    tool_result["result"] = {"matches": matches[:60]}
-
-                elif tool_name == "gh_api":
-                    endpoint = args.get("endpoint", "")
-                    if not endpoint:
-                        raise ValueError("Missing 'endpoint' argument")
-                    res = gh_api(endpoint, allowed_gh_repos, current_repo, request_timeout)
-                    if res.get("error"):
-                        raise ValueError(res["error"])
-                    data = res.get("data")
-                    text = ""
-                    if isinstance(data, (dict, list)):
-                        text = json.dumps(data, indent=2)[:max_response_bytes]
-                    tool_result["result"] = {"response": text}
-
-                elif tool_name == "web_fetch":
-                    url = args.get("url", "")
-                    if not url:
-                        raise ValueError("Missing 'url' argument")
-                    res = web_fetch(url, allowed_hosts, request_timeout)
-                    if res.get("error"):
-                        raise ValueError(res["error"])
-                    content_text = res.get("content", "")
-                    text, _ = mask_and_truncate(content_text, max_response_bytes)
-                    tool_result["result"] = {"content": text}
-
-                elif tool_name == "run_command":
-                    command = args.get("command", "")
-                    if not command:
-                        raise ValueError("Missing 'command' argument")
-                    res = run_command(command, workspace_root, request_timeout)
-                    if res.get("error"):
-                        raise ValueError(res["error"])
-                    stdout_text = res.get("stdout", "")
-                    stderr_text = res.get("stderr", "")
-                    stdout_text, _ = mask_and_truncate(stdout_text, max_response_bytes)
-                    stderr_text, _ = mask_and_truncate(stderr_text, max_response_bytes)
-                    tool_result["result"] = {
-                        "stdout": stdout_text,
-                        "stderr": stderr_text,
-                        "exit_code": res.get("exit_code"),
-                        "command": res.get("command"),
-                    }
-
-                else:
-                    raise ValueError(f"Unknown tool: {tool_name}")
-
-                tool_result["status"] = "ok"
+            if tool_result["status"] == "ok":
                 result["executed_request_count"] += 1
 
-            except Exception as exc:
-                # Error messages from raised ValueError (from res["error"] checks
-                # above) are masked by mask_secrets() in write_outputs(), which
-                # processes the markdown output. This is consistent with how
-                # run_command error messages are redacted.
-                tool_result["result"] = {"error": str(exc)}
-
             result["tool_results"].append(tool_result)
-
-            md_lines.append(f"## Tool {i + 1}: {tool_name}")
-            md_lines.append(f"**Status:** {tool_result['status']}")
-            md_lines.append(f"**Arguments:** {json.dumps(args)}")
-            if tool_result.get("result"):
-                md_lines.append("")
-                md_lines.append("```text")
-                md_lines.append(json.dumps(tool_result["result"], indent=2)[:3000])
-                md_lines.append("```")
-            md_lines.append("")
+            md_lines.extend(tool_result_md_lines(i + 1, tool_name, args, tool_result))
 
         write_outputs(result, "\n".join(md_lines))
         return 0
@@ -835,100 +874,23 @@ def main():
         if not isinstance(args, dict):
             args = {}
 
-        tool_result = {"tool": tool_name, "status": "error", "result": {}}
+        tool_result = execute_tool_request(
+            tool_name,
+            args,
+            workspace_root,
+            allowed_gh_repos,
+            current_repo,
+            allowed_hosts,
+            max_response_bytes,
+            request_timeout,
+        )
 
-        try:
-            if tool_name == "read_file":
-                path = args.get("path", "")
-                if not path:
-                    raise ValueError("Missing 'path' argument")
-                res = read_file(path, workspace_root)
-                if res.get("error"):
-                    raise ValueError(res["error"])
-                text = mask_secrets(res.get("content", ""))
-                text, _ = mask_and_truncate(text, max_response_bytes)
-                tool_result["result"] = {"content": text}
-
-            elif tool_name == "git_grep":
-                pattern = args.get("pattern", "")
-                if not pattern:
-                    raise ValueError("Missing 'pattern' argument")
-                res = git_grep(pattern, workspace_root, request_timeout)
-                if res.get("error"):
-                    raise ValueError(res["error"])
-                matches = res.get("matches", [])
-                text = "\n".join(matches)
-                text, _ = mask_and_truncate(text, max_response_bytes)
-                tool_result["result"] = {"matches": matches[:60]}
-
-            elif tool_name == "gh_api":
-                endpoint = args.get("endpoint", "")
-                if not endpoint:
-                    raise ValueError("Missing 'endpoint' argument")
-                res = gh_api(endpoint, allowed_gh_repos, current_repo, request_timeout)
-                if res.get("error"):
-                    raise ValueError(res["error"])
-                data = res.get("data")
-                text = ""
-                if isinstance(data, (dict, list)):
-                    text = json.dumps(data, indent=2)[:max_response_bytes]
-                tool_result["result"] = {"response": text}
-
-            elif tool_name == "web_fetch":
-                url = args.get("url", "")
-                if not url:
-                    raise ValueError("Missing 'url' argument")
-                res = web_fetch(url, allowed_hosts, request_timeout)
-                if res.get("error"):
-                    raise ValueError(res["error"])
-                content_text = res.get("content", "")
-                text, _ = mask_and_truncate(content_text, max_response_bytes)
-                tool_result["result"] = {"content": text}
-
-            elif tool_name == "run_command":
-                command = args.get("command", "")
-                if not command:
-                    raise ValueError("Missing 'command' argument")
-                res = run_command(command, workspace_root, request_timeout)
-                if res.get("error"):
-                    raise ValueError(res["error"])
-                stdout_text = res.get("stdout", "")
-                stderr_text = res.get("stderr", "")
-                stdout_text, _ = mask_and_truncate(stdout_text, max_response_bytes)
-                stderr_text, _ = mask_and_truncate(stderr_text, max_response_bytes)
-                tool_result["result"] = {
-                    "stdout": stdout_text,
-                    "stderr": stderr_text,
-                    "exit_code": res.get("exit_code"),
-                    "command": res.get("command"),
-                }
-
-            else:
-                raise ValueError(f"Unknown tool: {tool_name}")
-
-            tool_result["status"] = "ok"
+        if tool_result["status"] == "ok":
             result["executed_request_count"] += 1
 
-        except Exception as exc:
-            # Error messages from raised ValueError (from res["error"] checks
-            # above) are masked by mask_secrets() in write_outputs(), which
-            # processes the markdown output. This is consistent with how
-            # run_command error messages are redacted.
-            tool_result["result"] = {"error": str(exc)}
-
         result["tool_results"].append(tool_result)
+        md_lines.extend(tool_result_md_lines(i + 1, tool_name, args, tool_result))
 
-        md_lines.append(f"## Tool {i + 1}: {tool_name}")
-        md_lines.append(f"**Status:** {tool_result['status']}")
-        md_lines.append(f"**Arguments:** {json.dumps(args)}")
-        if tool_result.get("result"):
-            md_lines.append("")
-            md_lines.append("```text")
-            md_lines.append(json.dumps(tool_result["result"], indent=2)[:3000])
-            md_lines.append("```")
-        md_lines.append("")
-
-    # Write JSON output
     write_outputs(result, "\n".join(md_lines))
 
     return 0
