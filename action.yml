@@ -524,7 +524,9 @@ runs:
           echo "Submitting non-blocking review comment (approve) for #$PR_NUMBER"
         fi
 
-        gh pr review "$PR_NUMBER" --repo "$REPO" --comment --body-file "$BODY_FILE"
+        # NOTE: gh pr review --comment creates a COMMENTED review that is NOT visible in the PR UI timeline.
+        # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
+        gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file "$BODY_FILE"
 
     - name: Publish review verdict (native PR review)
       if: inputs.publish_mode == 'review_verdict' && steps.precheck.outputs.should_review == 'true'
