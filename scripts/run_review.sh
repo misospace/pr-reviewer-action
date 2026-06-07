@@ -154,16 +154,22 @@ resolve_standards_file() {
     return
   fi
 
-  local candidate
+  local candidate matches m
   IFS=',' read -ra candidates <<< "$STANDARDS_FILE_CANDIDATES"
+  shopt -s nullglob
   for candidate in "${candidates[@]}"; do
     candidate="$(printf '%s' "$candidate" | xargs)"
     [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate" ]]; then
-      STANDARDS_FILE="$candidate"
-      return
-    fi
+    matches=( $candidate )
+    for m in "${matches[@]}"; do
+      if [[ -f "$m" ]]; then
+        STANDARDS_FILE="$m"
+        shopt -u nullglob
+        return
+      fi
+    done
   done
+  shopt -u nullglob
 }
 
 resolve_system_prompt() {
