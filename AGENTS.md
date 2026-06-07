@@ -70,7 +70,7 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - Verdict must be `"approve"` or `"request_changes"` with a non-empty `review_markdown` string
 - Context limit modes: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) — controls MAX_DIFF, MAX_FILES, MAX_CORPUS byte limits
 - Evidence providers and tool harness are disabled by default on cross-repository PRs (`*_enable_for_forks=false`)
-- Standards file resolution: explicit `standards_file` → first found from `standards_file_candidates` list (default: AGENTS.md, agents.md, CLAUDE.md, claude.md, .github/ai-review-rules.md, .github/ai-review-rules.txt)
+- Standards file resolution: explicit `standards_file` → first found from `standards_file_candidates` list (default: AGENTS.md, agents.md, CLAUDE.md, claude.md, .github/ai-review-rules.md, .github/ai-review-rules.txt). Candidates support glob patterns (e.g. `.agents/*.md`); first match wins.
 - System prompt priority: inline `system_prompt` > file `system_prompt_file` > bundled default
 
 ## Inputs summary
