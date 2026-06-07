@@ -126,6 +126,10 @@ inputs:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
     default: normal
+  enrichment_budget_sec:
+    description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
+    required: false
+    default: "60"
   evidence_providers_file:
     description: Optional JSON file in the reviewed repository that defines evidence providers to run before review
     required: false
@@ -372,6 +376,7 @@ runs:
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
+        ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
         EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
         EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
