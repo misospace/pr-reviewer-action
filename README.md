@@ -61,6 +61,7 @@ Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the 
 | `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
 | `cleanup_previous_native_reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
 | `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
+| `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
 | `evidence_providers_file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
 | `evidence_provider_timeout_sec` | Default timeout in seconds for each evidence provider command | No | `30` |
 | `evidence_provider_max_output_bytes` | Max stdout or stderr bytes captured per provider command | No | `20000` |

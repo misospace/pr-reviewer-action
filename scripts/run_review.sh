@@ -19,6 +19,34 @@ sedi() {
   fi
 }
 
+# Timing helpers for per-section performance logging
+SECTION_TIMERS=()
+section_timer_start() {
+  local name="$1"
+  SECTION_TIMERS+=("${name}:$(date +%s)")
+}
+section_timer_end() {
+  local elapsed
+  local last="${SECTION_TIMERS[-1]}"
+  local name="${last%%:*}"
+  local start_ts="${last##*:}"
+  elapsed=$(( $(date +%s) - start_ts ))
+  log "PERF: section=$name elapsed=${elapsed}s"
+}
+
+# Returns 0 if within budget, 1 if exceeded. Uses ENRICHMENT_START_TS and ENRICHMENT_BUDGET_SEC.
+enrichment_budget_ok() {
+  if [[ -z "${ENRICHMENT_START_TS:-}" ]]; then
+    return 0
+  fi
+  local elapsed=$(( $(date +%s) - ENRICHMENT_START_TS ))
+  if [[ "$elapsed" -ge "$ENRICHMENT_BUDGET_SEC" ]]; then
+    log "Enrichment budget exceeded (${elapsed}s / ${ENRICHMENT_BUDGET_SEC}s); stopping enrichment."
+    return 1
+  fi
+  return 0
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 PR_NUMBER="${PR_NUMBER:-}"
@@ -67,6 +95,7 @@ OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 EFFECTIVE_SCOPE="${EFFECTIVE_SCOPE:-full}"
 PREVIOUS_HEAD_SHA="${PREVIOUS_HEAD_SHA:-}"
+ENRICHMENT_BUDGET_SEC="${ENRICHMENT_BUDGET_SEC:-60}"
 
 apply_context_limits() {
   case "${CONTEXT_LIMIT_MODE:-normal}" in
@@ -317,6 +346,7 @@ apply_all_enforcement(
 "
 }
 
+section_timer_start "pr-context"
 log "Collecting PR context for #$PR_NUMBER in $REPO..."
 
 gh pr view "$PR_NUMBER" --repo "$REPO" \
@@ -335,7 +365,9 @@ jq '[.[] | {filename,status,additions,deletions,changes,previous_filename,patch}
 head -c "$MAX_FILES" pr-files.json > pr-files.truncated.json
 
 jq -r '.body // ""' pr.json > pr-body.txt
+section_timer_end
 
+section_timer_start "linked-issues"
 log "Gathering linked issue context..."
 REPO="$REPO" python3 - <<'PY' > linked-issues.json
 import json
@@ -373,6 +405,7 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
 else
   echo "No linked issue references found in the PR body." >> linked-issues.md
 fi
+section_timer_end
 
 cat pr-body.txt pr.diff.truncated \
   | grep -Eo 'https?://[^ )]+' \
@@ -388,8 +421,9 @@ sedi 's#ghcr\.io/##' ghcr-images.txt
 sedi 's#:.*##' ghcr-images.txt
 sort -u ghcr-images.txt -o ghcr-images.txt
 
+section_timer_start "manifest-context"
 log "Gathering changed manifest context..."
-CHANGED_MANIFESTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[] | select(.filename | test("(helmrelease|deployment|statefulset|daemonset|kustomization)\\.ya?ml$"; "i")) | .filename' 2>/dev/null || true)
+CHANGED_MANIFESTS=$(jq -r '.[] | select(.filename | test("(helmrelease|deployment|statefulset|daemonset|kustomization)\\.ya?ml$"; "i")) | .filename' pr-files.raw.json 2>/dev/null || true)
 
 : > manifest-context.md
 if [ -n "$CHANGED_MANIFESTS" ]; then
@@ -422,10 +456,13 @@ if [ -n "$CHANGED_MANIFESTS" ]; then
 else
   echo "No common manifest files changed in this PR." >> manifest-context.md
 fi
+section_timer_end
 
+section_timer_start "enrichment"
 log "Gathering linked sources..."
 : > linked-sources.md
 if [ -s urls.txt ]; then
+  ENRICHMENT_START_TS=$(date +%s)
   TARGET_VERSION="$(jq -r '.title' pr.json | sed -n 's/.*→ *v\?\([0-9][0-9.]*\).*/\1/p' | head -n1)"
   if [ -z "$TARGET_VERSION" ]; then
     TARGET_VERSION="$(grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' version-hints.truncated.txt 2>/dev/null | sed 's/^v//' | tail -n1 || true)"
@@ -438,6 +475,7 @@ if [ -s urls.txt ]; then
     [ -z "$url" ] && continue
     i=$((i + 1))
     [ "$i" -gt 25 ] && break
+    enrichment_budget_ok || break
 
     normalized_url="$(printf '%s' "$url" | sed -E 's#^https?://redirect.github.com/#https://github.com/#')"
 
@@ -489,7 +527,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Release Metadata: $owner/$repo@$tag" >> linked-sources.md
 
-      if gh api "repos/$owner/$repo/releases/tags/$tag" > gh-release.json 2>/dev/null; then
+      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases/tags/$tag" > gh-release.json 2>/dev/null; then
         jq '{tag_name,name,published_at,html_url,body}' gh-release.json > gh-release.filtered.json
         echo '```json' >> linked-sources.md
         head -c 5000 gh-release.filtered.json >> linked-sources.md
@@ -499,7 +537,7 @@ if [ -s urls.txt ]; then
         echo "(Could not fetch release metadata for tag $tag)" >> linked-sources.md
       fi
 
-      if gh api "repos/$owner/$repo/releases?per_page=8" > gh-releases.json 2>/dev/null; then
+      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases?per_page=8" > gh-releases.json 2>/dev/null; then
         jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.json > gh-releases.filtered.json
         echo "### Recent Releases" >> linked-sources.md
         echo '```json' >> linked-sources.md
@@ -517,7 +555,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Compare Metadata: $owner/$repo@$compare_spec" >> linked-sources.md
 
-      if gh api "repos/$owner/$repo/compare/$compare_spec" > gh-compare.json 2>/dev/null; then
+      if enrichment_budget_ok && gh api "repos/$owner/$repo/compare/$compare_spec" > gh-compare.json 2>/dev/null; then
         jq '{html_url,status,ahead_by,behind_by,total_commits,commits:[.commits[]? | {sha,commit:{message,author,date}}]}' gh-compare.json > gh-compare.filtered.json
         echo '```json' >> linked-sources.md
         head -c 7000 gh-compare.filtered.json >> linked-sources.md
@@ -547,6 +585,7 @@ if [ -s urls.txt ]; then
 
   while IFS= read -r repo_key; do
     [ -z "$repo_key" ] && continue
+    enrichment_budget_ok || break
     if ! grep -qx "$repo_key" seen-repos.txt 2>/dev/null; then
       echo "$repo_key" >> seen-repos.txt
       owner="${repo_key%/*}"
@@ -555,7 +594,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Releases Enrichment: $repo_key" >> linked-sources.md
 
-      if gh api "repos/$owner/$repo/releases?per_page=30" > gh-releases.repo.json 2>/dev/null; then
+      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases?per_page=30" > gh-releases.repo.json 2>/dev/null; then
         jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.repo.json > gh-releases.repo.filtered.json
         echo "#### Recent Releases (tags)" >> linked-sources.md
         echo '```json' >> linked-sources.md
@@ -583,7 +622,7 @@ if [ -s urls.txt ]; then
             echo '```' >> linked-sources.md
           else
             echo "(No release tags matched target version $TARGET_VERSION in $repo_key)" >> linked-sources.md
-            if gh api "repos/$owner/$repo/tags?per_page=50" > gh-tags.repo.json 2>/dev/null; then
+            if enrichment_budget_ok && gh api "repos/$owner/$repo/tags?per_page=50" > gh-tags.repo.json 2>/dev/null; then
               jq '[.[] | {name,commit:.commit.sha}]' gh-tags.repo.json > gh-tags.repo.filtered.json
               echo "#### Recent Tags" >> linked-sources.md
               echo '```json' >> linked-sources.md
@@ -605,6 +644,7 @@ if [ -s urls.txt ]; then
   if [ -s ghcr-images.txt ]; then
     while IFS= read -r img_repo; do
       [ -z "$img_repo" ] && continue
+      enrichment_budget_ok || break
 
       if grep -qx "$img_repo" seen-repos.txt 2>/dev/null; then
         continue
@@ -621,7 +661,7 @@ if [ -s urls.txt ]; then
 
       if [ -n "$TARGET_VERSION" ]; then
         for tag_prefix in "v$TARGET_VERSION" "$TARGET_VERSION"; do
-          if gh api "repos/$owner/$repo/releases/tags/$tag_prefix" > ghcr-release.json 2>/dev/null; then
+          if enrichment_budget_ok && gh api "repos/$owner/$repo/releases/tags/$tag_prefix" > ghcr-release.json 2>/dev/null; then
             echo "#### Matched via ghcr.io path: $owner/$repo@$tag_prefix" >> linked-sources.md
             jq '{tag_name,name,published_at,html_url,body}' ghcr-release.json > ghcr-release.filtered.json
             echo '```json' >> linked-sources.md
@@ -640,13 +680,17 @@ if [ -s urls.txt ]; then
     done < ghcr-images.txt
   fi
 fi
+section_timer_end
 
+section_timer_start "image-digests"
 log "Gathering image digest provenance..."
 if ! python3 "$SCRIPT_DIR/image_digest_analysis.py"; then
   error "Image digest analysis failed"
   echo "Image digest provenance analysis failed for this run." > image-digest-context.md
 fi
+section_timer_end
 
+section_timer_start "repo-impact-history"
 log "Gathering repository impact and history..."
 {
   jq -r '.title, (.body // "")' pr.json
@@ -694,7 +738,9 @@ else
   cp repo-impact.md repo-impact.truncated.md
   cp repo-history.md repo-history.truncated.md
 fi
+section_timer_end
 
+section_timer_start "evidence-providers"
 log "Running optional evidence providers..."
 if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$EVIDENCE_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
   cat > evidence-providers.md <<'EOF'
@@ -714,6 +760,7 @@ EOF
 EOF
   fi
 fi
+section_timer_end
 
 log "Building review corpus..."
 : > standards-context.md
@@ -837,6 +884,7 @@ build_review_corpus() {
   } > review-corpus.md
 }
 
+section_timer_start "corpus-building"
 log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
 
 if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
@@ -846,6 +894,7 @@ else
   build_review_corpus "full"
 fi
 cp review-corpus.md review-corpus.truncated.md
+section_timer_end
 
 if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]]; then
   if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
