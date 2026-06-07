@@ -3,21 +3,40 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import yaml
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _walk_steps(value):
-    if isinstance(value, dict):
-        if "run" in value:
-            yield value
-        for child in value.values():
-            yield from _walk_steps(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk_steps(child)
+def _leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _extract_literal_run_blocks(action_yml: str) -> list[tuple[str, str]]:
+    lines = action_yml.splitlines()
+    blocks: list[tuple[str, str]] = []
+    last_step_name = "unnamed run step"
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith("- name:"):
+            last_step_name = stripped.removeprefix("- name:").strip().strip('"')
+        if stripped == "run: |":
+            run_indent = _leading_spaces(line)
+            block_lines: list[str] = []
+            index += 1
+            while index < len(lines):
+                candidate = lines[index]
+                if candidate.strip() and _leading_spaces(candidate) <= run_indent:
+                    break
+                block_lines.append(candidate[run_indent + 2 :] if len(candidate) > run_indent + 1 else "")
+                index += 1
+            blocks.append((last_step_name, "\n".join(block_lines)))
+            continue
+        index += 1
+
+    return blocks
 
 
 def _replace_github_expressions(script: str) -> str:
@@ -25,14 +44,12 @@ def _replace_github_expressions(script: str) -> str:
 
 
 def test_action_run_blocks_are_valid_bash_syntax() -> None:
-    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
-    run_steps = list(_walk_steps(action))
+    run_steps = _extract_literal_run_blocks((ROOT / "action.yml").read_text(encoding="utf-8"))
 
     assert run_steps, "expected action.yml to contain run steps"
 
-    for index, step in enumerate(run_steps, start=1):
-        name = step.get("name", f"run-step-{index}")
-        script = _replace_github_expressions(step["run"])
+    for name, run_block in run_steps:
+        script = _replace_github_expressions(run_block)
         with tempfile.NamedTemporaryFile("w", suffix=".sh", encoding="utf-8") as handle:
             handle.write(script)
             handle.flush()
@@ -43,4 +60,3 @@ def test_action_run_blocks_are_valid_bash_syntax() -> None:
                 check=False,
             )
         assert result.returncode == 0, f"{name} has invalid bash syntax:\n{result.stderr}"
-
