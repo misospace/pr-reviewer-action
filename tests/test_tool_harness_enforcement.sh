@@ -392,6 +392,58 @@ else
   check "null has_blocker does not trigger enforcement" "no" "yes"
 fi
 
+
+echo ""
+echo "=== Evidence Provider Fork Enablement ==="
+
+# Helper: returns "skip" or "run" based on the fork enablement logic from run_review.sh
+should_skip_evidence() {
+  local is_fork_pr="$1"
+  local evidence_enable_for_forks="${2:-false}"
+  if [[ "$is_fork_pr" == "true" ]] && [[ "$(printf '%s' "$evidence_enable_for_forks" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
+    echo "skip"
+  else
+    echo "run"
+  fi
+}
+
+# Fork PR with default (false) — should skip
+result="$(should_skip_evidence "true" "false")"
+check "fork PR, evidence_enable_for_forks=false -> skip" "$result" "skip"
+
+# Fork PR with true — should run
+result="$(should_skip_evidence "true" "true")"
+check "fork PR, evidence_enable_for_forks=true -> run" "$result" "run"
+
+# Fork PR with TRUE (uppercase) — should run
+result="$(should_skip_evidence "true" "TRUE")"
+check "fork PR, evidence_enable_for_forks=TRUE -> run" "$result" "run"
+
+# Fork PR with True (mixed case) — should run
+result="$(should_skip_evidence "true" "True")"
+check "fork PR, evidence_enable_for_forks=True -> run" "$result" "run"
+
+# Fork PR with empty string — should skip
+result="$(should_skip_evidence "true" "")"
+check "fork PR, evidence_enable_for_forks=empty -> skip" "$result" "skip"
+
+# Fork PR with unset (defaults to false) — should skip
+result="$(should_skip_evidence "true")"
+check "fork PR, evidence_enable_for_forks=unset -> skip" "$result" "skip"
+
+# Same-repo PR (not fork) with false — should run
+result="$(should_skip_evidence "false" "false")"
+check "same-repo PR, evidence_enable_for_forks=false -> run" "$result" "run"
+
+# Same-repo PR (not fork) with true — should run
+result="$(should_skip_evidence "false" "true")"
+check "same-repo PR, evidence_enable_for_forks=true -> run" "$result" "run"
+
+# Same-repo PR (not fork) with empty — should run
+result="$(should_skip_evidence "false" "")"
+check "same-repo PR, evidence_enable_for_forks=empty -> run" "$result" "run"
+
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 

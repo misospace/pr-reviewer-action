@@ -255,6 +255,20 @@ Example provider config (`.github/pr-review-providers.json`):
 
 Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence_blocker_enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict.
 
+#### Evidence provider execution model
+
+Evidence providers execute in the context of the **checked-out pull request code**. The command runs from the repository root with full access to the PR's working tree, environment variables, and installed tools. This means:
+
+- Provider scripts reference files relative to the PR branch being reviewed, not the base branch.
+- Commands have access to all repository files staged or committed in the PR.
+- Environment variables set by the GitHub Actions runner (such as `GITHUB_TOKEN`, `HOME`, etc.) are available to provider commands.
+
+**Argv arrays are strongly recommended over shell strings.** When `command` is an array like `["python3", "scripts/check.py"]`, the action invokes the process directly via `subprocess.run` with no shell interpretation. When `command` is a string, it runs through `bash -lc`, which introduces shell injection risks if any part of the command or environment is influenced by untrusted PR content.
+
+#### Cross-repository (fork) behavior
+
+Evidence providers are **disabled by default on cross-repository pull requests** (`evidence_enable_for_forks=false`). This prevents forked PRs from executing arbitrary scripts defined in the destination repository's config. Set `evidence_enable_for_forks: "true"` only when you trust fork contributors or run reviews in an isolated environment.
+
 ### Publish modes
 
 The action supports three publish modes via the `publish_mode` input:
@@ -519,7 +533,7 @@ You can force specific behavior:
 - `publish_review_comment` uses `gh pr comment --edit-last --create-if-none`, so the comment is managed by the token identity used in the workflow.
 - `context_limit_mode` reduces the amount of PR data sent to the LLM. Use `minimal` for models with very small context windows. This skips nothing but truncates more aggressively.
 - `evidence_providers_file` accepts JSON only. It can be either an object with `providers: []` or a top-level provider array.
-- Provider `command` may be a shell string or an argument array. Each provider can override `timeout_sec` and `max_output_bytes`.
+- Provider `command` accepts either a shell string (executed via `bash -lc`) or an argument array (invoked directly). **Argv arrays are strongly recommended** to avoid shell injection risks. Each provider can override `timeout_sec` and `max_output_bytes`.
 - Provider output is appended to the review corpus under an `Evidence Providers` section.
 - `tool_mode=plan_execute_once` adds a single planning-and-execution tool round before final review synthesis.
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.

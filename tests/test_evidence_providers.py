@@ -474,5 +474,88 @@ class TestMarkdownOutput:
         assert "[REDACTED]" in content
 
 
+# ── Integration tests: command format (argv vs shell string) ───────
+
+class TestCommandFormat:
+    def test_argv_command_executes_directly(self, tmp_path: Path):
+        """Argv array commands run via subprocess with no shell interpretation."""
+        helper = tmp_path / "argv_provider.py"
+        helper.write_text(HELPER_JSON_FINDINGS)
+        config = {"providers": [{"id": "test-argv", "command": [sys.executable, str(helper)]}]}
+        result = _run_with_config(config, tmp_path)
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        p = data["providers"][0]
+        assert p["status"] == "ok"
+        assert p["output_format"] == "json"
+        assert len(p["findings"]) == 1
+
+    def test_shell_string_command_executes_via_bash(self, tmp_path: Path):
+        """Shell string commands run via bash -lc."""
+        config = {"providers": [{"id": "test-shell", "command": "echo 'shell output'"}]}
+        result = _run_with_config(config, tmp_path)
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        p = data["providers"][0]
+        assert p["status"] == "ok"
+        assert "shell output" in p["stdout"]
+
+    def test_argv_command_stored_quoted(self, tmp_path: Path):
+        """Argv commands are stored with shlex-quoted arguments."""
+        config = {"providers": [{"id": "test-quote", "command": ["echo", "hello world"]}]}
+        result = _run_with_config(config, tmp_path)
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        p = data["providers"][0]
+        # The command should be stored as shlex-quoted: echo 'hello world'
+        assert "echo" in p["command"]
+
+    def test_shell_string_stored_as_is(self, tmp_path: Path):
+        """Shell string commands are stored verbatim."""
+        config = {"providers": [{"id": "test-verbatim", "command": 'echo "verbatim"'}]}
+        result = _run_with_config(config, tmp_path)
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        p = data["providers"][0]
+        assert p["command"] == 'echo "verbatim"'
+
+
+# ── Integration tests: fork enablement skip behavior ────────────────
+
+class TestForkEnablement:
+    """Tests for evidence_enable_for_forks skip logic.
+
+    The skip logic lives in run_review.sh, not the Python script. These tests
+    verify the flag normalization used by the shell condition:
+      IS_FORK_PR == "true" && EVIDENCE_ENABLE_FOR_FORKS != "true" (case-insensitive)
+    """
+    def _should_skip(self, is_fork_pr: str, enable_for_forks: str | None = None) -> bool:
+        value = (enable_for_forks or "false").strip().lower()
+        return is_fork_pr == "true" and value != "true"
+
+    def test_fork_with_default_skips(self):
+        assert self._should_skip("true", "false") is True
+
+    def test_fork_with_true_runs(self):
+        assert self._should_skip("true", "true") is False
+
+    def test_fork_with_uppercase_true_runs(self):
+        assert self._should_skip("true", "TRUE") is False
+
+    def test_fork_with_mixed_case_runs(self):
+        assert self._should_skip("true", "True") is False
+
+    def test_fork_with_empty_skips(self):
+        assert self._should_skip("true", "") is True
+
+    def test_fork_with_unset_skips(self):
+        assert self._should_skip("true", None) is True
+
+    def test_same_repo_always_runs(self):
+        assert self._should_skip("false", "false") is False
+        assert self._should_skip("false", "true") is False
+        assert self._should_skip("false", "") is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
