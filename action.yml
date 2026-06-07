@@ -438,6 +438,10 @@ runs:
 
         # Build metadata marker
         METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || '' }}" "${{ steps.precheck.outputs.previous_head_sha || '' }}")"
+        ANALYSIS_SCOPE_SUFFIX=""
+        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+          ANALYSIS_SCOPE_SUFFIX=" (incremental delta review)"
+        fi
 
         if [ "$VERDICT" = "request_changes" ]; then
           VERDICT_PREFIX="⚠️ **Automated recommendation: REQUEST CHANGES**"
@@ -455,7 +459,7 @@ runs:
           fi
           echo "$VERDICT_PREFIX"
           echo
-          echo "_Analysis engine: ${ANALYSIS_ENGINE}_$(if [ \"$EFFECTIVE_SCOPE\" = \"incremental\" ]; then echo \" (incremental delta review)\"; fi)_"
+          printf '_Analysis engine: %s%s_\n' "$ANALYSIS_ENGINE" "$ANALYSIS_SCOPE_SUFFIX"
           echo
           cat review-markdown.raw.md
         } > review-comment.md
@@ -498,6 +502,10 @@ runs:
 
         # Build metadata marker
         METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || '' }}" "")"
+        ANALYSIS_SCOPE_SUFFIX=""
+        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+          ANALYSIS_SCOPE_SUFFIX=" (incremental delta review)"
+        fi
 
         # Build the review body with managed marker
         BODY_FILE="review-comment-body.md"
@@ -505,7 +513,7 @@ runs:
           echo "$METADATA_MARKER"
           echo "# AI Automated Review"
           echo
-          echo "_Analysis engine: ${ANALYSIS_ENGINE}_$(if [ \"$EFFECTIVE_SCOPE\" = \"incremental\" ]; then echo \" (incremental delta review)\"; fi)_"
+          printf '_Analysis engine: %s%s_\n' "$ANALYSIS_ENGINE" "$ANALYSIS_SCOPE_SUFFIX"
           echo
           cat review-comment-markdown.raw.md
         } > "$BODY_FILE"
@@ -561,6 +569,10 @@ runs:
 
         # Build metadata marker with verdict safety for incremental
         METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || '' }}" "$PREVIOUS_HEAD_SHA")"
+        ANALYSIS_SCOPE_SUFFIX=""
+        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+          ANALYSIS_SCOPE_SUFFIX=" (incremental delta review)"
+        fi
 
         # Evaluate approval guardrails with baseline check for incremental
         ALLOW_APPROVE_BOOL="$(printf '%s' "$ALLOW_APPROVE" | tr '[:upper:]' '[:lower:]')"
@@ -595,7 +607,7 @@ runs:
             echo "_Full PR review._"
           fi
           echo
-          echo "_Analysis engine: ${ANALYSIS_ENGINE}_$(if [ \"$EFFECTIVE_SCOPE\" = \"incremental\" ]; then echo \" (incremental delta review)\"; fi)_"
+          printf '_Analysis engine: %s%s_\n' "$ANALYSIS_ENGINE" "$ANALYSIS_SCOPE_SUFFIX"
           echo
           cat review-verdict-markdown.raw.md
         } > "$BODY_FILE"
