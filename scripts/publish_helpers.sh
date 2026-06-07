@@ -87,7 +87,7 @@ build_metadata_marker() {
   local base_sha="$1"
   local previous_head_sha="${2:-}"
 
-  local marker="<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"${HEAD_SHA:-unknown}\",\"base_sha\":\"${base_sha}\",\"review_scope\":\"${EFFECTIVE_SCOPE}\",\"review_result\":\"${REVIEW_RESULT}\"}"
+  local marker="<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"${HEAD_SHA:-unknown}\",\"base_sha\":\"${base_sha}\",\"review_scope\":\"${EFFECTIVE_SCOPE}\",\"review_result\":\"${REVIEW_RESULT}\"} -->"
   if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ -n "$previous_head_sha" ]; then
     marker="${marker%,*},\"previous_head_sha\":\"${previous_head_sha}\"}"
   fi
