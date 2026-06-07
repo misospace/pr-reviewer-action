@@ -7,6 +7,8 @@ COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}"
 SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
 
 if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   echo "Missing REPO or PR_NUMBER for review precheck" >&2
@@ -319,4 +321,3 @@ echo "baseline_clean=$BASELINE_CLEAN" >> "$OUTPUT_FILE"
 echo "diff_fingerprint=$broad_fingerprint" >> "$OUTPUT_FILE"
 echo "should_review=$should_review" >> "$OUTPUT_FILE"
 echo "skip_reason=$skip_reason" >> "$OUTPUT_FILE"
-
