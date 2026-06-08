@@ -763,6 +763,22 @@ EOF
 fi
 section_timer_end
 
+section_timer_start "pr-classification"
+log "Running deterministic PR classification..."
+if python3 "$SCRIPT_DIR/../pr_reviewer/classifier.py" \
+    --pr-files pr-files.json \
+    --diff pr.diff.truncated \
+    --body pr-body.txt \
+    --linked-issues linked-issues.json \
+    --output classification.json 2>/dev/null; then
+  log "PR classification complete: $(jq -r '.pr_kind' classification.json 2>/dev/null || echo unknown)"
+else
+  log "PR classification failed; continuing without it"
+  echo '{"pr_kind":"unknown","risk_flags":[],"changed_files_summary":[],"linked_issue_labels":[],"must_check":[]}' > classification.json
+fi
+section_timer_end
+
+
 log "Building review corpus..."
 : > standards-context.md
 if [ -f "$STANDARDS_FILE" ]; then
@@ -811,6 +827,15 @@ build_review_corpus() {
     echo '```json'
     jq . pr.json
     echo '```'
+    echo
+
+
+    echo "# PR Classification"
+    if [ -f classification.json ]; then
+      jq '{pr_kind, risk_flags, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
+    else
+      echo "(Classification data unavailable for this review)"
+    fi
     echo
 
     if [[ "$corpus_type" == "incremental" ]]; then

@@ -25,6 +25,23 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the review markdown to neutralize upstream GitHub references (PR URLs, issue URLs, commit URLs, compare URLs, cross-repo `owner/repo#123` references, and bare `#123` references). This prevents GitHub from auto-linking them into the reviewed repository, which would create notification noise and misleading linkbacks to unrelated projects. Sanitization is documented as P0 hygiene in [issue #132](https://github.com/misospace/pr-reviewer-action/issues/132).
 
 
+
+### Deterministic PR Classification
+
+Before invoking the AI model, the action runs a deterministic classification step that analyzes changed file paths, diff content, and linked issue context to produce structured metadata about the PR. This helps smaller/weaker reviewer models stay focused and reduces the chance of being misled by irrelevant context.
+
+**Classification output (injected into the review corpus):**
+
+| Field | Description |
+|-------|-------------|
+| `pr_kind` | One of: `renovate_digest_only`, `dependency_upgrade`, `app_code`, `k8s_manifest`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes`, `db_or_migration_changes` |
+| `risk_flags` | Detected risk indicators such as `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1`, `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` |
+| `changed_files_summary` | List of changed file paths (truncated to 50) |
+| `linked_issue_labels` | Labels from linked issues when available |
+| `must_check` | Explicit checklist items derived from the classification (e.g., "review auth flow for regression" for `auth_changes`) |
+
+The classification is purely rule-based — no model calls are involved. It uses pattern matching on file paths, diff content, and linked issue metadata to determine the PR type and associated risk flags.
+
 ## Requirements
 
 - The repository under review must already be checked out.
