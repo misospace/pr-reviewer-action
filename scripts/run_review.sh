@@ -362,7 +362,10 @@ gh pr diff "$PR_NUMBER" --repo "$REPO" > pr.diff
 head -c "$MAX_DIFF" pr.diff > pr.diff.truncated
 
 gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate > pr-files.raw.json
-jq '[.[] | {filename,status,additions,deletions,changes,previous_filename,patch}]' pr-files.raw.json > pr-files.json
+# Note: 'patch' is intentionally dropped — the per-file patches duplicate the
+# raw diff that is already embedded in the corpus, and the classifier does not
+# read them. Keeping them here doubled the diff bytes sent to the model.
+jq '[.[] | {filename,status,additions,deletions,changes,previous_filename}]' pr-files.raw.json > pr-files.json
 head -c "$MAX_FILES" pr-files.json > pr-files.truncated.json
 
 jq -r '.body // ""' pr.json > pr-body.txt
@@ -942,7 +945,13 @@ EOF
 EOF
     fi
   fi
-  build_review_corpus
+  # Rebuild with the same scope used before the harness ran; build_review_corpus
+  # defaults to "full", which would silently discard an incremental delta review.
+  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
+    build_review_corpus "incremental"
+  else
+    build_review_corpus "full"
+  fi
   cp review-corpus.md review-corpus.truncated.md
 fi
 
@@ -1031,10 +1040,14 @@ apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
 
+# Use a random heredoc delimiter so model-controlled review text (which can be
+# influenced by prompt injection in the PR diff/title/body) cannot terminate the
+# multiline output early and inject arbitrary step outputs (e.g. flip the verdict).
+RM_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 {
-  echo 'review_markdown<<EOF'
+  echo "review_markdown<<$RM_DELIM"
   jq -r '.review_markdown' ai-output.json
-  echo 'EOF'
+  echo "$RM_DELIM"
 } >> "$OUTPUT_FILE"
 
 log "Analysis complete. Writing outputs..."

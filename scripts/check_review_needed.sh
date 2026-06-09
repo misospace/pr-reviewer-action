@@ -195,17 +195,26 @@ extract_review_metadata() {
   LAST_REVIEW_SCOPE=""
   LAST_REVIEW_RESULT=""
   
-  # Use Python to parse the JSON marker reliably (handles embedded quotes)
+  # Use Python to parse the JSON marker reliably (handles embedded quotes).
+  # The comment body is attacker-controllable (any user can post a comment
+  # carrying the marker), and the output of this helper is eval'd below, so
+  # every field is sanitized to a safe character set first: SHAs to hex, the
+  # scope/result enums to lowercase letters and underscores. This prevents
+  # shell-command injection through crafted metadata markers.
   eval "$(printf '%s' "$comment_body" | python3 -c "
-import sys
+import re, sys
 sys.path.insert(0, '.')
 from pr_reviewer.metadata import parse_metadata
 data = parse_metadata(sys.stdin.read())
 if data:
-    print(f'LAST_HEAD_SHA={data.get(\"head_sha\", \"\")}')
-    print(f'LAST_BASE_SHA={data.get(\"base_sha\", \"\")}')
-    print(f'LAST_REVIEW_SCOPE={data.get(\"review_scope\", \"\")}')
-    print(f'LAST_REVIEW_RESULT={data.get(\"review_result\", \"\")}')
+    def hexsan(v):
+        return re.sub(r'[^0-9a-fA-F]', '', str(v or ''))[:64]
+    def enumsan(v):
+        return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
+    print(f'LAST_HEAD_SHA={hexsan(data.get(\"head_sha\"))}')
+    print(f'LAST_BASE_SHA={hexsan(data.get(\"base_sha\"))}')
+    print(f'LAST_REVIEW_SCOPE={enumsan(data.get(\"review_scope\"))}')
+    print(f'LAST_REVIEW_RESULT={enumsan(data.get(\"review_result\"))}')
 " 2>/dev/null || true)"
 }
 

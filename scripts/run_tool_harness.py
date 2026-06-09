@@ -338,12 +338,12 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     if len(parts) < 2:
         return {"error": "Invalid endpoint format: expected owner/repo/..."}
 
-    # Reject dot-segments in any path component
+    # Reject traversal/empty segments only. Dots *inside* a component are safe
+    # (and required for release tags like v1.2.3 and repos like next.js); only
+    # the ".", ".." and empty ("//") segments are traversal risks.
     for part in parts:
-        if part in (".", ".."):
-            return {"error": f"Dot-segment not allowed in path: {part}"}
-        if "." in part:
-            return {"error": "Dot segments in path components are not allowed"}
+        if part in ("", ".", ".."):
+            return {"error": f"Dot-segment not allowed in path: {part or '(empty)'}"}
 
     # If the first segment is "repos", skip it and use the next two segments
     if parts[0] == "repos" and len(parts) >= 3:
@@ -377,7 +377,8 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
         if deny in full_path.lower():
             return {"error": f"Path segment denied: {deny}"}
 
-    url = f"https://api.github.com/{full_path}"
+    # full_path already begins with "/"; avoid a double slash after the host.
+    url = f"https://api.github.com{full_path}"
     try:
         req = urllib.request.Request(
             url,

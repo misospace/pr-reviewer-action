@@ -214,16 +214,33 @@ class TestGhApiPathValidation:
             f"Dot-segment '.' should be rejected: {result}"
         )
 
-    def test_dot_in_path_component_rejected(self):
-        """Endpoints with dots in path components should be rejected."""
+    def test_dot_in_path_component_allowed(self):
+        """Dots inside non-traversal components (release tags, repos) are allowed.
+
+        Only ".", ".." and empty segments are rejected. A request like
+        releases/tags/v1.2.3 may still fail on the network call (test token),
+        but it must not be rejected for containing dots.
+        """
         self._setup_env()
         result = gh_api(
-            "repos/misospace/pr-reviewer-action/pulls/1.patch",
+            "repos/misospace/pr-reviewer-action/releases/tags/v1.2.3",
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "dot" in (result.get("error") or "").lower(), (
-            f"Dots in path components should be rejected: {result}"
+        assert "dot" not in (result.get("error") or "").lower(), (
+            f"Dots in non-traversal components should be allowed: {result}"
+        )
+
+    def test_empty_segment_rejected(self):
+        """Endpoints producing an empty path segment ('//') should be rejected."""
+        self._setup_env()
+        result = gh_api(
+            "repos/misospace//pulls/1",
+            allowed_repos=set(),
+            current_repo="misospace/pr-reviewer-action",
+        )
+        assert "dot-segment" in (result.get("error") or "").lower(), (
+            f"Empty segment should be rejected: {result}"
         )
 
     def test_unallowed_prefix_rejected(self):
