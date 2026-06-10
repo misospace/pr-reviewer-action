@@ -15,7 +15,7 @@ from pathlib import Path
 def apply_evidence_blocker_enforcement(
     evidence_path: str = "evidence-providers.json",
     output_path: str = "ai-output.json",
-) -> bool:
+) -> tuple[bool, str]:
     """Override verdict to request_changes if any evidence provider reported a blocker.
 
     Parameters
@@ -27,8 +27,8 @@ def apply_evidence_blocker_enforcement(
 
     Returns
     -------
-    bool
-        True if enforcement was applied, False otherwise.
+    tuple[bool, str]
+        (applied, reason) — reason is empty when not applied.
     """
     if not Path(evidence_path).exists():
         return False, ""
@@ -48,7 +48,6 @@ def apply_evidence_blocker_enforcement(
     ids_str = ", ".join(blocker_ids)
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
-    verdict = data.get("verdict")
     markdown = str(data.get("review_markdown") or "")
 
     markdown = (
@@ -118,7 +117,7 @@ def _harness_requested_tools(tool_harness_path: str = "tool-harness.json") -> bo
 def apply_tool_harness_failure_enforcement(
     tool_harness_path: str = "tool-harness.json",
     output_path: str = "ai-output.json",
-) -> bool:
+) -> tuple[bool, str]:
     """Override verdict to request_changes if tool harness planning or execution failed.
 
     Parameters
@@ -130,8 +129,8 @@ def apply_tool_harness_failure_enforcement(
 
     Returns
     -------
-    bool
-        True if enforcement was applied, False otherwise.
+    tuple[bool, str]
+        (applied, reason) — reason is empty when not applied.
     """
     reason = _get_tool_harness_failure_reason(tool_harness_path)
     if not reason:
@@ -163,7 +162,7 @@ def apply_tool_min_successful_enforcement(
     min_required: int,
     tool_harness_path: str = "tool-harness.json",
     output_path: str = "ai-output.json",
-) -> bool:
+) -> tuple[bool, str]:
     """Override verdict to request_changes if fewer than ``min_required`` tool requests succeeded.
 
     Parameters
@@ -177,8 +176,8 @@ def apply_tool_min_successful_enforcement(
 
     Returns
     -------
-    bool
-        True if enforcement was applied, False otherwise.
+    tuple[bool, str]
+        (applied, reason) — reason is empty when not applied.
     """
     successful = _count_successful_requests(tool_harness_path)
     if successful >= min_required:

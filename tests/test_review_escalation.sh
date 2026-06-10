@@ -43,6 +43,8 @@ check_contains "escalation requires auto routing" "$SRC" '[[ "$REVIEW_ROUTING_MO
 check_contains "escalation requires the fast route" "$SRC" '[[ "${REVIEW_ROUTE:-legacy}" == "fast" ]] || return 0'
 check_contains "escalation requires a smart model" "$SRC" '[[ -n "$SMART_MODEL_RESOLVED" ]] || return 0'
 check_contains "no-op when smart equals the active fast config" "$SRC" 'nothing distinct to escalate to'
+check_contains "no-op when the fallback already produced the review on the smart config" "$SRC" 'the fallback model that produced this review is the smart model'
+check_contains "step summary reads smart-response usage when escalated" "$SRC" 'usage_file="ai-response.smart.json"'
 
 echo ""
 echo "=== Decision and publication contracts ==="
