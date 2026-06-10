@@ -138,8 +138,9 @@ The result is exposed as the `required_checks` output (`complete` / `incomplete`
 | `evidence_provider_parallelism` | Max evidence provider commands run concurrently (set `1` to force serial execution) | No | `4` |
 | `evidence_blocker_enforcement` | Force `request_changes` when any provider reports blocker severity | No | `false` |
 | `evidence_enable_for_forks` | Allow evidence providers on cross-repository PRs | No | `false` |
-| `tool_mode` | Tool harness mode: `off` or `plan_execute_once` | No | `off` |
-| `tool_max_requests` | Maximum tool requests executed in one harness run | No | `4` |
+| `tool_mode` | Tool harness mode: `off`, `plan_execute_once`, or `plan_execute_loop` | No | `off` |
+| `tool_max_requests` | Maximum tool requests executed in one harness run (total across rounds in loop mode) | No | `4` |
+| `tool_max_rounds` | Maximum planning rounds for `tool_mode=plan_execute_loop` | No | `3` |
 | `tool_planning_timeout_sec` | Timeout in seconds for tool harness planning model call | No | `60` |
 | `tool_planning_max_context_bytes` | Maximum corpus bytes passed to planning | No | `50000` |
 | `tool_planning_max_tokens` | Maximum completion tokens for tool harness planning call | No | `400` |
@@ -516,7 +517,9 @@ The `pull-requests: write` permission is required for both posting reviews and d
     tool_min_successful_requests: "1"
 ```
 
-In `plan_execute_once` mode, the model first plans up to `tool_max_requests` read-only evidence calls, then the action executes those calls and appends the results to the final review corpus. Supported tools are:
+In `plan_execute_once` mode, the model first plans up to `tool_max_requests` read-only evidence calls, then the action executes those calls and appends the results to the final review corpus.
+
+In `plan_execute_loop` mode the planning iterates: after each round's tools run, the planner sees the results (clearly fenced as untrusted data) and may request follow-ups — "the diff touches `auth/session.go` → read it → it calls `validateToken` → grep for other callers". The loop stops when the planner replies `{"requests": []}` (or `DONE`), the `tool_max_requests` total budget is spent, `tool_max_rounds` is reached, or a later-round response fails to parse (the review proceeds with the evidence gathered so far — a planning hiccup never fails the review). Requests identical to ones already executed are deduplicated so weak models cannot burn the budget re-fetching the same evidence. Each round is an extra planning model call, so latency grows with depth; the executor, allowlists, and size caps are identical to single-round mode. Supported tools are:
 
 - `gh_api` with a repo-local path like `repos/owner/repo/pulls/123/files`
 - `read_file` for files inside the checked-out repository
@@ -788,7 +791,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 - `evidence_providers_file` accepts JSON only. It can be either an object with `providers: []` or a top-level provider array.
 - Provider `command` accepts either a shell string (executed via `bash -lc`) or an argument array (invoked directly). **Argv arrays are strongly recommended** to avoid shell injection risks. Each provider can override `timeout_sec` and `max_output_bytes`.
 - Provider output is appended to the review corpus under an `Evidence Providers` section.
-- `tool_mode=plan_execute_once` adds a single planning-and-execution tool round before final review synthesis.
+- `tool_mode=plan_execute_once` adds a single planning-and-execution tool round before final review synthesis; `plan_execute_loop` iterates planning (bounded by `tool_max_rounds` and the total `tool_max_requests` budget) with results fed back as untrusted data.
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.
 - Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction. The `run_command` tool does not execute arbitrary shell text; it accepts only named read-only command definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`) and runs them argv-only without `bash -lc`.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).

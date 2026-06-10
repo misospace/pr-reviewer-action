@@ -109,8 +109,10 @@ class TestMaxRequestsSlicing(TestCase):
         harness_path = _SCRIPTS_DIR / "run_tool_harness.py"
         source = harness_path.read_text(encoding="utf-8")
 
-        # Both paths should use the variable for slicing
-        self.assertIn("requests_list[:max_requests]", source)
+        # The loop path slices by the remaining cross-round budget, which is
+        # initialised from max_requests; the file-based path slices directly.
+        self.assertIn("requests_list[:budget]", source)
+        self.assertIn("budget = max_requests", source)
         self.assertIn("tool_calls[:max_requests]", source)
         # Should NOT have hardcoded [:4] slices in the execution loops
         self.assertNotIn("[:4]", source)

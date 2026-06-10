@@ -373,7 +373,7 @@ resolve_standards_file
 resolve_system_prompt
 
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-  off|plan_execute_once) ;;
+  off|plan_execute_once|plan_execute_loop) ;;
   *)
     error "Invalid TOOL_MODE '$TOOL_MODE'; defaulting to off"
     TOOL_MODE="off"
@@ -1033,7 +1033,7 @@ fi
 
 if [ ! -f tool-harness.md ]; then
   case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-    plan_execute_once)
+    plan_execute_once|plan_execute_loop)
       cat > tool-harness.md <<'EOF'
 Tool harness planning pending.
 EOF
@@ -1186,13 +1186,13 @@ fi
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]]; then
+if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" || "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_loop" ]]; then
   if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     cat > tool-harness.md <<'EOF'
 Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.
 EOF
     cat > tool-harness.json <<'EOF'
-{"mode":"plan_execute_once","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}
+{"mode":"plan_execute","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}
 EOF
   else
     log "Running tool harness in mode: $TOOL_MODE"
@@ -1202,7 +1202,7 @@ EOF
 Tool harness failed to run in this review.
 EOF
       cat > tool-harness.json <<'EOF'
-{"mode":"plan_execute_once","planned_request_count":0,"executed_request_count":0,"tool_results":[],"error":"execution failed"}
+{"mode":"plan_execute","planned_request_count":0,"executed_request_count":0,"tool_results":[],"error":"execution failed"}
 EOF
     fi
   fi
@@ -1496,7 +1496,7 @@ if [[ "$(printf '%s' "$EVIDENCE_BLOCKER_ENFORCEMENT" | tr '[:upper:]' '[:lower:]
 fi
 
 TOOL_FAILURE_ENABLED="false"
-if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" ]] && \
+if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" != "off" ]] && \
   [[ "$(printf '%s' "$TOOL_FAILURE_ENFORCEMENT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
   TOOL_FAILURE_ENABLED="true"
 fi

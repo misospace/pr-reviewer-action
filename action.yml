@@ -303,13 +303,21 @@ inputs:
     required: false
     default: "false"
   tool_mode:
-    description: Optional tool harness mode; set to plan_execute_once to let the model request read-only evidence tools before final review
+    description: >-
+      Optional tool harness mode. plan_execute_once lets the model request read-only
+      evidence tools in a single planning round before the final review. plan_execute_loop
+      re-plans after seeing each round's results (up to tool_max_rounds), so the model can
+      dig further based on what it found; tool_max_requests is the total budget across rounds.
     required: false
     default: "off"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
     default: "4"
+  tool_max_rounds:
+    description: Maximum planning rounds for tool_mode=plan_execute_loop. Ignored for other modes.
+    required: false
+    default: "3"
   tool_planning_timeout_sec:
     description: Timeout in seconds for the model planning call used by tool harness. Non-streaming, so set generously for local models with slow prompt eval.
     required: false
@@ -500,6 +508,7 @@ runs:
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
+        TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
         TOOL_PLANNING_MAX_CONTEXT_BYTES: ${{ inputs.tool_planning_max_context_bytes }}
         TOOL_PLANNING_MAX_TOKENS: ${{ inputs.tool_planning_max_tokens }}
@@ -593,6 +602,7 @@ runs:
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
+        TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
         TOOL_PLANNING_MAX_CONTEXT_BYTES: ${{ inputs.tool_planning_max_context_bytes }}
         TOOL_PLANNING_MAX_TOKENS: ${{ inputs.tool_planning_max_tokens }}
