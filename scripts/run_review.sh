@@ -85,7 +85,7 @@ EVIDENCE_ENABLE_FOR_FORKS="${EVIDENCE_ENABLE_FOR_FORKS:-false}"
 TOOL_MODE="${TOOL_MODE:-off}"
 TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-4}"
 TOOL_MAX_RESPONSE_BYTES="${TOOL_MAX_RESPONSE_BYTES:-12000}"
-TOOL_PLANNING_TIMEOUT_SEC="${TOOL_PLANNING_TIMEOUT_SEC:-30}"
+TOOL_PLANNING_TIMEOUT_SEC="${TOOL_PLANNING_TIMEOUT_SEC:-60}"
 TOOL_PLANNING_MAX_CONTEXT_BYTES="${TOOL_PLANNING_MAX_CONTEXT_BYTES:-50000}"
 TOOL_PLANNING_MAX_TOKENS="${TOOL_PLANNING_MAX_TOKENS:-400}"
 TOOL_REQUEST_TIMEOUT_SEC="${TOOL_REQUEST_TIMEOUT_SEC:-20}"
@@ -1375,6 +1375,13 @@ maybe_escalate_review() {
   if [[ "$SMART_BASE_URL" == "$AI_BASE_URL" && "$SMART_MODEL" == "$AI_MODEL" ]]; then
     return 0  # nothing distinct to escalate to
   fi
+  # If the fast primary failed and the fallback produced this review, and the
+  # smart config is that same fallback (the default mapping), escalating would
+  # just re-call the model that already reviewed this corpus.
+  if [[ "${PRIMARY_OK:-0}" -ne 1 && "$SMART_BASE_URL" == "$AI_FALLBACK_BASE_URL" && "$SMART_MODEL" == "$AI_FALLBACK_MODEL" ]]; then
+    log "Skipping escalation: the fallback model that produced this review is the smart model"
+    return 0
+  fi
 
   # Decide on the RAW fast output, before verdict policy / completeness
   # validation / enforcement mutate it.
@@ -1502,6 +1509,7 @@ write_step_summary() {
   usage_file=""
   [ -f ai-response.primary.json ] && usage_file="ai-response.primary.json"
   [[ "$ANALYSIS_ENGINE" == *fallback* || "$ANALYSIS_ENGINE" == "$AI_FALLBACK_MODEL"* ]] && [ -f ai-response.fallback.json ] && usage_file="ai-response.fallback.json"
+  [[ "${REVIEW_ROUTE:-}" == "escalated" ]] && [ -f ai-response.smart.json ] && usage_file="ai-response.smart.json"
   prompt_tok="-"; comp_tok="-"
   if [ -n "$usage_file" ]; then
     prompt_tok="$(jq -r '.usage.prompt_tokens // "-"' "$usage_file" 2>/dev/null || echo -)"

@@ -139,7 +139,7 @@ The result is exposed as the `required_checks` output (`complete` / `incomplete`
 | `evidence_enable_for_forks` | Allow evidence providers on cross-repository PRs | No | `false` |
 | `tool_mode` | Tool harness mode: `off` or `plan_execute_once` | No | `off` |
 | `tool_max_requests` | Maximum tool requests executed in one harness run | No | `4` |
-| `tool_planning_timeout_sec` | Timeout in seconds for tool harness planning model call | No | `30` |
+| `tool_planning_timeout_sec` | Timeout in seconds for tool harness planning model call | No | `60` |
 | `tool_planning_max_context_bytes` | Maximum corpus bytes passed to planning | No | `50000` |
 | `tool_planning_max_tokens` | Maximum completion tokens for tool harness planning call | No | `400` |
 | `tool_max_response_bytes` | Maximum bytes captured from each tool response | No | `12000` |
