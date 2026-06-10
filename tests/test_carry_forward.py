@@ -1,10 +1,15 @@
 """Tests for pr_reviewer.carry_forward (#193)."""
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
-from pr_reviewer.carry_forward import (
+# Ensure the repo root is on sys.path so ``pr_reviewer`` is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pr_reviewer.carry_forward import (  # noqa: E402
     apply_carry_forward,
     load_carried_findings,
     render_carried_findings_section,
