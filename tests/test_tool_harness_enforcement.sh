@@ -7,6 +7,14 @@
 
 set -euo pipefail
 
+# Bash >= 4 required: empty-array expansion under `set -u` and other 4.x
+# behaviors break on macOS stock bash 3.2. Skip (not fail) so local runs
+# explain themselves; CI runs bash 5.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "SKIP: bash >= 4 required (found ${BASH_VERSION:-unknown}); on macOS run with PATH=\"/opt/homebrew/bin:\$PATH\"" >&2
+  exit 0
+fi
+
 # Dependency preflight
 for dep in jq; do
   if ! command -v "$dep" &>/dev/null; then

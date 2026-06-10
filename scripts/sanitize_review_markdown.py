@@ -122,20 +122,17 @@ def sanitize_mention(match: re.Match) -> str:
     return "@\u200b" + match.group(1)
 
 
-def sanitize_markdown(text: str) -> str:
-    """Return *text* with upstream references neutralized.
+# Inline code spans (single line, balanced backticks). GitHub neither
+# auto-links nor notifies inside code, so sanitizing spans only mangles quoted
+# code (`#123` in a YAML example, `@decorator` in Python). Fenced blocks are
+# intentionally NOT excluded: a weak model emitting an unbalanced ``` fence
+# would otherwise disable sanitization for the rest of the body, which is the
+# higher-risk failure.
+_RE_CODE_SEGMENT = re.compile(r"(`[^`\n]+`)")
 
-    Applies sanitization in a specific order:
-    1. URLs first (so we don't partially match parts of URLs)
-    2. Cross-repo references (#123 patterns with owner/repo prefix)
-    3. Bare references (#123 standalone)
 
-    Preserves:
-    - Markdown formatting (headers, lists, code blocks, etc.)
-    - File paths and image digests
-    - Release URLs (not sanitized — they are safe single links)
-    - Local repo references that are part of the review context
-    """
+def _sanitize_prose(text: str) -> str:
+    """Apply all substitutions to a prose (non-code) segment."""
     # 1. Sanitize URLs first (most specific patterns)
     text = _RE_GH_PR_URL.sub(sanitize_pr_url, text)
     text = _RE_GH_ISSUE_URL.sub(sanitize_issue_url, text)
@@ -152,6 +149,27 @@ def sanitize_markdown(text: str) -> str:
     text = _RE_MENTION.sub(sanitize_mention, text)
 
     return text
+
+
+def sanitize_markdown(text: str) -> str:
+    """Return *text* with upstream references neutralized.
+
+    Substitutions skip inline code spans — GitHub does not auto-link or ping
+    there, and rewriting quoted code (e.g. `#123` in a YAML example) corrupts
+    it for no gain. Fenced blocks are still sanitized (see _RE_CODE_SEGMENT).
+
+    Preserves:
+    - Markdown formatting (headers, lists, code blocks, etc.)
+    - File paths and image digests
+    - Release URLs (not sanitized — they are safe single links)
+    - Local repo references that are part of the review context
+    """
+    parts = _RE_CODE_SEGMENT.split(text)
+    # re.split with one capture group alternates prose / code segments.
+    return "".join(
+        part if index % 2 else _sanitize_prose(part)
+        for index, part in enumerate(parts)
+    )
 
 
 def main() -> None:

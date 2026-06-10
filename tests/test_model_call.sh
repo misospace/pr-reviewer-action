@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bash >= 4 required: empty-array expansion under `set -u` and other 4.x
+# behaviors break on macOS stock bash 3.2. Skip (not fail) so local runs
+# explain themselves; CI runs bash 5.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "SKIP: bash >= 4 required (found ${BASH_VERSION:-unknown}); on macOS run with PATH=\"/opt/homebrew/bin:\$PATH\"" >&2
+  exit 0
+fi
+
 # Tests for scripts/model_call.sh curl_model(): HTTP-status handling, body
 # preservation, and exit-code contract, driven by a mock `curl` on PATH.
 
@@ -233,6 +241,19 @@ echo "=== Test: AI_TOKENS_PARAM=max_completion_tokens (newer OpenAI models) ==="
 T_AI_TOKENS_PARAM=max_completion_tokens build_req openai
 check "uses max_completion_tokens" "$(jq 'has("max_completion_tokens")' "$REQ")" "true"
 check "drops plain max_tokens" "$(jq 'has("max_tokens")' "$REQ")" "false"
+
+echo ""
+echo "=== Test: streaming requests ask for usage in the final chunk ==="
+( AI_MAX_TOKENS=4096
+  build_model_request openai m "sys" "usr" "$CORPUS" "$REQ" true )
+check "openai stream: stream_options.include_usage set" \
+  "$(jq -r '.stream_options.include_usage' "$REQ")" "true"
+( AI_MAX_TOKENS=4096
+  build_model_request openai m "sys" "usr" "$CORPUS" "$REQ" false )
+check "openai non-stream: no stream_options" "$(jq 'has("stream_options")' "$REQ")" "false"
+( AI_MAX_TOKENS=4096
+  build_model_request anthropic m "sys" "usr" "$CORPUS" "$REQ" true )
+check "anthropic: no stream_options (openai-only field)" "$(jq 'has("stream_options")' "$REQ")" "false"
 
 echo ""
 echo "=== Test: anthropic always sends max_tokens and never response_format ==="

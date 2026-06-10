@@ -49,6 +49,14 @@ cleanup_native_reviews() {
 
   echo "Cleaning up previous managed native reviews for #$PR_NUMBER"
   CURRENT_ACTOR="$(gh api user --jq .login 2>/dev/null || echo "")"
+  if [ -z "$CURRENT_ACTOR" ]; then
+    # The default GITHUB_TOKEN is an installation token and cannot call /user
+    # (403 Resource not accessible by integration). Reviews created with it
+    # are authored by github-actions[bot], so fall back to that identity
+    # instead of silently skipping cleanup.
+    CURRENT_ACTOR="github-actions[bot]"
+    echo "  Could not resolve current actor from /user; assuming $CURRENT_ACTOR (default GITHUB_TOKEN)"
+  fi
   if [ -n "$CURRENT_ACTOR" ]; then
     # Managed bodies start with the configured marker (or, for reviews created
     # by older action versions, the bare/JSON "<!-- ai-pr-reviewer" prefix).
@@ -85,8 +93,6 @@ cleanup_native_reviews() {
     else
       echo "  No previous managed native reviews found for #$PR_NUMBER"
     fi
-  else
-    echo "  WARN: Could not determine current actor; skipping cleanup" >&2
   fi
 }
 

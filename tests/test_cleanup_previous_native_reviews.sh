@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bash >= 4 required: empty-array expansion under `set -u` and other 4.x
+# behaviors break on macOS stock bash 3.2. Skip (not fail) so local runs
+# explain themselves; CI runs bash 5.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "SKIP: bash >= 4 required (found ${BASH_VERSION:-unknown}); on macOS run with PATH=\"/opt/homebrew/bin:\$PATH\"" >&2
+  exit 0
+fi
+
 # Tests for issue #106: cleanup of superseded native PR reviews
 # These tests validate the shell logic used by the native review publish steps.
 
@@ -293,6 +301,51 @@ PER_REVIEW_GETS="$(grep -E 'reviews/[0-9]+' "$CALL_LOG" | grep -vc -- '--method'
 check "review state read from list query (no per-review GET)" "$PER_REVIEW_GETS" "0"
 LIST_QUERIES="$(grep -c '/reviews --paginate' "$CALL_LOG" || true)"
 check "exactly one review list query" "$LIST_QUERIES" "1"
+
+echo ""
+echo "=== Functional: default GITHUB_TOKEN (no /user access) falls back to github-actions[bot] ==="
+
+# Reviews authored by github-actions[bot] — the identity used when reviews
+# were created with the default GITHUB_TOKEN, whose /user endpoint 403s.
+cat > "$CLEANUP_TMP/reviews.json" <<'JSONEOF'
+[
+  {"id": 55, "state": "APPROVED", "user": {"login": "github-actions[bot]"},
+   "body": "<!-- ai-pr-reviewer -->\nold bot review"},
+  {"id": 66, "state": "APPROVED", "user": {"login": "someone-else"},
+   "body": "<!-- ai-pr-reviewer -->\nnot ours"}
+]
+JSONEOF
+
+cat > "$CLEANUP_TMP/bin/gh" <<SHELLEOF
+#!/usr/bin/env bash
+echo "\$*" >> "$CALL_LOG"
+if [ "\$1" = "api" ] && [ "\$2" = "user" ]; then
+  echo "Resource not accessible by integration (HTTP 403)" >&2
+  exit 1
+fi
+case "\$*" in
+  *"/reviews --paginate"*) cat "$CLEANUP_TMP/reviews.json" ;;
+  *dismissals*) echo '{"id": 1}' ;;
+  *"--method PATCH"*) echo '{}' ;;
+esac
+exit 0
+SHELLEOF
+chmod +x "$CLEANUP_TMP/bin/gh"
+
+CLEANUP_OUTPUT="$(
+  PATH="$CLEANUP_TMP/bin:$PATH" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=9 COMMENT_MARKER="<!-- ai-pr-reviewer -->" \
+  bash -c 'source "'"$HELPER_SCRIPT"'"; cleanup_native_reviews true' 2>&1
+)"
+
+check_contains "falls back to the github-actions[bot] identity" \
+  "$CLEANUP_OUTPUT" "assuming github-actions[bot]"
+check_contains "github-actions[bot] review is dismissed" \
+  "$CLEANUP_OUTPUT" "Dismissed outdated managed review #55 (APPROVED)"
+check_not_contains "other users' reviews untouched" \
+  "$CLEANUP_OUTPUT" "#66"
+check_not_contains "cleanup is no longer skipped" \
+  "$CLEANUP_OUTPUT" "skipping cleanup"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
