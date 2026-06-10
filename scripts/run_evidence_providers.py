@@ -214,6 +214,22 @@ def run_provider(
     return entry
 
 
+def head_tail_cap(text: str, max_bytes: int) -> str:
+    """Cap text at max_bytes keeping the head and the tail.
+
+    Command failures usually print the interesting part (the error) at the
+    end of the output, which a plain head-cap discarded.
+    """
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return text
+    head_bytes = max_bytes * 6 // 10
+    tail_bytes = max_bytes - head_bytes
+    head = raw[:head_bytes].decode("utf-8", errors="ignore")
+    tail = raw[len(raw) - tail_bytes :].decode("utf-8", errors="ignore")
+    return head + "\n…[middle truncated]…\n" + tail
+
+
 def write_outputs(summary: dict, markdown: str) -> None:
     Path("evidence-providers.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
@@ -292,6 +308,28 @@ def main() -> int:
             summary["has_blocker"] = True
         summary["providers"].append(entry)
 
+    # Markdown embeds are head+tail capped, per stream and in aggregate, so
+    # one chatty provider cannot crowd everything else out of the corpus.
+    # evidence-providers.json keeps the full (per-provider capped) output.
+    md_stdout_cap = env_int("EVIDENCE_MARKDOWN_STDOUT_BYTES", 4000)
+    md_stderr_cap = env_int("EVIDENCE_MARKDOWN_STDERR_BYTES", 2000)
+    md_budget = env_int("EVIDENCE_MARKDOWN_AGGREGATE_BYTES", 24000)
+
+    def emit_stream(label: str, text: str, per_cap: int) -> None:
+        nonlocal md_budget
+        if md_budget < 256:
+            md_lines.append(
+                f"- {label}: (omitted — aggregate evidence output cap reached; "
+                "full output in evidence-providers.json)"
+            )
+            return
+        block = head_tail_cap(text, min(per_cap, md_budget))
+        md_budget -= len(block.encode("utf-8", errors="replace"))
+        md_lines.append(f"- {label}:")
+        md_lines.append("```text")
+        md_lines.append(block)
+        md_lines.append("```")
+
     if not summary["providers"]:
         md_lines.append("No providers were configured in the config file.")
     else:
@@ -313,17 +351,11 @@ def main() -> int:
 
             stdout_text = provider.get("stdout", "").strip()
             if stdout_text and not findings:
-                md_lines.append("- stdout:")
-                md_lines.append("```text")
-                md_lines.append(stdout_text)
-                md_lines.append("```")
+                emit_stream("stdout", stdout_text, md_stdout_cap)
 
             stderr_text = provider.get("stderr", "").strip()
             if stderr_text:
-                md_lines.append("- stderr:")
-                md_lines.append("```text")
-                md_lines.append(stderr_text)
-                md_lines.append("```")
+                emit_stream("stderr", stderr_text, md_stderr_cap)
 
             md_lines.append("")
 

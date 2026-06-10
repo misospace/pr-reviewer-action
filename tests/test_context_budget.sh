@@ -78,5 +78,17 @@ check "output is valid UTF-8" \
   "$(python3 -c 'open("'"$TMP"'/utfdst",encoding="utf-8").read(); print("ok")')" "ok"
 
 echo ""
+echo "=== Test: enrichment context trims are wired into run_review.sh ==="
+RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh")"
+check "github.com raw HTML fetch is skipped" \
+  "$(grep -c 'Raw HTML fetch skipped for github.com' "$ROOT_DIR/scripts/run_review.sh")" "1"
+check "non-github sources go through strip_source_to_text" \
+  "$(grep -c 'strip_source_to_text "source.$i.raw"' "$ROOT_DIR/scripts/run_review.sh")" "1"
+check "github.com is excluded from the parallel prefetch" \
+  "$(grep -c '"\$host" != "github.com"' "$ROOT_DIR/scripts/run_review.sh")" "1"
+check "strip helper delegates to strip_source_text.py" \
+  "$(grep -c 'strip_source_text.py' "$ROOT_DIR/scripts/run_review.sh")" "1"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

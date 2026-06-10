@@ -466,6 +466,63 @@ def run_command(command, workspace_root, request_timeout=30):
         }
 
 
+def build_planning_context(max_bytes, corpus_path=None):
+    """Build a compact, high-signal context for tool planning.
+
+    Head-truncating the full review corpus filled the planner's budget with
+    standards/manifest boilerplate and often cut the diff off entirely. The
+    planner needs: what kind of PR this is, which files changed, the version
+    hints, the standards requirements (its contract says they are mandatory),
+    and the head of the diff. Falls back to the corpus head when the piece
+    files are unavailable (e.g. standalone invocation).
+
+    Returns (text, truncated).
+    """
+    pieces = [
+        ("PR Classification", "classification.json", 4000, "json"),
+        ("Changed Files", "pr-files.truncated.json", 6000, "json"),
+        ("Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
+        ("Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
+    ]
+
+    sections = []
+    any_clipped = False
+
+    def add_section(title, path, cap, fence):
+        nonlocal any_clipped
+        p = Path(path)
+        if not p.exists():
+            return
+        body = p.read_text(encoding="utf-8", errors="replace").strip()
+        if not body:
+            return
+        raw = body.encode("utf-8")
+        if len(raw) > cap:
+            body = raw[:cap].decode("utf-8", errors="ignore") + "\n[truncated]"
+            any_clipped = True
+        if fence:
+            sections.append(f"# {title}\n```{fence}\n{body}\n```")
+        else:
+            sections.append(f"# {title}\n{body}")
+
+    for title, path, cap, fence in pieces:
+        add_section(title, path, cap, fence)
+
+    if sections:
+        # Whatever budget remains goes to the head of the diff.
+        used = sum(len(s.encode("utf-8")) for s in sections)
+        diff_cap = max(2000, max_bytes - used - 200)
+        add_section("PR Diff (head)", "pr.diff.truncated", diff_cap, "diff")
+        text, clipped = truncate_text("\n\n".join(sections), max_bytes)
+        return text, clipped or any_clipped
+
+    if corpus_path is not None and Path(corpus_path).exists():
+        corpus_text = Path(corpus_path).read_text(encoding="utf-8", errors="replace")
+        return truncate_text(corpus_text, max_bytes)
+
+    return "", False
+
+
 def normalize_tool_request(raw_req):
     """Return (tool_name, args) tolerating common planner output mistakes.
 
@@ -761,9 +818,11 @@ def main():
             write_outputs(result, "Tool harness could not run: missing REPO, AI_BASE_URL, or AI_MODEL.")
             return 0
 
-        # Read and prepare corpus
-        corpus_text = corpus_path.read_text(encoding="utf-8", errors="replace")
-        corpus_text, corpus_truncated = truncate_text(corpus_text, planning_max_context)
+        # Build the planning context from the high-signal pieces (falls back
+        # to the corpus head when they are unavailable).
+        corpus_text, corpus_truncated = build_planning_context(
+            planning_max_context, corpus_path
+        )
 
         current_repo_norm = normalize_repo_name(repo)
         allowed_gh_api_repos = set()

@@ -500,6 +500,14 @@ url_host_allowed() {
   return 1
 }
 
+# Reduce a fetched linked-source body to corpus-worthy text: HTML pages are
+# stripped to visible text, non-HTML passes through, output capped on a clean
+# boundary. Raw HTML heads were mostly <head> boilerplate that burned corpus
+# budget without giving the model anything to read.
+strip_source_to_text() {
+  python3 "$SCRIPT_DIR/strip_source_text.py" "$1" "$2" "$3"
+}
+
 section_timer_start "enrichment"
 log "Gathering linked sources..."
 : > linked-sources.md
@@ -523,7 +531,10 @@ if [ -s urls.txt ]; then
     [ "$i" -gt 25 ] && break
     normalized_url="$(printf '%s' "$url" | sed -E 's#^https?://redirect.github.com/#https://github.com/#')"
     rm -f "source.$i.raw"
-    if url_host_allowed "$normalized_url"; then
+    host=$(printf '%s' "$normalized_url" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
+    # github.com bodies are JS-app shells; phase 2's gh api branches capture
+    # the structured data instead, so don't spend a fetch on them at all.
+    if [ "$host" != "github.com" ] && url_host_allowed "$normalized_url"; then
       {
         echo "url = $normalized_url"
         echo "output = source.$i.raw"
@@ -558,8 +569,14 @@ if [ -s urls.txt ]; then
     host=$(printf '%s' "$normalized_url" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
 
     if url_host_allowed "$normalized_url"; then
-      if [ -s "source.$i.raw" ]; then
-        head -c 5000 "source.$i.raw" | tr $'\0' ' ' > source.tmp
+      if [ "$host" = "github.com" ]; then
+        # Raw github.com pages are JS-app HTML shells with none of the actual
+        # content; the gh api branches below capture the release/compare data
+        # in structured form instead. Skipping the fetch saves both time and
+        # ~5KB of corpus boilerplate per URL.
+        echo "(Raw HTML fetch skipped for github.com — structured release/compare metadata is captured below when available)" >> linked-sources.md
+      elif [ -s "source.$i.raw" ]; then
+        strip_source_to_text "source.$i.raw" source.tmp 4000
         if [ -s source.tmp ]; then
           echo '```text' >> linked-sources.md
           cat source.tmp >> linked-sources.md

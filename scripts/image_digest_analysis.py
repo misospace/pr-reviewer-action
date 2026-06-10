@@ -523,14 +523,13 @@ def main():
                         f"  - `{short(changed_file.get('filename'))}` status={short(changed_file.get('status'))} changes={short(changed_file.get('changes'))}"
                     )
 
-            lines.append("- Old digest metadata:")
-            lines.append("```json")
-            lines.append(json.dumps(old_meta, indent=2))
-            lines.append("```")
-            lines.append("- New digest metadata:")
-            lines.append("```json")
-            lines.append(json.dumps(new_meta, indent=2))
-            lines.append("```")
+            # The bullets above already carry every field the reviewer needs;
+            # the full metadata JSON dumps doubled this section's size for no
+            # added signal. Keep only fetch errors, which the bullets omit.
+            if old_meta.get("error"):
+                lines.append(f"- Old digest metadata error: `{short(old_meta['error'])}`")
+            if new_meta.get("error"):
+                lines.append(f"- New digest metadata error: `{short(new_meta['error'])}`")
             lines.append("")
 
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
