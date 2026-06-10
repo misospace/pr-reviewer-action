@@ -53,6 +53,50 @@ class TestPRKindRenovateDigestOnly:
         kind = _classify_pr_kind(files, diff)
         assert kind != "renovate_digest_only"
 
+    def test_not_digest_when_mixed_with_code(self):
+        # A lockfile plus a real source change must NOT be treated as trivial.
+        files = [
+            _make_file("package-lock.json"),
+            _make_file("src/app/handler.ts"),
+        ]
+        diff = '"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"'
+        kind = _classify_pr_kind(files, diff)
+        assert kind != "renovate_digest_only"
+
+    def test_not_digest_when_yaml_version_bump(self):
+        # Helm/YAML version bumps (unquoted) must defeat the digest-only path.
+        files = [_make_file("Chart.yaml")]
+        diff = "-appVersion: 1.2.3\n+appVersion: 1.3.0\n"
+        kind = _classify_pr_kind(files, diff)
+        assert kind != "renovate_digest_only"
+
+
+class TestPRKindMultiLanguage:
+    """Auth/route/DB heuristics should fire beyond Python."""
+
+    def test_auth_typescript(self):
+        assert _classify_pr_kind([_make_file("src/auth.ts")], "") == "auth_changes"
+
+    def test_auth_controller_java(self):
+        # AuthController.java should be flagged (auth takes precedence over route).
+        assert _classify_pr_kind(
+            [_make_file("src/main/java/AuthController.java")], ""
+        ) == "auth_changes"
+
+    def test_route_typescript(self):
+        assert _classify_pr_kind(
+            [_make_file("src/routes.ts")], ""
+        ) == "public_route_changes"
+
+    def test_model_go(self):
+        assert _classify_pr_kind(
+            [_make_file("internal/models.go")], ""
+        ) == "db_or_migration_changes"
+
+    def test_auth_risk_flag_typescript(self):
+        flags = _detect_risk_flags([_make_file("src/auth.ts")], "", [])
+        assert "auth_changes" in flags
+
 
 class TestPRKindDependencyUpgrade:
     def test_package_lock_with_version_bump(self):
