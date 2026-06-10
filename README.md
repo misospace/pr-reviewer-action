@@ -468,6 +468,17 @@ In `plan_execute_once` mode, the model first plans up to `tool_max_requests` rea
 - `read_file` for files inside the checked-out repository
 - `web_fetch` for allowlisted hosts from `allowed_source_hosts`
 - `git_grep` for local repository content search
+- `run_command` for a fixed catalog of named read-only commands
+
+`run_command` never executes model-supplied shell text. The planner may only pick a command **name** from the built-in catalog, and the action runs the corresponding fixed argv (no shell involved):
+
+| Command name | Executes |
+| --- | --- |
+| `git_status_short` | `git status --short` |
+| `git_diff_stat` | `git diff --stat HEAD` |
+| `git_diff_name_only` | `git diff --name-only HEAD` |
+
+Any other command name is rejected with an error listing the catalog. Output is secret-masked and truncated to `tool_max_response_bytes` like every other tool result.
 
 By default, tool harness execution is skipped on cross-repository PRs unless `tool_enable_for_forks` is set to `true`.
 
@@ -538,6 +549,76 @@ You can force specific behavior:
     review_scope: incremental
 ```
 
+## Local model troubleshooting
+
+The action is designed local-model-first (ollama, llama.cpp, vLLM, or anything behind an OpenAI/Anthropic-compatible proxy like LiteLLM). The settings below cover the failure modes that come up most often with self-hosted endpoints.
+
+### Base URL examples
+
+`ai_base_url` must point at the **OpenAI-compatible base** (the action appends `/chat/completions`, or `/messages` for `ai_api_format: anthropic`):
+
+```yaml
+# ollama on the same runner/host (note the /v1 — ollama's native API is not OpenAI-compatible)
+ai_base_url: http://localhost:11434/v1
+
+# ollama on another host on your network
+ai_base_url: http://192.168.1.50:11434/v1
+
+# llama.cpp llama-server
+ai_base_url: http://llama-server.internal:8080/v1
+
+# vLLM
+ai_base_url: http://vllm.internal:8000/v1
+
+# LiteLLM proxy (set ai_api_format to match the route's format; openai is typical)
+ai_base_url: http://litellm.internal:4000/v1
+```
+
+Self-hosted runners must be able to reach the endpoint — GitHub-hosted runners cannot reach `localhost` or LAN addresses on your network. Leave `ai_api_key` unset if the endpoint is unauthenticated; nothing is sent in that case.
+
+### Right-size the context budget with `model_context_tokens`
+
+The named `context_limit_mode` budgets assume large cloud-model windows (`normal` is roughly 55–70k tokens of corpus). Local models commonly run 8k–32k windows, and an overflowing prompt fails in confusing ways: the server returns `context length exceeded` (visible in the action log thanks to error-body preservation), or worse, silently truncates the prompt and the model returns malformed or irrelevant JSON.
+
+Set `model_context_tokens` to the window you actually serve the model with (e.g. ollama's `num_ctx`, llama.cpp's `--ctx-size`, vLLM's `--max-model-len`):
+
+```yaml
+model_context_tokens: "16384"   # derive corpus/diff/file budgets from the real window
+ai_max_tokens: "2048"           # reserved for the model's reply within that window
+```
+
+The action reserves `ai_max_tokens` plus prompt headroom and converts the rest to byte budgets conservatively (~3 bytes/token). Check the run's step summary: it shows the active budget and whether the diff/corpus were truncated.
+
+### Get reliable JSON out of small models with `ai_response_format`
+
+Small models often wrap their JSON in prose or markdown fences. The parser tolerates a lot, but structured output is more reliable when the server supports it:
+
+```yaml
+ai_response_format: json_object   # broad support: ollama, vLLM, llama.cpp server, LiteLLM
+# or, where supported (enforces the exact verdict/review_markdown schema):
+ai_response_format: json_schema   # vLLM guided decoding, llama.cpp grammars, newer servers
+```
+
+If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server does not support that mode — drop back to `json_object` or `off`. Ignored entirely for `ai_api_format: anthropic`.
+
+### Timeouts, streaming, and retries
+
+- **Slow prompt eval** (big corpus, CPU offload): raise `ai_request_timeout_sec` (default 300). The tool-planning call is non-streaming and has its own `tool_planning_timeout_sec` — raise it too if planning times out.
+- **Proxies with idle-read timeouts** (e.g. Cloudflare's ~100s edge timer): keep `ai_stream: "true"` (the default) so bytes flow before the timer fires.
+- **Models that reject sampling params**: set `ai_temperature: ""` to omit the field entirely; set `ai_tokens_param: max_completion_tokens` for newer OpenAI reasoning models.
+- **Endpoint not always up** (homelab): configure `ai_fallback_base_url`/`ai_fallback_model` (e.g. a small cloud model) or set `on_model_failure: notice` so the PR gets a visible explanation instead of a bare red check.
+
+### Quick symptom table
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `curl transport error (exit 7)` in logs | endpoint unreachable from the runner | check `ai_base_url`, runner network, server is listening |
+| HTTP 404 from the endpoint | base URL missing `/v1` (ollama) or wrong `ai_api_format` | use the OpenAI-compatible base path |
+| `context length exceeded` in the logged error body | corpus exceeds the served window | set `model_context_tokens` (and/or lower `ai_max_tokens`) |
+| Verdict parse failures, retries, then fallback | model wraps JSON in prose | set `ai_response_format: json_object` |
+| Reviews time out behind a proxy | idle-read timer on non-streamed response | keep `ai_stream: "true"` |
+| HTTP 400 mentioning `temperature` | model rejects non-default sampling | `ai_temperature: ""` |
+
 ## Notes
 - **Reserved comment markers**: The managed PR comment uses HTML comment markers for internal metadata. These are reserved and must not appear in model-generated review markdown:
   - `<!-- ai-pr-review-fingerprint:<value> -->` — stable patch + config fingerprint used by the precheck to skip unchanged diffs.
@@ -577,7 +658,7 @@ Run it with a specific PR:
 PR_NUMBER=6757 tests/smoke_test.sh
 ```
 
-Or let it pick the most recent open PR in `misospace/home-ops`:
+Or let it pick the most recent open PR in `misospace/pr-reviewer-action`:
 
 ```bash
 tests/smoke_test.sh
