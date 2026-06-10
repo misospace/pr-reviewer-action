@@ -12,6 +12,7 @@ Environment:
   INLINE_FINDINGS_MAX  maximum comments to emit (default 20)
 """
 
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,44 @@ _SEVERITY_LABELS = {
     "minor": "Minor",
     "info": "Info",
 }
+
+# Hidden marker correlating an inline comment with its finding across runs
+# (#208). The fingerprint is content-based because carried finding ids are
+# positional (P1..Pn, assigned per-run by carry_forward.load_carried_findings)
+# and therefore not stable between runs.
+FINDING_MARKER_PREFIX = "<!-- ai-pr-review-finding:"
+
+# Must match the truncation build_metadata_marker applies when persisting
+# open_findings (message[0:200]), so a finding fingerprinted here at comment
+# time equals the fingerprint of the same finding after a marker round-trip.
+_FINGERPRINT_MESSAGE_CHARS = 200
+
+
+def finding_fingerprint(finding: dict) -> str:
+    """Stable content fingerprint for correlating a finding across runs.
+
+    Computed from the fields the metadata marker persists (severity,
+    category, file, line, message truncated to 200 chars), normalized the
+    way carry_forward.load_carried_findings re-reads them. The trailing
+    strip mirrors the load-side strip-after-truncate so a cut that lands on
+    whitespace fingerprints identically on both sides.
+    """
+    severity = finding.get("severity") or "info"
+    category = finding.get("category") or "other"
+    file_path = finding.get("file") or ""
+    line = finding.get("line")
+    line_part = (
+        str(line)
+        if isinstance(line, int) and not isinstance(line, bool) and line > 0
+        else ""
+    )
+    message = str(finding.get("message") or "").strip()[:_FINGERPRINT_MESSAGE_CHARS].strip()
+    canon = "\x1f".join([str(severity), str(category), str(file_path), line_part, message])
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+
+
+def finding_marker(finding: dict) -> str:
+    return f"{FINDING_MARKER_PREFIX}{finding_fingerprint(finding)} -->"
 
 
 def commentable_lines(diff_text: str) -> dict:
@@ -123,12 +162,15 @@ def build_comments(findings, diff_text: str, max_comments: int = 20):
         ):
             skipped += 1
             continue
+        # The marker is appended after sanitization: it is generated locally
+        # from hex digits and must survive verbatim for the next run's
+        # thread-resolution matching.
         comments.append(
             {
                 "path": path,
                 "line": line,
                 "side": "RIGHT",
-                "body": finding_to_body(finding),
+                "body": finding_to_body(finding) + "\n\n" + finding_marker(finding),
             }
         )
         if len(comments) >= max_comments:

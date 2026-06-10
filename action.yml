@@ -790,6 +790,9 @@ runs:
           fi
         fi
 
+        # Resolve threads of carried findings this review verified as fixed (#208).
+        resolve_finding_threads
+
     - name: Publish review verdict (native PR review)
       if: inputs.publish_mode == 'review_verdict' && steps.precheck.outputs.should_review == 'true'
       shell: bash
@@ -960,3 +963,6 @@ runs:
             submit_native_review REQUEST_CHANGES "$BODY_FILE"
           fi
         fi
+
+        # Resolve threads of carried findings this review verified as fixed (#208).
+        resolve_finding_threads

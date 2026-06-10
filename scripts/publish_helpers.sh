@@ -120,6 +120,27 @@ cleanup_native_reviews() {
   fi
 }
 
+# Resolve inline finding threads for carried findings this run verified as
+# fixed (#208). Requires env: GH_TOKEN, REPO, PR_NUMBER, GITHUB_ACTION_PATH;
+# optional FINDINGS, INLINE_FINDINGS. Best-effort: never fails the publish —
+# the python script exits 0 on API errors and this wrapper swallows the rest.
+# Gated on inline_findings because without it no marker-bearing threads can
+# exist, and on a non-empty previous-findings.json because resolution only
+# makes sense when this run carried findings forward.
+resolve_finding_threads() {
+  if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]; then
+    return 0
+  fi
+  if [ ! -s previous-findings.json ]; then
+    return 0
+  fi
+  printf '%s' "${FINDINGS:-[]}" > resolve-findings.json
+  if ! python3 "${GITHUB_ACTION_PATH}/scripts/resolve_finding_threads.py" previous-findings.json resolve-findings.json; then
+    echo "  WARN: finding-thread resolution failed; continuing" >&2
+  fi
+  return 0
+}
+
 # Build metadata marker JSON string.
 # Requires env: HEAD_SHA, EFFECTIVE_SCOPE, REVIEW_RESULT; optional FINDINGS
 # (JSON array — persisted as open_findings when the review found issues, so

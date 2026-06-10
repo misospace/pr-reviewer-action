@@ -14,8 +14,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import pytest
 
 from build_review_comments import (
+    FINDING_MARKER_PREFIX,
     build_comments,
     commentable_lines,
+    finding_fingerprint,
+    finding_marker,
     finding_to_body,
     main,
 )
@@ -144,6 +147,55 @@ class TestFindingBody:
     def test_other_category_omitted(self):
         body = finding_to_body(_finding(category="other"))
         assert "(other)" not in body
+
+
+class TestFindingFingerprint:
+    def test_comment_body_carries_marker(self):
+        finding = _finding(line=12)
+        comments, _ = build_comments([finding], DIFF)
+        assert len(comments) == 1
+        assert comments[0]["body"].endswith(finding_marker(finding))
+        assert FINDING_MARKER_PREFIX in comments[0]["body"]
+
+    def test_deterministic_and_content_sensitive(self):
+        assert finding_fingerprint(_finding()) == finding_fingerprint(_finding())
+        assert finding_fingerprint(_finding()) != finding_fingerprint(_finding(line=13))
+        assert finding_fingerprint(_finding()) != finding_fingerprint(_finding(message="other"))
+
+    def test_none_file_and_line_fingerprint(self):
+        # Carried findings can have file/line of None; must not raise.
+        fp = finding_fingerprint(_finding(file=None, line=None))
+        assert len(fp) == 16
+
+    def test_marker_roundtrip_preserves_fingerprint(self, tmp_path):
+        """A finding fingerprinted at comment time must fingerprint
+        identically after the metadata-marker persist/load round-trip
+        (jq message[0:200] persist, load_carried_findings re-sanitize)."""
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
+        from pr_reviewer.carry_forward import load_carried_findings
+
+        # Message long enough that the cut lands on whitespace — the
+        # strip-after-truncate edge case.
+        long_message = ("a" * 199) + " trailing tail that gets cut off " + ("b" * 50)
+        for original in (
+            _finding(),
+            _finding(message=long_message),
+            _finding(file=None, line=None, severity="major", category="bug"),
+        ):
+            # Simulate build_metadata_marker's open_findings projection.
+            persisted = {
+                "severity": original["severity"],
+                "category": original["category"],
+                "file": original["file"],
+                "line": original["line"],
+                "message": str(original["message"])[:200],
+            }
+            path = tmp_path / "previous-findings.json"
+            path.write_text(json.dumps([persisted]), encoding="utf-8")
+            carried = load_carried_findings(str(path))
+            assert len(carried) == 1
+            assert finding_fingerprint(carried[0]) == finding_fingerprint(original)
 
 
 class TestMainCli:

@@ -622,6 +622,8 @@ With `inline_findings: "true"` and a native publish mode, findings that carry a 
 
 Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline_findings_max` (default 20).
 
+**Thread resolution on re-review.** Each inline comment carries a hidden content fingerprint of its finding. When a later incremental review's carry-forward concludes a carried finding is fixed (the model answers it with `resolution: resolved` — the same fail-closed rule that drives the verdict), the action resolves the matching open review thread via the GraphQL `resolveReviewThread` mutation, so authors see live thread state instead of stale open conversations. Best-effort: API failures (e.g. read-only tokens on fork PRs) warn and never fail the publish; findings answered `still_open` or `not_verifiable_from_delta` keep their threads open.
+
 ```yaml
 - uses: misospace/pr-reviewer-action@v1
   with:
