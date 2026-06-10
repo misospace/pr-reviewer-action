@@ -45,7 +45,10 @@ done
 if [ -n "$cfg" ] && [ -n "${MOCK_CONFIG_COPY:-}" ]; then
   cp "$cfg" "$MOCK_CONFIG_COPY"
   printf '%s' "$cfg" > "${MOCK_CONFIG_COPY}.path"
-  { stat -f %Lp "$cfg" 2>/dev/null || stat -c %a "$cfg" 2>/dev/null; } > "${MOCK_CONFIG_COPY}.perms"
+  # GNU stat first: BSD's -f flag is valid-but-different on GNU (filesystem
+  # status), so probing -f first captured garbage on Linux. -c fails cleanly
+  # on BSD/macOS, making it the safe first probe.
+  { stat -c %a "$cfg" 2>/dev/null || stat -f %Lp "$cfg" 2>/dev/null; } > "${MOCK_CONFIG_COPY}.perms"
 fi
 case "${MOCK_CURL_MODE:-ok}" in
   ok)
