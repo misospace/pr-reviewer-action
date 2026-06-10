@@ -216,10 +216,21 @@ def run_chat_completion(
     ]
     if api_format == "anthropic":
         curl_args.extend(["-H", f"anthropic-version: {os.getenv('ANTHROPIC_VERSION', '2023-06-01')}"])
-        if api_key:
-            curl_args.extend(["-H", f"x-api-key: {api_key}"])
-    elif api_key:
-        curl_args.extend(["-H", f"Authorization: Bearer {api_key}"])
+
+    # The API key goes through a 0600 curl --config file rather than argv, so
+    # it never appears in /proc/<pid>/cmdline or `ps` output on shared runners.
+    auth_config_path = None
+    if api_key:
+        if api_format == "anthropic":
+            auth_header = f"x-api-key: {api_key}"
+        else:
+            auth_header = f"Authorization: Bearer {api_key}"
+        escaped = auth_header.replace("\\", "\\\\").replace('"', '\\"')
+        fd, auth_config_path = tempfile.mkstemp()
+        with os.fdopen(fd, "w", encoding="utf-8") as auth_file:
+            auth_file.write(f'header = "{escaped}"\n')
+        os.chmod(auth_config_path, 0o600)
+        curl_args.extend(["--config", auth_config_path])
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as payload_file:
         json.dump(payload, payload_file)
@@ -228,10 +239,13 @@ def run_chat_completion(
     try:
         completed = safe_run(curl_args + ["--data", f"@{payload_path}"], timeout_sec + 5)
     finally:
-        try:
-            os.unlink(payload_path)
-        except OSError:
-            pass
+        for cleanup_path in (payload_path, auth_config_path):
+            if cleanup_path is None:
+                continue
+            try:
+                os.unlink(cleanup_path)
+            except OSError:
+                pass
 
     if isinstance(completed, dict) and completed.get("timeout"):
         raise RuntimeError("planner model request timed out")

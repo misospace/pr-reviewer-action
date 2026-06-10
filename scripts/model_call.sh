@@ -16,22 +16,26 @@
 # Unlike `curl -f`, the response body is preserved on HTTP errors so a local
 # endpoint's "context length exceeded" / "model not found" message is visible
 # instead of silently discarded and retried.
+# Escape a value for use inside a double-quoted curl-config string.
+curl_config_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 curl_model() {
   local base_url="$1" api_key="$2" api_format="$3" payload_file="$4" output_file="$5"
   local stream="${6:-false}" request_timeout_sec="${7:-300}" connect_timeout_sec="${8:-30}"
 
   local endpoint
-  local auth_header=()
+  local auth_header=""
   if [[ "$api_format" == "anthropic" ]]; then
     endpoint="$base_url/messages"
-    auth_header=( -H "anthropic-version: ${ANTHROPIC_VERSION:-2023-06-01}" )
     if [[ -n "$api_key" ]]; then
-      auth_header+=( -H "x-api-key: $api_key" )
+      auth_header="x-api-key: $api_key"
     fi
   else
     endpoint="$base_url/chat/completions"
     if [[ -n "$api_key" ]]; then
-      auth_header=( -H "Authorization: Bearer $api_key" )
+      auth_header="Authorization: Bearer $api_key"
     fi
   fi
 
@@ -48,7 +52,19 @@ curl_model() {
     -w '%{http_code}'
   )
 
-  args+=( "${auth_header[@]}" )
+  if [[ "$api_format" == "anthropic" ]]; then
+    args+=( -H "anthropic-version: ${ANTHROPIC_VERSION:-2023-06-01}" )
+  fi
+
+  # The API key goes through a 0600 curl --config file rather than argv, so
+  # it never appears in /proc/<pid>/cmdline or `ps` output on shared runners.
+  local auth_config=""
+  if [[ -n "$auth_header" ]]; then
+    auth_config="$(mktemp)"
+    chmod 600 "$auth_config"
+    printf 'header = "%s"\n' "$(curl_config_escape "$auth_header")" > "$auth_config"
+    args+=( --config "$auth_config" )
+  fi
 
   if [[ "$stream" == "true" ]]; then
     args+=( --no-buffer )
@@ -59,6 +75,10 @@ curl_model() {
 
   local http_code curl_rc=0
   http_code="$(curl "${args[@]}")" || curl_rc=$?
+
+  if [[ -n "$auth_config" ]]; then
+    rm -f "$auth_config"
+  fi
 
   if [[ "$curl_rc" -ne 0 ]]; then
     echo "  curl transport error (exit ${curl_rc}) calling model endpoint" >&2

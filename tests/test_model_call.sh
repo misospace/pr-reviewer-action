@@ -31,12 +31,22 @@ mkdir -p "$TMPDIR/bin"
 # prints an HTTP status to stdout (as -w '%{http_code}' would), or fails.
 cat > "$TMPDIR/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
+if [ -n "${MOCK_ARGV_LOG:-}" ]; then
+  printf '%s\n' "$@" > "$MOCK_ARGV_LOG"
+fi
 out=""
+cfg=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "-o" ]; then out="$a"; fi
+  if [ "$prev" = "--config" ]; then cfg="$a"; fi
   prev="$a"
 done
+if [ -n "$cfg" ] && [ -n "${MOCK_CONFIG_COPY:-}" ]; then
+  cp "$cfg" "$MOCK_CONFIG_COPY"
+  printf '%s' "$cfg" > "${MOCK_CONFIG_COPY}.path"
+  { stat -f %Lp "$cfg" 2>/dev/null || stat -c %a "$cfg" 2>/dev/null; } > "${MOCK_CONFIG_COPY}.perms"
+fi
 case "${MOCK_CURL_MODE:-ok}" in
   ok)
     [ -n "$out" ] && printf '{"choices":[{"message":{"content":"hi"}}]}' > "$out"
@@ -89,6 +99,50 @@ LOG="$(PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=http_error \
   curl_model "http://x/v1" "" "openai" "$PAYLOAD" "$OUT" "false" "5" "2" 2>&1 >/dev/null || true)"
 check "HTTP error is logged to stderr" \
   "$(printf '%s' "$LOG" | grep -q 'HTTP 400' && echo yes || echo no)" "yes"
+
+echo ""
+echo "=== Test: API key stays out of curl argv (0600 --config file) ==="
+OUT="$TMPDIR/auth.json"
+ARGV_LOG="$TMPDIR/argv.log"
+CONFIG_COPY="$TMPDIR/config.copy"
+rm -f "$ARGV_LOG" "$CONFIG_COPY" "$CONFIG_COPY.path" "$CONFIG_COPY.perms"
+(
+  PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok \
+  MOCK_ARGV_LOG="$ARGV_LOG" MOCK_CONFIG_COPY="$CONFIG_COPY" \
+    curl_model "http://x/v1" "sk-supersecret123" "openai" "$PAYLOAD" "$OUT" "false" "5" "2" >/dev/null 2>&1
+)
+check "api key absent from curl argv" \
+  "$(grep -c 'sk-supersecret123' "$ARGV_LOG" || true)" "0"
+check "--config flag passed" "$(grep -cx -- '--config' "$ARGV_LOG")" "1"
+check "config file carries the bearer header" \
+  "$(grep -c 'header = "Authorization: Bearer sk-supersecret123"' "$CONFIG_COPY")" "1"
+check "config file is 0600" "$(cat "$CONFIG_COPY.perms")" "600"
+check "config file removed after the call" \
+  "$(test -e "$(cat "$CONFIG_COPY.path")" && echo present || echo gone)" "gone"
+
+echo ""
+echo "=== Test: anthropic API key via config; version header stays in argv ==="
+rm -f "$ARGV_LOG" "$CONFIG_COPY" "$CONFIG_COPY.path" "$CONFIG_COPY.perms"
+(
+  PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok \
+  MOCK_ARGV_LOG="$ARGV_LOG" MOCK_CONFIG_COPY="$CONFIG_COPY" \
+    curl_model "http://x/v1" "sk-ant-secret456" "anthropic" "$PAYLOAD" "$OUT" "false" "5" "2" >/dev/null 2>&1
+)
+check "anthropic key absent from curl argv" \
+  "$(grep -c 'sk-ant-secret456' "$ARGV_LOG" || true)" "0"
+check "config file carries the x-api-key header" \
+  "$(grep -c 'header = "x-api-key: sk-ant-secret456"' "$CONFIG_COPY")" "1"
+check "anthropic-version stays in argv (not secret)" \
+  "$(grep -c 'anthropic-version' "$ARGV_LOG")" "1"
+
+echo ""
+echo "=== Test: empty API key produces no --config ==="
+rm -f "$ARGV_LOG" "$CONFIG_COPY"
+(
+  PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok MOCK_ARGV_LOG="$ARGV_LOG" \
+    curl_model "http://x/v1" "" "openai" "$PAYLOAD" "$OUT" "false" "5" "2" >/dev/null 2>&1
+)
+check "no --config without an api key" "$(grep -cx -- '--config' "$ARGV_LOG" || true)" "0"
 
 echo ""
 echo "=== build_model_request: payload shaping ==="
