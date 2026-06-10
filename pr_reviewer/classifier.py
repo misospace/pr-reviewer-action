@@ -97,25 +97,33 @@ K8S_PATTERNS = [
     re.compile(r"helm/"),
 ]
 
+# Common source-file extensions across ecosystems (not just Python), so auth /
+# route / DB filename heuristics fire for JS/TS/Go/Java/etc. repos too.
+_SRC_EXT = r"(py|js|jsx|ts|tsx|go|rb|java|kt|cs|php|rs|scala|swift)"
+
 # Auth-related changes
 AUTH_PATTERNS = [
     re.compile(r"(auth|login|oauth|oidc|saml|jwt|token|mfa|2fa|session)"
-               r"[_.-]?\w*\.py$", re.IGNORECASE),
+               r"[_.-]?\w*\." + _SRC_EXT + r"$", re.IGNORECASE),
     re.compile(r"middleware[_.-]?auth", re.IGNORECASE),
     re.compile(r"permissions?\.ya?ml$"),
     re.compile(r"rbac\.ya?ml$"),
     re.compile(r"role[-_].*binding", re.IGNORECASE),
     re.compile(r"\.env(\.example)?$", re.IGNORECASE),
+    re.compile(r"(auth|authn|authz)[-_]?(controller|service|guard|middleware|handler)",
+               re.IGNORECASE),
 ]
 
 # Public route changes
 PUBLIC_ROUTE_PATTERNS = [
-    re.compile(r"(routes?|urls?|api|endpoints?)\.py$", re.IGNORECASE),
+    re.compile(r"(routes?|urls?|api|endpoints?|controller)\." + _SRC_EXT + r"$",
+               re.IGNORECASE),
     re.compile(r"router[_.-]?py$"),
     re.compile(r"urlpatterns"),
     re.compile(r"app\.route\("),
     re.compile(r"@\w+\.route\("),
-    re.compile(r"registerEndpoint"),
+    re.compile(r"(registerEndpoint|@(Get|Post|Put|Delete|Patch|RequestMapping))",
+               re.IGNORECASE),
 ]
 
 # File serving changes — match directory names or file patterns
@@ -151,8 +159,9 @@ SECRET_HANDLING_PATTERNS = [
 # DB / migration changes
 DB_MIGRATION_PATTERNS = [
     re.compile(r"(migration|migrate|migrations?)", re.IGNORECASE),
-    re.compile(r"schema\.py$"),
-    re.compile(r"models?\.(py|go|rb)$"),
+    re.compile(r"schema\.(py|rb|ts|js|sql|prisma)$", re.IGNORECASE),
+    re.compile(r"models?\." + _SRC_EXT + r"$", re.IGNORECASE),
+    re.compile(r"(entity|entities|repository)\.(java|kt|cs|ts)$", re.IGNORECASE),
     re.compile(r"\.sql$", re.IGNORECASE),
     re.compile(r"alembic|django.*migrat|sequelize|migrate_", re.IGNORECASE),
     re.compile(r"prisma/schema\.prisma$"),
@@ -176,8 +185,31 @@ class PRClassification:
 
 
 def _has_version_bump(diff_text: str) -> bool:
-    """Check if the diff contains a version bump (not just a digest)."""
-    return bool(re.search(r'"version"\s*:\s*"[^"]+"', diff_text))
+    """Check if the diff contains a version bump (not just a digest).
+
+    Detects both JSON (`"version": "..."`) and YAML (`version:`/`appVersion:`)
+    forms. The YAML check only matches changed (+/-) lines so an unchanged
+    `version:` context line in a digest-only update is not a false positive.
+    """
+    if re.search(r'"version"\s*:\s*"[^"]+"', diff_text):
+        return True
+    if re.search(r'(?m)^[+-]\s*(?:app)?[Vv]ersion:\s*\S+', diff_text):
+        return True
+    return False
+
+
+def _all_files_are_lockfiles(filenames: list[str]) -> bool:
+    """True only when every changed file is a known lockfile.
+
+    Guards renovate_digest_only against mixed PRs (code + a lockfile), which
+    must not be classified as a trivial digest update.
+    """
+    if not filenames:
+        return False
+    return all(
+        any(pat.search(f) for pat in RENOVATE_DIGEST_FILE_PATTERNS)
+        for f in filenames
+    )
 
 
 def _is_digest_only_hash(diff_text: str) -> bool:
@@ -193,19 +225,11 @@ def _classify_pr_kind(
     """Determine the single best pr_kind from file patterns and diff content."""
     filenames = [f.get("filename", "") for f in files]
 
-    # Check Renovate digest-only first (most specific — if it's only lockfile
-    # hash updates with no version bumps, it's definitely not a meaningful code change)
-    is_renovate_digest = False
-    for pat in RENOVATE_DIGEST_FILE_PATTERNS:
-        if any(pat.search(f) for f in filenames):
-            has_version_bump_val = _has_version_bump(diff_text)
-            has_digest = _is_digest_only_hash(diff_text)
-            # If there are no version bumps, or only digest hashes, it's digest-only
-            if not has_version_bump_val or (has_digest and not has_version_bump_val):
-                is_renovate_digest = True
-                break
-
-    if is_renovate_digest:
+    # Check Renovate digest-only first (most specific). Require that EVERY
+    # changed file is a lockfile and the diff has no version bump — otherwise a
+    # mixed PR (real code + a lockfile) would be mislabeled as trivial and steer
+    # weaker models toward rubber-stamping it.
+    if _all_files_are_lockfiles(filenames) and not _has_version_bump(diff_text):
         return "renovate_digest_only"
 
     # Check dependency upgrade (has version bumps in lockfiles/deps)
