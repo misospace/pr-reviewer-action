@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for scripts/resolve_finding_threads.py — fingerprint matching,
-fail-closed resolution selection, and gh interaction against a mocked gh
-that mimics the real CLI's stdout-on-error behavior (#190)."""
+fail-closed resolution selection, still-open follow-up replies, suppression
+output, and gh interaction against a mocked gh that mimics the real CLI's
+stdout-on-error behavior (#190)."""
 
 import json
 import os
@@ -19,8 +20,11 @@ import pytest
 
 from build_review_comments import finding_fingerprint, finding_marker
 from resolve_finding_threads import (
+    FOLLOWUP_MARKER_PREFIX,
     extract_marker_fingerprint,
+    followup_body,
     main,
+    match_threads,
     resolved_fingerprints,
     threads_to_resolve,
 )
@@ -39,6 +43,15 @@ def _carried(finding, index=0):
         "file": finding["file"],
         "line": finding["line"],
         "message": finding["message"][:200],
+    }
+
+
+def _thread(thread_id, body, is_resolved=False, comment_id=1001, last_body=None):
+    return {
+        "id": thread_id,
+        "isResolved": is_resolved,
+        "first": {"nodes": [{"body": body, "databaseId": comment_id}]},
+        "last": {"nodes": [{"body": last_body if last_body is not None else body}]},
     }
 
 
@@ -86,22 +99,26 @@ class TestResolvedFingerprints:
         assert resolved_fingerprints(carried, []) == set()
 
 
-class TestThreadsToResolve:
-    def _thread(self, thread_id, body, is_resolved=False):
-        return {
-            "id": thread_id,
-            "isResolved": is_resolved,
-            "comments": {"nodes": [{"body": body}]},
-        }
-
-    def test_matches_unresolved_marker_threads(self):
+class TestMatchThreads:
+    def test_maps_unresolved_marker_threads(self):
         finding = _finding()
         fp = finding_fingerprint(finding)
         threads = [
-            self._thread("T1", f"text\n\n{finding_marker(finding)}"),
-            self._thread("T2", f"text\n\n{finding_marker(finding)}", is_resolved=True),
-            self._thread("T3", "no marker here"),
-            self._thread("T4", "<!-- ai-pr-review-finding:ffffffffffffffff -->"),
+            _thread("T1", f"text\n\n{finding_marker(finding)}", comment_id=7),
+            _thread("T2", f"text\n\n{finding_marker(finding)}", is_resolved=True),
+            _thread("T3", "no marker here"),
+        ]
+        matched = match_threads(threads)
+        assert set(matched) == {fp}
+        assert matched[fp]["thread_id"] == "T1"
+        assert matched[fp]["first_comment_id"] == 7
+
+    def test_threads_to_resolve_filters_by_fingerprint(self):
+        finding = _finding()
+        fp = finding_fingerprint(finding)
+        threads = [
+            _thread("T1", f"x\n\n{finding_marker(finding)}"),
+            _thread("T4", "<!-- ai-pr-review-finding:ffffffffffffffff -->"),
         ]
         assert threads_to_resolve(threads, {fp}) == ["T1"]
 
@@ -110,16 +127,29 @@ class TestThreadsToResolve:
         thread = {
             "id": "T1",
             "isResolved": False,
-            "comments": {"nodes": [{"body": "starter, no marker"}, {"body": finding_marker(finding)}]},
+            "first": {"nodes": [{"body": "starter, no marker", "databaseId": 1}]},
+            "last": {"nodes": [{"body": finding_marker(finding)}]},
         }
-        assert threads_to_resolve([thread], {finding_fingerprint(finding)}) == []
+        assert match_threads([thread]) == {}
 
     def test_malformed_nodes_skipped(self):
-        assert threads_to_resolve(None, {"x"}) == []
-        assert threads_to_resolve(["junk", {}, {"id": 7, "comments": {}}], {"x"}) == []
+        assert match_threads(None) == {}
+        assert match_threads(["junk", {}, {"id": 7, "first": {}}]) == {}
 
 
-def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutation_exit=0):
+class TestFollowupBody:
+    def test_still_open_with_sha(self):
+        body = followup_body({"resolution": "still_open"}, "a" * 40)
+        assert "Still open" in body
+        assert f"{FOLLOWUP_MARKER_PREFIX}{'a' * 40} -->" in body
+
+    def test_not_verifiable(self):
+        body = followup_body({"resolution": "not_verifiable_from_delta"}, "")
+        assert "Not verifiable" in body
+        assert FOLLOWUP_MARKER_PREFIX not in body
+
+
+def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutation_exit=0, reply_exit=0):
     """Drop a fake gh on PATH that logs calls and replays canned responses.
 
     On non-zero exit the fake still prints a JSON error body to stdout,
@@ -142,6 +172,14 @@ def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutat
         "  echo '{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}'\n"
         "  exit 0\n"
         "fi\n"
+        "if [[ \"$*\" == *in_reply_to* ]]; then\n"
+        f"  if [ {reply_exit} -ne 0 ]; then\n"
+        "    echo '{\"message\":\"Resource not accessible by integration\"}'\n"
+        f"    exit {reply_exit}\n"
+        "  fi\n"
+        "  echo '{\"id\": 4242}'\n"
+        "  exit 0\n"
+        "fi\n"
         f"if [ {list_exit} -ne 0 ]; then\n"
         "  echo '{\"message\":\"API rate limit exceeded\",\"documentation_url\":\"https://docs.github.com\"}'\n"
         f"  exit {list_exit}\n"
@@ -162,6 +200,13 @@ def _threads_payload(nodes):
     }
 
 
+def _persisted(finding):
+    """build_metadata_marker's open_findings projection of a finding."""
+    persisted = {k: finding[k] for k in ("severity", "category", "file", "line")}
+    persisted["message"] = finding["message"][:200]
+    return persisted
+
+
 def _write_inputs(tmp_path, carried_persisted, findings):
     prev = tmp_path / "previous-findings.json"
     prev.write_text(json.dumps(carried_persisted), encoding="utf-8")
@@ -171,68 +216,107 @@ def _write_inputs(tmp_path, carried_persisted, findings):
 
 
 class TestMainEndToEnd:
+    HEAD_SHA = "c0ffee" * 6 + "abcd"
+
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch):
         monkeypatch.setenv("REPO", "owner/repo")
         monkeypatch.setenv("PR_NUMBER", "42")
+        monkeypatch.setenv("HEAD_SHA", self.HEAD_SHA)
 
-    def test_resolves_matching_thread(self, tmp_path, monkeypatch):
-        finding = _finding()
-        # Persisted (marker) projection of the finding from the previous run.
-        persisted = {k: finding[k] for k in ("severity", "category", "file", "line")}
-        persisted["message"] = finding["message"][:200]
+    def test_resolves_fixed_and_replies_still_open(self, tmp_path, monkeypatch):
+        fixed = _finding(message="fixed finding")
+        still = _finding(message="still broken", line=33)
         prev, found = _write_inputs(
             tmp_path,
-            [persisted],
-            [{"id": "P1", "resolution": "resolved", "message": finding["message"]}],
+            [_persisted(fixed), _persisted(still)],
+            [
+                {"id": "P1", "resolution": "resolved", "message": fixed["message"]},
+                {"id": "P2", "resolution": "still_open", "message": still["message"]},
+            ],
         )
         log = _install_fake_gh(
             tmp_path,
             monkeypatch,
             _threads_payload(
                 [
-                    {
-                        "id": "T_match",
-                        "isResolved": False,
-                        "comments": {"nodes": [{"body": f"x\n\n{finding_marker(finding)}"}]},
-                    },
-                    {
-                        "id": "T_unrelated",
-                        "isResolved": False,
-                        "comments": {"nodes": [{"body": "human comment"}]},
-                    },
+                    _thread("T_fixed", f"x\n\n{finding_marker(fixed)}", comment_id=11),
+                    _thread("T_still", f"x\n\n{finding_marker(still)}", comment_id=22),
+                    _thread("T_unrelated", "human comment", comment_id=33),
                 ]
             ),
         )
-        assert main(["prog", prev, found]) == 0
+        out = tmp_path / "finding-threads.json"
+        assert main(["prog", prev, found, str(out)]) == 0
         calls = log.read_text()
-        assert "T_match" in calls
-        assert "T_unrelated" not in calls
         assert calls.count("resolveReviewThread") == 1
+        assert "T_fixed" in calls
+        assert "in_reply_to=22" in calls
+        assert "in_reply_to=33" not in calls
+        # Suppression file lists only the surviving open thread.
+        assert json.loads(out.read_text()) == [finding_fingerprint(still)]
 
-    def test_still_open_thread_left_alone(self, tmp_path, monkeypatch):
-        finding = _finding()
-        persisted = {k: finding[k] for k in ("severity", "category", "file", "line")}
-        persisted["message"] = finding["message"][:200]
+    def test_followup_already_posted_for_head_is_skipped(self, tmp_path, monkeypatch):
+        still = _finding(message="still broken")
         prev, found = _write_inputs(
             tmp_path,
-            [persisted],
-            [{"id": "P1", "resolution": "still_open", "message": finding["message"]}],
+            [_persisted(still)],
+            [{"id": "P1", "resolution": "still_open", "message": still["message"]}],
+        )
+        log = _install_fake_gh(
+            tmp_path,
+            monkeypatch,
+            _threads_payload(
+                [
+                    _thread(
+                        "T_still",
+                        f"x\n\n{finding_marker(still)}",
+                        last_body=f"_Still open_\n\n{FOLLOWUP_MARKER_PREFIX}{self.HEAD_SHA} -->",
+                    )
+                ]
+            ),
+        )
+        out = tmp_path / "finding-threads.json"
+        assert main(["prog", prev, found, str(out)]) == 0
+        assert "in_reply_to" not in log.read_text()
+        # Still suppressed: the thread exists and stays open.
+        assert json.loads(out.read_text()) == [finding_fingerprint(still)]
+
+    def test_unanswered_carried_finding_gets_reply(self, tmp_path, monkeypatch):
+        """Fail-closed: a carried finding the model never answered is still
+        open, so its thread gets a follow-up too."""
+        still = _finding(message="ghosted finding")
+        prev, found = _write_inputs(tmp_path, [_persisted(still)], [])
+        log = _install_fake_gh(
+            tmp_path,
+            monkeypatch,
+            _threads_payload([_thread("T_still", f"x\n\n{finding_marker(still)}", comment_id=5)]),
+        )
+        assert main(["prog", prev, found]) == 0
+        assert "in_reply_to=5" in log.read_text()
+
+    def test_no_thread_no_reply_not_suppressed(self, tmp_path, monkeypatch):
+        """A still-open carried finding without a surviving thread falls back
+        to the fresh-comment path: no reply, absent from suppression."""
+        still = _finding(message="never anchored")
+        prev, found = _write_inputs(
+            tmp_path,
+            [_persisted(still)],
+            [{"id": "P1", "resolution": "still_open", "message": still["message"]}],
         )
         log = _install_fake_gh(tmp_path, monkeypatch, _threads_payload([]))
-        assert main(["prog", prev, found]) == 0
-        # Nothing resolved → not even the thread list is fetched.
-        assert not log.exists()
+        out = tmp_path / "finding-threads.json"
+        assert main(["prog", prev, found, str(out)]) == 0
+        assert "in_reply_to" not in log.read_text()
+        assert json.loads(out.read_text()) == []
 
     def test_gh_list_failure_is_swallowed(self, tmp_path, monkeypatch, capsys):
         """gh exits non-zero and prints a JSON error body to stdout (#190);
-        the script must warn, skip resolution, and still exit 0."""
+        the script must warn, skip everything, and still exit 0."""
         finding = _finding()
-        persisted = {k: finding[k] for k in ("severity", "category", "file", "line")}
-        persisted["message"] = finding["message"][:200]
         prev, found = _write_inputs(
             tmp_path,
-            [persisted],
+            [_persisted(finding)],
             [{"id": "P1", "resolution": "resolved", "message": finding["message"]}],
         )
         log = _install_fake_gh(tmp_path, monkeypatch, _threads_payload([]), list_exit=1)
@@ -242,29 +326,53 @@ class TestMainEndToEnd:
 
     def test_mutation_failure_is_swallowed(self, tmp_path, monkeypatch, capsys):
         finding = _finding()
-        persisted = {k: finding[k] for k in ("severity", "category", "file", "line")}
-        persisted["message"] = finding["message"][:200]
         prev, found = _write_inputs(
             tmp_path,
-            [persisted],
+            [_persisted(finding)],
             [{"id": "P1", "resolution": "resolved", "message": finding["message"]}],
         )
         _install_fake_gh(
             tmp_path,
             monkeypatch,
-            _threads_payload(
-                [
-                    {
-                        "id": "T_match",
-                        "isResolved": False,
-                        "comments": {"nodes": [{"body": finding_marker(finding)}]},
-                    }
-                ]
-            ),
+            _threads_payload([_thread("T_match", finding_marker(finding))]),
             mutation_exit=1,
         )
         assert main(["prog", prev, found]) == 0
         assert "could not resolve review thread" in capsys.readouterr().err
+
+    def test_reply_failure_is_swallowed(self, tmp_path, monkeypatch, capsys):
+        still = _finding(message="still broken")
+        prev, found = _write_inputs(
+            tmp_path,
+            [_persisted(still)],
+            [{"id": "P1", "resolution": "still_open", "message": still["message"]}],
+        )
+        _install_fake_gh(
+            tmp_path,
+            monkeypatch,
+            _threads_payload([_thread("T_still", finding_marker(still))]),
+            reply_exit=1,
+        )
+        assert main(["prog", prev, found]) == 0
+        assert "could not reply on review thread" in capsys.readouterr().err
+
+    def test_reply_cap_respected(self, tmp_path, monkeypatch):
+        findings = [_finding(message=f"open finding {i}", line=10 + i) for i in range(3)]
+        prev, found = _write_inputs(
+            tmp_path,
+            [_persisted(f) for f in findings],
+            [{"id": f"P{i + 1}", "resolution": "still_open", "message": f["message"]} for i, f in enumerate(findings)],
+        )
+        monkeypatch.setenv("INLINE_FINDINGS_MAX", "1")
+        log = _install_fake_gh(
+            tmp_path,
+            monkeypatch,
+            _threads_payload(
+                [_thread(f"T{i}", finding_marker(f), comment_id=100 + i) for i, f in enumerate(findings)]
+            ),
+        )
+        assert main(["prog", prev, found]) == 0
+        assert log.read_text().count("in_reply_to") == 1
 
     def test_missing_env_skips(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PR_NUMBER")
@@ -285,10 +393,26 @@ class TestActionWiring:
     def test_both_publish_steps_resolve_threads(self):
         assert self.ACTION.count("resolve_finding_threads") == 2
 
+    def test_resolution_precedes_comment_build(self):
+        # The suppression file must exist before comments are built, in both
+        # publish steps.
+        action = self.ACTION
+        first_build = action.find("build_review_comments.py")
+        first_resolve = action.find("resolve_finding_threads")
+        assert -1 < first_resolve < first_build
+        second_build = action.find("build_review_comments.py", first_build + 1)
+        second_resolve = action.find("resolve_finding_threads", first_resolve + 1)
+        assert -1 < second_resolve < second_build
+
+    def test_builders_receive_suppression_file(self):
+        assert self.ACTION.count("SUPPRESS_FINDINGS_FILE=finding-threads.json") == 2
+
     def test_helper_gates_on_inline_findings_and_carryover(self):
         assert "resolve_finding_threads()" in self.HELPERS
         assert "previous-findings.json" in self.HELPERS
         assert "INLINE_FINDINGS" in self.HELPERS
+        # Stale suppression from a previous step must not leak.
+        assert "rm -f finding-threads.json" in self.HELPERS
 
 
 if __name__ == "__main__":

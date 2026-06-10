@@ -120,14 +120,19 @@ cleanup_native_reviews() {
   fi
 }
 
-# Resolve inline finding threads for carried findings this run verified as
-# fixed (#208). Requires env: GH_TOKEN, REPO, PR_NUMBER, GITHUB_ACTION_PATH;
-# optional FINDINGS, INLINE_FINDINGS. Best-effort: never fails the publish —
-# the python script exits 0 on API errors and this wrapper swallows the rest.
-# Gated on inline_findings because without it no marker-bearing threads can
-# exist, and on a non-empty previous-findings.json because resolution only
-# makes sense when this run carried findings forward.
+# Manage inline finding threads for carried findings (#208, #209): resolve
+# threads this run verified as fixed, reply on threads still open, and write
+# finding-threads.json so the comment builder suppresses duplicates.
+# Requires env: GH_TOKEN, REPO, PR_NUMBER, GITHUB_ACTION_PATH; optional
+# FINDINGS, INLINE_FINDINGS, HEAD_SHA, INLINE_FINDINGS_MAX. Best-effort:
+# never fails the publish — the python script exits 0 on API errors and this
+# wrapper swallows the rest. Gated on inline_findings because without it no
+# marker-bearing threads can exist, and on a non-empty previous-findings.json
+# because thread management only makes sense when this run carried findings
+# forward. Must run BEFORE build_review_comments.py so the suppression file
+# exists when comments are built.
 resolve_finding_threads() {
+  rm -f finding-threads.json
   if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]; then
     return 0
   fi
@@ -135,8 +140,8 @@ resolve_finding_threads() {
     return 0
   fi
   printf '%s' "${FINDINGS:-[]}" > resolve-findings.json
-  if ! python3 "${GITHUB_ACTION_PATH}/scripts/resolve_finding_threads.py" previous-findings.json resolve-findings.json; then
-    echo "  WARN: finding-thread resolution failed; continuing" >&2
+  if ! python3 "${GITHUB_ACTION_PATH}/scripts/resolve_finding_threads.py" previous-findings.json resolve-findings.json finding-threads.json; then
+    echo "  WARN: finding-thread management failed; continuing" >&2
   fi
   return 0
 }

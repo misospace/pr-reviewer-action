@@ -9,7 +9,12 @@ payload for POST /repos/{owner}/{repo}/pulls/{n}/reviews.
 Usage: build_review_comments.py FINDINGS_JSON_FILE DIFF_FILE OUTPUT_FILE
 
 Environment:
-  INLINE_FINDINGS_MAX  maximum comments to emit (default 20)
+  INLINE_FINDINGS_MAX     maximum comments to emit (default 20)
+  SUPPRESS_FINDINGS_FILE  optional JSON array of finding fingerprints that
+                          already have a live review thread (written by
+                          resolve_finding_threads.py); matching findings are
+                          skipped so a carried-forward finding gets a thread
+                          reply instead of a duplicate anchored comment (#209)
 """
 
 import hashlib
@@ -138,10 +143,30 @@ def finding_to_body(finding: dict) -> str:
     return sanitize_markdown(mask_secrets(body))
 
 
-def build_comments(findings, diff_text: str, max_comments: int = 20):
-    """Return (comments, skipped_count) for the anchorable findings."""
+def load_suppressed_fingerprints(path) -> set:
+    """Read the fingerprint set resolve_finding_threads.py emitted, if any."""
+    if not path:
+        return set()
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {item for item in data if isinstance(item, str) and item}
+
+
+def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=None):
+    """Return (comments, skipped_count) for the anchorable findings.
+
+    Skipped findings include the non-anchorable ones, findings the model
+    marked resolved (a fixed finding needs no fresh comment — its thread is
+    resolved separately), and findings whose fingerprint already has a live
+    review thread (those get a thread reply instead, #209).
+    """
     if not isinstance(findings, list):
         return [], 0
+    suppressed = suppressed or set()
 
     anchors = commentable_lines(diff_text)
     comments = []
@@ -149,6 +174,12 @@ def build_comments(findings, diff_text: str, max_comments: int = 20):
 
     for finding in findings:
         if not isinstance(finding, dict):
+            skipped += 1
+            continue
+        if finding.get("resolution") == "resolved":
+            skipped += 1
+            continue
+        if suppressed and finding_fingerprint(finding) in suppressed:
             skipped += 1
             continue
         path = finding.get("file")
@@ -196,12 +227,15 @@ def main(argv) -> int:
     except ValueError:
         max_comments = 20
 
-    comments, skipped = build_comments(findings, diff_text, max_comments)
+    suppressed = load_suppressed_fingerprints(os.getenv("SUPPRESS_FINDINGS_FILE"))
+
+    comments, skipped = build_comments(findings, diff_text, max_comments, suppressed)
     Path(output_path).write_text(
         json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(
-        f"inline findings: {len(comments)} anchored comment(s), {skipped} finding(s) not anchorable",
+        f"inline findings: {len(comments)} anchored comment(s), "
+        f"{skipped} finding(s) skipped (not anchorable, resolved, or already threaded)",
         file=sys.stderr,
     )
     return 0

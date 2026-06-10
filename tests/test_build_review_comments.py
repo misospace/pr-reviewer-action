@@ -198,6 +198,62 @@ class TestFindingFingerprint:
             assert finding_fingerprint(carried[0]) == finding_fingerprint(original)
 
 
+class TestSuppression:
+    def test_resolved_findings_skipped(self):
+        resolved = _finding(line=12)
+        resolved["resolution"] = "resolved"
+        comments, skipped = build_comments([resolved, _finding(line=13, message="open")], DIFF)
+        assert len(comments) == 1
+        assert "open" in comments[0]["body"]
+        assert skipped == 1
+
+    def test_still_open_carried_findings_not_skipped_without_suppression(self):
+        carried = _finding(line=12)
+        carried["resolution"] = "still_open"
+        carried["carried_over"] = True
+        comments, _ = build_comments([carried], DIFF)
+        assert len(comments) == 1
+
+    def test_suppressed_fingerprints_skipped(self):
+        threaded = _finding(line=12, message="already has a thread")
+        fresh = _finding(line=13, message="brand new")
+        from build_review_comments import finding_fingerprint
+
+        comments, skipped = build_comments(
+            [threaded, fresh], DIFF, suppressed={finding_fingerprint(threaded)}
+        )
+        assert len(comments) == 1
+        assert "brand new" in comments[0]["body"]
+        assert skipped == 1
+
+    def test_main_reads_suppression_file_from_env(self, tmp_path, monkeypatch):
+        threaded = _finding(line=12, message="already threaded")
+        from build_review_comments import finding_fingerprint
+
+        findings_file = tmp_path / "findings.json"
+        findings_file.write_text(json.dumps([threaded]))
+        diff_file = tmp_path / "pr.diff"
+        diff_file.write_text(DIFF)
+        suppress_file = tmp_path / "finding-threads.json"
+        suppress_file.write_text(json.dumps([finding_fingerprint(threaded)]))
+        out_file = tmp_path / "comments.json"
+        monkeypatch.setenv("SUPPRESS_FINDINGS_FILE", str(suppress_file))
+        assert main(["prog", str(findings_file), str(diff_file), str(out_file)]) == 0
+        assert json.loads(out_file.read_text()) == []
+
+    def test_missing_or_garbage_suppression_file_ignored(self, tmp_path, monkeypatch):
+        from build_review_comments import load_suppressed_fingerprints
+
+        assert load_suppressed_fingerprints(None) == set()
+        assert load_suppressed_fingerprints(str(tmp_path / "absent.json")) == set()
+        garbage = tmp_path / "garbage.json"
+        garbage.write_text("not json")
+        assert load_suppressed_fingerprints(str(garbage)) == set()
+        not_list = tmp_path / "obj.json"
+        not_list.write_text('{"a": 1}')
+        assert load_suppressed_fingerprints(str(not_list)) == set()
+
+
 class TestMainCli:
     def test_end_to_end(self, tmp_path):
         findings_file = tmp_path / "findings.json"

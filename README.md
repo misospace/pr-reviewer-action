@@ -622,7 +622,13 @@ With `inline_findings: "true"` and a native publish mode, findings that carry a 
 
 Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline_findings_max` (default 20).
 
-**Thread resolution on re-review.** Each inline comment carries a hidden content fingerprint of its finding. When a later incremental review's carry-forward concludes a carried finding is fixed (the model answers it with `resolution: resolved` — the same fail-closed rule that drives the verdict), the action resolves the matching open review thread via the GraphQL `resolveReviewThread` mutation, so authors see live thread state instead of stale open conversations. Best-effort: API failures (e.g. read-only tokens on fork PRs) warn and never fail the publish; findings answered `still_open` or `not_verifiable_from_delta` keep their threads open.
+**Thread lifecycle on re-review.** Each inline comment carries a hidden content fingerprint of its finding. On a later incremental review, the action matches existing review threads by that fingerprint and keeps them alive instead of stacking duplicates:
+
+- A carried finding the model answered with `resolution: resolved` (the same fail-closed rule that drives the verdict) gets its thread **resolved** via the GraphQL `resolveReviewThread` mutation.
+- A carried finding that survives (`still_open`, `not_verifiable_from_delta`, or unanswered) gets a short **reply on its existing thread** ("Still open after this push…") instead of a fresh duplicate anchored comment. Replies are stamped with the head SHA, so a re-run on the same push never posts the same follow-up twice, and are capped by `inline_findings_max`.
+- A still-open carried finding whose thread no longer exists falls back to a fresh anchored comment as before.
+
+Best-effort throughout: API failures (e.g. read-only tokens on fork PRs) warn and never fail the publish.
 
 ```yaml
 - uses: misospace/pr-reviewer-action@v1
