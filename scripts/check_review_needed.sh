@@ -42,6 +42,18 @@ compute_config_hash() {
   if [[ -n "${AI_API_FORMAT:-}" ]]; then
     parts+=("api_format:${AI_API_FORMAT}")
   fi
+  # Sampling / output-format params affect the review, so a change forces a
+  # fresh review even on an unchanged diff. AI_TEMPERATURE may be intentionally
+  # empty (means "omit"), so include it whenever the var is set at all.
+  if [[ -n "${AI_TEMPERATURE+x}" ]]; then
+    parts+=("temperature:${AI_TEMPERATURE}")
+  fi
+  if [[ -n "${AI_RESPONSE_FORMAT:-}" ]]; then
+    parts+=("response_format:${AI_RESPONSE_FORMAT}")
+  fi
+  if [[ -n "${AI_TOKENS_PARAM:-}" ]]; then
+    parts+=("tokens_param:${AI_TOKENS_PARAM}")
+  fi
   if [[ -n "${AI_FALLBACK_MODEL:-}" ]]; then
     parts+=("fallback_model:${AI_FALLBACK_MODEL}")
   fi

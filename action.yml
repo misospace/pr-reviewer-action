@@ -326,6 +326,9 @@ runs:
         ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
+        AI_TEMPERATURE: ${{ inputs.ai_temperature }}
+        AI_RESPONSE_FORMAT: ${{ inputs.ai_response_format }}
+        AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
         AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
         ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}

@@ -129,6 +129,56 @@ check "anthropic: max_tokens present" "$(jq -r 'has("max_tokens")' "$REQ")" "tru
 check "anthropic: no response_format (unsupported)" "$(jq -r 'has("response_format")' "$REQ")" "false"
 check "anthropic: system field present" "$(jq -r 'has("system")' "$REQ")" "true"
 
+CORPUS="$TMPDIR/corpus.md"
+printf '# corpus\nbody' > "$CORPUS"
+REQ="$TMPDIR/req.json"
+
+build_req() {
+  # Run build_model_request with a controlled env, writing to $REQ.
+  local fmt="$1"
+  ( AI_MAX_TOKENS=4096 \
+    AI_TEMPERATURE="${T_AI_TEMPERATURE-0.1}" \
+    AI_RESPONSE_FORMAT="${T_AI_RESPONSE_FORMAT:-off}" \
+    AI_TOKENS_PARAM="${T_AI_TOKENS_PARAM:-max_tokens}" \
+    build_model_request "$fmt" "m" "sys" "usr" "$CORPUS" "$REQ" "false" )
+}
+
+echo ""
+echo "=== Test: OpenAI default → max_tokens, temperature 0.1, no response_format ==="
+T_AI_TEMPERATURE=0.1 T_AI_RESPONSE_FORMAT=off T_AI_TOKENS_PARAM=max_tokens build_req openai
+check "has max_tokens" "$(jq 'has("max_tokens")' "$REQ")" "true"
+check "temperature included" "$(jq '.temperature' "$REQ")" "0.1"
+check "no response_format" "$(jq 'has("response_format")' "$REQ")" "false"
+
+echo ""
+echo "=== Test: empty AI_TEMPERATURE omits the field ==="
+T_AI_TEMPERATURE="" build_req openai
+check "temperature omitted when empty" "$(jq 'has("temperature")' "$REQ")" "false"
+
+echo ""
+echo "=== Test: response_format=json_object ==="
+T_AI_RESPONSE_FORMAT=json_object build_req openai
+check "response_format type is json_object" "$(jq -r '.response_format.type' "$REQ")" "json_object"
+
+echo ""
+echo "=== Test: response_format=json_schema enforces verdict/review_markdown ==="
+T_AI_RESPONSE_FORMAT=json_schema build_req openai
+check "response_format type is json_schema" "$(jq -r '.response_format.type' "$REQ")" "json_schema"
+check "schema requires verdict+review_markdown" \
+  "$(jq -c '.response_format.json_schema.schema.required' "$REQ")" '["verdict","review_markdown"]'
+
+echo ""
+echo "=== Test: AI_TOKENS_PARAM=max_completion_tokens (newer OpenAI models) ==="
+T_AI_TOKENS_PARAM=max_completion_tokens build_req openai
+check "uses max_completion_tokens" "$(jq 'has("max_completion_tokens")' "$REQ")" "true"
+check "drops plain max_tokens" "$(jq 'has("max_tokens")' "$REQ")" "false"
+
+echo ""
+echo "=== Test: anthropic always sends max_tokens and never response_format ==="
+T_AI_RESPONSE_FORMAT=json_object T_AI_TOKENS_PARAM=max_completion_tokens build_req anthropic
+check "anthropic keeps max_tokens" "$(jq 'has("max_tokens")' "$REQ")" "true"
+check "anthropic ignores response_format" "$(jq 'has("response_format")' "$REQ")" "false"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
