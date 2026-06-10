@@ -269,3 +269,32 @@ class TestSanitizeMention:
         # An @@ sequence (e.g. literal) must not be turned into a mention.
         result = sanitize_markdown("see user@@host")
         assert "​" not in result
+
+
+class TestInlineCodeSpansPreserved:
+    """Inline code spans are never auto-linked by GitHub, so quoted code must
+    survive sanitization verbatim. Fenced blocks stay sanitized by design
+    (an unbalanced fence must not disable sanitization for the rest)."""
+
+    def test_bare_ref_in_inline_span_preserved(self):
+        result = sanitize_markdown("set the color to `#404` in the config")
+        assert "`#404`" in result
+
+    def test_mention_in_inline_span_preserved(self):
+        result = sanitize_markdown("use the `@property` decorator")
+        assert "`@property`" in result
+
+    def test_cross_repo_ref_in_inline_span_preserved(self):
+        result = sanitize_markdown("pin to `acme/app#12` in the lockfile")
+        assert "`acme/app#12`" in result
+
+    def test_prose_around_span_still_sanitized(self):
+        result = sanitize_markdown("see #99 and `#404` and acme/app#12")
+        assert "PR 99" in result
+        assert "`#404`" in result
+        assert "acme/app PR 12" in result
+
+    def test_unbalanced_backtick_does_not_disable_sanitization(self):
+        result = sanitize_markdown("a stray ` here, then #123 and @user")
+        assert "PR 123" in result
+        assert "@user" not in result

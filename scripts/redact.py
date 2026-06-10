@@ -27,9 +27,13 @@ _RE_KV_SECRET = re.compile(
 # AWS-style access keys
 _RE_AWS_KEY = re.compile(r"AKIA[0-9A-Z]{16}")
 
-# Kubernetes / kubeconfig snippets (base64-encoded credentials)
+# Kubernetes / kubeconfig credentials. Only credential-bearing keys are
+# matched: the old (server|username|...) form redacted every ordinary
+# `server:` line in YAML evidence output, destroying legitimate review
+# context for zero secrecy gain (server URLs and usernames are not secrets).
 _RE_KUBE_CRED = re.compile(
-    r"(?i)(server|username|password)\s*:\s*\S+", re.IGNORECASE
+    r"(?i)(password|client-certificate-data|client-key-data|"
+    r"certificate-authority-data|bearer[_-]?token)\s*:\s*\S+"
 )
 
 

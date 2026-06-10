@@ -98,6 +98,15 @@ class TestMaskSecrets:
         result = mask_secrets(text)
         # password line should be redacted
         assert "[REDACTED]" in result
+        # ...but ordinary server/username YAML lines are not secrets and must
+        # survive so evidence output stays readable.
+        assert "server: https://10.0.0.1" in result
+        assert "username: admin" in result
+
+    def test_kubeconfig_certificate_data_redacted(self):
+        text = "client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ=="
+        result = mask_secrets(text)
+        assert "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ" not in result
 
 
 # ---------------------------------------------------------------------------

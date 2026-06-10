@@ -170,6 +170,7 @@ build_model_request() {
       '{model:$model,stream:$stream,messages:[{role:"system",content:$system},{role:"user",content:($user + "\n\n" + $corpus)}]}
        + {($tokfield): $max_tokens}
        + (if $temp == null then {} else {temperature:$temp} end)
-       + (if $rf == null then {} else {response_format:$rf} end)' > "$output_file"
+       + (if $rf == null then {} else {response_format:$rf} end)
+       + (if $stream then {stream_options:{include_usage:true}} else {} end)' > "$output_file"
   fi
 }

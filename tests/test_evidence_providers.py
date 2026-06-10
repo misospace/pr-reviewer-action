@@ -627,6 +627,30 @@ class TestParallelExecution:
         # Serial execution: one window fully precedes the other.
         assert a_end <= b_start or b_end <= a_start
 
+    def test_model_api_keys_scrubbed_from_provider_env(self, tmp_path: Path):
+        config = {
+            "providers": [
+                {"id": "env-probe", "command": "echo \"key=[${AI_API_KEY:-}] fb=[${AI_FALLBACK_API_KEY:-}] gh=[${GH_TOKEN:-}]\""}
+            ]
+        }
+        result = _run_caps(
+            config,
+            tmp_path,
+            {
+                "AI_API_KEY": "sk-should-never-leak",
+                "AI_FALLBACK_API_KEY": "sk-fallback-never-leak",
+                "GH_TOKEN": "gh-token-ok",
+            },
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        data = _load_json_output(tmp_path)
+        stdout = data["providers"][0]["stdout"]
+        # Model keys are scrubbed before the provider runs (not just redacted
+        # after); GH_TOKEN stays available for gh-based providers.
+        assert "key=[]" in stdout
+        assert "fb=[]" in stdout
+        assert "gh-token-ok" not in stdout or "gh=[" in stdout
+
     def test_blocker_flag_still_aggregates(self, tmp_path: Path):
         helper = tmp_path / "blocker.py"
         helper.write_text(HELPER_BLOCKER)

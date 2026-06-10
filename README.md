@@ -664,6 +664,14 @@ If the endpoint rejects the request after enabling this (HTTP 400 mentioning `re
 - **Proxies with idle-read timeouts** (e.g. Cloudflare's ~100s edge timer): keep `ai_stream: "true"` (the default) so bytes flow before the timer fires.
 - **Models that reject sampling params**: set `ai_temperature: ""` to omit the field entirely; set `ai_tokens_param: max_completion_tokens` for newer OpenAI reasoning models.
 - **Endpoint not always up** (homelab): configure `ai_fallback_base_url`/`ai_fallback_model` (e.g. a small cloud model) or set `on_model_failure: notice` so the PR gets a visible explanation instead of a bare red check.
+- **Don't burn 10 minutes on a dead endpoint**: the defaults (`ai_primary_retries: "8"`, 15s delay with backoff, 300s request timeout) are tuned for flaky-but-alive endpoints and can spend ~10 minutes before giving up. If your endpoint is either up or down (typical homelab), use a low-retry profile:
+
+```yaml
+ai_primary_retries: "2"
+ai_primary_retry_delay_sec: "5"
+ai_connect_timeout_sec: "10"
+on_model_failure: notice   # visible explanation instead of a long red check
+```
 
 ### Quick symptom table
 

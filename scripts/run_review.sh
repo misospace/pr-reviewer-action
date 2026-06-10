@@ -174,9 +174,17 @@ fetch_incremental_patch() {
   compare_url="$(gh api "repos/$REPO/compare/${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
 
   if [[ -n "$compare_url" ]]; then
-    curl -q -fsSL -H "Authorization: token $GH_TOKEN" \
+    # The token goes through a 0600 curl --config file rather than argv (same
+    # treatment as model API keys in model_call.sh) so it never appears in
+    # /proc/<pid>/cmdline on shared runners.
+    local auth_config
+    auth_config="$(mktemp)"
+    chmod 600 "$auth_config"
+    printf 'header = "%s"\n' "$(curl_config_escape "Authorization: token $GH_TOKEN")" > "$auth_config"
+    curl -q -fsSL --config "$auth_config" \
       -H "Accept: application/vnd.github.v3.diff" \
       "$compare_url" > "$output_file" 2>/dev/null || true
+    rm -f "$auth_config"
   fi
 
   if [[ ! -s "$output_file" ]]; then

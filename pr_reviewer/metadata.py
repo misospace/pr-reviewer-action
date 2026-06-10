@@ -4,23 +4,31 @@ import json
 import re
 from typing import Optional
 
-MARKER_PATTERN = re.compile(
-    r'<!--\s*ai-pr-reviewer:\s*(\{.*?\})\s*-->'
-)
+MARKER_PREFIX_PATTERN = re.compile(r'<!--\s*ai-pr-reviewer:\s*(?=\{)')
 
 
 def parse_metadata(body: str) -> Optional[dict]:
-    """Extract the latest ai-pr-reviewer metadata JSON from a comment/review body.
+    """Extract the first ai-pr-reviewer metadata JSON from a comment/review body.
+
+    Uses json.JSONDecoder.raw_decode from the opening brace so nested objects
+    and arrays in future marker schema versions parse correctly (a `\\{.*?\\}`
+    regex stopped at the first `}` and silently truncated nested payloads).
 
     Returns None if no marker is found or parsing fails.
     """
-    match = MARKER_PATTERN.search(body)
+    match = MARKER_PREFIX_PATTERN.search(body)
     if not match:
         return None
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(match.group(1))
-    except (json.JSONDecodeError, IndexError):
+        data, end = decoder.raw_decode(body, match.end())
+    except (json.JSONDecodeError, ValueError):
         return None
+    # The JSON must still be terminated by the comment closer to count as a
+    # well-formed marker.
+    if not body[end:].lstrip().startswith("-->"):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",

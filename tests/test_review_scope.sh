@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bash >= 4 required: empty-array expansion under `set -u` and other 4.x
+# behaviors break on macOS stock bash 3.2. Skip (not fail) so local runs
+# explain themselves; CI runs bash 5.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "SKIP: bash >= 4 required (found ${BASH_VERSION:-unknown}); on macOS run with PATH=\"/opt/homebrew/bin:\$PATH\"" >&2
+  exit 0
+fi
+
 # Tests for incremental PR review scope feature
 # Validates review_scope input, effective scope resolution, metadata tracking, and verdict safety.
 
@@ -88,9 +96,9 @@ case "\$1" in
     ;;
   "api")
     if echo "\$*" | grep -q 'comments'; then
-      RESULT="$(cat /tmp/testfp_comments.json)"
+      RESULT="\$(cat /tmp/testfp_comments.json)"
     elif echo "\$*" | grep -q 'pulls/42'; then
-      RESULT="$(printf '{"head":{"repo":{"full_name":"test/repo"}},"base":{"repo":{"full_name":"test/repo"},"sha":"%s"}}' "\$PR_BASE_SHA")"
+      RESULT="\$(printf '{"head":{"repo":{"full_name":"test/repo"}},"base":{"repo":{"full_name":"test/repo"},"sha":"%s"}}' "\$PR_BASE_SHA")"
     elif echo "\$*" | grep -q 'compare/'; then
       RESULT='{"status":"ok"}'
     else

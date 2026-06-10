@@ -971,10 +971,13 @@ def main():
             for raw_req in requests_list[:max_requests]
             if isinstance(raw_req, dict)
         ]
+        # Use the same normalized repo set the planner was shown — the raw
+        # env-parsed set treated unnormalized entries ("Owner/Repo/")
+        # differently between prompt and execution.
         tool_results = execute_tool_requests(
             normalized,
             workspace_root,
-            allowed_gh_repos,
+            allowed_gh_api_repos,
             current_repo,
             allowed_hosts,
             max_response_bytes,

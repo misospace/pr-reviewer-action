@@ -30,7 +30,11 @@ jobs:
         run: ruby -e 'require "yaml"; YAML.load_file("examples/workflow-self-hosted.yml"); YAML.load_file("examples/workflow-cloud.yml")'
 
       - name: Check shell scripts
-        run: bash -n scripts/check_review_needed.sh && bash -n scripts/run_review.sh && bash -n tests/test_model_failure.sh && bash -n tests/test_step_summary.sh && bash -n scripts/model_call.sh && bash -n tests/smoke_test.sh && bash -n tests/test_check_review_needed.sh && bash -n tests/test_approval_guardrails.sh && bash -n tests/test_tool_harness_enforcement.sh && bash -n tests/test_cleanup_previous_native_reviews.sh && bash -n tests/test_model_call.sh && bash -n tests/test_context_budget.sh && bash -n tests/test_classification_steering.sh
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh tests/*.sh; do
+            bash -n "$f"
+          done
 
       - name: Check Python scripts
         run: python3 -m py_compile scripts/image_digest_analysis.py scripts/run_evidence_providers.py scripts/run_tool_harness.py tests/mock_openai_server.py tests/test_model_parsing.py tests/test_redact.py tests/test_strip_metadata_markers.py tests/test_evidence_providers.py
@@ -44,26 +48,18 @@ jobs:
       - name: Run Python tests (auto-discover all 215)
         run: pytest tests/ -v --tb=short
 
-      - name: Run precheck guardrails tests
-        run: bash tests/test_check_review_needed.sh
-
-      - name: Run approval guardrails tests
-        run: bash tests/test_approval_guardrails.sh
-
-      - name: Run tool harness enforcement tests
-        run: bash tests/test_tool_harness_enforcement.sh
-
-      - name: Run model-failure + step-summary tests
-        run: bash tests/test_model_failure.sh && bash tests/test_step_summary.sh
-
-      - name: Run native review cleanup + marker emission tests
-        run: bash tests/test_cleanup_previous_native_reviews.sh
-
-      - name: Run model-call (curl_model) tests
-        run: bash tests/test_model_call.sh
-
-      - name: Run context-budget tests
-        run: bash tests/test_context_budget.sh
-
-      - name: Run classification steering tests
-        run: bash tests/test_classification_steering.sh
+      # Auto-discover every bash suite so a new (or previously unlisted) suite
+      # cannot silently stay out of CI. The smoke test runs separately above.
+      - name: Run bash test suites (auto-discover)
+        run: |
+          set -euo pipefail
+          failed=0
+          for t in tests/test_*.sh; do
+            echo "::group::$t"
+            if ! bash "$t"; then
+              echo "::error::$t failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"

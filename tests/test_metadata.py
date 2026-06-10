@@ -79,6 +79,31 @@ def test_build_marker_roundtrip():
     assert parsed == original
 
 
+def test_parse_metadata_nested_object():
+    """Future marker schema versions may nest objects/arrays (e.g. escalation
+    metadata); the parser must not truncate at the first inner brace."""
+    body = (
+        '<!-- ai-pr-reviewer:{"version":2,"head_sha":"abc",'
+        '"routing":{"route":"escalated","fast_model":"m1"},'
+        '"escalation_reason":["incomplete_required_checks"]} -->'
+    )
+    parsed = parse_metadata(body)
+    assert parsed is not None
+    assert parsed["routing"]["route"] == "escalated"
+    assert parsed["escalation_reason"] == ["incomplete_required_checks"]
+
+
+def test_parse_metadata_unterminated_marker_rejected():
+    body = '<!-- ai-pr-reviewer:{"version":1,"head_sha":"abc"} no closer'
+    assert parse_metadata(body) is None
+
+
+def test_parse_metadata_non_object_rejected():
+    body = '<!-- ai-pr-reviewer:{"a":1} --> and <!-- ai-pr-reviewer:[1,2] -->'
+    parsed = parse_metadata(body)
+    assert parsed == {"a": 1}
+
+
 if __name__ == "__main__":
     test_parse_metadata_found()
     test_parse_metadata_with_previous_head()
