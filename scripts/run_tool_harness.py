@@ -1030,11 +1030,17 @@ def main():
             # Later rounds degrade to "use what we have" instead.
             try:
                 requests_list, done = parse_planned_requests(planning_response_text)
-            except ValueError:
+            except ValueError as exc:
                 if round_no > 1:
                     result["planning_warning"] = (
                         f"round {round_no} response unparseable; using evidence so far"
                     )
+                    break
+                if "did not contain requests" in str(exc):
+                    # Valid JSON of the wrong shape: a corrective retry rarely
+                    # changes the model's mind — record and move on (matches
+                    # the single-round behavior).
+                    result["planning_warning"] = "Planner response did not contain requests[]"
                     break
                 try:
                     retry_text = run_chat_completion(
