@@ -409,7 +409,7 @@ outputs:
     description: AI verdict, approve or request_changes
     value: ${{ steps.review.outputs.verdict }}
   verdict_source:
-    description: Where the final verdict came from ('model' or 'findings', per verdict_policy)
+    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when a carried-forward blocker survived an incremental review)
     value: ${{ steps.review.outputs.verdict_source }}
   required_checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)

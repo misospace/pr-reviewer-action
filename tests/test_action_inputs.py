@@ -32,22 +32,28 @@ def parse_action_inputs():
 
 
 def parse_readme_inputs():
-    """Parse documented input names from the README inputs table."""
+    """Parse documented input names from the README inputs tables.
+
+    The README groups inputs into multiple tables (one per category,
+    inside <details> blocks), so every table with an `| Input |` header
+    is scanned.
+    """
     readme = _REPO_ROOT / "README.md"
     content = readme.read_text()
 
     inputs = set()
     in_table = False
     for line in content.splitlines():
-        # Detect start of inputs table (first pipe row with Input header)
+        # Detect start of an inputs table (pipe row with Input header)
         if "| Input |" in line:
             in_table = True
             continue
-        # Detect end of table (next section header or non-table line)
+        # Detect end of the current table (non-table line); keep scanning
+        # for further tables.
         if in_table:
-            if line.startswith("## ") or (line.strip() and not line.startswith("|")):
+            if line.strip() and not line.startswith("|"):
                 in_table = False
-                break
+                continue
             # Match input name in backticks: | `input_name` |
             m = re.search(r"\| \s*`(\w+)`\s*\|", line)
             if m:
