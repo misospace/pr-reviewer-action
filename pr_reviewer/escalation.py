@@ -19,6 +19,13 @@ from pr_reviewer.completeness import validate_review
 # content — a fast model that produced two sentences did not review anything.
 LOW_CONFIDENCE_MIN_CHARS = 200
 
+# For trivial diffs the expected review is legitimately short: a correct
+# review of a one-line renovate bump should not escalate as "low confidence"
+# (#215). At or below this many changed lines, the minimum drops to a floor
+# that still catches bare "LGTM"-style non-reviews.
+TRIVIAL_DIFF_MAX_CHANGED_LINES = 10
+TRIVIAL_DIFF_MIN_CHARS = 80
+
 # Header of the section the default prompt asks for "when evidence is
 # incomplete" — its presence with real content is the model saying it is
 # unsure.
@@ -37,9 +44,28 @@ def _load(path: str) -> dict:
         return {}
 
 
-def is_low_confidence(review_markdown: str) -> bool:
+def count_changed_lines(diff_path: str = "pr.diff") -> int | None:
+    """Count added/removed lines in a unified diff, or None when unreadable.
+
+    None (rather than 0) on a missing/unreadable diff so callers fail closed
+    to the standard low-confidence threshold instead of the trivial one.
+    """
+    try:
+        text = Path(diff_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    count = 0
+    for line in text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            count += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            count += 1
+    return count
+
+
+def is_low_confidence(review_markdown: str, min_chars: int = LOW_CONFIDENCE_MIN_CHARS) -> bool:
     text = (review_markdown or "").strip()
-    if len(text) < LOW_CONFIDENCE_MIN_CHARS:
+    if len(text) < min_chars:
         return True
     match = _UNKNOWNS_HEADER_RE.search(text)
     if match:
@@ -53,13 +79,21 @@ def is_low_confidence(review_markdown: str) -> bool:
 def _has_blocker_signals(evidence: dict, harness: dict) -> bool:
     if evidence.get("has_blocker"):
         return True
-    if harness.get("planning_error") is not None or harness.get("error") is not None:
-        return True
     executed = harness.get("executed_request_count", 0)
     results = [t for t in harness.get("tool_results", []) if isinstance(t, dict)]
     if executed and results and not any(t.get("status") == "ok" for t in results):
         return True
     return False
+
+
+def _has_planning_failure(harness: dict) -> bool:
+    """The harness planning call failed before any tools ran (#215).
+
+    Kept separate from blocker signals: a planning failure means the review
+    proceeded with LESS evidence — the same situation as tool_mode 'off' —
+    not that the PR carries elevated risk. Escalating on it is opt-in.
+    """
+    return harness.get("planning_error") is not None or harness.get("error") is not None
 
 
 def should_escalate(
@@ -68,11 +102,13 @@ def should_escalate(
     on_low_confidence: bool = True,
     on_blockers: bool = True,
     on_dirty_baseline: bool = True,
+    on_planning_failure: bool = False,
     dirty_baseline: bool = False,
     output_path: str = "ai-output.json",
     classification_path: str = "classification.json",
     evidence_path: str = "evidence-providers.json",
     tool_harness_path: str = "tool-harness.json",
+    diff_path: str = "pr.diff",
 ) -> tuple[bool, list[str]]:
     """Return (escalate, reasons) for the fast review in *output_path*.
 
@@ -94,13 +130,24 @@ def should_escalate(
         if must_check and not validate_review(must_check, review)["validated"]:
             reasons.append("incomplete_required_checks")
 
-    if on_low_confidence and is_low_confidence(review):
-        reasons.append("fast_low_confidence")
+    if on_low_confidence:
+        # The minimum review length scales with the diff: a 2-line image bump
+        # warrants a short review, and escalating it wastes a smart-model run
+        # on exactly the PRs least worth one (#215). Unknowns-section
+        # detection inside is_low_confidence applies at any length.
+        min_chars = LOW_CONFIDENCE_MIN_CHARS
+        changed = count_changed_lines(diff_path)
+        if changed is not None and changed <= TRIVIAL_DIFF_MAX_CHANGED_LINES:
+            min_chars = TRIVIAL_DIFF_MIN_CHARS
+        if is_low_confidence(review, min_chars):
+            reasons.append("fast_low_confidence")
 
-    if on_blockers and _has_blocker_signals(
-        _load(evidence_path), _load(tool_harness_path)
-    ):
+    harness = _load(tool_harness_path)
+    if on_blockers and _has_blocker_signals(_load(evidence_path), harness):
         reasons.append("tool_or_evidence_blockers")
+
+    if on_planning_failure and _has_planning_failure(harness):
+        reasons.append("tool_planning_failed")
 
     # Incremental review against a baseline the previous review flagged: the
     # resolution judgment ("does this delta fix that blocker?") is exactly

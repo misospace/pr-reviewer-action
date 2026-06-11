@@ -184,9 +184,19 @@ inputs:
     required: false
     default: "true"
   escalate_on_tool_or_evidence_blockers:
-    description: Escalate when evidence providers report blocker severity or the tool harness failed (review_routing_mode=auto only).
+    description: >-
+      Escalate when evidence providers report blocker severity or every executed tool
+      request failed (review_routing_mode=auto only).
     required: false
     default: "true"
+  escalate_on_tool_planning_failure:
+    description: >-
+      Escalate when the tool harness planning call failed (review_routing_mode=auto only).
+      Off by default: a planning failure means the review ran with less evidence — the same
+      situation as tool_mode 'off' — not that the PR is risky. The failure is still recorded
+      in tool-harness.json and the step summary.
+    required: false
+    default: "false"
   escalate_on_dirty_baseline:
     description: >-
       Escalate incremental reviews whose baseline review found issues (review_routing_mode=auto
@@ -493,6 +503,7 @@ runs:
         ESCALATE_ON_FAST_REQUEST_CHANGES: ${{ inputs.escalate_on_fast_request_changes }}
         ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
+        ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
         ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
         ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
@@ -581,6 +592,7 @@ runs:
         ESCALATE_ON_FAST_REQUEST_CHANGES: ${{ inputs.escalate_on_fast_request_changes }}
         ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
+        ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
         ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
         BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean }}
         AI_STREAM: ${{ inputs.ai_stream }}
