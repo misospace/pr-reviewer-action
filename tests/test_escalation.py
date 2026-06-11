@@ -12,7 +12,11 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 import pytest
 
-from pr_reviewer.escalation import is_low_confidence, should_escalate
+from pr_reviewer.escalation import (
+    count_changed_lines,
+    is_low_confidence,
+    should_escalate,
+)
 
 
 GOOD_REVIEW = (
@@ -116,7 +120,9 @@ class TestShouldEscalate:
         escalate, reasons = should_escalate()
         assert reasons == ["tool_or_evidence_blockers"]
 
-    def test_tool_harness_failure_trigger(self, tmp_path, monkeypatch):
+    def test_planning_failure_does_not_escalate_by_default(self, tmp_path, monkeypatch):
+        """A failed planning call means the review ran with less evidence —
+        the same situation as tool_mode 'off' — not elevated risk (#215)."""
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path)
         _write_classification(tmp_path)
@@ -124,7 +130,29 @@ class TestShouldEscalate:
             json.dumps({"planning_error": "planner timed out", "tool_results": []})
         )
         escalate, reasons = should_escalate()
-        assert reasons == ["tool_or_evidence_blockers"]
+        assert escalate is False and reasons == []
+
+    def test_planning_failure_escalates_when_opted_in(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path)
+        _write_classification(tmp_path)
+        (tmp_path / "tool-harness.json").write_text(
+            json.dumps({"planning_error": "planner timed out", "tool_results": []})
+        )
+        escalate, reasons = should_escalate(on_planning_failure=True)
+        assert reasons == ["tool_planning_failed"]
+
+    def test_harness_hard_error_does_not_escalate_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path)
+        _write_classification(tmp_path)
+        (tmp_path / "tool-harness.json").write_text(
+            json.dumps({"error": "harness crashed", "tool_results": []})
+        )
+        escalate, reasons = should_escalate()
+        assert escalate is False
+        escalate, reasons = should_escalate(on_planning_failure=True)
+        assert reasons == ["tool_planning_failed"]
 
     def test_all_tool_requests_failed_trigger(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -164,6 +192,87 @@ class TestShouldEscalate:
         _write_fast_output(tmp_path)
         escalate, reasons = should_escalate()
         assert escalate is False
+
+
+TRIVIAL_DIFF = """\
+diff --git a/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml b/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml
+--- a/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml
++++ b/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml
+@@ -10,7 +10,7 @@ spec:
+     operation: copy
+   ref:
+-    tag: 0.2.7
++    tag: 0.2.8
+   url: oci://ghcr.io/home-operations/charts/konflate
+"""
+
+# Short but real: a correct review of a one-line bump (#215).
+SHORT_BUMP_REVIEW = (
+    "Approve. Renovate patch bump of the konflate chart, 0.2.7 to 0.2.8; "
+    "no functional manifest changes."
+)
+
+
+class TestCountChangedLines:
+    def test_counts_only_change_lines(self, tmp_path):
+        path = tmp_path / "pr.diff"
+        path.write_text(TRIVIAL_DIFF)
+        assert count_changed_lines(str(path)) == 2
+
+    def test_missing_diff_is_none(self, tmp_path):
+        assert count_changed_lines(str(tmp_path / "absent.diff")) is None
+
+    def test_empty_diff_is_zero(self, tmp_path):
+        path = tmp_path / "pr.diff"
+        path.write_text("")
+        assert count_changed_lines(str(path)) == 0
+
+
+class TestTrivialDiffLowConfidence:
+    def test_short_review_of_trivial_diff_does_not_escalate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
+        _write_classification(tmp_path)
+        (tmp_path / "pr.diff").write_text(TRIVIAL_DIFF)
+        escalate, reasons = should_escalate()
+        assert escalate is False and reasons == []
+
+    def test_bare_lgtm_still_escalates_on_trivial_diff(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path, review="LGTM.")
+        _write_classification(tmp_path)
+        (tmp_path / "pr.diff").write_text(TRIVIAL_DIFF)
+        escalate, reasons = should_escalate()
+        assert "fast_low_confidence" in reasons
+
+    def test_short_review_of_large_diff_still_escalates(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
+        _write_classification(tmp_path)
+        big = TRIVIAL_DIFF + "".join(f"+added line {i}\n" for i in range(40))
+        (tmp_path / "pr.diff").write_text(big)
+        escalate, reasons = should_escalate()
+        assert "fast_low_confidence" in reasons
+
+    def test_missing_diff_fails_closed_to_standard_threshold(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
+        _write_classification(tmp_path)
+        escalate, reasons = should_escalate()
+        assert "fast_low_confidence" in reasons
+
+    def test_unknowns_section_escalates_even_on_trivial_diff(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        review = SHORT_BUMP_REVIEW + (
+            "\n\n## Unknowns or Needs Verification\n"
+            "Could not verify the upstream changelog; the release fetch failed "
+            "and the compare endpoint returned an error."
+        )
+        _write_fast_output(tmp_path, review=review)
+        _write_classification(tmp_path)
+        (tmp_path / "pr.diff").write_text(TRIVIAL_DIFF)
+        escalate, reasons = should_escalate()
+        assert "fast_low_confidence" in reasons
 
 
 if __name__ == "__main__":

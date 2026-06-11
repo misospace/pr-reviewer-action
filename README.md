@@ -227,8 +227,9 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode | No | security/priority/auth/route/file-serving/path/secret/db list |
 | `escalate_on_incomplete_required_checks` | Escalate fast reviews with unaddressed required checks to the smart model (`auto` mode) | No | `true` |
 | `escalate_on_fast_request_changes` | Escalate fast reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
-| `escalate_on_fast_low_confidence` | Escalate low-confidence fast reviews (very short, or populated Unknowns section) (`auto` mode) | No | `true` |
-| `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers or tool-harness failures exist (`auto` mode) | No | `true` |
+| `escalate_on_fast_low_confidence` | Escalate low-confidence fast reviews (short relative to the diff, or populated Unknowns section) (`auto` mode) | No | `true` |
+| `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
+| `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
 | `escalate_on_dirty_baseline` | Escalate incremental reviews whose baseline review found issues (`auto` mode) | No | `true` |
 
 </details>
@@ -806,8 +807,9 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 
 - `escalate_on_fast_request_changes` — the fast model wants changes; let the smart model confirm or overturn before a human is summoned.
 - `escalate_on_incomplete_required_checks` — the fast review never discussed one of the classifier's required checks.
-- `escalate_on_fast_low_confidence` — the review is very short or carries a populated "Unknowns or Needs Verification" section.
-- `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker or the tool harness failed.
+- `escalate_on_fast_low_confidence` — the review is very short or carries a populated "Unknowns or Needs Verification" section. The length floor is diff-aware: a diff of ≤10 changed lines only needs an 80-char review (a correct review of a one-line renovate bump is short — escalating it wastes a smart-model run on exactly the PRs least worth one), while larger diffs keep the 200-char floor.
+- `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
+- `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
 - `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
 
 Only the **final** review is published. The fast result is kept on the runner as `ai-output.fast.json` for debugging; if the smart model fails, the fast review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.

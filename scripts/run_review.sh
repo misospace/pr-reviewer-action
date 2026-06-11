@@ -116,6 +116,7 @@ ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS="${ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS
 ESCALATE_ON_FAST_REQUEST_CHANGES="${ESCALATE_ON_FAST_REQUEST_CHANGES:-true}"
 ESCALATE_ON_FAST_LOW_CONFIDENCE="${ESCALATE_ON_FAST_LOW_CONFIDENCE:-true}"
 ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS="${ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS:-true}"
+ESCALATE_ON_TOOL_PLANNING_FAILURE="${ESCALATE_ON_TOOL_PLANNING_FAILURE:-false}"
 ESCALATE_ON_DIRTY_BASELINE="${ESCALATE_ON_DIRTY_BASELINE:-true}"
 # Default true: only the precheck can assert a dirty baseline; standalone runs
 # (smoke test, manual) have no baseline signal and must not over-escalate.
@@ -316,6 +317,7 @@ ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS="$(printf '%s' "$ESCALATE_ON_INCOMPLETE_R
 ESCALATE_ON_FAST_REQUEST_CHANGES="$(printf '%s' "$ESCALATE_ON_FAST_REQUEST_CHANGES" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_FAST_LOW_CONFIDENCE="$(printf '%s' "$ESCALATE_ON_FAST_LOW_CONFIDENCE" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS="$(printf '%s' "$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS" | tr '[:upper:]' '[:lower:]')"
+ESCALATE_ON_TOOL_PLANNING_FAILURE="$(printf '%s' "$ESCALATE_ON_TOOL_PLANNING_FAILURE" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_DIRTY_BASELINE="$(printf '%s' "$ESCALATE_ON_DIRTY_BASELINE" | tr '[:upper:]' '[:lower:]')"
 BASELINE_CLEAN="$(printf '%s' "$BASELINE_CLEAN" | tr '[:upper:]' '[:lower:]')"
 
@@ -1436,6 +1438,7 @@ escalate, reasons = should_escalate(
     on_low_confidence=('$ESCALATE_ON_FAST_LOW_CONFIDENCE' == 'true'),
     on_blockers=('$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS' == 'true'),
     on_dirty_baseline=('$ESCALATE_ON_DIRTY_BASELINE' == 'true'),
+    on_planning_failure=('$ESCALATE_ON_TOOL_PLANNING_FAILURE' == 'true'),
     dirty_baseline=('$DIRTY_BASELINE' == 'true'),
 )
 print('yes ' + ','.join(reasons) if escalate else 'no')
