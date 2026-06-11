@@ -117,5 +117,41 @@ check "publish steps receive REVIEW_ROUTE" \
 check_contains "marker carries review_route" "$(cat "$ROOT_DIR/scripts/publish_helpers.sh")" "review_route"
 
 echo ""
+echo "=== Test: annotate_analysis_engine ==="
+# Extract annotate_analysis_engine the same way as resolve_review_route.
+AAE_FUNCS="$(mktemp)"
+python3 - "$ROOT_DIR/scripts/run_review.sh" "$AAE_FUNCS" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^annotate_analysis_engine\(\) \{\n(.*?)\n\}", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract annotate_analysis_engine")
+open(sys.argv[2], "w").write("annotate_analysis_engine() {\n%s\n}\n" % m.group(1))
+PY
+# shellcheck source=/dev/null
+source "$AAE_FUNCS"
+rm -f "$AAE_FUNCS"
+
+BASE="review@http://llm:8080/v1 (openai)"
+check "legacy primary stays unannotated" \
+  "$(REVIEW_ROUTE=legacy annotate_analysis_engine "$BASE" primary)" "$BASE"
+check "routing-off default stays unannotated" \
+  "$(REVIEW_ROUTE= annotate_analysis_engine "$BASE" primary)" "$BASE"
+check "fast route annotated" \
+  "$(REVIEW_ROUTE=fast annotate_analysis_engine "$BASE" primary)" "$BASE — fast route"
+check "smart route carries the risk reason" \
+  "$(REVIEW_ROUTE=smart ROUTE_REASON="risk match: auth_changes" annotate_analysis_engine "$BASE" primary)" \
+  "$BASE — routed smart (risk match: auth_changes)"
+check "fallback annotated" \
+  "$(annotate_analysis_engine "$BASE" fallback)" "$BASE — fallback (primary failed)"
+check "escalated carries trigger names" \
+  "$(ESCALATION_REASONS="fast_low_confidence" annotate_analysis_engine "$BASE" escalated)" \
+  "$BASE — escalated (fast_low_confidence)"
+# The step-summary usage-file branch greps the engine string for "fallback";
+# only the fallback origin may introduce that word.
+check "fast annotation does not claim fallback" \
+  "$(case "$(REVIEW_ROUTE=fast annotate_analysis_engine "$BASE" primary)" in *fallback*) echo yes;; *) echo no;; esac)" "no"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

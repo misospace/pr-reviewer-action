@@ -346,7 +346,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |
 | `findings` | Normalized structured findings as a JSON array (`[]` when the model produced none) |
 | `review_markdown` | Full markdown review body |
-| `analysis_engine` | Model and endpoint that produced the final result |
+| `analysis_engine` | Model and endpoint that produced the final result, annotated with how it was chosen: `— fast route`, `— routed smart (risk match: …)`, `— escalated (…)`, or `— fallback (primary failed)`. Unannotated when routing is off |
 | `should_review` | `true` when a new LLM review was run |
 | `skip_reason` | Skip reason such as `diff-unchanged` |
 | `diff_fingerprint` | Stable fingerprint of the current PR patch |
@@ -812,7 +812,7 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
 - `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
 
-Only the **final** review is published. The fast result is kept on the runner as `ai-output.fast.json` for debugging; if the smart model fails, the fast review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
+Only the **final** review is published. The fast result is kept on the runner as `ai-output.fast.json` for debugging; if the smart model fails, the fast review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
 
 ## 💾 Token-saving with incremental reviews
 

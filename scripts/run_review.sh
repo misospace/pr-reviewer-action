@@ -1365,8 +1365,35 @@ print(json.dumps({"verdict": "request_changes", "review_markdown": md}))
 PY
 }
 
+# Append the routing/fallback story to the analysis-engine string, so the
+# published "_Analysis engine: …_" line says not just WHICH model produced
+# the review but WHY it was chosen: deliberate smart routing, post-review
+# escalation, and primary-failure fallback read very differently on cost and
+# health. Legacy (routing off) primary success stays unannotated so the
+# output is byte-identical for routing-off users.
+# Args: $1 = base "model@url (format)" string, $2 = origin: primary|fallback|escalated
+# Uses env: REVIEW_ROUTE, ROUTE_REASON, ESCALATION_REASONS
+annotate_analysis_engine() {
+  local engine="$1" origin="$2"
+  case "$origin" in
+    fallback)
+      engine="$engine — fallback (primary failed)"
+      ;;
+    escalated)
+      engine="$engine — escalated (${ESCALATION_REASONS:-unknown})"
+      ;;
+    primary)
+      case "${REVIEW_ROUTE:-legacy}" in
+        fast) engine="$engine — fast route" ;;
+        smart) engine="$engine — routed smart (${ROUTE_REASON:-risk match})" ;;
+      esac
+      ;;
+  esac
+  printf '%s' "$engine"
+}
+
 if [ "$PRIMARY_OK" -eq 1 ]; then
-  ANALYSIS_ENGINE="$AI_MODEL@$AI_BASE_URL ($AI_API_FORMAT)"
+  ANALYSIS_ENGINE="$(annotate_analysis_engine "$AI_MODEL@$AI_BASE_URL ($AI_API_FORMAT)" primary)"
   echo "Primary model succeeded"
 else
   TRY_FALLBACK=1
@@ -1397,7 +1424,7 @@ else
   if curl_model "$AI_FALLBACK_BASE_URL" "$AI_FALLBACK_API_KEY" "$AI_FALLBACK_API_FORMAT" ai-request.fallback.json ai-response.fallback.json "$FALLBACK_STREAM_BOOL" "$AI_FALLBACK_REQUEST_TIMEOUT_SEC" "$AI_FALLBACK_CONNECT_TIMEOUT_SEC" && \
     { [[ "$FALLBACK_STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.fallback.json "$AI_FALLBACK_API_FORMAT"; } && \
     parse_and_validate ai-response.fallback.json; then
-    ANALYSIS_ENGINE="$AI_FALLBACK_MODEL@$AI_FALLBACK_BASE_URL ($AI_FALLBACK_API_FORMAT)"
+    ANALYSIS_ENGINE="$(annotate_analysis_engine "$AI_FALLBACK_MODEL@$AI_FALLBACK_BASE_URL ($AI_FALLBACK_API_FORMAT)" fallback)"
     echo "Fallback model succeeded" >&2
   else
     handle_model_failure "Fallback model failed"
@@ -1481,7 +1508,7 @@ This is an ESCALATED review: a faster preliminary review was judged insufficient
   if [[ "$smart_ok" -eq 1 ]]; then
     REVIEW_ROUTE="escalated"
     ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
-    ANALYSIS_ENGINE="$SMART_MODEL@$SMART_BASE_URL ($SMART_API_FORMAT)"
+    ANALYSIS_ENGINE="$(annotate_analysis_engine "$SMART_MODEL@$SMART_BASE_URL ($SMART_API_FORMAT)" escalated)"
     log "Smart model succeeded; publishing the escalated review"
   else
     # parse_and_validate only rewrites ai-output.json on success, but restore
