@@ -28,7 +28,8 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`metadata.py`** — Managed metadata marker (fingerprint, scope, open findings) embedded in published comments
 - **`github_context.py`** — PR metadata/linked-issue context helpers
 - **`response_parser.py`** — Tolerant model-output parsing (JSON in fences/prose, verdict + findings extraction)
-- **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies
+- **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies (including streamed tool-call deltas; `function.arguments` is the accumulated JSON string, OpenAI non-streaming shape, per #233)
+- **`conversation.py`** — Multi-turn conversation/request builder for native tool calling (#202, 2/7 of #197 Option B): append-only neutral state, OpenAI/Anthropic wire rendering, per-API tool-schema catalogue, `truncate_oldest_tool_results` budget helper, `verdict_turn` mode that drops `tools` and switches to the strict JSON `response_format`
 
 ### Publishing and output hygiene
 
@@ -66,7 +67,7 @@ run_review.sh                   → collects context → classifies → builds c
   ├─ run_evidence_providers.py  → User-defined provider commands
   ├─ run_tool_harness.py        → Tool harness planning + execution (once or loop)
   ├─ model_call.sh              → Fast/smart routing, retries, streaming, fallback
-  └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward}
+  └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward,conversation}
                                  → required-check validation, verdict policy, escalation, carried findings
 publish (action.yml steps)      → sanitize markdown → strip markers → build managed body → publish
   ├─ publish_mode=comment        → gh pr comment --edit-last --create-if-none (sticky)
