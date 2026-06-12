@@ -449,29 +449,89 @@ When `ci_skip_on_timeout: true` (the default), the action proceeds with the revi
 
 By default an unchanged PR is not re-reviewed — the precheck skips when the diff + config fingerprint matches the last managed review (`skip_if_diff_unchanged`). Set `force_review: "true"` to bypass that guard and review anyway. This is for on-demand re-reviews when the diff is unchanged but something the fingerprint can't see has changed — a model repointed behind a stable alias, updated standards, or a flaky first pass.
 
-A common pattern is an `/ai-review` comment command. Because `issue_comment` workflows run with the base repo's secrets and a write-scoped token, **the command must be authorized against the commenter's repository permission** — `scripts/parse_review_command.sh` does this (matches the command and requires `write`/`admin` via the collaborators API; `author_association` alone is not trusted):
+The recommended pattern is an `/ai-review` comment command wired into your existing review workflow (one workflow, no duplicated model config). Because `issue_comment` workflows run with the base repo's secrets and a write-scoped token, **the command must be authorized against the commenter's repository permission** — the bundled `scripts/parse_review_command.sh` does this: the command must be its own line, the commenter must hold `write`/`admin` via the collaborators API (`author_association` alone is never trusted), and unauthorized comments are a silent no-op.
+
+Six additions to your existing `pull_request` review workflow:
 
 ```yaml
 on:
-  issue_comment:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:                                          # 1. new trigger
     types: [created]
 
+concurrency:
+  # 2. group comment-triggered runs with the PR's normal runs
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  rereview:
-    if: github.event.issue.pull_request
+  review:
+    # 3. cheap prefilter — real authorization happens in the gate step below
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.draft) || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, '/ai-review')) }}
     runs-on: ubuntu-latest
     steps:
+      # 4. comment events don't carry the PR head — resolve it before checkout
+      - name: Resolve PR head for comment trigger
+        id: prctx
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || steps.prctx.outputs.head_sha || github.sha }}
+
+      # ... your token step (id: app-token) ...
+
+      # 5. the authorization gate — the script ships with the action; check it
+      # out separately so the decision runs before any review work. Pin the
+      # same ref as your action pin.
+      - name: Check out re-review command gate
+        if: github.event_name == 'issue_comment'
+        uses: actions/checkout@v6
+        with:
+          repository: misospace/pr-reviewer-action
+          ref: v1.2.8   # pin a SHA in production
+          path: .ai-review-gate
+          persist-credentials: false
+
       - name: Authorize re-review command
         id: cmd
+        if: github.event_name == 'issue_comment'
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENTER_LOGIN: ${{ github.event.comment.user.login }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash "$GITHUB_ACTION_PATH/scripts/parse_review_command.sh"
-      # then check out the PR head + run the action with force_review: "true"
-      # only when steps.cmd.outputs.should_review == 'true'
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+        run: bash .ai-review-gate/scripts/parse_review_command.sh
+
+      - name: Acknowledge authorized re-review
+        if: github.event_name == 'issue_comment' && steps.cmd.outputs.should_review == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" -f content=rocket --silent || true
+
+      # 6. gate the review step and pass the forced context through
+      - name: Review PR
+        if: github.event_name == 'pull_request' || steps.cmd.outputs.should_review == 'true'
+        uses: misospace/pr-reviewer-action@v1
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
+          force_review: ${{ github.event_name == 'issue_comment' && 'true' || 'false' }}
+          # ... the rest of your existing inputs, unchanged ...
 ```
+
+Commenting `/ai-review` on a PR then forces a fresh review of the unchanged head; an authorized command is acknowledged with a 🚀 reaction. Keep all event data in `env` (never inline-interpolated into `run`), and keep `persist-credentials: false` on the gate checkout. This repository's own [`ai-pr-review.yaml`](.github/workflows/ai-pr-review.yaml) carries the wiring and serves as a living reference.
 
 `force_review` is also useful straight from a `workflow_dispatch` input or a `repository_dispatch` payload, neither of which needs the comment-permission gate (both already require a token with write access to fire).
 
