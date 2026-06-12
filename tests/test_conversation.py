@@ -306,9 +306,10 @@ class TestOpenAIPayload:
         )
         # Verdict turn omits tools.
         assert "tools" not in payload
-        # The conversation collapses into a system-prompt transcript note.
-        assert len(payload["messages"]) == 1
-        assert payload["messages"][0]["role"] == "system"
+        # The conversation collapses into a system-prompt transcript note,
+        # plus one closing user instruction (an array without a user message
+        # is degenerate on OpenAI and a hard 400 on Anthropic).
+        assert [m["role"] for m in payload["messages"]] == ["system", "user"]
         note = payload["messages"][0]["content"]
         assert "do not re-issue" in note
         assert "read_file" in note
@@ -461,8 +462,9 @@ class TestAnthropicPayload:
             "anthropic", "claude-3-5-sonnet", verdict_turn=True
         )
         assert "tools" not in payload
-        # History collapses to a system note; messages are empty.
-        assert payload["messages"] == []
+        # History collapses to a system note; one closing user instruction
+        # remains (Anthropic requires a non-empty messages array).
+        assert [m["role"] for m in payload["messages"]] == ["user"]
         assert "do not re-issue" in payload["system"]
 
 
@@ -492,6 +494,91 @@ class TestCrossFormat:
             payload = c.to_request_payload(api_format, model)
             serialised = json.dumps(payload)
             assert isinstance(serialised, str)
+
+
+class TestVerdictTurnContract:
+    """The closing turn drops tools and stays wire-valid (review findings)."""
+
+    def _conv(self):
+        c = Conversation(system="sys")
+        c.add_user("review this")
+        c.add_assistant_tool_calls(
+            [{"id": "c1", "name": "read_file", "arguments": '{"path": "x"}'}]
+        )
+        c.add_tool_result("c1", {"data": "ok"})
+        return c
+
+    def test_verdict_turn_drops_tools_even_without_response_format(self):
+        # The tools-drop is the verdict-turn contract itself, not a side
+        # effect of response_format: ai_response_format=off must not leave
+        # the tool catalogue attached to the closing call.
+        p = self._conv().to_request_payload(
+            "openai", "m", verdict_turn=True, response_format=None
+        )
+        assert "tools" not in p
+        assert "response_format" not in p
+
+    def test_collapsed_verdict_turn_keeps_a_user_message_openai(self):
+        p = self._conv().to_request_payload(
+            "openai", "m", verdict_turn=True, response_format="json_object"
+        )
+        roles = [m["role"] for m in p["messages"]]
+        assert roles == ["system", "user"]
+
+    def test_collapsed_verdict_turn_keeps_a_user_message_anthropic(self):
+        # Anthropic hard-400s on an empty messages array; the collapsed
+        # verdict turn must carry a closing user instruction.
+        p = self._conv().to_request_payload(
+            "anthropic", "m", verdict_turn=True, response_format="json_object"
+        )
+        assert len(p["messages"]) == 1
+        assert p["messages"][0]["role"] == "user"
+        assert p["messages"][0]["content"]
+        assert "tools" not in p
+
+    def test_full_history_verdict_turn_preserves_messages(self):
+        p = self._conv().to_request_payload(
+            "openai",
+            "m",
+            verdict_turn=True,
+            keep_full_history_on_verdict=True,
+            response_format="json_object",
+        )
+        roles = [m["role"] for m in p["messages"]]
+        assert "tool" in roles
+        assert "tools" not in p
+
+
+class TestReassemblerShapeIngest:
+    """add_assistant_tool_calls accepts sse_reassembler's nested output."""
+
+    def test_nested_function_shape_is_recorded(self):
+        # sse_reassembler emits {"id", "type", "function": {"name",
+        # "arguments"}}; the natural reassembler → conversation pipeline
+        # must not silently drop calls.
+        c = Conversation()
+        c.add_assistant_tool_calls(
+            [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "x"}'},
+                }
+            ]
+        )
+        events = [e for e in c.events if e["kind"] == "assistant_tool_calls"]
+        assert len(events) == 1
+        call = events[0]["calls"][0]
+        assert call["name"] == "read_file"
+        assert call["arguments"] == '{"path": "x"}'
+
+    def test_flat_shape_still_works(self):
+        c = Conversation()
+        c.add_assistant_tool_calls(
+            [{"id": "call_2", "name": "git_grep", "arguments": '{"pattern": "p"}'}]
+        )
+        events = [e for e in c.events if e["kind"] == "assistant_tool_calls"]
+        assert events[0]["calls"][0]["name"] == "git_grep"
 
 
 if __name__ == "__main__":

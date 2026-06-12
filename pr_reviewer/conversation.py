@@ -165,6 +165,14 @@ TOOL_RESULT_MAX_BYTES = 8000
 # will own the authoritative stop conditions.
 APPROX_BYTES_PER_TOKEN = 4
 
+# Closing user turn for the collapsed verdict request: the prior history is
+# folded into the system note, but both APIs still need a non-empty messages
+# array (Anthropic 400s without a leading user message).
+VERDICT_USER_INSTRUCTION = (
+    "Produce the final review verdict now as a single JSON object. "
+    "Do not issue any tool calls."
+)
+
 
 # ---------------------------------------------------------------------------
 # Message normalisation
@@ -207,8 +215,8 @@ def truncate_text(text: str, max_bytes: int) -> tuple[str, bool]:
     if nl > 0:
         clip = clip[:nl]
         # Drop a trailing newline so the caller sees a clean line boundary
-        # (e.g. cap-of-5 on "a\nb\nc\nd\ne" yields "a\nb\nc", not
-        # "a\nb\nc\n"). Keeps the result on the right side of the cap.
+        # (e.g. cap-of-5 on "a\nb\nc\nd\ne" yields "a\nb"). Keeps the result
+        # on the right side of the cap.
         if clip.endswith(b"\n"):
             clip = clip[:-1]
     # Codepoint-safe fallback: clip may end mid-multibyte when no newline
@@ -320,11 +328,19 @@ class Conversation:
         for call in calls:
             if not isinstance(call, dict):
                 continue
-            name = call.get("name")
+            # Accept both the flat {"id","name","arguments"} form and the
+            # OpenAI nested {"id","function":{"name","arguments"}} form —
+            # the latter is exactly what sse_reassembler emits, so the
+            # natural reassembler → conversation pipeline must not silently
+            # drop calls.
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = call.get("name") or fn.get("name")
             call_id = call.get("id")
             if not isinstance(name, str) or not isinstance(call_id, str):
                 continue
             args = call.get("arguments")
+            if args is None:
+                args = fn.get("arguments")
             if isinstance(args, str):
                 arguments = args
             elif args is None:
@@ -663,12 +679,15 @@ class Conversation:
         system = self.system
         messages = self._render_openai_messages()
 
-        if verdict_turn:
-            if not keep_full_history_on_verdict:
-                system = (
-                    system + "\n\n" if system else ""
-                ) + self._verdict_transcript_note()
-                messages = []
+        if verdict_turn and not keep_full_history_on_verdict:
+            system = (
+                system + "\n\n" if system else ""
+            ) + self._verdict_transcript_note()
+            # Collapsing must still leave a closing user turn: a messages
+            # array with no user message is degenerate on OpenAI and a hard
+            # 400 on Anthropic, and any instruction the driver appended would
+            # otherwise be wiped along with the history.
+            messages = [{"role": "user", "content": VERDICT_USER_INSTRUCTION}]
 
         payload: dict[str, Any] = {
             "model": model,
@@ -682,11 +701,11 @@ class Conversation:
             payload["temperature"] = temperature
         if stream:
             payload["stream_options"] = {"include_usage": True}
-        if verdict_turn and response_format in ("json_object", "json_schema"):
-            # Only attach tools + response_format on the relevant turn. The
-            # bash build_model_request supports json_object and json_schema;
-            # we mirror its shape so the loop driver can render the closing
-            # turn from the same Conversation object.
+        # The closing turn drops tools UNCONDITIONALLY — that is the
+        # verdict-turn contract. response_format is a separate, optional
+        # add-on (the bash build_model_request supports json_object and
+        # json_schema; we mirror its shapes).
+        if verdict_turn:
             if response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
             elif response_format == "json_schema":
@@ -709,12 +728,13 @@ class Conversation:
         system = self.system
         messages = self._render_anthropic_messages()
 
-        if verdict_turn:
-            if not keep_full_history_on_verdict:
-                system = (
-                    system + "\n\n" if system else ""
-                ) + self._verdict_transcript_note()
-                messages = []
+        if verdict_turn and not keep_full_history_on_verdict:
+            system = (
+                system + "\n\n" if system else ""
+            ) + self._verdict_transcript_note()
+            # Anthropic requires a non-empty messages array starting with a
+            # user message — see the OpenAI counterpart for the rationale.
+            messages = [{"role": "user", "content": VERDICT_USER_INSTRUCTION}]
 
         payload: dict[str, Any] = {
             "model": model,
