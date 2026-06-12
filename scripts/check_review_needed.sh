@@ -6,6 +6,7 @@ PR_NUMBER="${PR_NUMBER:-}"
 COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}"
 SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
 FORCE_REVIEW="${FORCE_REVIEW:-false}"
+REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
@@ -17,6 +18,36 @@ source "${SCRIPT_DIR}/platform_api.sh"
 if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   echo "Missing REPO or PR_NUMBER for review precheck" >&2
   exit 1
+fi
+
+# ── Label-driven re-review (#231) ─────────────────────────────────────
+# A `labeled` pull_request event is the easy re-review trigger: adding the
+# rereview label forces a fresh review (labels are self-authorizing — only
+# users with write/triage can apply them). Any OTHER label add must NOT
+# trigger a review, so short-circuit before the diff fetch. The label is
+# removed after publishing (action.yml) so re-adding re-triggers.
+if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
+  event_action="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
+  if [[ "$event_action" == "labeled" ]]; then
+    added_label="$(jq -r '.label.name // ""' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
+    if [[ "$added_label" == "$REREVIEW_LABEL" ]]; then
+      FORCE_REVIEW=true
+    else
+      echo "Label '$added_label' is not the re-review label ('$REREVIEW_LABEL') — skipping" >&2
+      {
+        echo "should_review=false"
+        echo "skip_reason=unrelated-label"
+        echo "effective_review_scope=full"
+        echo "previous_head_sha="
+        echo "baseline_clean=false"
+        echo "head_sha="
+        echo "base_sha="
+        echo "is_fork_pr="
+        echo "diff_fingerprint="
+      } >> "$OUTPUT_FILE"
+      exit 0
+    fi
+  fi
 fi
 
 # ── Diff fingerprint (unchanged) ──────────────────────────────────────

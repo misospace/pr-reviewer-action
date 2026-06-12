@@ -121,6 +121,9 @@ run_precheck() {
     TOOL_ENABLE_FOR_FORKS="${TOOL_ENABLE_FOR_FORKS:-false}" \
     SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}" \
     FORCE_REVIEW="${FORCE_REVIEW:-false}" \
+    REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}" \
+    GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" \
+    GITHUB_EVENT_PATH="${GITHUB_EVENT_PATH:-}" \
     COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}" \
     PUBLISH_MODE="${PUBLISH_MODE:-comment}" \
     bash "$PRECHECK_SCRIPT"
@@ -235,6 +238,23 @@ FORCE_REVIEW=true
 RESULT="$(run_precheck)"
 check "should_review=true when force_review bypasses the guard" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
 unset FORCE_REVIEW
+
+# ── Test 6c: labeled event drives re-review (force on match, skip otherwise) ──
+echo ""
+echo "=== Test 6c: labeled event ==="
+# Matching label → forces review even with a matching fingerprint.
+printf '%s' '{"action":"labeled","label":{"name":"ai-review"}}' > "$TMPDIR/event-match.json"
+printf '%s' '{"action":"labeled","label":{"name":"bug"}}' > "$TMPDIR/event-other.json"
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${FP6B} -->
+APPROVE"
+GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$TMPDIR/event-match.json" SKIP_IF_DIFF_UNCHANGED=true RESULT="$(run_precheck)"
+check "matching label forces review despite unchanged fingerprint" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+# Unrelated label → skip, with the dedicated reason, and no diff fetch needed.
+GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$TMPDIR/event-other.json" RESULT="$(run_precheck)"
+check "unrelated label does not trigger a review" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "unrelated label reports skip_reason=unrelated-label" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "unrelated-label"
+unset GITHUB_EVENT_NAME GITHUB_EVENT_PATH
 
 # ── Test 7: Fingerprint format includes both diff and config parts ───
 echo ""

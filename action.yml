@@ -396,9 +396,19 @@ inputs:
     required: false
     default: "true"
   force_review:
-    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Intended for an on-demand "re-review" trigger (e.g. a /ai-review comment or repository_dispatch) when the diff is unchanged but the underlying model/standards changed. Default false.
+    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Set automatically when the rereview_label is added; can also be driven from a workflow_dispatch or repository_dispatch. Default false.
     required: false
     default: "false"
+  rereview_label:
+    description: >-
+      Label that, when added to a PR, forces a fresh review even if nothing
+      changed — the easy re-review trigger (only users with write/triage can
+      label, so it is self-authorizing). On a `labeled` event the action
+      reviews iff the added label matches this, then removes the label so
+      re-adding re-triggers; any other label add is ignored. To enable, add
+      `labeled` to the workflow's pull_request types. Default "ai-review".
+    required: false
+    default: "ai-review"
   comment_marker:
     description: HTML marker for the managed PR comment
     required: false
@@ -505,6 +515,7 @@ runs:
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
         FORCE_REVIEW: ${{ inputs.force_review }}
+        REREVIEW_LABEL: ${{ inputs.rereview_label }}
         ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
@@ -1007,3 +1018,15 @@ runs:
             submit_native_review REQUEST_CHANGES "$BODY_FILE"
           fi
         fi
+
+    - name: Clear re-review label
+      # When a label add triggered this review, remove it so re-adding the
+      # label re-triggers. Best-effort; never fails the run.
+      if: ${{ github.event.action == 'labeled' && github.event.label.name == inputs.rereview_label && steps.precheck.outputs.should_review == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ inputs.repo || github.repository }}
+        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        LABEL: ${{ inputs.rereview_label }}
+      run: gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${LABEL}" --silent 2>/dev/null || true
