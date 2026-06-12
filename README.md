@@ -426,6 +426,8 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 
 Set `ci_status_check: true` to wait for all CI checks to reach a terminal state before starting the AI review. This ensures the review considers the final CI results rather than running against in-progress checks.
 
+The per-check outcomes (name, status, conclusion) are also folded into the review corpus as a **CI Check Results** section, so the model cites real test/lint results instead of reporting them as "not verifiable". The reviewer never runs your test suite itself — that would mean executing untrusted PR code with the bot's token — it consumes the results your CI already produced in its own sandbox.
+
 ```yaml
 - uses: misospace/pr-reviewer-action@v1
   id: review

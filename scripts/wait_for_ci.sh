@@ -31,6 +31,10 @@ CI_TIMEOUT_SEC="${CI_TIMEOUT_SEC:-300}"
 CI_INTERVAL_SEC="${CI_INTERVAL_SEC:-15}"
 CI_SKIP_ON_TIMEOUT="${CI_SKIP_ON_TIMEOUT:-true}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
+# When set, render a per-check markdown summary here for run_review.sh to fold
+# into the review corpus. The data is already fetched for gating; this just
+# stops it from being discarded so the model can cite real CI outcomes.
+CI_CHECKS_FILE="${CI_CHECKS_FILE:-}"
 
 if [[ "$CI_STATUS_CHECK" != "true" ]]; then
   echo "ci_status_skipped=true" >> "$OUTPUT_FILE"
@@ -59,8 +63,58 @@ get_head_sha() {
   gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null
 }
 
+# Render the per-check results gathered this iteration into CI_CHECKS_FILE so
+# run_review.sh can surface them as review evidence. Own-workflow check runs are
+# excluded with the same rule used for gating. A no-op when CI_CHECKS_FILE is
+# unset or no external checks exist.
+render_ci_checks() {
+  local final_state="$1"
+  [[ -n "$CI_CHECKS_FILE" ]] || return 0
+  local runs="${check_runs_response:-{}}"
+  local combined="${combined_response:-{}}"
+
+  local rows
+  rows="$(printf '%s' "$runs" | jq -r --arg run "$GITHUB_RUN_ID" '
+    [.check_runs[]?
+      | select(
+          $run == ""
+          or ((((.details_url // "") | test("/runs/" + $run + "(/|$)"))
+               or ((.html_url // "") | test("/runs/" + $run + "(/|$)"))) | not)
+        )] as $ext
+    | $ext[]
+    | "| \(.name // "(unnamed)") | \(.status // "?") | \(.conclusion // "—") |"' 2>/dev/null || echo "")"
+
+  local legacy
+  legacy="$(printf '%s' "$combined" | jq -r '
+    if ((.total_count // 0) > 0) then
+      (.statuses[]? | "| \(.context // "(status)") | \(.state // "?") | \(.description // "") |")
+    else empty end' 2>/dev/null || echo "")"
+
+  # Nothing external to report — leave no file so run_review omits the section.
+  [[ -n "$rows" || -n "$legacy" ]] || return 0
+
+  {
+    echo "_CI reached a terminal state before this review began (overall: ${final_state}). These results are from the GitHub Checks API for commit ${sha} and are authoritative evidence of which checks ran and how they concluded._"
+    echo
+    if [[ -n "$rows" ]]; then
+      echo "| Check | Status | Conclusion |"
+      echo "| --- | --- | --- |"
+      printf '%s\n' "$rows"
+    fi
+    if [[ -n "$legacy" ]]; then
+      echo
+      echo "Legacy commit statuses:"
+      echo
+      echo "| Context | State | Description |"
+      echo "| --- | --- | --- |"
+      printf '%s\n' "$legacy"
+    fi
+  } > "$CI_CHECKS_FILE" 2>/dev/null || true
+}
+
 finalize() {
   local state="$1"
+  render_ci_checks "$state"
   echo "ci_status_final=$state" >> "$OUTPUT_FILE"
   echo "ci_status_skipped=false" >> "$OUTPUT_FILE"
   exit 0
@@ -87,6 +141,7 @@ while true; do
     log "Timeout reached after ${elapsed}s"
     if [[ "$(printf '%s' "$CI_SKIP_ON_TIMEOUT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
       log "ci_skip_on_timeout=true — proceeding without CI context"
+      render_ci_checks "timeout (CI did not finish in time)"
       echo "ci_status_skipped=true" >> "$OUTPUT_FILE"
       exit 1   # non-zero so the caller can decide whether to skip or continue
     else
