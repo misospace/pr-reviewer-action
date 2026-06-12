@@ -327,6 +327,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
+| `platform` | Host forge backend: `auto` (detect from `GITHUB_SERVER_URL`), `github`, or `forgejo` (requires `FORGEJO_API_URL`; support rolling out across 1.4.x — unimplemented operations fail loudly). Linked-source enrichment always targets github.com | No | `auto` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
 | `force_review` | Bypass the diff-unchanged guard and review even when the fingerprint matches. For an on-demand re-review (e.g. an `/ai-review` comment or `repository_dispatch`) when the diff is unchanged but the model/standards changed | No | `false` |
 | `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |

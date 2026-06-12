@@ -380,6 +380,17 @@ inputs:
     description: Timeout in seconds for the fallback model API connection (curl --connect-timeout). Defaults to ai_connect_timeout_sec when blank.
     required: false
     default: ""
+  platform:
+    description: >-
+      Host forge backend for repository API operations. auto (default)
+      detects from GITHUB_SERVER_URL (non-github.com hosts resolve to
+      forgejo); github forces the gh CLI backend; forgejo uses the Forgejo
+      /api/v1 REST backend (requires FORGEJO_API_URL in the environment;
+      Forgejo support is rolling out across the 1.4.x line — unimplemented
+      operations fail loudly). Linked-source enrichment always targets
+      github.com regardless of this setting.
+    required: false
+    default: "auto"
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
@@ -486,6 +497,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
@@ -547,6 +559,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -563,6 +576,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -648,6 +662,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -706,13 +721,14 @@ runs:
           cat review-markdown.raw.md
         } > review-comment.md
 
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file review-comment.md
+        platform_comment_sticky "$REPO" "$PR_NUMBER" review-comment.md
 
     - name: Publish review comment (non-blocking)
       if: inputs.publish_mode == 'review_comment' && steps.precheck.outputs.should_review == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -783,7 +799,7 @@ runs:
 
         # NOTE: gh pr review --comment creates a COMMENTED review that is NOT visible in the PR UI timeline.
         # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file "$BODY_FILE"
+        platform_comment_sticky "$REPO" "$PR_NUMBER" "$BODY_FILE"
 
         # Resolve threads of carried findings this review verified as fixed,
         # and reply on threads still open (#208, #209). Must precede the
@@ -807,7 +823,7 @@ runs:
             } > inline-findings-body.md
             jq -n --rawfile body inline-findings-body.md --argjson comments "$COMMENTS_JSON" \
               '{body: $body, event: "COMMENT", comments: $comments}' > review-request.json
-            if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input review-request.json >/dev/null 2>&1; then
+            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
               echo "Attached $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline finding comment(s)"
             else
               echo "WARN: inline findings review submission failed; summary comment was still published" >&2
@@ -820,6 +836,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -856,7 +873,7 @@ runs:
         # the PR object; only fall back to the API when its output is missing.
         IS_FORK_PR="${{ steps.precheck.outputs.is_fork_pr }}"
         if [ -z "$IS_FORK_PR" ]; then
-          IS_FORK_PR="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
+          IS_FORK_PR="$(platform_pr_get "$REPO" "$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
         fi
 
         # Resolve effective scope and review result
@@ -945,15 +962,15 @@ runs:
           if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
             jq -n --rawfile body "$body_file" --arg event "$event" --argjson comments "$COMMENTS_JSON" \
               '{body: $body, event: $event, comments: $comments}' > review-request.json
-            if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input review-request.json >/dev/null 2>&1; then
+            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
               echo "Submitted native review ($event) with $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline comment(s)"
               return 0
             fi
             echo "WARN: inline-comment review submission failed; falling back to plain review" >&2
           fi
           case "$event" in
-            APPROVE) gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file "$body_file" ;;
-            *) gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file "$body_file" ;;
+            APPROVE) platform_review_native "$REPO" "$PR_NUMBER" APPROVE "$body_file" ;;
+            *) platform_review_native "$REPO" "$PR_NUMBER" REQUEST_CHANGES "$body_file" ;;
           esac
         }
 

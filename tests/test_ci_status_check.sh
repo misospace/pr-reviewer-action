@@ -42,7 +42,9 @@ check_contains() {
 
 # ── Test 1: exit code 1 path for timeout+skip=true exists in script ──
 echo "=== Test: exit code 1 on timeout with skip=true ==="
-wait_content="$(cat "$WAIT_SCRIPT")"
+# The check-runs/status invocations live in the platform seam (issue #221);
+# include it so static-content assertions keep seeing the full command text.
+wait_content="$(cat "$WAIT_SCRIPT" "$SCRIPT_DIR/scripts/platform_api.sh")"
 
 check_contains "script has timeout branch checking CI_SKIP_ON_TIMEOUT" \
   "$wait_content" 'CI_SKIP_ON_TIMEOUT'

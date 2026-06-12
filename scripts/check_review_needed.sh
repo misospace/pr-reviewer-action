@@ -11,6 +11,8 @@ REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
+# shellcheck source=scripts/platform_api.sh
+source "${SCRIPT_DIR}/platform_api.sh"
 
 if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   echo "Missing REPO or PR_NUMBER for review precheck" >&2
@@ -22,7 +24,7 @@ fi
 # to a fresh review instead of aborting the action. The diff is saved to
 # pr.diff so run_review.sh can reuse it instead of fetching it a second time —
 # this also guarantees the reviewed diff is the one that was fingerprinted.
-if ! gh pr diff "$PR_NUMBER" --repo "$REPO" > pr.diff 2>/dev/null; then
+if ! platform_pr_diff "$REPO" "$PR_NUMBER" > pr.diff 2>/dev/null; then
   : > pr.diff
 fi
 current_fingerprint="$(git patch-id --stable < pr.diff | awk 'NR == 1 { print $1 }' || true)"
@@ -201,7 +203,7 @@ broad_fingerprint="${current_fingerprint}|cfg:${config_hash}"
 # submits a native PR review. Look in the right place so skip-if-unchanged
 # and incremental scope can find prior state in every mode.
 last_managed_comment_body() {
-  gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null | \
+  platform_issue_comments "$REPO" "$PR_NUMBER" 2>/dev/null | \
     jq -r --arg marker "$COMMENT_MARKER" '
       [ .[] | select((.body // "") | contains($marker)) ]
       | sort_by(.updated_at // .created_at)
@@ -211,7 +213,7 @@ last_managed_comment_body() {
 }
 
 last_managed_review_body() {
-  gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null | \
+  platform_pr_reviews "$REPO" "$PR_NUMBER" 2>/dev/null | \
     jq -r --arg marker "$COMMENT_MARKER" '
       [ .[] | select((.body // "") | contains($marker)) ]
       | sort_by(.submitted_at // "")
@@ -396,7 +398,7 @@ resolve_review_scope() {
   fi
 
   # Check: compare API still works for this range
-  if ! gh api "repos/$REPO/compare/${last_head_sha}...${current_head_sha}" >/dev/null 2>&1; then
+  if ! platform_compare "$REPO" "${last_head_sha}...${current_head_sha}" >/dev/null 2>&1; then
     echo "Review scope fallback: compare API failed for $last_head_sha...$current_head_sha" >&2
     EFFECTIVE_SCOPE="full"
     PREVIOUS_HEAD_SHA=""
@@ -429,7 +431,7 @@ fi
 # the whole action: the head/base SHAs drive scope resolution here, and the
 # object is saved to pr-object.json so run_review.sh (and the publish steps,
 # via the is_fork_pr output) do not have to fetch it again.
-if ! gh api "repos/$REPO/pulls/$PR_NUMBER" > pr-object.json 2>/dev/null; then
+if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then
   echo '{}' > pr-object.json
 fi
 CURRENT_HEAD_SHA="$(jq -r '.head.sha // ""' pr-object.json 2>/dev/null || echo "")"
