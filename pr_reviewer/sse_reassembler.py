@@ -11,8 +11,10 @@ non-streaming-equivalent shape used by ``response_parser``/downstream callers:
   by ``index``; ``id`` and ``function.name`` arrive once, and
   ``function.arguments`` accumulates as string fragments across deltas. The
   reassembled message carries ``tool_calls=[{id, type, function: {name,
-  arguments}}]`` with ``arguments`` parsed back to a JSON object when the
-  fragments form valid JSON (otherwise the raw string is preserved).
+  arguments}}]`` with ``arguments`` as the accumulated JSON-encoded *string*
+  (OpenAI's non-streaming schema — strict servers require the string form when
+  the assistant message is echoed back on the next turn). Consumers parse it;
+  a malformed fragment from a truncated stream passes through verbatim.
 * Anthropic streams tool calls as ``content_block_start`` (carrying
   ``id``/``name``/``type=="tool_use"``) plus ``input_json_delta`` partial-JSON
   fragments plus ``content_block_stop``; ``stop_reason: "tool_use"``.
@@ -127,18 +129,17 @@ def _reassemble_anthropic(
             current_tool_name = None
             current_tool_args_parts = []
             return
-        raw_args = "".join(current_tool_args_parts)
-        try:
-            parsed_args = json.loads(raw_args) if raw_args else {}
-        except (json.JSONDecodeError, ValueError):
-            # Malformed partial-JSON (truncated stream) — preserve raw string
-            # so the caller can decide whether to retry.
-            parsed_args = raw_args  # type: ignore[assignment]
+        # ``arguments`` stays a JSON-encoded string — OpenAI's non-streaming
+        # schema, and what strict servers expect when the assistant message is
+        # echoed back on the next turn. Consumers parse it themselves; a
+        # malformed fragment (truncated stream) is passed through verbatim so
+        # the caller can decide whether to retry.
+        raw_args = "".join(current_tool_args_parts) or "{}"
         tool_calls.append(
             {
                 "id": current_tool_id,
                 "type": "function",
-                "function": {"name": current_tool_name, "arguments": parsed_args},
+                "function": {"name": current_tool_name, "arguments": raw_args},
             }
         )
         current_tool_id = None
@@ -176,8 +177,9 @@ def _reassemble_anthropic(
             cb_index = event.get("index")
             # If we were mid-way through a previous tool block and never saw
             # a content_block_stop (malformed stream), flush it before opening
-            # the new one.
-            if tool_block_index is not None and current_tool_id is not None:
+            # the new one. Keyed on current_tool_id, not tool_block_index — a
+            # proxy that omits ``index`` must not strand the open block.
+            if current_tool_id is not None:
                 _flush_tool_call()
                 tool_block_index = None
             if cb_type == "tool_use":
@@ -206,7 +208,13 @@ def _reassemble_anthropic(
                     )
         elif etype == "content_block_stop":
             cb_index = event.get("index")
-            if tool_block_index is not None and cb_index == tool_block_index:
+            # Flush when the stop matches the open tool block. When the proxy
+            # never sent an index for the block, any stop closes it (the spec
+            # interleaves blocks sequentially, so the first stop after the
+            # deltas is the block's own).
+            if current_tool_id is not None and (
+                tool_block_index is None or cb_index == tool_block_index
+            ):
                 _flush_tool_call()
                 tool_block_index = None
         elif etype == "message_delta":
@@ -220,7 +228,7 @@ def _reassemble_anthropic(
             # End of stream: flush any still-open tool block (defensive — the
             # spec requires a content_block_stop before message_stop, but
             # proxies may collapse the two).
-            if tool_block_index is not None and current_tool_id is not None:
+            if current_tool_id is not None:
                 _flush_tool_call()
                 tool_block_index = None
 
@@ -276,16 +284,14 @@ def _reassemble_openai(
             # Incomplete (id/name never arrived) — drop rather than emit a
             # half-formed tool call; this matches Anthropic's flush behaviour.
             return
-        raw_args = "".join(state.get("args_parts", []))
-        try:
-            parsed_args = json.loads(raw_args) if raw_args else {}
-        except (json.JSONDecodeError, ValueError):
-            parsed_args = raw_args  # type: ignore[assignment]
+        # JSON-encoded string per OpenAI's non-streaming schema (see the
+        # Anthropic flush for the rationale); consumers parse it themselves.
+        raw_args = "".join(state.get("args_parts", [])) or "{}"
         tool_calls.append(
             {
                 "id": state["id"],
                 "type": "function",
-                "function": {"name": state["name"], "arguments": parsed_args},
+                "function": {"name": state["name"], "arguments": raw_args},
             }
         )
 
@@ -350,7 +356,7 @@ def _reassemble_openai(
                 # finish_reason of "tool_calls" (defensive — they should
                 # already be complete by then).
                 if fr == "tool_calls":
-                    for idx in list(tool_state.keys()):
+                    for idx in sorted(tool_state):
                         _flush_tool_call(idx)
                 finish_reason = fr
         usage = chunk.get("usage")
@@ -359,8 +365,9 @@ def _reassemble_openai(
             usage_completion_tokens += usage.get("completion_tokens", 0)
 
     # End of stream: flush any tool calls that never received a
-    # finish_reason (truncated streams).
-    for idx in list(tool_state.keys()):
+    # finish_reason (truncated streams). Sorted so parallel calls come out in
+    # index order even when the stream delivered their deltas out of order.
+    for idx in sorted(tool_state):
         _flush_tool_call(idx)
 
     content_text = "".join(content_parts)

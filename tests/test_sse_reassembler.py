@@ -196,8 +196,17 @@ class TestStreamErrorDetection:
         assert result["choices"][0]["message"]["content"] == "hi"
 
 
-if __name__ == "__main__":
-    unittest_main()
+def _parsed_args(tc):
+    """Assert the OpenAI string contract for ``function.arguments``, then parse.
+
+    ``arguments`` must always be a JSON-encoded string (never a dict) so the
+    assistant message round-trips to strict servers; tests compare content
+    through this helper so they don't depend on fragment formatting.
+    """
+    args = tc["function"]["arguments"]
+    assert isinstance(args, str), f"arguments must be a JSON string, got {type(args).__name__}"
+    return json.loads(args)
+
 
 class TestReassembleOpenAIToolCalls:
     """OpenAI streaming tool-call reassembly (issue #201)."""
@@ -220,7 +229,7 @@ class TestReassembleOpenAIToolCalls:
         assert tc["id"] == "call_abc"
         assert tc["type"] == "function"
         assert tc["function"]["name"] == "read_file"
-        assert tc["function"]["arguments"] == {"path": "/etc/hosts"}
+        assert _parsed_args(tc) == {"path": "/etc/hosts"}
         assert result["usage"]["prompt_tokens"] == 11
         assert result["usage"]["completion_tokens"] == 5
 
@@ -236,7 +245,7 @@ class TestReassembleOpenAIToolCalls:
         msg = result["choices"][0]["message"]
         assert msg["content"] == "Let me check that file."
         assert len(msg["tool_calls"]) == 1
-        assert msg["tool_calls"][0]["function"]["arguments"] == {"path": "a.py"}
+        assert _parsed_args(msg["tool_calls"][0]) == {"path": "a.py"}
 
     def test_parallel_tool_calls_distinct_indices(self):
         # Two parallel tool calls in one round, identified by ``index``.
@@ -255,8 +264,10 @@ class TestReassembleOpenAIToolCalls:
         tcs = result["choices"][0]["message"]["tool_calls"]
         assert len(tcs) == 2
         by_id = {tc["id"]: tc for tc in tcs}
-        assert by_id["call_0"]["function"]["arguments"] == {"path": "a.py"}
-        assert by_id["call_1"]["function"]["arguments"] == {"path": "b.py"}
+        assert _parsed_args(by_id["call_0"]) == {"path": "a.py"}
+        assert _parsed_args(by_id["call_1"]) == {"path": "b.py"}
+        # Index order, not arrival order.
+        assert [tc["id"] for tc in tcs] == ["call_0", "call_1"]
 
     def test_truncated_stream_flushes_partial_tool_calls(self):
         # No finish_reason, no [DONE] — the model died mid-stream. We still
@@ -304,7 +315,7 @@ class TestReassembleOpenAIToolCalls:
         ]
         result = reassemble_sse("\n".join(lines), "openai")
         tc = result["choices"][0]["message"]["tool_calls"][0]
-        assert tc["function"]["arguments"] == {"path": "café.txt"}
+        assert _parsed_args(tc) == {"path": "café.txt"}
 
     def test_text_only_no_tool_calls_key(self):
         # Backward compatibility: a text-only stream must not gain a
@@ -340,7 +351,7 @@ class TestReassembleAnthropicToolCalls:
         assert tc["id"] == "toolu_1"
         assert tc["type"] == "function"
         assert tc["function"]["name"] == "read_file"
-        assert tc["function"]["arguments"] == {"path": "x.py"}
+        assert _parsed_args(tc) == {"path": "x.py"}
         assert result["usage"]["completion_tokens"] == 6
 
     def test_text_then_tool_use_then_text_interleaved(self):
@@ -413,8 +424,8 @@ class TestReassembleAnthropicToolCalls:
         result = reassemble_sse("\n".join(lines), "anthropic")
         tcs = result["choices"][0]["message"]["tool_calls"]
         assert [tc["id"] for tc in tcs] == ["a", "b"]
-        assert tcs[0]["function"]["arguments"] == {"x": 1}
-        assert tcs[1]["function"]["arguments"] == {"y": 2}
+        assert _parsed_args(tcs[0]) == {"x": 1}
+        assert _parsed_args(tcs[1]) == {"y": 2}
 
     def test_malformed_partial_json_preserves_raw_string(self):
         # Truncated mid-value: the partial JSON doesn't form a complete
@@ -443,7 +454,7 @@ class TestReassembleAnthropicToolCalls:
         ]
         result = reassemble_sse("\n".join(lines), "anthropic")
         tc = result["choices"][0]["message"]["tool_calls"][0]
-        assert tc["function"]["arguments"] == {"a": 1, "b": "x"}
+        assert _parsed_args(tc) == {"a": 1, "b": "x"}
 
     def test_thinking_blocks_ignored(self):
         # Thinking blocks must not pollute content or tool_calls.
@@ -462,3 +473,41 @@ class TestReassembleAnthropicToolCalls:
         assert "private" not in msg["content"]
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["function"]["name"] == "f"
+
+    def test_tool_use_block_without_index_not_dropped(self):
+        # A malformed proxy can omit ``index`` on the content_block events.
+        # The block must still flush (keyed on the open tool id, not the
+        # index) and finish_reason must still normalise to "tool_calls".
+        lines = [
+            _make_sse_line({"type": "message_start", "message": {"id": "m", "model": "c", "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            _make_sse_line({"type": "content_block_start", "content_block": {"type": "tool_use", "id": "t_noidx", "name": "f"}}),
+            _make_sse_line({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"a":1}'}}),
+            _make_sse_line({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+            _make_sse_line({"type": "message_stop"}),
+        ]
+        result = reassemble_sse("\n".join(lines), "anthropic")
+        msg = result["choices"][0]["message"]
+        assert len(msg["tool_calls"]) == 1
+        assert msg["tool_calls"][0]["id"] == "t_noidx"
+        assert _parsed_args(msg["tool_calls"][0]) == {"a": 1}
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
+
+
+class TestToolCallOrdering:
+    """Parallel tool calls must come out in index order (issue #201)."""
+
+    def test_out_of_order_indices_sorted_on_flush(self):
+        # A stream that delivers index 1 before index 0 must still emit
+        # tool_calls in index order — downstream pairs results to calls
+        # positionally in some clients.
+        lines = [
+            _make_sse_line({"id": "c", "choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_B", "type": "function", "function": {"name": "b", "arguments": "{}"}}]}}]}),
+            _make_sse_line({"id": "c", "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_A", "type": "function", "function": {"name": "a", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]}),
+        ]
+        result = reassemble_sse("\n".join(lines), "openai")
+        tcs = result["choices"][0]["message"]["tool_calls"]
+        assert [tc["id"] for tc in tcs] == ["call_A", "call_B"]
+
+
+if __name__ == "__main__":
+    unittest_main()
