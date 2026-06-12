@@ -137,11 +137,19 @@ check_contains "allow_approve default is false" \
 check_exists "action.yml has native review step" \
   "$(grep -c 'Publish review verdict' "$ACTION_YML" || echo 0)"
 
-check_exists "action.yml has gh pr review approve" \
-  "$(grep -c 'gh pr review.*approve' "$ACTION_YML" || echo 0)"
+# The native-review invocations route through the platform seam (#221):
+# action.yml calls platform_review_native, whose github backend holds the
+# actual `gh pr review --approve/--request-changes` command lines.
+PLATFORM_SEAM="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/platform_api.sh"
 
-check_exists "action.yml has gh pr review request-changes" \
-  "$(grep -c 'gh pr review.*request-changes' "$ACTION_YML" || echo 0)"
+check_exists "action.yml routes approve through the seam" \
+  "$(grep -c 'platform_review_native "\$REPO" "\$PR_NUMBER" APPROVE' "$ACTION_YML" || echo 0)"
+
+check_exists "seam github backend has gh pr review approve" \
+  "$(grep -c 'gh pr review.*--approve' "$PLATFORM_SEAM" || echo 0)"
+
+check_exists "seam github backend has gh pr review request-changes" \
+  "$(grep -c 'gh pr review.*--request-changes' "$PLATFORM_SEAM" || echo 0)"
 
 echo ""
 echo "=== README.md documentation validation ==="

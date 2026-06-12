@@ -23,6 +23,8 @@ set -euo pipefail
 
 GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
+# shellcheck source=scripts/platform_api.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform_api.sh"
 PR_NUMBER="${PR_NUMBER:-}"
 PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 GITHUB_RUN_ID="${GITHUB_RUN_ID:-}"
@@ -60,7 +62,7 @@ error() {
 # Get the head SHA of the PR (may differ from event.pull_request.head.sha if
 # the action is invoked manually with a stale pr_number).
 get_head_sha() {
-  gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null
+  platform_pr_head_sha "$REPO" "$PR_NUMBER" 2>/dev/null
 }
 
 # Render the per-check results gathered this iteration into CI_CHECKS_FILE so
@@ -151,8 +153,8 @@ while true; do
     fi
   fi
 
-  check_runs_response="$(gh api "repos/$REPO/commits/$sha/check-runs?per_page=100" 2>/dev/null || echo "")"
-  combined_response="$(gh api "repos/$REPO/commits/$sha/status" 2>/dev/null || echo "")"
+  check_runs_response="$(platform_check_runs "$REPO" "$sha" 2>/dev/null || echo "")"
+  combined_response="$(platform_commit_status "$REPO" "$sha" 2>/dev/null || echo "")"
 
   if [[ -z "$check_runs_response" && -z "$combined_response" ]]; then
     log "API returned empty; retrying in ${CI_INTERVAL_SEC}s..."
