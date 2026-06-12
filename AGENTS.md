@@ -12,7 +12,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 - **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). The publish steps live inline in this file using helpers from `scripts/publish_helpers.sh`.
 - **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment
-- **`scripts/wait_for_ci.sh`** — Optional CI gating: polls commit status until checks reach a terminal state (`ci_status_check=true`)
+- **`scripts/wait_for_ci.sh`** — Optional CI gating: polls the Checks API until checks reach a terminal state (`ci_status_check=true`), then renders the per-check outcomes to `CI_CHECKS_FILE` for the review corpus
 - **`scripts/run_review.sh`** — Main review orchestration script (collects context, builds corpus, classifies, routes, calls model, validates and enforces verdicts)
 - **`scripts/model_call.sh`** — Shared model-call layer: request building, streaming/SSE handling, retries, error-body preservation for both API formats
 - **`scripts/default_system_prompt.txt`** — Bundled system prompt used when no override is provided
@@ -56,7 +56,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 ```
 check_review_needed.sh          → should_review + diff_fingerprint + effective scope (full/incremental)
-wait_for_ci.sh (optional)       → block until CI checks are terminal
+wait_for_ci.sh (optional)       → block until CI checks are terminal + emit per-check results
 run_review.sh                   → collects context → classifies → builds corpus → routes → calls model → validates/enforces
   ├─ gh pr view/diff/api        → PR metadata, files, linked issues
   ├─ pr_reviewer.classifier     → pr_kind, risk_flags, must_check (rule-based, no model)

@@ -124,6 +124,9 @@ BASELINE_CLEAN="${BASELINE_CLEAN:-true}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 EFFECTIVE_SCOPE="${EFFECTIVE_SCOPE:-full}"
 PREVIOUS_HEAD_SHA="${PREVIOUS_HEAD_SHA:-}"
+# Per-check CI results written by wait_for_ci.sh when ci_status_check=true.
+# Empty/absent when CI gating is off or no external checks ran.
+CI_CHECKS_FILE="${CI_CHECKS_FILE:-}"
 ENRICHMENT_BUDGET_SEC="${ENRICHMENT_BUDGET_SEC:-60}"
 
 apply_context_limits() {
@@ -1138,6 +1141,15 @@ print(render_carried_findings_section(load_carried_findings()), end='')
     echo "# Evidence Providers"
     cat evidence-providers.md
     echo
+    # CI ran to completion in its own sandbox before this review; surface the
+    # per-check outcomes so the model cites real test/lint results instead of
+    # reporting them as "not verifiable". Only present when ci_status_check=true
+    # and external checks existed.
+    if [ -n "$CI_CHECKS_FILE" ] && [ -s "$CI_CHECKS_FILE" ]; then
+      echo "# CI Check Results"
+      cat "$CI_CHECKS_FILE"
+      echo
+    fi
     echo "# Image Digest Provenance"
     cat image-digest-context.md
     echo
