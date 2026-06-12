@@ -384,12 +384,16 @@ inputs:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
     default: "true"
+  force_review:
+    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Intended for an on-demand "re-review" trigger (e.g. a /ai-review comment or repository_dispatch) when the diff is unchanged but the underlying model/standards changed. Default false.
+    required: false
+    default: "false"
   comment_marker:
     description: HTML marker for the managed PR comment
     required: false
     default: "<!-- ai-pr-reviewer -->"
   ci_status_check:
-    description: If true, wait for all CI checks to reach a terminal state before starting the AI review. Polls commit-status API for the PR head SHA. Default false — immediate review (original behavior).
+    description: If true, wait for all CI checks to reach a terminal state before starting the AI review, then fold the per-check outcomes into the review corpus as evidence (so the model cites real test/lint results instead of "not verifiable"). Polls the Checks API for the PR head SHA. Default false — immediate review (original behavior).
     required: false
     default: "false"
   ci_timeout_sec:
@@ -488,6 +492,7 @@ runs:
         PUBLISH_MODE: ${{ inputs.publish_mode }}
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
+        FORCE_REVIEW: ${{ inputs.force_review }}
         ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
@@ -549,6 +554,7 @@ runs:
         CI_TIMEOUT_SEC: ${{ inputs.ci_timeout_sec }}
         CI_INTERVAL_SEC: ${{ inputs.ci_interval_sec }}
         CI_SKIP_ON_TIMEOUT: ${{ inputs.ci_skip_on_timeout }}
+        CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
       run: bash "${{ github.action_path }}/scripts/wait_for_ci.sh"
 
     - name: Run AI review
@@ -631,6 +637,7 @@ runs:
         CI_STATUS_CHECK: ${{ inputs.ci_status_check }}
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
+        CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope }}
         PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha }}

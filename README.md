@@ -328,6 +328,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 |-------|-------------|----------|---------|
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
+| `force_review` | Bypass the diff-unchanged guard and review even when the fingerprint matches. For an on-demand re-review (e.g. an `/ai-review` comment or `repository_dispatch`) when the diff is unchanged but the model/standards changed | No | `false` |
 | `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
 | `ci_timeout_sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
 | `ci_interval_sec` | Seconds between CI status polls when ci_status_check=true. | No | `15` |
@@ -426,6 +427,8 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 
 Set `ci_status_check: true` to wait for all CI checks to reach a terminal state before starting the AI review. This ensures the review considers the final CI results rather than running against in-progress checks.
 
+The per-check outcomes (name, status, conclusion) are also folded into the review corpus as a **CI Check Results** section, so the model cites real test/lint results instead of reporting them as "not verifiable". The reviewer never runs your test suite itself — that would mean executing untrusted PR code with the bot's token — it consumes the results your CI already produced in its own sandbox.
+
 ```yaml
 - uses: misospace/pr-reviewer-action@v1
   id: review
@@ -440,6 +443,36 @@ Set `ci_status_check: true` to wait for all CI checks to reach a terminal state 
 ```
 
 When `ci_skip_on_timeout: true` (the default), the action proceeds with the review after `ci_timeout_sec` even if checks are still running. Set it to `false` to fail the action on timeout instead. The `ci_status_skipped` and `ci_status_final` outputs indicate whether the CI wait completed and what the final state was.
+
+### 🔁 Forcing a re-review
+
+By default an unchanged PR is not re-reviewed — the precheck skips when the diff + config fingerprint matches the last managed review (`skip_if_diff_unchanged`). Set `force_review: "true"` to bypass that guard and review anyway. This is for on-demand re-reviews when the diff is unchanged but something the fingerprint can't see has changed — a model repointed behind a stable alias, updated standards, or a flaky first pass.
+
+A common pattern is an `/ai-review` comment command. Because `issue_comment` workflows run with the base repo's secrets and a write-scoped token, **the command must be authorized against the commenter's repository permission** — `scripts/parse_review_command.sh` does this (matches the command and requires `write`/`admin` via the collaborators API; `author_association` alone is not trusted):
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  rereview:
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authorize re-review command
+        id: cmd
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENTER_LOGIN: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash "$GITHUB_ACTION_PATH/scripts/parse_review_command.sh"
+      # then check out the PR head + run the action with force_review: "true"
+      # only when steps.cmd.outputs.should_review == 'true'
+```
+
+`force_review` is also useful straight from a `workflow_dispatch` input or a `repository_dispatch` payload, neither of which needs the comment-permission gate (both already require a token with write access to fire).
 
 ### 🧾 With evidence providers
 

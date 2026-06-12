@@ -120,6 +120,7 @@ run_precheck() {
     TOOL_MIN_SUCCESSFUL_REQUESTS="${TOOL_MIN_SUCCESSFUL_REQUESTS:-0}" \
     TOOL_ENABLE_FOR_FORKS="${TOOL_ENABLE_FOR_FORKS:-false}" \
     SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}" \
+    FORCE_REVIEW="${FORCE_REVIEW:-false}" \
     COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}" \
     PUBLISH_MODE="${PUBLISH_MODE:-comment}" \
     bash "$PRECHECK_SCRIPT"
@@ -214,6 +215,26 @@ echo ""
 echo "=== Test 6: SKIP_IF_DIFF_UNCHANGED=false → always review ==="
 ACTION_REF="v1.0.0" AI_MODEL="gpt-4" AI_API_FORMAT="openai" CONTEXT_LIMIT_MODE="normal" TOOL_MODE="off" SKIP_IF_DIFF_UNCHANGED=false RESULT="$(run_precheck)"
 check "should_review=true when skip disabled" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+
+# ── Test 6b: force_review=true overrides the matching fingerprint ─────
+echo ""
+echo "=== Test 6b: FORCE_REVIEW=true reviews even when fingerprint matches ==="
+# Self-contained: compute a fresh fingerprint under the current env (earlier
+# tests leak config vars via bash assignment-only-command persistence), pin
+# the guard on, and clean FORCE_REVIEW up afterwards so later tests are unaffected.
+SKIP_IF_DIFF_UNCHANGED=true
+unset FORCE_REVIEW 2>/dev/null || true
+set_empty_comments
+FP6B="$(run_precheck | grep '^diff_fingerprint=' | head -1 | cut -d= -f2)"
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${FP6B} -->
+APPROVE"
+RESULT="$(run_precheck)"
+check "should_review=false without force (matching fingerprint)" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+FORCE_REVIEW=true
+RESULT="$(run_precheck)"
+check "should_review=true when force_review bypasses the guard" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+unset FORCE_REVIEW
 
 # ── Test 7: Fingerprint format includes both diff and config parts ───
 echo ""

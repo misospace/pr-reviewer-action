@@ -5,6 +5,7 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 PR_NUMBER="${PR_NUMBER:-}"
 COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}"
 SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
+FORCE_REVIEW="${FORCE_REVIEW:-false}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
@@ -236,7 +237,15 @@ last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- a
 should_review=true
 skip_reason=""
 
-if [[ "$SKIP_IF_DIFF_UNCHANGED" == "true" && -n "$last_broad_fingerprint" && "$last_broad_fingerprint" == "$broad_fingerprint" ]]; then
+# force_review wins over the diff-unchanged guard: an on-demand re-review
+# (e.g. a /ai-review comment) must run even when the fingerprint is unchanged,
+# because the reason to re-review is usually something the fingerprint can't
+# see — a model repointed behind a stable alias, updated standards, a flaky
+# first pass. The fingerprint is still computed above so the fresh review
+# re-stamps the comment normally.
+if [[ "$FORCE_REVIEW" == "true" ]]; then
+  echo "force_review=true — bypassing the diff-unchanged guard" >&2
+elif [[ "$SKIP_IF_DIFF_UNCHANGED" == "true" && -n "$last_broad_fingerprint" && "$last_broad_fingerprint" == "$broad_fingerprint" ]]; then
   should_review=false
   skip_reason="diff-unchanged"
 fi

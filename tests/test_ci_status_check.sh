@@ -205,9 +205,13 @@ exit 0
 SHELLEOF
 chmod +x "$CI_TMP/bin/gh"
 
+# Shared with each run_wait call so tests can inspect the rendered CI summary.
+CHECKS_OUT="$CI_TMP/ci-checks.md"
+
 run_wait() {
   local output_file="$CI_TMP/out_$RANDOM$RANDOM"
   local rc=0
+  rm -f "$CHECKS_OUT"
   (
     PATH="$CI_TMP/bin:$PATH" \
     GH_TOKEN=test REPO="test/repo" PR_NUMBER=7 \
@@ -217,6 +221,7 @@ run_wait() {
     CI_TIMEOUT_SEC="${CI_TIMEOUT_SEC_OVERRIDE:-6}" \
     CI_INTERVAL_SEC=1 \
     CI_SKIP_ON_TIMEOUT="${CI_SKIP_ON_TIMEOUT_OVERRIDE:-true}" \
+    CI_CHECKS_FILE="$CHECKS_OUT" \
     GITHUB_OUTPUT="$output_file" \
     bash "$WAIT_SCRIPT" >/dev/null 2>&1
   ) || rc=$?
@@ -236,6 +241,16 @@ echo '{"state": "pending", "total_count": 0}' > "$CI_TMP/combined.json"
 RESULT="$(run_wait)"
 check "exit 0 on checks-only success" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
 check_contains "final state is success" "$RESULT" "ci_status_final=success"
+CHECKS_CONTENT="$(cat "$CHECKS_OUT" 2>/dev/null || true)"
+check_contains "checks summary names the external check" "$CHECKS_CONTENT" "build"
+check_contains "checks summary records its conclusion" "$CHECKS_CONTENT" "success"
+if echo "$CHECKS_CONTENT" | grep -q "ai-review"; then
+  echo "FAIL: own workflow run leaked into the CI checks summary"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS: own workflow run excluded from CI checks summary"
+  PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "--- Own run is the only check: concludes none instead of hanging ---"
@@ -244,6 +259,13 @@ echo '{"state": "pending", "total_count": 0}' > "$CI_TMP/combined.json"
 RESULT="$(run_wait)"
 check "exit 0 when only own run exists" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
 check_contains "final state is none" "$RESULT" "ci_status_final=none"
+if [ -s "$CHECKS_OUT" ]; then
+  echo "FAIL: CI checks file written when no external checks exist"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS: no CI checks file when only own run exists"
+  PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "--- External check failure is terminal ---"
