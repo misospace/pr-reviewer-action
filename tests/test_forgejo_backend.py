@@ -14,7 +14,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 # Ensure the project root is on sys.path so we can import pr_reviewer modules.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -30,31 +30,56 @@ import pr_reviewer.forgejo_backend as fb  # noqa: E402
 
 COMMENT_MARKER = "<!-- ai-pr-reviewer -->"
 
+# Field shapes verified against a live Forgejo instance (Codeberg /api/v1):
+# the PR object uses number/state/draft, and head/base are
+# {label, ref, repo, repo_id, sha} with repo.full_name carrying identity.
 PR_META = {
-    "index": 42,
+    "number": 42,
     "title": "Add new feature",
     "body": "This PR adds the new feature.\n\nFixes #100",
-    "status": "open",
+    "state": "open",
     "user": {"login": "contributor"},
     "head": {
-        "sha": "abc123def456",
+        "label": "feature-branch",
         "ref": "feature-branch",
-        "name": "pr-reviewer-action",
-        "owner": {"login": "contributor"},
+        "sha": "abc123def456",
+        "repo_id": 7,
+        "repo": {"full_name": "misospace/pr-reviewer-action"},
     },
     "base": {
-        "sha": "789xyz000",
+        "label": "main",
         "ref": "main",
-        "name": "pr-reviewer-action",
-        "owner": {"login": "misospace"},
+        "sha": "789xyz000",
+        "repo_id": 7,
+        "repo": {"full_name": "misospace/pr-reviewer-action"},
     },
     "merged_at": None,
     "created_at": "2026-06-11T10:00:00Z",
     "updated_at": "2026-06-11T12:00:00Z",
     "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/pulls/42",
-    "is_draft": False,
+    "draft": False,
     "labels": [{"name": "enhancement"}],
 }
+
+# A fork PR: head.repo is the fork, base.repo the upstream.
+FORK_PR_META = dict(
+    PR_META,
+    number=43,
+    head={
+        "label": "outsider:feature",
+        "ref": "feature",
+        "sha": "f0f0f0f0f0f0",
+        "repo_id": 99,
+        "repo": {"full_name": "outsider/pr-reviewer-action"},
+    },
+)
+
+# A fork PR whose fork repo was deleted: head.repo comes back null.
+DELETED_FORK_PR_META = dict(
+    FORK_PR_META,
+    number=44,
+    head={"label": "unknown", "ref": "feature", "sha": "dead00000000", "repo_id": 0, "repo": None},
+)
 
 PR_DIFF = (
     "diff --git a/test.txt b/test.txt\n"
@@ -109,10 +134,10 @@ EDITED_COMMENT = {
 }
 
 ISSUE = {
-    "index": 100,
+    "number": 100,
     "title": "Bug report",
     "body": "Found a bug in the system.",
-    "status": "open",
+    "state": "open",
     "created_at": "2026-06-10T08:00:00Z",
     "updated_at": "2026-06-11T09:00:00Z",
 }
@@ -466,20 +491,118 @@ class TestListPrFiles(unittest.TestCase):
         self.assertEqual(result[0]["filename"], "src/main.py")
 
 
-class TestGitHubModeFallsBack(unittest.TestCase):
-    """Test that when FORGEJO_API_URL is not set, GitHub mode is used."""
+class TestGitHubMode(unittest.TestCase):
+    """GitHub mode must invoke gh with arguments the real CLI accepts.
 
-    def test_get_pr_metadata_uses_gh_when_no_forgejo_url(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""):
+    These mock ``_gh`` (no live network calls from unit tests) and assert
+    the exact invocation: the original implementation passed ``gh pr view
+    --json`` field names that don't exist (user/head/base/merged_at) and a
+    ``--create-if-none`` flag that is invalid without ``--edit-last`` — both
+    invisible to tests that only checked the fallback result.
+    """
+
+    GH_REST_PR = {
+        "number": 42,
+        "title": "Add new feature",
+        "state": "open",
+        "user": {"login": "contributor"},
+        "head": {"sha": "abc123def456", "ref": "feature-branch", "repo": {"full_name": "outsider/pr-reviewer-action"}},
+        "base": {"sha": "789xyz000", "ref": "main", "repo": {"full_name": "misospace/pr-reviewer-action"}},
+        "draft": False,
+    }
+
+    def test_get_pr_metadata_uses_gh_api_rest(self):
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(0, json.dumps(self.GH_REST_PR))) as mock_gh:
             result = fb.get_pr_metadata("misospace/pr-reviewer-action", 42)
+
+        mock_gh.assert_called_once_with("api", "repos/misospace/pr-reviewer-action/pulls/42")
+        self.assertEqual(result["number"], 42)
+        self.assertEqual(result["head"]["repo"]["full_name"], "outsider/pr-reviewer-action")
+
+    def test_get_pr_metadata_returns_none_on_gh_failure(self):
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(1, '{"message":"Not Found"}')):
+            result = fb.get_pr_metadata("misospace/pr-reviewer-action", 999)
 
         self.assertIsNone(result)
 
-    def test_get_pr_diff_returns_empty_when_no_gh(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""):
+    def test_get_pr_diff_returns_empty_on_gh_failure(self):
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(1, "")):
             result = fb.get_pr_diff("misospace/pr-reviewer-action", 42)
 
         self.assertEqual(result, "")
+
+    def test_create_comment_does_not_pass_create_if_none(self):
+        # --create-if-none is only valid with --edit-last; plain creation
+        # must not send it.
+        url = "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-77"
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(0, url + "\n")) as mock_gh:
+            result = fb.create_comment("misospace/pr-reviewer-action", 42, "hello")
+
+        args = mock_gh.call_args[0]
+        self.assertNotIn("--create-if-none", args)
+        self.assertEqual(result["id"], 77)
+        self.assertEqual(result["html_url"], url)
+
+    def test_edit_last_comment_parses_gh_url(self):
+        # gh prints .../pull/N#issuecomment-ID — no slash before the fragment.
+        url = "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-88"
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(0, url + "\n")):
+            result = fb.edit_last_comment("misospace/pr-reviewer-action", 42, "updated")
+
+        self.assertEqual(result["id"], 88)
+        self.assertEqual(result["html_url"], url)
+
+
+class TestIsForkPr(unittest.TestCase):
+    """Fork detection must key off head.repo.full_name and fail closed."""
+
+    def _meta(self, fixture):
+        return patch.object(fb, "get_pr_metadata", return_value=fb._forgejo_pr_to_github(
+            fixture, "misospace", "pr-reviewer-action"))
+
+    def test_same_repo_pr_is_not_fork(self):
+        with self._meta(PR_META):
+            self.assertFalse(fb.is_fork_pr("misospace/pr-reviewer-action", 42))
+
+    def test_fork_pr_detected(self):
+        with self._meta(FORK_PR_META):
+            self.assertTrue(fb.is_fork_pr("misospace/pr-reviewer-action", 43))
+
+    def test_deleted_fork_head_repo_fails_closed(self):
+        # head.repo: null (deleted fork) → unknown origin must be treated as
+        # a fork so fork gating stays engaged.
+        with self._meta(DELETED_FORK_PR_META):
+            self.assertTrue(fb.is_fork_pr("misospace/pr-reviewer-action", 44))
+
+
+class TestCurlStatusParsing(unittest.TestCase):
+    """_curl appends '\\n%{http_code}' and must parse bodies of any shape."""
+
+    def _run_curl(self, stdout: bytes, returncode: int = 0):
+        proc = Mock(stdout=stdout, returncode=returncode)
+        with patch.object(fb.subprocess, "run", return_value=proc):
+            return fb._curl("GET", "http://example.invalid/api")
+
+    def test_compact_json_body_without_trailing_newline(self):
+        code, body = self._run_curl(b'{"a": 1}\n200')
+        self.assertEqual(code, 200)
+        self.assertEqual(body, '{"a": 1}')
+
+    def test_empty_body_status_only(self):
+        # An empty 204 body must not be misread as a network error.
+        code, body = self._run_curl(b"\n204")
+        self.assertEqual(code, 204)
+        self.assertEqual(body, "")
+
+    def test_no_status_marker_is_network_error(self):
+        code, body = self._run_curl(b"curl: (7) connection refused", returncode=7)
+        self.assertEqual(code, 7)
+        self.assertEqual(body, "curl: (7) connection refused")
 
 
 class TestErrorBodyOnStdout(unittest.TestCase):

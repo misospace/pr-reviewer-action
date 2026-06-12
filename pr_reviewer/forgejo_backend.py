@@ -60,20 +60,24 @@ def _curl(
 ) -> tuple[int, str]:
     """Execute a curl request and return (http_status_code, body_text).
 
-    Uses ``-w '%{http_code}'`` to capture the actual HTTP status code.
+    Uses ``-w '\\n%{http_code}'`` to capture the actual HTTP status code.
     On HTTP errors the response body is written to stdout so callers can
     parse error payloads — this is the *error-body-on-stdout* discipline.
     """
     if token is None:
         token = FORGEJO_TOKEN or GH_TOKEN
 
+    # The status code is appended after an explicit newline separator: bodies
+    # are not guaranteed to end with whitespace (an empty 204 body, or compact
+    # JSON without a trailing newline, would otherwise fuse with the code and
+    # make it unparseable).
     cmd: list[str] = [
         "curl", "-sS",
         "-X", method.upper(),
         "-H", f"Authorization: token {token}",
         "-H", f"Accept: {accept}",
         "-o", "-",
-        "-w", "%{http_code}",
+        "-w", "\n%{http_code}",
         url,
     ]
     if data is not None and method.upper() in ("POST", "PATCH", "PUT"):
@@ -89,11 +93,11 @@ def _curl(
 
     raw = proc.stdout.decode("utf-8", errors="replace")
 
-    # The last token from -w is the HTTP status code.
-    parts = raw.rsplit(None, 1)
-    if len(parts) == 2 and parts[-1].isdigit():
-        http_code = int(parts[-1])
-        body_text = parts[0].rstrip()
+    # Everything after the last newline is the HTTP status code we appended
+    # with -w; everything before it is the body (possibly empty).
+    body_text, sep, code_text = raw.rpartition("\n")
+    if sep and code_text.strip().isdigit():
+        http_code = int(code_text.strip())
     else:
         # No status code — curl failed entirely (network error).
         http_code = proc.returncode if proc.returncode != 0 else 500
@@ -150,11 +154,13 @@ def get_pr_metadata(repo_full_name: str, pr_number: int) -> dict[str, Any] | Non
             return None
         return _forgejo_pr_to_github(data, owner, repo, pr_number)
 
-    # GitHub via gh CLI
+    # GitHub via gh CLI. The REST pulls endpoint already returns the exact
+    # shape this module normalises Forgejo into (snake_case, user/head/base
+    # objects), so no field mapping is needed. ``gh pr view --json`` is NOT
+    # equivalent — its fields are camelCase (author/headRefOid/mergedAt) and
+    # it has no user/head/base keys at all.
     status_code, body = _gh(
-        "pr", "view", str(pr_number),
-        "--repo", repo_full_name,
-        "--json", "number,title,body,state,user,head,base,merged_at,created_at,updated_at,url,draft,labels",
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}",
     )
     if status_code != 0 or not body.strip():
         return None
@@ -162,31 +168,44 @@ def get_pr_metadata(repo_full_name: str, pr_number: int) -> dict[str, Any] | Non
 
 
 def _forgejo_pr_to_github(data: dict, owner: str, repo: str, pr_number: int = 0) -> dict[str, Any]:
-    """Normalise a Forgejo PR response to the GitHub shape used by callers."""
-    head = data.get("head", {})
-    base = data.get("base", {})
+    """Normalise a Forgejo PR response to the GitHub shape used by callers.
+
+    Field names verified against a live Forgejo instance (Codeberg
+    ``/api/v1``): the PR object uses ``number``/``state``/``draft``, and
+    ``head``/``base`` are ``{label, ref, repo, repo_id, sha}`` where
+    ``repo.full_name`` carries the repository identity. ``head.repo`` is the
+    *fork* repo on fork PRs — it must never be defaulted to the base repo,
+    or fork detection (and the fork gating built on it) fails open.
+    """
+    head = data.get("head") or {}
+    base = data.get("base") or {}
+
+    def _branch_repo_full_name(branch: dict) -> str:
+        # Missing repo (e.g. deleted fork) yields "" so is_fork_pr can treat
+        # the origin as unknown rather than silently same-repo.
+        return ((branch.get("repo") or {}).get("full_name")) or ""
 
     return {
-        "number": data.get("index", data.get("number", pr_number)),
+        "number": data.get("number", pr_number),
         "title": data.get("title", ""),
         "body": data.get("body", ""),
-        "state": data.get("status", data.get("state", "open")),
-        "user": {"login": data.get("user", {}).get("login", "")},
+        "state": data.get("state", "open"),
+        "user": {"login": (data.get("user") or {}).get("login", "")},
         "head": {
-            "sha": head.get("sha", head.get("hash", "")),
+            "sha": head.get("sha", ""),
             "ref": head.get("ref", ""),
-            "repo": {"full_name": f"{head.get('owner', {}).get('login', owner)}/{head.get('name', repo)}"},
+            "repo": {"full_name": _branch_repo_full_name(head)},
         },
         "base": {
-            "sha": base.get("sha", base.get("hash", "")),
+            "sha": base.get("sha", ""),
             "ref": base.get("ref", ""),
-            "repo": {"full_name": f"{base.get('owner', {}).get('login', owner)}/{base.get('name', repo)}"},
+            "repo": {"full_name": _branch_repo_full_name(base) or f"{owner}/{repo}"},
         },
         "merged_at": data.get("merged_at", None),
-        "created_at": data.get("created_at", data.get("created_on", "")),
-        "updated_at": data.get("updated_at", data.get("updated_on", "")),
-        "url": data.get("html_url", f"https://{FORGEJO_API_URL.replace('http://', '').replace('https://', '')}/{owner}/{repo}/pulls/{data.get('index', pr_number)}"),
-        "draft": data.get("is_private", False) or data.get("is_draft", False),
+        "created_at": data.get("created_at", ""),
+        "updated_at": data.get("updated_at", ""),
+        "url": data.get("html_url", f"https://{FORGEJO_API_URL.replace('http://', '').replace('https://', '')}/{owner}/{repo}/pulls/{data.get('number', pr_number)}"),
+        "draft": bool(data.get("draft", False)),
         "labels": [{"name": l.get("name", "")} for l in data.get("labels", [])],
     }
 
@@ -305,17 +324,19 @@ def create_comment(
             "body": data.get("body", body),
         }
 
-    # GitHub via gh CLI
+    # GitHub via gh CLI. Plain creation — ``--create-if-none`` is only valid
+    # together with ``--edit-last`` and is a flag-parse error on its own.
     status_code, body_text = _gh(
         "pr", "comment", str(issue_number),
         "--repo", repo_full_name,
-        "--create-if-none",
         "--body", body,
     )
     if status_code != 0 or not body_text.strip():
         return None
 
-    url_match = re.search(r"https?://[^\s]+/pull/[0-9]+/#issuecomment-[0-9]+", body_text)
+    # gh prints the comment URL as .../pull/N#issuecomment-ID (no slash
+    # before the fragment).
+    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", body_text)
     comment_id_match = re.search(r"#issuecomment-([0-9]+)", body_text or "")
     return {
         "id": int(comment_id_match.group(1)) if comment_id_match else 0,
@@ -380,7 +401,7 @@ def edit_last_comment(
         # --edit-last fails when no comment exists; fall back to create
         return create_comment(repo_full_name, issue_number, new_body)
 
-    url_match = re.search(r"https?://[^\s]+/pull/[0-9]+/#issuecomment-[0-9]+", body_text)
+    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", body_text)
     comment_id_match = re.search(r"#issuecomment-([0-9]+)", body_text or "")
     return {
         "id": int(comment_id_match.group(1)) if comment_id_match else 0,
@@ -413,9 +434,9 @@ def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None
         return {
             "body": data.get("body", ""),
             "title": data.get("title", ""),
-            "state": data.get("status", data.get("state", "open")),
-            "created_at": data.get("created_at", data.get("created_on", "")),
-            "updated_at": data.get("updated_at", data.get("updated_on", "")),
+            "state": data.get("state", "open"),
+            "created_at": data.get("created_at", ""),
+            "updated_at": data.get("updated_at", ""),
         }
 
     # GitHub via gh CLI
@@ -493,19 +514,22 @@ def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
-    """Return True if the PR originates from a fork."""
+    """Return True if the PR originates from a fork.
+
+    Both backends yield the same normalised shape, so a single comparison
+    serves both. A missing head repo (GitHub returns ``head.repo: null``
+    when a fork was deleted; Forgejo normalisation yields ``""``) is treated
+    as a fork — an unknown origin must fail closed because fork gating
+    (tool harness / evidence providers) keys off this answer.
+    """
     metadata = get_pr_metadata(repo_full_name, pr_number)
     if metadata is None:
         return False
 
-    head_repo = (metadata.get("head") or {}).get("repo", {})
-    base_repo = (metadata.get("base") or {}).get("repo", {})
-    head_full = head_repo.get("full_name", "")
-    base_full = base_repo.get("full_name", "")
-
-    if _is_forgejo_mode():
-        return head_full != base_full and head_full != ""
-
+    head_full = ((metadata.get("head") or {}).get("repo") or {}).get("full_name") or ""
+    base_full = ((metadata.get("base") or {}).get("repo") or {}).get("full_name") or ""
+    if not head_full:
+        return True
     return head_full != base_full
 
 
