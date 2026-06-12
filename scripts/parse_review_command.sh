@@ -72,9 +72,11 @@ fi
 
 # 4. Authorize against real repository permission. rc-check the call: gh
 #    prints error bodies to stdout on failure, so `$(... || echo "")` would
-#    capture JSON garbage — assign only when gh exits zero.
+#    capture JSON garbage — assign only when the call exits zero.
+# shellcheck source=scripts/platform_api.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform_api.sh"
 permission=""
-if out="$(gh api "repos/${REPO}/collaborators/${COMMENTER_LOGIN}/permission" --jq '.permission' 2>/dev/null)"; then
+if out="$(platform_collaborator_permission "$REPO" "$COMMENTER_LOGIN" 2>/dev/null)"; then
   permission="$out"
 else
   emit false "permission-check-failed"
