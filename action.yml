@@ -384,6 +384,10 @@ inputs:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
     default: "true"
+  force_review:
+    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Intended for an on-demand "re-review" trigger (e.g. a /ai-review comment or repository_dispatch) when the diff is unchanged but the underlying model/standards changed. Default false.
+    required: false
+    default: "false"
   comment_marker:
     description: HTML marker for the managed PR comment
     required: false
@@ -488,6 +492,7 @@ runs:
         PUBLISH_MODE: ${{ inputs.publish_mode }}
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
+        FORCE_REVIEW: ${{ inputs.force_review }}
         ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
