@@ -705,8 +705,8 @@ runs:
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
-      run: |
         PLATFORM: ${{ inputs.platform }}
+      run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
 
@@ -775,8 +775,8 @@ runs:
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
-      run: |
         PLATFORM: ${{ inputs.platform }}
+      run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
 
