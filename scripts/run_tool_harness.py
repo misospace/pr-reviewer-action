@@ -908,6 +908,20 @@ def run_native_loop(
     if outcome.error:
         result["loop_error"] = outcome.error
 
+    # Additive structured trace of executed calls (tool + args + status). The
+    # existing `tool_results` array keeps its executor-result shape for
+    # downstream enforcement; this richer record is what the #207 eval harness
+    # grades capability checks against (e.g. "did a web_fetch hit the support
+    # matrix?"), without parsing the markdown.
+    result["tool_calls"] = [
+        {
+            "tool": executed.tool,
+            "args": executed.args,
+            "status": executed.result.get("status", "error"),
+        }
+        for executed in outcome.executed
+    ]
+
     md_lines = ["# Tool Harness Results", ""]
     md_lines.append(f"**Planned requests:** {outcome.tool_calls_issued}")
     md_lines.append(f"**Loop rounds:** {outcome.rounds}")
