@@ -397,13 +397,14 @@ inputs:
     default: ""
   platform:
     description: >-
-      Host forge backend for repository API operations. auto (default)
-      detects from GITHUB_SERVER_URL (non-github.com hosts resolve to
-      forgejo); github forces the gh CLI backend; forgejo uses the Forgejo
-      /api/v1 REST backend (requires FORGEJO_API_URL in the environment;
-      Forgejo support is rolling out across the 1.4.x line — unimplemented
-      operations fail loudly). Linked-source enrichment always targets
-      github.com regardless of this setting.
+      Target hosting platform for API capability gating and backend selection.
+      'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL:
+      non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo';
+      otherwise 'github'. Set 'forgejo' or 'github' explicitly to override
+      auto-detection. On Forgejo, features requiring GitHub GraphQL (thread
+      resolution, review minimization) degrade gracefully with a log line;
+      the REST backend handles core PR operations. Linked-source enrichment
+      always targets github.com regardless of this setting.
     required: false
     default: "auto"
   skip_if_diff_unchanged:
@@ -450,15 +451,6 @@ inputs:
       last managed review. auto performs a full review first, then incremental
       reviews on later PR synchronize events when safe. Accepted values: auto,
       full, incremental.
-    required: false
-    default: "auto"
-  platform:
-    description: >-
-      Target hosting platform for API capability gating. 'auto' (default) detects
-      the platform from FORGEJO_API_URL: if set and non-empty, platform is
-      'forgejo'; otherwise 'github'. Set explicitly to 'forgejo' or 'github' to
-      override auto-detection. On Forgejo, features requiring GitHub GraphQL
-      (thread resolution, review minimization) degrade gracefully with a log line.
     required: false
     default: "auto"
 
