@@ -416,6 +416,15 @@ inputs:
       full, incremental.
     required: false
     default: "auto"
+  platform:
+    description: >-
+      Target hosting platform for API capability gating. 'auto' (default) detects
+      the platform from FORGEJO_API_URL: if set and non-empty, platform is
+      'forgejo'; otherwise 'github'. Set explicitly to 'forgejo' or 'github' to
+      override auto-detection. On Forgejo, features requiring GitHub GraphQL
+      (thread resolution, review minimization) degrade gracefully with a log line.
+    required: false
+    default: "auto"
 
 outputs:
 
@@ -662,6 +671,7 @@ runs:
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: |
+        PLATFORM: ${{ inputs.platform }}
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
 
@@ -730,6 +740,7 @@ runs:
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: |
+        PLATFORM: ${{ inputs.platform }}
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
 
@@ -838,6 +849,7 @@ runs:
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"

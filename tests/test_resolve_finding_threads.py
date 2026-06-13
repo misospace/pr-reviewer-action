@@ -374,6 +374,26 @@ class TestMainEndToEnd:
         assert main(["prog", prev, found]) == 0
         assert log.read_text().count("in_reply_to") == 1
 
+    def test_forgejo_platform_skips_graphql(self, tmp_path, monkeypatch):
+        """When platform=forgejo, skip GraphQL thread management and log."""
+        monkeypatch.setenv("PLATFORM", "forgejo")
+        carried = _persisted(_finding(message="carried finding"))
+        prev, found = _write_inputs(tmp_path, [carried], [])
+        out_file = tmp_path / "open-threads.json"
+        assert main(["prog", prev, found, str(out_file)]) == 0
+        # Should have written empty suppression file (no threads matched)
+        assert out_file.read_text().strip() == "[]"
+
+    def test_forgejo_auto_detect_skips_graphql(self, tmp_path, monkeypatch):
+        """When PLATFORM=auto and FORGEJO_API_URL set, skip GraphQL."""
+        monkeypatch.setenv("PLATFORM", "auto")
+        monkeypatch.setenv("FORGEJO_API_URL", "https://forgejo.example.com")
+        carried = _persisted(_finding(message="carried finding"))
+        prev, found = _write_inputs(tmp_path, [carried], [])
+        out_file = tmp_path / "open-threads.json"
+        assert main(["prog", prev, found, str(out_file)]) == 0
+        assert out_file.read_text().strip() == "[]"
+
     def test_missing_env_skips(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PR_NUMBER")
         prev, found = _write_inputs(tmp_path, [], [])

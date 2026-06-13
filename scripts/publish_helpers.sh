@@ -4,6 +4,26 @@ set -euo pipefail
 # Shared helpers for publish steps in action.yml.
 # Source this script from each publish step, then call the functions.
 
+
+# Resolve the effective platform from the PLATFORM input and FORGEJO_API_URL.
+# When PLATFORM=auto (default), detects Forgejo via FORGEJO_API_URL.
+# Outputs: "github" or "forgejo" to stdout.
+resolve_platform() {
+  local platform="${PLATFORM:-auto}"
+  case "$(printf '%s' "$platform" | tr '[:upper:]' '[:lower:]')" in
+    github) printf 'github' ;;
+    forgejo) printf 'forgejo' ;;
+    auto|"")
+      if [ -n "${FORGEJO_API_URL:-}" ]; then
+        printf 'forgejo'
+      else
+        printf 'github'
+      fi
+      ;;
+    *) printf 'github' ;;  # unknown → assume github
+  esac
+}
+
 # Sanitize model output: strip metadata markers and neutralize upstream references.
 # Args: $1 = output file path
 # Writes sanitized markdown to the output file using $REVIEW_MARKDOWN env var.
@@ -57,6 +77,9 @@ cleanup_native_reviews() {
     return 0
   fi
 
+  local _platform
+  _platform="$(resolve_platform)"
+
   echo "Cleaning up previous managed native reviews for #$PR_NUMBER"
   local reviews_json
   if ! reviews_json="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null)"; then
@@ -67,12 +90,16 @@ cleanup_native_reviews() {
   # Minimized state lives only in GraphQL (the REST review list does not
   # expose it); one query maps databaseId → isMinimized for skip logic. On
   # failure the map is empty and minimization is simply retried (idempotent).
-  local minimized_ids
-  minimized_ids="$(gh api graphql \
-    -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviews(first: 100) { nodes { databaseId isMinimized } } } } }' \
-    -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
-    --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.isMinimized) | .databaseId]' 2>/dev/null || echo '[]')"
-  printf '%s' "$minimized_ids" | jq -e 'type == "array"' >/dev/null 2>&1 || minimized_ids='[]'
+  local minimized_ids='[]'
+  if [ "$_platform" = "github" ]; then
+    minimized_ids="$(gh api graphql \
+      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviews(first: 100) { nodes { databaseId isMinimized } } } } }' \
+      -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
+      --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.isMinimized) | .databaseId]' 2>/dev/null || echo '[]')"
+    printf '%s' "$minimized_ids" | jq -e 'type == "array"' >/dev/null 2>&1 || minimized_ids='[]'
+  else
+    echo "  NOTE: Skipping GraphQL minimized-state query (platform=$_platform; no GraphQL API)" >&2
+  fi
 
   # Managed bodies start with the configured marker (or, for reviews created
   # by older action versions, the bare/JSON "<!-- ai-pr-reviewer" prefix).
@@ -104,14 +131,18 @@ cleanup_native_reviews() {
       # Hide the review in the PR timeline. Dismissal only strikes the verdict;
       # the full review text stays expanded without this. PullRequestReview
       # implements GraphQL's Minimizable, the same mechanism as the UI's
-      # "Hide" menu.
+      # "Hide" menu. Not available on Forgejo (no GraphQL API).
       if [ -n "$REVIEW_NODE_ID" ] && [ "$REVIEW_MINIMIZED" != "minimized" ]; then
-        if gh api graphql \
-            -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
-            -f id="$REVIEW_NODE_ID" >/dev/null 2>&1; then
-          echo "  Minimized (hidden as outdated) review #$REVIEW_ID"
+        if [ "$_platform" = "github" ]; then
+          if gh api graphql \
+              -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
+              -f id="$REVIEW_NODE_ID" >/dev/null 2>&1; then
+            echo "  Minimized (hidden as outdated) review #$REVIEW_ID"
+          else
+            echo "  WARN: Could not minimize review #$REVIEW_ID (may require additional permissions)" >&2
+          fi
         else
-          echo "  WARN: Could not minimize review #$REVIEW_ID (may require additional permissions)" >&2
+          echo "  NOTE: Skipping minimizeComment for review #$REVIEW_ID (platform=$_platform; no GraphQL API)" >&2
         fi
       fi
     done <<< "$PREV_REVIEWS"
