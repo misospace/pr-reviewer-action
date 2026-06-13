@@ -301,6 +301,71 @@ RESULT="$(run_wait)"
 check "exit 0 on combined success" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
 check_contains "final state is success (combined)" "$RESULT" "ci_status_final=success"
 
+
+# ── Functional tests: Forgejo commit-status path ────────────────────────
+echo ""
+echo "=== Functional: Forgejo commit-status path (no check-runs) ==="
+
+# On Forgejo, check-runs are always empty; commit statuses carry the signal.
+# The stubbed gh already handles this — we just set check-runs to empty
+# and provide statuses in the combined response.
+
+echo ""
+echo "--- Forgejo: statuses-only success (check-runs empty) ---"
+echo '{"check_runs": [], "total_count": 0}' > "$CI_TMP/check-runs.json"
+cat > "$CI_TMP/combined.json" <<'FJEOF'
+{"state":"success","total_count":2,"statuses":[{"id":10,"context":"pr-reviewer-action","state":"pending","description":"AI PR Review"},{"id":11,"context":"golangci-lint","state":"success","description":"Lint passed"}]}
+FJEOF
+RESULT="$(run_wait)"
+check "exit 0 on forgejo statuses-only success" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
+check_contains "final state is success (forgejo)" "$RESULT" "ci_status_final=success"
+CHECKS_CONTENT="$(cat "$CHECKS_OUT" 2>/dev/null || true)"
+check_contains "forgejo checks summary names the external context" "$CHECKS_CONTENT" "golangci-lint"
+check_contains "forgejo checks summary records its state" "$CHECKS_CONTENT" "success"
+if echo "$CHECKS_CONTENT" | grep -q "pr-reviewer-action"; then
+  echo "FAIL: own status context leaked into the CI checks summary (forgejo)"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS: own status context excluded from CI checks summary (forgejo)"
+  PASS=$((PASS + 1))
+fi
+
+echo ""
+echo "--- Forgejo: statuses-only failure ---"
+echo '{"check_runs": [], "total_count": 0}' > "$CI_TMP/check-runs.json"
+cat > "$CI_TMP/combined.json" <<'FJEOF'
+{"state":"failure","total_count":2,"statuses":[{"id":10,"context":"pr-reviewer-action","state":"pending","description":"AI PR Review"},{"id":12,"context":"test-suite","state":"failure","description":"Tests failed"}]}
+FJEOF
+RESULT="$(run_wait)"
+check "exit 0 on forgejo statuses-only failure" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
+check_contains "final state is failure (forgejo)" "$RESULT" "ci_status_final=failure"
+
+echo ""
+echo "--- Forgejo: pending status leads to timeout + skip ---"
+echo '{"check_runs": [], "total_count": 0}' > "$CI_TMP/check-runs.json"
+cat > "$CI_TMP/combined.json" <<'FJEOF'
+{"state":"pending","total_count":2,"statuses":[{"id":10,"context":"pr-reviewer-action","state":"pending","description":"AI PR Review"},{"id":13,"context":"build","state":"pending","description":"Building..."}]}
+FJEOF
+RESULT="$(CI_TIMEOUT_SEC_OVERRIDE=3 run_wait)"
+check "exit 1 on forgejo timeout with skip=true" "$(echo "$RESULT" | grep '^rc=')" "rc=1"
+check_contains "skipped output written (forgejo)" "$RESULT" "ci_status_skipped=true"
+
+echo ""
+echo "--- Forgejo: only own context exists — concludes none ---"
+echo '{"check_runs": [], "total_count": 0}' > "$CI_TMP/check-runs.json"
+cat > "$CI_TMP/combined.json" <<'FJEOF'
+{"state":"pending","total_count":1,"statuses":[{"id":10,"context":"pr-reviewer-action","state":"pending","description":"AI PR Review"}]}
+FJEOF
+RESULT="$(run_wait)"
+check "exit 0 when only own context exists (forgejo)" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
+check_contains "final state is none (forgejo own-only)" "$RESULT" "ci_status_final=none"
+
+# ── Test: CI_STATUS_CONTEXT env var present in script ────────────────────
+echo ""
+echo "=== Test: CI_STATUS_CONTEXT for forgejo context exclusion ==="
+check_contains "script defines CI_STATUS_CONTEXT default"   "$wait_content" 'CI_STATUS_CONTEXT'
+check_contains "legacy jq filter excludes own context by name"   "$wait_content" 'select(.context != $ctx)'
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
