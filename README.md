@@ -459,6 +459,17 @@ on:
     types: [opened, reopened, synchronize, ready_for_review, labeled]   # ← add `labeled`
 ```
 
+> **If your workflow uses `concurrency` with `cancel-in-progress: true`** (common), give `labeled`
+> events their own group — otherwise an auto-applied label (e.g. Renovate adding labels at PR
+> creation) spawns a `labeled` run that cancels the in-flight `opened` review, and the PR goes
+> unreviewed:
+>
+> ```yaml
+> concurrency:
+>   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}
+>   cancel-in-progress: true
+> ```
+
 Nothing else changes. The action detects the label event itself: if the added label is the `rereview_label` (default `ai-review`) it forces a fresh review and then **removes the label** so adding it again re-triggers; any other label is ignored. There's no second workflow, no command parsing, and no checkout/authorization dance — labels are inherently maintainer-only (only users with write/triage permission can apply them), and the trigger rides `pull_request`, so there's no privileged-checkout exposure.
 
 Rename the trigger label with the `rereview_label` input if `ai-review` collides with an existing label. This repository's own [`ai-pr-review.yaml`](.github/workflows/ai-pr-review.yaml) uses exactly this wiring.
