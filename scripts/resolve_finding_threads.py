@@ -51,6 +51,27 @@ from build_review_comments import FINDING_MARKER_PREFIX, finding_fingerprint  # 
 from pr_reviewer.carry_forward import load_carried_findings  # noqa: E402
 from pr_reviewer.platform import PlatformUnsupported, gh_argv  # noqa: E402
 
+
+def _resolve_platform() -> str:
+    """Resolve effective platform from PLATFORM env var and FORGEJO_API_URL.
+
+    Returns 'github' or 'forgejo'. Mirrors the shell resolve_platform() in
+    publish_helpers.sh so both degrade consistently.
+    """
+    platform = os.environ.get("PLATFORM", "auto").lower()
+    if platform in ("github", "forgejo"):
+        return platform
+    # auto (default) or unknown → detect from FORGEJO_API_URL
+    if os.environ.get("FORGEJO_API_URL", "").strip():
+        return "forgejo"
+    return "github"
+
+
+def _is_github_platform() -> bool:
+    """Return True when running on GitHub (GraphQL and review-thread APIs available)."""
+    return _resolve_platform() == "github"
+
+
 _THREADS_QUERY = (
     "query($owner: String!, $name: String!, $number: Int!) {"
     " repository(owner: $owner, name: $name) {"
@@ -234,6 +255,25 @@ def main(argv) -> int:
             open_by_fp[finding_fingerprint(item)] = entry
 
     owner, name = repo.split("/", 1)
+
+    # Forgejo has no GraphQL API — thread resolution and follow-up replies
+    # must degrade. The suppression file (open_threads_out) is still useful
+    # for dedup, but we cannot query or mutate threads.
+    if not _is_github_platform():
+        print(
+            f"resolve_finding_threads: skipping thread management "
+            f"(platform={_resolve_platform()}; no GraphQL API)",
+            file=sys.stderr,
+        )
+        # Still write empty surviving list so build_review_comments.py
+        # knows no threads were matched (no suppression).
+        if open_threads_out:
+            try:
+                Path(open_threads_out).write_text("[]\n", encoding="utf-8")
+            except OSError:
+                print(f"  WARN: could not write {open_threads_out}", file=sys.stderr)
+        return 0
+
     data = _gh_graphql(
         [
             "-f", f"query={_THREADS_QUERY}",

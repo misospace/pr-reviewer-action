@@ -64,6 +64,7 @@ jobs:
 ## 📚 Table of contents
 
 - [How it works](#%EF%B8%8F-how-it-works)
+- [Platform support](#-platform-support)
 - [Review pipeline features](#-review-pipeline-features)
 - [Inputs](#%EF%B8%8F-inputs)
 - [Outputs](#-outputs)
@@ -100,6 +101,28 @@ What it supports:
 | ✅ Managed PR comment publishing | ✅ Automatic skip when the effective PR diff is unchanged |
 | ✅ Linked issue ingestion (`Fixes #123`, `Closes owner/repo#456`) | ✅ Repo-provided rules via `CLAUDE.md`, `AGENTS.md`, or a custom file |
 | ✅ Upstream link sanitizer for published reviews | ✅ Incremental re-reviews with carried-forward findings |
+
+## 🖥️ Platform support
+
+The action works on **GitHub** and **Forgejo** (1.4.x). Set `platform: auto` (default) to detect automatically from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`, or set explicitly to `forgejo` / `github`.
+
+| Feature | GitHub | Forgejo |
+|---|---|---|
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) |
+| Managed sticky comment | ✅ Full | ✅ Full |
+| Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors |
+| Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
+| Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
+| Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
+| Thread resolution (`resolveReviewThread`) | ✅ Full | ❌ Skipped (no GraphQL) |
+| Thread follow-up replies (`in_reply_to`) | ✅ Full | ❌ Skipped — suppression-file dedup only |
+| CI status check polling | ✅ Full | ⚠️ Partial — uses Checks API if available |
+| Evidence providers | ✅ Full | ✅ Full |
+| Tool harness | ✅ Full | ✅ Full |
+| Incremental reviews + carry-forward | ✅ Full | ✅ Full |
+| Fast/smart model routing | ✅ Full | ✅ Full |
+
+> **Note:** On Forgejo, features requiring GitHub's GraphQL API (thread resolution, review minimization, thread follow-up replies) are skipped with a clear log line. The core review pipeline and all REST-based features work fully.
 
 ## 🧠 Review pipeline features
 
@@ -328,7 +351,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
-| `platform` | Host forge backend: `auto` (detect from `GITHUB_SERVER_URL`), `github`, or `forgejo` (requires `FORGEJO_API_URL`; support rolling out across 1.4.x — unimplemented operations fail loudly). Linked-source enrichment always targets github.com | No | `auto` |
+| `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
 | `force_review` | Bypass the diff-unchanged guard and review even when the fingerprint matches. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` | No | `false` |
 | `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
