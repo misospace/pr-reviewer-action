@@ -234,7 +234,10 @@ platform_collaborator_permission() {
 platform_check_runs() {
   # $1=repo $2=sha → check-runs JSON
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "check_runs"   # #225 uses commit statuses instead
+    # Forgejo has no check-runs API — return empty structure so the
+    # wait_for_ci.sh jq summary produces zero external checks. The commit
+    # statuses path (platform_commit_status) carries the CI signal.
+    printf '{"check_runs":[],"total_count":0}'
   else
     gh api "repos/$1/commits/$2/check-runs?per_page=100"
   fi
@@ -243,7 +246,7 @@ platform_check_runs() {
 platform_commit_status() {
   # $1=repo $2=sha → combined commit status JSON
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "commit_status"   # #225
+    _forgejo_py commit-status "$1" "$2"
   else
     gh api "repos/$1/commits/$2/status"
   fi
