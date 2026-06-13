@@ -380,7 +380,7 @@ resolve_standards_file
 resolve_system_prompt
 
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-  off|plan_execute_once|plan_execute_loop) ;;
+  off|plan_execute_once|plan_execute_loop|native_loop) ;;
   *)
     error "Invalid TOOL_MODE '$TOOL_MODE'; defaulting to off"
     TOOL_MODE="off"
@@ -1040,7 +1040,7 @@ fi
 
 if [ ! -f tool-harness.md ]; then
   case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-    plan_execute_once|plan_execute_loop)
+    plan_execute_once|plan_execute_loop|native_loop)
       cat > tool-harness.md <<'EOF'
 Tool harness planning pending.
 EOF
@@ -1202,7 +1202,8 @@ fi
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" || "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_loop" ]]; then
+case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in plan_execute_once|plan_execute_loop|native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
+if [[ "$TOOL_HARNESS_ENABLED" == "true" ]]; then
   if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     cat > tool-harness.md <<'EOF'
 Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.

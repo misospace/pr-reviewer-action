@@ -318,14 +318,29 @@ inputs:
       evidence tools in a single planning round before the final review. plan_execute_loop
       re-plans after seeing each round's results (up to tool_max_rounds), so the model can
       dig further based on what it found; tool_max_requests is the total budget across rounds.
+      native_loop uses the model's native tool-calling API (non-streaming): the model holds
+      the tool schemas and decides each next call from the previous result, enabling the
+      multi-hop chains the planner modes cannot express; a model that never emits a tool
+      call degrades automatically to the plan_execute_loop path. Budgets reuse
+      tool_max_requests and tool_max_rounds, plus tool_loop_wall_clock_sec.
     required: false
     default: "off"
+  tool_loop_wall_clock_sec:
+    description: >-
+      Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange
+      (all model round-trips plus tool execution). Ignored for other modes.
+    required: false
+    default: "120"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
     default: "4"
   tool_max_rounds:
-    description: Maximum planning rounds for tool_mode=plan_execute_loop. Ignored for other modes.
+    description: >-
+      Maximum planning rounds for tool_mode=plan_execute_loop. For tool_mode=native_loop
+      a round is a single model turn, so the loop allows up to twice this value (capped
+      at 8) to leave room for one-call-per-turn chains and repair turns. Ignored for
+      other modes.
     required: false
     default: "3"
   tool_planning_timeout_sec:
@@ -546,6 +561,7 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
@@ -644,6 +660,7 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
