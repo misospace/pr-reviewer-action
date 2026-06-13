@@ -558,9 +558,15 @@ def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
         data = _json_decode(body_text)
         if data is None:
             return None
-        # Forgejo returns the combined state directly; wrap in a list of
-        # individual statuses to match the GitHub combined-status shape.
-        statuses = data.get("statuses", [])
+        # Forgejo's combined-status object names the per-entry field ``status``
+        # (verified against Codeberg), whereas GitHub names it ``state``.
+        # Normalize each entry to ``state`` so downstream consumers (the
+        # wait_for_ci.sh jq filters) read one uniform shape across platforms.
+        statuses = []
+        for s in data.get("statuses", []) or []:
+            entry = dict(s)
+            entry["state"] = entry.get("state", entry.get("status"))
+            statuses.append(entry)
         return {
             "state": data.get("state", "pending"),
             "total_count": len(statuses),
