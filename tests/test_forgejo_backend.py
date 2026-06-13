@@ -637,5 +637,52 @@ class TestCommentMarkerEnv(unittest.TestCase):
         self.assertIn(COMMENT_MARKER, result[0]["body"])
 
 
+class TestGetCommitStatus(unittest.TestCase):
+    """get_commit_status normalizes Forgejo's per-entry ``status`` to ``state``.
+
+    Forgejo's combined-status object names the per-entry field ``status``
+    (verified against Codeberg), unlike GitHub's ``state``. The fixture below
+    uses the REAL Forgejo shape so the test guards the normalization rather
+    than re-encoding GitHub's shape.
+    """
+
+    _COMBINED = json.dumps({
+        "state": "success",
+        "sha": "abc123def456",
+        "total_count": 2,
+        "statuses": [
+            {"id": 10, "status": "pending", "context": "pr-reviewer-action",
+             "description": "AI PR Review"},
+            {"id": 11, "status": "success", "context": "golangci-lint",
+             "description": "Lint passed"},
+        ],
+    })
+
+    @_PATCH_FORGEJO
+    def test_normalizes_per_status_field(self, mock_curl):
+        url_map = {
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/commits/abc123def456/status": (200, self._COMBINED),
+        }
+        mock_curl.side_effect = _make_curl_mock(url_map)
+
+        with _forgejo_env_patch():
+            result = fb.get_commit_status("misospace/pr-reviewer-action", "abc123def456")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["state"], "success")
+        self.assertEqual(result["total_count"], 2)
+        # Every entry must expose ``state`` mapped from Forgejo's ``status``.
+        states = {s["context"]: s["state"] for s in result["statuses"]}
+        self.assertEqual(states["pr-reviewer-action"], "pending")
+        self.assertEqual(states["golangci-lint"], "success")
+
+    @_PATCH_FORGEJO
+    def test_not_found_returns_none(self, mock_curl):
+        mock_curl.side_effect = _make_curl_mock({})  # 404 for any URL
+        with _forgejo_env_patch():
+            result = fb.get_commit_status("misospace/pr-reviewer-action", "deadbeef")
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
