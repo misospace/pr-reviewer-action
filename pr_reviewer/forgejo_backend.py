@@ -533,6 +533,55 @@ def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
     return head_full != base_full
 
 
+
+# ---------------------------------------------------------------------------
+# Commit Statuses (CI wait — issue #225)
+# ---------------------------------------------------------------------------
+
+def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
+    """Return the combined commit status for a SHA.
+
+    On GitHub this is ``GET /repos/{owner}/{repo}/commits/{sha}/status``.
+    On Forgejo it is ``GET /api/v1/repos/{owner}/{repo}/commits/{sha}/status``.
+    Returns a dict with keys ``state``, ``total_count``, ``statuses`` (list),
+    or ``None`` on failure.
+    """
+    owner, repo = _parse_repo(repo_full_name)
+
+    if _is_forgejo_mode():
+        status_code, body_text = _curl(
+            "GET",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/commits/{sha}/status",
+        )
+        if status_code != 200:
+            return None
+        data = _json_decode(body_text)
+        if data is None:
+            return None
+        # Forgejo's combined-status object names the per-entry field ``status``
+        # (verified against Codeberg), whereas GitHub names it ``state``.
+        # Normalize each entry to ``state`` so downstream consumers (the
+        # wait_for_ci.sh jq filters) read one uniform shape across platforms.
+        statuses = []
+        for s in data.get("statuses", []) or []:
+            entry = dict(s)
+            entry["state"] = entry.get("state", entry.get("status"))
+            statuses.append(entry)
+        return {
+            "state": data.get("state", "pending"),
+            "total_count": len(statuses),
+            "statuses": statuses,
+        }
+
+    # GitHub via gh CLI — already returns the right shape.
+    status_code, body_text = _gh(
+        "api", f"repos/{owner}/{repo}/commits/{sha}/status",
+    )
+    if status_code != 0 or not body_text.strip():
+        return None
+    return _json_decode(body_text)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry-point for standalone testing
 # ---------------------------------------------------------------------------
@@ -574,6 +623,10 @@ def main() -> None:
     p_files.add_argument("repo")
     p_files.add_argument("pr_number", type=int)
 
+    p_status = sub.add_parser("commit-status")
+    p_status.add_argument("repo")
+    p_status.add_argument("sha")
+
     args = parser.parse_args()
 
     if args.command == "get-pr-metadata":
@@ -594,6 +647,9 @@ def main() -> None:
         print(json.dumps(result, indent=2) if result else "null")
     elif args.command == "list-pr-files":
         print(json.dumps(list_pr_files(args.repo, args.pr_number), indent=2))
+    elif args.command == "commit-status":
+        result = get_commit_status(args.repo, args.sha)
+        print(json.dumps(result, indent=2) if result else "null")
     else:
         parser.print_help()
         sys.exit(1)

@@ -128,8 +128,8 @@ RESULT="$(run_seam forgejo "" 'platform_graphql -f query=Q')"
 check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
 RESULT="$(run_seam forgejo "" 'platform_check_runs o/r abc')"
-check "unimplemented forgejo op exits nonzero" \
-  "$( (export PLATFORM=forgejo; unset _PLATFORM_API_SOURCED; source "$SEAM"; platform_check_runs o/r abc >/dev/null 2>&1 && echo 0 || echo 1) )" "1"
+check "forgejo check_runs returns empty structure (exit 0)" \
+  "$( (export PLATFORM=forgejo; unset _PLATFORM_API_SOURCED; source "$SEAM"; platform_check_runs o/r abc >/dev/null 2>&1 && echo 0 || echo 1) )" "0"
 RESULT="$(run_seam forgejo "" 'github_enrich_api repos/up/stream/releases')"
 check "enrichment stays on gh even in forgejo mode" "$RESULT" "gh api repos/up/stream/releases"
 

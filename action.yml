@@ -412,13 +412,14 @@ inputs:
     default: ""
   platform:
     description: >-
-      Host forge backend for repository API operations. auto (default)
-      detects from GITHUB_SERVER_URL (non-github.com hosts resolve to
-      forgejo); github forces the gh CLI backend; forgejo uses the Forgejo
-      /api/v1 REST backend (requires FORGEJO_API_URL in the environment;
-      Forgejo support is rolling out across the 1.4.x line — unimplemented
-      operations fail loudly). Linked-source enrichment always targets
-      github.com regardless of this setting.
+      Target hosting platform for API capability gating and backend selection.
+      'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL:
+      non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo';
+      otherwise 'github'. Set 'forgejo' or 'github' explicitly to override
+      auto-detection. On Forgejo, features requiring GitHub GraphQL (thread
+      resolution, review minimization) degrade gracefully with a log line;
+      the REST backend handles core PR operations. Linked-source enrichment
+      always targets github.com regardless of this setting.
     required: false
     default: "auto"
   skip_if_diff_unchanged:
@@ -723,6 +724,7 @@ runs:
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
@@ -792,6 +794,7 @@ runs:
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
@@ -902,6 +905,7 @@ runs:
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
