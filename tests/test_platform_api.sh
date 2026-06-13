@@ -34,10 +34,11 @@ export PATH="$TMP/bin:$PATH"
 
 # Run a snippet in a clean subshell with controlled env; echoes stdout.
 run_seam() {
-  local platform="$1" server="$2" snippet="$3"
+  local platform="$1" server="$2" snippet="$3" forgejo_api_url="${4:-}"
   (
     export PLATFORM="$platform"
     if [[ -n "$server" ]]; then export GITHUB_SERVER_URL="$server"; else unset GITHUB_SERVER_URL; fi
+    if [[ -n "$forgejo_api_url" ]]; then export FORGEJO_API_URL="$forgejo_api_url"; else unset FORGEJO_API_URL; fi
     unset _PLATFORM_API_SOURCED
     # shellcheck disable=SC1090
     source "$SEAM"
@@ -52,6 +53,7 @@ check "explicit forgejo" "$(run_seam forgejo "" 'platform_resolve')" "forgejo"
 check "auto + github.com server → github" "$(run_seam auto "https://github.com" 'platform_resolve')" "github"
 check "auto + no server → github" "$(run_seam auto "" 'platform_resolve')" "github"
 check "auto + custom host → forgejo" "$(run_seam auto "https://forgejo.example.com" 'platform_resolve')" "forgejo"
+check "auto + FORGEJO_API_URL → forgejo" "$(run_seam auto "https://github.com" 'platform_resolve' "https://forgejo.example.com")" "forgejo"
 check "case-insensitive" "$(run_seam GITHUB "" 'platform_resolve')" "github"
 RESULT="$(run_seam gitlab "" 'platform_resolve')"
 check "invalid platform errors" "$(echo "$RESULT" | grep -c "unsupported PLATFORM")" "1"
