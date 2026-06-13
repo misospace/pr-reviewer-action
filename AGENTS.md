@@ -11,8 +11,9 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 ### Action definition and orchestration
 
 - **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). The publish steps live inline in this file using helpers from `scripts/publish_helpers.sh`.
+- **`scripts/platform_api.sh`** — Platform seam (#221): every host-forge API call goes through `platform_*` functions (github backend = the exact pre-seam `gh` invocations; forgejo backend = `pr_reviewer/forgejo_backend.py`, rolling out across 1.4.x). `github_enrich_*` functions are for linked-source enrichment and always target github.com. `pr_reviewer/platform.py` is the Python mirror for script consumers.
 - **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment (unless `force_review=true`)
-- **`scripts/parse_review_command.sh`** — Authorization gate for an on-demand re-review command (`/ai-review`): matches the command in a comment and requires the commenter to have `write`/`admin` via the collaborators API before honoring it
+- **Re-review trigger** — adding the `rereview_label` (default `ai-review`) to a PR forces a fresh review (`check_review_needed.sh` reads the `labeled` event from `GITHUB_EVENT_PATH`, sets `force_review`, and skips unrelated labels; the label is removed post-publish in `action.yml`). Labels are maintainer-only, so no command-auth gate is needed.
 - **`scripts/wait_for_ci.sh`** — Optional CI gating: polls the Checks API until checks reach a terminal state (`ci_status_check=true`), then renders the per-check outcomes to `CI_CHECKS_FILE` for the review corpus
 - **`scripts/run_review.sh`** — Main review orchestration script (collects context, builds corpus, classifies, routes, calls model, validates and enforces verdicts)
 - **`scripts/model_call.sh`** — Shared model-call layer: request building, streaming/SSE handling, retries, error-body preservation for both API formats
@@ -28,7 +29,8 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`metadata.py`** — Managed metadata marker (fingerprint, scope, open findings) embedded in published comments
 - **`github_context.py`** — PR metadata/linked-issue context helpers
 - **`response_parser.py`** — Tolerant model-output parsing (JSON in fences/prose, verdict + findings extraction)
-- **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies
+- **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies (including streamed tool-call deltas; `function.arguments` is the accumulated JSON string, OpenAI non-streaming shape, per #233)
+- **`conversation.py`** — Multi-turn conversation/request builder for native tool calling (#202, 2/7 of #197 Option B): append-only neutral state, OpenAI/Anthropic wire rendering, per-API tool-schema catalogue, `truncate_oldest_tool_results` budget helper, `verdict_turn` mode that drops `tools` and switches to the strict JSON `response_format`
 
 ### Publishing and output hygiene
 
@@ -66,7 +68,7 @@ run_review.sh                   → collects context → classifies → builds c
   ├─ run_evidence_providers.py  → User-defined provider commands
   ├─ run_tool_harness.py        → Tool harness planning + execution (once or loop)
   ├─ model_call.sh              → Fast/smart routing, retries, streaming, fallback
-  └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward}
+  └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward,conversation}
                                  → required-check validation, verdict policy, escalation, carried findings
 publish (action.yml steps)      → sanitize markdown → strip markers → build managed body → publish
   ├─ publish_mode=comment        → gh pr comment --edit-last --create-if-none (sticky)

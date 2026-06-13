@@ -6,15 +6,48 @@ PR_NUMBER="${PR_NUMBER:-}"
 COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}"
 SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
 FORCE_REVIEW="${FORCE_REVIEW:-false}"
+REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
+# shellcheck source=scripts/platform_api.sh
+source "${SCRIPT_DIR}/platform_api.sh"
 
 if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   echo "Missing REPO or PR_NUMBER for review precheck" >&2
   exit 1
+fi
+
+# ── Label-driven re-review (#231) ─────────────────────────────────────
+# A `labeled` pull_request event is the easy re-review trigger: adding the
+# rereview label forces a fresh review (labels are self-authorizing — only
+# users with write/triage can apply them). Any OTHER label add must NOT
+# trigger a review, so short-circuit before the diff fetch. The label is
+# removed after publishing (action.yml) so re-adding re-triggers.
+if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
+  event_action="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
+  if [[ "$event_action" == "labeled" ]]; then
+    added_label="$(jq -r '.label.name // ""' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"
+    if [[ "$added_label" == "$REREVIEW_LABEL" ]]; then
+      FORCE_REVIEW=true
+    else
+      echo "Label '$added_label' is not the re-review label ('$REREVIEW_LABEL') — skipping" >&2
+      {
+        echo "should_review=false"
+        echo "skip_reason=unrelated-label"
+        echo "effective_review_scope=full"
+        echo "previous_head_sha="
+        echo "baseline_clean=false"
+        echo "head_sha="
+        echo "base_sha="
+        echo "is_fork_pr="
+        echo "diff_fingerprint="
+      } >> "$OUTPUT_FILE"
+      exit 0
+    fi
+  fi
 fi
 
 # ── Diff fingerprint (unchanged) ──────────────────────────────────────
@@ -22,7 +55,7 @@ fi
 # to a fresh review instead of aborting the action. The diff is saved to
 # pr.diff so run_review.sh can reuse it instead of fetching it a second time —
 # this also guarantees the reviewed diff is the one that was fingerprinted.
-if ! gh pr diff "$PR_NUMBER" --repo "$REPO" > pr.diff 2>/dev/null; then
+if ! platform_pr_diff "$REPO" "$PR_NUMBER" > pr.diff 2>/dev/null; then
   : > pr.diff
 fi
 current_fingerprint="$(git patch-id --stable < pr.diff | awk 'NR == 1 { print $1 }' || true)"
@@ -201,7 +234,7 @@ broad_fingerprint="${current_fingerprint}|cfg:${config_hash}"
 # submits a native PR review. Look in the right place so skip-if-unchanged
 # and incremental scope can find prior state in every mode.
 last_managed_comment_body() {
-  gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null | \
+  platform_issue_comments "$REPO" "$PR_NUMBER" 2>/dev/null | \
     jq -r --arg marker "$COMMENT_MARKER" '
       [ .[] | select((.body // "") | contains($marker)) ]
       | sort_by(.updated_at // .created_at)
@@ -211,7 +244,7 @@ last_managed_comment_body() {
 }
 
 last_managed_review_body() {
-  gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null | \
+  platform_pr_reviews "$REPO" "$PR_NUMBER" 2>/dev/null | \
     jq -r --arg marker "$COMMENT_MARKER" '
       [ .[] | select((.body // "") | contains($marker)) ]
       | sort_by(.submitted_at // "")
@@ -396,7 +429,7 @@ resolve_review_scope() {
   fi
 
   # Check: compare API still works for this range
-  if ! gh api "repos/$REPO/compare/${last_head_sha}...${current_head_sha}" >/dev/null 2>&1; then
+  if ! platform_compare "$REPO" "${last_head_sha}...${current_head_sha}" >/dev/null 2>&1; then
     echo "Review scope fallback: compare API failed for $last_head_sha...$current_head_sha" >&2
     EFFECTIVE_SCOPE="full"
     PREVIOUS_HEAD_SHA=""
@@ -429,7 +462,7 @@ fi
 # the whole action: the head/base SHAs drive scope resolution here, and the
 # object is saved to pr-object.json so run_review.sh (and the publish steps,
 # via the is_fork_pr output) do not have to fetch it again.
-if ! gh api "repos/$REPO/pulls/$PR_NUMBER" > pr-object.json 2>/dev/null; then
+if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then
   echo '{}' > pr-object.json
 fi
 CURRENT_HEAD_SHA="$(jq -r '.head.sha // ""' pr-object.json 2>/dev/null || echo "")"

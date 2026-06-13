@@ -49,6 +49,7 @@ for _p in (str(_SCRIPTS_DIR), str(_ACTION_ROOT)):
 
 from build_review_comments import FINDING_MARKER_PREFIX, finding_fingerprint  # noqa: E402
 from pr_reviewer.carry_forward import load_carried_findings  # noqa: E402
+from pr_reviewer.platform import PlatformUnsupported, gh_argv  # noqa: E402
 
 
 def _resolve_platform() -> str:
@@ -100,10 +101,18 @@ def _run_gh(args: list, timeout: int = 60):
     On HTTP errors gh prints the JSON error body to STDOUT (#190), so a
     non-zero exit discards stdout entirely instead of trying to parse it.
     Anything that is not a JSON object is treated as a failure.
+
+    The argv goes through the platform seam (#221). Thread management is
+    GraphQL-only, so on PLATFORM=forgejo it degrades to a no-op (None) like
+    every other best-effort failure here — #224 brings the Forgejo backend.
     """
     try:
+        argv = gh_argv(args)
+    except PlatformUnsupported:
+        return None
+    try:
         completed = subprocess.run(
-            ["gh", *args],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,

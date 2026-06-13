@@ -318,14 +318,29 @@ inputs:
       evidence tools in a single planning round before the final review. plan_execute_loop
       re-plans after seeing each round's results (up to tool_max_rounds), so the model can
       dig further based on what it found; tool_max_requests is the total budget across rounds.
+      native_loop uses the model's native tool-calling API (non-streaming): the model holds
+      the tool schemas and decides each next call from the previous result, enabling the
+      multi-hop chains the planner modes cannot express; a model that never emits a tool
+      call degrades automatically to the plan_execute_loop path. Budgets reuse
+      tool_max_requests and tool_max_rounds, plus tool_loop_wall_clock_sec.
     required: false
     default: "off"
+  tool_loop_wall_clock_sec:
+    description: >-
+      Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange
+      (all model round-trips plus tool execution). Ignored for other modes.
+    required: false
+    default: "120"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
     default: "4"
   tool_max_rounds:
-    description: Maximum planning rounds for tool_mode=plan_execute_loop. Ignored for other modes.
+    description: >-
+      Maximum planning rounds for tool_mode=plan_execute_loop. For tool_mode=native_loop
+      a round is a single model turn, so the loop allows up to twice this value (capped
+      at 8) to leave room for one-call-per-turn chains and repair turns. Ignored for
+      other modes.
     required: false
     default: "3"
   tool_planning_timeout_sec:
@@ -380,14 +395,35 @@ inputs:
     description: Timeout in seconds for the fallback model API connection (curl --connect-timeout). Defaults to ai_connect_timeout_sec when blank.
     required: false
     default: ""
+  platform:
+    description: >-
+      Host forge backend for repository API operations. auto (default)
+      detects from GITHUB_SERVER_URL (non-github.com hosts resolve to
+      forgejo); github forces the gh CLI backend; forgejo uses the Forgejo
+      /api/v1 REST backend (requires FORGEJO_API_URL in the environment;
+      Forgejo support is rolling out across the 1.4.x line — unimplemented
+      operations fail loudly). Linked-source enrichment always targets
+      github.com regardless of this setting.
+    required: false
+    default: "auto"
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
     default: "true"
   force_review:
-    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Intended for an on-demand "re-review" trigger (e.g. a /ai-review comment or repository_dispatch) when the diff is unchanged but the underlying model/standards changed. Default false.
+    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Set automatically when the rereview_label is added; can also be driven from a workflow_dispatch or repository_dispatch. Default false.
     required: false
     default: "false"
+  rereview_label:
+    description: >-
+      Label that, when added to a PR, forces a fresh review even if nothing
+      changed — the easy re-review trigger (only users with write/triage can
+      label, so it is self-authorizing). On a `labeled` event the action
+      reviews iff the added label matches this, then removes the label so
+      re-adding re-triggers; any other label add is ignored. To enable, add
+      `labeled` to the workflow's pull_request types. Default "ai-review".
+    required: false
+    default: "ai-review"
   comment_marker:
     description: HTML marker for the managed PR comment
     required: false
@@ -495,6 +531,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
@@ -502,6 +539,7 @@ runs:
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
         FORCE_REVIEW: ${{ inputs.force_review }}
+        REREVIEW_LABEL: ${{ inputs.rereview_label }}
         ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
@@ -532,6 +570,7 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
@@ -556,6 +595,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -572,6 +612,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -628,6 +669,7 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
@@ -657,6 +699,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -716,13 +759,14 @@ runs:
           cat review-markdown.raw.md
         } > review-comment.md
 
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file review-comment.md
+        platform_comment_sticky "$REPO" "$PR_NUMBER" review-comment.md
 
     - name: Publish review comment (non-blocking)
       if: inputs.publish_mode == 'review_comment' && steps.precheck.outputs.should_review == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -794,7 +838,7 @@ runs:
 
         # NOTE: gh pr review --comment creates a COMMENTED review that is NOT visible in the PR UI timeline.
         # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
-        gh pr comment "$PR_NUMBER" --repo "$REPO" --edit-last --create-if-none --body-file "$BODY_FILE"
+        platform_comment_sticky "$REPO" "$PR_NUMBER" "$BODY_FILE"
 
         # Resolve threads of carried findings this review verified as fixed,
         # and reply on threads still open (#208, #209). Must precede the
@@ -818,7 +862,7 @@ runs:
             } > inline-findings-body.md
             jq -n --rawfile body inline-findings-body.md --argjson comments "$COMMENTS_JSON" \
               '{body: $body, event: "COMMENT", comments: $comments}' > review-request.json
-            if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input review-request.json >/dev/null 2>&1; then
+            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
               echo "Attached $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline finding comment(s)"
             else
               echo "WARN: inline findings review submission failed; summary comment was still published" >&2
@@ -831,6 +875,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -868,7 +913,7 @@ runs:
         # the PR object; only fall back to the API when its output is missing.
         IS_FORK_PR="${{ steps.precheck.outputs.is_fork_pr }}"
         if [ -z "$IS_FORK_PR" ]; then
-          IS_FORK_PR="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
+          IS_FORK_PR="$(platform_pr_get "$REPO" "$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
         fi
 
         # Resolve effective scope and review result
@@ -957,15 +1002,15 @@ runs:
           if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
             jq -n --rawfile body "$body_file" --arg event "$event" --argjson comments "$COMMENTS_JSON" \
               '{body: $body, event: $event, comments: $comments}' > review-request.json
-            if gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input review-request.json >/dev/null 2>&1; then
+            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
               echo "Submitted native review ($event) with $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline comment(s)"
               return 0
             fi
             echo "WARN: inline-comment review submission failed; falling back to plain review" >&2
           fi
           case "$event" in
-            APPROVE) gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file "$body_file" ;;
-            *) gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file "$body_file" ;;
+            APPROVE) platform_review_native "$REPO" "$PR_NUMBER" APPROVE "$body_file" ;;
+            *) platform_review_native "$REPO" "$PR_NUMBER" REQUEST_CHANGES "$body_file" ;;
           esac
         }
 
@@ -1002,3 +1047,15 @@ runs:
             submit_native_review REQUEST_CHANGES "$BODY_FILE"
           fi
         fi
+
+    - name: Clear re-review label
+      # When a label add triggered this review, remove it so re-adding the
+      # label re-triggers. Best-effort; never fails the run.
+      if: ${{ github.event.action == 'labeled' && github.event.label.name == inputs.rereview_label && steps.precheck.outputs.should_review == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ inputs.repo || github.repository }}
+        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        LABEL: ${{ inputs.rereview_label }}
+      run: gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${LABEL}" --silent 2>/dev/null || true

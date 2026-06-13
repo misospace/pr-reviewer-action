@@ -1,0 +1,38 @@
+{
+  "benchmark_corpus": [
+    {
+      "number": 7462,
+      "repo_full_name": "joryirving/home-ops",
+      "url": "https://github.com/joryirving/home-ops/pull/7462",
+      "title": "fix(container): update kubernetes group (v1.36.1 -> v1.36.2)",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "The founding use case (#203 acceptance criterion). With NO Talos-specific prompting, steering, or evidence provider, the reviewer must notice the bumped kubelet image runs on a host platform visible in the repo, chain read_file -> extract the deployed Talos version -> web_fetch that version's published support matrix (host talos.dev is already allowlisted), and cite the matrix as evidence for the verdict instead of a pattern-reasoned 'patch bump, low risk' rubber stamp. Capability altitude only: nothing here is given to the reviewer as a prompt; this block is the GRADER's expected concrete evidence.",
+        "checks": [
+          {
+            "id": "read_machineconfig",
+            "type": "tool_call",
+            "tool": "read_file",
+            "args_contains": { "path": ["machineconfig"] }
+          },
+          {
+            "id": "fetched_support_matrix",
+            "type": "tool_call",
+            "tool": "web_fetch",
+            "args_contains": { "url": ["talos.dev", "support-matrix"] }
+          },
+          {
+            "id": "cited_matrix_in_review",
+            "type": "review_mentions",
+            "any_of": ["support matrix", "support-matrix", "talos.dev", "compatibility matrix"]
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-06-12T00:00:00Z",
+    "description": "Agentic-capability eval corpus for #207. home-ops#7462 is the canonical live fixture for the #203 acceptance criterion (Talos<->k8s support-matrix chain). Run with --modes native_loop plan_execute tools_off --runs-per-mode 10 and read mode_summary[*].capability_pass_rate; a single run is noise at the fast tier. The fixture PR is intentionally left OPEN. Keep prompts at capability altitude ('verify against the host platform's published compatibility matrix'), never recipe altitude ('check talos.dev') — only THIS grader names the concrete evidence.",
+    "issue_refs": [197, 203, 207]
+  }
+}

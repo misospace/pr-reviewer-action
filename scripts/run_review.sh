@@ -49,6 +49,8 @@ enrichment_budget_ok() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
+# shellcheck source=scripts/platform_api.sh
+source "${SCRIPT_DIR}/platform_api.sh"
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 PR_NUMBER="${PR_NUMBER:-}"
 AI_BASE_URL="${AI_BASE_URL:-}"
@@ -195,7 +197,7 @@ fetch_incremental_patch() {
 
   # Get the compare API URL and fetch the raw diff
   local compare_url
-  compare_url="$(gh api "repos/$REPO/compare/${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
+  compare_url="$(platform_compare "$REPO" "${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
 
   if [[ -n "$compare_url" ]]; then
     # The token goes through a 0600 curl --config file rather than argv (same
@@ -213,7 +215,7 @@ fetch_incremental_patch() {
 
   if [[ ! -s "$output_file" ]]; then
     echo "Compare API returned empty or failed; falling back to full PR diff" >&2
-    gh pr diff "$PR_NUMBER" --repo "$REPO" > "$output_file"
+    platform_pr_diff "$REPO" "$PR_NUMBER" > "$output_file"
   fi
 }
 
@@ -378,7 +380,7 @@ resolve_standards_file
 resolve_system_prompt
 
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-  off|plan_execute_once|plan_execute_loop) ;;
+  off|plan_execute_once|plan_execute_loop|native_loop) ;;
   *)
     error "Invalid TOOL_MODE '$TOOL_MODE'; defaulting to off"
     TOOL_MODE="off"
@@ -457,7 +459,7 @@ log "Collecting PR context for #$PR_NUMBER in $REPO..."
 if [[ -s pr-object.json && "$(jq -r '.number // empty' pr-object.json 2>/dev/null)" == "$PR_NUMBER" ]]; then
   log "Reusing PR object fetched by precheck"
 else
-  gh api "repos/$REPO/pulls/$PR_NUMBER" > pr-object.json
+  platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json
 fi
 jq '{number, title, body, headRefOid: .head.sha, baseRefName: .base.ref, headRefName: .head.ref, author: {login: (.user.login // "")}, changedFiles: .changed_files, additions, deletions, url: .html_url}' \
   pr-object.json > pr.json
@@ -470,14 +472,14 @@ fi
 if [[ -s pr.diff ]]; then
   log "Reusing PR diff fetched by precheck"
 else
-  gh pr diff "$PR_NUMBER" --repo "$REPO" > pr.diff
+  platform_pr_diff "$REPO" "$PR_NUMBER" > pr.diff
 fi
 truncate_clean pr.diff pr.diff.truncated "$MAX_DIFF" '…[diff truncated to fit context budget]'
 
 # One bounded page instead of --paginate: 100 files is far beyond what the
 # MAX_FILES byte budget keeps anyway, and unbounded pagination on huge PRs
 # both burned API quota and produced concatenated JSON documents.
-gh api "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" > pr-files.raw.json
+platform_pr_files "$REPO" "$PR_NUMBER" > pr-files.raw.json
 # Note: 'patch' is intentionally dropped — the per-file patches duplicate the
 # raw diff that is already embedded in the corpus, and the classifier does not
 # read them. Keeping them here doubled the diff bytes sent to the model.
@@ -515,7 +517,7 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
     issue_ref="$(printf '%s' "$item" | jq -r '.ref')"
 
     echo "## $issue_ref" >> linked-issues.md
-    if gh api "repos/$issue_repo/issues/$issue_number" > linked-issue.raw.json 2>/dev/null; then
+    if platform_issue_get "$issue_repo" "$issue_number" > linked-issue.raw.json 2>/dev/null; then
       jq '{number,title,state,html_url,labels:[.labels[]?.name],body}' linked-issue.raw.json > linked-issue.filtered.json
       echo '```json' >> linked-issues.md
       head -c 12000 linked-issue.filtered.json >> linked-issues.md
@@ -697,7 +699,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Release Metadata: $owner/$repo@$tag" >> linked-sources.md
 
-      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases/tags/$tag" > gh-release.json 2>/dev/null; then
+      if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases/tags/$tag" > gh-release.json 2>/dev/null; then
         jq '{tag_name,name,published_at,html_url,body}' gh-release.json > gh-release.filtered.json
         echo '```json' >> linked-sources.md
         head -c 5000 gh-release.filtered.json >> linked-sources.md
@@ -707,7 +709,7 @@ if [ -s urls.txt ]; then
         echo "(Could not fetch release metadata for tag $tag)" >> linked-sources.md
       fi
 
-      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases?per_page=8" > gh-releases.json 2>/dev/null; then
+      if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases?per_page=8" > gh-releases.json 2>/dev/null; then
         jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.json > gh-releases.filtered.json
         echo "### Recent Releases" >> linked-sources.md
         echo '```json' >> linked-sources.md
@@ -725,7 +727,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Compare Metadata: $owner/$repo@$compare_spec" >> linked-sources.md
 
-      if enrichment_budget_ok && gh api "repos/$owner/$repo/compare/$compare_spec" > gh-compare.json 2>/dev/null; then
+      if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/compare/$compare_spec" > gh-compare.json 2>/dev/null; then
         jq '{html_url,status,ahead_by,behind_by,total_commits,commits:[.commits[]? | {sha,commit:{message,author,date}}]}' gh-compare.json > gh-compare.filtered.json
         echo '```json' >> linked-sources.md
         head -c 7000 gh-compare.filtered.json >> linked-sources.md
@@ -764,7 +766,7 @@ if [ -s urls.txt ]; then
       echo >> linked-sources.md
       echo "### GitHub Releases Enrichment: $repo_key" >> linked-sources.md
 
-      if enrichment_budget_ok && gh api "repos/$owner/$repo/releases?per_page=30" > gh-releases.repo.json 2>/dev/null; then
+      if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases?per_page=30" > gh-releases.repo.json 2>/dev/null; then
         jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.repo.json > gh-releases.repo.filtered.json
         echo "#### Recent Releases (tags)" >> linked-sources.md
         echo '```json' >> linked-sources.md
@@ -792,7 +794,7 @@ if [ -s urls.txt ]; then
             echo '```' >> linked-sources.md
           else
             echo "(No release tags matched target version $TARGET_VERSION in $repo_key)" >> linked-sources.md
-            if enrichment_budget_ok && gh api "repos/$owner/$repo/tags?per_page=50" > gh-tags.repo.json 2>/dev/null; then
+            if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/tags?per_page=50" > gh-tags.repo.json 2>/dev/null; then
               jq '[.[] | {name,commit:.commit.sha}]' gh-tags.repo.json > gh-tags.repo.filtered.json
               echo "#### Recent Tags" >> linked-sources.md
               echo '```json' >> linked-sources.md
@@ -831,7 +833,7 @@ if [ -s urls.txt ]; then
 
       if [ -n "$TARGET_VERSION" ]; then
         for tag_prefix in "v$TARGET_VERSION" "$TARGET_VERSION"; do
-          if enrichment_budget_ok && gh api "repos/$owner/$repo/releases/tags/$tag_prefix" > ghcr-release.json 2>/dev/null; then
+          if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases/tags/$tag_prefix" > ghcr-release.json 2>/dev/null; then
             echo "#### Matched via ghcr.io path: $owner/$repo@$tag_prefix" >> linked-sources.md
             jq '{tag_name,name,published_at,html_url,body}' ghcr-release.json > ghcr-release.filtered.json
             echo '```json' >> linked-sources.md
@@ -1038,7 +1040,7 @@ fi
 
 if [ ! -f tool-harness.md ]; then
   case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-    plan_execute_once|plan_execute_loop)
+    plan_execute_once|plan_execute_loop|native_loop)
       cat > tool-harness.md <<'EOF'
 Tool harness planning pending.
 EOF
@@ -1200,7 +1202,8 @@ fi
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_once" || "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "plan_execute_loop" ]]; then
+case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in plan_execute_once|plan_execute_loop|native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
+if [[ "$TOOL_HARNESS_ENABLED" == "true" ]]; then
   if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     cat > tool-harness.md <<'EOF'
 Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.

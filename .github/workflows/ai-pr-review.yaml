@@ -3,7 +3,9 @@ name: AI PR Review
 on:
   pull_request:
     branches: ["main"]
-    types: [opened, reopened, synchronize, ready_for_review]
+    # `labeled` enables the one-click re-review: add the `ai-review` label to
+    # force a fresh review (only write/triage can label — self-authorizing).
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
   workflow_dispatch:
 
 concurrency:
@@ -35,7 +37,7 @@ jobs:
       - name: Review PR with reusable AI reviewer
         if: github.event_name == 'pull_request'
         id: review
-        uses: misospace/pr-reviewer-action@7c0cbcb719dee329e2784ce36e9e4af8d87f3a23 # v1.2.6
+        uses: misospace/pr-reviewer-action@4126a2701a5e9adcf7c48ac6eb678e2e3a2bb2a0 # v1.2.9
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           ai_primary_retries: "3"

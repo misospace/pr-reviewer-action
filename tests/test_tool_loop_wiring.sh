@@ -30,16 +30,19 @@ SRC="$(cat "$ROOT_DIR/scripts/run_review.sh")"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
 HARNESS="$(cat "$ROOT_DIR/scripts/run_tool_harness.py")"
 
-echo "=== run_review.sh accepts the loop mode ==="
-check_contains "mode validation accepts plan_execute_loop" "$SRC" "off|plan_execute_once|plan_execute_loop)"
-check_contains "harness pending stub covers loop mode" "$SRC" "plan_execute_once|plan_execute_loop)"
-check_contains "loop mode runs the harness" "$SRC" '"$(printf '"'"'%s'"'"' "$TOOL_MODE" | tr '"'"'[:upper:]'"'"' '"'"'[:lower:]'"'"')" == "plan_execute_loop"'
+echo "=== run_review.sh accepts the loop modes ==="
+check_contains "mode validation accepts plan_execute_loop" "$SRC" "off|plan_execute_once|plan_execute_loop|native_loop)"
+check_contains "harness pending stub covers loop mode" "$SRC" "plan_execute_once|plan_execute_loop|native_loop)"
+check_contains "loop mode runs the harness" "$SRC" 'plan_execute_once|plan_execute_loop|native_loop) TOOL_HARNESS_ENABLED="true"'
 
 echo ""
 echo "=== action.yml wiring ==="
 check_contains "tool_max_rounds input declared" "$ACTION" "tool_max_rounds:"
 check_contains "TOOL_MAX_ROUNDS passed to steps" "$ACTION" 'TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}'
 check_contains "tool_mode description mentions the loop" "$ACTION" "plan_execute_loop"
+check_contains "tool_mode description mentions native_loop" "$ACTION" "native_loop"
+check_contains "tool_loop_wall_clock_sec input declared" "$ACTION" "tool_loop_wall_clock_sec:"
+check_contains "TOOL_LOOP_WALL_CLOCK_SEC passed to steps" "$ACTION" 'TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}'
 
 echo ""
 echo "=== harness loop contracts ==="
@@ -50,6 +53,13 @@ check_contains "requests deduplicated across rounds" "$HARNESS" "dedup_requests(
 check_contains "results fed back as untrusted data" "$HARNESS" "UNTRUSTED DATA"
 check_contains "later-round parse failure degrades gracefully" "$HARNESS" "using evidence so far"
 check_contains "planner can stop with empty requests" "$HARNESS" 'reply exactly {"requests": []}'
+
+echo ""
+echo "=== native_loop wiring ==="
+check_contains "native_loop dispatches to run_native_loop" "$HARNESS" 'if tool_mode == "native_loop":'
+check_contains "native_loop degrades to plan_execute_loop" "$HARNESS" 'tool_mode = "plan_execute_loop"'
+check_contains "wall-clock budget bounded" "$HARNESS" 'env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC"'
+check_contains "native loop driver imported lazily" "$HARNESS" "from pr_reviewer.tool_loop import"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
