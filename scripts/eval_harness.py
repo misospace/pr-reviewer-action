@@ -294,9 +294,22 @@ def evaluate_capability(
             passed = False
         elif ctype == "tool_call":
             want_tool = check.get("tool")
+            # ``tool`` may be a single name or a list of acceptable names — the
+            # latter lets one check credit either path to the same evidence
+            # (e.g. web_search OR web_fetch reaching a support matrix).
+            want_tools = (
+                want_tool if isinstance(want_tool, list)
+                else [want_tool] if want_tool else []
+            )
             args_contains = check.get("args_contains", {})
+            # ``args_any_contains``: pass when ANY of the call's string arg
+            # values contains ANY listed substring — tool-agnostic, so it
+            # matches a matrix URL in web_fetch or a matrix query in web_search.
+            any_needles = [
+                str(n).lower() for n in check.get("args_any_contains", [])
+            ]
             for call in run.tool_calls:
-                if want_tool and call.get("tool") != want_tool:
+                if want_tools and call.get("tool") not in want_tools:
                     continue
                 if call.get("status") not in (None, "ok"):
                     # A failed tool call isn't usable evidence.
@@ -308,6 +321,12 @@ def evaluate_capability(
                     if not all(str(n).lower() in hay for n in needle_list):
                         ok = False
                         break
+                if ok and any_needles:
+                    arg_vals = (call.get("args") or {}).values()
+                    haystack = " ".join(
+                        v.lower() for v in arg_vals if isinstance(v, str)
+                    )
+                    ok = any(n in haystack for n in any_needles)
                 if ok:
                     passed = True
                     break

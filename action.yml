@@ -367,6 +367,21 @@ inputs:
     description: Timeout in seconds for each tool request execution
     required: false
     default: "20"
+  search_url:
+    description: >-
+      Search-engine endpoint (e.g. a SearXNG instance's /search URL) that
+      enables the read-only web_search tool in the native tool loop. When set,
+      the model can search for a page (release notes, a support/compatibility
+      matrix) and then web_fetch the best result — useful when it doesn't know
+      the exact URL. Empty (default) leaves web_search un-advertised. The model
+      supplies only the query; the host is fixed by this setting. Subject to
+      the same fork gating as the rest of the tool harness.
+    required: false
+    default: ""
+  tool_max_search_results:
+    description: Maximum results returned per web_search call
+    required: false
+    default: "5"
   tool_failure_enforcement:
     description: If true, force request_changes when tool harness planning fails
     required: false
@@ -570,6 +585,8 @@ runs:
         TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
         TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
         TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
+        SEARCH_URL: ${{ inputs.search_url }}
+        TOOL_MAX_SEARCH_RESULTS: ${{ inputs.tool_max_search_results }}
         TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool_failure_enforcement }}
         TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool_min_successful_requests }}
         TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool_enable_for_forks }}
@@ -669,6 +686,8 @@ runs:
         TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
         TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
         TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
+        SEARCH_URL: ${{ inputs.search_url }}
+        TOOL_MAX_SEARCH_RESULTS: ${{ inputs.tool_max_search_results }}
         TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool_failure_enforcement }}
         TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool_min_successful_requests }}
         TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool_enable_for_forks }}

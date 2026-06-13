@@ -446,6 +446,42 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
         return {"error": str(exc)}
 
 
+def web_search(query, search_url, request_timeout=20, max_results=5):
+    """Query a configured search engine (SearXNG JSON API) for a free-text query.
+
+    ``search_url`` is the engine's search endpoint (e.g.
+    ``https://search.example.com/search``); the query and ``format=json`` are
+    appended. Returns ``{"results": [{title, url, snippet}], ...}`` capped at
+    ``max_results``, or ``{"error": ...}``. The endpoint is a single trusted,
+    operator-configured URL — unlike web_fetch it is not host-allowlisted,
+    because the model supplies only the query string, never the host.
+    """
+    if not search_url:
+        return {"error": "Search is not configured (no search_url)."}
+    sep = "&" if urllib.parse.urlparse(search_url).query else "?"
+    full = f"{search_url}{sep}" + urllib.parse.urlencode({"q": query, "format": "json"})
+    try:
+        req = urllib.request.Request(
+            full,
+            headers={"User-Agent": "ai-pr-reviewer/1.0", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    results = []
+    for item in (data.get("results") or [])[:max_results]:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "title": str(item.get("title", ""))[:300],
+            "url": str(item.get("url", "")),
+            "snippet": str(item.get("content", ""))[:500],
+        })
+    return {"results": results}
+
+
 def run_command(command, workspace_root, request_timeout=30):
     """Execute a named read-only command definition.
 
@@ -563,7 +599,7 @@ def normalize_tool_request(raw_req):
     if not isinstance(args, dict):
         args = {}
     # Promote known top-level params when "args" wasn't nested.
-    for key in ("path", "endpoint", "url", "pattern", "command"):
+    for key in ("path", "endpoint", "url", "pattern", "command", "query"):
         if key not in args and isinstance(raw_req.get(key), str):
             args[key] = raw_req[key]
     # gh_api accepts "path" as an alias for "endpoint".
@@ -641,6 +677,8 @@ def execute_tool_request(
     allowed_hosts,
     max_response_bytes,
     request_timeout,
+    search_url="",
+    max_search_results=5,
 ):
     """Execute a single tool request and return the result dict.
 
@@ -696,6 +734,17 @@ def execute_tool_request(
             content_text = res.get("content", "")
             text, _ = mask_and_truncate(content_text, max_response_bytes)
             tool_result["result"] = {"content": text}
+
+        elif tool_name == "web_search":
+            query = args.get("query", "")
+            if not query:
+                raise ValueError("Missing 'query' argument")
+            res = web_search(query, search_url, request_timeout, max_search_results)
+            if res.get("error"):
+                raise ValueError(res["error"])
+            text = json.dumps(res.get("results", []), indent=2)
+            text, _ = mask_and_truncate(text, max_response_bytes)
+            tool_result["result"] = {"results": text}
 
         elif tool_name == "run_command":
             command = args.get("command", "")
@@ -842,18 +891,31 @@ def run_native_loop(
     repo_root = str(_SCRIPTS_DIR.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    from pr_reviewer.conversation import Conversation  # noqa: PLC0415
+    from pr_reviewer.conversation import (  # noqa: PLC0415
+        TOOL_SCHEMAS,
+        WEB_SEARCH_SCHEMA,
+        Conversation,
+    )
     from pr_reviewer.tool_loop import LoopBudgets, drive_tool_loop  # noqa: PLC0415
 
-    conversation = Conversation(system=NATIVE_LOOP_SYSTEM)
+    # web_search is advertised only when a search endpoint is configured.
+    search_url = os.getenv("SEARCH_URL", "").strip()
+    max_search_results = env_int_bounded("TOOL_MAX_SEARCH_RESULTS", 5, 1, 15)
+    tool_schemas = list(TOOL_SCHEMAS)
+    if search_url:
+        tool_schemas.append(WEB_SEARCH_SCHEMA)
+
+    conversation = Conversation(system=NATIVE_LOOP_SYSTEM, tool_schemas=tool_schemas)
     conversation.add_user(
         f"Repository: {repo}\n"
         f"Review scope: {os.getenv('EFFECTIVE_SCOPE', 'full')}\n"
         f"Allowed repos for gh_api: "
         f"{', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: "
-        f"{', '.join(allowed_hosts) if allowed_hosts else '(none)'}\n\n"
-        "Gather the evidence needed to review this PR corpus:\n\n" + corpus_text
+        f"{', '.join(allowed_hosts) if allowed_hosts else '(none)'}\n"
+        + ("web_search is available — use it to find a page's URL when you don't "
+           "know it, then web_fetch the best result.\n" if search_url else "")
+        + "\nGather the evidence needed to review this PR corpus:\n\n" + corpus_text
     )
 
     max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
@@ -883,6 +945,8 @@ def run_native_loop(
             allowed_hosts,
             max_response_bytes,
             request_timeout,
+            search_url,
+            max_search_results,
         )
 
     outcome = drive_tool_loop(

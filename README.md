@@ -302,6 +302,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `tool_max_response_bytes` | Maximum bytes captured from each tool response | No | `12000` |
 | `tool_allowed_gh_api_repos` | Comma-separated owner/repo allowlist for `gh_api`; use `*` to allow any repo endpoint still permitted by the tool path allowlist (empty = current repo only) | No | `""` |
 | `tool_request_timeout_sec` | Timeout in seconds for each tool execution request | No | `20` |
+| `search_url` | Search-engine endpoint (e.g. a SearXNG `/search` URL) that enables the read-only `web_search` tool in the native tool loop. When set, the model can search for a page and then `web_fetch` the best result; empty leaves `web_search` un-advertised. The model supplies only the query — the host is fixed by this setting. Subject to the same fork gating as the rest of the tool harness | No | `""` |
+| `tool_max_search_results` | Maximum results returned per `web_search` call | No | `5` |
 | `tool_failure_enforcement` | Force `request_changes` when tool harness planning fails | No | `false` |
 | `tool_min_successful_requests` | Minimum successful tool requests required when `tool_failure_enforcement=true` | No | `0` |
 | `tool_enable_for_forks` | Allow tool harness on cross-repository PRs | No | `false` |
