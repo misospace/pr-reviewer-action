@@ -1021,6 +1021,14 @@ def run_native_loop(
     # long thinking-model turns don't 524 behind a short-idle proxy (#204).
     stream = os.getenv("AI_STREAM", "true").strip().lower() == "true"
 
+    # Mirror the bash review path's token-field choice: newer OpenAI models
+    # reject max_tokens and require max_completion_tokens (AI_TOKENS_PARAM).
+    tokens_param = (
+        "max_completion_tokens"
+        if os.getenv("AI_TOKENS_PARAM", "max_tokens").strip() == "max_completion_tokens"
+        else "max_tokens"
+    )
+
     def post_fn(payload):
         # Per-turn fallback: a streamed turn that can't be reassembled — a
         # truncated/garbled SSE body (transport raise) or a 200 error object
@@ -1070,6 +1078,7 @@ def run_native_loop(
         budgets=budgets,
         max_tokens=planning_max_tokens,
         stream=stream,
+        tokens_param=tokens_param,
     )
 
     if outcome.degraded:
@@ -1116,6 +1125,7 @@ def run_native_loop(
                     verdict_turn=True,
                     keep_full_history_on_verdict=True,
                     response_format=response_format,
+                    tokens_param=tokens_param,
                 )
                 verdict_response = post_fn(verdict_payload)
                 Path("ai-response.primary.json").write_text(
