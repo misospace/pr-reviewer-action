@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -213,6 +214,7 @@ def drive_tool_loop(
     temperature: float = 0.0,
     stream: bool = False,
     tokens_param: str = "max_tokens",
+    cache_prefix: bool = False,
     time_fn: Callable[[], float] = time.monotonic,
 ) -> LoopOutcome:
     """Run the agentic loop until the model stops or a budget hits.
@@ -252,6 +254,7 @@ def drive_tool_loop(
             max_tokens=max_tokens,
             temperature=temperature,
             tokens_param=tokens_param,
+            cache_prefix=cache_prefix,
         )
         try:
             response = post_fn(payload)
@@ -278,42 +281,67 @@ def drive_tool_loop(
         conversation.add_assistant_tool_calls(calls)
         outcome.tool_calls_issued += len(calls)
 
-        for call in calls:
+        # Decide each call's disposition SEQUENTIALLY — dedup (seen_keys) and
+        # the budget counter are stateful and must stay deterministic and
+        # call-ordered. Only the to-run executions are then fanned out
+        # concurrently: the executor is read-only and a round's calls are
+        # independent (the model emitted them together). Results are applied in
+        # the original call order to preserve the open-call contract.
+        plan: list[tuple[str, str, Any]] = []  # (call_id, kind, data) in order
+        to_execute: dict[int, tuple[str, dict[str, Any]]] = {}
+        for idx, call in enumerate(calls):
             call_id = call["id"]
-            # Arguments arrive as an opaque JSON string (#233 contract);
-            # parse here, and on failure answer with a repairable error
-            # instead of crashing the loop — weak models misquote JSON.
+            # Arguments arrive as an opaque JSON string (#233 contract); parse
+            # here, and on failure answer with a repairable error instead of
+            # crashing the loop — weak models misquote JSON.
             try:
                 args = json.loads(call["arguments"]) if call["arguments"] else {}
                 if not isinstance(args, dict):
                     raise ValueError("arguments must be a JSON object")
             except (json.JSONDecodeError, ValueError) as exc:
-                conversation.add_tool_result(
-                    call_id,
-                    {"error": f"Invalid tool arguments (not a JSON object): {exc}"},
-                    is_error=True,
+                plan.append(
+                    (call_id, "error",
+                     {"error": f"Invalid tool arguments (not a JSON object): {exc}"})
                 )
                 continue
 
             key = _request_key(call["name"], args)
             if key in seen_keys:
-                # Free synthetic answer: doesn't execute, doesn't burn budget.
-                conversation.add_tool_result(
-                    call_id, {"note": _DUPLICATE_NOTE}, is_error=True
-                )
+                plan.append((call_id, "dup", {"note": _DUPLICATE_NOTE}))
                 continue
 
             if calls_executed >= budgets.max_tool_calls:
-                conversation.add_tool_result(
-                    call_id, {"error": _BUDGET_NOTE}, is_error=True
-                )
+                plan.append((call_id, "budget", {"error": _BUDGET_NOTE}))
                 continue
 
             seen_keys.add(key)
             calls_executed += 1
-            result = execute_fn(call["name"], args)
+            to_execute[idx] = (call["name"], args)
+            plan.append((call_id, "exec", idx))
+
+        # Fan out the executions (read-only, independent within a round).
+        results_by_idx: dict[int, dict[str, Any]] = {}
+        if len(to_execute) == 1:
+            (only_idx, (name, args)), = to_execute.items()
+            results_by_idx[only_idx] = execute_fn(name, args)
+        elif to_execute:
+            with ThreadPoolExecutor(max_workers=min(len(to_execute), 8)) as pool:
+                futures = {
+                    pool.submit(execute_fn, name, args): i
+                    for i, (name, args) in to_execute.items()
+                }
+                for fut in futures:
+                    results_by_idx[futures[fut]] = fut.result()
+
+        # Apply results in call order (synthetic refusals inline).
+        for call_id, kind, data in plan:
+            if kind != "exec":
+                conversation.add_tool_result(call_id, data, is_error=True)
+                continue
+            name, args = to_execute[data]
+            result = results_by_idx[data]
             outcome.executed.append(
-                ExecutedCall(tool=call["name"], args=args, result=result)
+                ExecutedCall(tool=name, args=args, result=result)
             )
             conversation.add_tool_result(
                 call_id,

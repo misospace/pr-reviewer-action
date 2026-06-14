@@ -128,6 +128,44 @@ class TestTokensParam:
         assert "max_completion_tokens" not in payload
 
 
+class TestAnthropicCachePrefix:
+    """Anthropic prompt caching is opt-in (#263 Part 2): cache_control markers
+    on the stable prefix (system + tools). Default off — unchanged wire shape."""
+
+    def test_default_system_is_plain_string(self):
+        payload = Conversation(system="s").to_request_payload("anthropic", "m", max_tokens=64)
+        assert payload["system"] == "s"
+        assert all("cache_control" not in t for t in payload["tools"])
+
+    def test_cache_prefix_marks_system_and_last_tool(self):
+        payload = Conversation(system="s").to_request_payload(
+            "anthropic", "m", max_tokens=64, cache_prefix=True
+        )
+        assert payload["system"] == [
+            {"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}
+        ]
+        # Exactly one tools breakpoint, on the last tool.
+        marked = [t for t in payload["tools"] if "cache_control" in t]
+        assert len(marked) == 1 and marked[0] is payload["tools"][-1]
+
+    def test_cache_prefix_is_noop_for_openai(self):
+        # OpenAI caches the prefix automatically; no markers, no shape change.
+        payload = Conversation(system="s").to_request_payload(
+            "openai", "m", max_tokens=64, cache_prefix=True
+        )
+        assert isinstance(payload["messages"][0]["content"], str)
+        assert all("cache_control" not in t for t in payload["tools"])
+
+    def test_cache_prefix_verdict_turn_marks_system_only(self):
+        # The verdict turn drops tools, so only the system block is marked.
+        payload = Conversation(system="s").to_request_payload(
+            "anthropic", "m", max_tokens=64, verdict_turn=True, cache_prefix=True
+        )
+        assert "tools" not in payload
+        assert isinstance(payload["system"], list)
+        assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
 class TestTruncateText:
     def test_no_truncation_under_limit(self):
         out, truncated = truncate_text("hello\nworld", 100)

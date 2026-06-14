@@ -94,6 +94,36 @@ def _opt_int(value):
         return None
 
 
+def _accumulate_usage(acc, response, api_format):
+    """Fold a turn's token usage into the loop accumulator (telemetry).
+
+    Tolerant: a response without a usage block (or with odd values) is skipped.
+    Captures cached prompt tokens where the backend reports them — that's the
+    prompt-cache-effectiveness signal for native_loop.
+    """
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return
+
+    def _int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    acc["requests"] += 1
+    if api_format == "anthropic":
+        acc["prompt_tokens"] += _int(usage.get("input_tokens"))
+        acc["completion_tokens"] += _int(usage.get("output_tokens"))
+        acc["cached_prompt_tokens"] += _int(usage.get("cache_read_input_tokens"))
+    else:
+        acc["prompt_tokens"] += _int(usage.get("prompt_tokens"))
+        acc["completion_tokens"] += _int(usage.get("completion_tokens"))
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            acc["cached_prompt_tokens"] += _int(details.get("cached_tokens"))
+
+
 def normalize_api_format(value):
     candidate = (value or "openai").strip().lower()
     if candidate in {"openai", "anthropic"}:
@@ -1171,28 +1201,42 @@ def run_native_loop(
         else "max_tokens"
     )
 
+    # Token/cost telemetry: accumulate per-turn usage across the whole loop so
+    # the harness output can report tokens spent + prompt-cache effectiveness
+    # (cached_prompt_tokens) — observability for cost and for tuning caching.
+    usage_acc = {
+        "requests": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
+
     def post_fn(payload):
         # Per-turn fallback: a streamed turn that can't be reassembled — a
         # truncated/garbled SSE body (transport raise) or a 200 error object
         # (error key) — is retried once non-streamed before the loop gives up.
+        response = None
         try:
             response = run_chat_request(
                 base_url, api_format, payload, api_key, planning_timeout
             )
-            if not (payload.get("stream") and response.get("error")):
-                return response
+            usable = not (payload.get("stream") and response.get("error"))
         except Exception:
             if not payload.get("stream"):
                 raise
-        print(
-            "  native loop: streamed turn unusable; retrying non-streamed",
-            file=sys.stderr,
-        )
-        fallback = {k: v for k, v in payload.items() if k != "stream_options"}
-        fallback["stream"] = False
-        return run_chat_request(
-            base_url, api_format, fallback, api_key, planning_timeout
-        )
+            usable = False
+        if not usable:
+            print(
+                "  native loop: streamed turn unusable; retrying non-streamed",
+                file=sys.stderr,
+            )
+            fallback = {k: v for k, v in payload.items() if k != "stream_options"}
+            fallback["stream"] = False
+            response = run_chat_request(
+                base_url, api_format, fallback, api_key, planning_timeout
+            )
+        _accumulate_usage(usage_acc, response, api_format)
+        return response
 
     def execute_fn(tool_name, args):
         normalized_name, normalized_args = normalize_tool_request(
@@ -1221,6 +1265,7 @@ def run_native_loop(
         max_tokens=planning_max_tokens,
         stream=stream,
         tokens_param=tokens_param,
+        cache_prefix=True,
     )
 
     if outcome.degraded:
@@ -1268,6 +1313,7 @@ def run_native_loop(
                     keep_full_history_on_verdict=True,
                     response_format=response_format,
                     tokens_param=tokens_param,
+                    cache_prefix=True,
                 )
                 verdict_response = post_fn(verdict_payload)
                 Path("ai-response.primary.json").write_text(
@@ -1276,6 +1322,19 @@ def run_native_loop(
                 result["native_loop_verdict_produced"] = True
         except Exception as exc:  # noqa: BLE001 — never let it break evidence output
             result["native_loop_verdict_error"] = str(exc)
+
+    # Token/cost telemetry (loop turns + the verdict turn). cache_hit_ratio is
+    # the share of prompt tokens served from the prefix cache — the empirical
+    # prompt-cache-effectiveness signal (0.0 when the backend doesn't report it).
+    prompt_tokens = usage_acc["prompt_tokens"]
+    result["usage"] = {
+        **usage_acc,
+        "cache_hit_ratio": (
+            round(usage_acc["cached_prompt_tokens"] / prompt_tokens, 3)
+            if prompt_tokens
+            else 0.0
+        ),
+    }
 
     result["mode"] = "native_loop"
     result["rounds"] = outcome.rounds
