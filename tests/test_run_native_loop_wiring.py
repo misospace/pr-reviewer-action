@@ -444,3 +444,41 @@ def test_native_loop_accumulates_token_usage(monkeypatch, tmp_path):
     assert u["completion_tokens"] == 60
     assert u["cached_prompt_tokens"] == 340
     assert u["cache_hit_ratio"] == round(340 / 450, 3)
+
+
+def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
+    """#245: an allowlisted read-only MCP tool is advertised in the loop request
+    and routed to the MCP client; its result folds into the harness output."""
+    import pr_reviewer.mcp_client as mcp
+
+    monkeypatch.setenv("TOOL_MCP_SERVERS", "konflate=http://x/mcp")
+    tools = [{"name": "get_pr_diff", "description": "rendered diff",
+              "inputSchema": {"type": "object", "properties": {"number": {"type": "integer"}}}}]
+
+    def mcp_post(url, payload, session_id, token, timeout):
+        method = payload.get("method")
+        if method == "initialize":
+            return {"result": {"capabilities": {}}}, "s1", None
+        if method == "tools/list":
+            return {"result": {"tools": tools}}, session_id, None
+        if method == "tools/call":
+            return ({"result": {"content": [{"type": "text", "text": "version: v1.36.1 -> v1.36.2"}]}},
+                    session_id, None)
+        return None, session_id, None
+
+    monkeypatch.setattr(mcp, "_default_post", mcp_post)
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "mcp__konflate__get_pr_diff", '{"number": 7462}'),
+            _openai_text("done"),
+        ],
+    )
+    assert handled is True
+    # advertised in the (first) loop request
+    advertised = [t["function"]["name"] for t in payloads[0]["tools"]]
+    assert "mcp__konflate__get_pr_diff" in advertised
+    # executed + folded into the harness trace
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    mcp_calls = [tc for tc in harness.get("tool_calls", []) if tc["tool"] == "mcp__konflate__get_pr_diff"]
+    assert mcp_calls and mcp_calls[0]["status"] == "ok"

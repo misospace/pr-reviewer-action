@@ -1147,6 +1147,11 @@ def run_native_loop(
         adaptive_loop_budgets,
         drive_tool_loop,
     )
+    from pr_reviewer.mcp_client import (  # noqa: PLC0415
+        McpToolset,
+        parse_server_specs,
+        split_namespaced,
+    )
 
     # web_search is advertised only when a search endpoint is configured.
     search_url = os.getenv("SEARCH_URL", "").strip()
@@ -1154,6 +1159,30 @@ def run_native_loop(
     tool_schemas = list(TOOL_SCHEMAS)
     if search_url:
         tool_schemas.append(WEB_SEARCH_SCHEMA)
+
+    # Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
+    # happens upstream in run_review.sh (the env is blanked on fork PRs unless
+    # tool_enable_for_forks), so reaching here means MCP is permitted. A server
+    # that fails to connect is logged and skipped — never breaks the loop.
+    mcp_routes = {}
+    for srv_name, srv_url in parse_server_specs(os.getenv("TOOL_MCP_SERVERS", "")):
+        toolset = McpToolset(
+            srv_name, srv_url, os.getenv("TOOL_MCP_TOKEN", ""), timeout=request_timeout
+        )
+        try:
+            connect_error = toolset.connect()
+        except Exception as exc:  # noqa: BLE001 — never let MCP break the harness
+            connect_error = str(exc)
+        if connect_error:
+            print(f"  MCP server '{srv_name}' skipped: {connect_error}", file=sys.stderr)
+            continue
+        tool_schemas.extend(toolset.schemas)
+        for schema in toolset.schemas:
+            mcp_routes[schema["name"]] = toolset
+        print(
+            f"  MCP server '{srv_name}': {len(toolset.schemas)} read-only tool(s) advertised",
+            file=sys.stderr,
+        )
 
     # One stable system for the whole review (#263): reviewer prompt + tool-use
     # preamble, used for both the loop and the verdict turn so the cached prefix
@@ -1239,6 +1268,21 @@ def run_native_loop(
         return response
 
     def execute_fn(tool_name, args):
+        # Route mcp__server__tool to the MCP client; everything else falls
+        # through to the built-in read-only executor unchanged. MCP output is
+        # masked + capped exactly like built-in tool output (untrusted corpus).
+        if split_namespaced(tool_name):
+            toolset = mcp_routes.get(tool_name)
+            if toolset is None:
+                return {"tool": tool_name, "status": "error",
+                        "result": {"error": f"Unknown MCP tool: {tool_name}"}}
+            _, bare_tool = split_namespaced(tool_name)
+            res = toolset.call(bare_tool, args if isinstance(args, dict) else {})
+            if res.get("error"):
+                return {"tool": tool_name, "status": "error", "result": {"error": res["error"]}}
+            text, _ = mask_and_truncate(res.get("content", ""), max_response_bytes)
+            return {"tool": tool_name, "status": "ok", "result": {"content": text}}
+
         normalized_name, normalized_args = normalize_tool_request(
             {"tool": tool_name, "args": args}
         )

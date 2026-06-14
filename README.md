@@ -330,6 +330,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `tool_failure_enforcement` | Force `request_changes` when tool harness planning fails | No | `false` |
 | `tool_min_successful_requests` | Minimum successful tool requests required when `tool_failure_enforcement=true` | No | `0` |
 | `tool_enable_for_forks` | Allow tool harness on cross-repository PRs | No | `false` |
+| `tool_mcp_servers` | Allowlist of read-only MCP servers for `tool_mode: native_loop`, as a newline/comma list of `name=url`. Read-verb tools are advertised as `mcp__<name>__<tool>`; write-verb tools are refused. Empty = off. Fork-gated like the rest of the harness | No | `""` |
+| `tool_mcp_token` | Optional bearer token sent to every configured MCP server | No | `""` |
 
 </details>
 

@@ -402,6 +402,19 @@ inputs:
     description: If true, allow the tool harness to run on cross-repository pull requests
     required: false
     default: "false"
+  tool_mcp_servers:
+    description: >-
+      Optional allowlist of read-only MCP servers for tool_mode=native_loop, as a
+      newline/comma list of name=url (e.g. konflate=https://konflate.example/mcp).
+      Their read-verb tools (list/get/read/…) are advertised as
+      mcp_<name>_<tool>; write-verb tools are refused. Empty = off (default).
+      Fork-gated like the rest of the harness (tool_enable_for_forks).
+    required: false
+    default: ""
+  tool_mcp_token:
+    description: Optional bearer token sent to every configured MCP server (tool_mcp_servers)
+    required: false
+    default: ""
   ai_request_timeout_sec:
     description: Timeout in seconds for the primary model API request (curl --max-time)
     required: false
@@ -585,6 +598,8 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
+        TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
@@ -686,6 +701,8 @@ runs:
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
         EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
         TOOL_MODE: ${{ inputs.tool_mode }}
+        TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
+        TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
