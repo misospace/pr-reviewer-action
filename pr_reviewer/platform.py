@@ -20,11 +20,14 @@ def resolve_platform() -> str:
     """Resolve PLATFORM (github|forgejo|auto) to a concrete backend name.
 
     Mirrors ``platform_resolve`` in scripts/platform_api.sh: ``auto`` maps to
-    forgejo when GITHUB_SERVER_URL names a non-github.com host (Forgejo
-    Actions runners populate it with the instance URL), github otherwise.
+    forgejo when FORGEJO_API_URL is set or GITHUB_SERVER_URL names a
+    non-github.com host (Forgejo Actions runners populate it with the
+    instance URL), github otherwise.
     """
     platform = os.environ.get("PLATFORM", "github").strip().lower() or "github"
     if platform == "auto":
+        if os.environ.get("FORGEJO_API_URL", "").strip():
+            return "forgejo"
         server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
         if server and server != "https://github.com":
             return "forgejo"

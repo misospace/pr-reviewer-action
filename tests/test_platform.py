@@ -37,8 +37,16 @@ class TestResolvePlatform(unittest.TestCase):
         with _env(PLATFORM="auto", GITHUB_SERVER_URL="https://forgejo.example.com"):
             self.assertEqual(resolve_platform(), "forgejo")
 
+    def test_auto_forgejo_api_url_wins(self):
+        with _env(
+            PLATFORM="auto",
+            FORGEJO_API_URL="https://forgejo.example.com",
+            GITHUB_SERVER_URL="https://github.com",
+        ):
+            self.assertEqual(resolve_platform(), "forgejo")
+
     def test_auto_no_server_is_github(self):
-        with _env(PLATFORM="auto", GITHUB_SERVER_URL=""):
+        with _env(PLATFORM="auto", GITHUB_SERVER_URL="", FORGEJO_API_URL=""):
             self.assertEqual(resolve_platform(), "github")
 
     def test_invalid_raises(self):

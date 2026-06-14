@@ -13,9 +13,9 @@
 #   forgejo – operations via pr_reviewer/forgejo_backend.py (curl /api/v1).
 #             Requires FORGEJO_API_URL. Implemented per-operation across the
 #             1.4.x line; unimplemented operations fail loudly, never silently.
-#   auto    – resolved here: forgejo when GITHUB_SERVER_URL is set to a
-#             non-github.com host (Forgejo Actions runners populate it with
-#             the instance URL), github otherwise.
+#   auto    – resolved here: forgejo when FORGEJO_API_URL is set or when
+#             GITHUB_SERVER_URL names a non-github.com host (Forgejo Actions
+#             runners populate it with the instance URL), github otherwise.
 #
 # Two function classes:
 #   platform_*       – the repo under review; switches on PLATFORM.
@@ -40,10 +40,15 @@ _PLATFORM_API_SOURCED=1
 _PLATFORM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 platform_resolve() {
-  # Normalise PLATFORM, resolving `auto` from GITHUB_SERVER_URL.
+  # Normalize PLATFORM, resolving `auto` from explicit Forgejo config or host.
   local p="${PLATFORM:-github}"
   p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
   if [[ "$p" == "auto" ]]; then
+    if [[ -n "${FORGEJO_API_URL:-}" ]]; then
+      p="forgejo"
+      printf '%s' "$p"
+      return 0
+    fi
     local server="${GITHUB_SERVER_URL:-}"
     if [[ -n "$server" && "$server" != "https://github.com" && "$server" != "https://github.com/" ]]; then
       p="forgejo"

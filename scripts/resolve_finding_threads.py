@@ -49,22 +49,15 @@ for _p in (str(_SCRIPTS_DIR), str(_ACTION_ROOT)):
 
 from build_review_comments import FINDING_MARKER_PREFIX, finding_fingerprint  # noqa: E402
 from pr_reviewer.carry_forward import load_carried_findings  # noqa: E402
-from pr_reviewer.platform import PlatformUnsupported, gh_argv  # noqa: E402
+from pr_reviewer.platform import PlatformUnsupported, gh_argv, resolve_platform  # noqa: E402
 
 
 def _resolve_platform() -> str:
-    """Resolve effective platform from PLATFORM env var and FORGEJO_API_URL.
-
-    Returns 'github' or 'forgejo'. Mirrors the shell resolve_platform() in
-    publish_helpers.sh so both degrade consistently.
-    """
-    platform = os.environ.get("PLATFORM", "auto").lower()
-    if platform in ("github", "forgejo"):
-        return platform
-    # auto (default) or unknown → detect from FORGEJO_API_URL
-    if os.environ.get("FORGEJO_API_URL", "").strip():
-        return "forgejo"
-    return "github"
+    """Resolve effective platform using the shared Python seam."""
+    try:
+        return resolve_platform()
+    except ValueError:
+        return "github"
 
 
 def _is_github_platform() -> bool:
