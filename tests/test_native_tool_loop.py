@@ -473,3 +473,36 @@ def test_hostile_tool_result_is_fenced_before_next_round():
     assert "UNTRUSTED DATA" in tool_message["content"]
     assert hostile in tool_message["content"]
     assert tool_message["content"].index("UNTRUSTED DATA") < tool_message["content"].index(hostile)
+
+
+def test_round_calls_execute_concurrently_and_in_order():
+    """A round's calls run concurrently (a Barrier(3) would deadlock/timeout if
+    they ran sequentially), and results are still applied in original call order."""
+    import threading
+
+    conv = fresh_conversation()
+    post = scripted_post(
+        [
+            openai_tool_call_response(
+                [
+                    ("c1", "read_file", '{"path": "a"}'),
+                    ("c2", "read_file", '{"path": "b"}'),
+                    ("c3", "read_file", '{"path": "c"}'),
+                ]
+            ),
+            openai_text_response("done"),
+        ]
+    )
+    barrier = threading.Barrier(3, timeout=5)
+
+    def execute(tool, args):
+        barrier.wait()  # all three must be in-flight at once, else BrokenBarrierError
+        return {"tool": tool, "status": "ok", "result": {"path": args["path"]}}
+
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m",
+        budgets=LoopBudgets(max_tool_calls=3),
+    )
+    assert len(outcome.executed) == 3
+    assert [e.args["path"] for e in outcome.executed] == ["a", "b", "c"]
+    assert conv.open_tool_call_ids() == set()

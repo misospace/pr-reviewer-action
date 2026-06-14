@@ -770,6 +770,7 @@ class Conversation:
         keep_full_history_on_verdict: bool = False,
         response_format: str | None = None,
         tokens_param: str = "max_tokens",
+        cache_prefix: bool = False,
     ) -> dict[str, Any]:
         """Render the conversation as a wire-ready request body.
 
@@ -790,6 +791,7 @@ class Conversation:
                 verdict_turn=verdict_turn,
                 keep_full_history_on_verdict=keep_full_history_on_verdict,
                 response_format=response_format,
+                cache_prefix=cache_prefix,
             )
         return self._to_openai_payload(
             model=model,
@@ -866,6 +868,7 @@ class Conversation:
         verdict_turn: bool,
         keep_full_history_on_verdict: bool,
         response_format: str | None,
+        cache_prefix: bool = False,
     ) -> dict[str, Any]:
         system = self.system
         messages = self._render_anthropic_messages()
@@ -893,6 +896,21 @@ class Conversation:
         # on the system prompt to request JSON. response_format is silently
         # ignored to keep the call sites uniform between the two APIs.
         _ = response_format
+        # Anthropic prompt caching is opt-in (#263 Part 2): unlike OpenAI's
+        # automatic prefix cache, it caches nothing unless cache_control markers
+        # are present. Mark the stable prefix — the system block and the tools
+        # block (the two large turn-invariant pieces) — so the multi-turn loop
+        # reuses them. The growing messages tail stays uncached.
+        if cache_prefix:
+            if system:
+                payload["system"] = [
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                ]
+            if payload.get("tools"):
+                payload["tools"][-1] = {
+                    **payload["tools"][-1],
+                    "cache_control": {"type": "ephemeral"},
+                }
         return payload
 
 

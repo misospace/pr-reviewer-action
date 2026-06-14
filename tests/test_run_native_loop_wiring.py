@@ -414,3 +414,33 @@ def test_native_loop_honors_max_completion_tokens(monkeypatch, tmp_path):
     for payload in payloads:
         assert "max_completion_tokens" in payload
         assert "max_tokens" not in payload
+
+
+def test_native_loop_accumulates_token_usage(monkeypatch, tmp_path):
+    """Token/cost telemetry: per-turn usage (loop + verdict) is summed into
+    result['usage'], including cached prompt tokens → cache_hit_ratio."""
+    (tmp_path / "review-corpus.truncated.md").write_text("# corpus\n", encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+
+    def with_usage(resp, p, c, cached):
+        resp["usage"] = {"prompt_tokens": p, "completion_tokens": c,
+                         "prompt_tokens_details": {"cached_tokens": cached}}
+        return resp
+
+    verdict = {"choices": [{"finish_reason": "stop",
+               "message": {"content": '{"verdict":"approve","review_markdown":"ok","findings":[]}'}}]}
+    handled, result, _ = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            with_usage(_openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'), 100, 20, 40),
+            with_usage(_openai_text("done"), 150, 10, 120),
+            with_usage(verdict, 200, 30, 180),
+        ],
+    )
+    assert handled is True
+    u = result["usage"]
+    assert u["requests"] == 3
+    assert u["prompt_tokens"] == 450
+    assert u["completion_tokens"] == 60
+    assert u["cached_prompt_tokens"] == 340
+    assert u["cache_hit_ratio"] == round(340 / 450, 3)
