@@ -33,6 +33,8 @@ class TestToolSchemas:
             "read_file",
             "web_fetch",
             "git_grep",
+            "git_log",
+            "git_blame",
             "run_command",
         }
 

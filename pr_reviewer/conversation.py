@@ -86,7 +86,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": (
             "Read a file from the workspace. Path-traversal and sensitive "
             "files (.env, .pem, credentials, id_rsa, …) are blocked. Output "
-            "is truncated to ~12 KB."
+            "is truncated to ~12 KB. For a large file, pass offset/limit to "
+            "read a line window (also the way to expand context around a "
+            "diff hunk) instead of blowing the cap."
         ),
         "parameters": {
             "type": "object",
@@ -94,6 +96,64 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "path": {
                     "type": "string",
                     "description": "Path relative to the workspace root.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Optional 1-based first line to read.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Optional max number of lines to read from offset.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "git_log",
+        "description": (
+            "Read-only recent commit history (oneline: hash date author "
+            "subject), optionally scoped to a path. No file content — use "
+            "git_blame for line-level authorship."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional path to scope history to.",
+                },
+                "max_count": {
+                    "type": "integer",
+                    "description": "Optional max commits (1–100, default 20).",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "git_blame",
+        "description": (
+            "Read-only line-level authorship for a tracked file (who last "
+            "changed each line, and in which commit). Pass start/end to blame "
+            "a line range. Sensitive files are blocked like read_file."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path relative to the workspace root.",
+                },
+                "start": {
+                    "type": "integer",
+                    "description": "Optional 1-based first line of the range.",
+                },
+                "end": {
+                    "type": "integer",
+                    "description": "Optional last line of the range (with start).",
                 },
             },
             "required": ["path"],
