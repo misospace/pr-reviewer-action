@@ -55,9 +55,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "gh_api",
         "description": (
-            "Read-only GitHub REST API call. Path must start with one of "
-            "repos/, issues/, search/, releases/, git/ and target an "
-            "allowlisted repo. Use for PR/issue/release/commit lookups."
+            "Read-only GitHub REST API call returning structured JSON. Path "
+            "must start with repos/, issues/, search/, releases/, git/ and "
+            "target an allowlisted repo. Prefer this over web_fetch for "
+            "anything on github.com: releases (repos/o/r/releases/tags/TAG) "
+            "and version diffs (repos/o/r/compare/BASE...HEAD) — it avoids the "
+            "HTML pages that often 404."
         ),
         "parameters": {
             "type": "object",
@@ -100,8 +103,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "web_fetch",
         "description": (
-            "Fetch a URL whose host appears in the action's allowlist. "
-            "Output is truncated to ~10 KB of decoded text."
+            "Fetch a URL whose host is allowlisted; output truncated to ~10 KB "
+            "of decoded text. Prefer a structured API endpoint over an HTML "
+            "release/compare page (HTML often 404s or is JS-rendered): for "
+            "github.com use gh_api; for a Gitea/Forgejo host fetch its "
+            "/api/v1/... JSON (e.g. .../releases/tags/TAG or "
+            ".../compare/BASE...HEAD), not the web page."
         ),
         "parameters": {
             "type": "object",

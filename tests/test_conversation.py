@@ -51,6 +51,15 @@ class TestToolSchemas:
         # The allowlist in scripts/run_tool_harness.py (ALLOWED_COMMANDS).
         assert set(enum) == {"git_status_short", "git_diff_stat", "git_diff_name_only"}
 
+    def test_structured_api_steering_present(self):
+        # Guards the gh_api-over-web_fetch steering: the model should reach for
+        # the structured API (gh_api / a forge's /api/v1) rather than scraping
+        # HTML release/compare pages that 404. Forge-agnostic.
+        desc = {s["name"]: s["description"].lower() for s in TOOL_SCHEMAS}
+        assert "compare" in desc["gh_api"]
+        assert "gh_api" in desc["web_fetch"]
+        assert "/api/v1" in desc["web_fetch"]
+
 
 class TestWebSearchGating:
     """web_search is opt-in: advertised only when the conversation carries it."""
