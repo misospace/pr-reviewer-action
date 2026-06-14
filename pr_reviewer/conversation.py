@@ -45,7 +45,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 # Per the executor catalogue in scripts/run_tool_harness.py (the
 # normalize_tool_request repair logic and the per-tool arg shapes). Keep these
@@ -597,6 +597,57 @@ class Conversation:
                 e["content"] = new_body
                 shrunk += 1
         return shrunk
+
+    def summarize_oldest_tool_results(
+        self, summarize_fn: Callable[[str], str], *, keep_newest: int = 2
+    ) -> int:
+        """Fold the oldest tool results into one model-generated digest.
+
+        When the conversation outgrows the loop's context budget, blunt
+        truncation (:meth:`truncate_oldest_tool_results`) drops the tail of
+        each old result — losing whatever evidence sat past the byte cap. This
+        instead compresses the older results (all but the newest
+        ``keep_newest``) into a single dense digest via ``summarize_fn``,
+        preserving the salient facts (versions, paths, URLs, findings) in far
+        fewer tokens.
+
+        Wire validity is preserved: every tool_result keeps its ``call_id`` so
+        the assistant_tool_calls ↔ tool_result pairing stays intact. The oldest
+        folded result's content becomes the digest; the rest become a short
+        placeholder pointing at it. The newest ``keep_newest`` results are left
+        verbatim — they're what the model is actively reasoning over. Already
+        folded results are skipped, so this is safe to call every round.
+
+        Returns the number of results folded (0 when there aren't enough old
+        results, all are already folded, or the summary came back empty — the
+        caller should fall back to truncation in that case).
+        """
+        indices = [i for i, e in enumerate(self.events) if e["kind"] == "tool_result"]
+        keep = max(keep_newest, 0)
+        if len(indices) <= keep:
+            return 0
+        old = indices[: len(indices) - keep] if keep else indices
+        foldable = [i for i in old if not self.events[i].get("summarized")]
+        if not foldable:
+            return 0
+        block = "\n\n".join(
+            f"[earlier result {n + 1}"
+            f"{' (error)' if self.events[i].get('is_error') else ''}]\n"
+            + self.events[i]["content"]
+            for n, i in enumerate(foldable)
+        )
+        digest = (summarize_fn(block) or "").strip()
+        if not digest:
+            return 0
+        head = foldable[0]
+        self.events[head]["content"] = (
+            "Condensed digest of earlier tool results:\n" + digest
+        )
+        self.events[head]["summarized"] = True
+        for i in foldable[1:]:
+            self.events[i]["content"] = "[folded into the condensed digest above]"
+            self.events[i]["summarized"] = True
+        return len(foldable)
 
     # ---- wire emission ---------------------------------------------------
 

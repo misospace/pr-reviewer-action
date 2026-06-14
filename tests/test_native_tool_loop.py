@@ -321,6 +321,123 @@ def test_wall_clock_budget():
 
 
 # ---------------------------------------------------------------------------
+# drive_tool_loop — between-round result compaction (#197 §2)
+# ---------------------------------------------------------------------------
+
+
+def _big_execute(nbytes):
+    """execute_fn returning a large result body to push the conversation over
+    the context budget."""
+    def execute(name, args):
+        return {"tool": name, "status": "ok", "result": {"content": "Z" * nbytes}}
+    return execute
+
+
+def test_summarize_fn_folds_oldest_results_when_over_budget():
+    conv = fresh_conversation()
+    post = scripted_post(
+        [
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
+            openai_text_response("done"),
+        ]
+    )
+    seen = []
+
+    def summarize(block):
+        seen.append(block)
+        return "DIGEST: read a and b"
+
+    # Two ~600-token results blow a 800-token budget; folding one + the digest
+    # lands back under it, so the blunt-truncate backstop never fires.
+    outcome = drive_tool_loop(
+        conv,
+        post,
+        _big_execute(2400),
+        api_format="openai",
+        model="m",
+        budgets=LoopBudgets(
+            max_conversation_tokens=800,
+            max_rounds=8,
+            max_tool_calls=10,
+            summarize_keep_newest=1,
+        ),
+        summarize_fn=summarize,
+    )
+    assert outcome.stop_reason == STOP_MODEL_DONE
+    assert seen, "summarizer should have been invoked when over budget"
+    rendered = json.dumps(conv._render_openai_messages())
+    assert "DIGEST: read a and b" in rendered
+    assert conv.open_tool_call_ids() == set()
+
+
+def test_empty_digest_falls_back_to_truncation():
+    conv = fresh_conversation()
+    post = scripted_post(
+        [
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
+            openai_text_response("done"),
+        ]
+    )
+
+    outcome = drive_tool_loop(
+        conv,
+        post,
+        _big_execute(6000),
+        api_format="openai",
+        model="m",
+        budgets=LoopBudgets(
+            max_conversation_tokens=800,
+            truncated_result_bytes=500,
+            max_rounds=8,
+            max_tool_calls=10,
+            summarize_keep_newest=1,
+        ),
+        summarize_fn=lambda block: "",  # summarizer yields nothing usable
+    )
+    assert outcome.stop_reason == STOP_MODEL_DONE
+    # Backstop ran: the oldest result was blunt-truncated to the byte cap.
+    oldest = next(e for e in conv.events if e["kind"] == "tool_result")
+    assert len(oldest["content"].encode("utf-8")) <= 500
+
+
+def test_no_summarize_fn_truncates_as_before():
+    conv = fresh_conversation()
+    post = scripted_post(
+        [
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
+            openai_text_response("done"),
+        ]
+    )
+
+    outcome = drive_tool_loop(
+        conv,
+        post,
+        _big_execute(6000),
+        api_format="openai",
+        model="m",
+        budgets=LoopBudgets(
+            max_conversation_tokens=800,
+            truncated_result_bytes=500,
+            max_rounds=8,
+            max_tool_calls=10,
+        ),
+        # summarize_fn defaults to None — existing truncation behavior.
+    )
+    assert outcome.stop_reason == STOP_MODEL_DONE
+    oldest = next(e for e in conv.events if e["kind"] == "tool_result")
+    assert len(oldest["content"].encode("utf-8")) <= 500
+
+
+# ---------------------------------------------------------------------------
 # drive_tool_loop — degradation and repair
 # ---------------------------------------------------------------------------
 

@@ -339,6 +339,22 @@ inputs:
       (all model round-trips plus tool execution). Ignored for other modes.
     required: false
     default: "120"
+  tool_loop_summarize:
+    description: >-
+      When "true", tool_mode=native_loop folds the oldest tool results into a
+      model-generated evidence digest once the conversation outgrows its context
+      budget, instead of blunt-truncating them — preserving salient facts
+      (versions, paths, URLs, findings) in fewer tokens at the cost of one extra
+      model call per compaction. Off by default (truncation). Ignored for other
+      modes.
+    required: false
+    default: "false"
+  tool_loop_summarize_max_tokens:
+    description: >-
+      Maximum completion tokens for each result-summarization call when
+      tool_loop_summarize is enabled. Keep it small — the digest should be terse.
+    required: false
+    default: "512"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
@@ -603,6 +619,8 @@ runs:
         TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
         TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
+        TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
+        TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
@@ -706,6 +724,8 @@ runs:
         TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
         TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
+        TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
+        TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}

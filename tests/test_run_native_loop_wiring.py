@@ -277,6 +277,54 @@ def test_native_loop_degrades_writes_nothing(monkeypatch, tmp_path):
     assert not (tmp_path / "tool-harness.md").exists()
 
 
+def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled):
+    """Run run_native_loop with drive_tool_loop stubbed to capture the
+    summarize_fn kwarg, so we can assert the result-summarization wiring
+    without forcing a real 24k-token conversation overflow."""
+    import pr_reviewer.tool_loop as tl
+
+    captured = {}
+
+    def fake_drive(conversation, post_fn, execute_fn, **kwargs):
+        captured["summarize_fn"] = kwargs.get("summarize_fn")
+        out = tl.LoopOutcome()
+        out.degraded = True
+        out.stop_reason = "no-tool-calls"
+        return out
+
+    monkeypatch.setattr(tl, "drive_tool_loop", fake_drive)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
+    if enabled:
+        monkeypatch.setenv("TOOL_LOOP_SUMMARIZE", "true")
+    else:
+        monkeypatch.delenv("TOOL_LOOP_SUMMARIZE", raising=False)
+    result = {
+        "mode": "plan_execute_once",
+        "planned_request_count": 0,
+        "executed_request_count": 0,
+        "tool_results": [],
+    }
+    handled = rth.run_native_loop(
+        "owner/repo", "http://model.local/v1", "openai", "mock-model", "key",
+        "# PR Corpus\nbumps kubelet image",
+        {"owner/repo"}, ["talos.dev"], str(tmp_path),
+        12000, 15, 4, 45, 400, result,
+    )
+    assert handled is False  # the stub degraded
+    return captured["summarize_fn"]
+
+
+def test_summarize_fn_wired_when_enabled(monkeypatch, tmp_path):
+    summarize_fn = _capture_summarize_fn(monkeypatch, tmp_path, enabled=True)
+    assert callable(summarize_fn)
+
+
+def test_summarize_fn_absent_by_default(monkeypatch, tmp_path):
+    summarize_fn = _capture_summarize_fn(monkeypatch, tmp_path, enabled=False)
+    assert summarize_fn is None
+
+
 def _openai_text_with_usage(text, *, prompt, completion, cached=0):
     resp = _openai_text(text)
     resp["usage"] = {

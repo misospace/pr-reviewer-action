@@ -358,6 +358,67 @@ class TestConversationOverflow:
         assert new_event["content"] == "short"
 
 
+class TestConversationSummarize:
+    """summarize_oldest_tool_results: fold old results into one model digest
+    while keeping the newest verbatim and preserving wire validity (#197 §2)."""
+
+    def _conv_with_results(self, n):
+        c = Conversation()
+        c.add_assistant_tool_calls(
+            [{"id": f"c{i}", "name": "read_file", "arguments": "{}"} for i in range(n)]
+        )
+        for i in range(n):
+            c.add_tool_result(f"c{i}", f"result body {i} " + "z" * 100)
+        return c
+
+    def test_folds_old_results_keeps_newest_verbatim(self):
+        c = self._conv_with_results(4)
+        seen = {}
+
+        def summarize(block):
+            seen["block"] = block
+            return "- digest of earlier reads"
+
+        folded = c.summarize_oldest_tool_results(summarize, keep_newest=2)
+        assert folded == 2  # c0, c1 folded; c2, c3 kept
+        results = [e for e in c.events if e["kind"] == "tool_result"]
+        # Oldest carries the digest; the next folded one is a pointer.
+        assert results[0]["content"].startswith("Condensed digest of earlier")
+        assert "- digest of earlier reads" in results[0]["content"]
+        assert results[1]["content"] == "[folded into the condensed digest above]"
+        # Newest two are byte-for-byte intact.
+        assert results[2]["content"] == "result body 2 " + "z" * 100
+        assert results[3]["content"] == "result body 3 " + "z" * 100
+        # The summarizer saw every folded result's body.
+        assert "result body 0" in seen["block"] and "result body 1" in seen["block"]
+        # call_id ↔ result pairing preserved (wire validity).
+        assert c.open_tool_call_ids() == set()
+
+    def test_idempotent_skips_already_folded(self):
+        c = self._conv_with_results(4)
+        c.summarize_oldest_tool_results(lambda b: "digest one", keep_newest=2)
+        # A second pass with the same window has nothing new to fold.
+        calls = []
+        folded = c.summarize_oldest_tool_results(
+            lambda b: calls.append(b) or "digest two", keep_newest=2
+        )
+        assert folded == 0
+        assert calls == []  # summarizer not even invoked
+
+    def test_empty_digest_returns_zero_and_no_change(self):
+        c = self._conv_with_results(3)
+        before = [e["content"] for e in c.events if e["kind"] == "tool_result"]
+        folded = c.summarize_oldest_tool_results(lambda b: "   ", keep_newest=1)
+        assert folded == 0
+        after = [e["content"] for e in c.events if e["kind"] == "tool_result"]
+        assert before == after
+
+    def test_too_few_results_to_fold(self):
+        c = self._conv_with_results(2)
+        folded = c.summarize_oldest_tool_results(lambda b: "x", keep_newest=2)
+        assert folded == 0
+
+
 class TestOpenAIPayload:
     def test_basic_assistant_tool_round_trip(self):
         c = Conversation(system="you are a reviewer")

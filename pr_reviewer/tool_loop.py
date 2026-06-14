@@ -69,9 +69,13 @@ class LoopBudgets:
     max_rounds: int = 3  # model round-trips (TOOL_MAX_ROUNDS)
     wall_clock_sec: float = 120.0  # whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC)
     # When the conversation outgrows this, the oldest tool results are
-    # truncated before the next request (newest results stay intact).
+    # compacted before the next request (newest results stay intact) — by a
+    # model-generated digest when a summarizer is wired, else blunt truncation.
     max_conversation_tokens: int = 24000
     truncated_result_bytes: int = 2000
+    # Results kept verbatim when summarizing the rest (the model is actively
+    # reasoning over the newest evidence).
+    summarize_keep_newest: int = 2
 
 
 def adaptive_loop_budgets(
@@ -215,6 +219,7 @@ def drive_tool_loop(
     stream: bool = False,
     tokens_param: str = "max_tokens",
     cache_prefix: bool = False,
+    summarize_fn: Callable[[str], str] | None = None,
     time_fn: Callable[[], float] = time.monotonic,
 ) -> LoopOutcome:
     """Run the agentic loop until the model stops or a budget hits.
@@ -243,9 +248,26 @@ def drive_tool_loop(
             break
 
         # Keep the next request within the advisory context budget by
-        # shrinking the oldest tool results (newest stay intact).
+        # compacting the oldest tool results (newest stay intact). When a
+        # summarizer is wired, fold them into a model-generated digest that
+        # preserves salient facts; otherwise (or if it frees nothing / fails)
+        # fall back to blunt truncation, which is the guaranteed backstop.
         if conversation.approx_tokens() > budgets.max_conversation_tokens:
-            conversation.truncate_oldest_tool_results(budgets.truncated_result_bytes)
+            summarized = 0
+            if summarize_fn is not None:
+                try:
+                    summarized = conversation.summarize_oldest_tool_results(
+                        summarize_fn, keep_newest=budgets.summarize_keep_newest
+                    )
+                except Exception:  # noqa: BLE001 — summarization is best-effort
+                    summarized = 0
+            if (
+                not summarized
+                or conversation.approx_tokens() > budgets.max_conversation_tokens
+            ):
+                conversation.truncate_oldest_tool_results(
+                    budgets.truncated_result_bytes
+                )
 
         payload = conversation.to_request_payload(
             api_format,
