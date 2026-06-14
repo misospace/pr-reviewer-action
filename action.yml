@@ -324,11 +324,13 @@ inputs:
       evidence tools in a single planning round before the final review. plan_execute_loop
       re-plans after seeing each round's results (up to tool_max_rounds), so the model can
       dig further based on what it found; tool_max_requests is the total budget across rounds.
-      native_loop uses the model's native tool-calling API (non-streaming): the model holds
+      native_loop uses the model's native tool-calling API: the model holds
       the tool schemas and decides each next call from the previous result, enabling the
       multi-hop chains the planner modes cannot express; a model that never emits a tool
-      call degrades automatically to the plan_execute_loop path. Budgets reuse
-      tool_max_requests and tool_max_rounds, plus tool_loop_wall_clock_sec.
+      call degrades automatically to the plan_execute_loop path. Loop turns stream by
+      default (controlled by ai_stream) so long turns don't time out behind a short-idle
+      proxy; a stream that can't be reassembled is retried non-streamed for that turn.
+      Budgets reuse tool_max_requests and tool_max_rounds, plus tool_loop_wall_clock_sec.
     required: false
     default: "off"
   tool_loop_wall_clock_sec:
@@ -350,7 +352,7 @@ inputs:
     required: false
     default: "3"
   tool_planning_timeout_sec:
-    description: Timeout in seconds for the model planning call used by tool harness. Non-streaming, so set generously for local models with slow prompt eval.
+    description: Timeout in seconds for the model planning call used by tool harness. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts.
     required: false
     default: "60"
   tool_planning_max_context_bytes:

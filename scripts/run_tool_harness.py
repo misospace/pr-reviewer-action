@@ -197,6 +197,15 @@ def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
     if api_format == "anthropic":
         curl_args.extend(["-H", f"anthropic-version: {os.getenv('ANTHROPIC_VERSION', '2023-06-01')}"])
 
+    # Streaming keeps bytes flowing so proxies with a short idle/read timeout
+    # (Cloudflare's 100s edge timer etc.) don't 524 a long thinking-model turn.
+    # --no-buffer flushes each SSE chunk; the body is reassembled below.
+    streaming = bool(payload.get("stream"))
+    if streaming:
+        curl_args.append("--no-buffer")
+        if api_format == "anthropic":
+            curl_args.extend(["-H", "Accept: text/event-stream"])
+
     # The API key goes through a 0600 curl --config file rather than argv, so
     # it never appears in /proc/<pid>/cmdline or `ps` output on shared runners.
     auth_config_path = None
@@ -238,6 +247,13 @@ def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
             + (f": {stderr}" if stderr else "")
         )
 
+    if streaming:
+        # SSE deltas → the non-streaming response shape the loop parses. The
+        # reassembler also surfaces a JSON error body returned mid-"stream"
+        # (some servers reply 200 + an error object instead of events).
+        from pr_reviewer.sse_reassembler import reassemble_sse  # noqa: PLC0415
+
+        return reassemble_sse(completed.stdout, api_format)
     return json.loads(completed.stdout)
 
 
@@ -929,8 +945,32 @@ def run_native_loop(
         wall_clock_sec=float(wall_clock),
     )
 
+    # Stream loop turns by default (mirrors AI_STREAM for the review call) so
+    # long thinking-model turns don't 524 behind a short-idle proxy (#204).
+    stream = os.getenv("AI_STREAM", "true").strip().lower() == "true"
+
     def post_fn(payload):
-        return run_chat_request(base_url, api_format, payload, api_key, planning_timeout)
+        # Per-turn fallback: a streamed turn that can't be reassembled — a
+        # truncated/garbled SSE body (transport raise) or a 200 error object
+        # (error key) — is retried once non-streamed before the loop gives up.
+        try:
+            response = run_chat_request(
+                base_url, api_format, payload, api_key, planning_timeout
+            )
+            if not (payload.get("stream") and response.get("error")):
+                return response
+        except Exception:
+            if not payload.get("stream"):
+                raise
+        print(
+            "  native loop: streamed turn unusable; retrying non-streamed",
+            file=sys.stderr,
+        )
+        fallback = {k: v for k, v in payload.items() if k != "stream_options"}
+        fallback["stream"] = False
+        return run_chat_request(
+            base_url, api_format, fallback, api_key, planning_timeout
+        )
 
     def execute_fn(tool_name, args):
         normalized_name, normalized_args = normalize_tool_request(
@@ -957,6 +997,7 @@ def run_native_loop(
         model=model,
         budgets=budgets,
         max_tokens=planning_max_tokens,
+        stream=stream,
     )
 
     if outcome.degraded:
