@@ -3,8 +3,15 @@
 Drives an agentic exchange against a tool-capable model: send the corpus +
 tool schemas, execute the tool calls the model returns, append the results,
 and repeat until the model stops calling tools or a budget runs out.
-Non-streaming requests only (streaming arrives in 4/7 on top of
-``pr_reviewer.sse_reassembler``).
+
+Each turn can be streamed (``stream=True``): the injected ``post_fn`` is
+responsible for reassembling the SSE deltas (via
+``pr_reviewer.sse_reassembler``) back into the non-streaming response shape
+this module parses, so the driver itself stays format-agnostic. Streaming
+restores the long-request timeout protection (Cloudflare's 100s edge timer
+etc.) that a blocking POST through a proxy loses on long thinking-model
+turns; the non-streamed request stays available as the per-turn fallback
+the transport falls back to when a stream can't be reassembled (#204).
 
 The module is deliberately I/O-free: the HTTP POST and the tool execution
 are injected callables, so the whole loop is unit-testable against scripted
@@ -175,12 +182,15 @@ def drive_tool_loop(
     budgets: LoopBudgets | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.0,
+    stream: bool = False,
     time_fn: Callable[[], float] = time.monotonic,
 ) -> LoopOutcome:
     """Run the agentic loop until the model stops or a budget hits.
 
     ``post_fn`` takes a wire-ready request payload and returns the parsed
-    response JSON (raising on transport failure). ``execute_fn`` takes
+    response JSON (raising on transport failure). When ``stream`` is set the
+    payload carries ``stream: true`` and ``post_fn`` owns SSE reassembly,
+    handing back the same non-streaming response shape. ``execute_fn`` takes
     ``(tool_name, args)`` and returns the executor result dict
     ``{"tool", "status", "result"}`` — in production this is
     ``run_tool_harness.execute_tool_request`` with allowlists/caps bound in.
@@ -208,7 +218,7 @@ def drive_tool_loop(
         payload = conversation.to_request_payload(
             api_format,
             model,
-            stream=False,
+            stream=stream,
             max_tokens=max_tokens,
             temperature=temperature,
         )
