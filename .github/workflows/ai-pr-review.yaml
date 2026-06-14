@@ -53,6 +53,7 @@ jobs:
           ai_fallback_api_format: ${{ vars.FALLBACK_FORMAT }}
           ai_fallback_model: ${{ vars.FALLBACK_MODEL }}
           ai_fallback_api_key: ${{ secrets.LITELLM_API_KEY }}
+          ai_max_tokens: "16384"
           review_routing_mode: auto
           ai_smart_base_url: ${{ vars.LITELLM_URL }}
           ai_smart_api_format: ${{ vars.SMART_FORMAT }}
