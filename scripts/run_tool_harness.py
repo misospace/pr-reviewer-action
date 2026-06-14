@@ -124,6 +124,25 @@ def _accumulate_usage(acc, response, api_format):
             acc["cached_prompt_tokens"] += _int(details.get("cached_tokens"))
 
 
+def _usage_with_cache_ratio(usage_acc):
+    """Stamp the loop's accumulated usage with cache_hit_ratio for telemetry.
+
+    cache_hit_ratio is the share of prompt tokens served from the prefix cache
+    — the empirical prompt-cache-effectiveness signal (0.0 when the backend
+    doesn't report it). Shared by the completed-loop and degraded-loop paths so
+    both emit the same shape.
+    """
+    prompt_tokens = usage_acc["prompt_tokens"]
+    return {
+        **usage_acc,
+        "cache_hit_ratio": (
+            round(usage_acc["cached_prompt_tokens"] / prompt_tokens, 3)
+            if prompt_tokens
+            else 0.0
+        ),
+    }
+
+
 def normalize_api_format(value):
     candidate = (value or "openai").strip().lower()
     if candidate in {"openai", "anthropic"}:
@@ -1316,6 +1335,14 @@ def run_native_loop(
         result["native_loop_degraded"] = outcome.stop_reason
         if outcome.error:
             result["native_loop_error"] = outcome.error
+        # Record the native attempt's token usage even though we're degrading to
+        # the planner path below. Otherwise the spend on a turn that errored
+        # (stop_reason=request-error) or burned a full reasoning turn before
+        # declining tools (no-tool-calls) is invisible — and the fallback's
+        # plan_execute mode in tool-harness.json carries no record of it. Kept
+        # under a native_loop-namespaced key so it never reads as the fallback
+        # mode's own usage (which is accounted separately).
+        result["native_loop_usage"] = _usage_with_cache_ratio(usage_acc)
         return False
 
     # ── In-conversation verdict (#205, Option 1) ─────────────────────────────
@@ -1370,15 +1397,7 @@ def run_native_loop(
     # Token/cost telemetry (loop turns + the verdict turn). cache_hit_ratio is
     # the share of prompt tokens served from the prefix cache — the empirical
     # prompt-cache-effectiveness signal (0.0 when the backend doesn't report it).
-    prompt_tokens = usage_acc["prompt_tokens"]
-    result["usage"] = {
-        **usage_acc,
-        "cache_hit_ratio": (
-            round(usage_acc["cached_prompt_tokens"] / prompt_tokens, 3)
-            if prompt_tokens
-            else 0.0
-        ),
-    }
+    result["usage"] = _usage_with_cache_ratio(usage_acc)
 
     result["mode"] = "native_loop"
     result["rounds"] = outcome.rounds

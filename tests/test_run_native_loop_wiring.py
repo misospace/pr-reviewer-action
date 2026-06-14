@@ -277,6 +277,70 @@ def test_native_loop_degrades_writes_nothing(monkeypatch, tmp_path):
     assert not (tmp_path / "tool-harness.md").exists()
 
 
+def _openai_text_with_usage(text, *, prompt, completion, cached=0):
+    resp = _openai_text(text)
+    resp["usage"] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+    }
+    return resp
+
+
+def test_native_loop_degrade_records_native_usage(monkeypatch, tmp_path):
+    """A turn that burns tokens then declines tools still records its spend.
+
+    Before the fix the no-tool-calls degrade returned without stamping usage,
+    so the (real) cost of the reasoning turn that declined tools vanished and
+    the fallback's plan_execute mode carried no record of it.
+    """
+    handled, result = _run(
+        monkeypatch,
+        tmp_path,
+        [_openai_text_with_usage(
+            "Approve.", prompt=1000, completion=400, cached=600
+        )],
+    )
+    assert handled is False
+    assert result["native_loop_degraded"] == "no-tool-calls"
+    usage = result["native_loop_usage"]
+    assert usage["prompt_tokens"] == 1000
+    assert usage["completion_tokens"] == 400
+    assert usage["cached_prompt_tokens"] == 600
+    assert usage["cache_hit_ratio"] == 0.6
+
+
+def test_native_loop_request_error_records_usage_and_error(monkeypatch, tmp_path):
+    """A first-turn transport error degrades to the planner, but the native
+    attempt's stop reason + (zeroed) usage are still recorded — no silent
+    'mode present, usage absent' tool-harness.json."""
+    def boom(base_url, api_format, payload, api_key, timeout_sec):
+        raise RuntimeError("upstream 524")
+
+    monkeypatch.setattr(rth, "run_chat_request", boom)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
+    monkeypatch.setenv("AI_STREAM", "false")
+    result = {
+        "mode": "plan_execute_once",
+        "planned_request_count": 0,
+        "executed_request_count": 0,
+        "tool_results": [],
+    }
+    handled = rth.run_native_loop(
+        "owner/repo", "http://model.local/v1", "openai", "mock-model", "key",
+        "# PR Corpus\nbumps kubelet image",
+        {"owner/repo"}, ["talos.dev"], str(tmp_path),
+        12000, 15, 4, 45, 400, result,
+    )
+    assert handled is False
+    assert result["native_loop_degraded"] == "request-error"
+    assert "upstream 524" in result["native_loop_error"]
+    # Usage block is present (zeroed — the request never returned a body).
+    assert result["native_loop_usage"]["prompt_tokens"] == 0
+    assert result["native_loop_usage"]["cache_hit_ratio"] == 0.0
+
+
 def _run_capturing(monkeypatch, tmp_path, api_format, responses):
     """Like _run but records every payload sent, for the verdict-turn tests."""
     queue = list(responses)
