@@ -275,3 +275,90 @@ def test_native_loop_degrades_writes_nothing(monkeypatch, tmp_path):
     # No output files: the caller (main) falls through to the planner path.
     assert not (tmp_path / "tool-harness.json").exists()
     assert not (tmp_path / "tool-harness.md").exists()
+
+
+def _run_capturing(monkeypatch, tmp_path, api_format, responses):
+    """Like _run but records every payload sent, for the verdict-turn tests."""
+    queue = list(responses)
+    payloads = []
+
+    def fake_request(base_url, fmt, payload, api_key, timeout_sec):
+        payloads.append(payload)
+        assert queue, "model called more times than scripted"
+        return queue.pop(0)
+
+    monkeypatch.setattr(rth, "run_chat_request", fake_request)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
+    monkeypatch.setenv("AI_STREAM", "false")
+    result = {
+        "mode": "plan_execute_once",
+        "planned_request_count": 0,
+        "executed_request_count": 0,
+        "tool_results": [],
+    }
+    handled = rth.run_native_loop(
+        "owner/repo", "http://model.local/v1", api_format, "mock-model", "key",
+        "# PR Corpus\nbumps kubelet image in machineconfig.yaml.j2",
+        {"owner/repo"}, ["talos.dev"], str(tmp_path),
+        12000, 15, 4, 45, 400, result,
+    )
+    return handled, result, payloads
+
+
+def test_native_loop_emits_in_conversation_verdict(monkeypatch, tmp_path):
+    """#205: after gathering evidence the loop produces the verdict itself —
+    drops tools, forces strict JSON, re-injects the full corpus, and writes the
+    response where the standard review call would (run_review.sh consumes it)."""
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_object")
+    (tmp_path / "review-corpus.truncated.md").write_text(
+        "# Full corpus\nthe complete unified diff lives here\n", encoding="utf-8"
+    )
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
+    )
+    verdict_json = '{"verdict": "approve", "review_markdown": "LGTM", "findings": []}'
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("Evidence gathered: Talos v1.13.4."),  # ends the loop
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    assert handled is True
+    assert result.get("native_loop_verdict_produced") is True
+
+    # Written where the standard primary review call writes its response.
+    resp = json.loads((tmp_path / "ai-response.primary.json").read_text())
+    assert "approve" in resp["choices"][0]["message"]["content"]
+
+    # The verdict turn (final call) dropped tools, forced strict JSON, and
+    # re-injected the full corpus the loop never saw on a closing user turn.
+    verdict_payload = payloads[-1]
+    assert "tools" not in verdict_payload
+    assert verdict_payload.get("response_format", {}).get("type") == "json_object"
+    user_text = "\n".join(
+        m.get("content") or "" for m in verdict_payload["messages"] if m["role"] == "user"
+    )
+    assert "the complete unified diff lives here" in user_text
+
+
+def test_native_loop_skips_verdict_for_anthropic(monkeypatch, tmp_path):
+    """Anthropic native_loop keeps the standard corpus review: a verdict turn
+    after trailing tool_result (user-role) blocks would make adjacent user
+    turns (a 400). No verdict is produced and no primary response is written."""
+    (tmp_path / "review-corpus.truncated.md").write_text("# Full corpus\n", encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "anthropic",
+        [
+            {"content": [{"type": "tool_use", "id": "c1", "name": "read_file",
+                          "input": {"path": "machineconfig.yaml.j2"}}],
+             "stop_reason": "tool_use"},
+            {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"},
+        ],
+    )
+    assert handled is True
+    assert result.get("native_loop_verdict_produced") is not True
+    assert not (tmp_path / "ai-response.primary.json").exists()

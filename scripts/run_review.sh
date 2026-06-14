@@ -1304,6 +1304,26 @@ The corpus lists Open Findings From the Previous Review. Answer EVERY one: inclu
   log "Carry-forward active: $(jq 'length' previous-findings.json) open finding(s) from the previous review"
 fi
 
+PRIMARY_OK=0
+# native_loop in-conversation verdict (#205): when the tool loop produced its
+# own verdict (final turn, full reasoning history preserved), it wrote the
+# response to ai-response.primary.json. Parse it and skip the separate review
+# call. A parse failure (degraded/oversized/garbled verdict) falls through to
+# the standard corpus review below, so this only ever adds capability.
+NATIVE_VERDICT_USED=0
+if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop" ]] \
+  && [[ "$(jq -r '.native_loop_verdict_produced // false' tool-harness.json 2>/dev/null)" == "true" ]] \
+  && [ -s ai-response.primary.json ]; then
+  log "native_loop produced an in-conversation verdict; using it and skipping the separate review call"
+  if parse_and_validate ai-response.primary.json; then
+    PRIMARY_OK=1
+    NATIVE_VERDICT_USED=1
+  else
+    log "native_loop verdict did not parse; falling back to the standard review call"
+  fi
+fi
+
+if [ "$NATIVE_VERDICT_USED" -ne 1 ]; then
 build_model_request \
   "$AI_API_FORMAT" \
   "$AI_MODEL" \
@@ -1353,6 +1373,7 @@ while [ "$ATTEMPT" -le "$AI_PRIMARY_RETRIES" ]; do
     [ "$RETRY_DELAY" -gt 120 ] && RETRY_DELAY=120
   fi
 done
+fi  # NATIVE_VERDICT_USED guard
 
 # On total model failure, either fail the step (default, preserves prior
 # behaviour) or — when on_model_failure=notice — emit a request_changes notice so

@@ -888,6 +888,37 @@ NATIVE_LOOP_SYSTEM = (
     "reply with a short plain-text summary of the key evidence found."
 )
 
+# Closing turn for the in-conversation verdict (#205). NATIVE_LOOP_SYSTEM is an
+# evidence-gatherer prompt, so the verdict turn swaps to the reviewer prompt and
+# re-injects the full corpus (the loop only saw the compact planning context).
+_VERDICT_CLOSING_INSTRUCTION = (
+    "You have finished gathering evidence (the tool calls and their results "
+    "above). Below is the full review corpus for this PR. Using your "
+    "investigation together with this corpus, produce the final review verdict "
+    "now in the exact output format specified in your instructions. Do not "
+    "issue any further tool calls.\n\n"
+)
+
+
+def resolve_review_system_prompt():
+    """Resolve the reviewer system prompt for the native-loop verdict turn.
+
+    Mirrors run_review.sh's resolve_system_prompt (SYSTEM_PROMPT env, then
+    SYSTEM_PROMPT_FILE, then the bundled default) so the in-conversation verdict
+    is graded under the same reviewer instructions as the standard review call.
+    """
+    inline = os.getenv("SYSTEM_PROMPT", "")
+    if inline.strip():
+        return inline
+    prompt_file = os.getenv("SYSTEM_PROMPT_FILE", "").strip()
+    if prompt_file and Path(prompt_file).is_file():
+        return Path(prompt_file).read_text(encoding="utf-8")
+    default = _SCRIPTS_DIR / "default_system_prompt.txt"
+    try:
+        return default.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
 
 def run_native_loop(
     repo,
@@ -1017,6 +1048,53 @@ def run_native_loop(
         if outcome.error:
             result["native_loop_error"] = outcome.error
         return False
+
+    # ── In-conversation verdict (#205, Option 1) ─────────────────────────────
+    # The loop's final turn produces the review verdict itself — preserving the
+    # multi-hop reasoning trajectory — instead of flattening evidence into the
+    # corpus for a separate review call. Swap NATIVE_LOOP_SYSTEM (evidence
+    # gatherer) for the reviewer prompt, re-inject the full corpus the loop never
+    # saw (it ran on the compact planning context), drop tools, and force a
+    # strict-JSON verdict. The response is written where the standard review call
+    # writes it; run_review.sh consumes it and skips that call. If the verdict is
+    # degraded/oversized/garbled it simply fails to parse downstream and
+    # run_review.sh falls back to the standard corpus review — so this only adds
+    # capability. OpenAI only: an Anthropic verdict turn after trailing
+    # tool_result (user-role) blocks would create adjacent user turns (a 400),
+    # and native_loop runs on the OpenAI primary in practice.
+    if api_format == "openai":
+        try:
+            review_system = resolve_review_system_prompt()
+            corpus_file = Path("review-corpus.truncated.md")
+            verdict_corpus = (
+                corpus_file.read_text(encoding="utf-8", errors="replace")
+                if corpus_file.is_file()
+                else ""
+            )
+            if review_system and verdict_corpus:
+                conversation.system = review_system
+                conversation.add_user(_VERDICT_CLOSING_INSTRUCTION + verdict_corpus)
+                temp_raw = os.getenv("AI_TEMPERATURE", "").strip()
+                temperature = float(temp_raw) if temp_raw else None
+                rf = os.getenv("AI_RESPONSE_FORMAT", "off").strip().lower()
+                response_format = rf if rf in ("json_object", "json_schema") else None
+                verdict_payload = conversation.to_request_payload(
+                    api_format,
+                    model,
+                    stream=stream,
+                    max_tokens=env_int_bounded("AI_MAX_TOKENS", 8192, 256, 200000),
+                    temperature=temperature,
+                    verdict_turn=True,
+                    keep_full_history_on_verdict=True,
+                    response_format=response_format,
+                )
+                verdict_response = post_fn(verdict_payload)
+                Path("ai-response.primary.json").write_text(
+                    json.dumps(verdict_response), encoding="utf-8"
+                )
+                result["native_loop_verdict_produced"] = True
+        except Exception as exc:  # noqa: BLE001 — never let it break evidence output
+            result["native_loop_verdict_error"] = str(exc)
 
     result["mode"] = "native_loop"
     result["rounds"] = outcome.rounds
