@@ -1010,6 +1010,9 @@ if [[ -n "$SMART_BASE_URL" && -n "$SMART_MODEL" ]]; then
 fi
 
 resolve_review_route
+# Export so the native-loop harness can right-size loop depth by route (#197 §2):
+# the fast route only fires on low-risk PRs, which get a shallower loop.
+export REVIEW_ROUTE
 if [[ "$REVIEW_ROUTE" == "fast" ]]; then
   AI_BASE_URL="$FAST_BASE_URL"
   AI_MODEL="$FAST_MODEL"
