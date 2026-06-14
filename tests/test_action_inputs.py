@@ -92,43 +92,62 @@ def test_action_inputs_in_readme():
     )
 
 
-def test_action_yml_has_no_duplicate_mapping_keys():
-    """No YAML mapping in action.yml may define the same key twice.
+def find_duplicate_block_keys(content: str):
+    """Find duplicate keys within any ``env:``/``with:`` block in action.yml.
 
-    Regression test for the broken v1.2.10 release: a step env: block carried
-    a duplicate ``PLATFORM`` key, which GitHub's Actions runner rejects at load
-    time ("'PLATFORM' is already defined") so the action failed for every
-    consumer. ``yaml.safe_load`` silently keeps the last value and hid it, so
-    this uses a constructor that records duplicates instead of collapsing them.
+    Returns a list of ``(block_keyword, key, line_number)`` tuples. Line-based
+    (no PyYAML — the CI test env has none, which is why the rest of this module
+    parses with regex). Scoped to env:/with: blocks because (a) that is where
+    GitHub's runner raises a fatal "'X' is already defined" and (b) those blocks
+    hold ``key: ${{ ... }}`` scalars with no embedded shell to confuse a line
+    parser. Only direct children (block indent + 2) are inspected.
     """
-    import yaml
-    from yaml.constructor import SafeConstructor
+    duplicates = []
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s*)(env|with):\s*$", lines[i])
+        if not m:
+            i += 1
+            continue
+        block_indent = len(m.group(1))
+        child_indent = block_indent + 2
+        keyword = m.group(2)
+        seen: set[str] = set()
+        j = i + 1
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip() or line.lstrip().startswith("#"):
+                j += 1
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            if indent <= block_indent:
+                break  # dedented out of the block
+            km = re.match(r"^\s*([A-Za-z0-9_.\-]+):(?:\s|$)", line)
+            if km and indent == child_indent:
+                key = km.group(1)
+                if key in seen:
+                    duplicates.append((keyword, key, j + 1))
+                seen.add(key)
+            j += 1
+        i = j
+    return duplicates
 
-    duplicates: list[tuple[str, int]] = []
 
-    class DupCheckLoader(yaml.SafeLoader):
-        pass
+def test_action_yml_has_no_duplicate_env_keys():
+    """No env:/with: block in action.yml may define the same key twice.
 
-    def construct_mapping(loader, node, deep=False):
-        seen: set = set()
-        for key_node, _ in node.value:
-            key = loader.construct_object(key_node, deep=deep)
-            if key in seen:
-                duplicates.append((str(key), key_node.start_mark.line + 1))
-            seen.add(key)
-        return SafeConstructor.construct_mapping(loader, node, deep)
-
-    DupCheckLoader.add_constructor(
-        "tag:yaml.org,2002:map", construct_mapping
-    )
-
-    action_yml = _REPO_ROOT / "action.yml"
-    with action_yml.open(encoding="utf-8") as fh:
-        yaml.load(fh, Loader=DupCheckLoader)
-
+    Regression test for the broken v1.2.10 release: three publish-step env:
+    blocks carried a duplicate ``PLATFORM`` key, which GitHub's Actions runner
+    rejects at load time ("'PLATFORM' is already defined") so the action failed
+    to load for every consumer. The action's own validate CI never caught it
+    because nothing checked the manifest for duplicate keys.
+    """
+    content = (_REPO_ROOT / "action.yml").read_text()
+    duplicates = find_duplicate_block_keys(content)
     assert not duplicates, (
-        "action.yml has duplicate mapping keys (GitHub's runner rejects these "
-        f"at load time): {duplicates}. Remove the redundant key(s)."
+        "action.yml has duplicate keys in an env:/with: block (GitHub's runner "
+        f"rejects these at load time): {duplicates}. Remove the redundant key(s)."
     )
 
 
