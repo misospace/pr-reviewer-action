@@ -769,6 +769,7 @@ class Conversation:
         verdict_turn: bool = False,
         keep_full_history_on_verdict: bool = False,
         response_format: str | None = None,
+        tokens_param: str = "max_tokens",
     ) -> dict[str, Any]:
         """Render the conversation as a wire-ready request body.
 
@@ -798,6 +799,7 @@ class Conversation:
             verdict_turn=verdict_turn,
             keep_full_history_on_verdict=keep_full_history_on_verdict,
             response_format=response_format,
+            tokens_param=tokens_param,
         )
 
     def _to_openai_payload(
@@ -810,6 +812,7 @@ class Conversation:
         verdict_turn: bool,
         keep_full_history_on_verdict: bool,
         response_format: str | None,
+        tokens_param: str = "max_tokens",
     ) -> dict[str, Any]:
         system = self.system
         messages = self._render_openai_messages()
@@ -831,7 +834,11 @@ class Conversation:
             if system
             else messages,
         }
-        payload["max_tokens"] = max_tokens
+        # Mirror the bash build_model_request: newer OpenAI models reject
+        # max_tokens and require max_completion_tokens (AI_TOKENS_PARAM). Only
+        # those two field names are honoured; anything else falls back safely.
+        field = tokens_param if tokens_param == "max_completion_tokens" else "max_tokens"
+        payload[field] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
         if stream:

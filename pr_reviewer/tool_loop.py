@@ -183,6 +183,7 @@ def drive_tool_loop(
     max_tokens: int = 1024,
     temperature: float = 0.0,
     stream: bool = False,
+    tokens_param: str = "max_tokens",
     time_fn: Callable[[], float] = time.monotonic,
 ) -> LoopOutcome:
     """Run the agentic loop until the model stops or a budget hits.
@@ -221,6 +222,7 @@ def drive_tool_loop(
             stream=stream,
             max_tokens=max_tokens,
             temperature=temperature,
+            tokens_param=tokens_param,
         )
         try:
             response = post_fn(payload)
