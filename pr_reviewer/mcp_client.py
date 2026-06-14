@@ -23,6 +23,7 @@ unit-testable against a scripted MCP server with no network — mirroring
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -209,8 +210,26 @@ def _render_content(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def is_safe_server_url(url: str) -> bool:
+    """Only http(s) URLs with a host reach urlopen.
+
+    The URL is operator-set (not model/PR-controlled), but validating the scheme
+    is cheap defence-in-depth against a misconfigured ``tool_mcp_servers`` value
+    becoming an SSRF/LFI vector (file://, gopher://, …). HTTPS is recommended;
+    plain http is permitted for internal/cluster MCP servers.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
 def parse_server_specs(raw: str) -> list[tuple[str, str]]:
-    """Parse ``tool_mcp_servers`` (newline/comma list of ``name=url``)."""
+    """Parse ``tool_mcp_servers`` (newline/comma list of ``name=url``).
+
+    Entries that are malformed or whose URL is not a host-bearing http(s) URL
+    are silently dropped (see :func:`is_safe_server_url`)."""
     specs: list[tuple[str, str]] = []
     if not raw:
         return specs
@@ -220,6 +239,6 @@ def parse_server_specs(raw: str) -> list[tuple[str, str]]:
             continue
         name, _, url = item.partition("=")
         name, url = name.strip(), url.strip()
-        if name and url:
+        if name and url and is_safe_server_url(url):
             specs.append((name, url))
     return specs

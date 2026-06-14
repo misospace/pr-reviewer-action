@@ -408,7 +408,9 @@ inputs:
       newline/comma list of name=url (e.g. konflate=https://konflate.example/mcp).
       Their read-verb tools (list/get/read/…) are advertised as
       mcp_<name>_<tool>; write-verb tools are refused. Empty = off (default).
-      Fork-gated like the rest of the harness (tool_enable_for_forks).
+      Fork-gated like the rest of the harness (tool_enable_for_forks). Only
+      host-bearing http(s) URLs are accepted (HTTPS recommended); other schemes
+      are dropped.
     required: false
     default: ""
   tool_mcp_token:

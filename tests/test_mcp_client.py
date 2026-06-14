@@ -108,10 +108,18 @@ def test_namespacing_round_trip():
 def test_parse_server_specs():
     assert parse_server_specs("") == []
     assert parse_server_specs("konflate=https://k/mcp") == [("konflate", "https://k/mcp")]
-    assert parse_server_specs("a=http://a,\n b=http://b ") == [
-        ("a", "http://a"), ("b", "http://b")
+    assert parse_server_specs("a=http://a/x,\n b=https://b/y ") == [
+        ("a", "http://a/x"), ("b", "https://b/y")
     ]
     assert parse_server_specs("garbage,nourl=") == []  # no url → dropped
+
+
+def test_parse_server_specs_rejects_unsafe_urls():
+    # SSRF/LFI hardening: only host-bearing http(s) URLs survive.
+    assert parse_server_specs("x=file:///etc/passwd") == []
+    assert parse_server_specs("x=gopher://evil/") == []
+    assert parse_server_specs("x=https:///nohost") == []
+    assert parse_server_specs("ok=https://k/mcp, bad=file:///x") == [("ok", "https://k/mcp")]
 
 
 def test_parse_jsonrpc_plain_and_sse():
