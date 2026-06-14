@@ -362,3 +362,26 @@ def test_native_loop_skips_verdict_for_anthropic(monkeypatch, tmp_path):
     assert handled is True
     assert result.get("native_loop_verdict_produced") is not True
     assert not (tmp_path / "ai-response.primary.json").exists()
+
+
+def test_native_loop_honors_max_completion_tokens(monkeypatch, tmp_path):
+    """AI_TOKENS_PARAM=max_completion_tokens must reach every native_loop request
+    — the loop turns and the verdict turn — for parity with the bash review path
+    (newer OpenAI models reject max_tokens)."""
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")
+    (tmp_path / "review-corpus.truncated.md").write_text("# corpus\n", encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
+    handled, _result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("done"),  # ends the loop
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    assert handled is True
+    assert len(payloads) >= 2  # loop turn(s) + the verdict turn
+    for payload in payloads:
+        assert "max_completion_tokens" in payload
+        assert "max_tokens" not in payload
