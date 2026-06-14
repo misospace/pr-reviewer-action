@@ -18,16 +18,32 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.x'
+          # Pinned to 3.14 to match the local dev interpreter — a version skew
+          # between local and CI is how the duplicate-key regression test first
+          # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
+          python-version: '3.14'
 
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest yamllint
 
       - name: Validate action metadata YAML
         run: ruby -e 'require "yaml"; YAML.load_file("action.yml")'
 
       - name: Validate example workflow YAML
         run: ruby -e 'require "yaml"; YAML.load_file("examples/workflow-self-hosted.yml"); YAML.load_file("examples/workflow-cloud.yml")'
+
+      # GitHub's Actions runner rejects a mapping with a duplicate key at load
+      # time ("'X' is already defined") — but ruby/python YAML loaders silently
+      # keep the last value, so the loads above pass on a manifest the runner
+      # would reject. This shipped the broken v1.2.10 (duplicate PLATFORM in
+      # three env: blocks, #255). yamllint's key-duplicates rule catches the
+      # whole class at any nesting depth, across the manifest and every workflow.
+      - name: Lint for duplicate YAML keys
+        run: |
+          yamllint -d "{rules: {key-duplicates: enable}}" \
+            action.yml \
+            .github/workflows/*.yaml \
+            examples/*.yml
 
       - name: Check shell scripts
         run: |
