@@ -362,3 +362,55 @@ def test_native_loop_skips_verdict_for_anthropic(monkeypatch, tmp_path):
     assert handled is True
     assert result.get("native_loop_verdict_produced") is not True
     assert not (tmp_path / "ai-response.primary.json").exists()
+
+
+def _openai_system(payload):
+    return next((m["content"] for m in payload["messages"] if m["role"] == "system"), None)
+
+
+def test_native_loop_system_is_stable_across_verdict_turn(monkeypatch, tmp_path):
+    """Prompt-cache preservation (#263): one unified reviewer+tools system for the
+    whole review — the verdict turn must NOT swap it, or llama.cpp/OpenAI lose the
+    cached prefix at token 0. Every turn (loop + verdict) carries the same system,
+    and it includes the tool-use preamble."""
+    (tmp_path / "review-corpus.truncated.md").write_text("# corpus\nfull diff\n", encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("done"),  # ends the loop
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    assert handled is True
+    assert result.get("native_loop_verdict_produced") is True
+    systems = [_openai_system(p) for p in payloads]
+    # Loop turns and the verdict turn all share one stable system (no swap).
+    assert systems[0] is not None
+    assert len(set(systems)) == 1
+    assert "Gathering evidence with tools" in systems[0]
+
+
+def test_native_loop_honors_max_completion_tokens(monkeypatch, tmp_path):
+    """AI_TOKENS_PARAM=max_completion_tokens must reach every native_loop request
+    — the loop turns and the verdict turn — for parity with the bash review path
+    (newer OpenAI models reject max_tokens)."""
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")
+    (tmp_path / "review-corpus.truncated.md").write_text("# corpus\n", encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
+    handled, _result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("done"),  # ends the loop
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    assert handled is True
+    assert len(payloads) >= 2  # loop turn(s) + the verdict turn
+    for payload in payloads:
+        assert "max_completion_tokens" in payload
+        assert "max_tokens" not in payload

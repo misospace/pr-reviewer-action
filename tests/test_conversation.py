@@ -95,6 +95,37 @@ class TestWebSearchGating:
         assert "tools" not in payload
 
 
+class TestTokensParam:
+    """tokens_param mirrors the bash review path: newer OpenAI models reject
+    max_tokens and require max_completion_tokens (AI_TOKENS_PARAM)."""
+
+    def test_default_is_max_tokens(self):
+        payload = Conversation(system="s").to_request_payload("openai", "m", max_tokens=64)
+        assert payload["max_tokens"] == 64
+        assert "max_completion_tokens" not in payload
+
+    def test_openai_honors_max_completion_tokens(self):
+        payload = Conversation(system="s").to_request_payload(
+            "openai", "m", max_tokens=64, tokens_param="max_completion_tokens"
+        )
+        assert payload["max_completion_tokens"] == 64
+        assert "max_tokens" not in payload
+
+    def test_unknown_param_falls_back_to_max_tokens(self):
+        payload = Conversation(system="s").to_request_payload(
+            "openai", "m", max_tokens=64, tokens_param="bogus"
+        )
+        assert payload["max_tokens"] == 64
+
+    def test_anthropic_always_uses_max_tokens(self):
+        # The Anthropic API has no max_completion_tokens; the param is ignored.
+        payload = Conversation(system="s").to_request_payload(
+            "anthropic", "m", max_tokens=64, tokens_param="max_completion_tokens"
+        )
+        assert payload["max_tokens"] == 64
+        assert "max_completion_tokens" not in payload
+
+
 class TestTruncateText:
     def test_no_truncation_under_limit(self):
         out, truncated = truncate_text("hello\nworld", 100)
