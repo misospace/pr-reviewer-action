@@ -218,6 +218,13 @@ def is_safe_server_url(url: str) -> bool:
     becoming an SSRF/LFI vector (file://, gopher://, …). HTTPS is recommended;
     plain http is permitted for internal/cluster MCP servers.
     """
+    # Raw control characters / null bytes are never legitimate in a URL and
+    # signal corruption or injection; reject them up front (a NUL also raises
+    # later at the socket layer). Percent-encoded sequences (%00, %2f, …) are
+    # valid URL encoding and are left intact — they ride in the HTTP path to the
+    # remote server, not a local file read, so they are not an LFI vector here.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in url):
+        return False
     try:
         parsed = urllib.parse.urlparse(url)
     except ValueError:

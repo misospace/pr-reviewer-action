@@ -122,6 +122,16 @@ def test_parse_server_specs_rejects_unsafe_urls():
     assert parse_server_specs("ok=https://k/mcp, bad=file:///x") == [("ok", "https://k/mcp")]
 
 
+def test_parse_server_specs_rejects_raw_control_chars():
+    # Raw NUL / control chars are never valid in a URL — rejected as hygiene.
+    # (Percent-encoded %00/%2f are valid encoding and ride in the HTTP path; not
+    # an LFI here, so they are NOT rejected.)
+    assert parse_server_specs("x=https://h/a\x00b") == []
+    assert parse_server_specs("x=https://h/a\tb") == []
+    assert parse_server_specs("x=https://\x00evil/p") == []
+    assert parse_server_specs("ok=https://h/a%00b") == [("ok", "https://h/a%00b")]
+
+
 def test_parse_jsonrpc_plain_and_sse():
     assert _parse_jsonrpc('{"jsonrpc":"2.0","id":1,"result":{}}')["id"] == 1
     sse = 'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"ok":true}}\n\n'
