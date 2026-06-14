@@ -322,13 +322,25 @@ def fetch_url(url, allowed_hosts, request_timeout=25):
 
 def read_file(path, workspace_root):
     """Read a file with path-traversal protection."""
-    resolved = Path(workspace_root) / path
+    # Reject embedded null bytes before touching the filesystem: pathlib raises
+    # ValueError (not OSError) on them, and a NUL can truncate the path at the C
+    # layer of an underlying syscall, so an early explicit reject is safest.
+    if "\x00" in path:
+        return {"error": "Null byte in path"}
+
+    root = Path(workspace_root).resolve()
     try:
-        resolved = resolved.resolve()
-    except OSError:
+        # resolve() also collapses symlinks, so a symlink that lives inside the
+        # workspace but points outside it is normalised to its real target and
+        # caught by the containment check below.
+        resolved = (root / path).resolve()
+    except (OSError, ValueError):
         return {"error": f"Cannot resolve path: {path}"}
 
-    if not str(resolved).startswith(str(Path(workspace_root).resolve())):
+    # Containment via is_relative_to, NOT str.startswith: startswith wrongly
+    # accepts a sibling directory whose name shares the workspace as a prefix
+    # (e.g. resolving to /work/repo2 passes a /work/repo prefix test).
+    if not resolved.is_relative_to(root):
         return {"error": "Path escapes workspace root"}
 
     if SENSITIVE_PATH_RE.search(resolved.name):

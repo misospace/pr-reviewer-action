@@ -46,12 +46,12 @@ _REPO = "owner/repo"
 _HOSTS = ["github.com", "docs.siderolabs.com"]
 
 
-def _exec(tool, args, tmp_path, *, allowed_repos=None, hosts=None, search_url=""):
+def _exec(tool, args, tmp_path, *, allowed_repos=None, hosts=None, search_url="", workspace=None):
     """Drive the loop's real execute_fn target with a single tool request."""
     return rth.execute_tool_request(
         tool,
         args,
-        str(tmp_path),
+        str(workspace if workspace is not None else tmp_path),
         allowed_repos if allowed_repos is not None else {_REPO},
         _REPO,
         hosts if hosts is not None else _HOSTS,
@@ -83,6 +83,42 @@ def test_read_file_blocks_workspace_escape(tmp_path, path):
     assert res["status"] == "error"
     assert "escaped" not in str(res["result"])
     assert "root:" not in str(res["result"])
+
+
+# 2a. Edge cases flagged in the #206 review: null bytes, symlink escape, and a
+#     sibling dir sharing the workspace's name prefix (the str.startswith bug).
+@pytest.mark.parametrize("path", ["evil\x00.txt", "sub/\x00", "\x00/etc/passwd"])
+def test_read_file_rejects_null_byte(tmp_path, path):
+    # A NUL can truncate the path at the C layer; pathlib raises ValueError, not
+    # OSError, so it must be rejected explicitly rather than slipping through.
+    res = _exec("read_file", {"path": path}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_blocks_symlink_escape(tmp_path):
+    # A symlink that lives inside the workspace but points outside must not be a
+    # read primitive for host files — resolve() + containment defangs it.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text("SYMLINK_LEAK\n", encoding="utf-8")
+    (ws / "link.txt").symlink_to(secret)
+    res = _exec("read_file", {"path": "link.txt"}, tmp_path, workspace=ws)
+    assert res["status"] == "error"
+    assert "SYMLINK_LEAK" not in str(res["result"])
+
+
+def test_read_file_blocks_sibling_prefix_escape(tmp_path):
+    # Regression for the str.startswith containment bug: /ws and /ws2 share a
+    # prefix, so a startswith check wrongly admits the sibling.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sibling = tmp_path / "ws2"
+    sibling.mkdir()
+    (sibling / "secret.txt").write_text("SIBLING_LEAK\n", encoding="utf-8")
+    res = _exec("read_file", {"path": "../ws2/secret.txt"}, tmp_path, workspace=ws)
+    assert res["status"] == "error"
+    assert "SIBLING_LEAK" not in str(res["result"])
 
 
 # 3. A secret living in an otherwise-allowed file is masked on the way out.
