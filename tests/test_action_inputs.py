@@ -92,6 +92,46 @@ def test_action_inputs_in_readme():
     )
 
 
+def test_action_yml_has_no_duplicate_mapping_keys():
+    """No YAML mapping in action.yml may define the same key twice.
+
+    Regression test for the broken v1.2.10 release: a step env: block carried
+    a duplicate ``PLATFORM`` key, which GitHub's Actions runner rejects at load
+    time ("'PLATFORM' is already defined") so the action failed for every
+    consumer. ``yaml.safe_load`` silently keeps the last value and hid it, so
+    this uses a constructor that records duplicates instead of collapsing them.
+    """
+    import yaml
+    from yaml.constructor import SafeConstructor
+
+    duplicates: list[tuple[str, int]] = []
+
+    class DupCheckLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader, node, deep=False):
+        seen: set = set()
+        for key_node, _ in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in seen:
+                duplicates.append((str(key), key_node.start_mark.line + 1))
+            seen.add(key)
+        return SafeConstructor.construct_mapping(loader, node, deep)
+
+    DupCheckLoader.add_constructor(
+        "tag:yaml.org,2002:map", construct_mapping
+    )
+
+    action_yml = _REPO_ROOT / "action.yml"
+    with action_yml.open(encoding="utf-8") as fh:
+        yaml.load(fh, Loader=DupCheckLoader)
+
+    assert not duplicates, (
+        "action.yml has duplicate mapping keys (GitHub's runner rejects these "
+        f"at load time): {duplicates}. Remove the redundant key(s)."
+    )
+
+
 def test_comment_marker_input_exists():
     """Verify comment_marker input is declared (regression test for #113)."""
     action_inputs = parse_action_inputs()
