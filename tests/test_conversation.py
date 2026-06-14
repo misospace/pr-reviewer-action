@@ -13,6 +13,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from pr_reviewer.conversation import (  # noqa: E402
     APPROX_BYTES_PER_TOKEN,
     TOOL_SCHEMAS,
+    WEB_SEARCH_SCHEMA,
     Conversation,
     normalize_assistant_tool_calls_openai,
     truncate_text,
@@ -49,6 +50,40 @@ class TestToolSchemas:
         enum = run_command["parameters"]["properties"]["command"]["enum"]
         # The allowlist in scripts/run_tool_harness.py (ALLOWED_COMMANDS).
         assert set(enum) == {"git_status_short", "git_diff_stat", "git_diff_name_only"}
+
+
+class TestWebSearchGating:
+    """web_search is opt-in: advertised only when the conversation carries it."""
+
+    def test_web_search_not_in_default_catalogue(self):
+        assert "web_search" not in _tool_names()
+
+    def test_default_conversation_omits_web_search(self):
+        conv = Conversation(system="s")
+        for fmt, key in (("openai", "function"), ("anthropic", None)):
+            payload = conv.to_request_payload(fmt, "m", max_tokens=64)
+            names = [
+                (t["function"]["name"] if key else t["name"])
+                for t in payload["tools"]
+            ]
+            assert "web_search" not in names
+
+    def test_extended_conversation_advertises_web_search(self):
+        conv = Conversation(
+            system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA]
+        )
+        payload = conv.to_request_payload("openai", "m", max_tokens=64)
+        names = [t["function"]["name"] for t in payload["tools"]]
+        assert "web_search" in names
+
+    def test_verdict_turn_drops_web_search_too(self):
+        conv = Conversation(
+            system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA]
+        )
+        payload = conv.to_request_payload(
+            "openai", "m", max_tokens=64, verdict_turn=True
+        )
+        assert "tools" not in payload
 
 
 class TestTruncateText:

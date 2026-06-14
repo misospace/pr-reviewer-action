@@ -16,15 +16,15 @@
             "args_contains": { "path": ["machineconfig"] }
           },
           {
-            "id": "fetched_support_matrix",
+            "id": "consulted_support_matrix",
             "type": "tool_call",
-            "tool": "web_fetch",
-            "args_contains": { "url": ["talos.dev", "support-matrix"] }
+            "tool": ["web_fetch", "web_search"],
+            "args_any_contains": ["support-matrix", "support matrix", "compatibility matrix"]
           },
           {
             "id": "cited_matrix_in_review",
             "type": "review_mentions",
-            "any_of": ["support matrix", "support-matrix", "talos.dev", "compatibility matrix"]
+            "any_of": ["support matrix", "support-matrix", "talos.dev", "siderolabs", "compatibility matrix"]
           }
         ]
       }

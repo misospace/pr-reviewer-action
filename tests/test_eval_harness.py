@@ -105,6 +105,57 @@ class TestEvaluateCapability:
         assert not any(c["passed"] for c in cap["checks"])
 
 
+class TestConsultedMatrixCheck:
+    """The broadened check credits either web_fetch OR web_search reaching the
+    matrix (tool-list + args_any_contains) — the web_search path the loop took
+    once the search tool was added."""
+
+    EVIDENCE = {
+        "description": "consult the support matrix via fetch or search, and cite",
+        "checks": [
+            {"id": "consulted_support_matrix", "type": "tool_call",
+             "tool": ["web_fetch", "web_search"],
+             "args_any_contains": ["support-matrix", "support matrix"]},
+            {"id": "cited", "type": "review_mentions", "any_of": ["support matrix"]},
+        ],
+    }
+
+    def _run(self, calls, md="Per the support matrix, k8s v1.36 is supported."):
+        return ReviewRun(
+            mode="native_loop", pr_number=7462, repo_full_name="joryirving/home-ops",
+            review_markdown=md, tool_calls=calls, tool_stop_reason="model-stopped",
+        )
+
+    def test_web_search_query_satisfies_check(self):
+        run = self._run([
+            {"tool": "web_search", "args": {"query": "talos v1.13 kubernetes support matrix"}, "status": "ok"},
+        ])
+        cap = evaluate_capability(run, self.EVIDENCE)
+        assert cap["passed"] is True
+
+    def test_web_fetch_url_satisfies_check(self):
+        run = self._run([
+            {"tool": "web_fetch", "args": {"url": "https://docs.siderolabs.com/talos/v1.13/getting-started/support-matrix"}, "status": "ok"},
+        ])
+        assert evaluate_capability(run, self.EVIDENCE)["passed"] is True
+
+    def test_unrelated_calls_do_not_satisfy(self):
+        run = self._run([
+            {"tool": "web_search", "args": {"query": "kubernetes 1.36 release notes"}, "status": "ok"},
+            {"tool": "web_fetch", "args": {"url": "https://github.com/kubernetes/kubernetes/releases"}, "status": "ok"},
+        ])
+        cap = evaluate_capability(run, self.EVIDENCE)
+        assert any(c["id"] == "consulted_support_matrix" and not c["passed"] for c in cap["checks"])
+
+    def test_wrong_tool_not_credited(self):
+        # read_file mentioning the phrase shouldn't count — tool must be in the list.
+        run = self._run([
+            {"tool": "read_file", "args": {"path": "docs/support-matrix.md"}, "status": "ok"},
+        ])
+        cap = evaluate_capability(run, self.EVIDENCE)
+        assert any(c["id"] == "consulted_support_matrix" and not c["passed"] for c in cap["checks"])
+
+
 class TestCapabilityRateAggregation:
     def test_pass_rate_over_repeated_runs(self):
         """10 native_loop runs, 7 close the chain -> rate 0.7."""

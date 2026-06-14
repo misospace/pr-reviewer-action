@@ -154,6 +154,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+# Opt-in tool: advertised only when a search endpoint is configured (see
+# run_native_loop). web_fetch needs the exact URL up front; web_search lets a
+# weaker model DISCOVER the right URL (e.g. a moved docs site) and then
+# web_fetch it — the two-step that closes multi-hop verification chains.
+WEB_SEARCH_SCHEMA: dict[str, Any] = {
+    "name": "web_search",
+    "description": (
+        "Search the web via the action's configured search engine. Returns a "
+        "ranked list of {title, url, snippet}. Use it to find an authoritative "
+        "page (release notes, a support/compatibility matrix, an advisory) when "
+        "you do not already know its exact URL, then web_fetch the best result."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Free-text search query.",
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
+
 # Per-tool result cap applied when re-adding tool output to the conversation
 # (bytes). Roughly tracks the executor's own internal caps so a tool's
 # truncated response doesn't grow on every loop round.
@@ -305,6 +330,13 @@ class Conversation:
     #   {"kind": "tool_result", "call_id": str, "result": Any, "is_error": bool}
     #   {"kind": "system_note", "content": str}   # verdict-turn transcript etc.
     events: list[dict[str, Any]] = field(default_factory=list)
+
+    # Tool schemas advertised on every non-verdict turn. Defaults to the
+    # built-in read-only set; callers can extend it (e.g. add WEB_SEARCH_SCHEMA
+    # when a search endpoint is configured) without mutating the global.
+    tool_schemas: list[dict[str, Any]] = field(
+        default_factory=lambda: list(TOOL_SCHEMAS)
+    )
 
     # ---- mutators --------------------------------------------------------
 
@@ -711,7 +743,7 @@ class Conversation:
             elif response_format == "json_schema":
                 payload["response_format"] = _OPENAI_VERDICT_JSON_SCHEMA
         else:
-            payload["tools"] = [_tool_to_openai(s) for s in TOOL_SCHEMAS]
+            payload["tools"] = [_tool_to_openai(s) for s in self.tool_schemas]
         return payload
 
     def _to_anthropic_payload(
@@ -746,7 +778,7 @@ class Conversation:
         if temperature is not None:
             payload["temperature"] = temperature
         if not verdict_turn:
-            payload["tools"] = [_tool_to_anthropic(s) for s in TOOL_SCHEMAS]
+            payload["tools"] = [_tool_to_anthropic(s) for s in self.tool_schemas]
         # Anthropic has no response_format; the closing-turn contract relies
         # on the system prompt to request JSON. response_format is silently
         # ignored to keep the call sites uniform between the two APIs.
