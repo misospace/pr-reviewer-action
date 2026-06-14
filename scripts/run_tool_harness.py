@@ -1097,6 +1097,17 @@ def resolve_review_system_prompt():
         return ""
 
 
+def _classification_risk_flag_count():
+    """Count risk_flags in classification.json (0 if unavailable). Used to keep
+    full loop depth on a risk-flagged PR even if it was routed to the fast tier."""
+    try:
+        data = json.loads(Path("classification.json").read_text(encoding="utf-8"))
+        flags = data.get("risk_flags")
+        return len(flags) if isinstance(flags, list) else 0
+    except Exception:
+        return 0
+
+
 def run_native_loop(
     repo,
     base_url,
@@ -1132,7 +1143,10 @@ def run_native_loop(
         WEB_SEARCH_SCHEMA,
         Conversation,
     )
-    from pr_reviewer.tool_loop import LoopBudgets, drive_tool_loop  # noqa: PLC0415
+    from pr_reviewer.tool_loop import (  # noqa: PLC0415
+        adaptive_loop_budgets,
+        drive_tool_loop,
+    )
 
     # web_search is advertised only when a search endpoint is configured.
     search_url = os.getenv("SEARCH_URL", "").strip()
@@ -1163,13 +1177,16 @@ def run_native_loop(
 
     max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
     wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900)
-    budgets = LoopBudgets(
-        max_tool_calls=max_requests,
-        # A native round is one model turn (often a single call), unlike the
-        # planner's batched rounds — give the chain headroom: 2× rounds,
-        # bounded by the catalogue cap of 6 plus repair slack.
-        max_rounds=min(max_rounds * 2, 8),
-        wall_clock_sec=float(wall_clock),
+    # Right-size the loop to PR risk (#197 §2): the fast route only fires on
+    # low-risk PRs, so they get a shallow loop; risk-flagged / smart-routed PRs
+    # get full depth. REVIEW_ROUTE is exported by run_review.sh; standalone runs
+    # default to legacy (full depth).
+    budgets = adaptive_loop_budgets(
+        max_rounds,
+        max_requests,
+        wall_clock,
+        review_route=os.getenv("REVIEW_ROUTE", "legacy"),
+        risk_flag_count=_classification_risk_flag_count(),
     )
 
     # Stream loop turns by default (mirrors AI_STREAM for the review call) so

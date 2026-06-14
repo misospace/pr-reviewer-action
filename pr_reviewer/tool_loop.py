@@ -74,6 +74,35 @@ class LoopBudgets:
     truncated_result_bytes: int = 2000
 
 
+def adaptive_loop_budgets(
+    max_rounds: int,
+    max_tool_calls: int,
+    wall_clock_sec: float,
+    *,
+    review_route: str = "legacy",
+    risk_flag_count: int = 0,
+) -> "LoopBudgets":
+    """Right-size the loop budget to PR risk (#197 §2: spend research where risk is).
+
+    A native round is one model turn, so the default headroom is 2× the
+    configured rounds (capped at 8). When auto-routing sent the PR to the FAST
+    tier — which only happens for a low-risk PR, since the route keys off
+    ``risk_flags`` — a shallow loop is enough; don't burn the full research
+    budget thrashing a trivial diff. A risk flag forces full depth even on the
+    fast route (guards a mis-route). Smart/legacy (routing off) keep full depth.
+    """
+    rounds = min(max(max_rounds, 1) * 2, 8)
+    calls = max_tool_calls
+    if (review_route or "legacy").strip().lower() == "fast" and risk_flag_count == 0:
+        rounds = min(rounds, 2)
+        calls = min(calls, 3)
+    return LoopBudgets(
+        max_tool_calls=calls,
+        max_rounds=rounds,
+        wall_clock_sec=float(wall_clock_sec),
+    )
+
+
 @dataclass
 class ExecutedCall:
     tool: str

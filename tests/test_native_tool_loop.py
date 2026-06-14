@@ -15,9 +15,37 @@ from pr_reviewer.tool_loop import (
     STOP_REQUEST_ERROR,
     STOP_WALL_CLOCK,
     LoopBudgets,
+    adaptive_loop_budgets,
     drive_tool_loop,
     extract_tool_calls,
 )
+
+
+class TestAdaptiveLoopBudgets:
+    """Risk/route-adaptive loop depth (#197 §2)."""
+
+    def test_default_headroom_doubles_rounds_capped_at_8(self):
+        b = adaptive_loop_budgets(3, 4, 120.0)
+        assert b.max_rounds == 6  # 3 * 2
+        assert b.max_tool_calls == 4
+        assert adaptive_loop_budgets(6, 4, 120.0).max_rounds == 8  # capped
+
+    def test_fast_route_low_risk_is_shallow(self):
+        b = adaptive_loop_budgets(3, 8, 120.0, review_route="fast", risk_flag_count=0)
+        assert b.max_rounds == 2
+        assert b.max_tool_calls == 3
+
+    def test_fast_route_with_risk_flag_keeps_full_depth(self):
+        # A risk flag forces full depth even if the PR was routed to fast.
+        b = adaptive_loop_budgets(3, 8, 120.0, review_route="fast", risk_flag_count=1)
+        assert b.max_rounds == 6
+        assert b.max_tool_calls == 8
+
+    def test_smart_and_legacy_keep_full_depth(self):
+        for route in ("smart", "legacy", "", None):
+            b = adaptive_loop_budgets(3, 8, 120.0, review_route=route, risk_flag_count=0)
+            assert b.max_rounds == 6
+            assert b.max_tool_calls == 8
 
 
 def openai_tool_call_response(calls, content=None):
