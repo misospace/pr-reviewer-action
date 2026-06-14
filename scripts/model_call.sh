@@ -104,7 +104,7 @@ curl_model() {
 # build_model_request API_FORMAT MODEL SYSTEM USER CORPUS_FILE OUTPUT_FILE [STREAM]
 #
 # Reads globals (with safe defaults so the historical behaviour is preserved):
-#   AI_MAX_TOKENS     completion-token cap (default 4096)
+#   AI_MAX_TOKENS     completion-token cap (default 8192)
 #   AI_TEMPERATURE    sampling temperature; empty => omit the field entirely
 #                     (some newer cloud models reject any non-default value)
 #   AI_RESPONSE_FORMAT  OpenAI-compatible structured output: off|json_object|json_schema
@@ -121,7 +121,7 @@ build_model_request() {
   local output_file="$6"
   local stream="${7:-false}"
 
-  local max_tokens="${AI_MAX_TOKENS:-4096}"
+  local max_tokens="${AI_MAX_TOKENS:-8192}"
 
   # temperature: empty string omits the field; otherwise pass through as JSON.
   local temp_json="null"

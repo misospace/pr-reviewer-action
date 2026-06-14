@@ -28,9 +28,15 @@ inputs:
     required: false
     default: ""
   ai_max_tokens:
-    description: Maximum completion tokens for the primary and fallback final review calls
+    description: >-
+      Maximum completion tokens for the primary and fallback final review calls.
+      Default 8192. Reasoning models that emit a thinking channel need this
+      headroom — too low a cap is consumed by reasoning, leaving empty content
+      with finish_reason=length, so the verdict JSON fails to parse and the
+      review needlessly escalates or fails. Raise further (e.g. 16000) for
+      verbose reasoning models.
     required: false
-    default: "4096"
+    default: "8192"
   ai_temperature:
     description: >-
       Sampling temperature for the review model. Default "0.1". Set to an empty string to

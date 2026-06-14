@@ -57,7 +57,7 @@ AI_BASE_URL="${AI_BASE_URL:-}"
 AI_API_FORMAT="${AI_API_FORMAT:-openai}"
 AI_MODEL="${AI_MODEL:-}"
 AI_API_KEY="${AI_API_KEY:-}"
-AI_MAX_TOKENS="${AI_MAX_TOKENS:-4096}"
+AI_MAX_TOKENS="${AI_MAX_TOKENS:-8192}"
 # Single-dash default: an explicitly empty AI_TEMPERATURE is preserved (it means
 # "omit the field"); only an unset value falls back to 0.1.
 AI_TEMPERATURE="${AI_TEMPERATURE-0.1}"
@@ -251,8 +251,8 @@ elif ! AI_FALLBACK_API_FORMAT="$(normalize_api_format "$AI_FALLBACK_API_FORMAT")
 fi
 
 if [[ ! "$AI_MAX_TOKENS" =~ ^[0-9]+$ || "$AI_MAX_TOKENS" -lt 1 ]]; then
-  error "Invalid AI_MAX_TOKENS '$AI_MAX_TOKENS'; defaulting to 4096"
-  AI_MAX_TOKENS=4096
+  error "Invalid AI_MAX_TOKENS '$AI_MAX_TOKENS'; defaulting to 8192"
+  AI_MAX_TOKENS=8192
 fi
 
 # AI_TEMPERATURE: empty means "omit the field"; otherwise must be numeric.

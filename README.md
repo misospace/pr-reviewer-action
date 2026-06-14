@@ -197,7 +197,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `ai_api_format` | Primary API request/response format: `openai` or `anthropic` | No | `openai` |
 | `ai_model` | Model name for the primary analysis pass | Yes | - |
 | `ai_api_key` | Optional API key for the primary AI endpoint. OpenAI format sends `Authorization: Bearer`; Anthropic format sends `x-api-key` | No | `""` |
-| `ai_max_tokens` | Maximum completion tokens for primary and fallback final review calls. Required by Anthropic-compatible APIs | No | `4096` |
+| `ai_max_tokens` | Maximum completion tokens for primary and fallback final review calls. Required by Anthropic-compatible APIs. **Reasoning models** (those that emit a thinking channel, e.g. Gemma) need this headroom — too low a cap is spent on reasoning, leaving empty content (`finish_reason=length`) so the verdict JSON fails to parse and the review needlessly escalates; raise to `16000`+ for verbose reasoners | No | `8192` |
 | `ai_temperature` | Sampling temperature for the review model. Empty string omits the field (some newer cloud models reject non-default temperature) | No | `0.1` |
 | `ai_response_format` | Structured-output mode for OpenAI-compatible endpoints (incl. LiteLLM): `off`, `json_object`, or `json_schema` (enforces the verdict/review_markdown schema). Ignored for `anthropic`. Improves reliability with smaller local models | No | `off` |
 | `ai_tokens_param` | Token-limit field name for OpenAI-compatible requests: `max_tokens` or `max_completion_tokens` (newer OpenAI reasoning models). Ignored for `anthropic` | No | `max_tokens` |
@@ -430,7 +430,7 @@ jobs:
     ai_api_format: anthropic
     ai_model: claude-sonnet-4-5
     ai_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    ai_max_tokens: "4096"
+    ai_max_tokens: "8192"
     publish_review_comment: "true"
 ```
 
