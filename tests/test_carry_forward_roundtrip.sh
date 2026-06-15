@@ -116,5 +116,46 @@ print(';'.join(f\"{i['id']}:{i['severity']}\" for i in items))
 check "carried findings get sequential ids" "$LOADED" "P1:blocker;P2:minor"
 
 echo ""
+echo "=== Cross-run evidence memory: marker persists → precheck extracts → load reuses ==="
+# build_metadata_marker carries the evidence digest, tagged with HEAD_SHA.
+MARKER_EV="$(HEAD_SHA=deadbeef EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="- read_file → installer:v1.13.4" build_metadata_marker "b" "")"
+check_contains "marker carries evidence_digest" "$MARKER_EV" '"evidence_digest":'
+check_contains "digest content persisted" "$MARKER_EV" "installer:v1.13.4"
+
+# Disabled → omitted even when a digest was produced.
+MARKER_EVOFF="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="x" TOOL_EVIDENCE_MEMORY=false build_metadata_marker "b" "")"
+check_not_contains "evidence memory off omits the digest" "$MARKER_EVOFF" "evidence_digest"
+
+# No digest (non-native / nothing gathered) → no field.
+MARKER_EVEMPTY="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean build_metadata_marker "b" "")"
+check_not_contains "no digest yields no evidence_digest field" "$MARKER_EVEMPTY" "evidence_digest"
+
+# Precheck extracts it into previous-evidence.json, tagged with the gathered-at sha.
+BODY_EV="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_EV")"
+extract_review_metadata "$BODY_EV"
+check_contains "previous-evidence.json carries the digest" "$(jq -r '.digest' previous-evidence.json)" "installer:v1.13.4"
+check "evidence tagged with the gathered-at sha" "$(jq -r '.head_sha' previous-evidence.json)" "deadbeef"
+
+# Review side: load + render reuse it in the corpus.
+RENDERED_EV="$(PYTHONPATH="$ROOT_DIR" python3 -c "
+from pr_reviewer.evidence_memory import load_evidence_memory, render_evidence_memory_section
+print(render_evidence_memory_section(load_evidence_memory()), end='')
+")"
+check_contains "rendered section reuses the digest" "$RENDERED_EV" "installer:v1.13.4"
+check_contains "rendered section tags the gathered-at sha" "$RENDERED_EV" "deadbeef"
+
+# Hostile digest: a control char (BELL 0x07) and HTML must be stripped by the
+# precheck's shell-embedded regex BEFORE the file is written (the regex doubling
+# is correct inside bash's double-quoted python3 -c string — this guards it).
+DIGEST_HOSTILE="$(printf 'fact v1.13.4 \007 <script>alert(1)</script> end')"
+MARKER_HOSTILE="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="$DIGEST_HOSTILE" build_metadata_marker "b" "")"
+BODY_HOSTILE="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_HOSTILE")"
+extract_review_metadata "$BODY_HOSTILE"
+HOSTILE_DIGEST="$(jq -r '.digest' previous-evidence.json)"
+check_not_contains "control char stripped from digest by precheck" "$HOSTILE_DIGEST" "$(printf '\007')"
+check_not_contains "angle brackets stripped from digest by precheck" "$HOSTILE_DIGEST" "<script>"
+check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.13.4"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

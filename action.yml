@@ -355,6 +355,16 @@ inputs:
       tool_loop_summarize is enabled. Keep it small — the digest should be terse.
     required: false
     default: "512"
+  tool_evidence_memory:
+    description: >-
+      Carry the evidence a tool_mode=native_loop review gathers across
+      incremental reviews of the same PR. The review stores a compact digest of
+      what it read/fetched in its metadata marker; the next incremental review
+      reuses it (re-verifying only what the delta touched) instead of
+      re-gathering from scratch. On by default; set "false" to disable. No
+      effect on full reviews or non-native modes.
+    required: false
+    default: "true"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
@@ -750,6 +760,7 @@ runs:
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope }}
         PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha }}
+        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
     - name: Publish review comment
@@ -768,6 +779,8 @@ runs:
         ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
+        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
@@ -833,6 +846,8 @@ runs:
         ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
+        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
@@ -941,6 +956,8 @@ runs:
         ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
+        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}

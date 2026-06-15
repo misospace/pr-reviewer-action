@@ -1112,6 +1112,17 @@ from pr_reviewer.carry_forward import load_carried_findings, render_carried_find
 print(render_carried_findings_section(load_carried_findings()), end='')
 " 2>/dev/null || echo "(Previous review findings could not be loaded)"
       fi
+      # Cross-run evidence memory (#265): reuse the evidence the previous review
+      # already gathered so this delta review doesn't re-run the same reads/
+      # fetches. Rendered with fail-safe "re-verify the delta" framing. Below
+      # carried findings on purpose — findings are the more important context.
+      if [ "$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ] \
+         && [ -s previous-evidence.json ]; then
+        PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
+from pr_reviewer.evidence_memory import load_evidence_memory, render_evidence_memory_section
+print(render_evidence_memory_section(load_evidence_memory()), end='')
+" 2>/dev/null || true
+      fi
     else
       echo "# Linked Issue Context"
       cat linked-issues.md
@@ -1596,6 +1607,17 @@ FD_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   echo "findings<<$FD_DELIM"
   jq -c '.findings // []' ai-output.json
   echo "$FD_DELIM"
+} >> "$OUTPUT_FILE"
+
+# Cross-run evidence memory (#265): the native_loop's gathered-evidence digest,
+# carried into the metadata marker by the publish step so the next incremental
+# review reuses it. Empty for non-native modes / when no evidence was gathered.
+# Same random-delimiter defense — the digest is tool/model-influenced text.
+ED_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+{
+  echo "evidence_digest<<$ED_DELIM"
+  jq -r '.evidence_digest // ""' tool-harness.json 2>/dev/null || true
+  echo "$ED_DELIM"
 } >> "$OUTPUT_FILE"
 
 log "Analysis complete. Writing outputs..."
