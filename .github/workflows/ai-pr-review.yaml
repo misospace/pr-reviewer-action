@@ -39,7 +39,7 @@ jobs:
       - name: Review PR with reusable AI reviewer
         if: github.event_name == 'pull_request'
         id: review
-        uses: misospace/pr-reviewer-action@4126a2701a5e9adcf7c48ac6eb678e2e3a2bb2a0 # v1.2.9
+        uses: misospace/pr-reviewer-action@3479bf51ab9133414ae07af783bff985d3929884 # v1.3.0
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           ai_primary_retries: "3"
@@ -53,7 +53,7 @@ jobs:
           ai_fallback_api_format: ${{ vars.FALLBACK_FORMAT }}
           ai_fallback_model: ${{ vars.FALLBACK_MODEL }}
           ai_fallback_api_key: ${{ secrets.LITELLM_API_KEY }}
-          ai_max_tokens: "16384"
+          ai_max_tokens: "32768"
           review_routing_mode: auto
           ai_smart_base_url: ${{ vars.LITELLM_URL }}
           ai_smart_api_format: ${{ vars.SMART_FORMAT }}
@@ -62,12 +62,13 @@ jobs:
           context_limit_mode: normal
           ci_status_check: "true"
           ci_timeout_sec: "600"
-          tool_mode: plan_execute_loop
+          tool_mode: native_loop
           tool_max_rounds: "2"
           tool_max_requests: "4"
-          tool_planning_timeout_sec: "45"
+          tool_loop_wall_clock_sec: "300"
+          tool_planning_timeout_sec: "300"
           tool_planning_max_context_bytes: "15000"
-          tool_planning_max_tokens: "300"
+          tool_planning_max_tokens: "16000"
           tool_max_response_bytes: "12000"
           tool_allowed_gh_api_repos: misospace/pr-reviewer-action
           tool_request_timeout_sec: "15"
