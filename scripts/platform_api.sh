@@ -177,7 +177,7 @@ platform_comment_sticky() {
 platform_pr_reviews() {
   # $1=repo $2=pr_number [first-page|paginate] → reviews JSON
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "pr_reviews"   # lands with #224 (native reviews)
+    _forgejo_py list-pr-reviews "$1" "$2"
   elif [[ "${3:-first-page}" == "paginate" ]]; then
     gh api "repos/$1/pulls/$2/reviews" --paginate
   else
@@ -188,7 +188,7 @@ platform_pr_reviews() {
 platform_review_create_json() {
   # $1=repo $2=pr_number $3=request_json_file — POST a review (inline comments)
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "review_create_json"   # #224
+    _forgejo_py create-review-json "$1" "$2" "$3"
   else
     gh api "repos/$1/pulls/$2/reviews" --method POST --input "$3"
   fi
@@ -197,7 +197,7 @@ platform_review_create_json() {
 platform_review_native() {
   # $1=repo $2=pr_number $3=APPROVE|REQUEST_CHANGES $4=body_file
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "review_native"   # #224
+    _forgejo_py create-native-review "$1" "$2" "$3" "$4"
   else
     case "$3" in
       APPROVE) gh pr review "$2" --repo "$1" --approve --body-file "$4" ;;
@@ -209,7 +209,7 @@ platform_review_native() {
 platform_review_dismiss() {
   # $1=repo $2=pr_number $3=review_id $4=message
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "review_dismiss"   # #224
+    _forgejo_py dismiss-review "$1" "$2" "$3" "$4"
   else
     gh api "repos/$1/pulls/$2/reviews/$3/dismissals" --method PUT -f message="$4" --jq '.id'
   fi

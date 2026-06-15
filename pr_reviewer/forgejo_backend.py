@@ -539,6 +539,231 @@ def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
     return results
 
 
+
+# ---------------------------------------------------------------------------
+# Native PR Reviews (list / create / dismiss)
+# ---------------------------------------------------------------------------
+
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _diff_positions(diff_text: str) -> dict[str, dict[int, int]]:
+    """Map file/new-line anchors to Forgejo ``new_position`` values."""
+    positions_by_path: dict[str, dict[int, int]] = {}
+    current_path: str | None = None
+    new_line = 0
+    diff_position = 0
+    in_hunk = False
+
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            current_path = None
+            in_hunk = False
+            diff_position = 0
+            continue
+        if raw.startswith("+++ "):
+            target = raw[4:].strip()
+            current_path = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
+            continue
+        match = _HUNK_RE.match(raw)
+        if match:
+            new_line = int(match.group(1))
+            in_hunk = True
+            continue
+        if not in_hunk or current_path is None or raw.startswith("\\"):
+            continue
+
+        diff_position += 1
+        if raw.startswith("+"):
+            positions_by_path.setdefault(current_path, {})[new_line] = diff_position
+            new_line += 1
+        elif raw.startswith("-"):
+            continue
+        else:
+            positions_by_path.setdefault(current_path, {})[new_line] = diff_position
+            new_line += 1
+
+    return positions_by_path
+
+
+def list_pr_reviews(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
+    """List native PR reviews, normalised to the fields publish helpers read."""
+    owner, repo = _parse_repo(repo_full_name)
+
+    if _is_forgejo_mode():
+        status_code, body_text = _curl(
+            "GET",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+        )
+        if status_code != 200:
+            return []
+        data = _json_decode(body_text)
+        if not isinstance(data, list):
+            return []
+        return [_forgejo_review_to_github(review) for review in data]
+
+    status_code, body_text = _gh(
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--paginate",
+    )
+    if status_code != 0 or not body_text.strip():
+        return []
+    data = _json_decode(body_text)
+    return data if isinstance(data, list) else []
+
+
+def _forgejo_review_to_github(review: dict[str, Any]) -> dict[str, Any]:
+    state = str(review.get("state") or review.get("event") or "COMMENT").upper()
+    if state == "APPROVE":
+        state = "APPROVED"
+    if state == "REQUEST_CHANGES":
+        state = "CHANGES_REQUESTED"
+    return {
+        "id": review.get("id", 0),
+        "body": review.get("body", ""),
+        "state": state,
+        "user": review.get("user", {}),
+        "submitted_at": review.get("submitted_at", review.get("updated_at", "")),
+        "html_url": review.get("html_url", ""),
+    }
+
+
+def _forgejo_review_event(event: str) -> str:
+    event = (event or "COMMENT").upper()
+    if event in {"APPROVE", "APPROVED"}:
+        return "APPROVE"
+    if event in {"REQUEST_CHANGES", "CHANGES_REQUESTED"}:
+        return "REQUEST_CHANGES"
+    return "COMMENT"
+
+
+def _normalise_review_comment_positions(
+    repo_full_name: str,
+    pr_number: int,
+    comments: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(comments, list):
+        return []
+    positions = _diff_positions(get_pr_diff(repo_full_name, pr_number))
+    normalised: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        path = comment.get("path")
+        body = comment.get("body")
+        if not isinstance(path, str) or not path or not isinstance(body, str) or not body:
+            continue
+        new_position = comment.get("new_position")
+        if not isinstance(new_position, int) or new_position <= 0:
+            line = comment.get("line")
+            if not isinstance(line, int) or line <= 0:
+                continue
+            new_position = positions.get(path, {}).get(line)
+        if not isinstance(new_position, int) or new_position <= 0:
+            continue
+        normalised.append({"path": path, "new_position": new_position, "body": body})
+    return normalised
+
+
+def create_pr_review_from_payload(
+    repo_full_name: str,
+    pr_number: int,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Create a native PR review from a GitHub-shaped review payload."""
+    owner, repo = _parse_repo(repo_full_name)
+
+    if _is_forgejo_mode():
+        request = {
+            "body": str(payload.get("body") or ""),
+            "event": _forgejo_review_event(str(payload.get("event") or "COMMENT")),
+        }
+        comments = _normalise_review_comment_positions(repo_full_name, pr_number, payload.get("comments"))
+        if comments:
+            request["comments"] = comments
+        status_code, body_text = _curl(
+            "POST",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            data=request,
+        )
+        if status_code not in (200, 201):
+            return None
+        data = _json_decode(body_text)
+        return data if isinstance(data, dict) else {"id": 0, "body": request["body"]}
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+        json.dump(payload, tmp)
+        tmp_path = tmp.name
+    try:
+        status_code, body_text = _gh(
+            "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--method", "POST", "--input", tmp_path,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    if status_code != 0:
+        return None
+    data = _json_decode(body_text)
+    return data if isinstance(data, dict) else {"id": 0}
+
+
+def create_pr_review_from_file(
+    repo_full_name: str,
+    pr_number: int,
+    payload_file: str,
+) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(open(payload_file, encoding="utf-8").read())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return create_pr_review_from_payload(repo_full_name, pr_number, payload)
+
+
+def create_native_review(
+    repo_full_name: str,
+    pr_number: int,
+    event: str,
+    body: str,
+) -> dict[str, Any] | None:
+    return create_pr_review_from_payload(
+        repo_full_name,
+        pr_number,
+        {"event": _forgejo_review_event(event), "body": body},
+    )
+
+
+def dismiss_pr_review(repo_full_name: str, pr_number: int, review_id: int, message: str) -> int | None:
+    owner, repo = _parse_repo(repo_full_name)
+
+    if _is_forgejo_mode():
+        status_code, body_text = _curl(
+            "POST",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
+            data={"message": message},
+        )
+        if status_code not in (200, 201, 204):
+            return None
+        data = _json_decode(body_text)
+        if isinstance(data, dict):
+            return int(data.get("id") or review_id)
+        return review_id
+
+    status_code, body_text = _gh(
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
+        "--method", "PUT", "-f", f"message={message}", "--jq", ".id",
+    )
+    if status_code != 0:
+        return None
+    try:
+        return int(body_text.strip())
+    except ValueError:
+        return review_id
+
 # ---------------------------------------------------------------------------
 # Convenience: check if PR is a fork PR
 # ---------------------------------------------------------------------------
@@ -661,6 +886,27 @@ def main() -> None:
     p_compare.add_argument("repo")
     p_compare.add_argument("spec")
 
+    p_reviews = sub.add_parser("list-pr-reviews")
+    p_reviews.add_argument("repo")
+    p_reviews.add_argument("pr_number", type=int)
+
+    p_review_json = sub.add_parser("create-review-json")
+    p_review_json.add_argument("repo")
+    p_review_json.add_argument("pr_number", type=int)
+    p_review_json.add_argument("payload_file")
+
+    p_review_native = sub.add_parser("create-native-review")
+    p_review_native.add_argument("repo")
+    p_review_native.add_argument("pr_number", type=int)
+    p_review_native.add_argument("event")
+    p_review_native.add_argument("body_file")
+
+    p_dismiss = sub.add_parser("dismiss-review")
+    p_dismiss.add_argument("repo")
+    p_dismiss.add_argument("pr_number", type=int)
+    p_dismiss.add_argument("review_id", type=int)
+    p_dismiss.add_argument("message")
+
     args = parser.parse_args()
 
     if args.command == "get-pr-metadata":
@@ -690,6 +936,24 @@ def main() -> None:
             print("null")
             sys.exit(1)
         print(json.dumps(result, indent=2))
+    elif args.command == "list-pr-reviews":
+        print(json.dumps(list_pr_reviews(args.repo, args.pr_number), indent=2))
+    elif args.command == "create-review-json":
+        result = create_pr_review_from_file(args.repo, args.pr_number, args.payload_file)
+        print(json.dumps(result, indent=2) if result else "null")
+        if result is None:
+            sys.exit(1)
+    elif args.command == "create-native-review":
+        body = open(args.body_file, encoding="utf-8").read()
+        result = create_native_review(args.repo, args.pr_number, args.event, body)
+        print(json.dumps(result, indent=2) if result else "null")
+        if result is None:
+            sys.exit(1)
+    elif args.command == "dismiss-review":
+        result = dismiss_pr_review(args.repo, args.pr_number, args.review_id, args.message)
+        print(result if result is not None else "null")
+        if result is None:
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)

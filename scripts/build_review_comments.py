@@ -86,15 +86,28 @@ def commentable_lines(diff_text: str) -> dict:
     Commentable lines are added (+) and context lines inside hunks — the
     new-side lines GitHub accepts for a review comment with side=RIGHT.
     """
-    lines_by_path: dict = {}
+    return {path: set(mapping) for path, mapping in diff_positions(diff_text).items()}
+
+
+def diff_positions(diff_text: str) -> dict:
+    """Map new-side file path -> {new_line: diff-relative position}.
+
+    GitHub review comments use the final-file line plus ``side=RIGHT``.
+    Forgejo/Gitea review comments use ``new_position`` instead: a position in
+    the file's patch body. Track both from the same hunk walk so the two
+    publish backends anchor the same validated finding lines.
+    """
+    positions_by_path: dict = {}
     current_path = None
     new_line = 0
+    diff_position = 0
     in_hunk = False
 
     for raw in diff_text.splitlines():
         if raw.startswith("diff --git "):
             current_path = None
             in_hunk = False
+            diff_position = 0
             continue
         if raw.startswith("+++ "):
             target = raw[4:].strip()
@@ -110,19 +123,21 @@ def commentable_lines(diff_text: str) -> dict:
             continue
         if not in_hunk or current_path is None:
             continue
+        if raw.startswith("\\"):
+            # "\ No newline at end of file" is metadata, not a diff slot.
+            continue
+
+        diff_position += 1
         if raw.startswith("+"):
-            lines_by_path.setdefault(current_path, set()).add(new_line)
+            positions_by_path.setdefault(current_path, {})[new_line] = diff_position
             new_line += 1
         elif raw.startswith("-"):
             continue
-        elif raw.startswith("\\"):
-            # "\ No newline at end of file"
-            continue
         else:
-            lines_by_path.setdefault(current_path, set()).add(new_line)
+            positions_by_path.setdefault(current_path, {})[new_line] = diff_position
             new_line += 1
 
-    return lines_by_path
+    return positions_by_path
 
 
 def _safe_path(path) -> bool:
@@ -168,7 +183,12 @@ def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=
         return [], 0
     suppressed = suppressed or set()
 
-    anchors = commentable_lines(diff_text)
+    use_forgejo_positions = (
+        os.getenv("REVIEW_COMMENT_POSITION_BACKEND", "").lower() in {"forgejo", "gitea"}
+        or os.getenv("PLATFORM", "").lower() == "forgejo"
+    )
+    position_map = diff_positions(diff_text)
+    anchors = {path: set(mapping) for path, mapping in position_map.items()}
     comments = []
     skipped = 0
 
@@ -196,14 +216,16 @@ def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=
         # The marker is appended after sanitization: it is generated locally
         # from hex digits and must survive verbatim for the next run's
         # thread-resolution matching.
-        comments.append(
-            {
-                "path": path,
-                "line": line,
-                "side": "RIGHT",
-                "body": finding_to_body(finding) + "\n\n" + finding_marker(finding),
-            }
-        )
+        comment = {
+            "path": path,
+            "body": finding_to_body(finding) + "\n\n" + finding_marker(finding),
+        }
+        if use_forgejo_positions:
+            comment["new_position"] = position_map[path][line]
+        else:
+            comment["line"] = line
+            comment["side"] = "RIGHT"
+        comments.append(comment)
         if len(comments) >= max_comments:
             break
 

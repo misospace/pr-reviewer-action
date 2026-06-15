@@ -119,6 +119,16 @@ NEW_COMMENT = {
     "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/pulls/42#issuecomment-3",
 }
 
+
+REVIEW = {
+    "id": 55,
+    "body": f"{COMMENT_MARKER}\nAutomated review",
+    "state": "REQUEST_CHANGES",
+    "user": {"login": "ai-reviewer"},
+    "submitted_at": "2026-06-11T14:00:00Z",
+    "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/pulls/42#pullrequestreview-55",
+}
+
 def _make_create_response(input_body: str) -> tuple[int, str]:
     """Return a create comment response that reflects the input body."""
     resp = dict(NEW_COMMENT, body=input_body)
@@ -599,6 +609,87 @@ class TestGitHubMode(unittest.TestCase):
 
         self.assertEqual(result["id"], 88)
         self.assertEqual(result["html_url"], url)
+
+
+
+class TestNativeReviews(unittest.TestCase):
+    """Forgejo native review support uses review endpoints and new_position anchors."""
+
+    @_PATCH_FORGEJO
+    def test_list_pr_reviews_normalizes_state(self, mock_curl):
+        url_map = {
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews": (200, json.dumps([REVIEW])),
+        }
+        mock_curl.side_effect = _make_curl_mock(url_map)
+
+        with _forgejo_env_patch():
+            result = fb.list_pr_reviews("misospace/pr-reviewer-action", 42)
+
+        self.assertEqual(result[0]["id"], 55)
+        self.assertEqual(result[0]["state"], "CHANGES_REQUESTED")
+        self.assertIn(COMMENT_MARKER, result[0]["body"])
+
+    @_PATCH_FORGEJO
+    def test_create_review_converts_line_comments_to_new_position(self, mock_curl):
+        calls = []
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            calls.append((method, url, kwargs))
+            if url.endswith("/pulls/42.diff"):
+                return 200, PR_DIFF
+            self.assertEqual(method, "POST")
+            return 201, json.dumps(dict(REVIEW, id=56, body=kwargs["data"]["body"]))
+
+        mock_curl.side_effect = _run
+        payload = {
+            "body": "review body",
+            "event": "REQUEST_CHANGES",
+            "comments": [{"path": "test.txt", "line": 1, "side": "RIGHT", "body": "anchored"}],
+        }
+
+        with _forgejo_env_patch():
+            result = fb.create_pr_review_from_payload("misospace/pr-reviewer-action", 42, payload)
+
+        self.assertIsNotNone(result)
+        review_call = calls[-1]
+        data = review_call[2]["data"]
+        self.assertEqual(review_call[1], f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews")
+        self.assertEqual(data["event"], "REQUEST_CHANGES")
+        self.assertEqual(data["comments"], [{"path": "test.txt", "new_position": 2, "body": "anchored"}])
+
+    @_PATCH_FORGEJO
+    def test_create_native_review_posts_approve_event(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=57, state="APPROVE"))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "APPROVE", "looks good")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"], {"body": "looks good", "event": "APPROVE"})
+
+    @_PATCH_FORGEJO
+    def test_dismiss_review_uses_forgejo_dismissal_endpoint(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 200, json.dumps({"id": 55})
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.dismiss_pr_review("misospace/pr-reviewer-action", 42, 55, "Superseded")
+
+        self.assertEqual(result, 55)
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["url"], f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews/55/dismissals")
+        self.assertEqual(seen["data"], {"message": "Superseded"})
 
 
 class TestIsForkPr(unittest.TestCase):
