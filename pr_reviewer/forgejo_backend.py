@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import quote
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +458,35 @@ def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None
     }
 
 
+def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
+    """Return compare metadata for ``base...head``.
+
+    Forgejo/Gitea expose the compare endpoint at
+    ``/repos/{owner}/{repo}/compare/{base}...{head}``. Callers use failure as
+    a fail-closed signal for incremental review scope, so return ``None`` on
+    any non-200 response or malformed payload rather than fabricating data.
+    """
+    owner, repo = _parse_repo(repo_full_name)
+
+    if _is_forgejo_mode():
+        status_code, body_text = _curl(
+            "GET",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/compare/{quote(spec, safe='')}",
+        )
+        if status_code != 200:
+            return None
+        data = _json_decode(body_text)
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    status_code, body_text = _gh("api", f"repos/{owner}/{repo}/compare/{spec}")
+    if status_code != 0 or not body_text.strip():
+        return None
+    data = _json_decode(body_text)
+    return data if isinstance(data, dict) else None
+
+
 # ---------------------------------------------------------------------------
 # PR Files (for classifier)
 # ---------------------------------------------------------------------------
@@ -627,6 +657,10 @@ def main() -> None:
     p_status.add_argument("repo")
     p_status.add_argument("sha")
 
+    p_compare = sub.add_parser("compare")
+    p_compare.add_argument("repo")
+    p_compare.add_argument("spec")
+
     args = parser.parse_args()
 
     if args.command == "get-pr-metadata":
@@ -650,6 +684,12 @@ def main() -> None:
     elif args.command == "commit-status":
         result = get_commit_status(args.repo, args.sha)
         print(json.dumps(result, indent=2) if result else "null")
+    elif args.command == "compare":
+        result = compare_commits(args.repo, args.spec)
+        if result is None:
+            print("null")
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
     else:
         parser.print_help()
         sys.exit(1)

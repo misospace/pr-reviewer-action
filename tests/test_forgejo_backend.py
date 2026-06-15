@@ -446,6 +446,49 @@ class TestFetchIssue(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestCompareCommits(unittest.TestCase):
+    """Forgejo compare support backs fail-closed incremental scope checks."""
+
+    _COMPARE = {
+        "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/compare/abc...def",
+        "total_commits": 1,
+        "commits": [{"sha": "def"}],
+        "files": [{"filename": "README.md"}],
+    }
+
+    @_PATCH_FORGEJO
+    def test_forgejo_compare_uses_api_endpoint(self, mock_curl):
+        url_map = {
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/compare/abc...def": (200, json.dumps(self._COMPARE)),
+        }
+        mock_curl.side_effect = _make_curl_mock(url_map)
+
+        with _forgejo_env_patch():
+            result = fb.compare_commits("misospace/pr-reviewer-action", "abc...def")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["total_commits"], 1)
+        mock_curl.assert_called_once()
+        self.assertIn("/compare/abc...def", mock_curl.call_args[0][1])
+
+    @_PATCH_FORGEJO
+    def test_forgejo_compare_failure_returns_none(self, mock_curl):
+        mock_curl.side_effect = _make_curl_mock({})
+
+        with _forgejo_env_patch():
+            result = fb.compare_commits("misospace/pr-reviewer-action", "missing...head")
+
+        self.assertIsNone(result)
+
+    def test_github_compare_uses_gh_api(self):
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", return_value=(0, json.dumps(self._COMPARE))) as mock_gh:
+            result = fb.compare_commits("misospace/pr-reviewer-action", "abc...def")
+
+        mock_gh.assert_called_once_with("api", "repos/misospace/pr-reviewer-action/compare/abc...def")
+        self.assertEqual(result["commits"][0]["sha"], "def")
+
+
 class TestListPrFiles(unittest.TestCase):
     """Test list_pr_files with Forgejo fixtures."""
 
