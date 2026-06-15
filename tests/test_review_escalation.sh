@@ -40,8 +40,10 @@ ACTION="$(cat "$ROOT_DIR/action.yml")"
 
 echo "=== Escalation gating ==="
 check_contains "escalation requires auto routing" "$SRC" '[[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0'
-check_contains "escalation requires the fast route" "$SRC" '[[ "${REVIEW_ROUTE:-legacy}" == "fast" ]] || return 0'
+check_contains "escalation requires the primary route" "$SRC" '[[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0'
 check_contains "escalation requires a smart model" "$SRC" '[[ -n "$SMART_MODEL_RESOLVED" ]] || return 0'
+check_contains "smart resolves ONLY from ai_smart_model (fallback is not the smart tier)" "$SRC" 'SMART_MODEL="${AI_SMART_MODEL}"'
+check_contains "smart gating keys off the smart model alone" "$SRC" 'if [[ -n "$SMART_MODEL" ]]; then'
 check_contains "no-op when smart equals the active fast config" "$SRC" 'nothing distinct to escalate to'
 check_contains "no-op when the fallback already produced the review on the smart config" "$SRC" 'the fallback model that produced this review is the smart model'
 check_contains "step summary reads smart-response usage when escalated" "$SRC" 'usage_file="ai-response.smart.json"'
@@ -50,10 +52,10 @@ echo ""
 echo "=== Decision and publication contracts ==="
 check_contains "decision made by pr_reviewer.escalation" "$SRC" "from pr_reviewer.escalation import should_escalate"
 check_contains "decision runs on the raw fast output (before mutation)" "$SRC" "before verdict policy / completeness"
-check_contains "fast output preserved as ai-output.fast.json" "$SRC" "cp ai-output.json ai-output.fast.json"
+check_contains "primary output preserved as ai-output.primary.json" "$SRC" "cp ai-output.json ai-output.primary.json"
 check_contains "escalated prompt names the reasons" "$SRC" "ESCALATED review"
-check_contains "smart failure restores the fast review" "$SRC" "cp ai-output.fast.json ai-output.json"
-check_contains "smart failure publishes the fast review" "$SRC" "publishing the fast review"
+check_contains "smart failure restores the primary review" "$SRC" "cp ai-output.primary.json ai-output.json"
+check_contains "smart failure publishes the primary review" "$SRC" "publishing the primary review"
 check_contains "route becomes escalated on success" "$SRC" 'REVIEW_ROUTE="escalated"'
 check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' "$RUN_REVIEW")" "1"
 # Escalation must be decided before the enforcement wrapper runs.

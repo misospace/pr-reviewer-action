@@ -133,42 +133,59 @@ inputs:
     default: "warn"
   review_routing_mode:
     description: >-
-      Route PR reviews between fast and smart models based on the deterministic
-      classification. 'off' (default) preserves existing primary/fallback behavior.
-      'auto' sends PRs whose pr_kind or risk_flags match escalate_on_risk_flags to the
-      smart model and everything else to the fast model.
+      Route PR reviews between the primary and smart models based on the
+      deterministic classification. 'off' (default) preserves existing
+      primary/fallback behavior. 'auto' sends PRs whose pr_kind or risk_flags
+      match escalate_on_risk_flags to the smart model (when one is configured)
+      and keeps everything else on the primary model.
     required: false
     default: "off"
+  ai_primary_model:
+    description: Model for the primary review route when review_routing_mode=auto. Defaults to ai_model.
+    required: false
+    default: ""
+  ai_primary_base_url:
+    description: Base URL for the primary route model. Defaults to ai_base_url.
+    required: false
+    default: ""
+  ai_primary_api_format:
+    description: API format for the primary route model (openai or anthropic). Defaults to ai_api_format.
+    required: false
+    default: ""
+  ai_primary_api_key:
+    description: API key for the primary route model. Defaults to ai_api_key.
+    required: false
+    default: ""
   ai_fast_model:
-    description: Fast/local model for low-risk reviews when review_routing_mode=auto. Defaults to ai_model.
+    description: "Deprecated alias for ai_primary_model (the route was renamed fast -> primary)."
     required: false
     default: ""
   ai_fast_base_url:
-    description: Base URL for the fast model. Defaults to ai_base_url.
+    description: "Deprecated alias for ai_primary_base_url."
     required: false
     default: ""
   ai_fast_api_format:
-    description: API format for the fast model (openai or anthropic). Defaults to ai_api_format.
+    description: "Deprecated alias for ai_primary_api_format."
     required: false
     default: ""
   ai_fast_api_key:
-    description: API key for the fast model. Defaults to ai_api_key.
+    description: "Deprecated alias for ai_primary_api_key."
     required: false
     default: ""
   ai_smart_model:
-    description: Smarter model for high-risk reviews when review_routing_mode=auto. Defaults to ai_fallback_model; with neither set, risky PRs stay on the fast model.
+    description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
     required: false
     default: ""
   ai_smart_base_url:
-    description: Base URL for the smart model. Defaults to ai_fallback_base_url.
+    description: Base URL for the smart model. Defaults to ai_base_url.
     required: false
     default: ""
   ai_smart_api_format:
-    description: API format for the smart model (openai or anthropic). Defaults to ai_fallback_api_format, then ai_api_format.
+    description: API format for the smart model (openai or anthropic). Defaults to ai_api_format.
     required: false
     default: ""
   ai_smart_api_key:
-    description: API key for the smart model. Defaults to ai_fallback_api_key.
+    description: API key for the smart model. Defaults to ai_api_key.
     required: false
     default: ""
   escalate_on_risk_flags:
@@ -178,15 +195,15 @@ inputs:
     required: false
     default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
   escalate_on_incomplete_required_checks:
-    description: Escalate a fast review to the smart model when required checks are unaddressed (review_routing_mode=auto only).
+    description: Escalate a primary-route review to the smart model when required checks are unaddressed (review_routing_mode=auto only).
     required: false
     default: "true"
   escalate_on_fast_request_changes:
-    description: Escalate a fast review to the smart model when the fast verdict is request_changes (review_routing_mode=auto only).
+    description: Escalate a primary-route review to the smart model when its verdict is request_changes (review_routing_mode=auto only).
     required: false
     default: "true"
   escalate_on_fast_low_confidence:
-    description: Escalate when the fast review is low-confidence (very short, or carries a populated Unknowns/Needs Verification section). review_routing_mode=auto only.
+    description: Escalate when the primary-route review is low-confidence (very short, or carries a populated Unknowns/Needs Verification section). review_routing_mode=auto only.
     required: false
     default: "true"
   escalate_on_tool_or_evidence_blockers:
@@ -530,7 +547,7 @@ outputs:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
     value: ${{ steps.review.outputs.required_checks }}
   review_route:
-    description: Model route used for this review ('legacy', 'fast', 'smart', or 'escalated')
+    description: Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')
     value: ${{ steps.review.outputs.review_route }}
   escalation_reason:
     description: Comma-separated escalation trigger names when review_route is 'escalated' (empty otherwise)
@@ -604,6 +621,7 @@ runs:
         AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
         AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
         REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
+        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model || inputs.ai_fast_model }}
         AI_FAST_MODEL: ${{ inputs.ai_fast_model }}
         AI_SMART_MODEL: ${{ inputs.ai_smart_model }}
         ESCALATE_ON_RISK_FLAGS: ${{ inputs.escalate_on_risk_flags }}
@@ -697,6 +715,10 @@ runs:
         VALIDATE_REQUIRED_CHECKS: ${{ inputs.validate_required_checks }}
         REQUIRED_CHECK_VALIDATION_MODE: ${{ inputs.required_check_validation_mode }}
         REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
+        AI_PRIMARY_BASE_URL: ${{ inputs.ai_primary_base_url || inputs.ai_fast_base_url }}
+        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model || inputs.ai_fast_model }}
+        AI_PRIMARY_API_FORMAT: ${{ inputs.ai_primary_api_format || inputs.ai_fast_api_format }}
+        AI_PRIMARY_API_KEY: ${{ inputs.ai_primary_api_key || inputs.ai_fast_api_key }}
         AI_FAST_BASE_URL: ${{ inputs.ai_fast_base_url }}
         AI_FAST_MODEL: ${{ inputs.ai_fast_model }}
         AI_FAST_API_FORMAT: ${{ inputs.ai_fast_api_format }}

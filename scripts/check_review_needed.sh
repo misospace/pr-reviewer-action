@@ -200,8 +200,8 @@ compute_config_hash() {
   if [[ -n "${REVIEW_ROUTING_MODE:-}" ]]; then
     parts+=("routing_mode:${REVIEW_ROUTING_MODE}")
   fi
-  if [[ -n "${AI_FAST_MODEL:-}" ]]; then
-    parts+=("fast_model:${AI_FAST_MODEL}")
+  if [[ -n "${AI_PRIMARY_MODEL:-${AI_FAST_MODEL:-}}" ]]; then
+    parts+=("primary_model:${AI_PRIMARY_MODEL:-${AI_FAST_MODEL}}")
   fi
   if [[ -n "${AI_SMART_MODEL:-}" ]]; then
     parts+=("smart_model:${AI_SMART_MODEL}")

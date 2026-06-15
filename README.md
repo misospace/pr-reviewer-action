@@ -86,7 +86,7 @@ flowchart LR
     A -->|changed| B[Wait for CI<br/><i>optional</i>]
     B --> C[Collect context<br/>diff · issues · sources · evidence · tools]
     C --> D[Classify PR<br/>rule-based risk flags]
-    D --> E[Route & call model<br/>fast / smart / fallback]
+    D --> E[Route & call model<br/>primary / smart / fallback]
     E --> F[Validate & enforce<br/>required checks · findings · carry-forward]
     F --> G[Publish<br/>comment / native review]
 ```
@@ -234,23 +234,27 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 </details>
 
 <details>
-<summary><b>Routing & escalation</b> — fast/smart model split and escalation triggers</summary>
+<summary><b>Routing & escalation</b> — primary/smart model split and escalation triggers</summary>
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `review_routing_mode` | Route reviews between fast and smart models from the classification: `off` (existing primary/fallback behavior) or `auto` | No | `off` |
-| `ai_fast_model` | Fast model for low-risk reviews in `auto` mode; defaults to `ai_model` | No | `""` |
-| `ai_fast_base_url` | Base URL for the fast model; defaults to `ai_base_url` | No | `""` |
-| `ai_fast_api_format` | API format for the fast model; defaults to `ai_api_format` | No | `""` |
-| `ai_fast_api_key` | API key for the fast model; defaults to `ai_api_key` | No | `""` |
+| `review_routing_mode` | Route reviews between the primary and smart models from the classification: `off` (existing primary/fallback behavior) or `auto` | No | `off` |
+| `ai_primary_model` | Model for the primary route in `auto` mode; defaults to `ai_model` | No | `""` |
+| `ai_primary_base_url` | Base URL for the primary route model; defaults to `ai_base_url` | No | `""` |
+| `ai_primary_api_format` | API format for the primary route model; defaults to `ai_api_format` | No | `""` |
+| `ai_primary_api_key` | API key for the primary route model; defaults to `ai_api_key` | No | `""` |
+| `ai_fast_model` | Deprecated alias for `ai_primary_model` (route renamed `fast` → `primary`) | No | `""` |
+| `ai_fast_base_url` | Deprecated alias for `ai_primary_base_url` | No | `""` |
+| `ai_fast_api_format` | Deprecated alias for `ai_primary_api_format` | No | `""` |
+| `ai_fast_api_key` | Deprecated alias for `ai_primary_api_key` | No | `""` |
 | `ai_smart_model` | Smart model for high-risk reviews in `auto` mode; defaults to `ai_fallback_model` | No | `""` |
 | `ai_smart_base_url` | Base URL for the smart model; defaults to `ai_fallback_base_url` | No | `""` |
 | `ai_smart_api_format` | API format for the smart model; defaults to `ai_fallback_api_format`, then `ai_api_format` | No | `""` |
 | `ai_smart_api_key` | API key for the smart model; defaults to `ai_fallback_api_key` | No | `""` |
 | `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode | No | security/priority/auth/route/file-serving/path/secret/db list |
-| `escalate_on_incomplete_required_checks` | Escalate fast reviews with unaddressed required checks to the smart model (`auto` mode) | No | `true` |
-| `escalate_on_fast_request_changes` | Escalate fast reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
-| `escalate_on_fast_low_confidence` | Escalate low-confidence fast reviews (short relative to the diff, or populated Unknowns section) (`auto` mode) | No | `true` |
+| `escalate_on_incomplete_required_checks` | Escalate primary-route reviews with unaddressed required checks to the smart model (`auto` mode) | No | `true` |
+| `escalate_on_fast_request_changes` | Escalate primary-route reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
+| `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews (short relative to the diff, or populated Unknowns section) (`auto` mode) | No | `true` |
 | `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
 | `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
 | `escalate_on_dirty_baseline` | Escalate incremental reviews whose baseline review found issues (`auto` mode) | No | `true` |
@@ -376,7 +380,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `verdict` | `approve` or `request_changes` |
 | `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (a carried-forward blocker survived an incremental review) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
-| `review_route` | Model route used: `legacy` (routing off), `fast`, `smart`, or `escalated` |
+| `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |
 | `findings` | Normalized structured findings as a JSON array (`[]` when the model produced none) |
 | `review_markdown` | Full markdown review body |
@@ -881,7 +885,7 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
 - `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
 
-Only the **final** review is published. The fast result is kept on the runner as `ai-output.fast.json` for debugging; if the smart model fails, the fast review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
+Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
 
 ## 💾 Token-saving with incremental reviews
 
