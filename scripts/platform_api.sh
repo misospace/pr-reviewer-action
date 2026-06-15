@@ -155,7 +155,7 @@ platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
   # object (or the --jq projection) on stdout
   if _platform_is_forgejo; then
-    _forgejo_unimplemented "compare"   # lands with #223 (incremental scope)
+    _forgejo_py compare "$1" "$2"
   else
     local repo="$1" spec="$2"
     shift 2

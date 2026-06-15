@@ -129,6 +129,8 @@ check "forgejo without FORGEJO_API_URL fails loudly" \
 RESULT="$(run_seam forgejo "" 'platform_graphql -f query=Q')"
 check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_compare o/r aaa...bbb' "https://forgejo.example.com")"
+check "forgejo compare uses backend cli" "$RESULT" "forgejo compare o/r aaa...bbb"
 RESULT="$(run_seam forgejo "" 'platform_check_runs o/r abc')"
 check "forgejo check_runs returns empty structure (exit 0)" \
   "$( (export PLATFORM=forgejo; unset _PLATFORM_API_SOURCED; source "$SEAM"; platform_check_runs o/r abc >/dev/null 2>&1 && echo 0 || echo 1) )" "0"
