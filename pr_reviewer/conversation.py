@@ -822,16 +822,18 @@ class Conversation:
         response_format: str | None = None,
         tokens_param: str = "max_tokens",
         cache_prefix: bool = False,
+        keep_tools_on_verdict: bool = False,
     ) -> dict[str, Any]:
         """Render the conversation as a wire-ready request body.
 
         Parameters mirror the bash ``build_model_request`` in
         ``scripts/model_call.sh`` so the loop driver can drop in with
         minimal reshuffling. ``verdict_turn=True`` triggers the
-        ``ai_response_format`` switch: ``tools`` is dropped, and the prior
-        conversation is either carried through (default off — see
-        ``keep_full_history_on_verdict``) or collapsed into a single system
-        note via :meth:`_verdict_transcript_note`.
+        ``ai_response_format`` switch: ``tools`` is dropped by default on the
+        verdict turn (set ``keep_tools_on_verdict=True`` to preserve them for
+        cache-prefix reuse — see #263 Part 3). The prior conversation is either
+        carried through (default off — see ``keep_full_history_on_verdict``) or
+        collapsed into a single system note via :meth:`_verdict_transcript_note`.
         """
         if api_format == "anthropic":
             return self._to_anthropic_payload(
@@ -843,6 +845,7 @@ class Conversation:
                 keep_full_history_on_verdict=keep_full_history_on_verdict,
                 response_format=response_format,
                 cache_prefix=cache_prefix,
+                keep_tools_on_verdict=keep_tools_on_verdict,
             )
         return self._to_openai_payload(
             model=model,
@@ -853,6 +856,7 @@ class Conversation:
             keep_full_history_on_verdict=keep_full_history_on_verdict,
             response_format=response_format,
             tokens_param=tokens_param,
+            keep_tools_on_verdict=keep_tools_on_verdict,
         )
 
     def _to_openai_payload(
@@ -866,6 +870,7 @@ class Conversation:
         keep_full_history_on_verdict: bool,
         response_format: str | None,
         tokens_param: str = "max_tokens",
+        keep_tools_on_verdict: bool = False,
     ) -> dict[str, Any]:
         system = self.system
         messages = self._render_openai_messages()
@@ -896,15 +901,18 @@ class Conversation:
             payload["temperature"] = temperature
         if stream:
             payload["stream_options"] = {"include_usage": True}
-        # The closing turn drops tools UNCONDITIONALLY — that is the
-        # verdict-turn contract. response_format is a separate, optional
-        # add-on (the bash build_model_request supports json_object and
-        # json_schema; we mirror its shapes).
+        # The closing turn drops tools by default (the verdict-turn contract).
+        # With keep_tools_on_verdict=True (#263 Part 3), tools are retained so
+        # the cached prefix survives — the response_format enforces JSON output.
+        # Most backends support both; some reject them together, in which case
+        # the caller should keep this off. Default False preserves current behaviour.
         if verdict_turn:
             if response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
             elif response_format == "json_schema":
                 payload["response_format"] = _OPENAI_VERDICT_JSON_SCHEMA
+            if keep_tools_on_verdict:
+                payload["tools"] = [_tool_to_openai(s) for s in self.tool_schemas]
         else:
             payload["tools"] = [_tool_to_openai(s) for s in self.tool_schemas]
         return payload
@@ -920,6 +928,7 @@ class Conversation:
         keep_full_history_on_verdict: bool,
         response_format: str | None,
         cache_prefix: bool = False,
+        keep_tools_on_verdict: bool = False,
     ) -> dict[str, Any]:
         system = self.system
         messages = self._render_anthropic_messages()
@@ -942,6 +951,11 @@ class Conversation:
         if temperature is not None:
             payload["temperature"] = temperature
         if not verdict_turn:
+            payload["tools"] = [_tool_to_anthropic(s) for s in self.tool_schemas]
+        elif keep_tools_on_verdict:
+            # #263 Part 3: retain tools on the verdict turn so the cached prefix
+            # survives. Anthropic has no response_format — the system prompt
+            # already carries JSON-output instructions (from the reviewer prompt).
             payload["tools"] = [_tool_to_anthropic(s) for s in self.tool_schemas]
         # Anthropic has no response_format; the closing-turn contract relies
         # on the system prompt to request JSON. response_format is silently

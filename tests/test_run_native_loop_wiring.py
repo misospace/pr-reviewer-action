@@ -450,10 +450,11 @@ def test_native_loop_emits_in_conversation_verdict(monkeypatch, tmp_path):
     resp = json.loads((tmp_path / "ai-response.primary.json").read_text())
     assert "approve" in resp["choices"][0]["message"]["content"]
 
-    # The verdict turn (final call) dropped tools, forced strict JSON, and
-    # re-injected the full corpus the loop never saw on a closing user turn.
+    # The verdict turn (final call) keeps tools for cache-prefix reuse (#263 Part 3),
+    # forces strict JSON via response_format, and re-injects the full corpus
+    # the loop never saw on a closing user turn.
     verdict_payload = payloads[-1]
-    assert "tools" not in verdict_payload
+    assert "tools" in verdict_payload
     assert verdict_payload.get("response_format", {}).get("type") == "json_object"
     user_text = "\n".join(
         m.get("content") or "" for m in verdict_payload["messages"] if m["role"] == "user"

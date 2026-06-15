@@ -516,6 +516,72 @@ class TestOpenAIPayload:
         assert any(m["role"] == "tool" for m in payload["messages"])
         assert payload["response_format"] == {"type": "json_object"}
 
+    def test_verdict_turn_keep_tools_on_verdict(self):
+        """#263 Part 3: keep tools on the verdict turn for cache-prefix reuse."""
+        c = Conversation(system="reviewer")
+        c.add_user("review me")
+        c.add_assistant_tool_calls(
+            [{"id": "call_1", "name": "read_file", "arguments": "{}"}]
+        )
+        c.add_tool_result("call_1", "ok")
+
+        payload = c.to_request_payload(
+            "openai",
+            "gpt-4o",
+            verdict_turn=True,
+            response_format="json_schema",
+            keep_full_history_on_verdict=True,
+            keep_tools_on_verdict=True,
+        )
+        # Tools are retained on the verdict turn.
+        assert "tools" in payload
+        assert len(payload["tools"]) == len(c.tool_schemas)
+        # response_format still present (JSON enforcement).
+        assert payload["response_format"]["type"] == "json_schema"
+        # History preserved.
+        assert any(m["role"] == "tool" for m in payload["messages"])
+
+    def test_verdict_turn_keep_tools_on_verdict_anthropic(self):
+        """#263 Part 3: Anthropic verdict turn with tools retained."""
+        c = Conversation(system="reviewer")
+        c.add_user("review me")
+        c.add_assistant_tool_calls(
+            [{"id": "call_1", "name": "read_file", "arguments": "{}"}]
+        )
+        c.add_tool_result("call_1", "ok")
+
+        payload = c.to_request_payload(
+            "anthropic",
+            "claude-3-5-sonnet",
+            verdict_turn=True,
+            keep_full_history_on_verdict=True,
+            keep_tools_on_verdict=True,
+            cache_prefix=True,
+        )
+        # Tools retained on Anthropic verdict turn.
+        assert "tools" in payload
+        # cache_control markers present on system and last tool.
+        if isinstance(payload["system"], list):
+            assert any(
+                b.get("cache_control", {}).get("type") == "ephemeral"
+                for b in payload["system"]
+            )
+
+    def test_verdict_turn_drops_tools_by_default(self):
+        """Default: tools dropped on verdict turn even with keep_full_history."""
+        c = Conversation(system="reviewer")
+        c.add_user("review me")
+
+        payload = c.to_request_payload(
+            "openai",
+            "gpt-4o",
+            verdict_turn=True,
+            response_format="json_schema",
+            keep_full_history_on_verdict=True,
+        )
+        # Default: tools dropped.
+        assert "tools" not in payload
+
     def test_no_system_prompt_omits_system_message(self):
         c = Conversation()
         c.add_user("hi")

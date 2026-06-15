@@ -1391,7 +1391,8 @@ def run_native_loop(
     # corpus for a separate review call. The system prompt is already the unified
     # reviewer+tools prompt (set above, #263) — no swap, so the cached prefix
     # survives. We re-inject the full corpus the loop never saw (it ran on the
-    # compact planning context), drop tools, and force a strict-JSON verdict. The
+    # compact planning context), keep tools for cache-prefix reuse (#263 Part 3),
+    # and force a strict-JSON verdict via response_format. The
     # response is written where the standard review call writes it; run_review.sh
     # consumes it and skips that call. If the verdict is degraded/oversized/
     # garbled it simply fails to parse downstream and run_review.sh falls back to
@@ -1425,6 +1426,7 @@ def run_native_loop(
                     response_format=response_format,
                     tokens_param=tokens_param,
                     cache_prefix=True,
+                    keep_tools_on_verdict=True,
                 )
                 verdict_response = post_fn(verdict_payload)
                 Path("ai-response.primary.json").write_text(
