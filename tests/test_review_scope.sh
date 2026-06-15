@@ -151,8 +151,13 @@ run_precheck() {
     export TOOL_MODE="${TOOL_MODE:-off}"
     export SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
     export REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
+    export FORCE_REVIEW="${FORCE_REVIEW:-false}"
     export COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}"
-    bash "$PRECHECK_SCRIPT" 2>/dev/null
+    # Capture stderr so tests can assert on diagnostic log lines (e.g. the
+    # forced-full wedge-recovery message) — the mock-git env can't produce an
+    # incremental scope, so scope alone can't distinguish a forced full from a
+    # safe-fallback full.
+    bash "$PRECHECK_SCRIPT" 2>"$TMPDIR/precheck_stderr"
   ) || true
   cat "$output_file" 2>/dev/null || echo ""
 }
@@ -250,6 +255,41 @@ set_empty_comments
 REVIEW_SCOPE=incremental RESULT="$(run_precheck)"
 check "effective_scope=full when incremental but no prior metadata" \
   "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
+
+# ── Wedge recovery: a forced re-review on a DIRTY baseline escalates to full ──
+# so it can re-establish a clean baseline (incrementals can't clear one). The
+# mock-git env can't produce an incremental scope (ancestry can't be verified →
+# safe-fallback to full), so we assert on the recovery LOG LINE — which only
+# fires from the new forced-full branch — not on the scope alone.
+forced_full_logged() {
+  grep -q 'non-clean baseline' "$TMPDIR/precheck_stderr" && echo yes || echo no
+}
+
+echo ""
+echo "=== Test 7b: force_review + dirty baseline → forced full (wedge recovery) ==="
+set_pr_data "def456ghi" "base789sha"
+set_comments_with_metadata "def456ghi" "base789sha" "incremental" "issues" "abc123def"
+echo "abc123def" >> "$SHA_TRACK_FILE"
+FORCE_REVIEW=true REVIEW_SCOPE=auto RESULT="$(run_precheck)"
+check "dirty-baseline forced re-review resolves to full scope" \
+  "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
+check "dirty-baseline forced re-review takes the recovery branch" "$(forced_full_logged)" "yes"
+
+echo ""
+echo "=== Test 7c: force_review + CLEAN baseline → recovery branch NOT taken ==="
+set_pr_data "def456ghi" "base789sha"
+set_comments_with_metadata "def456ghi" "base789sha" "incremental" "clean" "abc123def"
+echo "abc123def" >> "$SHA_TRACK_FILE"
+FORCE_REVIEW=true REVIEW_SCOPE=auto RESULT="$(run_precheck)"
+check "clean-baseline forced re-review does NOT take the recovery branch" "$(forced_full_logged)" "no"
+
+echo ""
+echo "=== Test 7d: DIRTY baseline, no force → recovery branch NOT taken (force-gated) ==="
+set_pr_data "def456ghi" "base789sha"
+set_comments_with_metadata "def456ghi" "base789sha" "incremental" "issues" "abc123def"
+echo "abc123def" >> "$SHA_TRACK_FILE"
+FORCE_REVIEW=false REVIEW_SCOPE=auto RESULT="$(run_precheck)"
+check "non-forced dirty-baseline re-review does NOT take the recovery branch" "$(forced_full_logged)" "no"
 
 # ── Test 8: action.yml has review_scope input ────────────────────────
 echo ""
