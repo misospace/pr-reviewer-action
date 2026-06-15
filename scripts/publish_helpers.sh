@@ -179,6 +179,13 @@ build_metadata_marker() {
   # appending previous_head_sha cut at the LAST comma, silently dropping
   # review_result and the closing " -->" — which made incremental markers
   # unparseable and degraded the next run back to a full review.
+  # Cross-run evidence memory (#265): the native_loop's gathered-evidence
+  # digest, persisted so the next incremental review can reuse it. Omitted when
+  # evidence memory is disabled or no digest was produced; capped defensively
+  # (the producer already capped it, but the marker stays small regardless).
+  local evmem
+  evmem="$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')"
+
   local marker_json
   marker_json="$(jq -nc \
     --arg head "${HEAD_SHA:-unknown}" \
@@ -189,12 +196,15 @@ build_metadata_marker() {
     --arg route "${REVIEW_ROUTE:-}" \
     --arg esc "${ESCALATION_REASON:-}" \
     --arg prev "$previous_head_sha" \
+    --arg evidence "${EVIDENCE_DIGEST:-}" \
+    --arg evmem "$evmem" \
     --argjson findings "$findings_json" \
     '{version: 1, head_sha: $head, base_sha: $base, review_scope: $scope, review_result: $result}
      + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
      + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
      + (if $esc == "" then {} else {escalation_reason: ($esc | split(","))} end)
      + (if $scope == "incremental" and $prev != "" then {previous_head_sha: $prev} else {} end)
+     + (if $evmem != "false" and $evidence != "" then {evidence_digest: ($evidence | .[0:2000])} else {} end)
      + (if $result == "issues" and ($findings | length) > 0
         then {open_findings: ($findings
           | map(select(type == "object" and (.resolution // "") != "resolved")

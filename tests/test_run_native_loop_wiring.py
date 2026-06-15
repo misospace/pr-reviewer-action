@@ -118,6 +118,11 @@ def test_native_loop_two_hops_writes_outputs(monkeypatch, tmp_path):
     assert "v1.13.4" in md
     assert "v1.36.2" in md
 
+    # Cross-run evidence memory: the loop's closing summary becomes the digest
+    # carried into tool-harness.json (which run_review.sh folds into the marker).
+    assert result["evidence_digest"] == "Talos v1.13.4 with k8s v1.36.2."
+    assert harness["evidence_digest"] == "Talos v1.13.4 with k8s v1.36.2."
+
 
 def _make_sse_line(data):
     return f"data: {json.dumps(data)}"

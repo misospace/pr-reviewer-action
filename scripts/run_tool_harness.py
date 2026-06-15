@@ -1182,6 +1182,7 @@ def run_native_loop(
         parse_server_specs,
         split_namespaced,
     )
+    from pr_reviewer.evidence_memory import build_evidence_digest  # noqa: PLC0415
 
     # web_search is advertised only when a search endpoint is configured.
     search_url = os.getenv("SEARCH_URL", "").strip()
@@ -1472,6 +1473,25 @@ def run_native_loop(
         md_lines.extend(
             tool_result_md_lines(i + 1, executed.tool, executed.args, executed.result)
         )
+
+    # Cross-run evidence memory: a compact digest of what this review gathered,
+    # carried forward so the next incremental review of this PR reuses it
+    # instead of re-running the same reads/fetches. Prefer the model's own
+    # closing summary; else a deterministic ledger of the successful calls. The
+    # tool output it draws from was already secret-masked + size-capped by the
+    # executor. run_review.sh surfaces this into the metadata marker.
+    digest_entries = [
+        {
+            "tool": executed.tool,
+            "args": executed.args,
+            "content": (executed.result.get("result") or {}).get("content", ""),
+        }
+        for executed in outcome.executed
+        if executed.result.get("status") == "ok"
+    ]
+    evidence_digest = build_evidence_digest(digest_entries, outcome.final_text)
+    if evidence_digest:
+        result["evidence_digest"] = evidence_digest
 
     if outcome.final_text:
         md_lines.append("## Evidence summary (from the tool loop, untrusted)")
