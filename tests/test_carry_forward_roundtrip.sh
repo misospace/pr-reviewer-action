@@ -144,6 +144,18 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 check_contains "rendered section reuses the digest" "$RENDERED_EV" "installer:v1.13.4"
 check_contains "rendered section tags the gathered-at sha" "$RENDERED_EV" "deadbeef"
 
+# Hostile digest: a control char (BELL 0x07) and HTML must be stripped by the
+# precheck's shell-embedded regex BEFORE the file is written (the regex doubling
+# is correct inside bash's double-quoted python3 -c string — this guards it).
+DIGEST_HOSTILE="$(printf 'fact v1.13.4 \007 <script>alert(1)</script> end')"
+MARKER_HOSTILE="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="$DIGEST_HOSTILE" build_metadata_marker "b" "")"
+BODY_HOSTILE="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_HOSTILE")"
+extract_review_metadata "$BODY_HOSTILE"
+HOSTILE_DIGEST="$(jq -r '.digest' previous-evidence.json)"
+check_not_contains "control char stripped from digest by precheck" "$HOSTILE_DIGEST" "$(printf '\007')"
+check_not_contains "angle brackets stripped from digest by precheck" "$HOSTILE_DIGEST" "<script>"
+check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.13.4"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

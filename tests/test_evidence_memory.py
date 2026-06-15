@@ -95,6 +95,27 @@ class TestLoadEvidenceMemory:
         assert "\x07" not in mem["digest"]
         assert "<" not in mem["digest"] and ">" not in mem["digest"]
 
+    def test_strips_null_bytes_on_read(self, tmp_path):
+        # Defense-in-depth: even if a null byte survives the precheck's shell
+        # sanitizer, load re-strips it (_CONTROL_CHARS_RE covers \x00) before the
+        # digest reaches the corpus.
+        path = self._write(tmp_path, {"digest": "v1.13.4\x00 supported", "head_sha": "abc"})
+        mem = load_evidence_memory(path)
+        assert "\x00" not in mem["digest"]
+        assert "v1.13.4 supported" in mem["digest"]
+
+    def test_symlinked_path_is_read_not_traversed(self, tmp_path):
+        # The path is hardcoded ('previous-evidence.json'), so there is no
+        # user-controlled-path traversal vector. A symlinked file still loads
+        # correctly (read-only follow), and its content is sanitized all the same.
+        real = tmp_path / "real-evidence.json"
+        real.write_text(json.dumps({"digest": "linked <x>fact", "head_sha": "ff"}), encoding="utf-8")
+        link = tmp_path / "previous-evidence.json"
+        link.symlink_to(real)
+        mem = load_evidence_memory(str(link))
+        assert mem["digest"] == "linked xfact"
+        assert mem["head_sha"] == "ff"
+
 
 class TestRenderEvidenceMemorySection:
     def test_none_renders_empty(self):

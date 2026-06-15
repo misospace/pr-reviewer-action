@@ -362,6 +362,11 @@ if data:
     # evidence_digest (cross-run evidence memory, #265): written to a file like
     # open_findings, never eval'd. head_sha is the SHA the evidence was gathered
     # at. evidence_memory.load_evidence_memory re-sanitizes on the read side.
+    # This block runs inside a bash double-quoted python3 -c string, so bash
+    # collapses the doubled backslashes before Python compiles the regex below;
+    # Python sees a control-char + angle-bracket class (matches
+    # evidence_memory._CONTROL_CHARS_RE). Same doubling as the open_findings
+    # sanitizer above; do not simplify to single backslashes.
     digest = data.get('evidence_digest')
     if isinstance(digest, str) and digest.strip():
         clean = re.sub(r'[\\x00-\\x08\\x0b-\\x1f<>]', '', digest)[:2000]
