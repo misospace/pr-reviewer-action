@@ -1,0 +1,39 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Label Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview label changes without applying them.
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: ["main"]
+    paths: [".github/labels.yaml"]
+
+permissions:
+  contents: read
+
+jobs:
+  main:
+    name: Label Sync - Sync Labels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/labels.yaml
+
+      - name: Sync Labels
+        uses: EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a # v2.3.3
+        with:
+          config-file: .github/labels.yaml
+          delete-other-labels: false
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}

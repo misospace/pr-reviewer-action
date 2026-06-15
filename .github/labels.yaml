@@ -1,0 +1,76 @@
+---
+# Status
+- name: status/backlog
+  color: "cfd3d7"
+  description: Not ready for worker pickup yet.
+- name: status/ready
+  color: "0e8a16"
+  description: Ready for Dispatch worker pickup.
+- name: status/in-progress
+  color: "fbca04"
+  description: Work has been claimed or started.
+- name: status/in-review
+  color: "5319e7"
+  description: Pull request or human review is in progress.
+- name: status/done
+  color: "0e8a16"
+  description: Work is complete.
+# Priority
+- name: priority/p0
+  color: "b60205"
+  description: Critical priority.
+- name: priority/p1
+  color: "d93f0b"
+  description: High priority.
+- name: priority/p2
+  color: "fbca04"
+  description: Normal priority.
+- name: priority/p3
+  color: "0e8a16"
+  description: Low priority.
+# Type / Classification
+- name: bug
+  color: "d73a4a"
+  description: Something is not working.
+- name: enhancement
+  color: "a2eeef"
+  description: New feature or improvement.
+- name: documentation
+  color: "0075ca"
+  description: Documentation work.
+- name: dependencies
+  color: "0366d6"
+  description: Dependency update or maintenance.
+- name: audit
+  color: "bfdadc"
+  description: Audit, review, or investigation work.
+- name: pr-review-fix
+  color: "c5def5"
+  description: Follow-up work from pull request review.
+- name: ai-review
+  color: "b4f8f8"
+  description: Request an AI pull request review.
+- name: umbrella
+  color: "5319e7"
+  description: Parent issue that may need decomposition.
+# Dispatch / Workflow
+- name: needs-info
+  color: "d4c5f9"
+  description: More information is needed before work can continue.
+- name: needs-human
+  color: "e99695"
+  description: Human input or decision is required.
+- name: needs-escalation
+  color: "b60205"
+  description: Needs escalated lane attention.
+- name: blocked
+  color: "e11d21"
+  description: Progress is blocked.
+# Stable Agents
+- name: agent/saffron-normal
+  color: "1d76db"
+  description: Stable normal-lane Saffron worker.
+- name: agent/saffron-escalated
+  color: "0052cc"
+  description: Stable escalated-lane Saffron worker.
+# Repo-specific labels can be appended below. Unknown labels are not pruned.
