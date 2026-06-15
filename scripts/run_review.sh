@@ -105,6 +105,11 @@ VERDICT_POLICY="${VERDICT_POLICY:-model}"
 VALIDATE_REQUIRED_CHECKS="${VALIDATE_REQUIRED_CHECKS:-auto}"
 REQUIRED_CHECK_VALIDATION_MODE="${REQUIRED_CHECK_VALIDATION_MODE:-warn}"
 REVIEW_ROUTING_MODE="${REVIEW_ROUTING_MODE:-off}"
+AI_PRIMARY_BASE_URL="${AI_PRIMARY_BASE_URL:-}"
+AI_PRIMARY_MODEL="${AI_PRIMARY_MODEL:-}"
+AI_PRIMARY_API_FORMAT="${AI_PRIMARY_API_FORMAT:-}"
+AI_PRIMARY_API_KEY="${AI_PRIMARY_API_KEY:-}"
+# ai_fast_* — deprecated aliases for ai_primary_* (route renamed fast -> primary)
 AI_FAST_BASE_URL="${AI_FAST_BASE_URL:-}"
 AI_FAST_MODEL="${AI_FAST_MODEL:-}"
 AI_FAST_API_FORMAT="${AI_FAST_API_FORMAT:-}"
@@ -309,6 +314,10 @@ case "$(printf '%s' "$REVIEW_ROUTING_MODE" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+if [[ -n "$AI_PRIMARY_API_FORMAT" ]] && ! AI_PRIMARY_API_FORMAT="$(normalize_api_format "$AI_PRIMARY_API_FORMAT")"; then
+  error "Invalid AI_PRIMARY_API_FORMAT '$AI_PRIMARY_API_FORMAT'; expected openai or anthropic"
+  exit 1
+fi
 if [[ -n "$AI_FAST_API_FORMAT" ]] && ! AI_FAST_API_FORMAT="$(normalize_api_format "$AI_FAST_API_FORMAT")"; then
   error "Invalid AI_FAST_API_FORMAT '$AI_FAST_API_FORMAT'; expected openai or anthropic"
   exit 1
@@ -952,11 +961,11 @@ fi
 section_timer_end
 
 # ── Model routing (#159) ─────────────────────────────────────────────
-# With review_routing_mode=auto, low-risk PRs go to the fast model and PRs
-# whose pr_kind or risk_flags match ESCALATE_ON_RISK_FLAGS go straight to the
-# smart model. The fast config defaults to the primary model; the smart config
-# defaults to the fallback model. Routing only rebinds which model the
-# existing retry/fallback machinery talks to — that machinery is unchanged.
+# With review_routing_mode=auto, most PRs run on the PRIMARY model and PRs whose
+# pr_kind or risk_flags match ESCALATE_ON_RISK_FLAGS go to the smart model when
+# one is configured. Routing only rebinds which model the existing retry/fallback
+# machinery talks to — that machinery is unchanged. (The primary model is fully
+# capable; the route is not a "fast/dumb" lane, and it gets the full tool budget.)
 resolve_review_route() {
   REVIEW_ROUTE="legacy"
   ROUTE_REASON="routing off"
@@ -986,38 +995,45 @@ resolve_review_route() {
       REVIEW_ROUTE="smart"
       ROUTE_REASON="risk match: ${matched}"
     else
-      REVIEW_ROUTE="fast"
+      REVIEW_ROUTE="primary"
       ROUTE_REASON="risk match: ${matched}, but no smart model configured"
     fi
   else
-    REVIEW_ROUTE="fast"
+    REVIEW_ROUTE="primary"
     ROUTE_REASON="no escalation flags matched"
   fi
 }
 
-# Fast defaults to the primary config; smart defaults to the fallback config.
-FAST_BASE_URL="${AI_FAST_BASE_URL:-$AI_BASE_URL}"
-FAST_MODEL="${AI_FAST_MODEL:-$AI_MODEL}"
-FAST_API_FORMAT="${AI_FAST_API_FORMAT:-$AI_API_FORMAT}"
-FAST_API_KEY="${AI_FAST_API_KEY:-$AI_API_KEY}"
-SMART_BASE_URL="${AI_SMART_BASE_URL:-$AI_FALLBACK_BASE_URL}"
-SMART_MODEL="${AI_SMART_MODEL:-$AI_FALLBACK_MODEL}"
-SMART_API_FORMAT="${AI_SMART_API_FORMAT:-${AI_FALLBACK_API_FORMAT:-$AI_API_FORMAT}}"
-SMART_API_KEY="${AI_SMART_API_KEY:-$AI_FALLBACK_API_KEY}"
+# The primary route is the default model (ai_model). ai_primary_* overrides it;
+# ai_fast_* is the deprecated alias for those overrides.
+PRIMARY_BASE_URL="${AI_PRIMARY_BASE_URL:-${AI_FAST_BASE_URL:-$AI_BASE_URL}}"
+PRIMARY_MODEL="${AI_PRIMARY_MODEL:-${AI_FAST_MODEL:-$AI_MODEL}}"
+PRIMARY_API_FORMAT="${AI_PRIMARY_API_FORMAT:-${AI_FAST_API_FORMAT:-$AI_API_FORMAT}}"
+PRIMARY_API_KEY="${AI_PRIMARY_API_KEY:-${AI_FAST_API_KEY:-$AI_API_KEY}}"
+# Smart is an OPT-IN quality tier resolved ONLY from ai_smart_*. It deliberately
+# does NOT borrow the fallback model: the fallback exists solely to catch a
+# primary-availability failure, never as an escalation target. With no
+# ai_smart_model set there is no smart lane — auto-routing stays on the primary
+# model and nothing escalates. The endpoint/format/key default to the primary's
+# (a smart model usually shares the endpoint); ai_smart_model alone is the gate.
+SMART_MODEL="${AI_SMART_MODEL}"
+SMART_BASE_URL="${AI_SMART_BASE_URL:-$AI_BASE_URL}"
+SMART_API_FORMAT="${AI_SMART_API_FORMAT:-$AI_API_FORMAT}"
+SMART_API_KEY="${AI_SMART_API_KEY:-$AI_API_KEY}"
 SMART_MODEL_RESOLVED=""
-if [[ -n "$SMART_BASE_URL" && -n "$SMART_MODEL" ]]; then
+if [[ -n "$SMART_MODEL" ]]; then
   SMART_MODEL_RESOLVED=1
 fi
 
 resolve_review_route
-# Export so the native-loop harness can right-size loop depth by route (#197 §2):
-# the fast route only fires on low-risk PRs, which get a shallower loop.
+# Exported for the native-loop harness; the loop budget is the same on every
+# route (the route selects the model, not the tool budget — see adaptive_loop_budgets).
 export REVIEW_ROUTE
-if [[ "$REVIEW_ROUTE" == "fast" ]]; then
-  AI_BASE_URL="$FAST_BASE_URL"
-  AI_MODEL="$FAST_MODEL"
-  AI_API_FORMAT="$FAST_API_FORMAT"
-  AI_API_KEY="$FAST_API_KEY"
+if [[ "$REVIEW_ROUTE" == "primary" ]]; then
+  AI_BASE_URL="$PRIMARY_BASE_URL"
+  AI_MODEL="$PRIMARY_MODEL"
+  AI_API_FORMAT="$PRIMARY_API_FORMAT"
+  AI_API_KEY="$PRIMARY_API_KEY"
 elif [[ "$REVIEW_ROUTE" == "smart" ]]; then
   AI_BASE_URL="$SMART_BASE_URL"
   AI_MODEL="$SMART_MODEL"
@@ -1434,7 +1450,7 @@ annotate_analysis_engine() {
       ;;
     primary)
       case "${REVIEW_ROUTE:-legacy}" in
-        fast) engine="$engine — fast route" ;;
+        primary) engine="$engine — primary route" ;;
         smart) engine="$engine — routed smart (${ROUTE_REASON:-risk match})" ;;
       esac
       ;;
@@ -1483,28 +1499,29 @@ else
 fi
 
 # ── Escalation (#160) ────────────────────────────────────────────────
-# When the fast route produced this review and a configured trigger fires
+# When the primary route produced this review and a configured trigger fires
 # (request_changes, unaddressed required checks, low confidence, blocker
-# signals), re-run the review on the smart model and publish only that
-# result. The fast output is kept as ai-output.fast.json for debugging. A
-# smart-model failure keeps the fast review — strictly better than failing.
+# signals), re-run the review on the smart model and publish only that result.
+# Escalation requires a configured smart model (ai_smart_model) — it NEVER
+# escalates to the fallback. The primary output is kept as ai-output.primary.json
+# for debugging. A smart-model failure keeps the primary review.
 ESCALATION_REASONS=""
 maybe_escalate_review() {
   [[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0
-  [[ "${REVIEW_ROUTE:-legacy}" == "fast" ]] || return 0
+  [[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0
   [[ -n "$SMART_MODEL_RESOLVED" ]] || return 0
   if [[ "$SMART_BASE_URL" == "$AI_BASE_URL" && "$SMART_MODEL" == "$AI_MODEL" ]]; then
     return 0  # nothing distinct to escalate to
   fi
-  # If the fast primary failed and the fallback produced this review, and the
-  # smart config is that same fallback (the default mapping), escalating would
-  # just re-call the model that already reviewed this corpus.
+  # Defensive: if the primary failed and the fallback produced this review, and
+  # the operator explicitly set ai_smart_model to that same fallback, escalating
+  # would just re-call the model that already reviewed this corpus.
   if [[ "${PRIMARY_OK:-0}" -ne 1 && "$SMART_BASE_URL" == "$AI_FALLBACK_BASE_URL" && "$SMART_MODEL" == "$AI_FALLBACK_MODEL" ]]; then
     log "Skipping escalation: the fallback model that produced this review is the smart model"
     return 0
   fi
 
-  # Decide on the RAW fast output, before verdict policy / completeness
+  # Decide on the RAW primary output, before verdict policy / completeness
   # validation / enforcement mutate it.
   local decision
   decision="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
@@ -1521,17 +1538,17 @@ escalate, reasons = should_escalate(
 print('yes ' + ','.join(reasons) if escalate else 'no')
 " 2>/dev/null || echo no)"
   if [[ "$decision" == "no" || -z "$decision" ]]; then
-    log "No escalation triggers fired; keeping the fast review"
+    log "No escalation triggers fired; keeping the primary review"
     return 0
   fi
   ESCALATION_REASONS="${decision#yes }"
   log "Escalating to smart model $SMART_MODEL ($ESCALATION_REASONS)"
 
-  cp ai-output.json ai-output.fast.json
+  cp ai-output.json ai-output.primary.json
 
   local escalated_user
   escalated_user="$USER_MESSAGE
-This is an ESCALATED review: a faster preliminary review was judged insufficient (${ESCALATION_REASONS}). Review thoroughly and address every required check explicitly."
+This is an ESCALATED review: a preliminary review was judged insufficient (${ESCALATION_REASONS}). Review thoroughly and address every required check explicitly."
 
   build_model_request \
     "$SMART_API_FORMAT" \
@@ -1562,10 +1579,10 @@ This is an ESCALATED review: a faster preliminary review was judged insufficient
     log "Smart model succeeded; publishing the escalated review"
   else
     # parse_and_validate only rewrites ai-output.json on success, but restore
-    # defensively so a partial write can never replace the fast review.
-    cp ai-output.fast.json ai-output.json
+    # defensively so a partial write can never replace the primary review.
+    cp ai-output.primary.json ai-output.json
     ESCALATION_REASONS=""
-    log "Smart model failed after escalation; publishing the fast review"
+    log "Smart model failed after escalation; publishing the primary review"
   fi
 }
 maybe_escalate_review
