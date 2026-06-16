@@ -121,6 +121,13 @@ check "github_enrich_api passthrough" \
   "$(run_seam github "" 'github_enrich_api repos/up/stream/releases?per_page=8')" \
   "gh api repos/up/stream/releases?per_page=8"
 
+check "forgejo backend falls back from GITHUB_TOKEN to GH_TOKEN" \
+  "$(FORGEJO_API_URL= GITHUB_TOKEN= GH_TOKEN=from-gh python3 - <<'PYEOF'
+import pr_reviewer.forgejo_backend as fb
+print(fb.FORGEJO_TOKEN)
+PYEOF
+)" "from-gh"
+
 echo ""
 echo "=== forgejo mode: loud failures, no silent fallthrough ==="
 RESULT="$(run_seam forgejo "" 'platform_pr_get o/r 7')"

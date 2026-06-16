@@ -36,7 +36,12 @@ from urllib.parse import quote
 # ---------------------------------------------------------------------------
 
 FORGEJO_API_URL = os.environ.get("FORGEJO_API_URL", "").rstrip("/")
-FORGEJO_TOKEN = os.environ.get("FORGEJO_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+FORGEJO_TOKEN = (
+    os.environ.get("FORGEJO_TOKEN")
+    or os.environ.get("GITHUB_TOKEN")
+    or os.environ.get("GH_TOKEN")
+    or ""
+)
 COMMENT_MARKER = os.environ.get(
     "COMMENT_MARKER", "<!-- ai-pr-reviewer -->"
 )

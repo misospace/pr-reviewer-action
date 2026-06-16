@@ -488,6 +488,21 @@ inputs:
       always targets github.com regardless of this setting.
     required: false
     default: "auto"
+  forgejo_api_url:
+    description: >-
+      Base URL for the Forgejo instance API backend (for example,
+      https://forgejo.example.com). Optional on Forgejo Actions runners when
+      GITHUB_SERVER_URL is set; set it when running from GitHub Actions or any
+      runner that does not export the Forgejo server URL.
+    required: false
+    default: ""
+  forgejo_token:
+    description: >-
+      Optional Forgejo API token. Defaults to github_token when blank. Use this
+      when the token used for GitHub-compatible operations is not also valid for
+      the Forgejo REST API.
+    required: false
+    default: ""
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
@@ -605,6 +620,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
@@ -676,6 +693,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -693,6 +712,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -791,6 +812,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -859,6 +882,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -969,6 +994,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -1149,6 +1176,9 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         LABEL: ${{ inputs.rereview_label }}
