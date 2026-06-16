@@ -258,9 +258,14 @@ def _forgejo_translate(full_path, repo_key):
     if rest == "/releases/tags" or rest.startswith("/releases/tags/"):
         return f"/api/v1/repos/{repo_key}{rest}"
 
-    # Commit status (read-only; used by the CI-required check).
+    # Commits + commit status (read-only; the status form feeds the
+    # CI-required check). Forgejo mirrors the GitHub paths under /api/v1, so
+    # pass the validated path through verbatim — do NOT fabricate a /status
+    # suffix, which would silently turn "get commit <sha>" into a status
+    # lookup. An endpoint shape Forgejo doesn't implement returns a 404 the
+    # caller surfaces, rather than wrong data.
     if rest == "/commits" or rest.startswith("/commits/"):
-        return f"/api/v1/repos/{repo_key}{rest}/status" if not rest.endswith("/status") else f"/api/v1/repos/{repo_key}{rest}"
+        return f"/api/v1/repos/{repo_key}{rest}"
 
     return None
 
@@ -296,6 +301,10 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
             "curl", "-sS",
             "-H", f"Authorization: token {token}",
             "-H", "Accept: application/json",
+            # Match the GitHub backend's UA: a default curl/* User-Agent is
+            # blocked by Cloudflare's bot-fight mode, which fronts the typical
+            # self-hosted Forgejo instance.
+            "-H", "User-Agent: ai-pr-reviewer/1.0",
             "-w", "\n%{http_code}",
             url,
         ]

@@ -27,30 +27,18 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from redact import mask_secrets  # noqa: E402
 
-# Allowlist constants for the gh_api tool live on the platform seam
-# (pr_reviewer.platform) so the same allowlist governs both the GitHub
-# and the Forgejo backend — drift between them is the kind of tiny
-# mechanical mapping mistake that becomes a CVE.
-from pr_reviewer.platform import (  # noqa: E402
-    GH_API_ALLOWED_PREFIXES,
-    GH_DENY_SUBSTRINGS,
-    GH_SAFE_PATH_RE,
-)
+# The gh_api allowlist (path regex, prefixes, deny substrings) now lives
+# entirely on the platform seam (pr_reviewer.platform), which owns both the
+# GitHub and Forgejo backends — a single source of truth so the two can't
+# drift (the kind of tiny mapping mistake that becomes a CVE). We import only
+# GH_DENY_SUBSTRINGS here, reused below by _resolve_workspace_path to block
+# the same sensitive segments in filesystem paths.
+from pr_reviewer.platform import GH_DENY_SUBSTRINGS  # noqa: E402
 
 
 SENSITIVE_PATH_RE = re.compile(
     r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$)",
     re.IGNORECASE,
-)
-# Re-exported from pr_reviewer.platform for call sites that still
-# import them from this module; the platform seam is the single
-# source of truth. See pr_reviewer.platform for the rationale.
-GH_API_ALLOWED_PREFIXES = (
-    "/repos/",
-    "/issues/",
-    "/search/",
-    "/releases/",
-    "/git/",
 )
 
 # The tool harness executes same-repo code, so command execution must not be

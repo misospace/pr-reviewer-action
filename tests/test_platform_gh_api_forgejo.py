@@ -224,6 +224,39 @@ def test_forgejo_release_tag_routes_to_api_v1(monkeypatch):
     assert any("/api/v1/repos/" + _REPO + "/releases/tags/v1.2.3" in tok for tok in cmd), cmd
 
 
+def test_forgejo_commit_status_passes_through(monkeypatch):
+    """A commit-status endpoint keeps its ``/status`` shape verbatim."""
+    result, captured = _exec_forgejo(
+        monkeypatch, f"repos/{_REPO}/commits/abc123/status"
+    )
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any("/api/v1/repos/" + _REPO + "/commits/abc123/status" in tok for tok in cmd), cmd
+
+
+def test_forgejo_get_commit_is_not_rewritten_to_status(monkeypatch):
+    """``commits/<sha>`` (get a commit) must NOT be turned into a status lookup.
+
+    The endpoint translation previously appended ``/status`` to every commits
+    call, so fetching a commit silently returned its CI status instead. The
+    validated path is passed through verbatim now.
+    """
+    result, captured = _exec_forgejo(
+        monkeypatch, f"repos/{_REPO}/commits/abc123"
+    )
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(tok.endswith("/api/v1/repos/" + _REPO + "/commits/abc123") for tok in cmd), cmd
+    assert not any("/commits/abc123/status" in tok for tok in cmd), cmd
+
+
+def test_forgejo_curl_sends_user_agent(monkeypatch):
+    """The Forgejo curl carries a non-default User-Agent (Cloudflare BIC)."""
+    _result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/pulls/1")
+    cmd = captured["cmd"]
+    assert any("User-Agent: ai-pr-reviewer/1.0" in tok for tok in cmd), cmd
+
+
 def test_forgejo_search_prefix_check_passes(monkeypatch):
     """``search/...`` (no repo key) passes the prefix check on both backends.
 
