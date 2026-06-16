@@ -33,7 +33,8 @@ if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" 
     if [[ "$added_label" == "$REREVIEW_LABEL" ]]; then
       FORCE_REVIEW=true
     else
-      echo "Label '$added_label' is not the re-review label ('$REREVIEW_LABEL') — skipping" >&2
+      echo "Label '$added_label' is not the re-review trigger ('$REREVIEW_LABEL') — reviews run on open/push, not on label adds; this run is a no-op." >&2
+      echo "::notice title=AI review: label no-op::Triggered by adding the '$added_label' label, not a code change. The PR is reviewed automatically on open/push; add the '$REREVIEW_LABEL' label only to force a re-review."
       {
         echo "should_review=false"
         echo "skip_reason=unrelated-label"
