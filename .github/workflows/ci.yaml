@@ -56,13 +56,16 @@ jobs:
           done
 
       - name: Check Python scripts
-        run: python3 -m py_compile scripts/image_digest_analysis.py scripts/run_evidence_providers.py scripts/run_tool_harness.py tests/mock_openai_server.py tests/test_model_parsing.py tests/test_redact.py tests/test_strip_metadata_markers.py tests/test_evidence_providers.py
+        run: python3 -m py_compile scripts/image_digest_analysis.py scripts/run_evidence_providers.py scripts/run_tool_harness.py tests/mock_openai_server.py tests/test_model_parsing.py tests/test_redact.py tests/test_strip_metadata_markers.py tests/test_evidence_providers.py pr_reviewer/forgejo_backend.py
 
       - name: Verify smoke test helper is executable
         run: test -x tests/smoke_test.sh
 
       - name: Run smoke test
         run: tests/smoke_test.sh
+
+      - name: Verify Forgejo E2E smoke harness parses
+        run: bash -n tests/forgejo_e2e_smoke.sh
 
       - name: Run Python tests (auto-discover all 215)
         run: pytest tests/ -v --tb=short

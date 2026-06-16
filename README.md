@@ -116,7 +116,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x). Set `platform: auto` (de
 | Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
 | Thread resolution (`resolveReviewThread`) | ✅ Full | ❌ Skipped (no GraphQL) |
 | Thread follow-up replies (`in_reply_to`) | ✅ Full | ❌ Skipped — suppression-file dedup only |
-| CI status check polling | ✅ Full | ⚠️ Partial — uses Checks API if available |
+| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST) |
 | Evidence providers | ✅ Full | ✅ Full |
 | Tool harness | ✅ Full | ✅ Full |
 | Incremental reviews + carry-forward | ✅ Full | ✅ Full |
@@ -363,6 +363,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 |-------|-------------|----------|---------|
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
+| `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
+| `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. | No | `""` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
 | `force_review` | Bypass the diff-unchanged guard and review even when the fingerprint matches. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch`. When the last managed review was not clean, a forced re-review runs at **full** scope to re-establish a clean baseline (recovers a PR wedged in *Request changes*) | No | `false` |
 | `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
