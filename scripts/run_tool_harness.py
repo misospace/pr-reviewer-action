@@ -13,34 +13,32 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Ensure the scripts directory is on sys.path so we can import shared helpers.
+# Ensure the scripts directory and the project root are on sys.path so we
+# can import the shared helpers (redact) and the platform seam module
+# (pr_reviewer.platform) — the latter is needed for gh_api to route
+# through the platform abstraction (issue #226). The project root is
+# the parent of the scripts directory.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+_PROJECT_ROOT = _SCRIPTS_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from redact import mask_secrets  # noqa: E402
+
+# The gh_api allowlist (path regex, prefixes, deny substrings) now lives
+# entirely on the platform seam (pr_reviewer.platform), which owns both the
+# GitHub and Forgejo backends — a single source of truth so the two can't
+# drift (the kind of tiny mapping mistake that becomes a CVE). We import only
+# GH_DENY_SUBSTRINGS here, reused below by _resolve_workspace_path to block
+# the same sensitive segments in filesystem paths.
+from pr_reviewer.platform import GH_DENY_SUBSTRINGS  # noqa: E402
 
 
 SENSITIVE_PATH_RE = re.compile(
     r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$)",
     re.IGNORECASE,
-)
-GH_SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9._~/%?&=:+,-]+$")
-GH_DENY_SUBSTRINGS = (
-    "/actions/secrets",
-    "/dependabot/secrets",
-    "/environments/",
-    "/dispatches",
-)
-
-# Allowed GitHub API path prefixes for gh_api tool calls.
-# Only read-only, non-sensitive endpoints are permitted.
-GH_API_ALLOWED_PREFIXES = (
-    "/repos/",
-    "/issues/",
-    "/search/",
-    "/releases/",
-    "/git/",
 )
 
 # The tool harness executes same-repo code, so command execution must not be
@@ -524,79 +522,19 @@ def git_blame(path, workspace_root, start=None, end=None, request_timeout=15):
 
 
 def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
-    """Make a GitHub API call with path/endpoint restrictions."""
-    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
-    if not token:
-        return {"error": "Missing GH_TOKEN"}
+    """Make a host-platform API call with path/endpoint restrictions.
 
-    # Validate endpoint contains only safe characters
-    if not GH_SAFE_PATH_RE.match(endpoint):
-        return {"error": "Endpoint contains disallowed characters"}
-
-    # Parse endpoint to extract repo and path
-    # Support both "repos/owner/repo/..." (prompt format) and "owner/repo/..." (direct)
-    parts = endpoint.strip("/").split("/")
-    if len(parts) < 2:
-        return {"error": "Invalid endpoint format: expected owner/repo/..."}
-
-    # Reject traversal/empty segments only. Dots *inside* a component are safe
-    # (and required for release tags like v1.2.3 and repos like next.js); only
-    # the ".", ".." and empty ("//") segments are traversal risks.
-    for part in parts:
-        if part in ("", ".", ".."):
-            return {"error": f"Dot-segment not allowed in path: {part or '(empty)'}"}
-
-    # If the first segment is "repos", skip it and use the next two segments
-    if parts[0] == "repos" and len(parts) >= 3:
-        repo_key = f"{parts[1]}/{parts[2]}"
-    else:
-        repo_key = f"{parts[0]}/{parts[1]}"
-
-    # Validate repo is allowed
-    allowed = False
-    if repo_key == current_repo:
-        allowed = True
-    elif "*" in allowed_repos:
-        allowed = True
-    elif repo_key in allowed_repos:
-        allowed = True
-
-    if not allowed:
-        return {"error": f"Repo not allowed: {repo_key}"}
-
-    # Check endpoint prefix is in the allowlist of safe API paths
-    # Normalize direct format (owner/repo/...) to repos/owner/repo/... for prefix check
-    if parts[0] == "repos":
-        full_path = "/" + "/".join(parts)
-    else:
-        full_path = "/repos/" + "/".join(parts)
-    if not any(full_path.startswith(prefix) for prefix in GH_API_ALLOWED_PREFIXES):
-        return {"error": f"Endpoint prefix not allowed: {full_path}"}
-
-    # Check for denied path segments
-    for deny in GH_DENY_SUBSTRINGS:
-        if deny in full_path.lower():
-            return {"error": f"Path segment denied: {deny}"}
-
-    # full_path already begins with "/"; avoid a double slash after the host.
-    url = f"https://api.github.com{full_path}"
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "ai-pr-reviewer/1.0",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            raw = resp.read()
-            data = json.loads(raw.decode("utf-8", errors="replace"))
-            return {"data": data}
-    except urllib.error.HTTPError as exc:
-        return {"error": f"GitHub API error: {exc.code} {exc.reason}"}
-    except Exception as exc:
-        return {"error": str(exc)}
+    Thin shim over :func:`pr_reviewer.platform.gh_api` so the gh_api tool
+    routes through the platform seam (#226). The seam owns the allowlist
+    (path traversal, repo key, denied substrings) and the per-backend
+    transport; this shim exists only for backward compatibility with
+    call sites that import the function from this module.
+    """
+    # Imported lazily so this module can still be loaded when the
+    # platform seam is unavailable (e.g. in a script-only test that
+    # doesn't add the package to sys.path).
+    from pr_reviewer.platform import gh_api as _platform_gh_api
+    return _platform_gh_api(endpoint, allowed_repos, current_repo, request_timeout)
 
 
 def web_fetch(url, allowed_hosts, request_timeout=25):
