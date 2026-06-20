@@ -61,11 +61,6 @@ AI_PRIMARY_BASE_URL="${AI_PRIMARY_BASE_URL:-}"
 AI_PRIMARY_MODEL="${AI_PRIMARY_MODEL:-}"
 AI_PRIMARY_API_FORMAT="${AI_PRIMARY_API_FORMAT:-}"
 AI_PRIMARY_API_KEY="${AI_PRIMARY_API_KEY:-}"
-# ai_fast_* — deprecated aliases for ai_primary_* (route renamed fast -> primary)
-AI_FAST_BASE_URL="${AI_FAST_BASE_URL:-}"
-AI_FAST_MODEL="${AI_FAST_MODEL:-}"
-AI_FAST_API_FORMAT="${AI_FAST_API_FORMAT:-}"
-AI_FAST_API_KEY="${AI_FAST_API_KEY:-}"
 AI_SMART_BASE_URL="${AI_SMART_BASE_URL:-}"
 AI_SMART_MODEL="${AI_SMART_MODEL:-}"
 AI_SMART_API_FORMAT="${AI_SMART_API_FORMAT:-}"
@@ -268,10 +263,6 @@ esac
 
 if [[ -n "$AI_PRIMARY_API_FORMAT" ]] && ! AI_PRIMARY_API_FORMAT="$(normalize_api_format "$AI_PRIMARY_API_FORMAT")"; then
   error "Invalid AI_PRIMARY_API_FORMAT '$AI_PRIMARY_API_FORMAT'; expected openai or anthropic"
-  exit 1
-fi
-if [[ -n "$AI_FAST_API_FORMAT" ]] && ! AI_FAST_API_FORMAT="$(normalize_api_format "$AI_FAST_API_FORMAT")"; then
-  error "Invalid AI_FAST_API_FORMAT '$AI_FAST_API_FORMAT'; expected openai or anthropic"
   exit 1
 fi
 if [[ -n "$AI_SMART_API_FORMAT" ]] && ! AI_SMART_API_FORMAT="$(normalize_api_format "$AI_SMART_API_FORMAT")"; then

@@ -89,7 +89,7 @@ check "custom list: matching kind routes smart" \
 echo ""
 echo "=== Test: wiring ==="
 RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh" "$ROOT_DIR"/scripts/sections/*.sh)"
-check_contains "primary route config defaults to ai_model (ai_fast_* alias)" "$RUN_REVIEW" 'PRIMARY_MODEL="${AI_PRIMARY_MODEL:-${AI_FAST_MODEL:-$AI_MODEL}}"'
+check_contains "primary route config defaults to ai_model" "$RUN_REVIEW" 'PRIMARY_MODEL="${AI_PRIMARY_MODEL:-$AI_MODEL}"'
 check_contains "smart resolves ONLY from ai_smart_model (not the fallback)" "$RUN_REVIEW" 'SMART_MODEL="${AI_SMART_MODEL}"'
 check "review_route output emitted" "$(grep -c '^echo "review_route=' "$ROOT_DIR/scripts/sections/review.sh")" "1"
 check "precheck fingerprints routing mode" "$(grep -c 'routing_mode:' "$ROOT_DIR/scripts/check_review_needed.sh")" "1"
