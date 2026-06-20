@@ -25,7 +25,7 @@ FUNC="$(mktemp)"
 TMP="$(mktemp -d)"
 trap 'rm -f "$FUNC"; rm -rf "$TMP"' EXIT
 
-python3 - "$ROOT_DIR/scripts/run_review.sh" "$FUNC" <<'PY'
+python3 - "$ROOT_DIR/scripts/sections/review.sh" "$FUNC" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r"^write_step_summary\(\) \{\n(.*?)\n\}", src, re.S | re.M)

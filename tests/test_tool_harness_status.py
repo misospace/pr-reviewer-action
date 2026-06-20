@@ -215,9 +215,12 @@ def test_all_fail_fixture():
 # ---------------------------------------------------------------------------
 
 def test_run_review_uses_correct_path():
-    """Confirm run_review.sh delegates enforcement to pr_reviewer.enforcement."""
-    script = Path(__file__).resolve().parent.parent / "scripts" / "run_review.sh"
-    content = script.read_text(encoding="utf-8", errors="replace")
+    """Confirm the review driver delegates enforcement to pr_reviewer.enforcement."""
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    # The driver was split into an orchestrator + sourced section modules (#307);
+    # read the orchestrator and every section so this check is split-agnostic.
+    sources = [scripts_dir / "run_review.sh", *sorted((scripts_dir / "sections").glob("*.sh"))]
+    content = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
 
     # The buggy pattern should NOT be present anywhere:
     assert ".tool_results[]?.result.status" not in content, (

@@ -20,7 +20,7 @@ FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-SRC="$(cat "$ROOT_DIR/scripts/run_review.sh")"
+SRC="$(cat "$ROOT_DIR/scripts/run_review.sh" "$ROOT_DIR"/scripts/sections/*.sh)"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
 HARNESS="$(cat "$ROOT_DIR/scripts/run_tool_harness.py")"
 

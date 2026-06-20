@@ -15,7 +15,8 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment (unless `force_review=true`)
 - **Re-review trigger** — adding the `rereview_label` (default `ai-review`) to a PR forces a fresh review (`check_review_needed.sh` reads the `labeled` event from `GITHUB_EVENT_PATH`, sets `force_review`, and skips unrelated labels; the label is removed post-publish in `action.yml`). Labels are maintainer-only, so no command-auth gate is needed.
 - **`scripts/wait_for_ci.sh`** — Optional CI gating: polls the Checks API until checks reach a terminal state (`ci_status_check=true`), then renders the per-check outcomes to `CI_CHECKS_FILE` for the review corpus
-- **`scripts/run_review.sh`** — Main review orchestration script (collects context, builds corpus, classifies, routes, calls model, validates and enforces verdicts)
+- **`scripts/run_review.sh`** — Main review orchestrator: sources the section modules under `scripts/sections/` in order (collects context, builds corpus, classifies, routes, calls model, validates and enforces verdicts)
+- **`scripts/sections/`** — Review-pipeline modules sourced by `run_review.sh` (#307 split): `common.sh` (helpers/timers), `config.sh` (env defaults + validation + prompts), `context.sh`, `enrichment.sh`, `classification.sh`, `corpus.sh`, `review.sh` (model call → escalation → enforcement → outputs). Each is a verbatim in-order slice of the former monolith, so sourcing them reproduces the original top-level execution.
 - **`scripts/model_call.sh`** — Shared model-call layer: request building, streaming/SSE handling, retries, error-body preservation for both API formats
 - **`scripts/default_system_prompt.txt`** — Bundled system prompt used when no override is provided
 

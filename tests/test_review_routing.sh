@@ -25,7 +25,7 @@ source "$SCRIPT_DIR/_lib/assert.sh"
 FUNCS="$(mktemp)"
 WORKDIR="$(mktemp -d)"
 trap 'rm -f "$FUNCS"; rm -rf "$WORKDIR"' EXIT
-python3 - "$ROOT_DIR/scripts/run_review.sh" "$FUNCS" <<'PY'
+python3 - "$ROOT_DIR/scripts/sections/classification.sh" "$FUNCS" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r"^resolve_review_route\(\) \{\n(.*?)\n\}", src, re.S | re.M)
@@ -88,10 +88,10 @@ check "custom list: matching kind routes smart" \
 
 echo ""
 echo "=== Test: wiring ==="
-RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh")"
+RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh" "$ROOT_DIR"/scripts/sections/*.sh)"
 check_contains "primary route config defaults to ai_model (ai_fast_* alias)" "$RUN_REVIEW" 'PRIMARY_MODEL="${AI_PRIMARY_MODEL:-${AI_FAST_MODEL:-$AI_MODEL}}"'
 check_contains "smart resolves ONLY from ai_smart_model (not the fallback)" "$RUN_REVIEW" 'SMART_MODEL="${AI_SMART_MODEL}"'
-check "review_route output emitted" "$(grep -c '^echo "review_route=' "$ROOT_DIR/scripts/run_review.sh")" "1"
+check "review_route output emitted" "$(grep -c '^echo "review_route=' "$ROOT_DIR/scripts/sections/review.sh")" "1"
 check "precheck fingerprints routing mode" "$(grep -c 'routing_mode:' "$ROOT_DIR/scripts/check_review_needed.sh")" "1"
 check "precheck fingerprints escalate flags" "$(grep -c 'escalate_flags:' "$ROOT_DIR/scripts/check_review_needed.sh")" "1"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
@@ -104,9 +104,9 @@ check_contains "marker carries review_route" "$(cat "$ROOT_DIR/scripts/publish_h
 
 echo ""
 echo "=== Test: annotate_analysis_engine ==="
-# Extract annotate_analysis_engine the same way as resolve_review_route.
+# Extract annotate_analysis_engine from the review section module.
 AAE_FUNCS="$(mktemp)"
-python3 - "$ROOT_DIR/scripts/run_review.sh" "$AAE_FUNCS" <<'PY'
+python3 - "$ROOT_DIR/scripts/sections/review.sh" "$AAE_FUNCS" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r"^annotate_analysis_engine\(\) \{\n(.*?)\n\}", src, re.S | re.M)
