@@ -10,7 +10,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 ### Action definition and orchestration
 
-- **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). The publish steps live inline in this file using helpers from `scripts/publish_helpers.sh`.
+- **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). Publishing is a single `Publish review` step with one superset `env:` block that dispatches on `$PUBLISH_MODE` (comment / review_comment / review_verdict), using helpers from `scripts/publish_helpers.sh`.
 - **`scripts/platform_api.sh`** — Platform seam (#221): every host-forge API call goes through `platform_*` functions (github backend = the exact pre-seam `gh` invocations; forgejo backend = `pr_reviewer/forgejo_backend.py`, rolling out across 1.4.x). `github_enrich_*` functions are for linked-source enrichment and always target github.com. `pr_reviewer/platform.py` is the Python mirror for script consumers.
 - **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment (unless `force_review=true`)
 - **Re-review trigger** — adding the `rereview_label` (default `ai-review`) to a PR forces a fresh review (`check_review_needed.sh` reads the `labeled` event from `GITHUB_EVENT_PATH`, sets `force_review`, and skips unrelated labels; the label is removed post-publish in `action.yml`). Labels are maintainer-only, so no command-auth gate is needed.

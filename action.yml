@@ -804,8 +804,14 @@ runs:
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
-    - name: Publish review comment
-      if: inputs.publish_review_comment == 'true' && steps.precheck.outputs.should_review == 'true' && inputs.publish_mode == 'comment'
+    - name: Publish review
+      # Single dispatcher for all three publish modes. One superset env block
+      # (harmless unused keys per mode) replaces the three near-duplicate
+      # blocks that drifted apart and broke v1.2.10 (#255, #303): a single
+      # block makes a duplicate-key manifest error structurally impossible.
+      # All per-mode inline `${{ }}` expressions are hoisted into env so the
+      # run body is pure bash dispatching on $PUBLISH_MODE.
+      if: steps.precheck.outputs.should_review == 'true' && (inputs.publish_mode == 'review_comment' || inputs.publish_mode == 'review_verdict' || (inputs.publish_mode == 'comment' && inputs.publish_review_comment == 'true'))
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -826,325 +832,281 @@ runs:
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
-
-        # Sanitize model output
-        sanitize_review_markdown "review-markdown.raw.md"
-
-        # Validate PR number
-        validate_pr_number "review_comment"
-
-        # Resolve effective scope and review result
-        EFFECTIVE_SCOPE="${{ steps.precheck.outputs.effective_review_scope || 'full' }}"
-        REVIEW_RESULT="clean"
-        if [ "$VERDICT" = "request_changes" ]; then
-          REVIEW_RESULT="issues"
-        fi
-
-        # Build metadata marker
-        METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}" "${{ steps.precheck.outputs.previous_head_sha || '' }}")"
-
-        if [ "$VERDICT" = "request_changes" ]; then
-          VERDICT_PREFIX="⚠️ **Automated recommendation: REQUEST CHANGES**"
-        else
-          VERDICT_PREFIX="✅ **Automated recommendation: APPROVE**"
-        fi
-        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-          VERDICT_PREFIX="$VERDICT_PREFIX (incremental)"
-        fi
-
-        {
-          emit_review_markers
-          echo "$VERDICT_PREFIX"
-          echo
-          printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
-          echo
-          cat review-markdown.raw.md
-        } > review-comment.md
-
-        platform_comment_sticky "$REPO" "$PR_NUMBER" review-comment.md
-
-    - name: Publish review comment (non-blocking)
-      if: inputs.publish_mode == 'review_comment' && steps.precheck.outputs.should_review == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
-        VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
-        FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
-
-        # Sanitize model output
-        sanitize_review_markdown "review-comment-markdown.raw.md"
-
-        # Validate PR number
-        validate_pr_number "mode=review_comment"
-
-        # Resolve cleanup flag and execute cleanup
-        CLEANUP_NATIVE_REVIEWS="$(resolve_cleanup_flag "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" "review_comment")"
-        cleanup_native_reviews "$CLEANUP_NATIVE_REVIEWS"
-
-        # Resolve effective scope and review result
-        EFFECTIVE_SCOPE="${{ steps.precheck.outputs.effective_review_scope || 'full' }}"
-        REVIEW_RESULT="clean"
-        if [ "$VERDICT" = "request_changes" ]; then
-          REVIEW_RESULT="issues"
-        fi
-
-        # Build metadata marker
-        METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}" "")"
-        REVIEW_HEADER="# AI Automated Review"
-        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-          REVIEW_HEADER="# AI Automated Review (incremental)"
-        fi
-
-        # Build the review body with managed marker
-        BODY_FILE="review-comment-body.md"
-        {
-          emit_review_markers
-          echo "$REVIEW_HEADER"
-          echo
-          printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
-          echo
-          cat review-comment-markdown.raw.md
-        } > "$BODY_FILE"
-
-        if [ "$VERDICT" = "request_changes" ]; then
-          echo "Submitting non-blocking review comment (request_changes) for #$PR_NUMBER"
-        else
-          echo "Submitting non-blocking review comment (approve) for #$PR_NUMBER"
-        fi
-
-        # NOTE: gh pr review --comment creates a COMMENTED review that is NOT visible in the PR UI timeline.
-        # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
-        platform_comment_sticky "$REPO" "$PR_NUMBER" "$BODY_FILE"
-
-        # Resolve threads of carried findings this review verified as fixed,
-        # and reply on threads still open (#208, #209). Must precede the
-        # comment build so finding-threads.json suppresses duplicates.
-        resolve_finding_threads
-
-        # Optionally attach line-anchored inline comments from the structured
-        # findings as a separate native COMMENT review. It carries the managed
-        # marker so the next run's cleanup marks it superseded. Best-effort:
-        # the summary comment above is already published.
-        if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
-          printf '%s' "$FINDINGS" > findings.json
-          COMMENTS_JSON="[]"
-          if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
-            COMMENTS_JSON="$(cat review-comments.json)"
-          fi
-          if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
-            {
-              echo "$COMMENT_MARKER"
-              echo "_Inline findings from the automated review (summary in the sticky comment)._"
-            } > inline-findings-body.md
-            jq -n --rawfile body inline-findings-body.md --argjson comments "$COMMENTS_JSON" \
-              '{body: $body, event: "COMMENT", comments: $comments}' > review-request.json
-            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
-              echo "Attached $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline finding comment(s)"
-            else
-              echo "WARN: inline findings review submission failed; summary comment was still published" >&2
-            fi
-          fi
-        fi
-
-    - name: Publish review verdict (native PR review)
-      if: inputs.publish_mode == 'review_verdict' && steps.precheck.outputs.should_review == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
-        VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
-        FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
-        INLINE_FINDINGS: ${{ inputs.inline_findings }}
-        INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
-        CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
+        PUBLISH_MODE: ${{ inputs.publish_mode }}
+        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}
+        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
+        IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
+        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
 
-        # Sanitize model output
-        sanitize_review_markdown "review-verdict-markdown.raw.md"
+        case "$PUBLISH_MODE" in
+          comment)
+            # Sanitize model output
+            sanitize_review_markdown "review-markdown.raw.md"
 
-        # Validate PR number
-        validate_pr_number "mode=review_verdict"
+            # Validate PR number
+            validate_pr_number "review_comment"
 
-        # Resolve cleanup flag and execute cleanup
-        CLEANUP_NATIVE_REVIEWS="$(resolve_cleanup_flag "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" "review_verdict")"
-        cleanup_native_reviews "$CLEANUP_NATIVE_REVIEWS"
-
-        # Determine if the PR is from a fork. The precheck step already fetched
-        # the PR object; only fall back to the API when its output is missing.
-        IS_FORK_PR="${{ steps.precheck.outputs.is_fork_pr }}"
-        if [ -z "$IS_FORK_PR" ]; then
-          IS_FORK_PR="$(platform_pr_get "$REPO" "$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
-        fi
-
-        # Resolve effective scope and review result
-        EFFECTIVE_SCOPE="${{ steps.precheck.outputs.effective_review_scope || 'full' }}"
-        PREVIOUS_HEAD_SHA="${{ steps.precheck.outputs.previous_head_sha || '' }}"
-        BASELINE_CLEAN="${{ steps.precheck.outputs.baseline_clean || 'false' }}"
-        REVIEW_RESULT="clean"
-        if [ "$VERDICT" = "request_changes" ]; then
-          REVIEW_RESULT="issues"
-        fi
-
-        # Build metadata marker with verdict safety for incremental
-        METADATA_MARKER="$(build_metadata_marker "${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}" "$PREVIOUS_HEAD_SHA")"
-        REVIEW_HEADER="# AI Automated Review"
-        if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-          REVIEW_HEADER="# AI Automated Review (incremental)"
-        fi
-
-        # Evaluate approval guardrails with baseline check for incremental
-        ALLOW_APPROVE_BOOL="$(printf '%s' "$ALLOW_APPROVE" | tr '[:upper:]' '[:lower:]')"
-        APPROVE_FORKS_BOOL="$(printf '%s' "$APPROVE_FORKS" | tr '[:upper:]' '[:lower:]')"
-
-        CAN_APPROVE=false
-
-        if [ "$VERDICT" = "approve" ] && [ "$ALLOW_APPROVE_BOOL" = "true" ]; then
-          # For incremental reviews, require a trusted clean full baseline
-          if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
-            echo "Blocking approval: incremental review without trusted clean full baseline" >&2
-            CAN_APPROVE=false
-          else
-            # Check fork gate
-            if [ "$IS_FORK_PR" != "true" ]; then
-              CAN_APPROVE=true
-            elif [ "$APPROVE_FORKS_BOOL" = "true" ]; then
-              CAN_APPROVE=true
+            # Resolve review result
+            REVIEW_RESULT="clean"
+            if [ "$VERDICT" = "request_changes" ]; then
+              REVIEW_RESULT="issues"
             fi
-          fi
-        fi
 
-        # Build the review body with managed marker
-        BODY_FILE="review-verdict-body.md"
-        {
-          emit_review_markers
-          echo "$REVIEW_HEADER"
-          echo
-          if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-            echo "_Incremental review: reviewed the changes since the last managed review; unresolved findings from that review are carried forward._"
-          else
-            echo "_Full PR review._"
-          fi
-          echo
-          printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
-          echo
-          cat review-verdict-markdown.raw.md
-        } > "$BODY_FILE"
+            # Build metadata marker
+            METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "$PREVIOUS_HEAD_SHA")"
 
-        # Resolve threads of carried findings this review verified as fixed,
-        # and reply on threads still open (#208, #209). Must precede the
-        # comment build so finding-threads.json suppresses duplicates.
-        resolve_finding_threads
-
-        # Build line-anchored inline comments from the structured findings
-        # when enabled. Anchors are validated against pr.diff (written by the
-        # review step); non-anchorable findings stay in the body only.
-        COMMENTS_JSON="[]"
-        if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
-          printf '%s' "$FINDINGS" > findings.json
-          if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
-            COMMENTS_JSON="$(cat review-comments.json)"
-          fi
-        fi
-
-        # Submit the native review, attaching inline comments when present.
-        # If GitHub rejects the comments payload (e.g. an anchor raced a new
-        # push), fall back to the plain review so publishing never breaks
-        # because of inline findings.
-        submit_native_review() {
-          local event="$1" body_file="$2"
-          if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
-            jq -n --rawfile body "$body_file" --arg event "$event" --argjson comments "$COMMENTS_JSON" \
-              '{body: $body, event: $event, comments: $comments}' > review-request.json
-            if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
-              echo "Submitted native review ($event) with $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline comment(s)"
-              return 0
-            fi
-            echo "WARN: inline-comment review submission failed; falling back to plain review" >&2
-          fi
-          case "$event" in
-            APPROVE) platform_review_native "$REPO" "$PR_NUMBER" APPROVE "$body_file" ;;
-            *) platform_review_native "$REPO" "$PR_NUMBER" REQUEST_CHANGES "$body_file" ;;
-          esac
-        }
-
-        if [ "$CAN_APPROVE" = true ]; then
-          echo "Submitting native approval for #$PR_NUMBER"
-          if ! submit_native_review APPROVE "$BODY_FILE" 2>&1; then
-            echo "ERROR: Native approval failed for #$PR_NUMBER." >&2
-            echo "This may be caused by the 'Allow GitHub Actions to create and approve pull requests' setting being disabled." >&2
-            echo "Enable this setting at: Repository Settings → Actions → General → Allow GitHub Actions to create and approve pull requests" >&2
-            echo "Or at the organization level: Organization Settings → Actions → Organization permissions → Allow GitHub Actions to create and approve pull requests" >&2
-            exit 1
-          fi
-        else
-          # Block approval: submit request_changes with explanation
-          echo "Blocking native approval for #$PR_NUMBER (allow_approve=${ALLOW_APPROVE_BOOL}, approve_forks=${APPROVE_FORKS_BOOL}, is_fork=${IS_FORK_PR})"
-
-          if [ "$VERDICT" = "request_changes" ]; then
-            submit_native_review REQUEST_CHANGES "$BODY_FILE"
-          else
-            # The review approved but a guardrail blocked native approval —
-            # explain the actual reason.
-            if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
-              {
-                echo ""
-                echo "> **Approval withheld**: the previous review of this PR found blocking issues. This review's verdict is approve, but native approval is withheld until a review against a clean baseline confirms the PR as a whole."
-              } >> "$BODY_FILE"
+            if [ "$VERDICT" = "request_changes" ]; then
+              VERDICT_PREFIX="⚠️ **Automated recommendation: REQUEST CHANGES**"
             else
-              {
-                echo ""
-                echo "> **Approval blocked by policy**: native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs)."
-              } >> "$BODY_FILE"
+              VERDICT_PREFIX="✅ **Automated recommendation: APPROVE**"
+            fi
+            if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+              VERDICT_PREFIX="$VERDICT_PREFIX (incremental)"
             fi
 
-            submit_native_review REQUEST_CHANGES "$BODY_FILE"
-          fi
-        fi
+            {
+              emit_review_markers
+              echo "$VERDICT_PREFIX"
+              echo
+              printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
+              echo
+              cat review-markdown.raw.md
+            } > review-comment.md
+
+            platform_comment_sticky "$REPO" "$PR_NUMBER" review-comment.md
+            ;;
+
+          review_comment)
+            # Sanitize model output
+            sanitize_review_markdown "review-comment-markdown.raw.md"
+
+            # Validate PR number
+            validate_pr_number "mode=review_comment"
+
+            # Resolve cleanup flag and execute cleanup
+            CLEANUP_NATIVE_REVIEWS="$(resolve_cleanup_flag "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" "review_comment")"
+            cleanup_native_reviews "$CLEANUP_NATIVE_REVIEWS"
+
+            # Resolve review result
+            REVIEW_RESULT="clean"
+            if [ "$VERDICT" = "request_changes" ]; then
+              REVIEW_RESULT="issues"
+            fi
+
+            # Build metadata marker
+            METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "")"
+            REVIEW_HEADER="# AI Automated Review"
+            if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+              REVIEW_HEADER="# AI Automated Review (incremental)"
+            fi
+
+            # Build the review body with managed marker
+            BODY_FILE="review-comment-body.md"
+            {
+              emit_review_markers
+              echo "$REVIEW_HEADER"
+              echo
+              printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
+              echo
+              cat review-comment-markdown.raw.md
+            } > "$BODY_FILE"
+
+            if [ "$VERDICT" = "request_changes" ]; then
+              echo "Submitting non-blocking review comment (request_changes) for #$PR_NUMBER"
+            else
+              echo "Submitting non-blocking review comment (approve) for #$PR_NUMBER"
+            fi
+
+            # NOTE: gh pr review --comment creates a COMMENTED review that is NOT visible in the PR UI timeline.
+            # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
+            platform_comment_sticky "$REPO" "$PR_NUMBER" "$BODY_FILE"
+
+            # Resolve threads of carried findings this review verified as fixed,
+            # and reply on threads still open (#208, #209). Must precede the
+            # comment build so finding-threads.json suppresses duplicates.
+            resolve_finding_threads
+
+            # Optionally attach line-anchored inline comments from the structured
+            # findings as a separate native COMMENT review. It carries the managed
+            # marker so the next run's cleanup marks it superseded. Best-effort:
+            # the summary comment above is already published.
+            if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
+              printf '%s' "$FINDINGS" > findings.json
+              COMMENTS_JSON="[]"
+              if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
+                COMMENTS_JSON="$(cat review-comments.json)"
+              fi
+              if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
+                {
+                  echo "$COMMENT_MARKER"
+                  echo "_Inline findings from the automated review (summary in the sticky comment)._"
+                } > inline-findings-body.md
+                jq -n --rawfile body inline-findings-body.md --argjson comments "$COMMENTS_JSON" \
+                  '{body: $body, event: "COMMENT", comments: $comments}' > review-request.json
+                if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
+                  echo "Attached $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline finding comment(s)"
+                else
+                  echo "WARN: inline findings review submission failed; summary comment was still published" >&2
+                fi
+              fi
+            fi
+            ;;
+
+          review_verdict)
+            # Sanitize model output
+            sanitize_review_markdown "review-verdict-markdown.raw.md"
+
+            # Validate PR number
+            validate_pr_number "mode=review_verdict"
+
+            # Resolve cleanup flag and execute cleanup
+            CLEANUP_NATIVE_REVIEWS="$(resolve_cleanup_flag "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" "review_verdict")"
+            cleanup_native_reviews "$CLEANUP_NATIVE_REVIEWS"
+
+            # Determine if the PR is from a fork. The precheck step already fetched
+            # the PR object; only fall back to the API when its output is missing.
+            if [ -z "$IS_FORK_PR" ]; then
+              IS_FORK_PR="$(platform_pr_get "$REPO" "$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
+            fi
+
+            # Resolve review result
+            REVIEW_RESULT="clean"
+            if [ "$VERDICT" = "request_changes" ]; then
+              REVIEW_RESULT="issues"
+            fi
+
+            # Build metadata marker with verdict safety for incremental
+            METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "$PREVIOUS_HEAD_SHA")"
+            REVIEW_HEADER="# AI Automated Review"
+            if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+              REVIEW_HEADER="# AI Automated Review (incremental)"
+            fi
+
+            # Evaluate approval guardrails with baseline check for incremental
+            ALLOW_APPROVE_BOOL="$(printf '%s' "$ALLOW_APPROVE" | tr '[:upper:]' '[:lower:]')"
+            APPROVE_FORKS_BOOL="$(printf '%s' "$APPROVE_FORKS" | tr '[:upper:]' '[:lower:]')"
+
+            CAN_APPROVE=false
+
+            if [ "$VERDICT" = "approve" ] && [ "$ALLOW_APPROVE_BOOL" = "true" ]; then
+              # For incremental reviews, require a trusted clean full baseline
+              if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
+                echo "Blocking approval: incremental review without trusted clean full baseline" >&2
+                CAN_APPROVE=false
+              else
+                # Check fork gate
+                if [ "$IS_FORK_PR" != "true" ]; then
+                  CAN_APPROVE=true
+                elif [ "$APPROVE_FORKS_BOOL" = "true" ]; then
+                  CAN_APPROVE=true
+                fi
+              fi
+            fi
+
+            # Build the review body with managed marker
+            BODY_FILE="review-verdict-body.md"
+            {
+              emit_review_markers
+              echo "$REVIEW_HEADER"
+              echo
+              if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
+                echo "_Incremental review: reviewed the changes since the last managed review; unresolved findings from that review are carried forward._"
+              else
+                echo "_Full PR review._"
+              fi
+              echo
+              printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
+              echo
+              cat review-verdict-markdown.raw.md
+            } > "$BODY_FILE"
+
+            # Resolve threads of carried findings this review verified as fixed,
+            # and reply on threads still open (#208, #209). Must precede the
+            # comment build so finding-threads.json suppresses duplicates.
+            resolve_finding_threads
+
+            # Build line-anchored inline comments from the structured findings
+            # when enabled. Anchors are validated against pr.diff (written by the
+            # review step); non-anchorable findings stay in the body only.
+            COMMENTS_JSON="[]"
+            if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
+              printf '%s' "$FINDINGS" > findings.json
+              if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
+                COMMENTS_JSON="$(cat review-comments.json)"
+              fi
+            fi
+
+            # Submit the native review, attaching inline comments when present.
+            # If GitHub rejects the comments payload (e.g. an anchor raced a new
+            # push), fall back to the plain review so publishing never breaks
+            # because of inline findings.
+            submit_native_review() {
+              local event="$1" body_file="$2"
+              if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
+                jq -n --rawfile body "$body_file" --arg event "$event" --argjson comments "$COMMENTS_JSON" \
+                  '{body: $body, event: $event, comments: $comments}' > review-request.json
+                if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
+                  echo "Submitted native review ($event) with $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline comment(s)"
+                  return 0
+                fi
+                echo "WARN: inline-comment review submission failed; falling back to plain review" >&2
+              fi
+              case "$event" in
+                APPROVE) platform_review_native "$REPO" "$PR_NUMBER" APPROVE "$body_file" ;;
+                *) platform_review_native "$REPO" "$PR_NUMBER" REQUEST_CHANGES "$body_file" ;;
+              esac
+            }
+
+            if [ "$CAN_APPROVE" = true ]; then
+              echo "Submitting native approval for #$PR_NUMBER"
+              if ! submit_native_review APPROVE "$BODY_FILE" 2>&1; then
+                echo "ERROR: Native approval failed for #$PR_NUMBER." >&2
+                echo "This may be caused by the 'Allow GitHub Actions to create and approve pull requests' setting being disabled." >&2
+                echo "Enable this setting at: Repository Settings → Actions → General → Allow GitHub Actions to create and approve pull requests" >&2
+                echo "Or at the organization level: Organization Settings → Actions → Organization permissions → Allow GitHub Actions to create and approve pull requests" >&2
+                exit 1
+              fi
+            else
+              # Block approval: submit request_changes with explanation
+              echo "Blocking native approval for #$PR_NUMBER (allow_approve=${ALLOW_APPROVE_BOOL}, approve_forks=${APPROVE_FORKS_BOOL}, is_fork=${IS_FORK_PR})"
+
+              if [ "$VERDICT" = "request_changes" ]; then
+                submit_native_review REQUEST_CHANGES "$BODY_FILE"
+              else
+                # The review approved but a guardrail blocked native approval —
+                # explain the actual reason.
+                if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
+                  {
+                    echo ""
+                    echo "> **Approval withheld**: the previous review of this PR found blocking issues. This review's verdict is approve, but native approval is withheld until a review against a clean baseline confirms the PR as a whole."
+                  } >> "$BODY_FILE"
+                else
+                  {
+                    echo ""
+                    echo "> **Approval blocked by policy**: native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs)."
+                  } >> "$BODY_FILE"
+                fi
+
+                submit_native_review REQUEST_CHANGES "$BODY_FILE"
+              fi
+            fi
+            ;;
+
+          *)
+            echo "Unknown publish_mode: $PUBLISH_MODE" >&2
+            exit 1
+            ;;
+        esac
 
     - name: Clear re-review label
       # When a label add triggered this review, remove it so re-adding the
