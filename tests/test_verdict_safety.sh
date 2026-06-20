@@ -11,19 +11,11 @@ fi
 
 # Tests for PR verdict safety: incremental reviews require clean full baseline for approval
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASS=0
 FAIL=0
-
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
+# shellcheck source=_lib/assert.sh
+source "$SCRIPT_DIR/_lib/assert.sh"
 
 # Core verdict safety evaluation extracted from action.yml publish_verdict step.
 evaluate_verdict_approval() {
@@ -94,17 +86,6 @@ check "INCREMENTAL scope not matched (case-sensitive)" "$result" "true"
 echo ""
 echo "=== action.yml integration checks ==="
 ACTION_YML="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/action.yml"
-
-check_exists() {
-  local desc="$1" count="$2"
-  if [[ "$count" -gt 0 ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (expected to exist)"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 check_exists "action.yml has EFFECTIVE_SCOPE reference in verdict step" \
   "$(grep -c 'EFFECTIVE_SCOPE' "$ACTION_YML" || echo 0)"

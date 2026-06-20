@@ -14,31 +14,12 @@ fi
 
 PASS=0
 FAIL=0
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$_TEST_DIR/.." && pwd)"
 WAIT_SCRIPT="$SCRIPT_DIR/scripts/wait_for_ci.sh"
 ACTION_YML="$SCRIPT_DIR/action.yml"
-
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_contains() {
-  local desc="$1" haystack="$2" needle="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (expected to contain '$needle')"
-    FAIL=$((FAIL + 1))
-  fi
-}
+# shellcheck source=_lib/assert.sh
+source "$_TEST_DIR/_lib/assert.sh"
 
 # ── Test 1: exit code 1 path for timeout+skip=true exists in script ──
 echo "=== Test: exit code 1 on timeout with skip=true ==="

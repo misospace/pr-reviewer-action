@@ -12,52 +12,11 @@ fi
 # Tests for PR #40: guarded approval controls for review_verdict mode
 # These tests validate the shell logic used by the "Publish review verdict" step.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASS=0
 FAIL=0
-
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_ne() {
-  local desc="$1" result="$2" not_expected="$3"
-  if [[ "$result" != "$not_expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', should not be '$not_expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_contains() {
-  local desc="$1" haystack="$2" needle="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (expected to contain '$needle')"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_exists() {
-  local desc="$1" result="$2"
-  if [[ "$result" -gt 0 ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (expected to exist)"
-    FAIL=$((FAIL + 1))
-  fi
-}
+# shellcheck source=_lib/assert.sh
+source "$SCRIPT_DIR/_lib/assert.sh"
 
 # The core guardrail logic extracted from action.yml's publish verdict step.
 # It sets CAN_APPROVE based on VERDICT, ALLOW_APPROVE, APPROVE_FORKS, IS_FORK_PR.

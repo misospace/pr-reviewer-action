@@ -12,6 +12,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# shellcheck source=_lib/assert.sh
+source "$SCRIPT_DIR/_lib/assert.sh"
+
 # Source just the resolve_standards_file function
 resolve_standards_file() {
   if [[ -n "$STANDARDS_FILE" && -f "$STANDARDS_FILE" ]]; then
@@ -38,17 +41,6 @@ resolve_standards_file() {
 
 PASS=0
 FAIL=0
-
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 # ── Setup ─────────────────────────────────────────────────────────────
 TMPDIR="$(mktemp -d)"
