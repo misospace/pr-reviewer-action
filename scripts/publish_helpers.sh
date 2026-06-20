@@ -214,6 +214,28 @@ build_metadata_marker() {
   printf '<!-- ai-pr-reviewer:%s -->' "$marker_json"
 }
 
+# Emit the managed review-comment marker preamble to stdout: the sticky
+# comment marker, the metadata marker, and (when set) the head-sha and
+# fingerprint markers. Centralizes the strip-then-append discipline so a
+# publish step cannot silently drop the markers that skip-on-unchanged
+# (check_review_needed.sh) and managed-comment cleanup depend on. The two
+# required markers are guarded so a future refactor that forgets to set them
+# fails loudly under `set -e` rather than publishing an unmatchable comment.
+# Reads env/globals: COMMENT_MARKER, METADATA_MARKER, HEAD_SHA (optional),
+# BROAD_FINGERPRINT (optional).
+emit_review_markers() {
+  : "${COMMENT_MARKER:?emit_review_markers: COMMENT_MARKER must be set}"
+  : "${METADATA_MARKER:?emit_review_markers: METADATA_MARKER must be set}"
+  echo "$COMMENT_MARKER"
+  echo "$METADATA_MARKER"
+  if [ -n "${HEAD_SHA:-}" ]; then
+    echo "<!-- ai-pr-review-sha:${HEAD_SHA} -->"
+  fi
+  if [ -n "${BROAD_FINGERPRINT:-}" ]; then
+    echo "<!-- ai-pr-review-fingerprint:${BROAD_FINGERPRINT} -->"
+  fi
+}
+
 # Validate that PR_NUMBER is set.
 # Requires env: PR_NUMBER
 # Args: $1 = mode description for error message

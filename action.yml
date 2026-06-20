@@ -859,14 +859,7 @@ runs:
         fi
 
         {
-          echo "$COMMENT_MARKER"
-          echo "$METADATA_MARKER"
-          if [ -n "${HEAD_SHA:-}" ]; then
-            echo "<!-- ai-pr-review-sha:${HEAD_SHA} -->"
-          fi
-          if [ -n "${BROAD_FINGERPRINT:-}" ]; then
-            echo "<!-- ai-pr-review-fingerprint:${BROAD_FINGERPRINT} -->"
-          fi
+          emit_review_markers
           echo "$VERDICT_PREFIX"
           echo
           printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
@@ -933,14 +926,7 @@ runs:
         # Build the review body with managed marker
         BODY_FILE="review-comment-body.md"
         {
-          echo "$COMMENT_MARKER"
-          echo "$METADATA_MARKER"
-          if [ -n "${HEAD_SHA:-}" ]; then
-            echo "<!-- ai-pr-review-sha:${HEAD_SHA} -->"
-          fi
-          if [ -n "${BROAD_FINGERPRINT:-}" ]; then
-            echo "<!-- ai-pr-review-fingerprint:${BROAD_FINGERPRINT} -->"
-          fi
+          emit_review_markers
           echo "$REVIEW_HEADER"
           echo
           printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
@@ -1077,14 +1063,7 @@ runs:
         # Build the review body with managed marker
         BODY_FILE="review-verdict-body.md"
         {
-          echo "$COMMENT_MARKER"
-          echo "$METADATA_MARKER"
-          if [ -n "${HEAD_SHA:-}" ]; then
-            echo "<!-- ai-pr-review-sha:${HEAD_SHA} -->"
-          fi
-          if [ -n "${BROAD_FINGERPRINT:-}" ]; then
-            echo "<!-- ai-pr-review-fingerprint:${BROAD_FINGERPRINT} -->"
-          fi
+          emit_review_markers
           echo "$REVIEW_HEADER"
           echo
           if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
