@@ -26,7 +26,7 @@ source "$SCRIPT_DIR/_lib/assert.sh"
 FUNCS="$(mktemp)"
 TMP="$(mktemp -d)"
 trap 'rm -f "$FUNCS"; rm -rf "$TMP"' EXIT
-python3 - "$ROOT_DIR/scripts/run_review.sh" "$FUNCS" <<'PY'
+python3 - "$ROOT_DIR/scripts/sections/review.sh" "$FUNCS" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r"^build_user_message\(\) \{\n(.*?)\n\}", src, re.S | re.M)
@@ -94,10 +94,9 @@ MSG="$(build_user_message "$TMP/classification.json")"
 check "at most 12 check bullets" "$(printf '%s\n' "$MSG" | grep -c '^- check ')" "12"
 
 echo ""
-echo "=== Test: wiring in run_review.sh and system prompt ==="
-RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh")"
+echo "=== Test: wiring in the review section module and system prompt ==="
 check "primary request uses the steered message" \
-  "$(grep -c '"\$USER_MESSAGE" \\' "$ROOT_DIR/scripts/run_review.sh")" "2"
+  "$(grep -c '"\$USER_MESSAGE" \\' "$ROOT_DIR/scripts/sections/review.sh")" "2"
 PROMPT="$(cat "$ROOT_DIR/scripts/default_system_prompt.txt")"
 check_contains "system prompt references the PR Classification section" \
   "$PROMPT" "# PR Classification"

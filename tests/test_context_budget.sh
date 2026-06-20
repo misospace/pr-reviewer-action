@@ -21,10 +21,11 @@ FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-# Extract the two functions from run_review.sh so we can call them directly.
+# Extract the two functions from the config section module (#307 split) so we
+# can call them directly.
 FUNCS="$(mktemp)"
 trap 'rm -f "$FUNCS"' EXIT
-python3 - "$ROOT_DIR/scripts/run_review.sh" "$FUNCS" <<'PY'
+python3 - "$ROOT_DIR/scripts/sections/config.sh" "$FUNCS" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 out = []
@@ -80,23 +81,22 @@ check "output is valid UTF-8" \
   "$(python3 -c 'open("'"$TMP"'/utfdst",encoding="utf-8").read(); print("ok")')" "ok"
 
 echo ""
-echo "=== Test: enrichment context trims are wired into run_review.sh ==="
-RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh")"
+echo "=== Test: enrichment context trims are wired into the section modules ==="
 check "github.com raw HTML fetch is skipped" \
-  "$(grep -c 'Raw HTML fetch skipped for github.com' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'Raw HTML fetch skipped for github.com' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
 check "non-github sources go through strip_source_to_text" \
-  "$(grep -c 'strip_source_to_text "source.$i.raw"' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'strip_source_to_text "source.$i.raw"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
 check "github.com is excluded from the parallel prefetch" \
-  "$(grep -c '"\$host" != "github.com"' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c '"\$host" != "github.com"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
 
 echo ""
-echo "=== Test: no tokens on curl argv in run_review.sh ==="
+echo "=== Test: no tokens on curl argv in the incremental fetch ==="
 check "incremental fetch passes the token via --config, not argv" \
-  "$(grep -c 'Authorization: token \$GH_TOKEN" \\' "$ROOT_DIR/scripts/run_review.sh" || true)" "0"
+  "$(grep -c 'Authorization: token \$GH_TOKEN" \\' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
 check "incremental fetch uses curl_config_escape helper" \
-  "$(grep -c 'curl_config_escape "Authorization: token' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'curl_config_escape "Authorization: token' "$ROOT_DIR/scripts/sections/config.sh")" "1"
 check "strip helper delegates to strip_source_text.py" \
-  "$(grep -c 'strip_source_text.py' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'strip_source_text.py' "$ROOT_DIR/scripts/sections/context.sh")" "1"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

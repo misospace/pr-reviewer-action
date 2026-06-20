@@ -14,14 +14,16 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUN_REVIEW="$ROOT_DIR/scripts/run_review.sh"
+# The escalation / enforcement / output logic now lives in the review section
+# module (#307 split); the orchestrator just sources the sections in order.
+RUN_REVIEW="$ROOT_DIR/scripts/sections/review.sh"
 
 PASS=0
 FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-SRC="$(cat "$RUN_REVIEW")"
+SRC="$(cat "$ROOT_DIR/scripts/run_review.sh" "$ROOT_DIR"/scripts/sections/*.sh)"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
 
 echo "=== Escalation gating ==="

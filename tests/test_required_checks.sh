@@ -22,15 +22,15 @@ FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-echo "=== Wiring: run_review.sh and action.yml ==="
+echo "=== Wiring: run_review section modules and action.yml ==="
 check "run_review validates VALIDATE_REQUIRED_CHECKS values" \
-  "$(grep -c 'Invalid VALIDATE_REQUIRED_CHECKS' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'Invalid VALIDATE_REQUIRED_CHECKS' "$ROOT_DIR/scripts/sections/config.sh")" "1"
 check "run_review validates REQUIRED_CHECK_VALIDATION_MODE values" \
-  "$(grep -c 'Invalid REQUIRED_CHECK_VALIDATION_MODE' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c 'Invalid REQUIRED_CHECK_VALIDATION_MODE' "$ROOT_DIR/scripts/sections/config.sh")" "1"
 check "wrapper calls apply_required_check_validation" \
-  "$(grep -c 'apply_required_check_validation' "$ROOT_DIR/scripts/run_review.sh")" "2"
+  "$(grep -c 'apply_required_check_validation' "$ROOT_DIR/scripts/sections/config.sh")" "2"
 check "required_checks step output emitted" \
-  "$(grep -c '^echo "required_checks=' "$ROOT_DIR/scripts/run_review.sh")" "1"
+  "$(grep -c '^echo "required_checks=' "$ROOT_DIR/scripts/sections/review.sh")" "1"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
 check_contains "action.yml declares validate_required_checks input" "$ACTION" "validate_required_checks:"
 check_contains "action.yml declares required_check_validation_mode input" "$ACTION" "required_check_validation_mode:"
