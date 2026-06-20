@@ -176,6 +176,7 @@ DB_MIGRATION_PATTERNS = [
 class PRClassification:
     pr_kind: str = "app_code"
     risk_flags: list[str] = field(default_factory=list)
+    risk_flags_with_files: dict[str, list[str]] = field(default_factory=dict)
     changed_files_summary: list[str] = field(default_factory=list)
     linked_issue_labels: list[str] = field(default_factory=list)
     must_check: list[str] = field(default_factory=list)
@@ -285,9 +286,22 @@ def _detect_risk_flags(
     files: list[dict],
     diff_text: str,
     linked_issues: list[dict],
-) -> list[str]:
-    """Detect risk flags based on file patterns and linked issue metadata."""
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Detect risk flags based on file patterns and linked issue metadata.
+
+    Returns
+    -------
+    flags : list[str]
+        Ordered list of detected risk flag names (unchanged semantics).
+    flags_with_files : dict[str, list[str]]
+        Mapping from each file-based risk flag to the file paths that triggered
+        it.  Issue-linked flags (linked_security_issue, etc.) have no file
+        attribution and are omitted from this mapping.  When a flag fires only
+        from diff content (no filename match), the mapping contains an empty
+        list for that flag.
+    """
     flags: list[str] = []
+    flags_with_files: dict[str, list[str]] = {}
     filenames = [f.get("filename", "") for f in files]
 
     # Check for linked security/audit/priority issues
@@ -313,16 +327,19 @@ def _detect_risk_flags(
         (AUTH_PATTERNS, "auth_changes"),
         (SECRET_HANDLING_PATTERNS, "secret_handling_changes"),
     ]:
-        # Check both filenames and diff content for risk flags
-        matches_in_files = any(
-            any(pat.search(f) for pat in pat_set) for f in filenames
-        )
+        # Collect the specific files that triggered this flag
+        triggering_files = [
+            f for f in filenames
+            if any(pat.search(f) for pat in pat_set)
+        ]
         matches_in_diff = any(pat.search(diff_text) for pat in pat_set)
-        if matches_in_files or matches_in_diff:
+        if triggering_files or matches_in_diff:
             if flag not in flags:
                 flags.append(flag)
+            # Record file attribution (empty list when only diff content matched)
+            flags_with_files[flag] = triggering_files
 
-    return flags
+    return flags, flags_with_files
 
 
 # Checklist items per risk class. Keys are pr_kind values AND the file-based
@@ -424,7 +441,7 @@ def classify_pr(
         linked_issues = []
 
     pr_kind = _classify_pr_kind(pr_files, diff_text)
-    risk_flags = _detect_risk_flags(pr_files, diff_text, linked_issues)
+    risk_flags, risk_flags_with_files = _detect_risk_flags(pr_files, diff_text, linked_issues)
     must_check = _build_must_check(pr_kind, risk_flags)
 
     # Build changed files summary (just filenames, truncated)
@@ -442,6 +459,7 @@ def classify_pr(
     return PRClassification(
         pr_kind=pr_kind,
         risk_flags=risk_flags,
+        risk_flags_with_files=risk_flags_with_files,
         changed_files_summary=changed_files_summary,
         linked_issue_labels=linked_issue_labels,
         must_check=must_check,

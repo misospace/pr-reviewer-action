@@ -1098,7 +1098,7 @@ build_review_corpus() {
 
     echo "# PR Classification"
     if [ -f classification.json ]; then
-      jq '{pr_kind, risk_flags, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
+      jq '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
     else
       echo "(Classification data unavailable for this review)"
     fi
@@ -1294,8 +1294,17 @@ parts = [base]
 pr_kind = str(data.get("pr_kind") or "unknown")
 parts.append(f"PR kind (deterministic classification): {pr_kind}.")
 flags = [str(flag) for flag in (data.get("risk_flags") or []) if flag]
+attribution = data.get("risk_flags_with_files") or {}
 if flags:
-    parts.append("Risk flags: " + ", ".join(flags[:12]) + ".")
+    flag_parts = []
+    for flag in flags[:12]:
+        files_for_flag = attribution.get(flag) or []
+        if files_for_flag:
+            file_list = ", ".join(files_for_flag[:5])
+            flag_parts.append(f"{flag} (triggered by: {file_list})")
+        else:
+            flag_parts.append(flag)
+    parts.append("Risk flags: " + ", ".join(flag_parts) + ".")
 checks = [str(check) for check in (data.get("must_check") or []) if check]
 if checks:
     parts.append(

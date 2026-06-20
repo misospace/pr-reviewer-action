@@ -19,6 +19,7 @@ from run_evidence_providers import (  # noqa: E402
     parse_findings,
     severity_rank,
     env_int,
+    run_provider,
 )
 
 EVIDENCE_SCRIPT = _SCRIPTS_DIR / "run_evidence_providers.py"
@@ -522,6 +523,35 @@ class TestCommandFormat:
         data = _load_json_output(tmp_path)
         p = data["providers"][0]
         assert p["command"] == 'echo "verbatim"'
+
+
+# ── Unit tests: shell-string trust-boundary WARN log ───────────────
+
+class TestShellStringWarnLog:
+    """Verify that run_provider emits a WARNING for shell-string commands.
+
+    The warning is the sole observability hook for the string→bash trust
+    boundary documented in SECURITY.md ("Prefer argv arrays … over shell
+    strings … to avoid shell injection risks from `bash -lc` execution").
+    Execution behaviour is unchanged by this test.
+    """
+
+    def test_warn_fires_for_shell_string_command(self):
+        """A string command triggers a WARNING containing 'bash -lc'."""
+        provider = {"id": "shell-warn-probe", "command": "true"}
+        with mock.patch("run_evidence_providers.logger") as mock_logger:
+            run_provider(1, provider, default_timeout=5, default_max_output=4096)
+        # Exactly one warning call, mentioning the bash trust boundary.
+        assert mock_logger.warning.call_count == 1
+        warn_msg = mock_logger.warning.call_args[0][0]
+        assert "bash -lc" in warn_msg
+
+    def test_no_warn_for_argv_list_command(self):
+        """An argv-list command must NOT trigger the shell-string WARNING."""
+        provider = {"id": "argv-no-warn-probe", "command": ["true"]}
+        with mock.patch("run_evidence_providers.logger") as mock_logger:
+            run_provider(1, provider, default_timeout=5, default_max_output=4096)
+        assert mock_logger.warning.call_count == 0
 
 
 # ── Integration tests: fork enablement skip behavior ────────────────
