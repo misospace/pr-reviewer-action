@@ -28,11 +28,75 @@
           }
         ]
       }
+    },
+    {
+      "number": 8001,
+      "repo_full_name": "joryirving/home-ops",
+      "url": "https://github.com/joryirving/home-ops/pull/8001",
+      "title": "chore(deps): update digest sha256:abc1234 (no version bump)",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "P2-5 trivial scenario (#301). A renovate digest-only bump — no semver change, no breaking behaviour. The reviewer must recognise this as a low-risk mechanical update and NOT escalate. The grader checks that the review does NOT mention any risk flag that would trigger unnecessary scrutiny on a pure digest pin.",
+        "checks": [
+          {
+            "id": "verdict_is_approve_or_trivial",
+            "type": "review_mentions",
+            "any_of": ["digest", "low risk", "low-risk", "trivial", "no breaking", "no version change", "approve"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 8002,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/8002",
+      "title": "feat: add deployment config with credentials",
+      "known_findings": [
+        {
+          "category": "security",
+          "severity": "high",
+          "description": "Hardcoded AWS access key AKIAIOSFODNN7EXAMPLE found in deployment config — rotate immediately and move to a secrets manager"
+        }
+      ],
+      "expected_evidence": {
+        "description": "P2-5 secret-leaking scenario (#301). The diff contains an obviously fake AWS key placeholder (AKIAIOSFODNN7EXAMPLE — the canonical AWS documentation example key). The reviewer MUST surface the secret_handling_changes risk flag and call out the hardcoded credential. This is the regression fixture: if the model fails to flag it, the capability check fails.",
+        "checks": [
+          {
+            "id": "flags_hardcoded_secret",
+            "type": "review_mentions",
+            "any_of": ["secret", "credential", "hardcoded", "hard-coded", "AKIA", "access key", "rotate", "leak"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 8003,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/8003",
+      "title": "refactor: extract shared config loader",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "P2-5 tool-required scenario (#301). The PR moves logic from inline code into a shared config-loader module; the reviewer cannot assess correctness without reading the referenced module to verify the interface contract is preserved. A rubber-stamp review that skips read_file fails this check.",
+        "checks": [
+          {
+            "id": "read_config_loader",
+            "type": "tool_call",
+            "tool": "read_file",
+            "args_contains": { "path": ["config"] }
+          },
+          {
+            "id": "cited_loader_in_review",
+            "type": "review_mentions",
+            "any_of": ["config", "loader", "module", "interface", "import", "extracted"]
+          }
+        ]
+      }
     }
   ],
   "metadata": {
     "created_at": "2026-06-12T00:00:00Z",
-    "description": "Agentic-capability eval corpus for #207. home-ops#7462 is the canonical live fixture for the #203 acceptance criterion (Talos<->k8s support-matrix chain). Run with --modes native_loop plan_execute tools_off --runs-per-mode 10 and read mode_summary[*].capability_pass_rate; a single run is noise at the fast tier. The fixture PR is intentionally left OPEN. Keep prompts at capability altitude ('verify against the host platform's published compatibility matrix'), never recipe altitude ('check talos.dev') — only THIS grader names the concrete evidence.",
-    "issue_refs": [197, 203, 207]
+    "updated_at": "2026-06-19T00:00:00Z",
+    "description": "Agentic-capability eval corpus for #207/#301. home-ops#7462 is the canonical live fixture for the #203 acceptance criterion (Talos<->k8s support-matrix chain). #8001 is a trivial renovate digest-only bump (must not over-escalate). #8002 is a secret-leaking PR with the AKIAIOSFODNN7EXAMPLE placeholder key (must surface secret_handling_changes). #8003 requires read_file to verify a refactored config loader. Run with --modes native_loop plan_execute tools_off --runs-per-mode 10 and read mode_summary[*].capability_pass_rate; a single run is noise at the fast tier. Keep prompts at capability altitude, never recipe altitude — only THIS grader names the concrete evidence.",
+    "issue_refs": [197, 203, 207, 301]
   }
 }

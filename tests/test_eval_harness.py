@@ -489,6 +489,197 @@ class TestSampleCorpus:
                           review_markdown="patch bump, approve", tool_calls=[])
         assert evaluate_capability(stamp, ee)["passed"] is False
 
+    def test_agentic_corpus_has_four_scenarios(self):
+        path = Path(__file__).parent.parent / "evals" / "corpus-agentic.json"
+        if not path.exists():
+            pytest.skip("evals/corpus-agentic.json not found")
+        corpus = BenchmarkCorpus.from_file(path)
+        assert len(corpus.prs) >= 4, "corpus must include the 3 new P2-5 scenarios (#301)"
+
+
+# ---------------------------------------------------------------------------
+# P2-5 new scenario regression tests (#301)
+# ---------------------------------------------------------------------------
+
+# Evidence blocks for each new scenario, mirroring corpus-agentic.json exactly.
+TRIVIAL_DIGEST_EVIDENCE = {
+    "description": "digest-only bump must be recognised as low-risk",
+    "checks": [
+        {"id": "verdict_is_approve_or_trivial", "type": "review_mentions",
+         "any_of": ["digest", "low risk", "low-risk", "trivial", "no breaking",
+                    "no version change", "approve"]},
+    ],
+}
+
+SECRET_LEAK_EVIDENCE = {
+    "description": "hardcoded AWS key must trigger secret_handling_changes flag",
+    "checks": [
+        {"id": "flags_hardcoded_secret", "type": "review_mentions",
+         "any_of": ["secret", "credential", "hardcoded", "hard-coded", "AKIA",
+                    "access key", "rotate", "leak"]},
+    ],
+}
+
+TOOL_REQUIRED_EVIDENCE = {
+    "description": "config-loader refactor requires read_file and a mention of the module",
+    "checks": [
+        {"id": "read_config_loader", "type": "tool_call", "tool": "read_file",
+         "args_contains": {"path": ["config"]}},
+        {"id": "cited_loader_in_review", "type": "review_mentions",
+         "any_of": ["config", "loader", "module", "interface", "import", "extracted"]},
+    ],
+}
+
+
+class TestTrivialDigestScenario:
+    """Renovate digest-only bump: reviewer should acknowledge it is low-risk."""
+
+    def _run(self, review_md, tool_calls=None):
+        return ReviewRun(
+            mode="native_loop", pr_number=8001,
+            repo_full_name="joryirving/home-ops",
+            review_markdown=review_md,
+            tool_calls=tool_calls or [],
+            tool_stop_reason="model-stopped",
+        )
+
+    def test_low_risk_acknowledgement_passes(self):
+        run = self._run("Digest-only bump, no version change. Low risk. Approve.")
+        assert evaluate_capability(run, TRIVIAL_DIGEST_EVIDENCE)["passed"] is True
+
+    def test_approve_keyword_alone_passes(self):
+        run = self._run("This is a trivial update. LGTM, approve.")
+        assert evaluate_capability(run, TRIVIAL_DIGEST_EVIDENCE)["passed"] is True
+
+    def test_silent_review_without_any_keyword_fails(self):
+        """A review that never mentions risk posture or approval fails the check."""
+        run = self._run("Updated image reference in values.yaml.")
+        assert evaluate_capability(run, TRIVIAL_DIGEST_EVIDENCE)["passed"] is False
+
+    def test_errored_run_fails(self):
+        run = self._run("low risk")
+        run.error = "timeout"
+        assert evaluate_capability(run, TRIVIAL_DIGEST_EVIDENCE)["passed"] is False
+
+
+class TestSecretLeakScenario:
+    """PR with a fake AWS key — reviewer must flag the hardcoded credential."""
+
+    def _run(self, review_md):
+        return ReviewRun(
+            mode="native_loop", pr_number=8002,
+            repo_full_name="misospace/pr-reviewer-action",
+            review_markdown=review_md,
+            tool_calls=[],
+            tool_stop_reason="model-stopped",
+        )
+
+    def test_flags_secret_keyword_passes(self):
+        run = self._run(
+            "Found a hardcoded secret in deployment config: AKIAIOSFODNN7EXAMPLE. "
+            "Please rotate the access key and use a secrets manager."
+        )
+        assert evaluate_capability(run, SECRET_LEAK_EVIDENCE)["passed"] is True
+
+    def test_flags_credential_keyword_passes(self):
+        run = self._run("Hardcoded credential detected. Move to vault.")
+        assert evaluate_capability(run, SECRET_LEAK_EVIDENCE)["passed"] is True
+
+    def test_flags_AKIA_prefix_passes(self):
+        run = self._run("The AKIA-prefixed key should not be committed. Remove it.")
+        assert evaluate_capability(run, SECRET_LEAK_EVIDENCE)["passed"] is True
+
+    def test_rubber_stamp_without_flagging_fails(self):
+        """The classic false-negative: review approves without spotting the key."""
+        run = self._run("Config looks good. LGTM.")
+        assert evaluate_capability(run, SECRET_LEAK_EVIDENCE)["passed"] is False
+
+    def test_flags_rotate_keyword_passes(self):
+        run = self._run("Please rotate this key — do not commit AWS credentials.")
+        assert evaluate_capability(run, SECRET_LEAK_EVIDENCE)["passed"] is True
+
+    def test_secret_finding_in_known_findings(self):
+        """Corpus entry has a known finding; verify it is loadable."""
+        path = Path(__file__).parent.parent / "evals" / "corpus-agentic.json"
+        if not path.exists():
+            pytest.skip("evals/corpus-agentic.json not found")
+        corpus = BenchmarkCorpus.from_file(path)
+        pr = next((p for p in corpus.prs if p["number"] == 8002), None)
+        assert pr is not None, "PR 8002 not in corpus"
+        findings = load_known_findings(pr)
+        assert len(findings) == 1
+        assert findings[0].category == "security"
+        assert findings[0].severity == "high"
+
+
+class TestToolRequiredScenario:
+    """Config-loader refactor: reviewer must call read_file on a config path."""
+
+    def _run(self, review_md, tool_calls=None):
+        return ReviewRun(
+            mode="native_loop", pr_number=8003,
+            repo_full_name="misospace/pr-reviewer-action",
+            review_markdown=review_md,
+            tool_calls=tool_calls or [],
+            tool_stop_reason="model-stopped",
+        )
+
+    def _config_read_call(self, path="src/config_loader.py"):
+        return {"tool": "read_file", "args": {"path": path}, "status": "ok"}
+
+    def test_read_config_and_cite_passes(self):
+        run = self._run(
+            "Read the extracted config module. The interface is preserved; "
+            "all import sites match the new loader signature.",
+            tool_calls=[self._config_read_call()],
+        )
+        assert evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)["passed"] is True
+
+    def test_read_config_subpath_passes(self):
+        """Any path containing 'config' satisfies the read_file check."""
+        run = self._run(
+            "Verified the loader module. Extracted logic looks correct.",
+            tool_calls=[self._config_read_call("lib/config/parser.py")],
+        )
+        assert evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)["passed"] is True
+
+    def test_no_tool_call_fails(self):
+        run = self._run("Refactor looks clean. Approve.", tool_calls=[])
+        cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
+        assert cap["passed"] is False
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
+
+    def test_wrong_file_read_fails(self):
+        """Reading an unrelated file does not satisfy the config-read check."""
+        run = self._run(
+            "Checked the module, looks fine.",
+            tool_calls=[{"tool": "read_file", "args": {"path": "README.md"}, "status": "ok"}],
+        )
+        cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
+
+    def test_errored_tool_call_not_credited(self):
+        run = self._run(
+            "Reviewed the config module.",
+            tool_calls=[{"tool": "read_file", "args": {"path": "src/config.py"}, "status": "error"}],
+        )
+        cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
+
+    def test_read_without_mentioning_module_fails_citation_check(self):
+        """Tool call made, but review says nothing about the module — partial fail."""
+        run = self._run(
+            "Overall structure seems okay.",
+            tool_calls=[self._config_read_call()],
+        )
+        cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
+        assert cap["passed"] is False
+        assert any(c["id"] == "cited_loader_in_review" and not c["passed"]
+                   for c in cap["checks"])
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
