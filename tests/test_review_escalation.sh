@@ -67,8 +67,8 @@ check_contains "input escalate_on_dirty_baseline" "$ACTION" "escalate_on_dirty_b
 check_contains "review step receives BASELINE_CLEAN" "$ACTION" 'BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean }}'
 check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
 check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
-check "publish steps receive ESCALATION_REASON" \
-  "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "3"
+check "publish step receives ESCALATION_REASON" \
+  "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"
 
 echo ""
 echo "=== Marker carries escalation metadata ==="

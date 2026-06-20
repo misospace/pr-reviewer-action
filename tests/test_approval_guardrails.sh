@@ -93,8 +93,10 @@ check_contains "publish_mode default is comment" \
 check_contains "allow_approve default is false" \
   "$(cat "$ACTION_YML")" "default: \"false\""
 
-check_exists "action.yml has native review step" \
-  "$(grep -c 'Publish review verdict' "$ACTION_YML" || echo 0)"
+check_exists "action.yml has the publish dispatcher step" \
+  "$(grep -c '^    - name: Publish review$' "$ACTION_YML" || echo 0)"
+check_exists "action.yml dispatches the review_verdict publish mode" \
+  "$(grep -c '^          review_verdict)' "$ACTION_YML" || echo 0)"
 
 # The native-review invocations route through the platform seam (#221):
 # action.yml calls platform_review_native, whose github backend holds the

@@ -299,11 +299,13 @@ class TestActionWiring:
         assert "inline_findings_max:" in self.ACTION
 
     def test_all_publish_steps_receive_findings(self):
-        # All three publish steps (comment, review_comment, review_verdict)
-        # must receive FINDINGS so build_metadata_marker persists
-        # open_findings — without it, carry-forward never engages.
-        assert self.ACTION.count("FINDINGS: ${{ steps.review.outputs.findings }}") == 3
-        assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline_findings }}") == 2
+        # The single publish dispatcher (#303) carries one superset env block
+        # serving all three modes (comment, review_comment, review_verdict), so
+        # FINDINGS/INLINE_FINDINGS each appear once. FINDINGS lets
+        # build_metadata_marker persist open_findings — without it,
+        # carry-forward never engages.
+        assert self.ACTION.count("FINDINGS: ${{ steps.review.outputs.findings }}") == 1
+        assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline_findings }}") == 1
 
     def test_review_verdict_falls_back_on_failure(self):
         assert "falling back to plain review" in self.ACTION
