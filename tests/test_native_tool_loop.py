@@ -320,6 +320,60 @@ def test_wall_clock_budget():
     assert conv.open_tool_call_ids() == set()
 
 
+def test_wall_clock_triggers_mid_flight():
+    """wall_clock_sec fires after a slow tool executor, not just between model
+    round-trips.  A 1 s budget with a 1.5 s sleepy executor means round 1
+    completes (the budget is checked at the TOP of each iteration, before the
+    executor runs), but when the loop comes back for round 2 the elapsed time
+    already exceeds the budget and the loop stops with STOP_WALL_CLOCK.
+
+    Rounds are set to 10 and tool-call budget to 100, so neither of those caps
+    is responsible for the stop — it must be the wall-clock limit.
+
+    This test uses the real monotonic clock and a real time.sleep so it catches
+    regressions where the wall-clock check is moved or skipped.  The sleep is
+    intentionally short (1.5 s total) to keep the suite fast.
+    """
+    import time as _time
+
+    conv = fresh_conversation()
+
+    round_counter = {"n": 0}
+
+    def post(payload):
+        round_counter["n"] += 1
+        n = round_counter["n"]
+        return openai_tool_call_response(
+            [(f"c{n}", "read_file", json.dumps({"path": f"file{n}.txt"}))]
+        )
+
+    def slow_execute(tool_name, args):
+        _time.sleep(1.5)  # outlasts the 1 s wall-clock budget
+        return {"tool": tool_name, "status": "ok", "result": {"content": "ok"}}
+
+    outcome = drive_tool_loop(
+        conv,
+        post,
+        slow_execute,
+        api_format="openai",
+        model="m",
+        budgets=LoopBudgets(wall_clock_sec=1.0, max_rounds=10, max_tool_calls=100),
+        # Default time_fn=time.monotonic — real clock.
+    )
+
+    # The wall-clock guard fires on the second pass through the while-condition,
+    # after the slow executor has consumed more than 1 s.
+    assert outcome.stop_reason == STOP_WALL_CLOCK, (
+        f"expected STOP_WALL_CLOCK, got {outcome.stop_reason!r}"
+    )
+    # Rounds was not the limiting factor.
+    assert outcome.rounds < 10, "should have stopped long before max_rounds"
+    # At least one tool call executed (round 1 completed before the check fired).
+    assert len(outcome.executed) >= 1
+    # No open call ids — every issued call got a result.
+    assert conv.open_tool_call_ids() == set()
+
+
 # ---------------------------------------------------------------------------
 # drive_tool_loop — between-round result compaction (#197 §2)
 # ---------------------------------------------------------------------------
