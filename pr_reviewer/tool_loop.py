@@ -26,8 +26,8 @@ calls are answered from a dedup note without burning budget, every call id
 the model issues gets *some* result before the next request (the
 ``Conversation.open_tool_call_ids`` contract), and hard caps bound rounds,
 total calls, and wall clock. A model that never calls tools at all is
-reported as ``degraded`` so the caller can fall back to the
-plan_execute_loop planner path.
+reported as ``degraded`` so the caller can fall back to a corpus-only
+review (the plan_execute planner fallback was removed in #304).
 """
 
 from __future__ import annotations
@@ -123,8 +123,8 @@ class LoopOutcome:
     tool_calls_issued: int = 0  # everything the model asked for, incl. refused
     stop_reason: str = STOP_NO_TOOL_CALLS
     final_text: str = ""
-    # True when the model never issued a single tool call: the caller should
-    # degrade to the plan_execute_loop planner path (issue #203 spec).
+    # True when the model never issued a single tool call: the caller degrades
+    # to a corpus-only review (the plan_execute planner fallback was removed in #304).
     degraded: bool = False
     error: str = ""
 

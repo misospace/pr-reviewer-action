@@ -418,7 +418,7 @@ class TestGenerateReport:
                           verdict="request_changes", tokens_input=1000, tokens_output=500,
                           wall_clock_sec=5.0,
                           review_markdown="- [security/high] Hardcoded API key found in config"),
-                ReviewRun(mode="plan_execute", pr_number=1, repo_full_name="test/repo",
+                ReviewRun(mode="native_loop", pr_number=1, repo_full_name="test/repo",
                           verdict="request_changes", tokens_input=2000, tokens_output=800,
                           wall_clock_sec=10.0,
                           review_markdown="- [security/high] Hardcoded API key found in config\n- [correctness/medium] Unreachable code"),
@@ -430,9 +430,9 @@ class TestGenerateReport:
         assert report["metadata"]["total_prs"] == 1
         assert len(report["per_pr_results"]) == 1
         assert "tools_off" in report["mode_summary"]
-        assert "plan_execute" in report["mode_summary"]
+        assert "native_loop" in report["mode_summary"]
         assert report["mode_summary"]["tools_off"]["runs"] == 1
-        assert report["mode_summary"]["plan_execute"]["runs"] == 1
+        assert report["mode_summary"]["native_loop"]["runs"] == 1
 
     def test_multiple_prs(self):
         corpus = BenchmarkCorpus(prs=[{

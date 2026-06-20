@@ -75,47 +75,12 @@ class TestEnvIntBounded(TestCase):
             self.assertEqual(result, 4)
 
 
-class TestMaxRequestsInPlanningPrompt(TestCase):
-    """Test that the planning user prompt uses the dynamic max_requests value."""
-
-    def setUp(self):
-        self.mod = _import_harness()
-
-    def test_prompt_contains_dynamic_max_requests(self):
-        """Verify the f-string in main() uses {max_requests} not hardcoded 4.
-
-        We inspect the source code to confirm the prompt template uses the
-        variable rather than a literal, since main() requires a full runtime
-        environment to execute directly.
-        """
-        harness_path = _SCRIPTS_DIR / "run_tool_harness.py"
-        source = harness_path.read_text(encoding="utf-8")
-
-        # The prompt should use {max_requests} interpolation, not "4" literal
-        self.assertIn('f"Max requests: {max_requests}\\n"', source)
-        # Should NOT have a hardcoded "Max requests: 4" in the prompt
-        self.assertNotIn('"Max requests: 4\\n"', source)
-        self.assertNotIn("'Max requests: 4\\n'", source)
-
-
-class TestMaxRequestsSlicing(TestCase):
-    """Test that execution slicing uses the max_requests variable."""
-
-    def setUp(self):
-        self.mod = _import_harness()
-
-    def test_execution_uses_variable_slice(self):
-        """Verify both planning paths slice with [:max_requests] not [:4]."""
-        harness_path = _SCRIPTS_DIR / "run_tool_harness.py"
-        source = harness_path.read_text(encoding="utf-8")
-
-        # The loop path slices by the remaining cross-round budget, which is
-        # initialised from max_requests; the file-based path slices directly.
-        self.assertIn("requests_list[:budget]", source)
-        self.assertIn("budget = max_requests", source)
-        self.assertIn("tool_calls[:max_requests]", source)
-        # Should NOT have hardcoded [:4] slices in the execution loops
-        self.assertNotIn("[:4]", source)
+# NOTE: the plan_execute planner was removed in 2.0 (#304), so the former
+# TestMaxRequestsInPlanningPrompt / TestMaxRequestsSlicing classes — which
+# asserted the planner prompt's "Max requests: {max_requests}" string and the
+# planner/file-based [:budget] / [:max_requests] slicing — were dropped along
+# with that code. native_loop passes max_requests to the loop driver
+# programmatically; the budget cap is exercised in test_run_native_loop_wiring.py.
 
 
 class TestMaxRequestsBoundedCall(TestCase):

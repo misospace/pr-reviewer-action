@@ -340,8 +340,15 @@ resolve_system_prompt() {
 resolve_standards_file
 resolve_system_prompt
 
+# native_loop is the only tool mode as of 2.0 (the plan_execute_* planner paths
+# were removed in #304). A stale plan_execute_* value degrades to off with a
+# warning rather than erroring, so an un-migrated consumer still gets a review.
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-  off|plan_execute_once|plan_execute_loop|native_loop) ;;
+  off|native_loop) ;;
+  plan_execute_once|plan_execute_loop)
+    error "TOOL_MODE '$TOOL_MODE' was removed in 2.0 (#304); use native_loop. Treating as off."
+    TOOL_MODE="off"
+    ;;
   *)
     error "Invalid TOOL_MODE '$TOOL_MODE'; defaulting to off"
     TOOL_MODE="off"

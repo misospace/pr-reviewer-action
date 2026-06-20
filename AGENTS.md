@@ -48,7 +48,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 ### Enrichment
 
 - **`scripts/run_evidence_providers.py`** — Runs user-defined evidence provider commands from a JSON config, parses severity/findings output
-- **`scripts/run_tool_harness.py`** — Tool harness (`plan_execute_once` and `plan_execute_loop`): model plans read-only tool requests (`gh_api`, `read_file`, `web_fetch`, `git_grep`, named-only `run_command`), action executes them, appends results to corpus
+- **`scripts/run_tool_harness.py`** — Tool harness entry point (`tool_mode=native_loop`): drives the native tool-calling loop (`run_native_loop`) over the read-only tools in `tool_executors.py`; on a model that issues no tool calls it degrades to a corpus-only review. (The `plan_execute_*` planner modes were removed in 2.0/#304.)
 - **`scripts/image_digest_analysis.py`** — Analyzes image digests from the diff for provenance context
 
 ### Tests
