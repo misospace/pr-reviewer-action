@@ -601,6 +601,30 @@ outputs:
     description: Whether the full-review baseline was clean (for verdict safety)
     value: ${{ steps.precheck.outputs.baseline_clean }}
 
+# Shared environment for all three publish steps.
+# Using a YAML anchor so the common var mapping lives in one place — any new
+# input/output added to the publish env needs to be updated here only, closing
+# the v1.2.10-class of latent bug (#303).
+common_publish_env: &common_publish_env
+  GH_TOKEN: ${{ inputs.github_token }}
+  PLATFORM: ${{ inputs.platform }}
+  FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+  FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+  REPO: ${{ inputs.repo || github.repository }}
+  PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
+  VERDICT: ${{ steps.review.outputs.verdict }}
+  REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
+  REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
+  ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
+  REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
+  FINDINGS: ${{ steps.review.outputs.findings }}
+  EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+  TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
+  ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
+  COMMENT_MARKER: ${{ inputs.comment_marker }}
+  GITHUB_ACTION_PATH: ${{ github.action_path }}
+
 runs:
   using: composite
   steps:
@@ -810,25 +834,8 @@ runs:
       if: inputs.publish_review_comment == 'true' && steps.precheck.outputs.should_review == 'true' && inputs.publish_mode == 'comment'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
-        VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
-        FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        <<: *common_publish_env
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
@@ -873,28 +880,11 @@ runs:
       if: inputs.publish_mode == 'review_comment' && steps.precheck.outputs.should_review == 'true'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
-        VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
-        FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        <<: *common_publish_env
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
@@ -978,30 +968,13 @@ runs:
       if: inputs.publish_mode == 'review_verdict' && steps.precheck.outputs.should_review == 'true'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
-        VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
-        FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        <<: *common_publish_env
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
