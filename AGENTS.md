@@ -130,6 +130,36 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - The `run_command` tool never executes model-supplied shell text — only named argv definitions from a fixed read-only catalog (`git_status_short`, `git_diff_stat`, `git_diff_name_only`)
 - Versioning: `v1.x.y` semver tags; feature releases stay on `1.2.x` (`v1.3.0` is reserved for the tool-calling milestone, issue #197)
 
+## Label taxonomy (`agent/*` and Dispatch workflow labels)
+
+Labels are defined in `.github/labels.yaml`. There are two distinct groups that agents interact with:
+
+### Dispatch / operational labels
+These are managed by the Dispatch system (dispatch.jory.dev) and are the source of truth for issue workflow state. Agents read and set these to claim and advance work.
+
+| Label | Purpose |
+|---|---|
+| `status/backlog` | Not yet ready for pickup |
+| `status/ready` | Ready for a Dispatch worker to claim |
+| `status/in-progress` | Issue is claimed/actively worked |
+| `status/in-review` | PR or human review in progress |
+| `status/done` | Work complete |
+| `needs-escalation` | Routes to the escalated model lane (GPT-5.5 equivalent) |
+| `needs-info` | Blocked on information; agent should not pick up |
+| `needs-human` | Blocked on human decision; agent should not pick up |
+| `blocked` | Externally blocked; agent should not pick up |
+
+### Agent identity labels
+These tag which Dispatch worker lane handled the issue and are set by the Dispatch orchestrator, not by agents themselves.
+
+| Label | Meaning |
+|---|---|
+| `agent/saffron-normal` | Processed by the normal-lane Saffron worker (default untagged issues) |
+| `agent/saffron-escalated` | Processed by the escalated-lane Saffron worker (`needs-escalation` issues) |
+
+### Re-review label
+`ai-review` is a repo-internal label: adding it to an open PR triggers a fresh AI review run regardless of fingerprint. It is removed automatically by the action after publishing. This label is **not** a Dispatch workflow label.
+
 ## Inputs summary
 
 Required: `github_token`, `ai_base_url`, `ai_model`
