@@ -139,21 +139,18 @@ STICKY_COMMENT_BODY=$(awk '/Publish review comment$/,/^    - name: Publish revie
 check_contains "sticky comment mode uses COMMENT_MARKER variable" \
   "$STICKY_COMMENT_BODY" "COMMENT_MARKER"
 
-# Every published body must carry the bare COMMENT_MARKER and the fingerprint
-# marker, otherwise the precheck cannot find prior state and skip-if-unchanged /
-# incremental scope silently never trigger (regression guard).
-check_contains "sticky comment body emits the bare COMMENT_MARKER" \
-  "$STICKY_COMMENT_BODY" 'echo "$COMMENT_MARKER"'
-check_contains "sticky comment body emits the fingerprint marker" \
-  "$STICKY_COMMENT_BODY" "ai-pr-review-fingerprint"
-check_contains "review_comment body emits the bare COMMENT_MARKER" \
-  "$BODY_CONTENT_REVIEW_COMMENT" 'echo "$COMMENT_MARKER"'
-check_contains "review_comment body emits the fingerprint marker" \
-  "$BODY_CONTENT_REVIEW_COMMENT" "ai-pr-review-fingerprint"
-check_contains "review_verdict body emits the bare COMMENT_MARKER" \
-  "$BODY_CONTENT_REVIEW_VERDICT" 'echo "$COMMENT_MARKER"'
-check_contains "review_verdict body emits the fingerprint marker" \
-  "$BODY_CONTENT_REVIEW_VERDICT" "ai-pr-review-fingerprint"
+# Every published body must emit the marker preamble (sticky COMMENT_MARKER +
+# METADATA_MARKER + head-sha + fingerprint) so the precheck can find prior
+# state; otherwise skip-if-unchanged / incremental scope silently never trigger
+# (regression guard). The preamble is emitted via emit_review_markers
+# (publish_helpers.sh); its exact content and ordering are asserted in
+# tests/test_emit_review_markers.sh.
+check_contains "sticky comment body emits markers via emit_review_markers" \
+  "$STICKY_COMMENT_BODY" "emit_review_markers"
+check_contains "review_comment body emits markers via emit_review_markers" \
+  "$BODY_CONTENT_REVIEW_COMMENT" "emit_review_markers"
+check_contains "review_verdict body emits markers via emit_review_markers" \
+  "$BODY_CONTENT_REVIEW_VERDICT" "emit_review_markers"
 
 echo ""
 echo "=== Helper script validation ==="
