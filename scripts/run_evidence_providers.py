@@ -2,6 +2,7 @@
 """Execute evidence-provider commands and write structured results."""
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -16,6 +17,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from redact import mask_and_truncate, mask_secrets  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def env_int(name: str, default: int) -> int:
@@ -169,6 +172,19 @@ def run_provider(
         else:
             command_text = str(command)
             entry["command"] = command_text
+            # SECURITY: shell-string commands are executed via `bash -lc`, which
+            # interprets the string in a login shell — the full bash injection
+            # surface is available.  Prefer argv arrays (see SECURITY.md:
+            # "Prefer argv arrays … over shell strings … to avoid shell injection
+            # risks from `bash -lc` execution").  This branch is a trust
+            # boundary: the string is treated as trusted operator-supplied input,
+            # not as sanitised user content.
+            logger.warning(
+                "evidence provider %r: command is a shell string and will be "
+                "executed via `bash -lc`.  Prefer an argv list to avoid the "
+                "bash trust boundary (see SECURITY.md).",
+                entry["id"],
+            )
             completed = subprocess.run(
                 ["bash", "-lc", command_text],
                 stdout=subprocess.PIPE,

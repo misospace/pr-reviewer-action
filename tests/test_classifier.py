@@ -94,7 +94,7 @@ class TestPRKindMultiLanguage:
         ) == "db_or_migration_changes"
 
     def test_auth_risk_flag_typescript(self):
-        flags = _detect_risk_flags([_make_file("src/auth.ts")], "", [])
+        flags, _ = _detect_risk_flags([_make_file("src/auth.ts")], "", [])
         assert "auth_changes" in flags
 
 
@@ -230,30 +230,111 @@ class TestPRKindDefault:
 class TestRiskFlags:
     def test_linked_security_issue(self):
         issues = [{"labels": [{"name": "security"}]}]
-        flags = _detect_risk_flags([], "", issues)
+        flags, _ = _detect_risk_flags([], "", issues)
         assert "linked_security_issue" in flags
 
     def test_linked_audit_issue(self):
         issues = [{"labels": [{"name": "audit"}]}]
-        flags = _detect_risk_flags([], "", issues)
+        flags, _ = _detect_risk_flags([], "", issues)
         assert "linked_audit_issue" in flags
 
     def test_linked_priority_p1(self):
         issues = [{"labels": [{"name": "priority/p1"}]}]
-        flags = _detect_risk_flags([], "", issues)
+        flags, _ = _detect_risk_flags([], "", issues)
         assert "linked_priority_p1" in flags
 
     def test_no_risk_flags(self):
         issues = [{"labels": [{"name": "bug"}]}]
-        flags = _detect_risk_flags([], "", issues)
+        flags, _ = _detect_risk_flags([], "", issues)
         assert not any(
             f.startswith("linked_") for f in flags
         ), f"Expected no linked risk flags, got {flags}"
 
     def test_file_serving_flag(self):
         files = [_make_file("static/handler.py")]
-        flags = _detect_risk_flags(files, "", [])
+        flags, _ = _detect_risk_flags(files, "", [])
         assert "file_serving_changes" in flags
+
+
+# ---------------------------------------------------------------------------
+# Risk flag file attribution tests
+# ---------------------------------------------------------------------------
+
+class TestRiskFlagsWithFiles:
+    """Tests for risk_flags_with_files — per-flag file attribution (issue #297)."""
+
+    def test_auth_flag_attributes_triggering_file(self):
+        # auth.py triggers auth_changes; the file should appear in attribution.
+        files = [_make_file("auth.py"), _make_file("utils.py")]
+        flags, attribution = _detect_risk_flags(files, "", [])
+        assert "auth_changes" in flags
+        assert "auth_changes" in attribution
+        assert "auth.py" in attribution["auth_changes"]
+        # utils.py did NOT trigger the flag
+        assert "utils.py" not in attribution["auth_changes"]
+
+    def test_secret_flag_attributes_multiple_files(self):
+        # Two secret-related files both appear in the attribution list.
+        files = [
+            _make_file("secrets.yaml"),
+            _make_file("vault_config.json"),
+            _make_file("main.py"),
+        ]
+        flags, attribution = _detect_risk_flags(files, "", [])
+        assert "secret_handling_changes" in flags
+        attributed = attribution.get("secret_handling_changes", [])
+        assert "secrets.yaml" in attributed
+        assert "vault_config.json" in attributed
+        assert "main.py" not in attributed
+
+    def test_path_handling_diff_only_has_empty_file_list(self):
+        # Flag fires only from diff content → attribution list is empty (no file names matched).
+        files = [_make_file("app.py")]
+        diff = "import pathlib\nresult = pathlib.Path(user_input)"
+        flags, attribution = _detect_risk_flags(files, diff, [])
+        assert "path_handling_changes" in flags
+        # app.py itself did not match any path-handling filename pattern
+        assert attribution.get("path_handling_changes", None) == []
+
+    def test_linked_flags_absent_from_attribution(self):
+        # Issue-linked flags have no file attribution and must not appear in mapping.
+        issues = [{"labels": [{"name": "security"}, {"name": "priority/p0"}]}]
+        flags, attribution = _detect_risk_flags([], "", issues)
+        assert "linked_security_issue" in flags
+        assert "linked_priority_p0" in flags
+        assert "linked_security_issue" not in attribution
+        assert "linked_priority_p0" not in attribution
+
+    def test_classify_pr_exposes_risk_flags_with_files(self):
+        # End-to-end: classify_pr should populate risk_flags_with_files on the result.
+        files = [_make_file("src/auth_service.py"), _make_file("app.py")]
+        result = classify_pr(files, diff_text="", linked_issues=[])
+        assert isinstance(result.risk_flags_with_files, dict)
+        assert "auth_changes" in result.risk_flags_with_files
+        assert "src/auth_service.py" in result.risk_flags_with_files["auth_changes"]
+        assert "app.py" not in result.risk_flags_with_files["auth_changes"]
+
+    def test_risk_flags_with_files_in_serialized_dict(self):
+        # risk_flags_with_files must survive to_dict() so run_review.sh can jq it.
+        files = [_make_file("static/serve.py")]
+        result = classify_pr(files)
+        d = result.to_dict()
+        assert "risk_flags_with_files" in d
+        assert isinstance(d["risk_flags_with_files"], dict)
+        assert "file_serving_changes" in d["risk_flags_with_files"]
+        assert "static/serve.py" in d["risk_flags_with_files"]["file_serving_changes"]
+
+    def test_no_file_based_flags_produces_empty_attribution(self):
+        # A PR with only linked-issue flags and no file-pattern hits has empty attribution.
+        files = [_make_file("README.md")]
+        issues = [{"labels": [{"name": "audit"}]}]
+        flags, attribution = _detect_risk_flags(files, "", issues)
+        assert "linked_audit_issue" in flags
+        # No file-based flags fired, so attribution only contains file-based entries
+        file_based_flags = {"file_serving_changes", "path_handling_changes",
+                            "auth_changes", "secret_handling_changes"}
+        for flag in attribution:
+            assert flag in file_based_flags
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +433,7 @@ class TestClassifyPR:
         d = result.to_dict()
         assert "pr_kind" in d
         assert "risk_flags" in d
+        assert "risk_flags_with_files" in d
         assert "changed_files_summary" in d
         assert "linked_issue_labels" in d
         assert "must_check" in d

@@ -20,16 +20,8 @@ source "$ROOT_DIR/scripts/model_call.sh"
 
 PASS=0
 FAIL=0
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"
-    FAIL=$((FAIL + 1))
-  fi
-}
+# shellcheck source=_lib/assert.sh
+source "$SCRIPT_DIR/_lib/assert.sh"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT

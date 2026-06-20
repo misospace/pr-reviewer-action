@@ -11,19 +11,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$_TEST_DIR/.." && pwd)"
 SEAM="$SCRIPT_DIR/scripts/platform_api.sh"
 
 PASS=0
 FAIL=0
-check() {
-  local desc="$1" result="$2" expected="$3"
-  if [[ "$result" == "$expected" ]]; then
-    echo "  PASS: $desc"; PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc (got '$result', expected '$expected')"; FAIL=$((FAIL + 1))
-  fi
-}
+# shellcheck source=_lib/assert.sh
+source "$_TEST_DIR/_lib/assert.sh"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
