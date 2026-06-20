@@ -1,1 +1,4 @@
+# Single-owner model: @joryirving is the sole code owner for all files.
+# This is a deliberate bus-factor-1 choice for this personal project —
+# no co-owners are added until a second maintainer actively contributes.
 * @joryirving
