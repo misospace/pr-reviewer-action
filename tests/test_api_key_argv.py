@@ -16,7 +16,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import pytest
 
-import run_tool_harness as rth
+import run_tool_harness as rth  # noqa: F401  (kept for run_chat_completion re-export)
+from pr_reviewer import transport
 
 
 OPENAI_RESPONSE = json.dumps({"choices": [{"message": {"content": "planned"}}]})
@@ -40,7 +41,9 @@ class _Capture:
 
 def _call(api_format="openai", api_key="sk-secret-789"):
     cap = _Capture()
-    with mock.patch.object(rth, "safe_run", cap.fake_safe_run):
+    # safe_run + run_chat_request now live in pr_reviewer.transport (#304 split);
+    # patch there so run_chat_completion's internal call is intercepted.
+    with mock.patch.object(transport, "safe_run", cap.fake_safe_run):
         result = rth.run_chat_completion(
             base_url="http://localhost:11434/v1",
             api_format=api_format,
