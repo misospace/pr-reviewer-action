@@ -307,7 +307,7 @@ else
 fi
 
 echo ""
-echo "=== Tool harness: Anthropic planner request ==="
+echo "=== Tool harness: native_loop degrades on a no-tool-call response ==="
 mkdir -p "$TMPDIR/harness-anthropic"
 printf '# Review corpus\n' > "$TMPDIR/harness-anthropic/review-corpus.truncated.md"
 (
@@ -316,13 +316,16 @@ printf '# Review corpus\n' > "$TMPDIR/harness-anthropic/review-corpus.truncated.
     AI_BASE_URL=http://127.0.0.1:18080/v1 \
     AI_API_FORMAT=anthropic \
     AI_MODEL=mock-anthropic \
-    TOOL_MODE=plan_execute_once \
+    TOOL_MODE=native_loop \
     TOOL_ALLOWED_GH_API_REPOS='*' \
     ALLOWED_SOURCE_HOSTS=github.com \
     python3 "$ROOT_DIR/scripts/run_tool_harness.py"
 )
-check "anthropic planner completed" "$(jq -r '.mode' "$TMPDIR/harness-anthropic/tool-harness.json")" "plan_execute_once"
-check "anthropic planner ignored non-requests response" "$(jq -r '.planning_warning' "$TMPDIR/harness-anthropic/tool-harness.json")" "Planner response did not contain requests[]"
+# The mock returns a plain text response (no tool_use), so the native loop
+# issues no tool calls and the harness degrades to a corpus-only review —
+# still writing a native_loop-tagged tool-harness.json (#304).
+check "native_loop harness wrote a result" "$(jq -r '.mode' "$TMPDIR/harness-anthropic/tool-harness.json")" "native_loop"
+check "native_loop degraded (no tool calls)" "$(jq -r 'has("native_loop_degraded")' "$TMPDIR/harness-anthropic/tool-harness.json")" "true"
 
 echo ""
 echo "=== Evidence provider execution ==="
@@ -540,7 +543,7 @@ else
 fi
 
 echo ""
-echo "=== Tool harness planning corpus: plan_execute_once uses neutral text ==="
+echo "=== Tool harness planning corpus: native_loop uses neutral text ==="
 
 # Simulate the initial tool-harness.md creation logic from run_review.sh
 create_default_tool_harness() {
@@ -548,7 +551,7 @@ create_default_tool_harness() {
   local output_file="$2"
 
   case "$(printf '%s' "$tool_mode" | tr '[:upper:]' '[:lower:]')" in
-    plan_execute_once)
+    native_loop)
       cat > "$output_file" <<'EOF'
 Tool harness planning pending.
 EOF
@@ -561,8 +564,8 @@ EOF
   esac
 }
 
-# Test: plan_execute_once should NOT contain "disabled"
-create_default_tool_harness "plan_execute_once" "$TMPDIR/th-planning.md"
+# Test: native_loop should NOT contain "disabled"
+create_default_tool_harness "native_loop" "$TMPDIR/th-planning.md"
 check "planning mode has neutral text" "$(cat "$TMPDIR/th-planning.md")" "Tool harness planning pending."
 check "planning mode does not say disabled" "$(grep -c 'disabled' "$TMPDIR/th-planning.md" || true)" "0"
 

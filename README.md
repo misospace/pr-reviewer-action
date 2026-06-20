@@ -319,9 +319,9 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `tool_mode` | Tool harness mode: `off`, `plan_execute_once`, `plan_execute_loop`, or `native_loop` | No | `off` |
-| `tool_max_requests` | Maximum tool requests executed in one harness run (total across rounds in loop mode) | No | `4` |
-| `tool_max_rounds` | Maximum planning rounds for `tool_mode=plan_execute_loop`; for `native_loop`, up to twice this (capped at 8) since a round is one model turn | No | `3` |
+| `tool_mode` | Tool harness mode: `off` or `native_loop` (the `plan_execute_*` planner modes were removed in 2.0) | No | `off` |
+| `tool_max_requests` | Maximum tool requests executed in one harness run (total across the loop) | No | `4` |
+| `tool_max_rounds` | Round budget for `tool_mode=native_loop`: up to twice this (capped at 8) since a round is one model turn | No | `3` |
 | `tool_loop_wall_clock_sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `120` |
 | `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
 | `tool_loop_summarize_max_tokens` | Maximum completion tokens for each result-summarization call when `tool_loop_summarize` is enabled | No | `512` |
@@ -567,7 +567,7 @@ Evidence providers are **disabled by default on cross-repository pull requests**
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
     ai_model: qwen3-32b
-    tool_mode: plan_execute_once
+    tool_mode: native_loop
     tool_max_requests: "4"
     tool_planning_timeout_sec: "30"
     tool_planning_max_context_bytes: "50000"
@@ -579,11 +579,7 @@ Evidence providers are **disabled by default on cross-repository pull requests**
     tool_min_successful_requests: "1"
 ```
 
-In `plan_execute_once` mode, the model first plans up to `tool_max_requests` read-only evidence calls, then the action executes those calls and appends the results to the final review corpus.
-
-In `plan_execute_loop` mode the planning iterates: after each round's tools run, the planner sees the results (clearly fenced as untrusted data) and may request follow-ups — "the diff touches `auth/session.go` → read it → it calls `validateToken` → grep for other callers". The loop stops when the planner replies `{"requests": []}` (or `DONE`), the `tool_max_requests` total budget is spent, `tool_max_rounds` is reached, or a later-round response fails to parse (the review proceeds with the evidence gathered so far — a planning hiccup never fails the review). Requests identical to ones already executed are deduplicated so weak models cannot burn the budget re-fetching the same evidence. Each round is an extra planning model call, so latency grows with depth; the executor, allowlists, and size caps are identical to single-round mode.
-
-In `native_loop` mode the reviewing model uses its provider's native tool-calling API (OpenAI `tool_calls` / Anthropic `tool_use`) instead of a JSON-in-prose planner. The tool schemas are sent with the request and the model holds the conversation: it issues a call, sees the result appended as a real tool-result turn, and decides the next call from what came back — so a chain like "read the machineconfig → extract the platform version → fetch that version's published compatibility matrix" is expressed natively, with each hop conditioned on the previous one's content rather than guessed up front. The loop stops when the model replies with no further tool calls, the `tool_max_requests` total budget is spent, the round cap is hit (`native_loop` allows up to `2 × tool_max_rounds`, capped at 8, since one model turn is one round), or `tool_loop_wall_clock_sec` elapses. Malformed arguments and duplicate calls are answered with a corrective tool-result the model can react to (duplicates don't cost budget); a transport error mid-loop keeps the evidence already gathered. When the conversation outgrows its context budget the oldest tool results are compacted before the next turn — blunt-truncated by default, or (with `tool_loop_summarize`) folded into a model-generated evidence digest that keeps the salient facts in fewer tokens while the newest results stay verbatim. A model that never emits a tool call **degrades automatically to `plan_execute_loop`**, so `native_loop` is safe to enable on a model whose tool-calling support is uncertain. Non-streaming requests only. The executor, allowlists, size caps, and tool catalog are identical across all three modes. Supported tools are:
+In `native_loop` mode the reviewing model uses its provider's native tool-calling API (OpenAI `tool_calls` / Anthropic `tool_use`). The tool schemas are sent with the request and the model holds the conversation: it issues a call, sees the result appended as a real tool-result turn, and decides the next call from what came back — so a chain like "read the machineconfig → extract the platform version → fetch that version's published compatibility matrix" is expressed natively, with each hop conditioned on the previous one's content rather than guessed up front. The loop stops when the model replies with no further tool calls, the `tool_max_requests` total budget is spent, the round cap is hit (up to `2 × tool_max_rounds`, capped at 8, since one model turn is one round), or `tool_loop_wall_clock_sec` elapses. Malformed arguments and duplicate calls are answered with a corrective tool-result the model can react to (duplicates don't cost budget); a transport error mid-loop keeps the evidence already gathered. When the conversation outgrows its context budget the oldest tool results are compacted before the next turn — blunt-truncated by default, or (with `tool_loop_summarize`) folded into a model-generated evidence digest that keeps the salient facts in fewer tokens while the newest results stay verbatim. A model that never emits a tool call **degrades to a corpus-only review** (the verdict is still produced, just without gathered evidence), so `native_loop` is safe to enable on a model whose tool-calling support is uncertain. Loop turns stream by default (`ai_stream`). Supported tools are:
 
 - `gh_api` with a repo-local path like `repos/owner/repo/pulls/123/files`
 - `read_file` for files inside the checked-out repository
@@ -1014,7 +1010,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 - `evidence_providers_file` accepts JSON only. It can be either an object with `providers: []` or a top-level provider array.
 - Provider `command` accepts either a shell string (executed via `bash -lc`) or an argument array (invoked directly). **Argv arrays are strongly recommended** to avoid shell injection risks. Each provider can override `timeout_sec` and `max_output_bytes`.
 - Provider output is appended to the review corpus under an `Evidence Providers` section.
-- `tool_mode=plan_execute_once` adds a single planning-and-execution tool round before final review synthesis; `plan_execute_loop` iterates planning (bounded by `tool_max_rounds` and the total `tool_max_requests` budget) with results fed back as untrusted data.
+- `tool_mode=native_loop` lets the model gather read-only evidence via native tool calls before producing the verdict (bounded by `tool_max_requests`, `tool_max_rounds`, and `tool_loop_wall_clock_sec`); a model that issues no tool calls degrades to a corpus-only review.
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.
 - Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction. The `run_command` tool does not execute arbitrary shell text; it accepts only named read-only command definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`) and runs them argv-only without `bash -lc`.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).
