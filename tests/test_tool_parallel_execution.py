@@ -14,11 +14,15 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import pytest
 
-import run_tool_harness as rth
+import run_tool_harness as rth  # noqa: F401  (kept for execute_tool_requests re-export)
+from pr_reviewer import tool_executors
 
 
 def _call(requests, fake_execute):
-    with mock.patch.object(rth, "execute_tool_request", fake_execute):
+    # execute_tool_request[s] now live in pr_reviewer.tool_executors (#304 split);
+    # execute_tool_requests calls the module-local execute_tool_request, so the
+    # fake must be patched there to be invoked.
+    with mock.patch.object(tool_executors, "execute_tool_request", fake_execute):
         return rth.execute_tool_requests(
             requests,
             workspace_root="/tmp",

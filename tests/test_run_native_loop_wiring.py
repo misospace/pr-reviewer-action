@@ -17,6 +17,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import run_tool_harness as rth  # noqa: E402
+from pr_reviewer import transport  # noqa: E402
 
 
 def _openai_call(call_id, name, args):
@@ -194,7 +195,9 @@ def test_run_chat_request_streams_and_reassembles(monkeypatch):
         captured["args"] = args
         return types.SimpleNamespace(returncode=0, stdout=sse, stderr="")
 
-    monkeypatch.setattr(rth, "safe_run", fake_safe_run)
+    # safe_run + run_chat_request live in pr_reviewer.transport (#304 split);
+    # run_chat_request calls the module-local safe_run, so patch it there.
+    monkeypatch.setattr(transport, "safe_run", fake_safe_run)
 
     payload = {"model": "m", "stream": True, "stream_options": {"include_usage": True}}
     parsed = rth.run_chat_request("http://model.local/v1", "openai", payload, "", 30)

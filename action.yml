@@ -337,17 +337,16 @@ inputs:
     default: "false"
   tool_mode:
     description: >-
-      Optional tool harness mode. plan_execute_once lets the model request read-only
-      evidence tools in a single planning round before the final review. plan_execute_loop
-      re-plans after seeing each round's results (up to tool_max_rounds), so the model can
-      dig further based on what it found; tool_max_requests is the total budget across rounds.
-      native_loop uses the model's native tool-calling API: the model holds
-      the tool schemas and decides each next call from the previous result, enabling the
-      multi-hop chains the planner modes cannot express; a model that never emits a tool
-      call degrades automatically to the plan_execute_loop path. Loop turns stream by
-      default (controlled by ai_stream) so long turns don't time out behind a short-idle
-      proxy; a stream that can't be reassembled is retried non-streamed for that turn.
-      Budgets reuse tool_max_requests and tool_max_rounds, plus tool_loop_wall_clock_sec.
+      Optional tool harness mode: "off" (no evidence tools) or "native_loop". With
+      native_loop the model uses its native tool-calling API — it holds the tool
+      schemas and decides each next read-only call from the previous result, enabling
+      multi-hop evidence chains. A model that never emits a tool call degrades to a
+      corpus-only review (the verdict is still produced). Loop turns stream by default
+      (controlled by ai_stream) so long turns don't time out behind a short-idle proxy;
+      a stream that can't be reassembled is retried non-streamed for that turn. Budgets:
+      tool_max_requests, tool_max_rounds, and tool_loop_wall_clock_sec. (The legacy
+      plan_execute_once / plan_execute_loop planner modes were removed in 2.0; a stale
+      value is treated as "off".)
     required: false
     default: "off"
   tool_loop_wall_clock_sec:
@@ -388,10 +387,9 @@ inputs:
     default: "4"
   tool_max_rounds:
     description: >-
-      Maximum planning rounds for tool_mode=plan_execute_loop. For tool_mode=native_loop
-      a round is a single model turn, so the loop allows up to twice this value (capped
-      at 8) to leave room for one-call-per-turn chains and repair turns. Ignored for
-      other modes.
+      Round budget for tool_mode=native_loop, where a round is a single model turn:
+      the loop allows up to twice this value (capped at 8) to leave room for
+      one-call-per-turn chains and repair turns. Ignored when tool_mode=off.
     required: false
     default: "3"
   tool_planning_timeout_sec:

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """A/B evaluation harness for comparing PR review modes.
 
-Compares three review approaches on a shared PR corpus:
+Compares review approaches on a shared PR corpus:
   - tools_off:     no tool harness, direct model call only
-  - plan_execute:  current plan_execute_once tool harness mode
-  - native_loop:   future native tool-calling loop (Option B)
+  - native_loop:   native tool-calling loop (the only tool mode as of 2.0)
 
 For each PR the harness runs all enabled modes and collects:
   - findings quality  (vs known-good findings)
@@ -71,7 +70,7 @@ class KnownFinding:
 @dataclass
 class ReviewRun:
     """Results from a single review mode on a single PR."""
-    mode: str              # "tools_off", "plan_execute", "native_loop"
+    mode: str              # "tools_off", "native_loop"
     pr_number: int
     repo_full_name: str
     tokens_input: int = 0
@@ -387,7 +386,7 @@ def run_review_for_pr(
 
     Args:
         pr_entry: Corpus entry for one PR (with url, number, repo_full_name).
-        mode: One of "tools_off", "plan_execute", "native_loop".
+        mode: One of "tools_off", "native_loop".
         work_dir: Working directory for this run's artifacts.
         model_config: Model configuration (base_url, model, api_key, etc.).
 
@@ -409,10 +408,8 @@ def run_review_for_pr(
         # Determine tool_mode argument for run_review.sh
         if mode == "tools_off":
             tool_mode_arg = ""
-        elif mode == "plan_execute":
-            tool_mode_arg = "plan_execute_once"
         elif mode == "native_loop":
-            tool_mode_arg = "native_loop"  # future value
+            tool_mode_arg = "native_loop"
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -502,7 +499,7 @@ def generate_report(
     corpus: BenchmarkCorpus,
 ) -> dict[str, Any]:
     """Generate the full benchmark report."""
-    modes = {"tools_off", "plan_execute", "native_loop"}
+    modes = {"tools_off", "native_loop"}
     active_modes = set()
 
     # Per-mode aggregation
@@ -655,8 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["tools_off", "plan_execute"],
-        help="Review modes to run (default: tools_off plan_execute)",
+        default=["tools_off", "native_loop"],
+        help="Review modes to run (default: tools_off native_loop)",
     )
     parser.add_argument(
         "--model",

@@ -20,7 +20,7 @@ fi
 
 if [ ! -f tool-harness.md ]; then
   case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in
-    plan_execute_once|plan_execute_loop|native_loop)
+    native_loop)
       cat > tool-harness.md <<'EOF'
 Tool harness planning pending.
 EOF
@@ -193,14 +193,14 @@ fi
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in plan_execute_once|plan_execute_loop|native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
+case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
 if [[ "$TOOL_HARNESS_ENABLED" == "true" ]]; then
   if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     cat > tool-harness.md <<'EOF'
 Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.
 EOF
     cat > tool-harness.json <<'EOF'
-{"mode":"plan_execute","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}
+{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}
 EOF
   else
     log "Running tool harness in mode: $TOOL_MODE"
@@ -210,7 +210,7 @@ EOF
 Tool harness failed to run in this review.
 EOF
       cat > tool-harness.json <<'EOF'
-{"mode":"plan_execute","planned_request_count":0,"executed_request_count":0,"tool_results":[],"error":"execution failed"}
+{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"error":"execution failed"}
 EOF
     fi
   fi
