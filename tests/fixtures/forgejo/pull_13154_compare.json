@@ -1,0 +1,27 @@
+{
+  "total_commits": 1,
+  "commits": [
+    {
+      "sha": "c468a11dad3403e8428e7d60606cc2b13dc50ebe",
+      "commit": {
+        "message": "Update actions/setup-forgejo to v3.2.3\n",
+        "author": {
+          "name": "Renovate Bot",
+          "email": "bot@kriese.eu",
+          "date": "2026-06-21T00:18:56Z"
+        }
+      },
+      "stats": {
+        "total": 2,
+        "additions": 1,
+        "deletions": 1
+      }
+    }
+  ],
+  "files": [
+    {
+      "filename": ".forgejo/workflows/build-release-integration.yml",
+      "status": "modified"
+    }
+  ]
+}
