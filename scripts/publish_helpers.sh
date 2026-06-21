@@ -199,6 +199,7 @@ build_metadata_marker() {
     --arg evidence "${EVIDENCE_DIGEST:-}" \
     --arg evmem "$evmem" \
     --argjson findings "$findings_json" \
+    --arg chr "${CACHE_HIT_RATIO:-}" \
     '{version: 1, head_sha: $head, base_sha: $base, review_scope: $scope, review_result: $result}
      + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
      + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
@@ -210,7 +211,8 @@ build_metadata_marker() {
           | map(select(type == "object" and (.resolution // "") != "resolved")
               | {severity, category, file, line, message: ((.message // "") | tostring | .[0:200])})
           | .[0:20])}
-        else {} end)')"
+        else {} end)
+     + (if $chr != "" and $chr != "-" then {cache_hit_ratio: ($chr | tonumber)} else {} end)')"
   printf '<!-- ai-pr-reviewer:%s -->' "$marker_json"
 }
 
