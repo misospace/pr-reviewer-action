@@ -180,3 +180,8 @@ elif [[ "$REVIEW_ROUTE" == "smart" ]]; then
   AI_API_KEY="$SMART_API_KEY"
 fi
 log "Review route: $REVIEW_ROUTE ($ROUTE_REASON) → $AI_MODEL"
+
+# Tailor the default system prompt to this PR now that pr_kind / has_version_bump
+# are known: drop the host-platform and image-digest guidance blocks when they
+# do not apply, so they stop re-prefilling on every native_loop round (#258).
+apply_system_prompt_fragments

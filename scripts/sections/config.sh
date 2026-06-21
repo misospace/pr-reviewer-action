@@ -326,6 +326,35 @@ resolve_system_prompt() {
   fi
 
   SYSTEM_PROMPT="$(<"$SCRIPT_DIR/default_system_prompt.txt")"
+  SYSTEM_PROMPT_IS_DEFAULT=1
+}
+
+# Conditionally assemble the bundled default system prompt: substitute the
+# PR-type placeholders with their guidance fragments only when relevant to THIS
+# PR, so irrelevant instructions don't inflate every native_loop round's prefill
+# (#258 perf). The version-bump (host-platform / compatibility-matrix) guidance
+# applies to the infra-change classes (dependency_upgrade, k8s_manifest) — gated
+# on pr_kind, NOT a version-bump regex, because a Talos kubelet bump lives in an
+# `image:` tag (missed by version-bump detection) yet classifies as k8s_manifest,
+# and that IS the founding use case. The digest guidance is gated on the
+# renovate_digest_only kind. User-supplied prompts carry no placeholders and are
+# left untouched. SYSTEM_PROMPT is exported so the native_loop harness
+# (run_tool_harness.py, env-first) uses the same assembled prompt as the standard
+# review call rather than re-reading the file.
+apply_system_prompt_fragments() {
+  if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" && -f classification.json ]]; then
+    local kind vb="" dg=""
+    kind="$(jq -r '.pr_kind // ""' classification.json 2>/dev/null || echo "")"
+    if [[ "$kind" == "dependency_upgrade" || "$kind" == "k8s_manifest" ]]; then
+      vb="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
+    fi
+    if [[ "$kind" == "renovate_digest_only" ]]; then
+      dg="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/$vb}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
+  fi
+  export SYSTEM_PROMPT
 }
 
 resolve_standards_file
