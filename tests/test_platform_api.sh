@@ -133,6 +133,15 @@ check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_compare o/r aaa...bbb' "https://forgejo.example.com")"
 check "forgejo compare uses backend cli" "$RESULT" "forgejo compare o/r aaa...bbb"
+# --jq passthrough: the forgejo path applies a trailing --jq to the backend's
+# JSON, mirroring `gh api --jq`, so one call site works on either platform.
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"total_commits\":3}"; }; platform_compare o/r aaa...bbb --jq .total_commits' "https://forgejo.example.com")"
+check "forgejo compare --jq projects a present field" "$RESULT" "3"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"head\":{\"sha\":\"deadbeef\"}}"; }; platform_pr_get o/r 7 --jq .head.sha' "https://forgejo.example.com")"
+check "forgejo pr_get --jq projects a nested field" "$RESULT" "deadbeef"
+# Documented divergence: Forgejo's compare omits .url, so jq -r yields "null".
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"total_commits\":3}"; }; platform_compare o/r aaa...bbb --jq .url' "https://forgejo.example.com")"
+check "forgejo compare --jq on an absent field yields null" "$RESULT" "null"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_pr_reviews o/r 7' "https://forgejo.example.com")"
 check "forgejo pr reviews uses backend cli" "$RESULT" "forgejo list-pr-reviews o/r 7"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_review_create_json o/r 7 req.json' "https://forgejo.example.com")"
