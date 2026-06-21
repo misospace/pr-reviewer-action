@@ -582,6 +582,9 @@ outputs:
   baseline_clean:
     description: Whether the full-review baseline was clean (for verdict safety)
     value: ${{ steps.precheck.outputs.baseline_clean }}
+  cache_hit_ratio:
+    description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
+    value: ${{ steps.review.outputs.cache_hit_ratio }}
 
 runs:
   using: composite
@@ -810,6 +813,7 @@ runs:
         EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
+        CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}

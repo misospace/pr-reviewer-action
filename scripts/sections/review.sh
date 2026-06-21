@@ -396,6 +396,15 @@ if [[ -n "$PREVIOUS_HEAD_SHA" ]]; then
   echo "previous_head_sha=$PREVIOUS_HEAD_SHA" >> "$OUTPUT_FILE"
 fi
 
+# Cache hit ratio: per-review prompt-cache effectiveness signal from the
+# tool harness (native_loop). Exported as a step output so the publish step
+# can include it in the metadata marker for cross-run aggregation (#333).
+_chr="-"
+if [ -f tool-harness.json ]; then
+  _chr="$(jq -r '.usage.cache_hit_ratio // empty' tool-harness.json 2>/dev/null || true)"
+fi
+[[ -z "$_chr" ]] && _chr="-"
+echo "cache_hit_ratio=$_chr" >> "$OUTPUT_FILE"
 # Observability: a step-summary table so a user debugging a slow/odd review can
 # see the engine, verdict, token usage, truncation, and the active budget
 # without digging through raw logs.
@@ -416,6 +425,14 @@ write_step_summary() {
     prompt_tok="$(jq -r '.usage.prompt_tokens // "-"' "$usage_file" 2>/dev/null || echo -)"
     comp_tok="$(jq -r '.usage.completion_tokens // "-"' "$usage_file" 2>/dev/null || echo -)"
   fi
+
+  # Cache hit ratio: from the tool harness (native_loop mode).
+  # Falls back to "-" when unavailable (non-native modes or backend doesn't report it).
+  local cache_hit_ratio="-"
+  if [ -f tool-harness.json ]; then
+    cache_hit_ratio="$(jq -r '.usage.cache_hit_ratio // empty' tool-harness.json 2>/dev/null || true)"
+  fi
+  [[ -z "$cache_hit_ratio" ]] && cache_hit_ratio="-"
 
   local diff_trunc="no" corpus_trunc="no"
   [ "$diff_bytes" -gt "$MAX_DIFF" ] 2>/dev/null && diff_trunc="yes (cap ${MAX_DIFF})"
@@ -450,6 +467,9 @@ write_step_summary() {
     echo "| Diff bytes | ${diff_bytes} (truncated: ${diff_trunc}) |"
     echo "| Corpus bytes | ${corpus_bytes} (truncated: ${corpus_trunc}) |"
     echo "| Prompt tokens | ${prompt_tok} |"
+    if [[ "$cache_hit_ratio" != "-" ]]; then
+      echo "| Cache hit ratio | ${cache_hit_ratio} |"
+    fi
     echo "| Completion tokens | ${comp_tok} |"
   } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 }
