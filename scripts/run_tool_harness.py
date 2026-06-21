@@ -31,7 +31,6 @@ from redact import mask_secrets  # noqa: E402
 # Re-imported here so call sites and tests that reference these names via
 # run_tool_harness keep working unchanged.
 from pr_reviewer.transport import (  # noqa: E402
-    run_chat_completion,
     run_chat_request,
     safe_run,
 )
@@ -53,7 +52,6 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     normalize_host,
     read_file,
     run_command,
-    truncate_text,
     web_fetch,
     web_search,
 )
@@ -221,12 +219,12 @@ def build_planning_context(max_bytes, corpus_path=None):
         used = sum(len(s.encode("utf-8")) for s in sections)
         diff_cap = max(2000, max_bytes - used - 200)
         add_section("PR Diff (head)", "pr.diff.truncated", diff_cap, "diff")
-        text, clipped = truncate_text("\n\n".join(sections), max_bytes)
+        text, clipped = mask_and_truncate("\n\n".join(sections), max_bytes)
         return text, clipped or any_clipped
 
     if corpus_path is not None and Path(corpus_path).exists():
         corpus_text = Path(corpus_path).read_text(encoding="utf-8", errors="replace")
-        return truncate_text(corpus_text, max_bytes)
+        return mask_and_truncate(corpus_text, max_bytes)
 
     return "", False
 

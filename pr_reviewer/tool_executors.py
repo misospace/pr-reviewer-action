@@ -21,7 +21,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import mask_and_truncate, mask_secrets  # noqa: E402
 
 # The gh_api allowlist + denied path segments live on the platform seam (single
 # source of truth); _resolve_workspace_path reuses GH_DENY_SUBSTRINGS to block
@@ -64,22 +64,6 @@ def allowlisted_host(host, allowlist):
         if candidate == item:
             return True
     return False
-
-def truncate_text(text, max_bytes):
-    masked = mask_secrets(text)
-    raw = masked.encode("utf-8", errors="replace")
-    if len(raw) <= max_bytes:
-        return masked, False
-    clipped = raw[:max_bytes].decode("utf-8", errors="replace")
-    return clipped + "\n[truncated]", True
-
-def mask_and_truncate(text, max_bytes):
-    masked = mask_secrets(text)
-    raw = masked.encode("utf-8", errors="replace")
-    if len(raw) <= max_bytes:
-        return masked, False
-    clipped = raw[:max_bytes].decode("utf-8", errors="replace")
-    return clipped + "\n[truncated]", True
 
 def fetch_url(url, allowed_hosts, request_timeout=25):
     """Fetch a URL and return its text content (or None on failure)."""

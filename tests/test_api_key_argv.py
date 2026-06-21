@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests that run_tool_harness.run_chat_completion keeps the API key out of
-curl argv, passing it via a 0600 --config file that is removed afterwards."""
+"""Tests that transport.run_chat_request keeps the API key out of curl argv,
+passing it via a 0600 --config file that is removed afterwards."""
 
 import json
 import os
@@ -16,7 +16,6 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import pytest
 
-import run_tool_harness as rth  # noqa: F401  (kept for run_chat_completion re-export)
 from pr_reviewer import transport
 
 
@@ -41,18 +40,16 @@ class _Capture:
 
 def _call(api_format="openai", api_key="sk-secret-789"):
     cap = _Capture()
-    # safe_run + run_chat_request now live in pr_reviewer.transport (#304 split);
-    # patch there so run_chat_completion's internal call is intercepted.
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "user"}],
+        "max_tokens": 100,
+    }
+    # The API-key-out-of-argv handling lives in run_chat_request (the production
+    # transport primitive); patch safe_run to capture the curl invocation.
     with mock.patch.object(transport, "safe_run", cap.fake_safe_run):
-        result = rth.run_chat_completion(
-            base_url="http://localhost:11434/v1",
-            api_format=api_format,
-            model="m",
-            api_key=api_key,
-            system_prompt="sys",
-            user_prompt="user",
-            timeout_sec=5,
-            max_tokens=100,
+        result = transport.run_chat_request(
+            "http://localhost:11434/v1", api_format, payload, api_key, 5
         )
     return cap, result
 
@@ -60,7 +57,7 @@ def _call(api_format="openai", api_key="sk-secret-789"):
 class TestApiKeyOutOfArgv:
     def test_key_not_in_argv(self):
         cap, result = _call()
-        assert result == "planned"
+        assert result["choices"][0]["message"]["content"] == "planned"
         assert not any("sk-secret-789" in arg for arg in cap.argv)
 
     def test_config_file_carries_bearer_header(self):
