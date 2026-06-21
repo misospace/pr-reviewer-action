@@ -472,23 +472,5 @@ write_step_summary() {
     fi
     echo "| Completion tokens | ${comp_tok} |"
   } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-
-  # Telemetry: persist per-review cache-hit data for aggregate analysis.
-  # This JSONL file is appended to across PR reviews so operators can quantify
-  # whether the stable-system-prompt design (#264) pays off in production.
-  if [[ "$cache_hit_ratio" != "-" ]]; then
-    local ts
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local ptok_num="${prompt_tok//[^0-9]/}"
-    [[ -z "$ptok_num" ]] && ptok_num=0
-    jq -nc \
-      --arg ts "$ts" \
-      --arg repo "${REPO:-unknown}" \
-      --argjson pr "${PR_NUMBER:-0}" \
-      --argjson chr "$cache_hit_ratio" \
-      --argjson ptok "$ptok_num" \
-      '{timestamp: $ts, repo: $repo, pr: $pr, cache_hit_ratio: $chr, prompt_tokens: $ptok}' \
-      >> ".ai-review-telemetry.jsonl" 2>/dev/null || true
-  fi
 }
 write_step_summary

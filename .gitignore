@@ -25,6 +25,3 @@ Thumbs.db
 
 # Mock server artifacts
 test_uploads/
--e 
-# Telemetry (generated at runtime, not committed)
-.ai-review-telemetry.jsonl
