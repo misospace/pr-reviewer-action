@@ -243,14 +243,10 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `ai_primary_base_url` | Base URL for the primary route model; defaults to `ai_base_url` | No | `""` |
 | `ai_primary_api_format` | API format for the primary route model; defaults to `ai_api_format` | No | `""` |
 | `ai_primary_api_key` | API key for the primary route model; defaults to `ai_api_key` | No | `""` |
-| `ai_fast_model` | Deprecated alias for `ai_primary_model` (route renamed `fast` → `primary`) | No | `""` |
-| `ai_fast_base_url` | Deprecated alias for `ai_primary_base_url` | No | `""` |
-| `ai_fast_api_format` | Deprecated alias for `ai_primary_api_format` | No | `""` |
-| `ai_fast_api_key` | Deprecated alias for `ai_primary_api_key` | No | `""` |
-| `ai_smart_model` | Smart model for high-risk reviews in `auto` mode; defaults to `ai_fallback_model` | No | `""` |
-| `ai_smart_base_url` | Base URL for the smart model; defaults to `ai_fallback_base_url` | No | `""` |
-| `ai_smart_api_format` | API format for the smart model; defaults to `ai_fallback_api_format`, then `ai_api_format` | No | `""` |
-| `ai_smart_api_key` | API key for the smart model; defaults to `ai_fallback_api_key` | No | `""` |
+| `ai_smart_model` | Opt-in smarter model for high-risk reviews in `auto` mode. No default — when unset, auto-routing stays on the primary model and never escalates. The fallback model is never an escalation target | No | `""` |
+| `ai_smart_base_url` | Base URL for the smart model; defaults to `ai_base_url` | No | `""` |
+| `ai_smart_api_format` | API format for the smart model; defaults to `ai_api_format` | No | `""` |
+| `ai_smart_api_key` | API key for the smart model; defaults to `ai_api_key` | No | `""` |
 | `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode | No | security/priority/auth/route/file-serving/path/secret/db list |
 | `escalate_on_incomplete_required_checks` | Escalate primary-route reviews with unaddressed required checks to the smart model (`auto` mode) | No | `true` |
 | `escalate_on_fast_request_changes` | Escalate primary-route reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
@@ -867,7 +863,7 @@ With `review_routing_mode: auto`, the deterministic classification decides which
 Routing rules:
 
 - A PR whose `pr_kind` **or** any `risk_flags` entry matches `escalate_on_risk_flags` routes to the **smart** model; everything else routes to the **fast** model.
-- The fast config defaults to the primary `ai_*` inputs; the smart config defaults to the `ai_fallback_*` inputs. If a risky PR is detected but no smart/fallback model is configured, the review stays on the fast model (logged, never fails).
+- The fast config defaults to the primary `ai_*` inputs; the smart config's endpoint/format/key default to those same primary inputs, but the smart **model** is opt-in via `ai_smart_model` and is never the fallback model. If a risky PR is detected but no smart model is configured, the review stays on the fast model (logged, never fails).
 - `off` (the default) preserves the existing primary/fallback behavior exactly (`review_route` output reports `legacy`).
 - The retry and failure-fallback machinery is unchanged — routing only picks which model it talks to.
 - The chosen route appears in the `review_route` output, the step summary, and the managed metadata marker; routing config is part of the precheck fingerprint, so changing it forces a fresh review.

@@ -144,12 +144,11 @@ resolve_review_route() {
   fi
 }
 
-# The primary route is the default model (ai_model). ai_primary_* overrides it;
-# ai_fast_* is the deprecated alias for those overrides.
-PRIMARY_BASE_URL="${AI_PRIMARY_BASE_URL:-${AI_FAST_BASE_URL:-$AI_BASE_URL}}"
-PRIMARY_MODEL="${AI_PRIMARY_MODEL:-${AI_FAST_MODEL:-$AI_MODEL}}"
-PRIMARY_API_FORMAT="${AI_PRIMARY_API_FORMAT:-${AI_FAST_API_FORMAT:-$AI_API_FORMAT}}"
-PRIMARY_API_KEY="${AI_PRIMARY_API_KEY:-${AI_FAST_API_KEY:-$AI_API_KEY}}"
+# The primary route is the default model (ai_model). ai_primary_* overrides it.
+PRIMARY_BASE_URL="${AI_PRIMARY_BASE_URL:-$AI_BASE_URL}"
+PRIMARY_MODEL="${AI_PRIMARY_MODEL:-$AI_MODEL}"
+PRIMARY_API_FORMAT="${AI_PRIMARY_API_FORMAT:-$AI_API_FORMAT}"
+PRIMARY_API_KEY="${AI_PRIMARY_API_KEY:-$AI_API_KEY}"
 # Smart is an OPT-IN quality tier resolved ONLY from ai_smart_*. It deliberately
 # does NOT borrow the fallback model: the fallback exists solely to catch a
 # primary-availability failure, never as an escalation target. With no

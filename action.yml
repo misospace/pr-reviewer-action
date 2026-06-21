@@ -156,22 +156,6 @@ inputs:
     description: API key for the primary route model. Defaults to ai_api_key.
     required: false
     default: ""
-  ai_fast_model:
-    description: "Deprecated alias for ai_primary_model (the route was renamed fast -> primary)."
-    required: false
-    default: ""
-  ai_fast_base_url:
-    description: "Deprecated alias for ai_primary_base_url."
-    required: false
-    default: ""
-  ai_fast_api_format:
-    description: "Deprecated alias for ai_primary_api_format."
-    required: false
-    default: ""
-  ai_fast_api_key:
-    description: "Deprecated alias for ai_primary_api_key."
-    required: false
-    default: ""
   ai_smart_model:
     description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
     required: false
@@ -639,8 +623,7 @@ runs:
         AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
         AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
         REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
-        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model || inputs.ai_fast_model }}
-        AI_FAST_MODEL: ${{ inputs.ai_fast_model }}
+        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model }}
         AI_SMART_MODEL: ${{ inputs.ai_smart_model }}
         ESCALATE_ON_RISK_FLAGS: ${{ inputs.escalate_on_risk_flags }}
         ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS: ${{ inputs.escalate_on_incomplete_required_checks }}
@@ -737,14 +720,10 @@ runs:
         VALIDATE_REQUIRED_CHECKS: ${{ inputs.validate_required_checks }}
         REQUIRED_CHECK_VALIDATION_MODE: ${{ inputs.required_check_validation_mode }}
         REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
-        AI_PRIMARY_BASE_URL: ${{ inputs.ai_primary_base_url || inputs.ai_fast_base_url }}
-        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model || inputs.ai_fast_model }}
-        AI_PRIMARY_API_FORMAT: ${{ inputs.ai_primary_api_format || inputs.ai_fast_api_format }}
-        AI_PRIMARY_API_KEY: ${{ inputs.ai_primary_api_key || inputs.ai_fast_api_key }}
-        AI_FAST_BASE_URL: ${{ inputs.ai_fast_base_url }}
-        AI_FAST_MODEL: ${{ inputs.ai_fast_model }}
-        AI_FAST_API_FORMAT: ${{ inputs.ai_fast_api_format }}
-        AI_FAST_API_KEY: ${{ inputs.ai_fast_api_key }}
+        AI_PRIMARY_BASE_URL: ${{ inputs.ai_primary_base_url }}
+        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model }}
+        AI_PRIMARY_API_FORMAT: ${{ inputs.ai_primary_api_format }}
+        AI_PRIMARY_API_KEY: ${{ inputs.ai_primary_api_key }}
         AI_SMART_BASE_URL: ${{ inputs.ai_smart_base_url }}
         AI_SMART_MODEL: ${{ inputs.ai_smart_model }}
         AI_SMART_API_FORMAT: ${{ inputs.ai_smart_api_format }}
