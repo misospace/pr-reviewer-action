@@ -32,7 +32,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`response_parser.py`** — Tolerant model-output parsing (JSON in fences/prose, verdict + findings extraction)
 - **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies (including streamed tool-call deltas; `function.arguments` is the accumulated JSON string, OpenAI non-streaming shape, per #233)
 - **`conversation.py`** — Multi-turn conversation/request builder for native tool calling (#202, 2/7 of #197 Option B): append-only neutral state, OpenAI/Anthropic wire rendering, per-API tool-schema catalogue, `truncate_oldest_tool_results` budget helper, `verdict_turn` mode that drops `tools` and switches to the strict JSON `response_format`
-- **`transport.py`** — Low-level model-call transport split out of `run_tool_harness.py` (#304): `run_chat_request` (curl-based chat POST + SSE handling), `run_chat_completion` (one-shot system+user), and the shared `safe_run` subprocess helper
+- **`transport.py`** — Low-level model-call transport split out of `run_tool_harness.py` (#304): `run_chat_request` (curl-based chat POST + SSE handling, with the API key passed via a 0600 `--config` file, never argv) and the shared `safe_run` subprocess helper
 - **`tool_executors.py`** — Read-only tool executors split out of `run_tool_harness.py` (#304): `read_file`, `git_grep`/`git_log`/`git_blame`, `gh_api`, `web_fetch`, `web_search`, `run_command`, plus `execute_tool_request[s]` and the path/host guards (`_resolve_workspace_path`, allowlists). `scripts/run_tool_harness.py` re-imports these so existing call sites/tests are unchanged; it still owns the planner + `run_native_loop` + `main`
 
 ### Publishing and output hygiene

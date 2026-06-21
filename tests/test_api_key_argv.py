@@ -10,9 +10,15 @@ import types
 from pathlib import Path
 from unittest import mock
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+# Both paths: scripts/ for the redact/transport modules' own imports, and the
+# repo root so `pr_reviewer` resolves. Previously this came in transitively via
+# `import run_tool_harness`; that import was dropped when the test repointed to
+# transport directly, so add the root explicitly (CI does not put it on path).
+for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import pytest
 
