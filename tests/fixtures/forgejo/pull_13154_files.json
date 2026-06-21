@@ -1,0 +1,12 @@
+[
+  {
+    "additions": 1,
+    "changes": 2,
+    "contents_url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/contents/.forgejo/workflows/build-release-integration.yml?ref=c468a11dad3403e8428e7d60606cc2b13dc50ebe",
+    "deletions": 1,
+    "filename": ".forgejo/workflows/build-release-integration.yml",
+    "html_url": "https://codeberg.org/forgejo/forgejo/src/commit/c468a11dad3403e8428e7d60606cc2b13dc50ebe/.forgejo/workflows/build-release-integration.yml",
+    "raw_url": "https://codeberg.org/forgejo/forgejo/raw/commit/c468a11dad3403e8428e7d60606cc2b13dc50ebe/.forgejo/workflows/build-release-integration.yml",
+    "status": "changed"
+  }
+]

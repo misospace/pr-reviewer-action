@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1497044,
+    "user": null,
+    "state": "REQUEST_REVIEW",
+    "body": "",
+    "submitted_at": "2026-06-21T03:13:56+02:00",
+    "updated_at": "2026-06-21T03:13:56+02:00",
+    "html_url": ""
+  },
+  {
+    "id": 1497065,
+    "user": {
+      "id": 222642,
+      "login": "mfenniak",
+      "full_name": "Mathieu Fenniak"
+    },
+    "state": "APPROVED",
+    "body": "",
+    "submitted_at": "2026-06-21T03:42:51+02:00",
+    "updated_at": "2026-06-21T03:42:51+02:00",
+    "html_url": "https://codeberg.org/forgejo/forgejo/pulls/13154#issuecomment-17807519"
+  }
+]
