@@ -1,0 +1,35 @@
+[
+  {
+    "id": 8160824,
+    "body": "Seems to be a duplicate of #9999",
+    "created_at": "2025-11-07T11:39:01+01:00",
+    "updated_at": "2025-11-07T11:39:25+01:00",
+    "user": {
+      "id": 32636,
+      "login": "oliverpool",
+      "full_name": ""
+    }
+  },
+  {
+    "id": 8160857,
+    "body": "Yes it is! It took me a while to write the issue for unrelated reasons, and @earl-warren 's report apparently appeared while I was writing it.",
+    "created_at": "2025-11-07T11:42:31+01:00",
+    "updated_at": "2025-11-07T11:42:31+01:00",
+    "user": {
+      "id": 178391,
+      "login": "tseeker",
+      "full_name": "Emmanuel BENO\u00ceT"
+    }
+  },
+  {
+    "id": 8161994,
+    "body": "But you got the 10,000th issue \ud83d\ude01",
+    "created_at": "2025-11-07T13:29:38+01:00",
+    "updated_at": "2025-11-07T13:29:38+01:00",
+    "user": {
+      "id": 73579,
+      "login": "earl-warren",
+      "full_name": "Earl Warren"
+    }
+  }
+]

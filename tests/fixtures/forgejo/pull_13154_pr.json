@@ -1,0 +1,26 @@
+{
+  "base": {
+    "ref": "forgejo",
+    "repo": {
+      "full_name": "forgejo/forgejo"
+    },
+    "sha": "0ab8cecc52b292580bbfe01c4ba525f2d002596a"
+  },
+  "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [https://data.forgejo.org/actions/setup-forgejo](https://code.forgejo.org/actions/setup-forgejo) | act",
+  "draft": false,
+  "head": {
+    "ref": "refs/pull/13154/head",
+    "repo": {
+      "full_name": "forgejo/forgejo"
+    },
+    "sha": "c468a11dad3403e8428e7d60606cc2b13dc50ebe"
+  },
+  "html_url": "https://codeberg.org/forgejo/forgejo/pulls/13154",
+  "merged": true,
+  "number": 13154,
+  "state": "closed",
+  "title": "Update actions/setup-forgejo to v3.2.3 (forgejo)",
+  "user": {
+    "login": "viceice-bot"
+  }
+}
