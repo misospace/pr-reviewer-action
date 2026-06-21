@@ -38,7 +38,7 @@ platform_pr_files "$REPO" "$PR_NUMBER" > pr-files.raw.json
 # raw diff that is already embedded in the corpus, and the classifier does not
 # read them. Keeping them here doubled the diff bytes sent to the model.
 TOTAL_CHANGED_FILES="$(jq -r '.changedFiles // 0' pr.json 2>/dev/null || echo 0)"
-jq --argjson total "${TOTAL_CHANGED_FILES:-0}" \
+jq -c --argjson total "${TOTAL_CHANGED_FILES:-0}" \
   '[.[] | {filename,status,additions,deletions,changes,previous_filename}]
    + (if $total > 100 then [{note: "file list truncated to first 100 of \($total) changed files"}] else [] end)' \
   pr-files.raw.json > pr-files.json

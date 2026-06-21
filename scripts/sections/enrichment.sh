@@ -96,7 +96,7 @@ if [ -s urls.txt ]; then
       echo "### GitHub Release Metadata: $owner/$repo@$tag" >> linked-sources.md
 
       if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases/tags/$tag" > gh-release.json 2>/dev/null; then
-        jq '{tag_name,name,published_at,html_url,body}' gh-release.json > gh-release.filtered.json
+        jq -c '{tag_name,name,published_at,html_url,body}' gh-release.json > gh-release.filtered.json
         echo '```json' >> linked-sources.md
         head -c 5000 gh-release.filtered.json >> linked-sources.md
         echo >> linked-sources.md
@@ -106,7 +106,7 @@ if [ -s urls.txt ]; then
       fi
 
       if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases?per_page=8" > gh-releases.json 2>/dev/null; then
-        jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.json > gh-releases.filtered.json
+        jq -c '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.json > gh-releases.filtered.json
         echo "### Recent Releases" >> linked-sources.md
         echo '```json' >> linked-sources.md
         head -c 3000 gh-releases.filtered.json >> linked-sources.md
@@ -124,13 +124,13 @@ if [ -s urls.txt ]; then
       echo "### GitHub Compare Metadata: $owner/$repo@$compare_spec" >> linked-sources.md
 
       if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/compare/$compare_spec" > gh-compare.json 2>/dev/null; then
-        jq '{html_url,status,ahead_by,behind_by,total_commits,commits:[.commits[]? | {sha,commit:{message,author,date}}]}' gh-compare.json > gh-compare.filtered.json
+        jq -c '{html_url,status,ahead_by,behind_by,total_commits,commits:[.commits[]? | {sha,commit:{message,author,date}}]}' gh-compare.json > gh-compare.filtered.json
         echo '```json' >> linked-sources.md
         head -c 7000 gh-compare.filtered.json >> linked-sources.md
         echo >> linked-sources.md
         echo '```' >> linked-sources.md
 
-        jq '[.files[]? | {filename,status,additions,deletions,changes,patch}]' gh-compare.json > gh-compare.files.json
+        jq -c '[.files[]? | {filename,status,additions,deletions,changes,patch}]' gh-compare.json > gh-compare.files.json
         echo "### GitHub Compare Files" >> linked-sources.md
         echo '```json' >> linked-sources.md
         head -c 7000 gh-compare.files.json >> linked-sources.md
@@ -163,7 +163,7 @@ if [ -s urls.txt ]; then
       echo "### GitHub Releases Enrichment: $repo_key" >> linked-sources.md
 
       if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/releases?per_page=30" > gh-releases.repo.json 2>/dev/null; then
-        jq '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.repo.json > gh-releases.repo.filtered.json
+        jq -c '[.[] | {tag_name,name,published_at,html_url}]' gh-releases.repo.json > gh-releases.repo.filtered.json
         echo "#### Recent Releases (tags)" >> linked-sources.md
         echo '```json' >> linked-sources.md
         head -c 5000 gh-releases.repo.filtered.json >> linked-sources.md
@@ -191,7 +191,7 @@ if [ -s urls.txt ]; then
           else
             echo "(No release tags matched target version $TARGET_VERSION in $repo_key)" >> linked-sources.md
             if enrichment_budget_ok && github_enrich_api "repos/$owner/$repo/tags?per_page=50" > gh-tags.repo.json 2>/dev/null; then
-              jq '[.[] | {name,commit:.commit.sha}]' gh-tags.repo.json > gh-tags.repo.filtered.json
+              jq -c '[.[] | {name,commit:.commit.sha}]' gh-tags.repo.json > gh-tags.repo.filtered.json
               echo "#### Recent Tags" >> linked-sources.md
               echo '```json' >> linked-sources.md
               head -c 4000 gh-tags.repo.filtered.json >> linked-sources.md
