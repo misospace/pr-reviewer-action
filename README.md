@@ -278,6 +278,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 |-------|-------------|----------|---------|
 | `system_prompt` | Optional system prompt override | No | bundled prompt |
 | `system_prompt_file` | File in the reviewed repo to use as the full system prompt | No | `""` |
+| `system_prompt_mode` | How a supplied prompt combines with the bundled default: `replace` (verbatim) or `append` (repo addendum on the conditionally-assembled default — no need to copy/re-sync the default) | No | `replace` |
 | `standards_file` | Explicit standards file path; takes priority over candidates | No | `""` |
 | `standards_file_candidates` | Candidate files checked in order; first found is used | No | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` |
 
@@ -999,6 +1000,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 - The tool harness planner uses the primary `ai_api_format`; fallback settings apply only to the final review call.
 - `system_prompt` takes precedence over `system_prompt_file`.
 - `system_prompt_file` takes precedence over the bundled generic prompt.
+- With `system_prompt_mode: append`, the supplied prompt does not replace the default — it is appended to the conditionally-assembled bundled default as a repo-specific addendum, so you can add conventions without copying (and re-syncing) the whole default.
 - `standards_file` is optional; if blank, the action checks `standards_file_candidates` in order and uses the first file found. `AGENTS.md` is checked first by default, then `CLAUDE.md`, making the action compatible with both Claude Code and non-Claude Code setups.
 - By default, the action computes a stable patch fingerprint with `git patch-id --stable` and skips the LLM call when that fingerprint matches the most recent managed review comment. This avoids token spend on rebases and other history-only changes.
 - `publish_review_comment` uses `gh pr comment --edit-last --create-if-none`, so the comment is managed by the token identity used in the workflow.

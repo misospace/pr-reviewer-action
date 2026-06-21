@@ -231,6 +231,15 @@ inputs:
     description: Optional file path in the reviewed repository to use as the full system prompt
     required: false
     default: ""
+  system_prompt_mode:
+    description: >-
+      How a supplied system_prompt / system_prompt_file combines with the bundled
+      default. 'replace' (default) uses the supplied prompt verbatim. 'append'
+      keeps the conditionally-assembled bundled default and appends the supplied
+      prompt as a repo-specific addendum — so consumers add conventions without
+      copying (and re-syncing) the whole default.
+    required: false
+    default: "replace"
   standards_file:
     description: Repository standards file path for conventions and policy context
     required: false
@@ -635,6 +644,7 @@ runs:
         ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
+        SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
@@ -741,6 +751,7 @@ runs:
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
+        SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}

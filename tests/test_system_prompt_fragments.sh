@@ -74,6 +74,44 @@ RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"
 check_contains "reconstructed prompt has digest block" "$RECON" "digest-only image"
 
+# Extract resolve_system_prompt to test replace vs append mode end-to-end.
+RFUNCS="$(mktemp)"
+python3 - "$SCRIPT_DIR/sections/config.sh" "$RFUNCS" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^resolve_system_prompt\(\) \{\n(.*?)\n\}", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract resolve_system_prompt")
+open(sys.argv[2], "w").write("resolve_system_prompt() {\n%s\n}\n" % m.group(1))
+PY
+# shellcheck source=/dev/null
+source "$RFUNCS"; rm -f "$RFUNCS"
+
+echo "=== replace mode (default): a supplied prompt is used verbatim, no default ==="
+OUT="$(
+  SYSTEM_PROMPT="MY CUSTOM PROMPT" SYSTEM_PROMPT_FILE="" SYSTEM_PROMPT_MODE="replace"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  printf 'prompt=%s|default=%s|addendum=%s' "$SYSTEM_PROMPT" "${SYSTEM_PROMPT_IS_DEFAULT:-0}" "${SYSTEM_PROMPT_ADDENDUM:-}"
+)"
+check_contains "replace uses the supplied prompt verbatim" "$OUT" "prompt=MY CUSTOM PROMPT|"
+check_contains "replace does not flag the default" "$OUT" "|default=0|"
+check_contains "replace stashes no addendum" "$OUT" "|addendum="
+
+echo "=== append mode: supplied prompt composes onto the assembled default ==="
+OUT="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="REPO ADDENDUM SENTINEL" SYSTEM_PROMPT_FILE="" SYSTEM_PROMPT_MODE="append"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT"
+)"
+check_contains "append keeps the base output schema" "$OUT" "Return STRICT JSON"
+check_contains "append composes the repo addendum on the end" "$OUT" "REPO ADDENDUM SENTINEL"
+check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
+check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

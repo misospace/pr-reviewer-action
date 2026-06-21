@@ -28,6 +28,10 @@ ALLOWED_SOURCE_HOSTS="${ALLOWED_SOURCE_HOSTS:-github.com,api.github.com,gitlab.c
 GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 SYSTEM_PROMPT="${SYSTEM_PROMPT:-}"
 SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-}"
+SYSTEM_PROMPT_MODE="${SYSTEM_PROMPT_MODE:-replace}"
+# A supplied prompt held for append mode, composed onto the default after
+# fragment assembly (see apply_system_prompt_fragments).
+SYSTEM_PROMPT_ADDENDUM=""
 STANDARDS_FILE="${STANDARDS_FILE:-}"
 STANDARDS_FILE_CANDIDATES="${STANDARDS_FILE_CANDIDATES:-AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt}"
 CONTEXT_LIMIT_MODE="${CONTEXT_LIMIT_MODE:-normal}"
@@ -312,21 +316,32 @@ resolve_standards_file() {
 }
 
 resolve_system_prompt() {
+  # Resolve any user-supplied prompt (inline takes precedence over file).
+  local user=""
   if [[ -n "$SYSTEM_PROMPT" ]]; then
-    return
-  fi
-
-  if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
+    user="$SYSTEM_PROMPT"
+  elif [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
     if [[ ! -f "$SYSTEM_PROMPT_FILE" ]]; then
       error "SYSTEM_PROMPT_FILE does not exist: $SYSTEM_PROMPT_FILE"
       exit 1
     fi
-    SYSTEM_PROMPT="$(<"$SYSTEM_PROMPT_FILE")"
+    user="$(<"$SYSTEM_PROMPT_FILE")"
+  fi
+
+  # replace mode (default): a supplied prompt is used verbatim — no default,
+  # no fragments. append mode (or no supplied prompt at all): start from the
+  # bundled default so the conditional fragments apply; in append mode the
+  # supplied prompt is held and appended after assembly as a repo addendum.
+  if [[ -n "$user" && "$SYSTEM_PROMPT_MODE" != "append" ]]; then
+    SYSTEM_PROMPT="$user"
     return
   fi
 
   SYSTEM_PROMPT="$(<"$SCRIPT_DIR/default_system_prompt.txt")"
   SYSTEM_PROMPT_IS_DEFAULT=1
+  if [[ -n "$user" ]]; then
+    SYSTEM_PROMPT_ADDENDUM="$user"
+  fi
 }
 
 # Conditionally assemble the bundled default system prompt: substitute the
@@ -353,6 +368,12 @@ apply_system_prompt_fragments() {
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/$vb}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
+  fi
+  # append mode: compose the supplied prompt onto the assembled default as a
+  # repo-specific addendum, so a consumer adds conventions without copying (and
+  # re-syncing) the whole bundled default.
+  if [[ -n "${SYSTEM_PROMPT_ADDENDUM:-}" ]]; then
+    SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${SYSTEM_PROMPT_ADDENDUM}"
   fi
   export SYSTEM_PROMPT
 }
