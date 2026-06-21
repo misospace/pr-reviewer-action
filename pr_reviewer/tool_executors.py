@@ -420,7 +420,10 @@ def execute_tool_request(
             data = res.get("data")
             text = ""
             if isinstance(data, (dict, list)):
-                text = json.dumps(data, indent=2)[:max_response_bytes]
+                # Compact JSON: the model re-prefills tool results on every loop
+                # round, so indent whitespace is pure repeated prefill cost — and
+                # compacting fits ~25% more real data under max_response_bytes.
+                text = json.dumps(data, separators=(",", ":"))[:max_response_bytes]
             tool_result["result"] = {"response": text}
 
         elif tool_name == "web_fetch":
@@ -441,7 +444,7 @@ def execute_tool_request(
             res = web_search(query, search_url, request_timeout, max_search_results)
             if res.get("error"):
                 raise ValueError(res["error"])
-            text = json.dumps(res.get("results", []), indent=2)
+            text = json.dumps(res.get("results", []), separators=(",", ":"))
             text, _ = mask_and_truncate(text, max_response_bytes)
             tool_result["result"] = {"results": text}
 
