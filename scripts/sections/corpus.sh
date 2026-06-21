@@ -52,14 +52,14 @@ build_review_corpus() {
     # Project to review-relevant fields and cap the body: the full object also
     # carries the entire .files array (duplicating the PR Files section and the
     # classification summary) and an unbounded body.
-    jq '{number, title, author: (.author.login // .author), baseRefName, headRefName, headRefOid, changedFiles, additions, deletions, url, body: ((.body // "")[0:4000])}' pr.json
+    jq -c '{number, title, author: (.author.login // .author), baseRefName, headRefName, headRefOid, changedFiles, additions, deletions, url, body: ((.body // "")[0:4000])}' pr.json
     echo '```'
     echo
 
 
     echo "# PR Classification"
     if [ -f classification.json ]; then
-      jq '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
+      jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
     else
       echo "(Classification data unavailable for this review)"
     fi
