@@ -1,0 +1,1 @@
+For digest-only image updates, analyze OCI metadata such as revision, source, and created timestamps and state whether the evidence suggests a code change or a rebuild.

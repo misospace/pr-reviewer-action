@@ -354,9 +354,16 @@ def resolve_review_system_prompt():
         return Path(prompt_file).read_text(encoding="utf-8")
     default = _SCRIPTS_DIR / "default_system_prompt.txt"
     try:
-        return default.read_text(encoding="utf-8")
+        text = default.read_text(encoding="utf-8")
     except OSError:
         return ""
+    # run_review.sh normally exports an already-assembled SYSTEM_PROMPT (with the
+    # PR-type placeholders substituted), so this file fallback is defensive only.
+    # Strip any unsubstituted placeholders so the bare base never leaks "{{...}}"
+    # tokens to the model.
+    return text.replace("{{VERSION_BUMP_GUIDANCE}}", "").replace(
+        "{{IMAGE_DIGEST_GUIDANCE}}", ""
+    )
 
 
 def _classification_risk_flag_count():
