@@ -1,0 +1,1 @@
+When summarizing upstream release notes, do not enumerate raw upstream PR links, issue references, compare links, or commit SHAs in the final review. Avoid `#123` and `owner/repo#123` style references because GitHub auto-links them, creating notification noise. Summarize releases in prose; include at most one release-page URL if useful.

@@ -358,7 +358,7 @@ resolve_system_prompt() {
 # review call rather than re-reading the file.
 apply_system_prompt_fragments() {
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" && -f classification.json ]]; then
-    local kind vb="" dg=""
+    local kind vb="" dg="" rn=""
     kind="$(jq -r '.pr_kind // ""' classification.json 2>/dev/null || echo "")"
     if [[ "$kind" == "dependency_upgrade" || "$kind" == "k8s_manifest" ]]; then
       vb="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
@@ -366,8 +366,16 @@ apply_system_prompt_fragments() {
     if [[ "$kind" == "renovate_digest_only" ]]; then
       dg="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
     fi
+    # Release-notes / auto-link guidance only matters when the PR summarizes
+    # upstream releases — the renovate-ish kinds. Non-bump PRs (app_code,
+    # security, ...) never cite upstream, so this re-prefilled every round for
+    # no benefit before the split.
+    if [[ "$kind" == "dependency_upgrade" || "$kind" == "k8s_manifest" || "$kind" == "renovate_digest_only" ]]; then
+      rn="$(<"$SCRIPT_DIR/prompt_fragments/release_notes.txt") "
+    fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/$vb}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/$rn}"
   fi
   # append mode: compose the supplied prompt onto the assembled default as a
   # repo-specific addendum, so a consumer adds conventions without copying (and
