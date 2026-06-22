@@ -29,6 +29,17 @@
 # preserved by keeping each wrapper a thin exec of the original command —
 # wrappers must not capture-and-echo, which would launder an error body into
 # a success-shaped stdout.
+#
+# Known Forgejo divergences from the GitHub REST shape (callers must degrade,
+# never assume the field exists — golden fixtures in tests/fixtures/forgejo/
+# pin the real shapes):
+#   - compare: payload carries only commits/files/total_commits; it OMITS
+#     GitHub's status/ahead_by/behind_by/url/html_url. A `--jq '.url'` on the
+#     compare therefore yields empty on Forgejo (callers already fall back).
+#   - check-runs: no such API — platform_check_runs returns an empty struct;
+#     the CI signal comes from platform_commit_status instead.
+#   - graphql / collaborator_permission: GitHub-only; the forgejo path fails
+#     loudly (_forgejo_unimplemented), and call sites gate on this per #227.
 
 # Guard against double-sourcing (publish_helpers.sh and the caller may both
 # source this).
@@ -86,19 +97,34 @@ _forgejo_unimplemented() {
   return 1
 }
 
+_forgejo_jq() {
+  # Run a forgejo_backend CLI subcommand, then apply an optional trailing
+  # `--jq <expr>` to the JSON it prints — mirroring `gh api --jq` so a single
+  # call site works on either platform. $1=subcommand; the rest are the
+  # subcommand's positional args, optionally followed by `--jq <expr>`.
+  # NB: a `--jq` projection only yields data for fields the forgejo payload
+  # actually carries (see the divergence notes in the header) — e.g. `.url`
+  # on a compare is empty because Forgejo's compare object omits it.
+  local sub="$1"; shift
+  local jqexpr="" args=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--jq" && $# -ge 2 ]]; then jqexpr="$2"; shift 2; continue; fi
+    args+=("$1"); shift
+  done
+  if [[ -n "$jqexpr" ]]; then
+    _forgejo_py "$sub" "${args[@]}" | jq -r "$jqexpr"
+  else
+    _forgejo_py "$sub" "${args[@]}"
+  fi
+}
+
 # ── Core PR I/O ─────────────────────────────────────────────────────────
 
 platform_pr_get() {
   # $1=repo $2=pr_number [extra gh api flags, e.g. --jq] → PR object
   # (GitHub REST shape, or the --jq projection) on stdout
   if _platform_is_forgejo; then
-    local repo="$1" num="$2"
-    shift 2
-    if [[ "${1:-}" == "--jq" && -n "${2:-}" ]]; then
-      _forgejo_py get-pr-metadata "$repo" "$num" | jq -r "$2"
-    else
-      _forgejo_py get-pr-metadata "$repo" "$num"
-    fi
+    _forgejo_jq get-pr-metadata "$@"
   else
     local repo="$1" num="$2"
     shift 2
@@ -155,7 +181,7 @@ platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
   # object (or the --jq projection) on stdout
   if _platform_is_forgejo; then
-    _forgejo_py compare "$1" "$2"
+    _forgejo_jq compare "$@"
   else
     local repo="$1" spec="$2"
     shift 2

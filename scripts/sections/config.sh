@@ -155,7 +155,10 @@ fetch_incremental_patch() {
   local compare_url
   compare_url="$(platform_compare "$REPO" "${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
 
-  if [[ -n "$compare_url" ]]; then
+  # Only fetch when we actually got a URL: Forgejo's compare object omits `url`
+  # (jq -r yields the string "null"), and a gh error body could leave junk —
+  # either way, skip the diff fetch rather than curl a non-URL.
+  if [[ "$compare_url" == http://* || "$compare_url" == https://* ]]; then
     # The token goes through a 0600 curl --config file rather than argv (same
     # treatment as model API keys in model_call.sh) so it never appears in
     # /proc/<pid>/cmdline on shared runners.
