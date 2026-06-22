@@ -131,6 +131,7 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - System prompt priority: inline `system_prompt` > file `system_prompt_file` > bundled default
 - Reserved metadata markers (`<!-- ai-pr-review-fingerprint:... -->`, `<!-- ai-pr-review-sha:... -->`) are stripped from model output before publishing; the precheck reads only the first occurrence of each
 - The `run_command` tool never executes model-supplied shell text — only named argv definitions from a fixed read-only catalog (`git_status_short`, `git_diff_stat`, `git_diff_name_only`)
+- Adversarial fixtures for security boundaries (#252): any sanitizer or fence (untrusted-data delimiters, secret redaction, exfil guards) must have a test that feeds the boundary token / hostile delimiter *itself*, not just benign input — a mock that omits the attack encodes the same blind spot as the code (the #250 fence was escapable by content containing its own closing delimiter). See `tests/test_native_loop_exfil_redteam.py` and the outbound-UA guard (`tests/test_outbound_user_agent.py`) for the pattern; add one when introducing a new fence.
 - Versioning: `v1.x.y` semver tags; feature releases stay on `1.2.x` (`v1.3.0` is reserved for the tool-calling milestone, issue #197)
 
 ## Label taxonomy (`agent/*` and Dispatch workflow labels)
