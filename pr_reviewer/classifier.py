@@ -237,8 +237,7 @@ def _classify_pr_kind(
     has_dep_file = any(
         any(pat.search(f) for pat in DEPENDENCY_PATTERNS) for f in filenames
     )
-    has_version_bump_val = _has_version_bump(diff_text)
-    if has_dep_file or has_version_bump_val:
+    if has_dep_file:
         # But exclude k8s manifests that happen to reference versions
         has_k8s = any(
             any(pat.search(f) for pat in K8S_PATTERNS) for f in filenames
