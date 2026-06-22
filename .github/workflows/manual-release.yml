@@ -43,9 +43,11 @@ jobs:
             echo "Invalid version: $RAW_VERSION"
             exit 1
           fi
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "major_tag=v${VERSION%%.*}" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=v$VERSION"
+            echo "major_tag=v${VERSION%%.*}"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create immutable version tag
         env:
