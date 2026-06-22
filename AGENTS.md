@@ -134,6 +134,12 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - Adversarial fixtures for security boundaries (#252): any sanitizer or fence (untrusted-data delimiters, secret redaction, exfil guards) must have a test that feeds the boundary token / hostile delimiter *itself*, not just benign input — a mock that omits the attack encodes the same blind spot as the code (the #250 fence was escapable by content containing its own closing delimiter). See `tests/test_native_loop_exfil_redteam.py` and the outbound-UA guard (`tests/test_outbound_user_agent.py`) for the pattern; add one when introducing a new fence.
 - Versioning: `vX.Y.Z` semver tags with floating major tags — `v1` tracks the 1.3.x line, `v2` tracks 2.x. Latest release: `v2.0.0` (breaking: `plan_execute` tool modes and `ai_fast_*` inputs removed, publish steps collapsed into one)
 
+### Release process
+
+1. Confirm the intended changes are merged and CI is green on `main`.
+2. Open **Actions → Manual Release → Run workflow** and enter a version such as `2.0.2` (`v2.0.2` is also accepted).
+3. The workflow creates the immutable `vX.Y.Z` tag at protected `main`, advances the matching floating major tag, and publishes the GitHub release.
+
 ## Label taxonomy (`agent/*` and Dispatch workflow labels)
 
 Labels are defined in `.github/labels.yaml`. There are two distinct groups that agents interact with:

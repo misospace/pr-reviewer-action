@@ -1070,6 +1070,8 @@ Releases are cut when features or fixes are ready. The `v1.x.y` scheme follows s
 - **Minor** (`x`): new features, backward-compatible changes
 - **Major** (`v1` → `v2`): breaking changes to inputs/outputs or behavior
 
+To publish, run **Actions → Manual Release → Run workflow** with the target version. The workflow tags protected `main`, advances the matching floating major tag (`v1`, `v2`, and so on), and creates the GitHub release.
+
 To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-reviewer-action/releases) or enable Renovate to track the `misospace/pr-reviewer-action` dependency.
 
 ## 🔐 Security
