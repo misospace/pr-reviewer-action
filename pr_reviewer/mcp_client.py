@@ -40,11 +40,18 @@ READ_ONLY_VERBS = frozenset(
 
 
 def is_read_only_tool(name: str) -> bool:
-    """True if a tool name begins with an allowlisted read verb."""
+    """True if a tool name begins with an allowlisted read verb.
+
+    Scans the first three ``_``-segments so toolhive-prefixed tools
+    (e.g. ``github-mcp_list_issues``) still register.
+    """
     if not isinstance(name, str) or not name:
         return False
-    head = name.strip().lower().replace("-", "_").split("_", 1)[0]
-    return head in READ_ONLY_VERBS
+    parts = name.strip().lower().replace("-", "_").split("_", 3)
+    for part in parts[:3]:
+        if part in READ_ONLY_VERBS:
+            return True
+    return False
 
 
 def namespaced_name(server: str, tool: str) -> str:
