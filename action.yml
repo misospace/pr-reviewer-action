@@ -451,6 +451,10 @@ inputs:
     description: Optional bearer token sent to every configured MCP server (tool_mcp_servers)
     required: false
     default: ""
+  tool_mcp_name_prefixes:
+    description: Comma-separated list of tool name prefixes to strip before the read-only verb check (e.g. toolhive workload prefixes from `prefixFormat: "{workload}_"`). Empty preserves the default-deny boundary.
+    required: false
+    default: ""
   ai_request_timeout_sec:
     description: Timeout in seconds for the primary model API request (curl --max-time)
     required: false
@@ -657,6 +661,7 @@ runs:
         TOOL_MODE: ${{ inputs.tool_mode }}
         TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
         TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
+        TOOL_MCP_NAME_PREFIXES: ${{ inputs.tool_mcp_name_prefixes }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
         TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
@@ -767,6 +772,7 @@ runs:
         TOOL_MODE: ${{ inputs.tool_mode }}
         TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
         TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
+        TOOL_MCP_NAME_PREFIXES: ${{ inputs.tool_mcp_name_prefixes }}
         TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
         TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
         TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}

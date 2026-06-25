@@ -436,9 +436,13 @@ def run_native_loop(
     # tool_enable_for_forks), so reaching here means MCP is permitted. A server
     # that fails to connect is logged and skipped — never breaks the loop.
     mcp_routes = {}
+    name_prefixes = tuple(
+        p.strip() for p in os.getenv("TOOL_MCP_NAME_PREFIXES", "").split(",") if p.strip()
+    )
     for srv_name, srv_url in parse_server_specs(os.getenv("TOOL_MCP_SERVERS", "")):
         toolset = McpToolset(
-            srv_name, srv_url, os.getenv("TOOL_MCP_TOKEN", ""), timeout=request_timeout
+            srv_name, srv_url, os.getenv("TOOL_MCP_TOKEN", ""),
+            timeout=request_timeout, name_prefixes=name_prefixes,
         )
         try:
             connect_error = toolset.connect()
