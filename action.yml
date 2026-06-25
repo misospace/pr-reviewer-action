@@ -452,7 +452,11 @@ inputs:
     required: false
     default: ""
   tool_mcp_name_prefixes:
-    description: Comma-separated list of tool name prefixes to strip before the read-only verb check (e.g. toolhive workload prefixes from `prefixFormat: "{workload}_"`). Empty preserves the default-deny boundary.
+    description: >-
+      Comma-separated list of tool name prefixes to strip before the
+      read-only verb check (e.g. toolhive workload prefixes from
+      `prefixFormat: "{workload}_"`). Empty preserves the default-deny
+      boundary.
     required: false
     default: ""
   ai_request_timeout_sec:
