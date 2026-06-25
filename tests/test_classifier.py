@@ -115,6 +115,18 @@ class TestPRKindDependencyUpgrade:
         kind = _classify_pr_kind(files, "")
         assert kind == "dependency_upgrade"
 
+    def test_workflow_semver_text_is_not_dependency_upgrade(self):
+        files = [_make_file(".github/workflows/manual-release.yml")]
+        diff = "Release version (for example 2.0.2 or v2.0.2)"
+        kind = _classify_pr_kind(files, diff)
+        assert kind == "app_code"
+
+    def test_source_version_constant_is_not_dependency_upgrade(self):
+        files = [_make_file("src/version.py")]
+        diff = '-VERSION = "1.2.3"\n+VERSION = "1.2.4"'
+        kind = _classify_pr_kind(files, diff)
+        assert kind == "app_code"
+
 
 class TestPRKindK8sManifest:
     @pytest.mark.parametrize("fname", [
