@@ -88,12 +88,12 @@ def _curl(
     ]
     if data is not None and method.upper() in ("POST", "PATCH", "PUT"):
         if isinstance(data, bytes):
-            cmd.extend(["--data-binary", "@-"])
-            proc = subprocess.run(cmd, input=data, capture_output=True)
+            body_bytes = data
         else:
-            body_json = json.dumps(data).encode("utf-8")
+            body_bytes = json.dumps(data).encode("utf-8")
             cmd.extend(["-H", "Content-Type: application/json"])
-            proc = subprocess.run(cmd, input=body_json, capture_output=True)
+        cmd.extend(["--data-binary", "@-"])
+        proc = subprocess.run(cmd, input=body_bytes, capture_output=True)
     else:
         proc = subprocess.run(cmd, capture_output=True)
 
@@ -924,9 +924,13 @@ def main() -> None:
     elif args.command == "create-comment":
         result = create_comment(args.repo, args.issue_number, args.body)
         print(json.dumps(result, indent=2) if result else "null")
+        if result is None:
+            sys.exit(1)
     elif args.command == "edit-last-comment":
         result = edit_last_comment(args.repo, args.issue_number, args.body)
         print(json.dumps(result, indent=2) if result else "null")
+        if result is None:
+            sys.exit(1)
     elif args.command == "fetch-issue":
         result = fetch_issue(args.repo, args.issue_number)
         print(json.dumps(result, indent=2) if result else "null")

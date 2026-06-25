@@ -39,11 +39,21 @@ READ_ONLY_VERBS = frozenset(
 )
 
 
-def is_read_only_tool(name: str) -> bool:
-    """True if a tool name begins with an allowlisted read verb."""
+def is_read_only_tool(name: str, prefixes: tuple[str, ...] = ()) -> bool:
+    """True if a tool name begins with an allowlisted read verb.
+
+    If a prefix from ``prefixes`` matches the (normalized) leading
+    ``workload_`` segment, it is stripped before the verb check.
+    """
     if not isinstance(name, str) or not name:
         return False
-    head = name.strip().lower().replace("-", "_").split("_", 1)[0]
+    normalized = name.strip().lower().replace("-", "_")
+    for prefix in prefixes:
+        prefix_n = prefix.strip().lower().replace("-", "_").rstrip("_")
+        if prefix_n and normalized.startswith(prefix_n + "_"):
+            normalized = normalized[len(prefix_n) + 1:]
+            break
+    head = normalized.split("_", 1)[0]
     return head in READ_ONLY_VERBS
 
 
@@ -112,11 +122,15 @@ class McpToolset:
     """An initialized connection to one allowlisted MCP server."""
 
     def __init__(self, server: str, url: str, token: str = "", *, timeout: int = 20,
-                 post_fn: Callable | None = None):
+                 post_fn: Callable | None = None, name_prefixes: tuple[str, ...] = ()):
         self.server = server
         self.url = url
         self.token = token
         self.timeout = timeout
+        self._name_prefixes = tuple(
+            p.strip().lower().replace("-", "_").rstrip("_")
+            for p in name_prefixes if p and p.strip()
+        )
         # Runtime lookup of the default so tests can monkeypatch _default_post.
         self._post = post_fn or _default_post
         self._session_id: str | None = None
@@ -161,7 +175,7 @@ class McpToolset:
             if not isinstance(tool, dict):
                 continue
             name = tool.get("name")
-            if not isinstance(name, str) or not is_read_only_tool(name):
+            if not isinstance(name, str) or not is_read_only_tool(name, self._name_prefixes):
                 continue  # default-deny non-read-verb tools
             schema = tool.get("inputSchema")
             if not isinstance(schema, dict):
@@ -183,7 +197,7 @@ class McpToolset:
         Re-checks the read-only allowlist at call time (defence in depth) and
         refuses any tool not surfaced by connect().
         """
-        if tool not in self._tool_names or not is_read_only_tool(tool):
+        if tool not in self._tool_names or not is_read_only_tool(tool, self._name_prefixes):
             return {"error": f"MCP tool not allowed: {tool}"}
         result, error = self._rpc(
             "tools/call", {"name": tool, "arguments": args or {}}, msg_id=3

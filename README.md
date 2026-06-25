@@ -336,6 +336,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `tool_enable_for_forks` | Allow tool harness on cross-repository PRs | No | `false` |
 | `tool_mcp_servers` | Allowlist of read-only MCP servers for `tool_mode: native_loop`, as a newline/comma list of `name=url`. Read-verb tools are advertised as `mcp__<name>__<tool>`; write-verb tools are refused. Empty = off. Fork-gated like the rest of the harness | No | `""` |
 | `tool_mcp_token` | Optional bearer token sent to every configured MCP server | No | `""` |
+| `tool_mcp_name_prefixes` | Comma-separated list of tool name prefixes to strip before the read-only verb check. Used to handle toolhive-style workload prefixes (`prefixFormat: "{workload}_"`) on aggregated MCP servers — e.g. `github-mcp,talos-mcp`. Empty preserves the default-deny boundary | No | `""` |
 
 </details>
 

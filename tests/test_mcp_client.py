@@ -58,6 +58,30 @@ def test_is_read_only_tool():
         assert not is_read_only_tool(bad)
 
 
+def test_is_read_only_tool_default_deny_boundary():
+    # Regression: write tools whose second _-segment matches a read verb
+    # must stay denied when no prefix is configured. The earlier
+    # any-segment scan admitted these.
+    for bad in ("set_status", "create_view", "update_diff", "refresh_status",
+                "delete_query", "run_search", "set_y", "exec_z"):
+        assert not is_read_only_tool(bad), f"{bad!r} must be denied"
+
+
+def test_is_read_only_tool_strips_known_prefix():
+    prefixes = ("github-mcp",)
+    for ok in ("github-mcp_list_issues", "github-mcp_get_pr", "github-mcp_search"):
+        assert is_read_only_tool(ok, prefixes), f"{ok!r} should be admitted"
+    for bad in ("github-mcp_set_status", "github-mcp_create_view",
+                "github-mcp_update_config", "github-mcp_delete_pr"):
+        assert not is_read_only_tool(bad, prefixes), f"{bad!r} must be denied"
+
+
+def test_is_read_only_tool_prefix_partial_match_rejected():
+    prefixes = ("github-mcp",)
+    assert not is_read_only_tool("github_list_issues", prefixes)
+    assert not is_read_only_tool("github-mcpology_list", prefixes)
+
+
 def test_connect_advertises_only_read_only_namespaced():
     ts = McpToolset("konflate", "http://x/mcp", post_fn=_stub(_KONFLATE_TOOLS))
     assert ts.connect() is None
