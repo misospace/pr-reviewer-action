@@ -25,6 +25,14 @@ AI_PRIMARY_RETRY_DELAY_SEC="${AI_PRIMARY_RETRY_DELAY_SEC:-15}"
 AI_STREAM="${AI_STREAM:-true}"
 AI_FALLBACK_STREAM="${AI_FALLBACK_STREAM:-$AI_STREAM}"
 ALLOWED_SOURCE_HOSTS="${ALLOWED_SOURCE_HOSTS:-github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io}"
+# Implicitly trust the configured forge host as a linked source.
+if [ -n "${FORGEJO_API_URL:-}" ]; then
+  _self_source_host=$(printf '%s' "$FORGEJO_API_URL" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
+  case ",${ALLOWED_SOURCE_HOSTS}," in
+    *",${_self_source_host},"*) : ;;
+    *) [ -n "$_self_source_host" ] && ALLOWED_SOURCE_HOSTS="${ALLOWED_SOURCE_HOSTS},${_self_source_host}" ;;
+  esac
+fi
 GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 SYSTEM_PROMPT="${SYSTEM_PROMPT:-}"
 SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-}"

@@ -96,10 +96,25 @@ head -n 25 urls.all.txt > urls.txt || true
 grep -E '^[+-].*(image:|tag:|version:|chart:|appVersion:|digest:)' pr.diff.truncated > version-hints.txt || true
 head -n 180 version-hints.txt > version-hints.truncated.txt || true
 
-grep -Eo 'ghcr\.io/[^/]+/[^:"@ ]+' version-hints.txt | sort -u > ghcr-images.txt || true
-sedi 's#ghcr\.io/##' ghcr-images.txt
-sedi 's#:.*##' ghcr-images.txt
-sort -u ghcr-images.txt -o ghcr-images.txt
+# ghcr.io image/chart repos for upstream release lookup. Scans the diff (with
+# context) too: a chart `url:` often sits outside the changed +/- lines.
+# Multi-segment chart paths are kept whole; tag/digest stripped.
+{ cat version-hints.txt; grep -Eo '(oci://)?ghcr\.io/[^"'"'"' )]+' pr.diff.truncated 2>/dev/null; } \
+  | grep -Eo 'ghcr\.io/[^/]+(/[^:"@ )]+)+' \
+  | sed -E 's#^ghcr\.io/##; s#[:@].*##' \
+  | sort -u > ghcr-images.txt || true
+
+# Old→new short-SHA pair from <version>-<gitsha> tags, for a commit-compare
+# fallback when upstream cuts no release. Only when the pairing is unambiguous.
+: > compare-shas.txt
+_old_sha=$(grep -E '^-' version-hints.txt | grep -oiE '\b[0-9a-f]{7,40}\b' | grep -iE '[a-f]' | sort -u)
+_new_sha=$(grep -E '^\+' version-hints.txt | grep -oiE '\b[0-9a-f]{7,40}\b' | grep -iE '[a-f]' | sort -u)
+if [ -n "$_old_sha" ] \
+  && [ "$(printf '%s\n' "$_old_sha" | grep -c .)" = "1" ] \
+  && [ "$(printf '%s\n' "$_new_sha" | grep -c .)" = "1" ] \
+  && [ "$_old_sha" != "$_new_sha" ]; then
+  printf '%s %s\n' "$_old_sha" "$_new_sha" > compare-shas.txt
+fi
 
 section_timer_start "manifest-context"
 log "Gathering changed manifest context..."

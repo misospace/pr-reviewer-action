@@ -14,7 +14,8 @@ log "Gathering linked sources..."
 : > linked-sources.md
 if [ -s urls.txt ]; then
   ENRICHMENT_START_TS=$(date +%s)
-  TARGET_VERSION="$(jq -r '.title' pr.json | sed -n 's/.*→ *v\?\([0-9][0-9.]*\).*/\1/p' | head -n1)"
+  # New version = last version token in the title (arrow-glyph agnostic).
+  TARGET_VERSION="$(jq -r '.title' pr.json | grep -oE 'v?[0-9]+(\.[0-9]+)+' | tail -n1 | sed 's/^v//')"
   if [ -z "$TARGET_VERSION" ]; then
     TARGET_VERSION="$(grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' version-hints.truncated.txt 2>/dev/null | sed 's/^v//' | tail -n1 || true)"
   fi
@@ -157,6 +158,40 @@ if [ -s urls.txt ]; then
       fi
     fi
 
+    # Forge-hosted sources (same URL shapes as GitHub): query /api/v1.
+    # github.com is handled above; a non-Forgejo host returns non-JSON → degrade.
+    case "$host" in github.com) ;; *) if url_host_allowed "$normalized_url"; then
+      if [[ "$normalized_url" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/releases/tag/([^/?#]+) ]]; then
+        fg_host="${BASH_REMATCH[1]}"; fg_owner="${BASH_REMATCH[2]}"
+        fg_repo="${BASH_REMATCH[3]}"; fg_tag="${BASH_REMATCH[4]}"
+        echo >> linked-sources.md
+        echo "### Forge Release Metadata: $fg_host $fg_owner/$fg_repo@$fg_tag" >> linked-sources.md
+        if enrichment_budget_ok && forgejo_enrich_release "$fg_host" "$fg_owner/$fg_repo" "$fg_tag" > forge-release.json 2>/dev/null && [ "$(jq -r 'type' forge-release.json 2>/dev/null)" = "object" ]; then
+          echo '```json' >> linked-sources.md
+          head -c 6000 forge-release.json >> linked-sources.md
+          echo >> linked-sources.md
+          echo '```' >> linked-sources.md
+        else
+          echo "(Could not fetch release metadata from $fg_host for tag $fg_tag)" >> linked-sources.md
+        fi
+      fi
+      if [[ "$normalized_url" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)$ ]]; then
+        fg_host="${BASH_REMATCH[1]}"; fg_owner="${BASH_REMATCH[2]}"
+        fg_repo="${BASH_REMATCH[3]}"; fg_spec="${BASH_REMATCH[4]}"
+        echo >> linked-sources.md
+        echo "### Forge Compare Metadata: $fg_host $fg_owner/$fg_repo@$fg_spec" >> linked-sources.md
+        if enrichment_budget_ok && forgejo_enrich_compare "$fg_host" "$fg_owner/$fg_repo" "$fg_spec" > forge-compare.json 2>/dev/null && [ "$(jq -r 'type' forge-compare.json 2>/dev/null)" = "object" ]; then
+          jq -c '{total_commits,commits:[.commits[]?|{sha,commit:{message}}],files:[.files[]?|{filename,status,additions,deletions}]}' forge-compare.json > forge-compare.filtered.json 2>/dev/null || cp forge-compare.json forge-compare.filtered.json
+          echo '```json' >> linked-sources.md
+          head -c 7000 forge-compare.filtered.json >> linked-sources.md
+          echo >> linked-sources.md
+          echo '```' >> linked-sources.md
+        else
+          echo "(Could not fetch compare metadata from $fg_host for $fg_spec)" >> linked-sources.md
+        fi
+      fi
+    fi ;; esac
+
     if [[ "$normalized_url" =~ ^https?://github\.com/([^/]+)/([^/?#]+) ]]; then
       owner="${BASH_REMATCH[1]}"
       repo="${BASH_REMATCH[2]}"
@@ -234,11 +269,16 @@ if [ -s urls.txt ]; then
         continue
       fi
 
-      owner="${img_repo%/*}"
-      repo="${img_repo#*/}"
-      if [ -z "$owner" ] || [ -z "$repo" ] || [[ "$owner" == *"/"* ]]; then
+      # Source repo = first + last segment (home-operations/charts/tuppr →
+      # home-operations/tuppr).
+      owner="${img_repo%%/*}"
+      repo="${img_repo##*/}"
+      if [ -z "$owner" ] || [ -z "$repo" ] || [ "$owner" = "$img_repo" ]; then
         continue
       fi
+
+      # Clear prior iteration's files so they don't mask this image's result.
+      rm -f ghcr-release.json ghcr-release.filtered.json ghcr-compare.json ghcr-compare.filtered.json ghcr-compare.files.json
 
       echo >> linked-sources.md
       echo "### GitHub Release Lookup via ghcr.io Path: $owner/$repo" >> linked-sources.md
@@ -255,11 +295,33 @@ if [ -s urls.txt ]; then
             break
           fi
         done
-        if [ ! -s ghcr-release.json ] || [ ! -s ghcr-release.filtered.json ]; then
+        if [ ! -s ghcr-release.filtered.json ]; then
           echo "(No release found for $owner/$repo at version $TARGET_VERSION via ghcr.io path inference)" >> linked-sources.md
         fi
       else
         echo "(TARGET_VERSION not set; skipping release lookup for $owner/$repo)" >> linked-sources.md
+      fi
+
+      # No release for this version: fall back to a commit compare of the
+      # old→new tag SHAs.
+      if [ ! -s ghcr-release.filtered.json ] && [ -s compare-shas.txt ]; then
+        read -r cmp_old cmp_new < compare-shas.txt
+        if [ -n "$cmp_old" ] && [ -n "$cmp_new" ] && enrichment_budget_ok \
+          && github_enrich_api "repos/$owner/$repo/compare/$cmp_old...$cmp_new" > ghcr-compare.json 2>/dev/null \
+          && [ -n "$(jq -r '.status // empty' ghcr-compare.json 2>/dev/null)" ]; then
+          echo "#### Commit compare $cmp_old...$cmp_new (no release published for this version)" >> linked-sources.md
+          jq -c '{html_url,status,ahead_by,total_commits,commits:[.commits[]?|{sha,commit:{message}}]}' ghcr-compare.json > ghcr-compare.filtered.json
+          echo '```json' >> linked-sources.md
+          head -c 6000 ghcr-compare.filtered.json >> linked-sources.md
+          echo >> linked-sources.md
+          echo '```' >> linked-sources.md
+          jq -c '[.files[]?|{filename,status,additions,deletions,changes}]' ghcr-compare.json > ghcr-compare.files.json
+          echo "#### Changed Files" >> linked-sources.md
+          echo '```json' >> linked-sources.md
+          head -c 5000 ghcr-compare.files.json >> linked-sources.md
+          echo >> linked-sources.md
+          echo '```' >> linked-sources.md
+        fi
       fi
     done < ghcr-images.txt
   fi

@@ -818,5 +818,81 @@ class TestGetCommitStatus(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestForgeEnrichment(unittest.TestCase):
+    """Cross-host linked-source enrichment (release-by-tag / compare)."""
+
+    _RELEASE = {
+        "tag_name": "v0.4.21",
+        "name": "v0.4.21",
+        "published_at": "2026-06-28T00:00:00Z",
+        "html_url": "https://codeberg.org/o/r/releases/tag/v0.4.21",
+        "body": "patch bump",
+    }
+    _COMPARE = {"total_commits": 2, "commits": [{"sha": "a"}], "files": [{"filename": "x"}]}
+
+    @_PATCH_FORGEJO
+    def test_release_normalises_to_github_subset(self, mock_curl):
+        url_map = {"https://codeberg.org/api/v1/repos/o/r/releases/tags/v0.4.21": (200, json.dumps(self._RELEASE))}
+        mock_curl.side_effect = _make_curl_mock(url_map)
+        result = fb.fetch_forge_release("codeberg.org", "o/r", "v0.4.21")
+        self.assertEqual(result["tag_name"], "v0.4.21")
+        self.assertEqual(result["body"], "patch bump")
+        self.assertEqual(sorted(result), ["body", "html_url", "name", "published_at", "tag_name"])
+
+    @_PATCH_FORGEJO
+    def test_release_not_found_returns_none(self, mock_curl):
+        mock_curl.side_effect = _make_curl_mock({})
+        self.assertIsNone(fb.fetch_forge_release("codeberg.org", "o/r", "v9.9.9"))
+
+    @_PATCH_FORGEJO
+    def test_compare_returns_raw_object(self, mock_curl):
+        url_map = {"https://codeberg.org/api/v1/repos/o/r/compare/a...b": (200, json.dumps(self._COMPARE))}
+        mock_curl.side_effect = _make_curl_mock(url_map)
+        result = fb.fetch_forge_compare("codeberg.org", "o/r", "a...b")
+        self.assertEqual(result["total_commits"], 2)
+
+    @_PATCH_FORGEJO
+    def test_compare_failure_returns_none(self, mock_curl):
+        mock_curl.side_effect = _make_curl_mock({})
+        self.assertIsNone(fb.fetch_forge_compare("codeberg.org", "o/r", "missing...head"))
+
+    def test_token_sent_only_to_configured_instance(self):
+        # Token goes to the configured host only, never to other forges.
+        with patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"), \
+             patch.object(fb, "FORGEJO_TOKEN", "SECRET"):
+            self.assertEqual(fb._enrich_token_for_host("git.example.com"), "SECRET")
+            self.assertEqual(fb._enrich_token_for_host("codeberg.org"), "")
+
+    def test_release_uses_host_token_guard(self):
+        # fetch_forge_release must pass the empty token for a foreign host.
+        seen = {}
+
+        def _spy(method, url, token=None, **kwargs):
+            seen["token"] = token
+            return 200, json.dumps(self._RELEASE)
+
+        with patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"), \
+             patch.object(fb, "FORGEJO_TOKEN", "SECRET"), \
+             patch.object(fb, "_curl", side_effect=_spy):
+            fb.fetch_forge_release("codeberg.org", "o/r", "v1")
+        self.assertEqual(seen["token"], "")
+
+    def test_curl_omits_auth_header_when_token_empty(self):
+        # An empty token must not produce an Authorization header.
+        captured = {}
+
+        class _Proc:
+            stdout = b'{}\n200'
+            returncode = 0
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return _Proc()
+
+        with patch.object(fb.subprocess, "run", side_effect=_fake_run):
+            fb._curl("GET", "https://codeberg.org/api/v1/x", token="")
+        self.assertFalse(any(str(c).startswith("Authorization") for c in captured["cmd"]))
+
+
 if __name__ == "__main__":
     unittest.main()

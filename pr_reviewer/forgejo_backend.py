@@ -77,15 +77,16 @@ def _curl(
     # are not guaranteed to end with whitespace (an empty 204 body, or compact
     # JSON without a trailing newline, would otherwise fuse with the code and
     # make it unparseable).
-    cmd: list[str] = [
-        "curl", "-sS",
-        "-X", method.upper(),
-        "-H", f"Authorization: token {token}",
+    cmd: list[str] = ["curl", "-sS", "-X", method.upper()]
+    # Empty token: fetch unauthenticated (don't send our token to other forges).
+    if token:
+        cmd.extend(["-H", f"Authorization: token {token}"])
+    cmd.extend([
         "-H", f"Accept: {accept}",
         "-o", "-",
         "-w", "\n%{http_code}",
         url,
-    ]
+    ])
     if data is not None and method.upper() in ("POST", "PATCH", "PUT"):
         if isinstance(data, bytes):
             body_bytes = data
@@ -493,6 +494,48 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Linked-source enrichment against arbitrary Forgejo/Gitea instances
+# ---------------------------------------------------------------------------
+# The upstream repo may live on a different forge than the PR, so host is an
+# explicit argument (vs platform_*, which use the configured FORGEJO_API_URL).
+
+def _enrich_token_for_host(host: str) -> str:
+    """Token for *host*: the configured instance only, else empty (unauth)."""
+    configured = re.sub(r"^https?://", "", FORGEJO_API_URL).strip("/").lower()
+    return FORGEJO_TOKEN if (configured and host.lower() == configured) else ""
+
+
+def fetch_forge_release(host: str, repo_full_name: str, tag: str) -> dict[str, Any] | None:
+    """Release by tag from a Forgejo/Gitea *host*; None on failure."""
+    owner, repo = _parse_repo(repo_full_name)
+    url = f"https://{host}/api/v1/repos/{owner}/{repo}/releases/tags/{quote(tag, safe='')}"
+    status_code, body = _curl("GET", url, token=_enrich_token_for_host(host))
+    if status_code != 200:
+        return None
+    data = _json_decode(body)
+    if not isinstance(data, dict):
+        return None
+    return {
+        "tag_name": data.get("tag_name", tag),
+        "name": data.get("name", ""),
+        "published_at": data.get("published_at", data.get("created_at", "")),
+        "html_url": data.get("html_url", data.get("url", "")),
+        "body": data.get("body", ""),
+    }
+
+
+def fetch_forge_compare(host: str, repo_full_name: str, spec: str) -> dict[str, Any] | None:
+    """Compare (``base...head``) from a Forgejo/Gitea *host*; None on failure."""
+    owner, repo = _parse_repo(repo_full_name)
+    url = f"https://{host}/api/v1/repos/{owner}/{repo}/compare/{quote(spec, safe='')}"
+    status_code, body = _curl("GET", url, token=_enrich_token_for_host(host))
+    if status_code != 200:
+        return None
+    data = _json_decode(body)
+    return data if isinstance(data, dict) else None
+
+
+# ---------------------------------------------------------------------------
 # PR Files (for classifier)
 # ---------------------------------------------------------------------------
 
@@ -891,6 +934,16 @@ def main() -> None:
     p_compare.add_argument("repo")
     p_compare.add_argument("spec")
 
+    p_enrich_release = sub.add_parser("enrich-release")
+    p_enrich_release.add_argument("host")
+    p_enrich_release.add_argument("repo")
+    p_enrich_release.add_argument("tag")
+
+    p_enrich_compare = sub.add_parser("enrich-compare")
+    p_enrich_compare.add_argument("host")
+    p_enrich_compare.add_argument("repo")
+    p_enrich_compare.add_argument("spec")
+
     p_reviews = sub.add_parser("list-pr-reviews")
     p_reviews.add_argument("repo")
     p_reviews.add_argument("pr_number", type=int)
@@ -941,6 +994,18 @@ def main() -> None:
         print(json.dumps(result, indent=2) if result else "null")
     elif args.command == "compare":
         result = compare_commits(args.repo, args.spec)
+        if result is None:
+            print("null")
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
+    elif args.command == "enrich-release":
+        result = fetch_forge_release(args.host, args.repo, args.tag)
+        if result is None:
+            print("null")
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
+    elif args.command == "enrich-compare":
+        result = fetch_forge_compare(args.host, args.repo, args.spec)
         if result is None:
             print("null")
             sys.exit(1)
