@@ -132,7 +132,7 @@ if [ -s urls.txt ]; then
       fi
     fi
 
-    if [[ "$normalized_url" =~ ^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+)$ ]]; then
+    if [[ "$normalized_url" =~ ^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+) ]]; then
       owner="${BASH_REMATCH[1]}"
       repo="${BASH_REMATCH[2]}"
       compare_spec="${BASH_REMATCH[3]}"
@@ -175,7 +175,7 @@ if [ -s urls.txt ]; then
           echo "(Could not fetch release metadata from $fg_host for tag $fg_tag)" >> linked-sources.md
         fi
       fi
-      if [[ "$normalized_url" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)$ ]]; then
+      if [[ "$normalized_url" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+) ]]; then
         fg_host="${BASH_REMATCH[1]}"; fg_owner="${BASH_REMATCH[2]}"
         fg_repo="${BASH_REMATCH[3]}"; fg_spec="${BASH_REMATCH[4]}"
         echo >> linked-sources.md
