@@ -39,6 +39,9 @@ _RE_GH_ISSUE_URL = re.compile(
 )
 
 # GitHub commit URLs: https://github.com/owner/repo/commit/<sha>
+# The [0-9a-f]{7,40} pattern matches any lowercase hex token of that length.
+# False positives are prevented by the commit/ URL path prefix, which only
+# appears in legitimate GitHub commit links (not arbitrary hex literals).
 _RE_GH_COMMIT_URL = re.compile(
     r"https?://github\.com/"
     r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/"
