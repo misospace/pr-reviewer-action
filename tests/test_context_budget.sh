@@ -88,6 +88,16 @@ check "non-github sources go through strip_source_to_text" \
   "$(grep -c 'strip_source_to_text "source.$i.raw"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
 check "github.com is excluded from the parallel prefetch" \
   "$(grep -c '"\$host" != "github.com"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+check "SKIP_ENRICH_HOSTS constant is defined" \
+  "$(grep -c '^SKIP_ENRICH_HOSTS=' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+check "SKIP_ENRICH_HOSTS list covers gitlab.com" \
+  "$(grep -c 'gitlab.com' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+check "SKIP_ENRICH_HOSTS list covers bitbucket.org" \
+  "$(grep -c 'bitbucket.org' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+check "Phase-1 loop skips SKIP_ENRICH_HOSTS via case + continue" \
+  "$(grep -c 'SKIP_ENRICH_HOSTS' "$ROOT_DIR/scripts/sections/enrichment.sh")" "3"
+check "Phase-2 emits 'known non-Forgejo host' corpus note" \
+  "$(grep -c 'Raw HTML fetch skipped for known non-Forgejo host' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
 
 echo ""
 echo "=== Test: no tokens on curl argv in the incremental fetch ==="

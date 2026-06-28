@@ -3,6 +3,12 @@
 # Verbatim in-order slice of the former monolith (#307); relies on globals/helpers
 # set up by the orchestrator. Not executable on its own.
 
+# Known non-Forgejo hosts whose release/compare pages are JS-rendered HTML
+# shells that provide no useful corpus signal (#352). Phase-1's 25s/URL
+# curl would otherwise burn enrichment budget for content that yields
+# nothing. Mirrors the github.com skip below.
+SKIP_ENRICH_HOSTS="gitlab.com bitbucket.org"
+
 section_timer_start "enrichment"
 log "Gathering linked sources..."
 : > linked-sources.md
@@ -28,6 +34,12 @@ if [ -s urls.txt ]; then
     normalized_url="$(printf '%s' "$url" | sed -E 's#^https?://redirect.github.com/#https://github.com/#')"
     rm -f "source.$i.raw"
     host=$(printf '%s' "$normalized_url" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
+    # Skip known non-Forgejo hosts whose release/compare pages are JS-rendered
+    # HTML shells (#352) — emitting a curl config would burn 25s of
+    # enrichment budget for content that yields no corpus signal.
+    case " $SKIP_ENRICH_HOSTS " in
+      *" $host "*) continue ;;
+    esac
     # github.com bodies are JS-app shells; phase 2's gh api branches capture
     # the structured data instead, so don't spend a fetch on them at all.
     if [ "$host" != "github.com" ] && url_host_allowed "$normalized_url"; then
@@ -71,6 +83,10 @@ if [ -s urls.txt ]; then
         # in structured form instead. Skipping the fetch saves both time and
         # ~5KB of corpus boilerplate per URL.
         echo "(Raw HTML fetch skipped for github.com — structured release/compare metadata is captured below when available)" >> linked-sources.md
+      elif case " $SKIP_ENRICH_HOSTS " in *" $host "*) true ;; *) false ;; esac; then
+        # Same optimization for known non-Forgejo hosts (#352): their
+        # release/compare pages are JS-rendered HTML shells too.
+        echo "(Raw HTML fetch skipped for known non-Forgejo host: $host)" >> linked-sources.md
       elif [ -s "source.$i.raw" ]; then
         strip_source_to_text "source.$i.raw" source.tmp 4000
         if [ -s source.tmp ]; then
