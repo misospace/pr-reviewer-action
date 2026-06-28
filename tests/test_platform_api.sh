@@ -115,6 +115,13 @@ check "platform_commit_status" \
 check "github_enrich_api passthrough" \
   "$(run_seam github "" 'github_enrich_api repos/up/stream/releases?per_page=8')" \
   "gh api repos/up/stream/releases?per_page=8"
+# Forge enrichment helpers dispatch to the backend CLI for any host.
+check "forgejo_enrich_release dispatches to backend cli" \
+  "$(run_seam github "" 'python3(){ echo "py $*"; }; forgejo_enrich_release codeberg.org o/r v1')" \
+  "py -m pr_reviewer.forgejo_backend enrich-release codeberg.org o/r v1"
+check "forgejo_enrich_compare dispatches to backend cli" \
+  "$(run_seam github "" 'python3(){ echo "py $*"; }; forgejo_enrich_compare codeberg.org o/r a...b')" \
+  "py -m pr_reviewer.forgejo_backend enrich-compare codeberg.org o/r a...b"
 
 check "forgejo backend falls back from GITHUB_TOKEN to GH_TOKEN" \
   "$(FORGEJO_API_URL= GITHUB_TOKEN= GH_TOKEN=from-gh python3 - <<'PYEOF'

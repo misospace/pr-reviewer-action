@@ -292,3 +292,18 @@ platform_commit_status() {
 github_enrich_api() {
   gh api "$@"
 }
+
+# Linked-source enrichment against an arbitrary upstream forge host. Print the
+# JSON object on stdout, or `null` + nonzero exit when unavailable.
+
+forgejo_enrich_release() {
+  # $1=host $2=owner/repo $3=tag
+  PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -m pr_reviewer.forgejo_backend enrich-release "$1" "$2" "$3"
+}
+
+forgejo_enrich_compare() {
+  # $1=host $2=owner/repo $3=base...head
+  PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -m pr_reviewer.forgejo_backend enrich-compare "$1" "$2" "$3"
+}
