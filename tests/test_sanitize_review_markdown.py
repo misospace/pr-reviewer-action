@@ -51,6 +51,14 @@ class TestSanitizeCommitUrl:
         result = sanitize_markdown(text)
         assert "upstream owner/repo commit abcdef1234567890abcdef1234567890abcdef12" in result
 
+    def test_non_sha_hex_token_in_commit_url(self):
+        """A non-SHA hex token (e.g., UUID fragment, crypto constant) in a commit URL
+        context is still sanitized: the /commit/ path makes it a SHA by definition."""
+        text = "See https://github.com/owner/repo/commit/deadbabe00cafe123 for details."
+        result = sanitize_markdown(text)
+        assert "upstream owner/repo commit deadbabe00cafe123" in result
+        assert "https://github.com/owner/repo/commit/deadbabe00cafe123" not in result
+
 
 class TestSanitizeCompareUrl:
     """Test GitHub compare URL sanitization."""
