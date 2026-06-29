@@ -81,23 +81,27 @@ check "output is valid UTF-8" \
   "$(python3 -c 'open("'"$TMP"'/utfdst",encoding="utf-8").read(); print("ok")')" "ok"
 
 echo ""
-echo "=== Test: enrichment context trims are wired into the section modules ==="
+echo "=== Test: enrichment context trims are wired into the Python pipeline ==="
+# Enrichment rendering moved from scripts/sections/enrichment.sh into
+# scripts/run_enrichment.py (#7892). The skip-list and corpus-note behavior
+# must survive the migration.
+ENRICHMENT_PY="$ROOT_DIR/scripts/run_enrichment.py"
 check "github.com raw HTML fetch is skipped" \
-  "$(grep -c 'Raw HTML fetch skipped for github.com' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+  "$(grep -c 'Raw HTML fetch skipped for github.com' "$ENRICHMENT_PY")" "1"
 check "non-github sources go through strip_source_to_text" \
-  "$(grep -c 'strip_source_to_text "source.$i.raw"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+  "$(grep -c 'strip_source_to_text' "$ENRICHMENT_PY")" "2"
 check "github.com is excluded from the parallel prefetch" \
-  "$(grep -c '"\$host" != "github.com"' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
-check "SKIP_ENRICH_HOSTS constant is defined" \
-  "$(grep -c '^SKIP_ENRICH_HOSTS=' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
-check "SKIP_ENRICH_HOSTS list covers gitlab.com" \
-  "$(grep -c 'gitlab.com' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
-check "SKIP_ENRICH_HOSTS list covers bitbucket.org" \
-  "$(grep -c 'bitbucket.org' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
-check "Phase-1 loop skips SKIP_ENRICH_HOSTS via case + continue" \
-  "$(grep -c 'SKIP_ENRICH_HOSTS' "$ROOT_DIR/scripts/sections/enrichment.sh")" "3"
+  "$(grep -c 'host == "github.com"' "$ENRICHMENT_PY")" "2"
+check "SKIP_FETCH_HOSTS constant is defined" \
+  "$(grep -c '^SKIP_FETCH_HOSTS' "$ENRICHMENT_PY")" "1"
+check "SKIP_FETCH_HOSTS list covers gitlab.com" \
+  "$(grep -c 'gitlab.com' "$ENRICHMENT_PY")" "1"
+check "SKIP_FETCH_HOSTS list covers bitbucket.org" \
+  "$(grep -c 'bitbucket.org' "$ENRICHMENT_PY")" "1"
+check "Phase-1 loop skips SKIP_FETCH_HOSTS" \
+  "$(grep -c 'SKIP_FETCH_HOSTS' "$ENRICHMENT_PY")" "3"
 check "Phase-2 emits 'known non-Forgejo host' corpus note" \
-  "$(grep -c 'Raw HTML fetch skipped for known non-Forgejo host' "$ROOT_DIR/scripts/sections/enrichment.sh")" "1"
+  "$(grep -c 'Raw HTML fetch skipped for known non-Forgejo host' "$ENRICHMENT_PY")" "1"
 
 echo ""
 echo "=== Test: no tokens on curl argv in the incremental fetch ==="
