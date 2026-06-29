@@ -156,28 +156,51 @@ def test_forgejo_query_url_matches_bash():
     assert captures.get("R4") == "v1...v2"
 
 
-# --- Source file presence checks ---
+# --- Source file presence checks (patterns now in Python) ---
 
 
-def test_github_compare_pattern_in_source():
-    content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
+def test_github_compare_pattern_in_python_source():
+    content = (ROOT / "pr_reviewer/enrichment.py").read_text(encoding="utf-8")
     assert "github\\.com/([^/]+)/([^/]+)/compare/([^?#]+)" in content, (
-        "GitHub compare regex must be present in enrichment.sh"
+        "GitHub compare regex must be present in pr_reviewer/enrichment.py"
     )
 
 
-def test_forgejo_compare_pattern_in_source():
-    content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
+def test_forgejo_compare_pattern_in_python_source():
+    content = (ROOT / "pr_reviewer/enrichment.py").read_text(encoding="utf-8")
     assert "([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)" in content, (
-        "Forgejo compare regex must be present in enrichment.sh"
+        "Forgejo compare regex must be present in pr_reviewer/enrichment.py"
     )
 
 
 def test_patterns_not_anchored_to_end():
     """Ensure the compare regexes do not end with $ (which would reject query/fragment)."""
-    content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
+    content = (ROOT / "pr_reviewer/enrichment.py").read_text(encoding="utf-8")
     # The old broken pattern had ([^?#]+)$ which rejects query strings.
     assert "compare/([^?#]+)$" not in content, (
         "Compare regexes must not be anchored with $ at the end; "
         "this prevents matching URLs with query strings or fragments"
+    )
+
+
+def test_enrichment_sh_no_longer_has_brittle_grep_pipelines():
+    """Verify enrichment.sh is now a thin wrapper, not grep pipelines."""
+    content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
+    assert "run_enrichment.py" in content, (
+        "enrichment.sh should delegate to run_enrichment.py"
+    )
+    # Should not contain the old brittle TARGET_VERSION grep pipeline
+    assert 'TARGET_VERSION="$(jq -r' not in content, (
+        "enrichment.sh should not contain TARGET_VERSION grep pipeline"
+    )
+
+
+def test_context_sh_no_longer_has_brittle_compare_sha_grep():
+    """Verify context.sh no longer has the brittle compare-sha grep pipelines."""
+    content = (ROOT / "scripts/sections/context.sh").read_text(encoding="utf-8")
+    assert "_old_sha=$(grep" not in content, (
+        "context.sh should not contain brittle _old_sha grep pipeline"
+    )
+    assert "_new_sha=$(grep" not in content, (
+        "context.sh should not contain brittle _new_sha grep pipeline"
     )

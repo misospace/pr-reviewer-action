@@ -87,39 +87,13 @@ else
 fi
 section_timer_end
 
-cat pr-body.txt pr.diff.truncated \
-  | grep -Eo 'https?://[^ )]+' \
-  | sed 's/[",.;]$//' \
-  | sort -u > urls.all.txt || true
-head -n 25 urls.all.txt > urls.txt || true
-
-grep -E '^[+-].*(image:|tag:|version:|chart:|appVersion:|digest:)' pr.diff.truncated > version-hints.txt || true
-head -n 180 version-hints.txt > version-hints.truncated.txt || true
-
-# ghcr.io image/chart repos for upstream release lookup. Scans the diff (with
-# context) too: a chart `url:` often sits outside the changed +/- lines.
-# Multi-segment chart paths are kept whole; tag/digest stripped.
-{ cat version-hints.txt; grep -Eo '(oci://)?ghcr\.io/[^"'"'"' )]+' pr.diff.truncated 2>/dev/null; } \
-  | grep -Eo 'ghcr\.io/[^/]+(/[^:"@ )]+)+' \
-  | sed -E 's#^ghcr\.io/##; s#[:@].*##' \
-  | sort -u > ghcr-images.txt || true
-
-# Old→new short-SHA pair from <version>-<gitsha> tags, for a commit-compare
-# fallback when upstream cuts no release. Only when the pairing is unambiguous.
-: > compare-shas.txt
-# || true: the inner `grep -iE '[a-f]'` returns 1 when no hex SHA is present
-# (the common renovate image-tag bump, e.g. `0.8.19 → 0.8.21`); under
-# `set -euo pipefail` an unguarded `$(…)` assignment would abort the whole
-# review (regression in run home-ops#7883). The `if [ -n "$_old_sha" ]`
-# guard below already handles the empty case.
-_old_sha=$(grep -E '^-' version-hints.txt | grep -oiE '\b[0-9a-f]{7,40}\b' | grep -iE '[a-f]' | sort -u) || true
-_new_sha=$(grep -E '^\+' version-hints.txt | grep -oiE '\b[0-9a-f]{7,40}\b' | grep -iE '[a-f]' | sort -u) || true
-if [ -n "$_old_sha" ] \
-  && [ "$(printf '%s\n' "$_old_sha" | grep -c .)" = "1" ] \
-  && [ "$(printf '%s\n' "$_new_sha" | grep -c .)" = "1" ] \
-  && [ "$_old_sha" != "$_new_sha" ]; then
-  printf '%s %s\n' "$_old_sha" "$_new_sha" > compare-shas.txt
-fi
+# Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
+# by scripts/run_enrichment.py which runs in the enrichment section below.
+# This avoids brittle grep pipelines under set -euo pipefail (#7892).
+: > urls.all.txt urls.txt version-hints.txt version-hints.truncated.txt ghcr-images.txt compare-shas.txt 2>/dev/null || {
+  : > urls.all.txt; : > urls.txt; : > version-hints.txt
+  : > version-hints.truncated.txt; : > ghcr-images.txt; : > compare-shas.txt
+}
 
 section_timer_start "manifest-context"
 log "Gathering changed manifest context..."
