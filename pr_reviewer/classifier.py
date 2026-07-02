@@ -73,7 +73,6 @@ RENOVATE_DIGEST_FILE_PATTERNS = [
 ]
 
 # 64-character hex digest (SHA-256 style) — common in Renovate digest updates
-_SHA256_DIGEST = re.compile(r"(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])")
 
 # Dependency-related files (lockfiles, manifests)
 DEPENDENCY_PATTERNS = [
@@ -211,12 +210,6 @@ def _all_files_are_lockfiles(filenames: list[str]) -> bool:
         any(pat.search(f) for pat in RENOVATE_DIGEST_FILE_PATTERNS)
         for f in filenames
     )
-
-
-def _is_digest_only_hash(diff_text: str) -> bool:
-    """Check if the diff contains SHA-256 style digests (Renovate digest updates)."""
-    # Look for bare 64-char hex strings typical of SHA-256 digests in lockfiles
-    return bool(_SHA256_DIGEST.search(diff_text))
 
 
 def _classify_pr_kind(
@@ -413,7 +406,6 @@ def _build_must_check(pr_kind: str, risk_flags: list[str]) -> list[str]:
 def classify_pr(
     pr_files: list[dict],
     diff_text: str = "",
-    pr_body: str = "",
     linked_issues: list[dict] | None = None,
     max_summary_files: int = 50,
 ) -> PRClassification:
@@ -425,8 +417,6 @@ def classify_pr(
         PR files array from ``gh api repos/.../pulls/N/files``.
     diff_text : str
         Raw PR diff text (truncated).
-    pr_body : str
-        PR body text (used for linked issue reference extraction).
     linked_issues : list[dict], optional
         Already-fetched linked issue dicts with ``labels`` keys.
     max_summary_files : int
@@ -468,7 +458,6 @@ def classify_pr(
 def classify_from_files(
     pr_files_path: str | Path,
     diff_path: str | Path = "",
-    body_path: str | Path = "",
     issues_path: str | Path = "",
     output_path: str | Path = "classification.json",
 ) -> PRClassification:
@@ -483,16 +472,12 @@ def classify_from_files(
     if diff_path:
         diff_text = Path(diff_path).read_text(encoding="utf-8", errors="replace")
 
-    pr_body = ""
-    if body_path:
-        pr_body = Path(body_path).read_text(encoding="utf-8", errors="replace")
-
     linked_issues: list[dict] = []
     if issues_path and Path(issues_path).exists():
         linked_issues = json.loads(
             Path(issues_path).read_text(encoding="utf-8"))
 
-    result = classify_pr(pr_files, diff_text, pr_body, linked_issues)
+    result = classify_pr(pr_files, diff_text, linked_issues)
 
     output = Path(output_path)
     output.write_text(json.dumps(result.to_dict(), indent=2) + "\n")
@@ -514,8 +499,6 @@ def main() -> None:
                         help="Path to pr-files.json")
     parser.add_argument("--diff", default="",
                         help="Path to pr.diff.truncated (optional)")
-    parser.add_argument("--body", default="",
-                        help="Path to pr-body.txt (optional)")
     parser.add_argument("--linked-issues", default="",
                         help="Path to linked-issues.json (optional)")
     parser.add_argument("--output", default="classification.json",
@@ -525,7 +508,6 @@ def main() -> None:
     classify_from_files(
         pr_files_path=args.pr_files,
         diff_path=args.diff,
-        body_path=args.body,
         issues_path=args.linked_issues,
         output_path=args.output,
     )

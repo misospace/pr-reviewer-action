@@ -19,10 +19,10 @@ Two layers of defence are tested:
     ``${FORGEJO_API_URL}`` — never ``api.github.com`` — using the Forgejo
     token.
 
-The tests stub ``subprocess.run`` (the curl transport used by
-``_gh_api_forgejo``) so no real network is involved; the assertions are on
-the *captured* command line, which is the part the model-injection threat
-model cares about.
+The tests stub ``subprocess.run`` in ``pr_reviewer.forgejo_backend`` (whose
+``_curl`` is the transport ``_gh_api_forgejo`` delegates to) so no real
+network is involved; the assertions are on the *captured* command line,
+which is the part the model-injection threat model cares about.
 """
 
 from __future__ import annotations
@@ -48,19 +48,6 @@ _REPO = "owner/repo"
 _FORGEJO_BASE = "https://forgejo.example.com"
 
 
-def _mock_curl_return(body, http_code=200):
-    """Build a subprocess.run mock that returns the given body and status code."""
-
-    def _run(cmd, **kwargs):
-        # body + status code, on stdout, with the body and code on either side
-        # of a newline (matches the curl -w '\n%{http_code}' convention the
-        # backend uses).
-        stdout = f"{body}\n{http_code}"
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    return _run
-
-
 # ---------------------------------------------------------------------------
 # 1. The platform boundary is enforced identically on the Forgejo backend.
 # ---------------------------------------------------------------------------
@@ -71,7 +58,7 @@ def test_forgejo_blocks_unallowlisted_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fake-not-used")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api(
             "repos/attacker/evil/contents/x",
             allowed_repos={_REPO},
@@ -87,7 +74,7 @@ def test_forgejo_blocks_path_traversal(tmp_path, monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fake-not-used")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api(
             f"repos/{_REPO}/../another/pulls/1",
             allowed_repos=set(),
@@ -111,7 +98,7 @@ def test_forgejo_denies_sensitive_endpoints(endpoint, tmp_path, monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fake-not-used")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api(endpoint, allowed_repos=set(), current_repo=_REPO)
     assert result.get("error"), result
     assert "denied" in result["error"].lower()
@@ -123,7 +110,7 @@ def test_forgejo_blocks_unallowlisted_prefix(tmp_path, monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fake-not-used")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         # ``/users/`` is a valid GitHub endpoint but not in the allowlist.
         result = gh_api(
             f"users/{_REPO.split('/')[0]}/emails",
@@ -140,7 +127,7 @@ def test_forgejo_blocks_disallowed_characters(tmp_path, monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fake-not-used")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api(
             f"repos/{_REPO}/pulls/1 comment",
             allowed_repos=set(),
@@ -170,10 +157,10 @@ def _exec_forgejo(monkeypatch, endpoint, body='{"ok": true}', http_code=200):
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(
-            cmd, 0, stdout=f"{body}\n{http_code}", stderr=""
+            cmd, 0, stdout=f"{body}\n{http_code}".encode(), stderr=b""
         )
 
-    with patch("pr_reviewer.platform.subprocess.run", side_effect=fake_run):
+    with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
         result = gh_api(endpoint, allowed_repos=set(), current_repo=_REPO)
     return result, captured
 
@@ -269,7 +256,7 @@ def test_forgejo_search_prefix_check_passes(monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api("search/code?q=foo", allowed_repos=set(), current_repo=_REPO)
     # Fails on the repo allowlist — the prefix check still passed.
     assert "not allowed" in result.get("error", "").lower(), result
@@ -288,9 +275,9 @@ def test_forgejo_uses_forgejo_token_not_github_token(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout='{"ok":true}\n200', stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=b'{"ok":true}\n200', stderr=b"")
 
-    with patch("pr_reviewer.platform.subprocess.run", side_effect=fake_run):
+    with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
         gh_api(f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO)
 
     cmd = captured["cmd"]
@@ -322,6 +309,7 @@ def test_forgejo_missing_token_returns_error(monkeypatch):
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.delenv("FORGEJO_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
     result = gh_api(f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO)
     assert result.get("error"), result
     assert "token" in result["error"].lower()
@@ -333,9 +321,9 @@ def test_forgejo_non_200_status_returns_error(monkeypatch):
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
     with patch(
-        "pr_reviewer.platform.subprocess.run",
+        "pr_reviewer.forgejo_backend.subprocess.run",
         return_value=subprocess.CompletedProcess(
-            ["curl"], 0, stdout='{"message":"Not Found"}\n404', stderr=""
+            ["curl"], 0, stdout=b'{"message":"Not Found"}\n404', stderr=b""
         ),
     ):
         result = gh_api(
@@ -355,7 +343,7 @@ def test_forgejo_unsupported_endpoint_returns_error(monkeypatch):
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
-    with patch("pr_reviewer.platform.subprocess.run") as mock_run:
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
         result = gh_api(
             f"repos/{_REPO}/milestones", allowed_repos=set(), current_repo=_REPO
         )
@@ -386,10 +374,10 @@ def test_tool_harness_shim_dispatches_to_platform(monkeypatch):
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"ok":true}\n200', stderr=""
+            cmd, 0, stdout=b'{"ok":true}\n200', stderr=b""
         )
 
-    with patch("pr_reviewer.platform.subprocess.run", side_effect=fake_run):
+    with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
         result = rth_gh_api(
             f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO
         )
@@ -417,10 +405,10 @@ def test_auto_platform_with_forgejo_server_url_uses_forgejo_backend(monkeypatch)
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"ok":true}\n200', stderr=""
+            cmd, 0, stdout=b'{"ok":true}\n200', stderr=b""
         )
 
-    with patch("pr_reviewer.platform.subprocess.run", side_effect=fake_run):
+    with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
         result = gh_api(
             f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO
         )

@@ -21,6 +21,12 @@ class PlatformUnsupported(RuntimeError):
     """Raised when an operation has no implementation for the active platform."""
 
 
+# Sent on every outbound HTTP request. Must stay non-default: Cloudflare's
+# bot-fight mode (which fronts the typical self-hosted Forgejo instance)
+# blocks default curl/python-urllib User-Agents.
+USER_AGENT = "ai-pr-reviewer/1.0"
+
+
 # ---------------------------------------------------------------------------
 # gh_api tool (issue #226) — host-platform endpoint normalization + fetch.
 # ---------------------------------------------------------------------------
@@ -182,7 +188,7 @@ def _gh_api_github(full_path, request_timeout):
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "ai-pr-reviewer/1.0",
+                "User-Agent": USER_AGENT,
             },
         )
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
@@ -274,12 +280,19 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
     """Issue a read-only Forgejo API request for an already-validated path.
 
     Requires ``FORGEJO_API_URL`` (the same env var the rest of the Forgejo
-    backend reads) and ``FORGEJO_TOKEN`` (or ``GITHUB_TOKEN`` as a fallback
-    so existing action.yml wiring works). The response body is parsed as
-    JSON exactly like the GitHub backend; the model-facing schema is the
-    GitHub one, so the rest of the tool harness does not need to know
-    which platform served the response.
+    backend reads) and a token (``FORGEJO_TOKEN``/``GITHUB_TOKEN``/``GH_TOKEN``,
+    the same fallback chain as the rest of the Forgejo backend). The response
+    body is parsed as JSON exactly like the GitHub backend; the model-facing
+    schema is the GitHub one, so the rest of the tool harness does not need
+    to know which platform served the response.
+
+    Transport is ``forgejo_backend._curl`` — the single curl wrapper the
+    comment/review code paths already use — so quirks like the Cloudflare
+    User-Agent requirement and the error-body-on-stdout discipline are fixed
+    in one place.
     """
+    from pr_reviewer.forgejo_backend import _curl  # noqa: PLC0415
+
     base = os.environ.get("FORGEJO_API_URL", "").rstrip("/")
     if not base:
         return {"error": "FORGEJO_API_URL is not set; cannot route gh_api to Forgejo"}
@@ -288,32 +301,17 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
     if not translated:
         return {"error": f"Endpoint not supported on PLATFORM=forgejo: {full_path}"}
 
-    token = os.environ.get("FORGEJO_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    token = (
+        os.environ.get("FORGEJO_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN", "")
+    )
     if not token:
         return {"error": "Missing FORGEJO_TOKEN"}
 
     url = f"{base}{translated}"
     try:
-        # Use curl so we can keep parity with the rest of the Forgejo
-        # backend (and so HTTPS_PROXY / -k style operator knobs work the
-        # same way they do for the comment / review code paths).
-        cmd = [
-            "curl", "-sS",
-            "-H", f"Authorization: token {token}",
-            "-H", "Accept: application/json",
-            # Match the GitHub backend's UA: a default curl/* User-Agent is
-            # blocked by Cloudflare's bot-fight mode, which fronts the typical
-            # self-hosted Forgejo instance.
-            "-H", "User-Agent: ai-pr-reviewer/1.0",
-            "-w", "\n%{http_code}",
-            url,
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=request_timeout)
-        raw = proc.stdout
-        body_text, sep, code_text = raw.rpartition("\n")
-        if not sep or not code_text.strip().isdigit():
-            return {"error": f"Forgejo API error: curl failed (rc={proc.returncode})"}
-        status_code = int(code_text.strip())
+        status_code, body_text = _curl("GET", url, token=token, timeout=request_timeout)
         if status_code != 200:
             return {"error": f"Forgejo API error: {status_code} {body_text[:200]}"}
         try:

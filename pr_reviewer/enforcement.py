@@ -12,6 +12,19 @@ import re
 from pathlib import Path
 
 
+def _force_request_changes(
+    output_path: str, section_md: str, reason: str
+) -> tuple[bool, str]:
+    """Append an enforcement section to the review markdown and force the
+    verdict to ``request_changes``. Shared by all enforcement rules so the
+    output-mutation discipline lives in one place."""
+    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
+    data["review_markdown"] = str(data.get("review_markdown") or "") + section_md
+    data["verdict"] = "request_changes"
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    return True, reason
+
+
 def apply_evidence_blocker_enforcement(
     evidence_path: str = "evidence-providers.json",
     output_path: str = "ai-output.json",
@@ -47,25 +60,16 @@ def apply_evidence_blocker_enforcement(
     ]
     ids_str = ", ".join(blocker_ids)
 
-    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
-    markdown = str(data.get("review_markdown") or "")
-
-    markdown = (
-        (markdown + "\n\n## Evidence Provider Blockers\n"
-         + "One or more configured evidence providers reported blocker-level findings"
-         + (f" ({ids_str})" if ids_str else "")
-         + ". Resolve blocker findings before approval.")
-    )
-
-    data["verdict"] = "request_changes"
-    data["review_markdown"] = markdown
-    reason = (
-        f"Evidence provider blocker detected"
+    return _force_request_changes(
+        output_path,
+        "\n\n## Evidence Provider Blockers\n"
+        + "One or more configured evidence providers reported blocker-level findings"
+        + (f" ({ids_str})" if ids_str else "")
+        + ". Resolve blocker findings before approval.",
+        "Evidence provider blocker detected"
         + (f": {ids_str}" if ids_str else "")
-        + ". One or more configured evidence providers reported blocker-level findings."
+        + ". One or more configured evidence providers reported blocker-level findings.",
     )
-    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True, reason
 
 
 def _get_tool_harness_failure_reason(tool_harness_path: str = "tool-harness.json") -> str | None:
@@ -136,26 +140,16 @@ def apply_tool_harness_failure_enforcement(
     if not reason:
         return False, ""
 
-    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
-    markdown = str(data.get("review_markdown") or "")
-
-    markdown = (
-        markdown
-        + "\n\n## Tool Harness Failure\n"
+    return _force_request_changes(
+        output_path,
+        "\n\n## Tool Harness Failure\n"
         + f"The tool harness failed during planning or execution ({reason}). "
         + "This workflow is configured fail-closed for tool harness failures; "
-        + "rerun after reducing tool planning context or fixing connectivity."
-    )
-
-    data["verdict"] = "request_changes"
-    data["review_markdown"] = markdown
-    reason = (
+        + "rerun after reducing tool planning context or fixing connectivity.",
         f"Tool harness failure detected ({reason}). "
         + "The tool harness failed during planning or execution; "
-        + "this workflow is configured fail-closed for tool harness failures."
+        + "this workflow is configured fail-closed for tool harness failures.",
     )
-    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True, reason
 
 
 def apply_tool_min_successful_enforcement(
@@ -183,25 +177,15 @@ def apply_tool_min_successful_enforcement(
     if successful >= min_required:
         return False, ""
 
-    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
-    markdown = str(data.get("review_markdown") or "")
-
-    markdown = (
-        markdown
-        + "\n\n## Tool Harness Insufficient Evidence\n"
+    return _force_request_changes(
+        output_path,
+        "\n\n## Tool Harness Insufficient Evidence\n"
         + f"This workflow requires at least {min_required} successful tool requests, "
-        + f"but only {successful} succeeded. Rerun after adjusting tool planning settings."
-    )
-
-    data["verdict"] = "request_changes"
-    data["review_markdown"] = markdown
-    reason = (
-        f"Tool harness gathered insufficient evidence. "
+        + f"but only {successful} succeeded. Rerun after adjusting tool planning settings.",
+        "Tool harness gathered insufficient evidence. "
         + f"This workflow requires at least {min_required} successful tool requests, "
-        + f"but only {successful} succeeded."
+        + f"but only {successful} succeeded.",
     )
-    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-    return True, reason
 
 
 def normalize_enforced_review_markdown(

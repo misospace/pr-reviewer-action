@@ -474,7 +474,6 @@ class TestClassifyFromFile:
             classify_from_files(
                 pr_files_path=pr_files,
                 diff_path=diff_file,
-                body_path="",
                 issues_path=issues_file,
                 output_path=output_file,
             )
@@ -499,7 +498,6 @@ class TestClassifyFromFile:
             classify_from_files(
                 pr_files_path=pr_files,
                 diff_path=diff_file,
-                body_path="",
                 issues_path="",
                 output_path=output_file,
             )

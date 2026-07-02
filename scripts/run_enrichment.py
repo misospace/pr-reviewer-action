@@ -56,6 +56,7 @@ from pr_reviewer.forgejo_backend import (  # noqa: E402
     fetch_forge_compare,
     fetch_forge_release,
 )
+from pr_reviewer.platform import USER_AGENT  # noqa: E402
 
 # Import reduce_source from strip_source_text to avoid duplicating HTML-strip logic.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -84,7 +85,7 @@ def write_file(name: str, content: str) -> None:
 def fetch_url(url: str, timeout: int = 25) -> bytes | None:
     """Best-effort URL fetch. Returns None on any failure."""
     try:
-        req = Request(url, headers={"User-Agent": "ai-pr-reviewer/1.0"})
+        req = Request(url, headers={"User-Agent": USER_AGENT})
         with urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except Exception:
@@ -130,6 +131,24 @@ class BudgetTracker:
 
 # --- Markdown rendering ---
 
+def _pick(d: dict, keys: tuple[str, ...]) -> dict:
+    """Project a dict onto the given keys, dropping absent ones."""
+    return {k: d.get(k) for k in keys if k in d}
+
+
+def _commit_summaries(commits: list, with_author: bool = False) -> list[dict]:
+    """Reduce compare-API commit objects to sha + message (+ author/date)."""
+    out = []
+    for c in commits:
+        commit = c.get("commit") or {}
+        entry: dict = {"sha": c.get("sha"), "commit": {"message": commit.get("message")}}
+        if with_author:
+            entry["commit"]["author"] = commit.get("author")
+            entry["commit"]["date"] = (commit.get("author") or {}).get("date")
+        out.append(entry)
+    return out
+
+
 def render_linked_sources(
     urls: list[str],
     allowed_hosts: set[str],
@@ -169,6 +188,17 @@ def render_linked_sources(
     # Phase 2: render each URL section
     repo_candidates: list[str] = []
     seen_repos: set[str] = set()
+
+    # One releases fetch per unique repo, shared between the per-URL "Recent
+    # Releases" rendering (Phase 2) and the releases enrichment (Phase 3).
+    releases_cache: dict[str, list | None] = {}
+
+    def get_releases(owner: str, repo: str) -> list | None:
+        key = f"{owner}/{repo}"
+        if key not in releases_cache:
+            data = gh_api_call(f"repos/{owner}/{repo}/releases?per_page=30", gh_token)
+            releases_cache[key] = data if isinstance(data, list) else None
+        return releases_cache[key]
 
     for i, url in enumerate(urls[:25], 1):
         if not budget.ok():
@@ -216,7 +246,7 @@ def render_linked_sources(
                     gh_token,
                 )
                 if isinstance(data, dict):
-                    filtered = {k: data.get(k) for k in ("tag_name", "name", "published_at", "html_url", "body") if k in data}
+                    filtered = _pick(data, ("tag_name", "name", "published_at", "html_url", "body"))
                     lines.append("```json")
                     lines.append(json.dumps(filtered, indent=2)[:5000])
                     lines.append("")
@@ -226,12 +256,9 @@ def render_linked_sources(
 
             # Recent releases
             if budget.ok():
-                data = gh_api_call(
-                    f"repos/{cls['owner']}/{cls['repo']}/releases?per_page=8",
-                    gh_token,
-                )
+                data = get_releases(cls["owner"], cls["repo"])
                 if isinstance(data, list):
-                    filtered = [{k: r.get(k) for k in ("tag_name", "name", "published_at", "html_url") if k in r} for r in data]
+                    filtered = [_pick(r, ("tag_name", "name", "published_at", "html_url")) for r in data[:8]]
                     lines.append("### Recent Releases")
                     lines.append("```json")
                     lines.append(json.dumps(filtered, indent=2)[:3000])
@@ -248,24 +275,13 @@ def render_linked_sources(
                     gh_token,
                 )
                 if isinstance(data, dict):
-                    commits = data.get("commits", [])[:20]
                     filtered = {
                         "html_url": data.get("html_url"),
                         "status": data.get("status"),
                         "ahead_by": data.get("ahead_by"),
                         "behind_by": data.get("behind_by"),
                         "total_commits": data.get("total_commits"),
-                        "commits": [
-                            {
-                                "sha": c.get("sha"),
-                                "commit": {
-                                    "message": (c.get("commit") or {}).get("message"),
-                                    "author": (c.get("commit") or {}).get("author"),
-                                    "date": ((c.get("commit") or {}).get("author") or {}).get("date"),
-                                },
-                            }
-                            for c in commits
-                        ],
+                        "commits": _commit_summaries(data.get("commits", [])[:20], with_author=True),
                     }
                     lines.append("```json")
                     lines.append(json.dumps(filtered, indent=2)[:7000])
@@ -274,7 +290,7 @@ def render_linked_sources(
 
                     files = data.get("files", [])[:30]
                     file_list = [
-                        {k: f.get(k) for k in ("filename", "status", "additions", "deletions", "changes", "patch") if k in f}
+                        _pick(f, ("filename", "status", "additions", "deletions", "changes", "patch"))
                         for f in files
                     ]
                     lines.append("### GitHub Compare Files")
@@ -308,7 +324,7 @@ def render_linked_sources(
                     if isinstance(data, dict):
                         filtered = {
                             "total_commits": data.get("total_commits"),
-                            "commits": [{"sha": c.get("sha"), "commit": {"message": (c.get("commit") or {}).get("message")}} for c in (data.get("commits") or [])[:20]],
+                            "commits": _commit_summaries((data.get("commits") or [])[:20]),
                             "files": [{k: f.get(k) for k in ("filename", "status", "additions", "deletions")} for f in (data.get("files") or [])[:30]],
                         }
                         lines.append("```json")
@@ -338,9 +354,9 @@ def render_linked_sources(
         lines.append(f"### GitHub Releases Enrichment: {repo_key}")
 
         if budget.ok():
-            data = gh_api_call(f"repos/{owner}/{repo}/releases?per_page=30", gh_token)
+            data = get_releases(owner, repo)
             if isinstance(data, list):
-                filtered = [{k: r.get(k) for k in ("tag_name", "name", "published_at", "html_url") if k in r} for r in data]
+                filtered = [_pick(r, ("tag_name", "name", "published_at", "html_url")) for r in data]
                 lines.append("#### Recent Releases (tags)")
                 lines.append("```json")
                 lines.append(json.dumps(filtered, indent=2)[:5000])
@@ -359,7 +375,7 @@ def render_linked_sources(
                     if matched:
                         lines.append(f"#### Releases matching target version {target_version}")
                         lines.append("```json")
-                        matched_filtered = [{k: r.get(k) for k in ("tag_name", "name", "published_at", "html_url", "body") if k in r} for r in matched]
+                        matched_filtered = [_pick(r, ("tag_name", "name", "published_at", "html_url", "body")) for r in matched]
                         lines.append(json.dumps(matched_filtered, indent=2)[:8000])
                         lines.append("")
                         lines.append("```")
@@ -368,7 +384,7 @@ def render_linked_sources(
                         if budget.ok():
                             tags = gh_api_call(f"repos/{owner}/{repo}/tags?per_page=50", gh_token)
                             if isinstance(tags, list):
-                                tag_list = [{k: t.get(k) for k in ("name", "commit") if k in t} for t in tags]
+                                tag_list = [_pick(t, ("name", "commit")) for t in tags]
                                 lines.append("#### Recent Tags")
                                 lines.append("```json")
                                 lines.append(json.dumps(tag_list, indent=2)[:4000])
@@ -403,7 +419,7 @@ def render_linked_sources(
                     data = gh_api_call(f"repos/{owner}/{repo}/releases/tags/{tag_prefix}", gh_token)
                     if isinstance(data, dict):
                         lines.append(f"#### Matched via ghcr.io path: {owner}/{repo}@{tag_prefix}")
-                        filtered = {k: data.get(k) for k in ("tag_name", "name", "published_at", "html_url", "body") if k in data}
+                        filtered = _pick(data, ("tag_name", "name", "published_at", "html_url", "body"))
                         lines.append("```json")
                         lines.append(json.dumps(filtered, indent=2)[:8000])
                         lines.append("")
@@ -423,13 +439,12 @@ def render_linked_sources(
                 data = gh_api_call(f"repos/{owner}/{repo}/compare/{cmp_old}...{cmp_new}", gh_token)
                 if isinstance(data, dict) and data.get("status"):
                     lines.append(f"#### Commit compare {cmp_old}...{cmp_new} (no release published for this version)")
-                    commits = data.get("commits", [])[:20]
                     filtered = {
                         "html_url": data.get("html_url"),
                         "status": data.get("status"),
                         "ahead_by": data.get("ahead_by"),
                         "total_commits": data.get("total_commits"),
-                        "commits": [{"sha": c.get("sha"), "commit": {"message": (c.get("commit") or {}).get("message")}} for c in commits],
+                        "commits": _commit_summaries(data.get("commits", [])[:20]),
                     }
                     lines.append("```json")
                     lines.append(json.dumps(filtered, indent=2)[:6000])

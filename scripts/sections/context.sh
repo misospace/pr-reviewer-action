@@ -131,26 +131,3 @@ else
   echo "No common manifest files changed in this PR." >> manifest-context.md
 fi
 section_timer_end
-
-# Returns 0 when the URL's host is in ALLOWED_SOURCE_HOSTS.
-url_host_allowed() {
-  local host raw_host candidate
-  host=$(printf '%s' "$1" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
-  IFS=',' read -ra _allowed_hosts <<< "$ALLOWED_SOURCE_HOSTS"
-  for raw_host in "${_allowed_hosts[@]}"; do
-    candidate=$(printf '%s' "$raw_host" | xargs | tr '[:upper:]' '[:lower:]')
-    [ -n "$candidate" ] || continue
-    if [ "$host" = "$candidate" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Reduce a fetched linked-source body to corpus-worthy text: HTML pages are
-# stripped to visible text, non-HTML passes through, output capped on a clean
-# boundary. Raw HTML heads were mostly <head> boilerplate that burned corpus
-# budget without giving the model anything to read.
-strip_source_to_text() {
-  python3 "$SCRIPT_DIR/strip_source_text.py" "$1" "$2" "$3"
-}

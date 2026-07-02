@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
+from pr_reviewer.platform import USER_AGENT
+
 MCP_PREFIX = "mcp__"
 _PROTOCOL_VERSION = "2024-11-05"
 
@@ -82,7 +84,7 @@ def _default_post(url, payload, session_id, token, timeout):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "User-Agent": "ai-pr-reviewer/1.0",
+        "User-Agent": USER_AGENT,
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id

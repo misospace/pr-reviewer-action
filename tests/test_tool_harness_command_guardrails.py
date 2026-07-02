@@ -33,7 +33,7 @@ def test_run_command_executes_named_argv_only_definition(monkeypatch, tmp_path):
         )
         return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
 
-    monkeypatch.setattr(run_tool_harness.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = run_tool_harness.run_command("git_status_short", tmp_path)
 

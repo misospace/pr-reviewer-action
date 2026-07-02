@@ -64,16 +64,9 @@ def test_web_search_sets_non_default_user_agent(monkeypatch):
     assert seen["ua"] == "ai-pr-reviewer/1.0"
 
 
-def test_fetch_url_sets_non_default_user_agent(monkeypatch):
-    seen = _capture_ua(monkeypatch)
-    te.fetch_url("https://example.com/x", ["example.com"])
-    assert seen["ua"] == "ai-pr-reviewer/1.0"
-
-
 @pytest.mark.parametrize("call", [
     lambda: te.web_fetch("https://example.com/x", ["example.com"]),
     lambda: te.web_search("q", "https://search.example/search"),
-    lambda: te.fetch_url("https://example.com/x", ["example.com"]),
 ])
 def test_user_agent_is_never_the_urllib_default(monkeypatch, call):
     # The actual bug class: urllib's default UA is rejected by CDN bot checks.

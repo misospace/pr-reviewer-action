@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Sourced by run_review.sh — logging, sed wrapper, section timers, enrichment-budget helper.
+# Sourced by run_review.sh — logging, sed wrapper, section timers.
 # Verbatim in-order slice of the former monolith (#307); relies on globals/helpers
 # set up by the orchestrator. Not executable on its own.
 
@@ -34,17 +34,4 @@ section_timer_end() {
   local start_ts="${last##*:}"
   elapsed=$(( $(date +%s) - start_ts ))
   log "PERF: section=$name elapsed=${elapsed}s"
-}
-
-# Returns 0 if within budget, 1 if exceeded. Uses ENRICHMENT_START_TS and ENRICHMENT_BUDGET_SEC.
-enrichment_budget_ok() {
-  if [[ -z "${ENRICHMENT_START_TS:-}" ]]; then
-    return 0
-  fi
-  local elapsed=$(( $(date +%s) - ENRICHMENT_START_TS ))
-  if [[ "$elapsed" -ge "$ENRICHMENT_BUDGET_SEC" ]]; then
-    log "Enrichment budget exceeded (${elapsed}s / ${ENRICHMENT_BUDGET_SEC}s); stopping enrichment."
-    return 1
-  fi
-  return 0
 }

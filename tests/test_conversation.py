@@ -15,7 +15,6 @@ from pr_reviewer.conversation import (  # noqa: E402
     TOOL_SCHEMAS,
     WEB_SEARCH_SCHEMA,
     Conversation,
-    normalize_assistant_tool_calls_openai,
     truncate_text,
 )
 
@@ -219,8 +218,17 @@ class TestTruncateText:
         assert len(out.encode("utf-8")) <= 50
 
 
-class TestNormalizeAssistantToolCalls:
-    def test_passes_through_well_formed_calls(self):
+class TestAddAssistantToolCallsNormalization:
+    """The ingest-boundary coercion lives in add_assistant_tool_calls; the
+    OpenAI renderer emits the stored {"id", "name", "arguments"} form directly."""
+
+    @staticmethod
+    def _ingest(calls):
+        c = Conversation()
+        c.add_assistant_tool_calls(calls)
+        return c.events[-1]["calls"] if c.events else []
+
+    def test_accepts_openai_nested_form(self):
         calls = [
             {
                 "id": "call_1",
@@ -228,12 +236,11 @@ class TestNormalizeAssistantToolCalls:
                 "function": {"name": "read_file", "arguments": '{"path": "x"}'},
             }
         ]
-        out = normalize_assistant_tool_calls_openai(calls)
+        out = self._ingest(calls)
         assert len(out) == 1
         assert out[0]["id"] == "call_1"
-        assert out[0]["type"] == "function"
-        assert out[0]["function"]["name"] == "read_file"
-        assert out[0]["function"]["arguments"] == '{"path": "x"}'
+        assert out[0]["name"] == "read_file"
+        assert out[0]["arguments"] == '{"path": "x"}'
 
     def test_accepts_dict_arguments_at_ingest_boundary(self):
         # Dict arguments (e.g. from a non-reassembler caller) are serialised
@@ -241,8 +248,8 @@ class TestNormalizeAssistantToolCalls:
         # round-trip property matters most: a string input must come back
         # unchanged.
         calls = [{"id": "call_1", "name": "git_grep", "arguments": {"pattern": "x"}}]
-        out = normalize_assistant_tool_calls_openai(calls)
-        assert out[0]["function"]["arguments"] == '{"pattern": "x"}'
+        out = self._ingest(calls)
+        assert out[0]["arguments"] == '{"pattern": "x"}'
 
     def test_preserves_string_arguments_verbatim(self):
         # The reassembler hands us a string — preserve it byte-for-byte so
@@ -254,16 +261,16 @@ class TestNormalizeAssistantToolCalls:
                 "function": {"name": "x", "arguments": '{"pattern":'},
             }
         ]
-        out = normalize_assistant_tool_calls_openai(calls)
-        assert out[0]["function"]["arguments"] == '{"pattern":'
+        out = self._ingest(calls)
+        assert out[0]["arguments"] == '{"pattern":'
 
     def test_drops_calls_missing_id(self):
         calls = [{"function": {"name": "read_file", "arguments": "{}"}}]
-        assert normalize_assistant_tool_calls_openai(calls) == []
+        assert self._ingest(calls) == []
 
     def test_drops_calls_missing_name(self):
         calls = [{"id": "call_1", "function": {"arguments": "{}"}}]
-        assert normalize_assistant_tool_calls_openai(calls) == []
+        assert self._ingest(calls) == []
 
     def test_drops_non_dict_entries(self):
         calls = [
@@ -272,8 +279,24 @@ class TestNormalizeAssistantToolCalls:
             42,
             {"id": "call_1", "function": {"name": "x", "arguments": "{}"}},
         ]
-        out = normalize_assistant_tool_calls_openai(calls)
+        out = self._ingest(calls)
         assert len(out) == 1
+
+    def test_renders_openai_nested_form(self):
+        c = Conversation()
+        c.add_assistant_tool_calls(
+            [{"id": "call_1", "name": "read_file", "arguments": '{"path": "x"}'}]
+        )
+        msg = c._render_openai_messages()[-1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] is None
+        assert msg["tool_calls"] == [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path": "x"}'},
+            }
+        ]
 
 
 class TestConversationIntrospection:

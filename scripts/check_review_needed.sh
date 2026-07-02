@@ -376,6 +376,13 @@ if data:
 " 2>/dev/null || true)"
 }
 
+# Reset the scope state to a full review (no trusted incremental baseline).
+fallback_full_scope() {
+  EFFECTIVE_SCOPE="full"
+  PREVIOUS_HEAD_SHA=""
+  BASELINE_CLEAN=false
+}
+
 resolve_review_scope() {
   local user_scope="$1"
   local last_head_sha="$2"
@@ -396,56 +403,35 @@ resolve_review_scope() {
   # (cheap incremental) — there is nothing to unwedge.
   if [[ "${FORCE_REVIEW:-false}" == "true" && -n "$last_review_result" && "$last_review_result" != "clean" ]]; then
     echo "Forced re-review with a non-clean baseline ($last_review_result): using full scope to reset the baseline" >&2
-    EFFECTIVE_SCOPE="full"
-    PREVIOUS_HEAD_SHA=""
-    BASELINE_CLEAN=false
+    fallback_full_scope
     return
   fi
 
   case "$(printf '%s' "$user_scope" | tr '[:upper:]' '[:lower:]')" in
     full)
-      EFFECTIVE_SCOPE="full"
-      PREVIOUS_HEAD_SHA=""
-      BASELINE_CLEAN=false
+      fallback_full_scope
       return ;;
-    incremental|"")
-      # Incremental or empty without prior metadata is unsafe — fall back to full
-      if [[ -z "$last_head_sha" || -z "$last_base_sha" ]]; then
-        EFFECTIVE_SCOPE="full"
-        PREVIOUS_HEAD_SHA=""
-        BASELINE_CLEAN=false
-        return
-      fi
-      ;;
-    auto)
-      # Auto: full on first run, incremental on later runs with metadata
-      if [[ -z "$last_head_sha" || -z "$last_base_sha" ]]; then
-        EFFECTIVE_SCOPE="full"
-        PREVIOUS_HEAD_SHA=""
-        BASELINE_CLEAN=false
-        return
-      fi
+    incremental|""|auto)
       ;;
     *)
       echo "WARN: Invalid REVIEW_SCOPE '$user_scope'; defaulting to auto" >&2
       user_scope="auto"
-      if [[ -z "$last_head_sha" || -z "$last_base_sha" ]]; then
-        EFFECTIVE_SCOPE="full"
-        PREVIOUS_HEAD_SHA=""
-        BASELINE_CLEAN=false
-        return
-      fi
       ;;
   esac
+
+  # Incremental/auto without prior metadata is unsafe — fall back to full
+  # (auto: full on first run, incremental on later runs with metadata).
+  if [[ -z "$last_head_sha" || -z "$last_base_sha" ]]; then
+    fallback_full_scope
+    return
+  fi
 
   # From here, we're attempting incremental — validate safety
 
   # Check: current base SHA differs from previous base SHA
   if [[ -n "$current_base_sha" && -n "$last_base_sha" && "$current_base_sha" != "$last_base_sha" ]]; then
     echo "Review scope fallback: base SHA changed from $last_base_sha to $current_base_sha" >&2
-    EFFECTIVE_SCOPE="full"
-    PREVIOUS_HEAD_SHA=""
-    BASELINE_CLEAN=false
+    fallback_full_scope
     return
   fi
 
@@ -453,9 +439,7 @@ resolve_review_scope() {
   if [[ -n "$current_head_sha" && -n "$last_head_sha" ]]; then
     if ! git merge-base --is-ancestor "$last_head_sha" "$current_head_sha" 2>/dev/null; then
       echo "Review scope fallback: previous head $last_head_sha is not an ancestor of current head $current_head_sha (possible force-push/rebase)" >&2
-      EFFECTIVE_SCOPE="full"
-      PREVIOUS_HEAD_SHA=""
-      BASELINE_CLEAN=false
+      fallback_full_scope
       return
     fi
   fi
@@ -463,9 +447,7 @@ resolve_review_scope() {
   # Check: compare API still works for this range
   if ! platform_compare "$REPO" "${last_head_sha}...${current_head_sha}" >/dev/null 2>&1; then
     echo "Review scope fallback: compare API failed for $last_head_sha...$current_head_sha" >&2
-    EFFECTIVE_SCOPE="full"
-    PREVIOUS_HEAD_SHA=""
-    BASELINE_CLEAN=false
+    fallback_full_scope
     return
   fi
 

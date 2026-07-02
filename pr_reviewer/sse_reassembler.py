@@ -107,7 +107,6 @@ def _reassemble_anthropic(
     tool_calls: list[dict[str, Any]],
 ) -> dict:
     stop_reason: str | None = None
-    stop_sequence: str | None = None
     message_id: str | None = None
     model: str | None = None
     input_tokens = 0
@@ -220,7 +219,6 @@ def _reassemble_anthropic(
         elif etype == "message_delta":
             delta = event.get("delta", {}) or {}
             stop_reason = delta.get("stop_reason")
-            stop_sequence = delta.get("stop_sequence")
             usage = delta.get("usage", {})
             if usage:
                 output_tokens += usage.get("output_tokens", 0)
