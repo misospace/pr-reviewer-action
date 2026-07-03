@@ -24,6 +24,8 @@ ACTION_YML="$REPO_ROOT/action.yml"
 # var<TAB>reason — add a line ONLY when two steps genuinely need different
 # bindings for the same name, and say why.
 INTENTIONAL_DIFFERENCES="$(cat <<'EOF'
+PLATFORM	precheck binds the raw input and resolves it; downstream blocks consume steps.precheck.outputs.resolved_platform (#367)
+FORGEJO_API_URL	precheck binds the input||server_url fallback and resolves it; downstream blocks consume steps.precheck.outputs.effective_forgejo_api_url (#367)
 EOF
 )"
 
