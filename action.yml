@@ -695,8 +695,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
+        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -714,8 +714,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
+        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -819,8 +819,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
+        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -1123,8 +1123,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
+        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}

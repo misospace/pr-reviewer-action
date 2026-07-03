@@ -78,17 +78,34 @@ GH_API_ALLOWED_PREFIXES = (
 )
 
 
-def resolve_platform() -> str:
+def resolve_platform(
+    platform: str | None = None, forgejo_api_url: str | None = None
+) -> str:
     """Resolve PLATFORM (github|forgejo|auto) to a concrete backend name.
 
     Mirrors ``platform_resolve`` in scripts/platform_api.sh: ``auto`` maps to
     forgejo when FORGEJO_API_URL is set or GITHUB_SERVER_URL names a
     non-github.com host (Forgejo Actions runners populate it with the
     instance URL), github otherwise.
+
+    ``platform`` and ``forgejo_api_url`` are optional overrides for the two
+    env vars this function otherwise reads. They exist so a caller that
+    already holds those values can delegate here instead of re-deriving the
+    rule — notably ``forgejo_backend._is_forgejo_mode``, which must consult
+    its monkeypatchable module-level ``FORGEJO_API_URL`` rather than a fresh
+    env read. With no arguments the behaviour is unchanged: an unset PLATFORM
+    still defaults to ``github`` (the documented contract).
     """
-    platform = os.environ.get("PLATFORM", "github").strip().lower() or "github"
+    if platform is None:
+        platform = os.environ.get("PLATFORM", "github")
+    platform = platform.strip().lower() or "github"
     if platform == "auto":
-        if os.environ.get("FORGEJO_API_URL", "").strip():
+        api = (
+            forgejo_api_url
+            if forgejo_api_url is not None
+            else os.environ.get("FORGEJO_API_URL", "")
+        )
+        if api.strip():
             return "forgejo"
         server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
         if server and server != "https://github.com":

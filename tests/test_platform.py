@@ -55,6 +55,40 @@ class TestResolvePlatform(unittest.TestCase):
                 resolve_platform()
 
 
+class TestResolvePlatformOverrides(unittest.TestCase):
+    """The optional overrides added for #367 (forgejo_backend delegation)."""
+
+    def test_platform_override_beats_env(self):
+        # An explicit platform argument is authoritative over the env var.
+        with _env(PLATFORM="forgejo"):
+            self.assertEqual(resolve_platform(platform="github"), "github")
+
+    def test_forgejo_api_url_override_drives_auto(self):
+        # auto + a non-empty forgejo_api_url override → forgejo, regardless of
+        # the (unset) FORGEJO_API_URL env var.
+        with _env(PLATFORM="", FORGEJO_API_URL="", GITHUB_SERVER_URL="https://github.com"):
+            self.assertEqual(
+                resolve_platform(platform="auto", forgejo_api_url="https://f.example"),
+                "forgejo",
+            )
+
+    def test_empty_forgejo_api_url_override_falls_back_to_server(self):
+        # An empty override means "no configured Forgejo URL"; the server-host
+        # inference still applies on auto.
+        with _env(GITHUB_SERVER_URL="https://forgejo.example.com"):
+            self.assertEqual(
+                resolve_platform(platform="auto", forgejo_api_url=""), "forgejo"
+            )
+        with _env(GITHUB_SERVER_URL="https://github.com"):
+            self.assertEqual(
+                resolve_platform(platform="auto", forgejo_api_url=""), "github"
+            )
+
+    def test_empty_platform_override_defaults_to_github(self):
+        with _env(PLATFORM="forgejo"):
+            self.assertEqual(resolve_platform(platform=""), "github")
+
+
 class TestGhArgv(unittest.TestCase):
     def test_github_argv_is_byte_identical(self):
         with _env(PLATFORM="github"):

@@ -81,6 +81,9 @@ run_precheck() {
   (
     cd "$WORKDIR" || exit 1
     PATH="$TMPDIR/bin:$PATH" \
+    PLATFORM="${PLATFORM:-}" \
+    FORGEJO_API_URL="${FORGEJO_API_URL:-}" \
+    GITHUB_SERVER_URL="${GITHUB_SERVER_URL:-}" \
     REPO="test/repo" \
     PR_NUMBER=42 \
     GITHUB_OUTPUT="$output_file" \
@@ -399,6 +402,31 @@ cat > /tmp/testfp_pr_object.json <<'JSONEOF'
   "base": {"sha": "bbbb111122223333bbbb111122223333bbbb1111", "ref": "main", "repo": {"full_name": "test/repo"}}
 }
 JSONEOF
+
+# ── Test 18: precheck emits resolved platform outputs (#367) ──────────
+echo ""
+echo "=== Test 18: platform resolution outputs on the review path ==="
+set_empty_comments
+unset PLATFORM FORGEJO_API_URL GITHUB_SERVER_URL 2>/dev/null || true
+RESULT="$(run_precheck)"
+check "resolved_platform=github by default" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "github"
+check "effective_forgejo_api_url empty on github" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" ""
+
+# PLATFORM=github must win even when FORGEJO_API_URL is force-filled — the
+# exact seam that used to disagree between the shell path and forgejo_backend.
+PLATFORM=github FORGEJO_API_URL="https://forge.example.com" RESULT="$(run_precheck)"
+check "PLATFORM=github forces github despite FORGEJO_API_URL" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "github"
+check "effective_forgejo_api_url empty when forced github" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" ""
+
+# Test 19: forgejo resolution is emitted even on the label-skip early exit
+# (no PR fetch / network) — resolution is pure env.
+echo ""
+echo "=== Test 19: forgejo resolution on the unrelated-label early exit ==="
+printf '%s' '{"action":"labeled","label":{"name":"bug"}}' > "$TMPDIR/event-other.json"
+RESULT="$(PLATFORM=auto FORGEJO_API_URL="https://forge.example.com" GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$TMPDIR/event-other.json" run_precheck)"
+check "unrelated-label path still emits should_review=false" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "auto+FORGEJO_API_URL resolves to forgejo" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "forgejo"
+check "effective_forgejo_api_url forwarded when forgejo" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" "https://forge.example.com"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
