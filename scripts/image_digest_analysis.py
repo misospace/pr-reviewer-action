@@ -16,7 +16,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from pr_reviewer.budget import DeadlineBudget  # noqa: E402
-from pr_reviewer.enrichment import summarize_compare  # noqa: E402
 from pr_reviewer.platform import USER_AGENT  # noqa: E402
 
 

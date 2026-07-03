@@ -19,7 +19,6 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from pr_reviewer.env import env_int  # noqa: E402
 from redact import mask_secrets  # noqa: E402
 
 # Transport + read-only executors were split into dedicated modules (#304).
