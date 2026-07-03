@@ -195,13 +195,10 @@ section_timer_end
 
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
 if [[ "$TOOL_HARNESS_ENABLED" == "true" ]]; then
-  if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$TOOL_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
-    cat > tool-harness.md <<'EOF'
-Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.
-EOF
-    cat > tool-harness.json <<'EOF'
-{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}
-EOF
+  if gate_feature_for_forks "$TOOL_ENABLE_FOR_FORKS" \
+      tool-harness.md "Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override." \
+      tool-harness.json '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}'; then
+    : # fork PR without tool_enable_for_forks — skip artifacts already written
   else
     log "Running tool harness in mode: $TOOL_MODE"
     if ! python3 "$SCRIPT_DIR/run_tool_harness.py"; then
