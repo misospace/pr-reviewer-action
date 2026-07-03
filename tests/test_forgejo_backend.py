@@ -954,5 +954,224 @@ class TestForgeEnrichment(unittest.TestCase):
         self.assertFalse(any(str(c).startswith("Authorization") for c in captured["cmd"]))
 
 
+class TestDiffPositions(unittest.TestCase):
+    """Dedicated unit tests for _diff_positions in isolation.
+
+    _diff_positions returns dict[str, dict[int, int]] mapping file path →
+    {new_lineno: diff_position}. The diff_position is a 1-based counter
+    within each hunk that increments for every non-removed line (context
+    and additions). Removed lines are skipped entirely.
+    """
+
+    def _diff(self, body):
+        """Build a minimal unified diff with +++ b/path header."""
+        return "diff --git a/test.py b/test.py\n+++ b/test.py\n" + body
+
+    def test_empty_diff_returns_empty_dict(self):
+        self.assertEqual(fb._diff_positions(""), {})
+
+    def test_no_path_header_lines_ignored(self):
+        """Lines without a +++ path header are not associated with any file."""
+        diff = "@@ -1,3 +1,3 @@\n line1\n line2\n line3\n"
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {})
+
+    def test_single_hunk_context_lines(self):
+        """Three context lines in a single hunk."""
+        diff = self._diff("@@ -1,3 +1,3 @@\n line1\n line2\n line3\n")
+        result = fb._diff_positions(diff)
+        # new_line starts at 1; each context line records then increments.
+        # line1: {1: 1}, line2: {2: 2}, line3: {3: 3}
+        self.assertEqual(result, {"test.py": {1: 1, 2: 2, 3: 3}})
+
+    def test_added_lines_increment_new_line(self):
+        """Added lines are recorded and increment new_line."""
+        diff = self._diff("@@ -1,1 +1,2 @@\n context\n+added\n")
+        result = fb._diff_positions(diff)
+        # context: {1: 1}, added: {2: 2}
+        self.assertEqual(result, {"test.py": {1: 1, 2: 2}})
+
+    def test_removed_lines_skipped(self):
+        """Removed lines do not appear in the mapping."""
+        diff = self._diff("@@ -1,2 +1,1 @@\n context\n-removed\n")
+        result = fb._diff_positions(diff)
+        # Only context line: {1: 1}. Removed line is skipped.
+        self.assertEqual(result, {"test.py": {1: 1}})
+
+    def test_removed_lines_increment_diff_position(self):
+        """Removed lines increment diff_position but don't record an entry."""
+        diff = self._diff("@@ -1,3 +1,2 @@\n context\n-removed\n context2\n")
+        result = fb._diff_positions(diff)
+        # context: dp=1, {1: 1}, removed: dp=2 (no entry), context2: dp=3, {2: 3}
+        self.assertEqual(result, {"test.py": {1: 1, 2: 3}})
+
+    def test_mixed_context_added_removed(self):
+        """Mixed line types in a single hunk."""
+        diff = self._diff("@@ -1,4 +1,4 @@\n ctx1\n-removed\n+added\n ctx2\n")
+        result = fb._diff_positions(diff)
+        # ctx1: dp=1, {1: 1}, removed: dp=2 (no entry), added: dp=3, {2: 3}, ctx2: dp=4, {3: 4}
+        self.assertEqual(result, {"test.py": {1: 1, 2: 3, 3: 4}})
+
+    def test_multiple_hunks_diff_position_continues(self):
+        """diff_position continues across hunks within the same file."""
+        diff = self._diff(
+            "@@ -1,2 +1,2 @@\n hunk1a\n hunk1b\n"
+            "@@ -10,2 +10,2 @@\n hunk2a\n hunk2b\n"
+        )
+        result = fb._diff_positions(diff)
+        # Hunk 1: {1: 1, 2: 2}, Hunk 2: {10: 3, 11: 4} — dp continues
+        self.assertEqual(result, {"test.py": {1: 1, 2: 2, 10: 3, 11: 4}})
+
+    def test_hunk_with_only_additions(self):
+        """Hunk with only additions (new file)."""
+        diff = self._diff("@@ -0,0 +1,3 @@\n+line1\n+line2\n+line3\n")
+        result = fb._diff_positions(diff)
+        # new_line starts at 1: {1: 1, 2: 2, 3: 3}
+        self.assertEqual(result, {"test.py": {1: 1, 2: 2, 3: 3}})
+
+    def test_hunk_with_only_deletions_no_entries(self):
+        """Hunk with only deletions produces no entries (file not in result)."""
+        diff = self._diff("@@ -1,3 +0,0 @@\n-line1\n-line2\n-line3\n")
+        result = fb._diff_positions(diff)
+        # All lines are removed → no entries recorded → file not in result
+        self.assertEqual(result, {})
+
+    def test_multiple_files(self):
+        """Different files tracked separately."""
+        diff = (
+            "diff --git a/alpha.py b/alpha.py\n"
+            "+++ b/alpha.py\n"
+            "@@ -1,1 +1,1 @@\n alpha_line\n"
+            "diff --git a/beta.py b/beta.py\n"
+            "+++ b/beta.py\n"
+            "@@ -1,1 +1,1 @@\n beta_line\n"
+        )
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {
+            "alpha.py": {1: 1},
+            "beta.py": {1: 1},
+        })
+
+    def test_dev_null_path_ignored(self):
+        """+++ /dev/null means no target path (file deletion)."""
+        diff = (
+            "diff --git a/old.py b/old.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,1 +0,0 @@\n-removed\n"
+        )
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {})
+
+    def test_path_without_b_prefix(self):
+        """Path without b/ prefix is used as-is."""
+        diff = (
+            "diff --git a/raw.py b/raw.py\n"
+            "+++ raw.py\n"
+            "@@ -1,1 +1,1 @@\n line\n"
+        )
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {"raw.py": {1: 1}})
+
+    def test_backslash_no_newline_ignored(self):
+        """Lines starting with \\ (no newline at EOF marker) are skipped."""
+        diff = self._diff("@@ -1,2 +1,2 @@\n line1\n\\ No newline at end of file\n")
+        result = fb._diff_positions(diff)
+        # Only line1 is recorded; the backslash line is skipped.
+        self.assertEqual(result, {"test.py": {1: 1}})
+
+    def test_realistic_diff_pattern(self):
+        """Test a realistic diff with multiple hunks and mixed changes."""
+        diff = (
+            "diff --git a/main.py b/main.py\n"
+            "+++ b/main.py\n"
+            "@@ -10,6 +10,7 @@\n"
+            " context line 1\n"
+            " context line 2\n"
+            "-old line\n"
+            "+new line\n"
+            " context line 3\n"
+            " context line 4\n"
+            "@@ -50,3 +51,3 @@\n"
+            " tail context 1\n"
+            "-tail old\n"
+            "+tail new\n"
+        )
+        result = fb._diff_positions(diff)
+        # Hunk 1 (new_line=10):
+        #   ctx1: dp=1, {10: 1}, ctx2: dp=2, {11: 2}, removed: dp=3 (no entry),
+        #   added: dp=4, {12: 4}, ctx3: dp=5, {13: 5}, ctx4: dp=6, {14: 6}
+        # Hunk 2 (new_line=51):
+        #   tail_ctx: dp=7, {51: 7}, removed: dp=8 (no entry), added: dp=9, {52: 9}
+        self.assertEqual(result, {
+            "main.py": {
+                10: 1, 11: 2, 12: 4, 13: 5, 14: 6,
+                51: 7, 52: 9,
+            },
+        })
+
+    def test_return_type_structure(self):
+        """Verify the return type is dict[str, dict[int, int]]."""
+        diff = self._diff("@@ -1,1 +1,1 @@\n line\n")
+        result = fb._diff_positions(diff)
+        self.assertIsInstance(result, dict)
+        for path, mapping in result.items():
+            self.assertIsInstance(path, str)
+            self.assertIsInstance(mapping, dict)
+            for k, v in mapping.items():
+                self.assertIsInstance(k, int)
+                self.assertIsInstance(v, int)
+
+    def test_diff_position_continues_across_hunks(self):
+        """diff_position does NOT reset between hunks in the same file."""
+        diff = self._diff(
+            "@@ -1,3 +1,3 @@\n a\n b\n c\n"
+            "@@ -20,2 +20,2 @@\n x\n y\n"
+        )
+        result = fb._diff_positions(diff)
+        # Hunk 1: {1: 1, 2: 2, 3: 3}
+        # Hunk 2: {20: 4, 21: 5} — dp continues from hunk 1
+        self.assertEqual(result, {"test.py": {
+            1: 1, 2: 2, 3: 3,
+            20: 4, 21: 5,
+        }})
+
+    def test_consecutive_additions(self):
+        """Multiple consecutive additions each get their own position."""
+        diff = self._diff("@@ -1,0 +1,4 @@\n+a\n+b\n+c\n+d\n")
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {"test.py": {1: 1, 2: 2, 3: 3, 4: 4}})
+
+    def test_consecutive_removals_no_entries(self):
+        """Multiple consecutive removals produce no entries (file not in result)."""
+        diff = self._diff("@@ -1,4 +1,0 @@\n-a\n-b\n-c\n-d\n")
+        result = fb._diff_positions(diff)
+        # All lines removed → no entries → file not in result
+        self.assertEqual(result, {})
+
+    def test_interleaved_additions_and_removals(self):
+        """Alternating additions and removals."""
+        diff = self._diff("@@ -1,3 +1,3 @@\n-removed1\n+added1\n-removed2\n+added2\n")
+        result = fb._diff_positions(diff)
+        # removed1: dp=1 (no entry), added1: dp=2, {1: 2},
+        # removed2: dp=3 (no entry), added2: dp=4, {2: 4}
+        self.assertEqual(result, {"test.py": {1: 2, 2: 4}})
+
+    def test_diff_git_resets_state(self):
+        """diff --git line resets in_hunk and diff_position."""
+        diff = (
+            "diff --git a/first.py b/first.py\n"
+            "+++ b/first.py\n"
+            "@@ -1,2 +1,2 @@\n first_a\n first_b\n"
+            "diff --git a/second.py b/second.py\n"
+            "+++ b/second.py\n"
+            "@@ -1,1 +1,1 @@\n second_a\n"
+        )
+        result = fb._diff_positions(diff)
+        self.assertEqual(result, {
+            "first.py": {1: 1, 2: 2},
+            "second.py": {1: 1},
+        })
+
+
 if __name__ == "__main__":
     unittest.main()
