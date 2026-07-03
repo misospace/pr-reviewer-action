@@ -602,3 +602,49 @@ def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
     harness = json.loads((tmp_path / "tool-harness.json").read_text())
     mcp_calls = [tc for tc in harness.get("tool_calls", []) if tc["tool"] == "mcp__konflate__get_pr_diff"]
     assert mcp_calls and mcp_calls[0]["status"] == "ok"
+
+
+class TestResolveMcpToolName:
+    """Separator-tolerant MCP tool-name resolution (#245 follow-up).
+
+    Steering prompts written against the pre-fix action.yml docs used
+    single-underscore names (mcp_server_tool); the loop resolves those to the
+    advertised mcp__server__tool route when unambiguous, and never invents a
+    route outside the allowlisted set.
+    """
+
+    ROUTES = {
+        "mcp__konflate__get_pr_summary": object(),
+        "mcp__konflate__get_pr_diff": object(),
+    }
+
+    def test_exact_name_passes_through(self):
+        assert (
+            rth.resolve_mcp_tool_name("mcp__konflate__get_pr_diff", self.ROUTES)
+            == "mcp__konflate__get_pr_diff"
+        )
+
+    def test_single_underscore_alias_resolves(self):
+        assert (
+            rth.resolve_mcp_tool_name("mcp_konflate_get_pr_summary", self.ROUTES)
+            == "mcp__konflate__get_pr_summary"
+        )
+
+    def test_case_and_hyphen_variants_resolve(self):
+        assert (
+            rth.resolve_mcp_tool_name("MCP__Konflate__get-pr-diff", self.ROUTES)
+            == "mcp__konflate__get_pr_diff"
+        )
+
+    def test_unknown_name_returns_none(self):
+        assert rth.resolve_mcp_tool_name("mcp__konflate__render_diff", self.ROUTES) is None
+
+    def test_ambiguous_collapse_returns_none(self):
+        routes = {
+            "mcp__srv__get_x": object(),
+            "mcp__srv__getx": object(),  # collapses identically
+        }
+        assert rth.resolve_mcp_tool_name("mcp_srv_get_x", routes) is None
+
+    def test_empty_routes_returns_none(self):
+        assert rth.resolve_mcp_tool_name("mcp_konflate_get_pr_diff", {}) is None
