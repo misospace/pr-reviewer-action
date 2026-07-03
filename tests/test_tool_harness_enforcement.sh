@@ -396,11 +396,20 @@ fi
 echo ""
 echo "=== Evidence Provider Fork Enablement ==="
 
-# Helper: returns "skip" or "run" based on the fork enablement logic from run_review.sh
+# Exercise the SHARED gate_feature_for_forks helper (scripts/sections/common.sh)
+# that both classification.sh and corpus.sh call — not a local re-implementation —
+# so this pins the real fork-gating behavior. Returns "skip"/"run".
+# shellcheck source=../scripts/sections/common.sh
+source "$_TEST_DIR/../scripts/sections/common.sh"
+
 should_skip_evidence() {
   local is_fork_pr="$1"
   local evidence_enable_for_forks="${2:-false}"
-  if [[ "$is_fork_pr" == "true" ]] && [[ "$(printf '%s' "$evidence_enable_for_forks" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
+  local md="$TMPDIR/gate.md" json="$TMPDIR/gate.json"
+  rm -f "$md" "$json"
+  if IS_FORK_PR="$is_fork_pr" gate_feature_for_forks "$evidence_enable_for_forks" \
+      "$md" "skipped for a fork" \
+      "$json" '{"configured": false, "has_blocker": false, "providers": [], "skipped": true, "skip_reason": "fork-pr"}'; then
     echo "skip"
   else
     echo "run"
@@ -442,6 +451,24 @@ check "same-repo PR, evidence_enable_for_forks=true -> run" "$result" "run"
 # Same-repo PR (not fork) with empty — should run
 result="$(should_skip_evidence "false" "")"
 check "same-repo PR, evidence_enable_for_forks=empty -> run" "$result" "run"
+
+# gate_feature_for_forks writes BOTH paired skip artifacts when it gates.
+rm -f "$TMPDIR/gate.md" "$TMPDIR/gate.json"
+IS_FORK_PR="true" gate_feature_for_forks "false" \
+  "$TMPDIR/gate.md" "skipped for a fork" \
+  "$TMPDIR/gate.json" '{"skipped": true, "skip_reason": "fork-pr"}' || true
+check "gate writes .md skip artifact" "$(test -s "$TMPDIR/gate.md" && echo yes || echo no)" "yes"
+check "gate writes .json skip artifact" "$(test -s "$TMPDIR/gate.json" && echo yes || echo no)" "yes"
+check "gate .json skip artifact is valid JSON" \
+  "$(jq -r '.skip_reason' "$TMPDIR/gate.json" 2>/dev/null)" "fork-pr"
+
+# When NOT gated (same-repo), it writes neither artifact.
+rm -f "$TMPDIR/gate.md" "$TMPDIR/gate.json"
+IS_FORK_PR="false" gate_feature_for_forks "false" \
+  "$TMPDIR/gate.md" "skipped for a fork" \
+  "$TMPDIR/gate.json" '{"skipped": true}' || true
+check "gate writes no .md when not gated" "$(test -e "$TMPDIR/gate.md" && echo yes || echo no)" "no"
+check "gate writes no .json when not gated" "$(test -e "$TMPDIR/gate.json" && echo yes || echo no)" "no"
 
 
 echo ""

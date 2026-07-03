@@ -124,6 +124,30 @@ def _gh(*args: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout.decode("utf-8", errors="replace")
 
 
+def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str]:
+    """POST/PATCH JSON to the GitHub REST API via ``gh api`` and return
+    (returncode, stdout) — the structured JSON response, not human-oriented
+    text.
+
+    The body is written to a temp file and passed via ``--input`` rather
+    than as a ``-f field=value`` argv entry — the same pattern already used
+    by ``create_pr_review_from_payload`` — because comment bodies can be
+    large markdown blobs.
+    """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+        json.dump(data, tmp)
+        tmp_path = tmp.name
+    try:
+        return _gh("api", path, "--method", method, "--input", tmp_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def _parse_repo(repo_full_name: str) -> tuple[str, str]:
     """Split ``owner/repo`` into (owner, repo)."""
     parts = repo_full_name.split("/", 1)
@@ -140,21 +164,6 @@ def _json_decode(text: str) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
-
-
-def _parse_gh_comment_output(output_text: str, body: str) -> dict[str, Any]:
-    """Extract the comment id/URL from ``gh pr comment`` output.
-
-    gh prints the comment URL as .../pull/N#issuecomment-ID (no slash
-    before the fragment). Shared by create_comment and edit_last_comment.
-    """
-    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", output_text)
-    comment_id_match = re.search(r"#issuecomment-([0-9]+)", output_text or "")
-    return {
-        "id": int(comment_id_match.group(1)) if comment_id_match else 0,
-        "html_url": url_match.group(0) if url_match else "",
-        "body": body,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +332,24 @@ def _forgejo_comment_to_standard(comment: dict, owner: str, repo: str) -> dict[s
     }
 
 
+def _latest_marker_comment(
+    comments: list[dict[str, Any]], marker: str
+) -> dict[str, Any] | None:
+    """Return the most recently updated comment containing *marker*, or None.
+
+    Shared by both backends so "sticky comment" selection means the same
+    thing regardless of platform: the latest comment containing the marker
+    — not gh's platform-specific "last comment authored by the current
+    user" (``--edit-last``), which picks a different comment on multi-bot
+    repos and diverges from the Forgejo behaviour.
+    """
+    matching = [c for c in comments if marker in (c.get("body") or "")]
+    if not matching:
+        return None
+    matching.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+    return matching[0]
+
+
 def create_comment(
     repo_full_name: str,
     issue_number: int,
@@ -351,17 +378,23 @@ def create_comment(
             "body": data.get("body", body),
         }
 
-    # GitHub via gh CLI. Plain creation — ``--create-if-none`` is only valid
-    # together with ``--edit-last`` and is a flag-parse error on its own.
-    status_code, body_text = _gh(
-        "pr", "comment", str(issue_number),
-        "--repo", repo_full_name,
-        "--body", body,
+    # GitHub via gh CLI, hitting the REST endpoint directly rather than
+    # ``gh pr comment`` — that subcommand's stdout is a human-oriented URL
+    # string that a gh wording change can silently degrade to an unparsable
+    # blob. The REST endpoint returns real JSON we can decode structurally.
+    status_code, body_text = _gh_api_json(
+        "POST", f"repos/{owner}/{repo}/issues/{issue_number}/comments", {"body": body},
     )
     if status_code != 0 or not body_text.strip():
         return None
-
-    return _parse_gh_comment_output(body_text, body)
+    data = _json_decode(body_text)
+    if data is None:
+        return None
+    return {
+        "id": data.get("id", 0),
+        "html_url": data.get("html_url", ""),
+        "body": data.get("body", body),
+    }
 
 
 def edit_last_comment(
@@ -370,57 +403,58 @@ def edit_last_comment(
     new_body: str,
     marker: str = COMMENT_MARKER,
 ) -> dict[str, Any] | None:
-    """Edit the last comment containing *marker*, or create a new one.
+    """Edit the latest comment containing *marker*, or create a new one.
 
     This implements the "sticky comment" pattern used by the review action:
     if a comment with the marker exists, edit it in place; otherwise create
-    a new comment.
+    a new comment. Both backends select the target comment the same way
+    (see ``_latest_marker_comment``) so which comment gets updated no
+    longer depends on platform.
 
     Returns the comment dict with ``id`` and ``html_url``, or ``None`` on failure.
     """
     owner, repo = _parse_repo(repo_full_name)
+    comments = list_comments(repo_full_name, issue_number)
+    target = _latest_marker_comment(comments, marker)
+
+    if target is None:
+        # No matching comment — create a new one.
+        return create_comment(repo_full_name, issue_number, new_body)
 
     if _is_forgejo_mode():
-        # List comments and find the latest one containing the marker
-        comments = list_comments(repo_full_name, issue_number)
-        matching = [c for c in comments if marker in (c.get("body") or "")]
+        status_code, body_text = _curl(
+            "PATCH",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/issues/comments/{target['id']}",
+            data={"body": new_body},
+        )
+        if status_code != 200:
+            return None
+        data = _json_decode(body_text)
+        if data is None:
+            return None
+        return {
+            "id": target["id"],
+            "html_url": data.get("html_url", ""),
+            "body": new_body,
+        }
 
-        if matching:
-            # Sort by updated_at descending to get the latest
-            matching.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-            target = matching[0]
-
-            status_code, body_text = _curl(
-                "PATCH",
-                f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/issues/comments/{target['id']}",
-                data={"body": new_body},
-            )
-            if status_code != 200:
-                return None
-            data = _json_decode(body_text)
-            if data is None:
-                return None
-            return {
-                "id": target["id"],
-                "html_url": data.get("html_url", ""),
-                "body": new_body,
-            }
-
-        # No matching comment — create a new one
-        return create_comment(repo_full_name, issue_number, new_body)
-
-    # GitHub via gh CLI
-    status_code, body_text = _gh(
-        "pr", "comment", str(issue_number),
-        "--repo", repo_full_name,
-        "--edit-last",
-        "--body", new_body,
+    # GitHub via gh CLI — PATCH the located comment's REST resource directly
+    # (structured JSON in, structured JSON out), instead of ``gh pr comment
+    # --edit-last`` which both scrapes stdout text and edits a different
+    # comment (the last one authored by the current gh user).
+    status_code, body_text = _gh_api_json(
+        "PATCH", f"repos/{owner}/{repo}/issues/comments/{target['id']}", {"body": new_body},
     )
-    if status_code != 0:
-        # --edit-last fails when no comment exists; fall back to create
-        return create_comment(repo_full_name, issue_number, new_body)
-
-    return _parse_gh_comment_output(body_text, new_body)
+    if status_code != 0 or not body_text.strip():
+        return None
+    data = _json_decode(body_text)
+    if data is None:
+        return None
+    return {
+        "id": data.get("id", target["id"]),
+        "html_url": data.get("html_url", ""),
+        "body": data.get("body", new_body),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +858,9 @@ def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
     """
     metadata = get_pr_metadata(repo_full_name, pr_number)
     if metadata is None:
-        return False
+        # Total fetch failure: origin unknown -> fail closed, same as the
+        # shell derivation (derive_is_fork_pr in platform_api.sh).
+        return True
 
     head_full = ((metadata.get("head") or {}).get("repo") or {}).get("full_name") or ""
     base_full = ((metadata.get("base") or {}).get("repo") or {}).get("full_name") or ""
