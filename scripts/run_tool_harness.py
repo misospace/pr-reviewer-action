@@ -62,6 +62,25 @@ def normalize_repo_name(value):
     return f"{owner}/{repo}"
 
 
+def resolve_mcp_tool_name(tool_name, mcp_routes):
+    """Resolve a model-emitted MCP tool name to an advertised route.
+
+    Exact matches pass through. A name that only differs in separators —
+    e.g. ``mcp_konflate_get_pr_summary`` for the advertised
+    ``mcp__konflate__get_pr_summary`` (steering prompts written against the
+    pre-fix docs used single underscores) — resolves iff exactly one
+    advertised route collapses to the same form. Ambiguity or no match
+    returns None; only already-advertised (allowlisted, read-only-filtered)
+    routes are ever returned.
+    """
+    if tool_name in mcp_routes:
+        return tool_name
+    wanted = re.sub(r"[^a-z0-9]", "", tool_name.lower())
+    matches = [k for k in mcp_routes
+               if re.sub(r"[^a-z0-9]", "", k.lower()) == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
 def env_int(name, default_value, min_value):
     raw = os.getenv(name, str(default_value)).strip()
     try:
@@ -485,12 +504,25 @@ def run_native_loop(
         # Route mcp__server__tool to the MCP client; everything else falls
         # through to the built-in read-only executor unchanged. MCP output is
         # masked + capped exactly like built-in tool output (untrusted corpus).
-        if split_namespaced(tool_name):
-            toolset = mcp_routes.get(tool_name)
-            if toolset is None:
+        # A separator-mangled variant of an advertised name (e.g. the
+        # single-underscore mcp_server_tool a steering prompt may carry) is
+        # resolved when unambiguous — the route set is still the allowlisted,
+        # read-only-filtered one, so this loosens nothing.
+        if split_namespaced(tool_name) or (
+            mcp_routes and tool_name.startswith("mcp_")
+        ):
+            routed = resolve_mcp_tool_name(tool_name, mcp_routes)
+            if routed is None:
+                advertised = ", ".join(sorted(mcp_routes)) or "(none configured)"
                 return {"tool": tool_name, "status": "error",
-                        "result": {"error": f"Unknown MCP tool: {tool_name}"}}
-            _, bare_tool = split_namespaced(tool_name)
+                        "result": {"error": (
+                            f"Unknown MCP tool: {tool_name}. "
+                            f"Advertised MCP tools: {advertised}")}}
+            if routed != tool_name:
+                print(f"  MCP tool name '{tool_name}' resolved to '{routed}'",
+                      file=sys.stderr)
+            toolset = mcp_routes[routed]
+            _, bare_tool = split_namespaced(routed)
             res = toolset.call(bare_tool, args if isinstance(args, dict) else {})
             if res.get("error"):
                 return {"tool": tool_name, "status": "error", "result": {"error": res["error"]}}
@@ -554,7 +586,21 @@ def run_native_loop(
         summarize_fn=summarize_fn,
     )
 
+    # One always-printed outcome line: "it silently did nothing" is exactly the
+    # failure mode operators can't diagnose from an otherwise-quiet log.
+    print(
+        f"  native_loop: {len(outcome.executed)} tool call(s) executed in "
+        f"{outcome.rounds} round(s), {outcome.tool_calls_issued} issued "
+        f"(stop: {outcome.stop_reason})",
+        file=sys.stderr,
+    )
     if outcome.degraded:
+        print(
+            "  native_loop degraded: the model issued no tool calls"
+            + (f" ({outcome.error})" if outcome.error else "")
+            + " — reviewing the corpus directly (no evidence gathered)",
+            file=sys.stderr,
+        )
         result["native_loop_degraded"] = outcome.stop_reason
         if outcome.error:
             result["native_loop_error"] = outcome.error
