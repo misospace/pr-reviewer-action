@@ -311,23 +311,33 @@ BASELINE_CLEAN=false
 
 extract_review_metadata() {
   local comment_body="$1"
-  
+
   LAST_HEAD_SHA=""
   LAST_BASE_SHA=""
   LAST_REVIEW_SCOPE=""
   LAST_REVIEW_RESULT=""
-  
-  # Use Python to parse the JSON marker reliably (handles embedded quotes).
-  # The comment body is attacker-controllable (any user can post a comment
-  # carrying the marker), and the output of this helper is eval'd below, so
-  # every field is sanitized to a safe character set first: SHAs to hex, the
-  # scope/result enums to lowercase letters and underscores. This prevents
-  # shell-command injection through crafted metadata markers.
+
+  # A stale file from an earlier call in this same process (only possible in
+  # tests, which source this function and call it repeatedly — production
+  # runs the script once per process) must not leak into this call's reads
+  # below when the new comment body has no parseable marker.
+  rm -f previous-review-meta.json
+
+  # Use Python to parse the JSON marker reliably (handles embedded quotes) and
+  # write the scalar fields to a JSON side-file instead of printing shell
+  # assignments to be eval'd. The comment body is attacker-controllable (any
+  # user can post a comment carrying the marker), so fields still get
+  # sanitized to a safe character set before being written: SHAs to hex, the
+  # scope/result enums to lowercase letters and underscores. That sanitization
+  # guards the git/API calls these values feed below (resolve_review_scope);
+  # it's no longer load-bearing for shell-injection since nothing here is
+  # eval'd anymore.
   #
   # open_findings (carried forward for incremental cumulative verdicts, #193)
-  # never touches the eval path: it is sanitized field-by-field in Python and
-  # written straight to previous-findings.json for the review step.
-  eval "$(printf '%s' "$comment_body" | python3 -c "
+  # and evidence_digest (cross-run evidence memory, #265) are sanitized
+  # field-by-field and written straight to previous-findings.json /
+  # previous-evidence.json for the review step, same as before.
+  printf '%s' "$comment_body" | python3 -c "
 import json, re, sys
 sys.path.insert(0, '.')
 from pr_reviewer.metadata import parse_metadata
@@ -337,10 +347,14 @@ if data:
         return re.sub(r'[^0-9a-fA-F]', '', str(v or ''))[:64]
     def enumsan(v):
         return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
-    print(f'LAST_HEAD_SHA={hexsan(data.get(\"head_sha\"))}')
-    print(f'LAST_BASE_SHA={hexsan(data.get(\"base_sha\"))}')
-    print(f'LAST_REVIEW_SCOPE={enumsan(data.get(\"review_scope\"))}')
-    print(f'LAST_REVIEW_RESULT={enumsan(data.get(\"review_result\"))}')
+    meta = {
+        'head_sha': hexsan(data.get('head_sha')),
+        'base_sha': hexsan(data.get('base_sha')),
+        'review_scope': enumsan(data.get('review_scope')),
+        'review_result': enumsan(data.get('review_result')),
+    }
+    with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, ensure_ascii=False)
     raw = data.get('open_findings')
     sanitized = []
     if isinstance(raw, list):
@@ -356,24 +370,27 @@ if data:
                 'category': enumsan(item.get('category')),
                 'file': str(item.get('file'))[:200] if isinstance(item.get('file'), str) else None,
                 'line': line if isinstance(line, int) and not isinstance(line, bool) and line > 0 else None,
-                'message': re.sub(r'[\\x00-\\x08\\x0b-\\x1f<>]', '', message)[:200],
+                'message': re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', message)[:200],
             })
     with open('previous-findings.json', 'w', encoding='utf-8') as fh:
         json.dump(sanitized, fh, ensure_ascii=False)
-    # evidence_digest (cross-run evidence memory, #265): written to a file like
-    # open_findings, never eval'd. head_sha is the SHA the evidence was gathered
-    # at. evidence_memory.load_evidence_memory re-sanitizes on the read side.
-    # This block runs inside a bash double-quoted python3 -c string, so bash
-    # collapses the doubled backslashes before Python compiles the regex below;
-    # Python sees a control-char + angle-bracket class (matches
-    # evidence_memory._CONTROL_CHARS_RE). Same doubling as the open_findings
-    # sanitizer above; do not simplify to single backslashes.
+    # evidence_digest: head_sha is the SHA the evidence was gathered at.
+    # evidence_memory.load_evidence_memory re-sanitizes on the read side.
     digest = data.get('evidence_digest')
     if isinstance(digest, str) and digest.strip():
-        clean = re.sub(r'[\\x00-\\x08\\x0b-\\x1f<>]', '', digest)[:2000]
+        clean = re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', digest)[:2000]
         with open('previous-evidence.json', 'w', encoding='utf-8') as fh:
             json.dump({'digest': clean, 'head_sha': hexsan(data.get('head_sha'))}, fh, ensure_ascii=False)
-" 2>/dev/null || true)"
+" 2>/dev/null || true
+
+  # Read the scalars back with jq. No prior comment / unparseable marker means
+  # no previous-review-meta.json, so every field stays empty — same as today.
+  if [[ -f previous-review-meta.json ]]; then
+    LAST_HEAD_SHA="$(jq -r '.head_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_BASE_SHA="$(jq -r '.base_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_REVIEW_SCOPE="$(jq -r '.review_scope // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
+  fi
 }
 
 # Reset the scope state to a full review (no trusted incremental baseline).
