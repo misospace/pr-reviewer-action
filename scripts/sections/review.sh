@@ -89,6 +89,14 @@ PRIMARY_OK=0
 # response to ai-response.primary.json. Parse it and skip the separate review
 # call. A parse failure (degraded/oversized/garbled verdict) falls through to
 # the standard corpus review below, so this only ever adds capability.
+#
+# VERDICT-TURN CONTRACT (#362): the two paths that build a verdict request —
+# build_model_request here (Path A) and Conversation.to_request_payload in the
+# native loop (Path B) — must stay in lockstep on the shared invariants
+# (response_format, no-tools, token field, corpus reaches the model). The
+# authoritative divergence map lives in pr_reviewer/conversation.py's module
+# docstring; the shared literals are pinned by
+# tests/test_verdict_contract_equivalence.py.
 NATIVE_VERDICT_USED=0
 if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop" ]] \
   && [[ "$(jq -r '.native_loop_verdict_produced // false' tool-harness.json 2>/dev/null)" == "true" ]] \
