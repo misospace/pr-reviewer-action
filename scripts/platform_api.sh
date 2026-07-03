@@ -383,3 +383,25 @@ forgejo_enrich_compare() {
   PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 -m pr_reviewer.forgejo_backend enrich-compare "$1" "$2" "$3"
 }
+
+# ── Fork detection (single fail-closed derivation, #370) ────────────────
+# Echo "true" if the PR originates from a fork, else "false". Reads the saved
+# PR object (default: pr-object.json, written once by the precheck).
+#
+# This is the ONE place fork-ness is derived on the shell path. It mirrors
+# pr_reviewer.forgejo_backend.is_fork_pr: a missing/empty head.repo.full_name
+# is treated as a fork (a present head against a missing base is already
+# caught by head != base). Fork-ness gates the tool harness / evidence
+# providers / MCP against untrusted PR content while repo tokens are
+# available, so an unknown origin MUST fail closed. Degraded input all yields
+# "true": an empty `{}` object (the precheck writes `{}` when the PR fetch
+# fails), a missing base, or an unparseable / absent file (jq errors → the
+# `|| echo true` fallback).
+derive_is_fork_pr() {
+  local pr_object_file="${1:-pr-object.json}"
+  jq -r '
+    (.head.repo.full_name // "") as $head
+    | (.base.repo.full_name // "") as $base
+    | if $head == "" then true else ($head != $base) end
+  ' "$pr_object_file" 2>/dev/null || echo true
+}

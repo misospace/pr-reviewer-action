@@ -18,7 +18,13 @@ fi
 jq '{number, title, body, headRefOid: .head.sha, baseRefName: .base.ref, headRefName: .head.ref, author: {login: (.user.login // "")}, changedFiles: .changed_files, additions, deletions, url: .html_url}' \
   pr-object.json > pr.json
 
-IS_FORK_PR="$(jq -r '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' pr-object.json 2>/dev/null || echo false)"
+# Fork-ness is derived once by the precheck (fail-closed) and forwarded via the
+# IS_FORK_PR env. Derive locally only when the env is genuinely absent — e.g. a
+# standalone smoke test or manual run with no precheck step — and then with the
+# same fail-closed rule.
+if [[ -z "${IS_FORK_PR:-}" ]]; then
+  IS_FORK_PR="$(derive_is_fork_pr pr-object.json)"
+fi
 if [[ "$IS_FORK_PR" == "true" ]]; then
   log "Detected cross-repository pull request"
 fi
