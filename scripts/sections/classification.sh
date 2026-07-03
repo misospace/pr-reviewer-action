@@ -65,13 +65,10 @@ section_timer_end
 
 section_timer_start "evidence-providers"
 log "Running optional evidence providers..."
-if [[ "$IS_FORK_PR" == "true" ]] && [[ "$(printf '%s' "$EVIDENCE_ENABLE_FOR_FORKS" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
-  cat > evidence-providers.md <<'EOF'
-Evidence providers were skipped for a cross-repository pull request. Set evidence_enable_for_forks=true to override.
-EOF
-  cat > evidence-providers.json <<'EOF'
-{"configured": false, "has_blocker": false, "providers": [], "skipped": true, "skip_reason": "fork-pr"}
-EOF
+if gate_feature_for_forks "$EVIDENCE_ENABLE_FOR_FORKS" \
+    evidence-providers.md "Evidence providers were skipped for a cross-repository pull request. Set evidence_enable_for_forks=true to override." \
+    evidence-providers.json '{"configured": false, "has_blocker": false, "providers": [], "skipped": true, "skip_reason": "fork-pr"}'; then
+  : # fork PR without evidence_enable_for_forks — skip artifacts already written
 else
   if ! python3 "$SCRIPT_DIR/run_evidence_providers.py"; then
     error "Evidence provider execution failed"
