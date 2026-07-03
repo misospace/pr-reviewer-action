@@ -30,6 +30,8 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
+from pr_reviewer.platform import USER_AGENT
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -63,6 +65,7 @@ def _curl(
     token: str | None = None,
     data: dict[str, Any] | bytes | None = None,
     accept: str = "application/json",
+    timeout: float | None = None,
 ) -> tuple[int, str]:
     """Execute a curl request and return (http_status_code, body_text).
 
@@ -83,6 +86,7 @@ def _curl(
         cmd.extend(["-H", f"Authorization: token {token}"])
     cmd.extend([
         "-H", f"Accept: {accept}",
+        "-H", f"User-Agent: {USER_AGENT}",
         "-o", "-",
         "-w", "\n%{http_code}",
         url,
@@ -94,9 +98,9 @@ def _curl(
             body_bytes = json.dumps(data).encode("utf-8")
             cmd.extend(["-H", "Content-Type: application/json"])
         cmd.extend(["--data-binary", "@-"])
-        proc = subprocess.run(cmd, input=body_bytes, capture_output=True)
+        proc = subprocess.run(cmd, input=body_bytes, capture_output=True, timeout=timeout)
     else:
-        proc = subprocess.run(cmd, capture_output=True)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
 
     raw = proc.stdout.decode("utf-8", errors="replace")
 
@@ -136,6 +140,21 @@ def _json_decode(text: str) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+def _parse_gh_comment_output(output_text: str, body: str) -> dict[str, Any]:
+    """Extract the comment id/URL from ``gh pr comment`` output.
+
+    gh prints the comment URL as .../pull/N#issuecomment-ID (no slash
+    before the fragment). Shared by create_comment and edit_last_comment.
+    """
+    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", output_text)
+    comment_id_match = re.search(r"#issuecomment-([0-9]+)", output_text or "")
+    return {
+        "id": int(comment_id_match.group(1)) if comment_id_match else 0,
+        "html_url": url_match.group(0) if url_match else "",
+        "body": body,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +246,10 @@ def get_pr_diff(repo_full_name: str, pr_number: int) -> str:
     Returns an empty string on failure.
     """
     if _is_forgejo_mode():
+        owner, repo = _parse_repo(repo_full_name)
         status_code, body = _curl(
             "GET",
-            f"{FORGEJO_API_URL}/api/v1/repos/{_parse_repo(repo_full_name)[0]}/{_parse_repo(repo_full_name)[1]}/pulls/{pr_number}.diff",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}.diff",
         )
         if status_code != 200:
             return ""
@@ -341,15 +361,7 @@ def create_comment(
     if status_code != 0 or not body_text.strip():
         return None
 
-    # gh prints the comment URL as .../pull/N#issuecomment-ID (no slash
-    # before the fragment).
-    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", body_text)
-    comment_id_match = re.search(r"#issuecomment-([0-9]+)", body_text or "")
-    return {
-        "id": int(comment_id_match.group(1)) if comment_id_match else 0,
-        "html_url": url_match.group(0) if url_match else "",
-        "body": body,
-    }
+    return _parse_gh_comment_output(body_text, body)
 
 
 def edit_last_comment(
@@ -408,13 +420,7 @@ def edit_last_comment(
         # --edit-last fails when no comment exists; fall back to create
         return create_comment(repo_full_name, issue_number, new_body)
 
-    url_match = re.search(r"https?://\S+/pull/[0-9]+#issuecomment-[0-9]+", body_text)
-    comment_id_match = re.search(r"#issuecomment-([0-9]+)", body_text or "")
-    return {
-        "id": int(comment_id_match.group(1)) if comment_id_match else 0,
-        "html_url": url_match.group(0) if url_match else "",
-        "body": new_body,
-    }
+    return _parse_gh_comment_output(body_text, new_body)
 
 
 # ---------------------------------------------------------------------------
@@ -435,23 +441,14 @@ def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None
         )
         if status_code != 200:
             return None
-        data = _json_decode(body_text)
-        if data is None:
+    else:
+        # GitHub via gh CLI
+        status_code, body_text = _gh(
+            "api", f"repos/{owner}/{repo}/issues/{issue_number}",
+        )
+        if status_code != 0:
             return None
-        return {
-            "body": data.get("body", ""),
-            "title": data.get("title", ""),
-            "state": data.get("state", "open"),
-            "created_at": data.get("created_at", ""),
-            "updated_at": data.get("updated_at", ""),
-        }
 
-    # GitHub via gh CLI
-    status_code, body_text = _gh(
-        "api", f"repos/{owner}/{repo}/issues/{issue_number}",
-    )
-    if status_code != 0:
-        return None
     data = _json_decode(body_text)
     if data is None:
         return None

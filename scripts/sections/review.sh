@@ -426,13 +426,9 @@ write_step_summary() {
     comp_tok="$(jq -r '.usage.completion_tokens // "-"' "$usage_file" 2>/dev/null || echo -)"
   fi
 
-  # Cache hit ratio: from the tool harness (native_loop mode).
-  # Falls back to "-" when unavailable (non-native modes or backend doesn't report it).
-  local cache_hit_ratio="-"
-  if [ -f tool-harness.json ]; then
-    cache_hit_ratio="$(jq -r '.usage.cache_hit_ratio // empty' tool-harness.json 2>/dev/null || true)"
-  fi
-  [[ -z "$cache_hit_ratio" ]] && cache_hit_ratio="-"
+  # Cache hit ratio: reuse the value computed for the step output above
+  # (default "-" when the function is exercised standalone in tests).
+  local cache_hit_ratio="${_chr:--}"
 
   local diff_trunc="no" corpus_trunc="no"
   [ "$diff_bytes" -gt "$MAX_DIFF" ] 2>/dev/null && diff_trunc="yes (cap ${MAX_DIFF})"

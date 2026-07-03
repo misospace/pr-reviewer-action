@@ -109,8 +109,10 @@ check "incremental fetch passes the token via --config, not argv" \
   "$(grep -c 'Authorization: token \$GH_TOKEN" \\' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
 check "incremental fetch uses curl_config_escape helper" \
   "$(grep -c 'curl_config_escape "Authorization: token' "$ROOT_DIR/scripts/sections/config.sh")" "1"
-check "strip helper delegates to strip_source_text.py" \
-  "$(grep -c 'strip_source_text.py' "$ROOT_DIR/scripts/sections/context.sh")" "1"
+# HTML stripping lives only in run_enrichment.py (via strip_source_text.py);
+# context.sh must not grow a parallel shell implementation again.
+check "context.sh has no parallel strip implementation" \
+  "$(grep -c 'strip_source_to_text' "$ROOT_DIR/scripts/sections/context.sh" || true)" "0"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

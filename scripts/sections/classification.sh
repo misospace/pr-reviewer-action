@@ -90,7 +90,6 @@ log "Running deterministic PR classification..."
 if python3 "$SCRIPT_DIR/../pr_reviewer/classifier.py" \
     --pr-files pr-files.json \
     --diff pr.diff.truncated \
-    --body pr-body.txt \
     --linked-issues linked-issues.json \
     --output classification.json 2>/dev/null; then
   log "PR classification complete: $(jq -r '.pr_kind' classification.json 2>/dev/null || echo unknown)"

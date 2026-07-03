@@ -352,59 +352,6 @@ def truncate_text(text: str, max_bytes: int) -> tuple[str, bool]:
     return out, True
 
 
-def normalize_assistant_tool_calls_openai(
-    raw_calls: Iterable[Any],
-) -> list[dict[str, Any]]:
-    """Tolerantly shape model-emitted tool calls into OpenAI's non-streaming form.
-
-    Per the #233 contract, ``function.arguments`` is a JSON-encoded **string**
-    end-to-end (OpenAI's non-streaming schema) — strict servers reject a
-    dict when the assistant message is echoed back on the next turn. The
-    streaming reassembler already hands us a string, so we preserve it
-    verbatim. A caller that already has the parsed form (e.g. a unit test
-    or a non-reassembler path) may pass a dict; we serialise it once at
-    this boundary and then never touch it again. Malformed fragments
-    (truncated streams) are passed through as-is so the loop driver can
-    decide whether to retry.
-    """
-    out: list[dict[str, Any]] = []
-    for raw in raw_calls:
-        if not isinstance(raw, dict):
-            continue
-        fn = raw.get("function") if isinstance(raw.get("function"), dict) else None
-        name = (fn or {}).get("name") or raw.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        call_id = raw.get("id")
-        if not isinstance(call_id, str) or not call_id:
-            continue
-        # Look at the canonical location first (OpenAI's wire format), then
-        # fall back to a top-level "arguments" for proxies that flatten the
-        # shape.
-        args = (fn or {}).get("arguments")
-        if args is None:
-            args = raw.get("arguments")
-        if isinstance(args, str):
-            arguments = args
-        elif args is None:
-            arguments = ""
-        else:
-            # Dict/list at the ingest boundary: serialise once and stop
-            # touching. From here on the value is opaque.
-            try:
-                arguments = json.dumps(args, ensure_ascii=False, sort_keys=True)
-            except (TypeError, ValueError):
-                arguments = str(args)
-        out.append(
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": name, "arguments": arguments},
-            }
-        )
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Conversation state
 # ---------------------------------------------------------------------------
@@ -668,25 +615,23 @@ class Conversation:
             elif kind == "assistant_text":
                 messages.append({"role": "assistant", "content": e["content"]})
             elif kind == "assistant_tool_calls":
-                calls = normalize_assistant_tool_calls_openai(
-                    [
-                        {
-                            "id": c["id"],
-                            "function": {
-                                "name": c["name"],
-                                "arguments": c["arguments"],
-                            },
-                        }
-                        for c in e["calls"]
-                    ]
-                )
-                if not calls:
-                    continue
+                # Events are already normalised to {"id", "name", "arguments"}
+                # by add_assistant_tool_calls; emit OpenAI's nested form directly.
                 messages.append(
                     {
                         "role": "assistant",
                         "content": None,
-                        "tool_calls": calls,
+                        "tool_calls": [
+                            {
+                                "id": c["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": c["name"],
+                                    "arguments": c["arguments"],
+                                },
+                            }
+                            for c in e["calls"]
+                        ],
                     }
                 )
             elif kind == "tool_result":

@@ -20,12 +20,11 @@ import datetime
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -426,15 +425,6 @@ def run_review_for_pr(
         if not repo_path.exists():
             run.error = f"Repo {repo_full_name} not available locally"
             return run
-
-        # Extract PR number from URL
-        import urllib.parse
-        parsed = urllib.parse.urlparse(pr_entry["url"])
-        path_parts = parsed.path.strip("/").split("/")
-        if len(path_parts) >= 2:
-            pr_num = int(path_parts[-1])
-        else:
-            pr_num = pr_number
 
         # Set environment for the review run
         env = os.environ.copy()

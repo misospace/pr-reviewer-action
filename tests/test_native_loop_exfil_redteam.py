@@ -32,6 +32,8 @@ they document the defended surface and fail loudly if a future change weakens it
 from __future__ import annotations
 
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -165,7 +167,7 @@ def test_web_search_query_cannot_change_host(tmp_path, monkeypatch):
         captured["url"] = req.full_url if hasattr(req, "full_url") else req.get_full_url()
         return _Resp()
 
-    monkeypatch.setattr(rth.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     hostile_query = "talos matrix&engines=x http://evil.example/?leak=secret"
     res = _exec(
@@ -178,7 +180,7 @@ def test_web_search_query_cannot_change_host(tmp_path, monkeypatch):
     # The request host stayed the configured one; the hostile text rode inside
     # the URL-encoded q= parameter rather than re-pointing the request.
     assert captured["url"].startswith("https://search.jory.dev/search?")
-    assert "evil.example" not in rth.urllib.parse.urlparse(captured["url"]).netloc
+    assert "evil.example" not in urllib.parse.urlparse(captured["url"]).netloc
     assert "q=talos+matrix%26engines" in captured["url"] or "q=talos%20matrix%26engines" in captured["url"]
 
 

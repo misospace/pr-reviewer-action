@@ -4,13 +4,7 @@
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Ensure the scripts directory and the project root are on sys.path so we
@@ -42,8 +36,6 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     allowlisted_host,
     command_catalog_markdown,
     execute_tool_request,
-    execute_tool_requests,
-    fetch_url,
     gh_api,
     git_blame,
     git_grep,
@@ -138,38 +130,6 @@ def normalize_api_format(value):
     if candidate in {"openai", "anthropic"}:
         return candidate
     return "openai"
-
-
-def extract_json_object(text):
-    data = text.strip()
-    if data.startswith("```"):
-        lines = data.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        data = "\n".join(lines).strip()
-
-    decoder = json.JSONDecoder()
-    parsed = None
-
-    for start in range(len(data)):
-        if data[start] not in "[{":
-            continue
-        try:
-            candidate, end = decoder.raw_decode(data[start:])
-            parsed = candidate
-            break
-        except json.JSONDecodeError:
-            continue
-
-    if parsed is None:
-        raise ValueError("Could not extract JSON object from text")
-
-    if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
-        parsed = parsed[0]
-
-    return parsed
 
 
 def build_planning_context(max_bytes, corpus_path=None):
@@ -366,17 +326,6 @@ def resolve_review_system_prompt():
     )
 
 
-def _classification_risk_flag_count():
-    """Count risk_flags in classification.json (0 if unavailable). Used to keep
-    full loop depth on a risk-flagged PR even if it was routed to the fast tier."""
-    try:
-        data = json.loads(Path("classification.json").read_text(encoding="utf-8"))
-        flags = data.get("risk_flags")
-        return len(flags) if isinstance(flags, list) else 0
-    except Exception:
-        return 0
-
-
 def run_native_loop(
     repo,
     base_url,
@@ -481,17 +430,7 @@ def run_native_loop(
 
     max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
     wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900)
-    # Right-size the loop to PR risk (#197 §2): the fast route only fires on
-    # low-risk PRs, so they get a shallow loop; risk-flagged / smart-routed PRs
-    # get full depth. REVIEW_ROUTE is exported by run_review.sh; standalone runs
-    # default to legacy (full depth).
-    budgets = adaptive_loop_budgets(
-        max_rounds,
-        max_requests,
-        wall_clock,
-        review_route=os.getenv("REVIEW_ROUTE", "legacy"),
-        risk_flag_count=_classification_risk_flag_count(),
-    )
+    budgets = adaptive_loop_budgets(max_rounds, max_requests, wall_clock)
 
     # Stream loop turns by default (mirrors AI_STREAM for the review call) so
     # long thinking-model turns don't 524 behind a short-idle proxy (#204).

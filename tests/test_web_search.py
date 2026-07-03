@@ -8,6 +8,7 @@ the model supplies only the query string, never the host.
 import io
 import json
 import sys
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -28,7 +29,7 @@ def _fake_urlopen(payload):
         captured["url"] = req.full_url if hasattr(req, "full_url") else req
         return io.BytesIO(json.dumps(payload).encode("utf-8"))
 
-    with mock.patch.object(rth.urllib.request, "urlopen", _open):
+    with mock.patch.object(urllib.request, "urlopen", _open):
         yield captured
 
 
@@ -64,7 +65,7 @@ def test_empty_search_url_is_error():
 def test_transport_failure_is_error():
     def _boom(req, timeout=None):
         raise OSError("connection refused")
-    with mock.patch.object(rth.urllib.request, "urlopen", _boom):
+    with mock.patch.object(urllib.request, "urlopen", _boom):
         res = rth.web_search("q", SEARCH)
     assert "error" in res
 

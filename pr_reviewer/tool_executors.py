@@ -10,10 +10,8 @@ import json
 import re
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # mask_secrets lives in scripts/redact.py; ensure scripts/ is importable.
@@ -26,7 +24,7 @@ from redact import mask_and_truncate, mask_secrets  # noqa: E402
 # The gh_api allowlist + denied path segments live on the platform seam (single
 # source of truth); _resolve_workspace_path reuses GH_DENY_SUBSTRINGS to block
 # the same sensitive segments in filesystem paths.
-from pr_reviewer.platform import GH_DENY_SUBSTRINGS  # noqa: E402
+from pr_reviewer.platform import GH_DENY_SUBSTRINGS, USER_AGENT  # noqa: E402
 
 
 SENSITIVE_PATH_RE = re.compile(
@@ -64,26 +62,6 @@ def allowlisted_host(host, allowlist):
         if candidate == item:
             return True
     return False
-
-def fetch_url(url, allowed_hosts, request_timeout=25):
-    """Fetch a URL and return its text content (or None on failure)."""
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or ""
-
-    if not allowlisted_host(host, allowed_hosts):
-        return None
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "ai-pr-reviewer/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            raw = resp.read()
-            text = raw.decode("utf-8", errors="replace")
-            return text[:5000]
-    except Exception:
-        return None
 
 def _resolve_workspace_path(path, workspace_root):
     """Resolve a workspace-relative path with traversal/symlink/sensitive guards.
@@ -250,7 +228,7 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
     try:
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "ai-pr-reviewer/1.0"},
+            headers={"User-Agent": USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             raw = resp.read()
@@ -276,7 +254,7 @@ def web_search(query, search_url, request_timeout=20, max_results=5):
     try:
         req = urllib.request.Request(
             full,
-            headers={"User-Agent": "ai-pr-reviewer/1.0", "Accept": "application/json"},
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -478,41 +456,3 @@ def execute_tool_request(
         tool_result["result"] = {"error": str(exc)}
 
     return tool_result
-
-def execute_tool_requests(
-    normalized_requests,
-    workspace_root,
-    allowed_gh_repos,
-    current_repo,
-    allowed_hosts,
-    max_response_bytes,
-    request_timeout,
-):
-    """Execute normalized (tool_name, args) requests concurrently.
-
-    Tools are read-only, so they are safe to run in parallel; results are
-    returned in request order so the markdown/JSON output stays deterministic.
-    """
-    if not normalized_requests:
-        return []
-
-    def _run(pair):
-        tool_name, args = pair
-        return execute_tool_request(
-            tool_name,
-            args,
-            workspace_root,
-            allowed_gh_repos,
-            current_repo,
-            allowed_hosts,
-            max_response_bytes,
-            request_timeout,
-        )
-
-    if len(normalized_requests) == 1:
-        return [_run(normalized_requests[0])]
-
-    with ThreadPoolExecutor(
-        max_workers=min(4, len(normalized_requests))
-    ) as executor:
-        return list(executor.map(_run, normalized_requests))

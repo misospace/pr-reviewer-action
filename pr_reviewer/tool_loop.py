@@ -82,9 +82,6 @@ def adaptive_loop_budgets(
     max_rounds: int,
     max_tool_calls: int,
     wall_clock_sec: float,
-    *,
-    review_route: str = "primary",
-    risk_flag_count: int = 0,
 ) -> "LoopBudgets":
     """Right-size the loop budget. A native round is one model turn, so the
     headroom is 2× the configured rounds (capped at 8); the configured tool-call
@@ -98,8 +95,6 @@ def adaptive_loop_budgets(
     PRs that genuinely need a multi-hop chain (e.g. reading a deployed version,
     then verifying it against a host platform's compatibility matrix). The
     primary model is fully capable; don't ration its evidence-gathering.
-    ``review_route``/``risk_flag_count`` are retained for signature stability
-    and possible future heuristics.
     """
     rounds = min(max(max_rounds, 1) * 2, 8)
     return LoopBudgets(
