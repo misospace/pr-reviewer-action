@@ -26,7 +26,7 @@ import re
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ DB_MIGRATION_PATTERNS = [
 
 
 # ---------------------------------------------------------------------------
-# Classification logic
+# Classification result
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -212,66 +212,129 @@ def _all_files_are_lockfiles(filenames: list[str]) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# pr_kind rule table
+# ---------------------------------------------------------------------------
+#
+# Classification is a declarative table of rules evaluated top-to-bottom by one
+# engine loop (`_classify_pr_kind`). The FIRST matching rule wins, so TABLE
+# ORDER *is* precedence — rows are ordered most-specific first. This replaces
+# the former hand-written if-chain; the ordering below is identical to it.
+#
+# Each rule's `matches(filenames, diff_text) -> bool` predicate is built from a
+# pattern set by one of the factories below, except the two compound rules
+# (renovate_digest_only, dependency_upgrade) whose conditions don't reduce to a
+# single pattern scan and are kept as named predicate functions.
+
+# Pattern-based predicate factories -----------------------------------------
+
+def _filename_matches(patterns: list[re.Pattern]) -> Callable[[list[str], str], bool]:
+    """Predicate: any changed filename matches any pattern in the set."""
+    def _pred(filenames: list[str], diff_text: str) -> bool:
+        return any(any(pat.search(f) for pat in patterns) for f in filenames)
+    return _pred
+
+
+def _filename_or_diff_matches(patterns: list[re.Pattern]) -> Callable[[list[str], str], bool]:
+    """Predicate: any pattern matches a changed filename OR the diff content.
+
+    Mirrors the original two-step check (filenames first, then diff) — both
+    steps yielded the same kind, so folding them into one OR is behavior-
+    preserving while keeping the diff fallback in a single rule.
+    """
+    def _pred(filenames: list[str], diff_text: str) -> bool:
+        if any(any(pat.search(f) for pat in patterns) for f in filenames):
+            return True
+        return any(pat.search(diff_text) for pat in patterns)
+    return _pred
+
+
+# Compound predicates (don't reduce to a single pattern scan) ----------------
+
+def _is_renovate_digest_only(filenames: list[str], diff_text: str) -> bool:
+    """Most specific rule: EVERY changed file is a lockfile and the diff has no
+    version bump. Guards against a mixed PR (real code + a lockfile) being
+    mislabeled as trivial and steering weaker models toward rubber-stamping it.
+    """
+    return _all_files_are_lockfiles(filenames) and not _has_version_bump(diff_text)
+
+
+def _is_dependency_upgrade(filenames: list[str], diff_text: str) -> bool:
+    """A dependency/manifest file changed, but NOT a k8s manifest (which happens
+    to reference versions and must classify as k8s_manifest instead).
+    """
+    has_dep_file = any(
+        any(pat.search(f) for pat in DEPENDENCY_PATTERNS) for f in filenames
+    )
+    if not has_dep_file:
+        return False
+    has_k8s = any(any(pat.search(f) for pat in K8S_PATTERNS) for f in filenames)
+    return not has_k8s
+
+
+@dataclass(frozen=True)
+class KindRule:
+    """One pr_kind classification rule: a name plus a match predicate."""
+    kind: str
+    matches: Callable[[list[str], str], bool]
+
+
+# Precedence encoded as order: first matching rule wins.
+KIND_RULES: list[KindRule] = [
+    KindRule("renovate_digest_only", _is_renovate_digest_only),
+    KindRule("dependency_upgrade", _is_dependency_upgrade),
+    KindRule("k8s_manifest", _filename_matches(K8S_PATTERNS)),
+    # secret handling before auth (more specific)
+    KindRule("secret_handling_changes", _filename_matches(SECRET_HANDLING_PATTERNS)),
+    KindRule("db_or_migration_changes", _filename_matches(DB_MIGRATION_PATTERNS)),
+    KindRule("auth_changes", _filename_matches(AUTH_PATTERNS)),
+    KindRule("public_route_changes", _filename_matches(PUBLIC_ROUTE_PATTERNS)),
+    KindRule("file_serving_changes", _filename_or_diff_matches(FILE_SERVING_PATTERNS)),
+    KindRule("path_handling_changes", _filename_or_diff_matches(PATH_HANDLING_PATTERNS)),
+]
+
+# Fallback kind when no rule matches.
+DEFAULT_PR_KIND = "app_code"
+
+
 def _classify_pr_kind(
     files: list[dict],
     diff_text: str,
 ) -> str:
-    """Determine the single best pr_kind from file patterns and diff content."""
+    """Determine the single best pr_kind from file patterns and diff content.
+
+    Evaluates KIND_RULES in order and returns the first match; falls back to
+    DEFAULT_PR_KIND ("app_code") when nothing matches.
+    """
     filenames = [f.get("filename", "") for f in files]
+    for rule in KIND_RULES:
+        if rule.matches(filenames, diff_text):
+            return rule.kind
+    return DEFAULT_PR_KIND
 
-    # Check Renovate digest-only first (most specific). Require that EVERY
-    # changed file is a lockfile and the diff has no version bump — otherwise a
-    # mixed PR (real code + a lockfile) would be mislabeled as trivial and steer
-    # weaker models toward rubber-stamping it.
-    if _all_files_are_lockfiles(filenames) and not _has_version_bump(diff_text):
-        return "renovate_digest_only"
 
-    # Check dependency upgrade (has version bumps in lockfiles/deps)
-    has_dep_file = any(
-        any(pat.search(f) for pat in DEPENDENCY_PATTERNS) for f in filenames
-    )
-    if has_dep_file:
-        # But exclude k8s manifests that happen to reference versions
-        has_k8s = any(
-            any(pat.search(f) for pat in K8S_PATTERNS) for f in filenames
-        )
-        if not has_k8s:
-            return "dependency_upgrade"
+# ---------------------------------------------------------------------------
+# Risk-flag rule tables
+# ---------------------------------------------------------------------------
 
-    # Check k8s manifest changes
-    if any(any(pat.search(f) for pat in K8S_PATTERNS) for f in filenames):
-        return "k8s_manifest"
+# Linked-issue flags: a flag fires when a linked issue carries ANY of the
+# trigger labels (case-insensitive). Order matters — flags are appended in this
+# order (deduplicated) as issues are scanned.
+LINKED_ISSUE_RULES: list[tuple[frozenset[str], str]] = [
+    (frozenset({"security", "vulnerability"}), "linked_security_issue"),
+    (frozenset({"audit"}), "linked_audit_issue"),
+    (frozenset({"priority/p0", "priority_p0"}), "linked_priority_p0"),
+    (frozenset({"priority/p1", "priority_p1"}), "linked_priority_p1"),
+]
 
-    # Check secret handling (before auth, more specific)
-    if any(any(pat.search(f) for pat in SECRET_HANDLING_PATTERNS) for f in filenames):
-        return "secret_handling_changes"
-
-    # Check DB / migration changes
-    if any(any(pat.search(f) for pat in DB_MIGRATION_PATTERNS) for f in filenames):
-        return "db_or_migration_changes"
-
-    # Check auth changes
-    if any(any(pat.search(f) for pat in AUTH_PATTERNS) for f in filenames):
-        return "auth_changes"
-
-    # Check public route changes
-    if any(any(pat.search(f) for pat in PUBLIC_ROUTE_PATTERNS) for f in filenames):
-        return "public_route_changes"
-
-    # Check file serving changes (in filenames AND diff content)
-    if any(any(pat.search(f) for pat in FILE_SERVING_PATTERNS) for f in filenames):
-        return "file_serving_changes"
-    if any(pat.search(diff_text) for pat in FILE_SERVING_PATTERNS):
-        return "file_serving_changes"
-
-    # Check path handling changes (in filenames AND diff content)
-    if any(any(pat.search(f) for pat in PATH_HANDLING_PATTERNS) for f in filenames):
-        return "path_handling_changes"
-    if any(pat.search(diff_text) for pat in PATH_HANDLING_PATTERNS):
-        return "path_handling_changes"
-
-    # Default: app code change
-    return "app_code"
+# File-based flags: a flag fires when any changed filename OR the diff content
+# matches the pattern set. Order matters — flags are appended in this order.
+FILE_RISK_RULES: list[tuple[list[re.Pattern], str]] = [
+    (FILE_SERVING_PATTERNS, "file_serving_changes"),
+    (PATH_HANDLING_PATTERNS, "path_handling_changes"),
+    (AUTH_PATTERNS, "auth_changes"),
+    (SECRET_HANDLING_PATTERNS, "secret_handling_changes"),
+]
 
 
 def _detect_risk_flags(
@@ -280,6 +343,10 @@ def _detect_risk_flags(
     linked_issues: list[dict],
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Detect risk flags based on file patterns and linked issue metadata.
+
+    Driven by two rule tables: LINKED_ISSUE_RULES (scanned first, per issue)
+    and FILE_RISK_RULES (scanned second). Flag append order follows table
+    order, matching the former hand-written checks.
 
     Returns
     -------
@@ -296,29 +363,15 @@ def _detect_risk_flags(
     flags_with_files: dict[str, list[str]] = {}
     filenames = [f.get("filename", "") for f in files]
 
-    # Check for linked security/audit/priority issues
+    # Linked security/audit/priority issues (table order, deduplicated).
     for issue in linked_issues:
-        labels = [lb.get("name", "").lower() for lb in issue.get("labels", [])]
-        if "security" in labels or "vulnerability" in labels:
-            if "linked_security_issue" not in flags:
-                flags.append("linked_security_issue")
-        if "audit" in labels:
-            if "linked_audit_issue" not in flags:
-                flags.append("linked_audit_issue")
-        if "priority/p0" in labels or "priority_p0" in labels:
-            if "linked_priority_p0" not in flags:
-                flags.append("linked_priority_p0")
-        if "priority/p1" in labels or "priority_p1" in labels:
-            if "linked_priority_p1" not in flags:
-                flags.append("linked_priority_p1")
+        labels = {lb.get("name", "").lower() for lb in issue.get("labels", [])}
+        for trigger_labels, flag in LINKED_ISSUE_RULES:
+            if labels & trigger_labels and flag not in flags:
+                flags.append(flag)
 
-    # File-based risk flags (derived from classification patterns)
-    for pat_set, flag in [
-        (FILE_SERVING_PATTERNS, "file_serving_changes"),
-        (PATH_HANDLING_PATTERNS, "path_handling_changes"),
-        (AUTH_PATTERNS, "auth_changes"),
-        (SECRET_HANDLING_PATTERNS, "secret_handling_changes"),
-    ]:
+    # File-based risk flags (derived from classification patterns).
+    for pat_set, flag in FILE_RISK_RULES:
         # Collect the specific files that triggered this flag
         triggering_files = [
             f for f in filenames

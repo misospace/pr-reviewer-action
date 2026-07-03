@@ -548,10 +548,12 @@ class TestGitHubMode(unittest.TestCase):
     """GitHub mode must invoke gh with arguments the real CLI accepts.
 
     These mock ``_gh`` (no live network calls from unit tests) and assert
-    the exact invocation: the original implementation passed ``gh pr view
-    --json`` field names that don't exist (user/head/base/merged_at) and a
-    ``--create-if-none`` flag that is invalid without ``--edit-last`` — both
-    invisible to tests that only checked the fallback result.
+    the exact invocation: the original ``get_pr_metadata`` implementation
+    passed ``gh pr view --json`` field names that don't exist
+    (user/head/base/merged_at) — invisible to tests that only checked the
+    fallback result. Comment creation/editing similarly used to shell out
+    to ``gh pr comment`` and regex-scrape its human-oriented stdout; these
+    tests assert the structured ``gh api`` JSON path instead.
     """
 
     GH_REST_PR = {
@@ -587,28 +589,80 @@ class TestGitHubMode(unittest.TestCase):
 
         self.assertEqual(result, "")
 
-    def test_create_comment_does_not_pass_create_if_none(self):
-        # --create-if-none is only valid with --edit-last; plain creation
-        # must not send it.
-        url = "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-77"
+    def test_create_comment_posts_via_gh_api_json(self):
+        # create_comment must hit the REST endpoint via ``gh api`` and parse
+        # the structured JSON response — not scrape ``gh pr comment`` stdout.
+        gh_comment = {
+            "id": 77,
+            "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-77",
+            "body": "hello",
+        }
         with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, url + "\n")) as mock_gh:
+             patch.object(fb, "_gh", return_value=(0, json.dumps(gh_comment))) as mock_gh:
             result = fb.create_comment("misospace/pr-reviewer-action", 42, "hello")
 
         args = mock_gh.call_args[0]
-        self.assertNotIn("--create-if-none", args)
+        self.assertEqual(args[0], "api")
+        self.assertEqual(args[1], "repos/misospace/pr-reviewer-action/issues/42/comments")
+        self.assertIn("--method", args)
+        self.assertEqual(args[args.index("--method") + 1], "POST")
+        self.assertIn("--input", args)
         self.assertEqual(result["id"], 77)
-        self.assertEqual(result["html_url"], url)
+        self.assertEqual(result["html_url"], gh_comment["html_url"])
 
-    def test_edit_last_comment_parses_gh_url(self):
-        # gh prints .../pull/N#issuecomment-ID — no slash before the fragment.
-        url = "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-88"
+    def test_create_comment_malformed_json_returns_none(self):
         with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, url + "\n")):
+             patch.object(fb, "_gh", return_value=(0, "not json")):
+            result = fb.create_comment("misospace/pr-reviewer-action", 42, "hello")
+
+        self.assertIsNone(result)
+
+    def test_edit_last_comment_finds_latest_marker_and_patches(self):
+        # gh mode must select the comment the same way Forgejo mode does:
+        # the latest comment containing the marker, not "last comment by
+        # the current gh user" (--edit-last).
+        gh_comments = [
+            {"id": 1, "body": f"{COMMENT_MARKER}\nold", "updated_at": "2026-06-11T11:30:00Z"},
+            {"id": 2, "body": "no marker here", "updated_at": "2026-06-11T11:40:00Z"},
+        ]
+        patched = {"id": 1, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-1", "body": "updated"}
+
+        def _fake_gh(*args):
+            if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments"):
+                # list_comments consumes gh's --jq output, which is one JSON
+                # object per line (JSONL), not a JSON array.
+                return 0, "\n".join(json.dumps(c) for c in gh_comments)
+            self.assertEqual(args[0], "api")
+            self.assertEqual(args[1], "repos/misospace/pr-reviewer-action/issues/comments/1")
+            self.assertIn("--method", args)
+            self.assertEqual(args[args.index("--method") + 1], "PATCH")
+            self.assertIn("--input", args)
+            return 0, json.dumps(patched)
+
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", side_effect=_fake_gh):
             result = fb.edit_last_comment("misospace/pr-reviewer-action", 42, "updated")
 
-        self.assertEqual(result["id"], 88)
-        self.assertEqual(result["html_url"], url)
+        self.assertEqual(result["id"], 1)
+        self.assertEqual(result["html_url"], patched["html_url"])
+
+    def test_edit_last_comment_falls_back_to_create_when_no_marker(self):
+        created = {"id": 3, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-3", "body": "fresh"}
+
+        def _fake_gh(*args):
+            # The list (no --method) and the create (--method POST) both
+            # target .../issues/42/comments, so disambiguate on --method.
+            if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments") \
+                    and "--method" not in args:
+                return 0, json.dumps([])
+            return 0, json.dumps(created)
+
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.object(fb, "_gh", side_effect=_fake_gh):
+            result = fb.edit_last_comment("misospace/pr-reviewer-action", 42, "fresh")
+
+        self.assertEqual(result["id"], 3)
+        self.assertEqual(result["html_url"], created["html_url"])
 
 
 
