@@ -1,191 +1,81 @@
 #!/usr/bin/env bash
-# test_env_consistency.sh — CI lint check that cross-references env var usage
-# in shell scripts against each step's env block in action.yml.
+# test_env_consistency.sh — CI gate against env-block drift in action.yml (#361).
 #
-# This addresses issue #361: Consolidate env-block duplication across action.yml steps.
-# Rather than refactoring the monolithic env blocks (risky), we add a gate that
-# catches drift between what the shell scripts expect and what action.yml provides.
+# The composite action has several step-level env blocks that repeat the same
+# variables. The bug class this gate targets (the #255 family): the SAME env
+# var bound to DIFFERENT expressions in different blocks, so steps silently
+# disagree about the world (e.g. one block resolving FORGEJO_API_URL from the
+# input with a server_url fallback while another hardcodes the fallback only).
+#
+# Invariant enforced (hard FAIL, not a warning): every env var that appears in
+# more than one env block must be bound to the identical value expression in
+# all of them, unless the (var, step-scope) pair is listed in
+# INTENTIONAL_DIFFERENCES below with a justification.
+#
+# Duplicate keys WITHIN one block (the literal #255 bug) are already caught by
+# yamllint in CI; this check covers cross-block divergence, which YAML parsing
+# cannot see.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ACTION_YML="$REPO_ROOT/action.yml"
 
-FAIL=0
-
-# ---------------------------------------------------------------------------
-# Extract env vars from each env block in action.yml.
-# Output format: BLOCK_NUM:VAR_NAME
-# We identify blocks by the "      env:" header (6-space indent) and then
-# collect all lines with "        VAR_NAME:" (8-space indent, uppercase).
-# ---------------------------------------------------------------------------
-extract_env_blocks() {
-    awk '
-        /^      env:/ { block++; next }
-        block && /^        [A-Z_]+:/ {
-            # Extract variable name: strip leading spaces and trailing colon
-            var = $0
-            gsub(/^[[:space:]]+/, "", var)
-            gsub(/:.*/, "", var)
-            if (var != "") print block ":" var
-        }
-    ' "$ACTION_YML"
-}
-
-# ---------------------------------------------------------------------------
-# Get the union of all env vars defined across ALL env blocks in action.yml
-# ---------------------------------------------------------------------------
-get_all_action_env_vars() {
-    extract_env_blocks | cut -d: -f2 | sort -u
-}
-
-# ---------------------------------------------------------------------------
-# Extract input names from action.yml and convert to uppercase (matching env var convention)
-# Stops collecting when we hit the next top-level key (no indentation).
-# ---------------------------------------------------------------------------
-extract_input_names() {
-    awk '
-        /^inputs:/ { p=1; next }
-        p && /^[a-zA-Z]/ { p=0; next }
-        p && /^  [a-z_]+:/ {
-            var = $0
-            gsub(/^[[:space:]]+/, "", var)
-            gsub(/:.*/, "", var)
-            print toupper(var)
-        }
-    ' "$ACTION_YML" | sort -u
-}
-
-# ---------------------------------------------------------------------------
-# Report which action input env vars are missing from each env block.
-# This catches drift when a new input is added but not propagated to all steps.
-# ---------------------------------------------------------------------------
-report_inputs_in_all_blocks() {
-    local blocks
-    blocks="$(extract_env_blocks)"
-
-    if [ -z "$blocks" ]; then
-        echo "INFO: No env blocks found in action.yml (nothing to check)" >&2
-        return 0
-    fi
-
-    # Get all block numbers
-    local all_block_nums
-    all_block_nums="$(echo "$blocks" | cut -d: -f1 | sort -u)"
-
-    local input_vars
-    input_vars="$(extract_input_names)"
-
-    if [ -z "$input_vars" ]; then
-        echo "INFO: No inputs found in action.yml (nothing to check)" >&2
-        return 0
-    fi
-
-    local warnings=0
-
-    while IFS= read -r var; do
-        [ -z "$var" ] && continue
-
-        for b in $all_block_nums; do
-            if ! echo "$blocks" | grep -q "^${b}:${var}$"; then
-                echo "WARN: Input-derived env var ${var} is missing from block $b" >&2
-                warnings=$((warnings + 1))
-            fi
-        done
-    done <<< "$input_vars"
-
-    if [ "$warnings" -gt 0 ]; then
-        echo "INFO: Found $warnings input-derived env var(s) not consistently present across all env blocks" >&2
-    else
-        echo "PASS: All input-derived env vars are present in every env block" >&2
-    fi
-
-    # Always return success — this is informational only
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# Report inconsistencies between env blocks (informational, not a hard fail).
-# The primary review step (block 1) is treated as the reference.
-# ---------------------------------------------------------------------------
-report_env_block_consistency() {
-    local blocks
-    blocks="$(extract_env_blocks)"
-
-    if [ -z "$blocks" ]; then
-        echo "INFO: No env blocks found in action.yml (nothing to check)" >&2
-        return 0
-    fi
-
-    # Get vars in block 1 (the main review step)
-    local block1_vars
-    block1_vars="$(echo "$blocks" | grep '^1:' | cut -d: -f2 | sort -u)"
-
-    if [ -z "$block1_vars" ]; then
-        echo "INFO: Block 1 has no env vars (nothing to cross-check)" >&2
-        return 0
-    fi
-
-    # Get all other block numbers
-    local other_blocks
-    other_blocks="$(echo "$blocks" | grep -v '^1:' | cut -d: -f1 | sort -u)"
-
-    if [ -z "$other_blocks" ]; then
-        echo "INFO: Only one env block found, nothing to cross-check" >&2
-        return 0
-    fi
-
-    local inconsistencies=0
-
-    for b in $other_blocks; do
-        local block_vars
-        block_vars="$(echo "$blocks" | grep "^${b}:" | cut -d: -f2 | sort -u)"
-
-        # Check vars in block 1 that are NOT in this block
-        local missing_from_block
-        missing_from_block="$(comm -23 <(echo "$block1_vars") <(echo "$block_vars"))"
-        if [ -n "$missing_from_block" ]; then
-            echo "WARN: Block $b is missing vars from block 1:" >&2
-            echo "$missing_from_block" | while IFS= read -r v; do
-                echo "  - $v" >&2
-            done
-            inconsistencies=$((inconsistencies + 1))
-        fi
-
-        # Check vars in this block that are NOT in block 1
-        local extra_in_block
-        extra_in_block="$(comm -23 <(echo "$block_vars") <(echo "$block1_vars"))"
-        if [ -n "$extra_in_block" ]; then
-            echo "WARN: Block $b has vars not in block 1:" >&2
-            echo "$extra_in_block" | while IFS= read -r v; do
-                echo "  - $v" >&2
-            done
-            inconsistencies=$((inconsistencies + 1))
-        fi
-    done
-
-    if [ "$inconsistencies" -gt 0 ]; then
-        echo "INFO: Found $inconsistencies env block(s) with inconsistent variables (see WARN above)" >&2
-    else
-        echo "PASS: All env blocks are consistent (same set of variables)" >&2
-    fi
-
-    # Always return success — this is informational only
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-echo "=== Env Consistency Check ===" >&2
+# var<TAB>reason — add a line ONLY when two steps genuinely need different
+# bindings for the same name, and say why.
+INTENTIONAL_DIFFERENCES="$(cat <<'EOF'
+EOF
+)"
 
 if [ ! -f "$ACTION_YML" ]; then
     echo "FAIL: action.yml not found at $ACTION_YML" >&2
     exit 1
 fi
 
-report_inputs_in_all_blocks
-report_env_block_consistency
+# Emit "block<TAB>var<TAB>value" for every entry of every step-level env block.
+# Blocks are numbered in order of appearance ("      env:" at 6-space indent,
+# entries at 8-space indent). Values are the raw single-line expression text.
+extract_env_entries() {
+    awk '
+        /^      env:/ { block++; next }
+        block && /^        [A-Z_]+:/ {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            var = line
+            sub(/:.*/, "", var)
+            val = line
+            sub(/^[A-Z_]+:[[:space:]]*/, "", val)
+            print block "\t" var "\t" val
+        }
+    ' "$ACTION_YML"
+}
 
-echo "PASS: All env consistency checks passed" >&2
+entries="$(extract_env_entries)"
+if [ -z "$entries" ]; then
+    echo "FAIL: no env blocks found in action.yml — extraction broke or the file was restructured; update extract_env_entries" >&2
+    exit 1
+fi
+
+failures=0
+# Vars that appear in >1 block: check all their values are identical.
+for var in $(printf '%s\n' "$entries" | cut -f2 | sort | uniq -d | sort -u); do
+    distinct_values="$(printf '%s\n' "$entries" | awk -F'\t' -v v="$var" '$2 == v {print $3}' | sort -u)"
+    count="$(printf '%s\n' "$distinct_values" | wc -l | tr -d ' ')"
+    if [ "$count" -gt 1 ]; then
+        if printf '%s\n' "$INTENTIONAL_DIFFERENCES" | grep -q "^${var}	"; then
+            continue
+        fi
+        echo "FAIL: env var ${var} is bound to ${count} different expressions across env blocks:" >&2
+        printf '%s\n' "$entries" | awk -F'\t' -v v="$var" '$2 == v {print "  block " $1 ": " $3}' >&2
+        echo "  → make the bindings identical, or add '${var}<TAB>reason' to INTENTIONAL_DIFFERENCES in $0" >&2
+        failures=$((failures + 1))
+    fi
+done
+
+if [ "$failures" -gt 0 ]; then
+    echo "FAIL: $failures env var(s) drift across action.yml env blocks" >&2
+    exit 1
+fi
+
+echo "PASS: every env var repeated across blocks is bound identically" >&2
 exit 0
