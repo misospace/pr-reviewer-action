@@ -475,6 +475,7 @@ class TestRunEnrichmentMain:
 
     def test_budget_blocks_phase_one_fetch_submission(self, monkeypatch):
         """Expired budget should not submit URL fetch tasks."""
+        from pr_reviewer import linked_sources
         from scripts import run_enrichment
 
         calls = []
@@ -483,7 +484,8 @@ class TestRunEnrichmentMain:
             calls.append(url)
             return b"data"
 
-        monkeypatch.setattr(run_enrichment, "fetch_url", fake_fetch)
+        # render_linked_sources looks up fetch_url in its own module.
+        monkeypatch.setattr(linked_sources, "fetch_url", fake_fetch)
         budget = run_enrichment.BudgetTracker(max_seconds=0)
 
         md = run_enrichment.render_linked_sources(
@@ -524,3 +526,103 @@ class TestSelectTargetVersionLastWins:
             "+image: new:2.5.3",
         ])
         assert result == "2.5.3"
+
+
+class TestBudgetTracker:
+    """BudgetTracker.ok(): time-boxes enrichment, warns once when exhausted."""
+
+    def test_ok_true_before_expiry(self):
+        from pr_reviewer.budget import BudgetTracker
+        assert BudgetTracker(max_seconds=60).ok() is True
+
+    def test_ok_false_after_expiry(self):
+        from pr_reviewer.budget import BudgetTracker
+        assert BudgetTracker(max_seconds=0).ok() is False
+
+    def test_warning_logged_at_most_once(self, capsys):
+        from pr_reviewer.budget import BudgetTracker
+        bt = BudgetTracker(max_seconds=0)
+        bt.ok()
+        bt.ok()
+        err = capsys.readouterr().err
+        assert err.count("enrichment budget exceeded") == 1
+
+
+class TestGhApiCall:
+    """gh_api_call: parse JSON on success, fail soft (None) otherwise."""
+
+    def test_parses_json_on_success(self, monkeypatch):
+        from pr_reviewer import http_client
+
+        class _R:
+            returncode = 0
+            stdout = '{"tag_name": "v1.2.3"}'
+
+        monkeypatch.setattr(http_client.subprocess, "run", lambda *a, **k: _R())
+        assert http_client.gh_api_call("repos/o/r/releases") == {"tag_name": "v1.2.3"}
+
+    def test_returns_none_on_nonzero_exit(self, monkeypatch):
+        from pr_reviewer import http_client
+
+        class _R:
+            returncode = 1
+            stdout = "gh: not found"
+
+        monkeypatch.setattr(http_client.subprocess, "run", lambda *a, **k: _R())
+        assert http_client.gh_api_call("repos/o/r") is None
+
+    def test_returns_none_on_invalid_json(self, monkeypatch):
+        from pr_reviewer import http_client
+
+        class _R:
+            returncode = 0
+            stdout = "not json"
+
+        monkeypatch.setattr(http_client.subprocess, "run", lambda *a, **k: _R())
+        assert http_client.gh_api_call("repos/o/r") is None
+
+    def test_returns_none_on_exception(self, monkeypatch):
+        from pr_reviewer import http_client
+
+        def _boom(*a, **k):
+            raise OSError("gh missing")
+
+        monkeypatch.setattr(http_client.subprocess, "run", _boom)
+        assert http_client.gh_api_call("repos/o/r") is None
+
+
+class TestReleasesCache:
+    """render_linked_sources fetches a repo's releases list at most once."""
+
+    def test_single_releases_fetch_per_repo(self, monkeypatch):
+        from pr_reviewer import linked_sources
+
+        endpoints = []
+
+        def fake_gh_api(endpoint, token=None):
+            endpoints.append(endpoint)
+            if endpoint.endswith("/releases/tags/v1.2.3"):
+                return {"tag_name": "v1.2.3"}
+            if "releases?per_page=30" in endpoint:
+                return [{"tag_name": "v1.2.3"}]
+            return None
+
+        # The github.com URL is never HTML-fetched, but stub fetch_url anyway.
+        monkeypatch.setattr(linked_sources, "gh_api_call", fake_gh_api)
+        monkeypatch.setattr(linked_sources, "fetch_url", lambda url, timeout=25: None)
+
+        budget = linked_sources.BudgetTracker(max_seconds=60)
+        linked_sources.render_linked_sources(
+            ["https://github.com/owner/repo/releases/tag/v1.2.3"],
+            {"github.com"},
+            None,
+            "",
+            [],
+            None,
+            budget,
+        )
+
+        # Phase 2 ("Recent Releases") and Phase 3 (repo-candidate enrichment)
+        # share one cached fetch of the releases list.
+        releases_calls = [e for e in endpoints if "releases?per_page=30" in e]
+        assert len(releases_calls) == 1
