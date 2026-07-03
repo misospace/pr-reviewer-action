@@ -224,3 +224,38 @@ def classify_url(url: str) -> dict | None:
             }
 
     return None
+
+
+# --- Compare-payload summarization ---
+
+
+def _pick(obj: dict, *keys) -> dict:
+    """Project a dict onto the given keys, dropping absent ones."""
+    return {k: obj[k] for k in keys if k in obj}
+
+
+def _commit_summaries(commits: list) -> list[dict]:
+    """Reduce compare-API commit objects to sha + message."""
+    return [
+        {"sha": c.get("sha", ""), "message": (c.get("commit", {}).get("message") or "")[:120]}
+        for c in commits
+    ]
+
+
+def summarize_compare(compare_data: dict) -> dict:
+    """Summarize a GitHub compare-payload response.
+
+    Extracts the commit and file projections that are used both by
+    ``run_enrichment`` and ``image_digest_analysis``.  Returns a dict with
+    keys ``commits``, ``files``, and ``status``.
+    """
+    commits = _commit_summaries(compare_data.get("commits", []))
+    files = [
+        _pick(f, "filename", "status", "additions", "deletions", "changes")
+        for f in compare_data.get("files", [])
+    ]
+    return {
+        "commits": commits,
+        "files": files,
+        "status": compare_data.get("status"),
+    }
