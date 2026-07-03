@@ -713,6 +713,12 @@ class TestIsForkPr(unittest.TestCase):
         with self._meta(DELETED_FORK_PR_META):
             self.assertTrue(fb.is_fork_pr("misospace/pr-reviewer-action", 44))
 
+    def test_fetch_failure_fails_closed(self):
+        # Total metadata-fetch failure → origin unknown → fork (fail closed),
+        # matching the shell derivation (derive_is_fork_pr).
+        with patch.object(fb, "get_pr_metadata", return_value=None):
+            self.assertTrue(fb.is_fork_pr("misospace/pr-reviewer-action", 45))
+
 
 class TestCurlStatusParsing(unittest.TestCase):
     """_curl appends '\\n%{http_code}' and must parse bodies of any shape."""
