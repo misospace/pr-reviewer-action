@@ -154,6 +154,12 @@ build_model_request() {
         # findings is nullable-but-required: OpenAI strict mode requires every
         # property to be listed in required, so optionality is expressed via
         # the null type. The parser tolerates null/absent/malformed findings.
+        #
+        # VERDICT-TURN CONTRACT (#362): this literal is duplicated as
+        # _OPENAI_VERDICT_JSON_SCHEMA in pr_reviewer/conversation.py (the
+        # native_loop verdict path) and MUST stay byte-identical to it —
+        # see the divergence map in that module's docstring. Drift is pinned
+        # by tests/test_verdict_contract_equivalence.py.
         rf_json='{"type":"json_schema","json_schema":{"name":"pr_review","strict":true,"schema":{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","request_changes"]},"review_markdown":{"type":"string"},"findings":{"type":["array","null"],"items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","major","minor","info"]},"category":{"type":["string","null"]},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"message":{"type":"string"}},"required":["severity","category","file","line","message"],"additionalProperties":false}}},"required":["verdict","review_markdown","findings"],"additionalProperties":false}}}' ;;
     esac
 
