@@ -34,6 +34,68 @@ full (default off, expensive) or collapsed into a single system-prompt
 transcript note (default on, mirrors today's single-shot behaviour). See
 ``Conversation.to_request_payload`` for the flag.
 
+=====================================================================
+VERDICT-TURN CONTRACT — bash/Python divergence map (#362)
+=====================================================================
+The action produces its review verdict on one of TWO code paths, which
+build the closing model request in different languages and MUST stay in
+lockstep on the shared invariants below. This block is the single
+authoritative description; ``scripts/model_call.sh`` and
+``scripts/sections/review.sh`` carry a one-line cross-reference back here.
+The 2.0 model-call consolidation (#368) is where the bash path is meant to
+be retired; until then, treat both as live.
+
+  Path A — corpus-only / bash single-shot review
+    ``build_model_request`` in ``scripts/model_call.sh`` (invoked from
+    ``scripts/sections/review.sh``). Used for the standard review call, the
+    fallback model, and the escalation call. No tools ever attach.
+
+  Path B — native_loop in-conversation verdict (#205)
+    ``Conversation.to_request_payload(verdict_turn=True,
+    keep_full_history_on_verdict=True)`` (built in
+    ``scripts/run_tool_harness.py``). The multi-turn tool history is carried
+    through and the corpus is re-injected as a trailing user turn. OpenAI
+    only — an Anthropic verdict turn after trailing tool_result (user-role)
+    blocks would create adjacent user turns (a 400). ``review.sh`` consumes
+    its output (``ai-response.primary.json``) and skips Path A when
+    ``native_loop_verdict_produced`` is true.
+
+SHARED contract — MUST match across both paths (drift = bug):
+  * No ``tools`` on the request. Path A never adds them; Path B drops them
+    because ``verdict_turn=True``.
+  * ``response_format`` for a given ``AI_RESPONSE_FORMAT``:
+      - ``off``          → field omitted
+      - ``json_object``  → ``{"type": "json_object"}``
+      - ``json_schema``  → the strict ``pr_review`` schema. This literal is
+        DUPLICATED: ``_OPENAI_VERDICT_JSON_SCHEMA`` here and the inline
+        ``rf_json`` string in ``model_call.sh``. They must be byte-identical
+        (pinned by ``tests/test_verdict_contract_equivalence.py``).
+  * Token-limit field name obeys ``AI_TOKENS_PARAM`` (``max_tokens`` vs
+    ``max_completion_tokens``); default cap ``AI_MAX_TOKENS`` = 8192.
+  * ``temperature`` is omitted iff ``AI_TEMPERATURE`` is empty.
+  * ``stream_options.include_usage`` is set iff streaming (OpenAI only).
+  * The full corpus (``review-corpus.truncated.md``) reaches the model.
+  * The reviewer ``SYSTEM_PROMPT`` is present (Path B resolves the same base
+    prompt via ``resolve_review_system_prompt``).
+
+INTENTIONALLY different (do NOT try to unify):
+  * System prompt. Path A sends ``SYSTEM_PROMPT`` verbatim. Path B appends
+    ``TOOL_USE_PREAMBLE`` (#263) so the loop and verdict share ONE system
+    and the cached prefix survives — a token-0 swap would blow the cache.
+  * Corpus placement. Path A concatenates the corpus into its single user
+    message (``$user + "\n\n" + $corpus``). Path B re-injects it as a
+    trailing user turn (``_VERDICT_CLOSING_INSTRUCTION + corpus``) after the
+    tool history.
+  * User instruction wording. Path A: ``build_user_message`` (deterministic
+    classification steering). Path B: ``_VERDICT_CLOSING_INSTRUCTION`` in
+    ``run_tool_harness.py``. Different text, same intent (STRICT JSON now).
+  * Prior tool evidence. Path A has none in the request (tools were flattened
+    into the corpus upstream). Path B carries the real assistant tool_call /
+    tool_result turns in-conversation.
+  * API coverage. Path A supports openai and anthropic; Path B's verdict is
+    openai-only. Anthropic has no ``response_format`` on either path (both
+    lean on the system prompt to request JSON).
+
 The budget helpers in this module (rough token estimate + graceful
 truncation of the oldest tool results) are advisory: the loop driver in
 3/7 owns the authoritative stop conditions. Keeping them here means the

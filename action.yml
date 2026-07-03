@@ -804,6 +804,7 @@ runs:
         REVIEW_SCOPE: ${{ inputs.review_scope }}
         EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope }}
         PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha }}
+        IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
@@ -977,10 +978,13 @@ runs:
             CLEANUP_NATIVE_REVIEWS="$(resolve_cleanup_flag "${CLEANUP_PREVIOUS_NATIVE_REVIEWS:-auto}" "review_verdict")"
             cleanup_native_reviews "$CLEANUP_NATIVE_REVIEWS"
 
-            # Determine if the PR is from a fork. The precheck step already fetched
-            # the PR object; only fall back to the API when its output is missing.
+            # Fork-ness is derived once by the precheck (fail-closed) and
+            # forwarded via IS_FORK_PR. Fall back to the PR object the precheck
+            # saved only when that output is missing; derive_is_fork_pr fails
+            # closed (missing/empty head, missing base, or absent file → fork)
+            # rather than re-fetching the PR object.
             if [ -z "$IS_FORK_PR" ]; then
-              IS_FORK_PR="$(platform_pr_get "$REPO" "$PR_NUMBER" --jq '((.head.repo.full_name // "") != (.base.repo.full_name // ""))' 2>/dev/null || echo false)"
+              IS_FORK_PR="$(derive_is_fork_pr pr-object.json)"
             fi
 
             # Resolve review result
