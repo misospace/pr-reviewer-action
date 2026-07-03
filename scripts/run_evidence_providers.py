@@ -11,23 +11,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Ensure the scripts directory is on sys.path so we can import shared helpers.
+# Ensure the scripts directory and project root are on sys.path so we can
+# import shared helpers (redact) and pr_reviewer modules.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+_PROJECT_ROOT = _SCRIPTS_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
+from pr_reviewer.env import env_int  # noqa: E402
 from redact import mask_and_truncate, mask_secrets  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-
-def env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(1, value)
 
 
 def normalize_severity(value: object) -> str:

@@ -15,19 +15,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from pr_reviewer.budget import DeadlineBudget  # noqa: E402
 from pr_reviewer.platform import USER_AGENT  # noqa: E402
 
 
 def time_budget_deadline():
     """Return a monotonic deadline from IMAGE_DIGEST_BUDGET_SEC (0 disables)."""
-    raw = os.getenv("IMAGE_DIGEST_BUDGET_SEC", "60").strip()
-    try:
-        budget = int(raw)
-    except ValueError:
-        budget = 60
-    if budget <= 0:
-        return None
-    return time.monotonic() + budget
+    return DeadlineBudget.from_env("IMAGE_DIGEST_BUDGET_SEC", default=60).deadline
 
 
 def deadline_exceeded(deadline):

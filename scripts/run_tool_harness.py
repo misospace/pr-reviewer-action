@@ -81,18 +81,13 @@ def resolve_mcp_tool_name(tool_name, mcp_routes):
     return matches[0] if len(matches) == 1 else None
 
 
-def env_int(name, default_value, min_value):
+def env_int_bounded(name, default_value, min_value, max_value):
     raw = os.getenv(name, str(default_value)).strip()
     try:
         value = int(raw)
     except ValueError:
         return default_value
-    return max(min_value, value)
-
-
-def env_int_bounded(name, default_value, min_value, max_value):
-    value = env_int(name, default_value, min_value)
-    return min(max_value, value)
+    return max(min_value, min(max_value, value))
 
 
 def _accumulate_usage(acc, response, api_format):
