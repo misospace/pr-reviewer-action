@@ -754,7 +754,7 @@ runs:
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
         ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
         ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
-        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean }}
+        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
@@ -802,8 +802,8 @@ runs:
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
         REVIEW_SCOPE: ${{ inputs.review_scope }}
-        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope }}
-        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha }}
+        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
+        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
