@@ -20,6 +20,25 @@ if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   exit 1
 fi
 
+# ── Platform resolution, once (#367) ──────────────────────────────────
+# Resolve the host platform a single time here — using the shared
+# platform_resolve rule (PLATFORM=github|forgejo|auto; auto → forgejo when
+# FORGEJO_API_URL is set or GITHUB_SERVER_URL names a non-github host) — and
+# emit it as two step outputs. Downstream action.yml steps consume
+# resolved_platform / effective_forgejo_api_url instead of each re-deriving
+# the platform from github.server_url in a copy-pasted expression (which let
+# the shell seam and forgejo_backend disagree). The precheck's own env still
+# carries the `inputs.forgejo_api_url || server_url` fallback, so the
+# explicit-input-wins-then-server-url precedence is captured here, once.
+# Resolution needs no PR data (pure env), so it runs before every early-exit
+# path and is emitted on all of them.
+RESOLVED_PLATFORM="$(platform_resolve)"
+if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
+  EFFECTIVE_FORGEJO_API_URL="${FORGEJO_API_URL:-}"
+else
+  EFFECTIVE_FORGEJO_API_URL=""
+fi
+
 # ── Label-driven re-review (#231) ─────────────────────────────────────
 # A `labeled` pull_request event is the easy re-review trigger: adding the
 # rereview label forces a fresh review (labels are self-authorizing — only
@@ -45,6 +64,8 @@ if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" 
         echo "base_sha="
         echo "is_fork_pr="
         echo "diff_fingerprint="
+        echo "resolved_platform=$RESOLVED_PLATFORM"
+        echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
       } >> "$OUTPUT_FILE"
       exit 0
     fi
@@ -299,6 +320,8 @@ if [[ "$should_review" == "false" ]]; then
     echo "diff_fingerprint=$broad_fingerprint"
     echo "should_review=$should_review"
     echo "skip_reason=$skip_reason"
+    echo "resolved_platform=$RESOLVED_PLATFORM"
+    echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
   } >> "$OUTPUT_FILE"
   exit 0
 fi
@@ -518,3 +541,7 @@ echo "is_fork_pr=$IS_FORK_PR" >> "$OUTPUT_FILE"
 echo "diff_fingerprint=$broad_fingerprint" >> "$OUTPUT_FILE"
 echo "should_review=$should_review" >> "$OUTPUT_FILE"
 echo "skip_reason=$skip_reason" >> "$OUTPUT_FILE"
+
+# Platform resolution (resolved once near the top; see the #367 block).
+echo "resolved_platform=$RESOLVED_PLATFORM" >> "$OUTPUT_FILE"
+echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL" >> "$OUTPUT_FILE"

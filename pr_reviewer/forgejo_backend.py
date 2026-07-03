@@ -30,7 +30,9 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
-from pr_reviewer.platform import USER_AGENT
+# Top-level import is safe: platform.py imports forgejo_backend only lazily
+# (inside _gh_api_forgejo), so there is no import cycle in this direction.
+from pr_reviewer.platform import USER_AGENT, resolve_platform
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +53,36 @@ GH_TOKEN = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
 
 
 def _is_forgejo_mode() -> bool:
-    """Return True when FORGEJO_API_URL is set and non-empty."""
-    return bool(FORGEJO_API_URL)
+    """Return True when the active platform is Forgejo.
+
+    PLATFORM-aware (issue #367): delegates to ``platform.resolve_platform`` so
+    this backend and the shell seam (``platform_api.sh``) never disagree — in
+    particular ``PLATFORM=github`` now forces the GitHub path even when
+    FORGEJO_API_URL is populated (action.yml force-fills it from
+    ``github.server_url`` on non-github hosts, so keying purely off its
+    presence silently curled while the shell used gh).
+
+    Two deliberate deviations from a bare ``resolve_platform()`` call, each
+    needed to preserve existing behaviour:
+
+      * An unset/empty PLATFORM is treated as ``auto`` (not
+        ``resolve_platform``'s ``github`` default). Standalone/test callers
+        that switch to Forgejo purely by setting FORGEJO_API_URL — never
+        PLATFORM — must keep resolving to forgejo.
+      * The Forgejo URL passed in is this module's ``FORGEJO_API_URL``
+        constant (captured at import, monkeypatched by the test suite via
+        ``patch.object(fb, "FORGEJO_API_URL", ...)``) rather than a fresh env
+        read, so attribute patches still flip the mode.
+    """
+    if not FORGEJO_API_URL:
+        # This module cannot operate against Forgejo without a base URL, so
+        # an empty FORGEJO_API_URL always means GitHub mode — even when
+        # resolve_platform's auto rule would infer forgejo from a non-github
+        # GITHUB_SERVER_URL (always set on Forgejo runners). Matches the
+        # pre-#367 behaviour exactly.
+        return False
+    platform = os.environ.get("PLATFORM", "").strip().lower() or "auto"
+    return resolve_platform(platform=platform, forgejo_api_url=FORGEJO_API_URL) == "forgejo"
 
 
 # ---------------------------------------------------------------------------

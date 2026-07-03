@@ -1173,5 +1173,52 @@ class TestDiffPositions(unittest.TestCase):
         })
 
 
+class TestIsForgejoMode(unittest.TestCase):
+    """_is_forgejo_mode is PLATFORM-aware (issue #367).
+
+    Previously it keyed purely off FORGEJO_API_URL being non-empty, so a
+    PLATFORM=github deployment on a non-github host (where action.yml
+    force-fills FORGEJO_API_URL from github.server_url) silently curled while
+    the shell seam used gh. It now delegates to resolve_platform.
+    """
+
+    def test_platform_github_overrides_forgejo_url(self):
+        # The regression: explicit PLATFORM=github must win over a populated URL.
+        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.dict(os.environ, {"PLATFORM": "github"}, clear=False):
+            self.assertFalse(fb._is_forgejo_mode())
+
+    def test_platform_forgejo_explicit(self):
+        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.dict(os.environ, {"PLATFORM": "forgejo"}, clear=False):
+            self.assertTrue(fb._is_forgejo_mode())
+
+    def test_url_only_still_forgejo(self):
+        # No PLATFORM set → treated as auto → a populated FORGEJO_API_URL
+        # (the monkeypatched module attribute) still flips to forgejo. This is
+        # the behaviour the whole existing test suite relies on.
+        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(fb._is_forgejo_mode())
+
+    def test_empty_url_stays_github_even_on_forgejo_runner(self):
+        # Forgejo Actions runners always set GITHUB_SERVER_URL to the instance
+        # URL. Without a FORGEJO_API_URL this module cannot build API URLs, so
+        # it must stay in GitHub mode rather than curl an empty base (the
+        # auto rule's server_url inference must not leak in here).
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.dict(os.environ, {"GITHUB_SERVER_URL": "https://forgejo.example.com"}, clear=True):
+            self.assertFalse(fb._is_forgejo_mode())
+
+    def test_default_github_when_no_url(self):
+        with patch.object(fb, "FORGEJO_API_URL", ""), \
+             patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(fb._is_forgejo_mode())
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
 if __name__ == "__main__":
     unittest.main()

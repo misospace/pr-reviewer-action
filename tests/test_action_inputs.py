@@ -151,6 +151,36 @@ def test_action_yml_has_no_duplicate_env_keys():
     )
 
 
+def test_platform_resolution_centralized_in_precheck():
+    """Platform resolution lives in one place — the precheck (issue #367).
+
+    The ``github.server_url``→FORGEJO_API_URL fallback expression must appear
+    exactly once (the precheck step env, the only step with no precheck to
+    consume). Every downstream step reads the precheck's resolved_platform /
+    effective_forgejo_api_url outputs instead of re-deriving the platform,
+    which is what let the shell seam and forgejo_backend disagree.
+    """
+    content = (_REPO_ROOT / "action.yml").read_text()
+    fallback = "github.server_url != 'https://github.com'"
+    count = content.count(fallback)
+    assert count == 1, (
+        "the server_url→FORGEJO_API_URL fallback expression must appear exactly "
+        f"once (precheck only); found {count}. Downstream steps should consume "
+        "steps.precheck.outputs.resolved_platform / effective_forgejo_api_url."
+    )
+    assert "steps.precheck.outputs.resolved_platform" in content, (
+        "downstream steps must consume the precheck's resolved_platform output"
+    )
+    assert "steps.precheck.outputs.effective_forgejo_api_url" in content, (
+        "downstream steps must consume the precheck's effective_forgejo_api_url output"
+    )
+    # The lone remaining fallback must be paired with PLATFORM: inputs.platform
+    # (the precheck still takes raw inputs; it is the resolver, not a consumer).
+    assert "PLATFORM: ${{ inputs.platform }}" in content, (
+        "the precheck step must still resolve from the raw platform input"
+    )
+
+
 def test_comment_marker_input_exists():
     """Verify comment_marker input is declared (regression test for #113)."""
     action_inputs = parse_action_inputs()
