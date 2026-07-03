@@ -24,7 +24,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install test dependencies
-        run: pip install pytest yamllint
+        run: pip install pytest pytest-cov yamllint
 
       - name: Validate action metadata YAML
         run: ruby -e 'require "yaml"; YAML.load_file("action.yml")'
@@ -67,8 +67,17 @@ jobs:
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
+      # Coverage is scoped to pr_reviewer/ and scripts/ — the bash test suites
+      # below cover the shell side, which pytest-cov can't measure.
+      # Threshold: measured baseline was 76% (2026-07-03); gate at 72 to absorb
+      # small fluctuations. Ratchet toward the audit's 80% as coverage grows.
       - name: Run Python tests (auto-discover all 215)
-        run: pytest tests/ -v --tb=short
+        run: |
+          COV_FAIL_UNDER=72
+          pytest tests/ -v --tb=short \
+            --cov=pr_reviewer --cov=scripts \
+            --cov-report=term-missing:skip-covered \
+            --cov-fail-under="$COV_FAIL_UNDER"
 
       # Auto-discover every bash suite so a new (or previously unlisted) suite
       # cannot silently stay out of CI. The smoke test runs separately above.
