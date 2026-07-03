@@ -283,6 +283,82 @@ platform_commit_status() {
   fi
 }
 
+platform_external_checks() {
+  # $1=repo $2=sha → normalized JSON array of EXTERNAL checks on stdout:
+  #   [{"name": <string>, "state": "pending"|"success"|"failure"}, ...]
+  #
+  # This is the single normalization seam for CI gating (issue #373). It folds
+  # the two raw API shapes (GitHub check-runs + the combined commit-status
+  # object) into one uniform list and applies self-exclusion ONCE here:
+  #   - our own workflow run's check runs, matched by GITHUB_RUN_ID in the
+  #     check-run detail/html URL (/runs/<run_id>/);
+  #   - our own commit-status context, matched by name (CI_STATUS_CONTEXT).
+  # Forgejo divergences are already handled upstream (platform_check_runs
+  # returns an empty struct; platform_commit_status normalizes status→state),
+  # so the jq below is platform-agnostic.
+  #
+  # State mapping (unchanged from the pre-seam wait_for_ci.sh jq):
+  #   check runs — not "completed" → pending; conclusion in
+  #     {failure,timed_out,cancelled,action_required} → failure; else success.
+  #   commit statuses — state in {failure,error} → failure; "success" →
+  #     success; anything else → pending.
+  #
+  # Emits nothing (empty stdout) when BOTH underlying APIs return empty, so the
+  # caller can distinguish a transient failure (retry) from "no external CI"
+  # (an empty JSON array). Falls back to the aggregate combined-status state
+  # when the endpoint reports total_count>0 but carries no per-status detail.
+  local repo="$1" sha="$2"
+  local runs combined
+  runs="$(platform_check_runs "$repo" "$sha" 2>/dev/null || echo "")"
+  combined="$(platform_commit_status "$repo" "$sha" 2>/dev/null || echo "")"
+  if [[ -z "$runs" && -z "$combined" ]]; then
+    return 0
+  fi
+  [[ -n "$runs" ]] || runs='{}'
+  [[ -n "$combined" ]] || combined='{}'
+
+  jq -cn \
+    --argjson runs "$runs" \
+    --argjson combined "$combined" \
+    --arg run "${GITHUB_RUN_ID:-}" \
+    --arg ctx "${CI_STATUS_CONTEXT:-pr-reviewer-action}" '
+    def cr_state:
+      if .status != "completed" then "pending"
+      else ((.conclusion // "") as $c
+            | if ($c == "failure" or $c == "timed_out"
+                   or $c == "cancelled" or $c == "action_required")
+              then "failure" else "success" end)
+      end;
+    def st_state:
+      if (.state == "failure" or .state == "error") then "failure"
+      elif (.state == "success") then "success"
+      else "pending" end;
+    ([$runs.check_runs[]?
+       | select(
+           $run == ""
+           or ((((.details_url // "") | test("/runs/" + $run + "(/|$)"))
+                or ((.html_url // "") | test("/runs/" + $run + "(/|$)"))) | not)
+         )
+       | {name: (.name // "(unnamed)"), state: cr_state}]) as $cr
+    | ([$combined.statuses[]?
+        | select(.context != $ctx)
+        | {name: (.context // "(status)"), state: st_state}]) as $st
+    | ($cr + $st) as $ext
+    | if ($ext | length) > 0 then $ext
+      # No per-check detail, but the combined endpoint reports a terminal
+      # aggregate over >0 statuses (degraded shape): synthesize one entry.
+      elif (($combined.total_count // 0) > 0
+            and ((($combined.state // "pending") == "success")
+                 or (($combined.state // "pending") == "failure")
+                 or (($combined.state // "pending") == "error")))
+      then [{name: "(combined)",
+             state: (if ((($combined.state) == "failure")
+                         or (($combined.state) == "error"))
+                     then "failure" else "success" end)}]
+      else [] end
+  ' 2>/dev/null || echo "[]"
+}
+
 # ── GitHub-targeted enrichment (linked third-party sources) ─────────────
 # These hit github.com-hosted upstream repos (release notes, compares, tags
 # for version hints) and are NOT host-platform operations: on a Forgejo
