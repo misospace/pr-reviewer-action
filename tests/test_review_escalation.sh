@@ -64,7 +64,7 @@ check_contains "input escalate_on_fast_request_changes" "$ACTION" "escalate_on_f
 check_contains "input escalate_on_fast_low_confidence" "$ACTION" "escalate_on_fast_low_confidence:"
 check_contains "input escalate_on_tool_or_evidence_blockers" "$ACTION" "escalate_on_tool_or_evidence_blockers:"
 check_contains "input escalate_on_dirty_baseline" "$ACTION" "escalate_on_dirty_baseline:"
-check_contains "review step receives BASELINE_CLEAN" "$ACTION" 'BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean }}'
+check_contains "review step receives BASELINE_CLEAN" "$ACTION" "BASELINE_CLEAN: \${{ steps.precheck.outputs.baseline_clean || 'false' }}"
 check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
 check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
 check "publish step receives ESCALATION_REASON" \
