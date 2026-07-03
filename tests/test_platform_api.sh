@@ -112,6 +112,31 @@ check "platform_check_runs" \
 check "platform_commit_status" \
   "$(run_seam github "" 'platform_commit_status o/r abc123')" \
   "gh api repos/o/r/commits/abc123/status"
+
+# platform_external_checks — the single CI normalization seam (issue #373).
+# Override the two raw fetchers with fixed JSON so the merge/normalize/exclude
+# logic is asserted in isolation from the network.
+check "external_checks normalizes a completed check run to success" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[{\"name\":\"build\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"; }; platform_commit_status(){ echo "{}"; }; platform_external_checks o/r abc')" \
+  '[{"name":"build","state":"success"}]'
+check "external_checks excludes our own workflow run by GITHUB_RUN_ID" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[{\"name\":\"ai-review\",\"status\":\"in_progress\",\"details_url\":\"https://x/runs/999/job/1\"},{\"name\":\"build\",\"status\":\"completed\",\"conclusion\":\"success\",\"details_url\":\"https://x/runs/555/job/2\"}]}"; }; platform_commit_status(){ echo "{}"; }; GITHUB_RUN_ID=999 platform_external_checks o/r abc')" \
+  '[{"name":"build","state":"success"}]'
+check "external_checks excludes our own commit-status context by name" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[]}"; }; platform_commit_status(){ echo "{\"state\":\"success\",\"total_count\":2,\"statuses\":[{\"context\":\"pr-reviewer-action\",\"state\":\"pending\"},{\"context\":\"lint\",\"state\":\"success\"}]}"; }; CI_STATUS_CONTEXT=pr-reviewer-action platform_external_checks o/r abc')" \
+  '[{"name":"lint","state":"success"}]'
+check "external_checks maps a failed commit status to failure" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[]}"; }; platform_commit_status(){ echo "{\"state\":\"failure\",\"total_count\":1,\"statuses\":[{\"context\":\"test\",\"state\":\"failure\"}]}"; }; CI_STATUS_CONTEXT=pr-reviewer-action platform_external_checks o/r abc')" \
+  '[{"name":"test","state":"failure"}]'
+check "external_checks falls back to the aggregate combined state (no per-status detail)" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[]}"; }; platform_commit_status(){ echo "{\"state\":\"failure\",\"total_count\":2}"; }; platform_external_checks o/r abc')" \
+  '[{"name":"(combined)","state":"failure"}]'
+check "external_checks: own failed context does not gate when externals pass" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[]}"; }; platform_commit_status(){ echo "{\"state\":\"failure\",\"total_count\":2,\"statuses\":[{\"context\":\"pr-reviewer-action\",\"state\":\"failure\"},{\"context\":\"lint\",\"state\":\"success\"}]}"; }; CI_STATUS_CONTEXT=pr-reviewer-action platform_external_checks o/r abc')" \
+  '[{"name":"lint","state":"success"}]'
+check "external_checks emits an empty array when nothing is external" \
+  "$(run_seam github "" 'platform_check_runs(){ echo "{\"check_runs\":[]}"; }; platform_commit_status(){ echo "{\"state\":\"pending\",\"total_count\":0}"; }; platform_external_checks o/r abc')" \
+  '[]'
 check "github_enrich_api passthrough" \
   "$(run_seam github "" 'github_enrich_api repos/up/stream/releases?per_page=8')" \
   "gh api repos/up/stream/releases?per_page=8"

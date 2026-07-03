@@ -353,6 +353,53 @@ check "PR object fetched exactly once" "$PULLS_FETCHES" "1"
 DIFF_FETCHES="$(grep -c '^pr diff' /tmp/testfp_gh_calls.log || true)"
 check "diff fetched exactly once" "$DIFF_FETCHES" "1"
 
+# ── Test 15: fork PR (different head repo) → is_fork_pr=true ──────────
+echo ""
+echo "=== Test 15: cross-repo (fork) PR → is_fork_pr=true ==="
+cat > /tmp/testfp_pr_object.json <<'JSONEOF'
+{
+  "number": 42,
+  "head": {"sha": "aaaa111122223333aaaa111122223333aaaa1111", "ref": "feature", "repo": {"full_name": "attacker/repo"}},
+  "base": {"sha": "bbbb111122223333bbbb111122223333bbbb1111", "ref": "main", "repo": {"full_name": "test/repo"}}
+}
+JSONEOF
+set_empty_comments
+RESULT="$(run_precheck)"
+check "fork PR forwards is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
+
+# ── Test 16: missing head.repo → fail closed (treated as fork) ───────
+echo ""
+echo "=== Test 16: missing head.repo metadata → is_fork_pr=true (fail closed) ==="
+cat > /tmp/testfp_pr_object.json <<'JSONEOF'
+{
+  "number": 42,
+  "head": {"sha": "aaaa111122223333aaaa111122223333aaaa1111", "ref": "feature"},
+  "base": {"sha": "bbbb111122223333bbbb111122223333bbbb1111", "ref": "main", "repo": {"full_name": "test/repo"}}
+}
+JSONEOF
+set_empty_comments
+RESULT="$(run_precheck)"
+check "missing head.repo fails closed to is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
+
+# ── Test 17: degraded/empty PR object → fail closed ──────────────────
+echo ""
+echo "=== Test 17: empty PR object (degraded fetch) → is_fork_pr=true (fail closed) ==="
+cat > /tmp/testfp_pr_object.json <<'JSONEOF'
+{}
+JSONEOF
+set_empty_comments
+RESULT="$(run_precheck)"
+check "empty PR object fails closed to is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
+
+# Restore the default same-repo PR object for any later additions.
+cat > /tmp/testfp_pr_object.json <<'JSONEOF'
+{
+  "number": 42,
+  "head": {"sha": "aaaa111122223333aaaa111122223333aaaa1111", "ref": "feature", "repo": {"full_name": "test/repo"}},
+  "base": {"sha": "bbbb111122223333bbbb111122223333bbbb1111", "ref": "main", "repo": {"full_name": "test/repo"}}
+}
+JSONEOF
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 

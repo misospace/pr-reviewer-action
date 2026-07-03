@@ -2,18 +2,26 @@
 set -euo pipefail
 
 # ── wait_for_ci.sh ──────────────────────────────────────────────────────
-# Polls GitHub's Checks API (primary signal) and the legacy commit-status
-# API (supplementary) until every external check is final, a failure is
-# detected, or the timeout expires.
+# Polls CI state until every external check is final, a failure is detected,
+# or the timeout expires.
 #
-# Two pitfalls this is built around:
+# The platform seam (platform_external_checks in platform_api.sh) does all the
+# normalization: it merges GitHub's check-runs with the combined commit-status
+# object into ONE list of external checks [{name, state}] (state ∈
+# pending|success|failure) and applies self-exclusion there. This loop is then
+# a pure reducer over that list: any failure → failure; any pending → wait;
+# empty → no external CI; all success → success.
+#
+# Two pitfalls the seam is built around (documented here for context):
 #   1. Repos that only use GitHub Actions never produce legacy commit
-#      statuses, so the combined-status state stays "pending" forever. The
-#      combined state therefore only counts when total_count > 0.
+#      statuses. The seam drops the combined aggregate unless it is terminal
+#      over total_count > 0 statuses, so an always-"pending" combined state
+#      does not masquerade as an external check to wait on.
 #   2. The job running this action is itself a check run and would always be
 #      "in_progress". Every job belonging to the current workflow run is
 #      excluded via GITHUB_RUN_ID (check run detail/html URLs carry
-#      /runs/<run_id>/).
+#      /runs/<run_id>/); our own commit-status context is excluded by name
+#      (CI_STATUS_CONTEXT). Both exclusions happen once, inside the seam.
 #
 # Exit codes:
 #   0 – All external checks reached a terminal state (success/failure/none).
@@ -67,55 +75,27 @@ get_head_sha() {
   platform_pr_head_sha "$REPO" "$PR_NUMBER" 2>/dev/null
 }
 
-# Render the per-check results gathered this iteration into CI_CHECKS_FILE so
-# run_review.sh can surface them as review evidence. Own-workflow check runs are
-# excluded with the same rule used for gating. A no-op when CI_CHECKS_FILE is
-# unset or no external checks exist.
+# Render the normalized external checks gathered this iteration into
+# CI_CHECKS_FILE so run_review.sh can surface them as review evidence. The list
+# already has self-exclusion applied (see platform_external_checks). A no-op
+# when CI_CHECKS_FILE is unset or no external checks exist.
 render_ci_checks() {
   local final_state="$1"
   [[ -n "$CI_CHECKS_FILE" ]] || return 0
-  local runs="${check_runs_response:-{}}"
-  local combined="${combined_response:-{}}"
+  local checks="${ci_checks_json:-[]}"
 
   local rows
-  rows="$(printf '%s' "$runs" | jq -r --arg run "$GITHUB_RUN_ID" '
-    [.check_runs[]?
-      | select(
-          $run == ""
-          or ((((.details_url // "") | test("/runs/" + $run + "(/|$)"))
-               or ((.html_url // "") | test("/runs/" + $run + "(/|$)"))) | not)
-        )] as $ext
-    | $ext[]
-    | "| \(.name // "(unnamed)") | \(.status // "?") | \(.conclusion // "—") |"' 2>/dev/null || echo "")"
-
-  local legacy
-  # On Forgejo: exclude our own status context by name.
-  legacy="$(printf '%s' "$combined" | jq -r --arg ctx "$CI_STATUS_CONTEXT" '
-    if ((.total_count // 0) > 0) then
-      (.statuses[]?
-        | select(.context != $ctx)
-        | "| \(.context // "(status)") | \(.state // "?") | \(.description // "") |")
-    else empty end' 2>/dev/null || echo "")"
+  rows="$(printf '%s' "$checks" | jq -r '.[] | "| \(.name) | \(.state) |"' 2>/dev/null || echo "")"
 
   # Nothing external to report — leave no file so run_review omits the section.
-  [[ -n "$rows" || -n "$legacy" ]] || return 0
+  [[ -n "$rows" ]] || return 0
 
   {
     echo "_CI reached a terminal state before this review began (overall: ${final_state}). These results are from the CI status API for commit ${sha} and are authoritative evidence of which checks ran and how they concluded._"
     echo
-    if [[ -n "$rows" ]]; then
-      echo "| Check | Status | Conclusion |"
-      echo "| --- | --- | --- |"
-      printf '%s\n' "$rows"
-    fi
-    if [[ -n "$legacy" ]]; then
-      echo
-      echo "Commit statuses:"
-      echo
-      echo "| Context | State | Description |"
-      echo "| --- | --- | --- |"
-      printf '%s\n' "$legacy"
-    fi
+    echo "| Check | State |"
+    echo "| --- | --- |"
+    printf '%s\n' "$rows"
   } > "$CI_CHECKS_FILE" 2>/dev/null || true
 }
 
@@ -158,80 +138,33 @@ while true; do
     fi
   fi
 
-  check_runs_response="$(platform_check_runs "$REPO" "$sha" 2>/dev/null || echo "")"
-  combined_response="$(platform_commit_status "$REPO" "$sha" 2>/dev/null || echo "")"
+  # One normalization seam merges check-runs + commit statuses into a single
+  # list of EXTERNAL checks [{name, state}] (state ∈ pending|success|failure),
+  # with self-exclusion (GITHUB_RUN_ID + CI_STATUS_CONTEXT) already applied.
+  # Empty stdout means both underlying APIs came back empty — a transient
+  # failure worth retrying; an empty JSON array means "no external CI".
+  ci_checks_json="$(platform_external_checks "$REPO" "$sha" 2>/dev/null || echo "")"
 
-  if [[ -z "$check_runs_response" && -z "$combined_response" ]]; then
+  if [[ -z "$ci_checks_json" ]]; then
     log "API returned empty; retrying in ${CI_INTERVAL_SEC}s..."
     sleep "$CI_INTERVAL_SEC"
     elapsed=$((elapsed + CI_INTERVAL_SEC))
     continue
   fi
-  [[ -n "$check_runs_response" ]] || check_runs_response='{}'
-  [[ -n "$combined_response" ]] || combined_response='{}'
 
-  # Summarize external check runs, excluding every job of our own workflow
-  # run. Conclusions that mean "CI did not pass or did not run" (failure,
-  # timed_out, cancelled, action_required) all count as failed.
-  summary="$(printf '%s' "$check_runs_response" | jq -c --arg run "$GITHUB_RUN_ID" '
-    ([.check_runs[]?
-      | select(
-          $run == ""
-          or ((((.details_url // "") | test("/runs/" + $run + "(/|$)"))
-               or ((.html_url // "") | test("/runs/" + $run + "(/|$)"))) | not)
-        )]) as $ext
-    | {
-        total: ($ext | length),
-        pending: ([$ext[] | select(.status != "completed")] | length),
-        failed: ([$ext[] | select(.status == "completed"
-                  and ((.conclusion // "") as $c
-                       | ($c == "failure" or $c == "timed_out"
-                          or $c == "cancelled" or $c == "action_required")))] | length)
-      }' 2>/dev/null || echo '{"total":0,"pending":0,"failed":0}')"
-  total_checks="$(printf '%s' "$summary" | jq -r '.total' 2>/dev/null || echo 0)"
-  pending_checks="$(printf '%s' "$summary" | jq -r '.pending' 2>/dev/null || echo 0)"
-  failed_checks="$(printf '%s' "$summary" | jq -r '.failed' 2>/dev/null || echo 0)"
+  total_checks="$(printf '%s' "$ci_checks_json" | jq -r 'length' 2>/dev/null || echo 0)"
+  pending_checks="$(printf '%s' "$ci_checks_json" | jq -r '[.[] | select(.state == "pending")] | length' 2>/dev/null || echo 0)"
+  failed_checks="$(printf '%s' "$ci_checks_json" | jq -r '[.[] | select(.state == "failure")] | length' 2>/dev/null || echo 0)"
 
-  combined_state="$(printf '%s' "$combined_response" | jq -r '.state // "pending"' 2>/dev/null || echo "pending")"
-  combined_total="$(printf '%s' "$combined_response" | jq -r '.total_count // 0' 2>/dev/null || echo 0)"
-
-  # Summarize external commit statuses, excluding our own context. This is
-  # essential on Forgejo where check-runs are empty and the combined state
-  # includes our own (always-pending) status. On GitHub it refines the
-  # supplementary signal in the same way.
-  status_summary="$(printf '%s' "$combined_response" | jq -c --arg ctx "$CI_STATUS_CONTEXT" '
-    ([.statuses[]? | select(.context != $ctx)]) as $ext
-    | {
-        total: ($ext | length),
-        pending: ([$ext[] | select(.state != "success" and .state != "failure" and .state != "error")] | length),
-        failed: ([$ext[] | select(.state == "failure" or .state == "error")] | length)
-      }' 2>/dev/null || echo '{"total":0,"pending":0,"failed":0}')"
-  ext_status_total="$(printf '%s' "$status_summary" | jq -r '.total' 2>/dev/null || echo 0)"
-  ext_status_pending="$(printf '%s' "$status_summary" | jq -r '.pending' 2>/dev/null || echo 0)"
-  ext_status_failed="$(printf '%s' "$status_summary" | jq -r '.failed' 2>/dev/null || echo 0)"
-
-  # Failure is terminal as soon as either signal reports it.
+  # Any failure is terminal.
   if [[ "$failed_checks" -gt 0 ]]; then
-    log "Detected $failed_checks failed check run(s) — treating as failure"
-    finalize "failure"
-  fi
-  # Use external status count for failure detection so our own pending
-  # context on Forgejo doesn't mask an external failure.
-  if [[ "$ext_status_failed" -gt 0 ]]; then
-    log "Detected $ext_status_failed failed commit status(es) — treating as failure"
-    finalize "failure"
-  fi
-  if [[ "$combined_total" -gt 0 && ( "$combined_state" == "failure" || "$combined_state" == "error" ) ]]; then
-    log "Combined commit status reports $combined_state"
+    log "Detected $failed_checks failed check(s) — treating as failure"
     finalize "failure"
   fi
 
-  # No external CI at all (no check runs, no external commit statuses).
-  # On Forgejo: ext_status_total=0 means our own context is the only status;
-  # combined_state stays "pending" but there's nothing external to wait for.
-  # However, if combined_total>0 with a terminal state, use that signal.
-  if [[ "$total_checks" -eq 0 && "$ext_status_total" -eq 0 ]] && \
-     { [[ "$combined_total" -eq 0 ]] || [[ "$combined_state" == "pending" ]]; }; then
+  # No external CI at all: the merged list is empty (own workflow run / own
+  # status context were the only signals, or nothing has registered yet).
+  if [[ "$total_checks" -eq 0 ]]; then
     if [[ "$elapsed" -ge $(( CI_INTERVAL_SEC * 2 )) ]]; then
       log "No external CI checks found after ${elapsed}s — proceeding without CI gating"
       finalize "none"
@@ -242,18 +175,12 @@ while true; do
     continue
   fi
 
-  # All external signals are final (no pending check runs, no pending
-  # external commit statuses). Use ext_status_pending so our own pending
-  # context on Forgejo doesn't block completion.
-  # When individual statuses aren't available (ext_status_total=0 but
-  # combined_total>0), fall back to the aggregate combined_state.
-  if [[ "$pending_checks" -eq 0 ]] && \
-     { [[ "$ext_status_pending" -eq 0 ]] || \
-       [[ "$ext_status_total" -eq 0 && "$combined_state" == "success" ]]; }; then
-    log "CI checks finalized: success (${total_checks} external check run(s), ${ext_status_total}+${combined_total} status(es))"
+  # Every external check is final (none pending).
+  if [[ "$pending_checks" -eq 0 ]]; then
+    log "CI checks finalized: success (${total_checks} external check(s))"
     finalize "success"
   else
-    log "Pending: ${pending_checks}/${total_checks} external check(s), ${ext_status_pending}/${ext_status_total} external status(es) — waiting ${CI_INTERVAL_SEC}s..."
+    log "Pending: ${pending_checks}/${total_checks} external check(s) — waiting ${CI_INTERVAL_SEC}s..."
   fi
 
   sleep "$CI_INTERVAL_SEC"

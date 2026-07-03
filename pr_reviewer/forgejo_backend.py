@@ -858,7 +858,9 @@ def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
     """
     metadata = get_pr_metadata(repo_full_name, pr_number)
     if metadata is None:
-        return False
+        # Total fetch failure: origin unknown -> fail closed, same as the
+        # shell derivation (derive_is_fork_pr in platform_api.sh).
+        return True
 
     head_full = ((metadata.get("head") or {}).get("repo") or {}).get("full_name") or ""
     base_full = ((metadata.get("base") or {}).get("repo") or {}).get("full_name") or ""

@@ -21,6 +21,7 @@ for _p in (_REPO_ROOT, _SCRIPTS_DIR):
 
 import pytest
 
+from pr_reviewer import http_client
 from pr_reviewer import tool_executors as te
 from scripts import run_enrichment
 
@@ -76,7 +77,12 @@ def test_user_agent_is_never_the_urllib_default(monkeypatch, call):
 
 
 def test_run_enrichment_fetch_url_sets_user_agent(monkeypatch):
-    """run_enrichment.fetch_url must set the same non-default User-Agent."""
+    """run_enrichment.fetch_url must set the same non-default User-Agent.
+
+    fetch_url now lives in pr_reviewer.http_client and is re-exported as
+    run_enrichment.fetch_url; it looks up urlopen in the http_client
+    namespace, so that is where the patch must land.
+    """
     seen = {}
 
     class _FakeResp:
@@ -93,9 +99,9 @@ def test_run_enrichment_fetch_url_sets_user_agent(monkeypatch):
         seen["ua"] = req.get_header("User-agent")
         return _FakeResp()
 
-    # Patch both the module attribute and run_enrichment's local binding.
+    # Patch both the module attribute and http_client's local binding.
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(run_enrichment, "urlopen", fake_urlopen)
+    monkeypatch.setattr(http_client, "urlopen", fake_urlopen)
     run_enrichment.fetch_url("https://example.com/x")
     assert seen["ua"] == "ai-pr-reviewer/1.0"
 
