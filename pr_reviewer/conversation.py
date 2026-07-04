@@ -328,6 +328,73 @@ VERDICT_USER_INSTRUCTION = (
     "Do not issue any tool calls."
 )
 
+# Placeholder emitted for a corpus section dropped by dedupe_verdict_corpus.
+# Callers count occurrences of this literal to log how many sections were
+# dropped, so keep it stable.
+VERDICT_DEDUP_NOTICE = (
+    "(unchanged — provided in full in the first message of this conversation)"
+)
+
+
+def dedupe_verdict_corpus(corpus: str, planning_context: str) -> str:
+    """Drop corpus sections already present verbatim in the planning context.
+
+    The native_loop verdict turn (#372) re-sends the full review corpus as a
+    trailing user message, but the loop's FIRST user message (the planning
+    context, built by ``build_planning_context`` in
+    ``scripts/run_tool_harness.py``) already carries several of that corpus's
+    sections verbatim. This removes only the byte-duplicate sections, replacing
+    each with a one-line placeholder, so the corpus content still reaches the
+    model across the conversation as a whole — the #362 verdict-turn contract
+    invariant "the full corpus reaches the model" is preserved (the model has
+    the dropped bytes in message 1).
+
+    Matching rule (deliberately conservative — a false drop silently loses
+    evidence, which is far worse than re-sending some bytes):
+
+      * Sections are split on level-1 ATX headers only (``"# Title"``), the
+        top-level section delimiter emitted by ``build_review_corpus`` in
+        ``scripts/sections/corpus.sh``. ``"## Source N"`` / ``"### ..."``
+        subheaders inside a section are NOT delimiters and never split it.
+      * A section is dropped ONLY if its full text, modulo trailing whitespace,
+        appears byte-identically inside ``planning_context``. Partial overlap
+        never counts: a truncated or paraphrased copy (e.g. the planner's
+        "PR Diff (head)" excerpt vs the corpus's full "PR Diff (truncated)", or
+        a section whose header/cap differs between the two builders) is NOT a
+        byte match and is therefore sent IN FULL.
+
+    Total and never raises: empty corpus, empty planning context, or a
+    headerless blob all round-trip unchanged (nothing to dedup against, or
+    nothing to match).
+    """
+    if not corpus or not planning_context:
+        return corpus
+    lines = corpus.split("\n")
+    # Level-1 headers only: a line beginning "# " (hash + space). "## "/"### "
+    # start with "#" then "#", so startswith("# ") excludes them.
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+    if not starts:
+        return corpus
+    out: list[str] = []
+    # Any preamble before the first header is not a section — keep it verbatim.
+    if starts[0] > 0:
+        out.extend(lines[: starts[0]])
+    bounds = starts + [len(lines)]
+    for idx in range(len(starts)):
+        seg = lines[bounds[idx] : bounds[idx + 1]]
+        stripped = "\n".join(seg).rstrip()
+        # Substring containment of the rstripped section tolerates trailing
+        # whitespace on the corpus side and extra content after it in the
+        # planning context, while still requiring every internal byte
+        # (header + fences + body) to match — partial overlap can't pass.
+        if stripped and stripped in planning_context:
+            title = seg[0][2:].strip()  # drop the leading "# "
+            out.append(f"## {title}")
+            out.append(VERDICT_DEDUP_NOTICE)
+        else:
+            out.extend(seg)
+    return "\n".join(out)
+
 
 # ---------------------------------------------------------------------------
 # Message normalisation

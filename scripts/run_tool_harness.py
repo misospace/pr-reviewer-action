@@ -372,8 +372,10 @@ def run_native_loop(
         sys.path.insert(0, repo_root)
     from pr_reviewer.conversation import (  # noqa: PLC0415
         TOOL_SCHEMAS,
+        VERDICT_DEDUP_NOTICE,
         WEB_SEARCH_SCHEMA,
         Conversation,
+        dedupe_verdict_corpus,
     )
     from pr_reviewer.tool_loop import (  # noqa: PLC0415
         adaptive_loop_budgets,
@@ -631,7 +633,28 @@ def run_native_loop(
                 else ""
             )
             if verdict_corpus:
-                conversation.add_user(_VERDICT_CLOSING_INSTRUCTION + verdict_corpus)
+                # #372: the loop's first user message (corpus_text — the
+                # planning context) already carries several corpus sections
+                # verbatim. Drop only those byte-duplicates so the verdict turn
+                # doesn't re-send ~50KB the model already has. Dedup is
+                # section-exact and conservative (partial/truncated overlaps are
+                # kept in full), so the #362 contract invariant "the full corpus
+                # reaches the model" still holds — the dropped bytes live in
+                # message 1. Path A (bash single-shot review) has no prior
+                # context and is untouched.
+                deduped_corpus = dedupe_verdict_corpus(verdict_corpus, corpus_text)
+                dropped = deduped_corpus.count(VERDICT_DEDUP_NOTICE)
+                if dropped:
+                    saved = len(verdict_corpus.encode("utf-8")) - len(
+                        deduped_corpus.encode("utf-8")
+                    )
+                    print(
+                        f"  native_loop: verdict-corpus dedup dropped {dropped} "
+                        f"section(s) already in the planning context "
+                        f"({saved} bytes saved)",
+                        file=sys.stderr,
+                    )
+                conversation.add_user(_VERDICT_CLOSING_INSTRUCTION + deduped_corpus)
                 temp_raw = os.getenv("AI_TEMPERATURE", "").strip()
                 temperature = float(temp_raw) if temp_raw else None
                 rf = os.getenv("AI_RESPONSE_FORMAT", "off").strip().lower()
