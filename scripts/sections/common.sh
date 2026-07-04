@@ -36,6 +36,53 @@ section_timer_end() {
   log "PERF: section=$name elapsed=${elapsed}s"
 }
 
+# Harvest the advisory background phases (#371) launched in enrichment.sh and
+# classification.sh: linked-source enrichment, image-digest provenance, and the
+# evidence providers. None consumes another's output — each only writes files
+# read together later at build_review_corpus — so they run concurrently and are
+# reaped here before the corpus is built. We PARALLELIZE THE FETCH, never the
+# render order, so the corpus stays byte-deterministic. Each phase is advisory:
+# `wait` returns the job's exit status (guarded with `|| status=$?` so a nonzero
+# code cannot trip `set -e`), and on failure we apply the SAME fallback the old
+# sequential guards did. Per-phase logs are echoed in a FIXED order so
+# interleaved output stays attributable.
+harvest_advisory_phases() {
+  local status
+
+  status=0
+  wait "$ENRICHMENT_PID" || status=$?
+  cat enrichment.phase.log 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    log "WARNING: enrichment.py failed, producing empty linked-sources.md"
+    : > linked-sources.md
+  fi
+
+  status=0
+  wait "$IMAGE_DIGEST_PID" || status=$?
+  cat image-digest.phase.log 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    error "Image digest analysis failed"
+    echo "Image digest provenance analysis failed for this run." > image-digest-context.md
+  fi
+
+  # EVIDENCE_PID is unset when the evidence phase was skipped by the fork gate
+  # (its skip artifacts are already written) — nothing to harvest in that case.
+  if [ -n "${EVIDENCE_PID:-}" ]; then
+    status=0
+    wait "$EVIDENCE_PID" || status=$?
+    cat evidence-providers.phase.log 2>/dev/null || true
+    if [ "$status" -ne 0 ]; then
+      error "Evidence provider execution failed"
+      cat > evidence-providers.md <<'EOF'
+Evidence providers failed to run in this review.
+EOF
+      cat > evidence-providers.json <<'EOF'
+{"configured": false, "has_blocker": false, "providers": [], "error": "execution failed"}
+EOF
+    fi
+  fi
+}
+
 # Fork gate for a per-feature capability that runs untrusted PR content (#370).
 # When the PR is a fork and the feature is not explicitly enabled for forks,
 # write the paired skip artifacts (.md + .json) and return 0 (gated → skip).

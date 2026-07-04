@@ -5,10 +5,12 @@
 
 section_timer_start "image-digests"
 log "Gathering image digest provenance..."
-if ! python3 "$SCRIPT_DIR/image_digest_analysis.py"; then
-  error "Image digest analysis failed"
-  echo "Image digest provenance analysis failed for this run." > image-digest-context.md
-fi
+# Advisory phase parallelized in #371: writes only image-digest-context.md
+# (consumed later at build_review_corpus). Launched in the background here and
+# harvested in corpus.sh; its output is buffered to a per-phase log. Failure
+# handling is deferred to harvest_advisory_phases, preserving the old fallback.
+python3 "$SCRIPT_DIR/image_digest_analysis.py" >image-digest.phase.log 2>&1 &
+IMAGE_DIGEST_PID=$!
 section_timer_end
 
 section_timer_start "repo-impact-history"
@@ -23,33 +25,77 @@ log "Gathering repository impact and history..."
   | sort -u > terms.all.txt || true
 head -n 14 terms.all.txt > terms.txt || true
 
-: > repo-impact.md
-: > repo-history.md
+# Read the (already deduped + capped) terms into an ordered array so the
+# combined scan and the assembled output share one fixed term order.
+impact_terms=()
+while IFS= read -r term; do
+  [ -n "$term" ] && impact_terms+=("$term")
+done < terms.txt
 
-if [ -s terms.txt ]; then
-  while IFS= read -r term; do
-    [ -z "$term" ] && continue
+if [ "${#impact_terms[@]}" -gt 0 ]; then
+  # #371: collapse the former per-term scans (up to 14 × git grep + 14 × git log
+  # = 28 sequential passes) into ONE combined worktree grep plus concurrent
+  # history scans. Terms come from `grep -Eo '[a-z0-9._/-]{...}'`, so the only
+  # ERE metacharacter they can contain is '.'; escaping it lets us combine them
+  # into a single alternation that matches each term literally (and keeps one
+  # term from corrupting the pattern). Output stays per-term attributable and
+  # deterministic: attribution and assembly always follow impact_terms order.
+  alt=""
+  hist_pids=()
+  for ti in "${!impact_terms[@]}"; do
+    esc="$(printf '%s' "${impact_terms[$ti]}" | sed 's/\./\\./g')"
+    if [ -z "$alt" ]; then alt="$esc"; else alt="$alt|$esc"; fi
 
+    # Launch each bounded history scan concurrently; assembled in term order
+    # below, so completion order never affects the deterministic output.
     {
-      echo "## Term: $term"
-      echo
-      echo "### git grep hits"
-      echo '```text'
-      git grep -n -- "$term" -- . 2>/dev/null | head -n 60 || true
-      echo '```'
-      echo
-    } >> repo-impact.md
-
-    {
-      echo "## Term: $term"
+      echo "## Term: ${impact_terms[$ti]}"
       echo
       echo "### git log context"
       echo '```text'
-      git log --oneline --decorate --grep="$term" -n 10 || true
+      git log --oneline --decorate --grep="${impact_terms[$ti]}" -n 10 2>/dev/null || true
       echo '```'
       echo
-    } >> repo-history.md
-  done < terms.txt
+    } > "repo-history.part.$ti" &
+    hist_pids+=("$!")
+  done
+
+  # ONE combined worktree scan instead of one `git grep` per term. -I skips
+  # binary files: their `Binary file X matches` lines carry no line number, so
+  # they cannot be content-attributed to a term in the combined model — and
+  # they are pure noise in a text corpus. Every remaining line is `path:lineno:
+  # content`, which re-attributes byte-exactly to the old per-term matching.
+  git grep -nEI -e "$alt" -- . 2>/dev/null > repo-impact.combined.txt || true
+
+  # Re-attribute the single combined result to each term in fixed order,
+  # matching only the file CONTENT (after the `path:lineno:` prefix that
+  # `git grep -n` prints) so attribution matches the old per-term grep, and
+  # keeping the 60-hit cap per term.
+  : > repo-impact.md
+  for ti in "${!impact_terms[@]}"; do
+    esc="$(printf '%s' "${impact_terms[$ti]}" | sed 's/\./\\./g')"
+    {
+      echo "## Term: ${impact_terms[$ti]}"
+      echo
+      echo "### git grep hits"
+      echo '```text'
+      awk -v pat="$esc" '{ c=$0; sub(/^[^:]*:[0-9]+:/, "", c); if (c ~ pat) print }' \
+        repo-impact.combined.txt | head -n 60 || true
+      echo '```'
+      echo
+    } >> repo-impact.md
+  done
+
+  # Reap the concurrent history scans, then assemble in fixed term order.
+  for pid in "${hist_pids[@]}"; do
+    wait "$pid" || true
+  done
+  : > repo-history.md
+  for ti in "${!impact_terms[@]}"; do
+    cat "repo-history.part.$ti" >> repo-history.md
+    rm -f "repo-history.part.$ti"
+  done
+  rm -f repo-impact.combined.txt
 
   # These grep/log dumps are the lowest-value corpus sections (and on small PRs
   # can dwarf the actual change), so keep their caps tight.
@@ -70,15 +116,13 @@ if gate_feature_for_forks "$EVIDENCE_ENABLE_FOR_FORKS" \
     evidence-providers.json '{"configured": false, "has_blocker": false, "providers": [], "skipped": true, "skip_reason": "fork-pr"}'; then
   : # fork PR without evidence_enable_for_forks — skip artifacts already written
 else
-  if ! python3 "$SCRIPT_DIR/run_evidence_providers.py"; then
-    error "Evidence provider execution failed"
-    cat > evidence-providers.md <<'EOF'
-Evidence providers failed to run in this review.
-EOF
-    cat > evidence-providers.json <<'EOF'
-{"configured": false, "has_blocker": false, "providers": [], "error": "execution failed"}
-EOF
-  fi
+  # Advisory phase parallelized in #371: writes only evidence-providers.{md,json}
+  # (consumed later at build_review_corpus). Launched in the background here and
+  # harvested in corpus.sh. EVIDENCE_PID being set is the signal to harvest;
+  # failure handling is deferred to harvest_advisory_phases, preserving the old
+  # fallback exactly.
+  python3 "$SCRIPT_DIR/run_evidence_providers.py" >evidence-providers.phase.log 2>&1 &
+  EVIDENCE_PID=$!
 fi
 section_timer_end
 

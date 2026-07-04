@@ -689,3 +689,104 @@ class TestReleasesCache:
         # share one cached fetch of the releases list.
         releases_calls = [e for e in endpoints if "releases?per_page=30" in e]
         assert len(releases_calls) == 1
+
+
+class TestLinkedSourcesFanout:
+    """Phase 2-4 gh_api_call fan-out (#371): concurrent fetch, ordered render."""
+
+    URLS = [
+        "https://github.com/o1/r1/releases/tag/v1.0",
+        "https://github.com/o2/r2/releases/tag/v2.0",
+    ]
+
+    @staticmethod
+    def _data_for(endpoint: str):
+        """Pure function of endpoint so results are stable across timings."""
+        if endpoint.endswith("/releases/tags/v1.0"):
+            return {"tag_name": "v1.0", "name": "R1"}
+        if endpoint.endswith("/releases/tags/v2.0"):
+            return {"tag_name": "v2.0", "name": "R2"}
+        if "o1/r1/releases?per_page=30" in endpoint:
+            return [{"tag_name": "v1.0", "name": "R1"}]
+        if "o2/r2/releases?per_page=30" in endpoint:
+            return [{"tag_name": "v2.0", "name": "R2"}]
+        return None
+
+    def _render(self, monkeypatch, gh_stub):
+        from pr_reviewer import linked_sources
+
+        monkeypatch.setattr(linked_sources, "gh_api_call", gh_stub)
+        monkeypatch.setattr(linked_sources, "fetch_url", lambda url, timeout=25: None)
+        budget = linked_sources.BudgetTracker(max_seconds=60)
+        return linked_sources.render_linked_sources(
+            self.URLS, {"github.com"}, None, "", [], None, budget,
+        )
+
+    def test_output_identical_when_calls_complete_out_of_order(self, monkeypatch):
+        """Determinism: parallelism changes only WHEN a call runs, not output."""
+        import time
+
+        def instant(endpoint, token=None):
+            return self._data_for(endpoint)
+
+        def out_of_order(endpoint, token=None):
+            # Make the first source's calls finish LAST so completion order is
+            # the reverse of source order; the render must be unaffected.
+            if "o1/r1" in endpoint:
+                time.sleep(0.05)
+            return self._data_for(endpoint)
+
+        instant_md = self._render(monkeypatch, instant)
+        shuffled_md = self._render(monkeypatch, out_of_order)
+
+        assert shuffled_md == instant_md
+        # Sections stay in source order regardless of fetch completion order.
+        assert shuffled_md.index("## Source 1") < shuffled_md.index("## Source 2")
+        assert "R1" in shuffled_md and "R2" in shuffled_md
+
+    def test_fan_out_dedups_endpoints(self, monkeypatch):
+        """Each unique endpoint is fetched once even across prewarm + render."""
+        calls = []
+
+        def counting(endpoint, token=None):
+            calls.append(endpoint)
+            return self._data_for(endpoint)
+
+        self._render(monkeypatch, counting)
+
+        # Two repos × {release-tag lookup, releases list} = 4 unique calls, each once.
+        assert sorted(calls) == sorted(set(calls))
+        assert len(calls) == 4
+
+    def test_budget_drop_stops_remaining_sources(self, monkeypatch):
+        """Once the budget is exhausted the render drops remaining sources,
+        and the budget is only ever consulted on the main thread."""
+        from pr_reviewer import linked_sources
+
+        class FakeBudget:
+            def __init__(self, allowed):
+                self.allowed = allowed
+                self.calls = 0
+
+            def ok(self):
+                self.calls += 1
+                return self.calls <= self.allowed
+
+        # Non-allowlisted, non-github URLs: no fetch, no fan-out, exactly one
+        # budget.ok() per source at the loop top — so the drop point is precise.
+        urls = [f"https://skip{i}.example.com/x" for i in range(4)]
+        monkeypatch.setattr(linked_sources, "fetch_url", lambda url, timeout=25: None)
+
+        budget = FakeBudget(allowed=2)
+        md = linked_sources.render_linked_sources(
+            urls, set(), None, "", [], None, budget,
+        )
+
+        # Skip-only sections are collapsed into the trailing summary (#372), so
+        # the budget drop shows up as which HOSTS made it into that line: the
+        # two rendered before exhaustion, and none after.
+        assert "skip0.example.com" in md
+        assert "skip1.example.com" in md
+        assert "skip2.example.com" not in md
+        assert "skip3.example.com" not in md
+        assert "(2 sources skipped" in md

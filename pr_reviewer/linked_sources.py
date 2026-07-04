@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
@@ -103,20 +104,80 @@ def render_linked_sources(
             for fut in as_completed(futures):
                 fetched[futures[fut]] = fut.result()
 
+    # Thread-safe memo for every `gh api` result. Each gh_api_call is its own
+    # subprocess (~0.2s spawn + RTT); on link-heavy Renovate PRs, issuing the
+    # Phase 2-4 calls one-at-a-time blows the wall-clock budget and remaining
+    # sources get silently dropped. The prewarm below fans the INDEPENDENT
+    # calls out concurrently into this cache; the render loop is then served
+    # from it, so parallelism changes only WHEN a call runs, never the
+    # deterministic source-ordered output. The lock also makes the per-repo
+    # releases cache (#366) safe against the prewarm threads racing it.
+    api_lock = threading.Lock()
+    api_cache: dict[str, dict | list | None] = {}
+
+    def cached_gh_api(endpoint: str) -> dict | list | None:
+        with api_lock:
+            if endpoint in api_cache:
+                return api_cache[endpoint]
+        data = gh_api_call(endpoint, gh_token)  # network outside the lock
+        with api_lock:
+            return api_cache.setdefault(endpoint, data)
+
+    def get_releases(owner: str, repo: str) -> list | None:
+        # One releases fetch per unique repo (#366), shared between the per-URL
+        # "Recent Releases" rendering (Phase 2) and the releases enrichment
+        # (Phase 3); dedup + thread-safety come from cached_gh_api.
+        data = cached_gh_api(f"repos/{owner}/{repo}/releases?per_page=30")
+        return data if isinstance(data, list) else None
+
+    # Prewarm: enumerate the independent Phase 2-4 endpoints in source order and
+    # fetch them concurrently. Budget is consulted ONLY on the main thread (here
+    # at the submission boundary and in the render loop), so BudgetTracker needs
+    # no lock. Branch-dependent calls (tags-on-no-match, ghcr compare fallback)
+    # are left for the render loop to fetch on demand — they are rare and their
+    # cache miss simply falls through to a live call.
+    prewarm_endpoints: list[str] = []
+    _seen_prewarm: set[str] = set()
+    _gh_repo_keys: set[str] = set()
+
+    def _queue(endpoint: str) -> None:
+        if endpoint not in _seen_prewarm:
+            _seen_prewarm.add(endpoint)
+            prewarm_endpoints.append(endpoint)
+
+    for url in urls[:25]:
+        normalized = normalize_url(url)
+        cls = classify_url(normalized)
+        if cls and cls["type"] == "github_release":
+            _queue(f"repos/{cls['owner']}/{cls['repo']}/releases/tags/{cls['tag']}")
+            _queue(f"repos/{cls['owner']}/{cls['repo']}/releases?per_page=30")
+        elif cls and cls["type"] == "github_compare":
+            _queue(f"repos/{cls['owner']}/{cls['repo']}/compare/{cls['compare_spec']}")
+        gh_match = re.match(r"https?://github\.com/([^/]+)/([^/?#]+)", normalized)
+        if gh_match:
+            _gh_repo_keys.add(f"{gh_match.group(1)}/{gh_match.group(2)}")
+            _queue(f"repos/{gh_match.group(1)}/{gh_match.group(2)}/releases?per_page=30")
+
+    if target_version:
+        for img_repo in ghcr_images:
+            if img_repo in _gh_repo_keys:
+                continue
+            owner = img_repo.split("/")[0]
+            repo = img_repo.rsplit("/", 1)[-1]
+            if not owner or not repo or owner == img_repo:
+                continue
+            for tag_prefix in (f"v{target_version}", target_version):
+                _queue(f"repos/{owner}/{repo}/releases/tags/{tag_prefix}")
+
+    if prewarm_endpoints and budget.ok():
+        with ThreadPoolExecutor(max_workers=min(8, len(prewarm_endpoints))) as pool:
+            futures = [pool.submit(cached_gh_api, e) for e in prewarm_endpoints]
+            for fut in as_completed(futures):
+                fut.result()  # cached_gh_api fails soft; never raises
+
     # Phase 2: render each URL section
     repo_candidates: list[str] = []
     seen_repos: set[str] = set()
-
-    # One releases fetch per unique repo, shared between the per-URL "Recent
-    # Releases" rendering (Phase 2) and the releases enrichment (Phase 3).
-    releases_cache: dict[str, list | None] = {}
-
-    def get_releases(owner: str, repo: str) -> list | None:
-        key = f"{owner}/{repo}"
-        if key not in releases_cache:
-            data = gh_api_call(f"repos/{owner}/{repo}/releases?per_page=30", gh_token)
-            releases_cache[key] = data if isinstance(data, list) else None
-        return releases_cache[key]
 
     # Hosts whose source produced only a skip notice and no enrichment (#372):
     # each such source would otherwise emit a full "## Source N" block of pure
@@ -176,9 +237,8 @@ def render_linked_sources(
             lines.append("")
             lines.append(f"### GitHub Release Metadata: {cls['owner']}/{cls['repo']}@{cls['tag']}")
             if budget.ok():
-                data = gh_api_call(
-                    f"repos/{cls['owner']}/{cls['repo']}/releases/tags/{cls['tag']}",
-                    gh_token,
+                data = cached_gh_api(
+                    f"repos/{cls['owner']}/{cls['repo']}/releases/tags/{cls['tag']}"
                 )
                 if isinstance(data, dict):
                     filtered = _pick(data, ("tag_name", "name", "published_at", "html_url", "body"))
@@ -205,9 +265,8 @@ def render_linked_sources(
             lines.append("")
             lines.append(f"### GitHub Compare Metadata: {cls['owner']}/{cls['repo']}@{cls['compare_spec']}")
             if budget.ok():
-                data = gh_api_call(
-                    f"repos/{cls['owner']}/{cls['repo']}/compare/{cls['compare_spec']}",
-                    gh_token,
+                data = cached_gh_api(
+                    f"repos/{cls['owner']}/{cls['repo']}/compare/{cls['compare_spec']}"
                 )
                 if isinstance(data, dict):
                     filtered = {
@@ -337,7 +396,7 @@ def render_linked_sources(
                     else:
                         lines.append(f"(No release tags matched target version {target_version} in {repo_key})")
                         if budget.ok():
-                            tags = gh_api_call(f"repos/{owner}/{repo}/tags?per_page=50", gh_token)
+                            tags = cached_gh_api(f"repos/{owner}/{repo}/tags?per_page=50")
                             if isinstance(tags, list):
                                 tag_list = [_pick(t, ("name", "commit")) for t in tags]
                                 lines.append("#### Recent Tags")
@@ -371,7 +430,7 @@ def render_linked_sources(
                 for tag_prefix in (f"v{target_version}", target_version):
                     if not budget.ok():
                         break
-                    data = gh_api_call(f"repos/{owner}/{repo}/releases/tags/{tag_prefix}", gh_token)
+                    data = cached_gh_api(f"repos/{owner}/{repo}/releases/tags/{tag_prefix}")
                     if isinstance(data, dict):
                         lines.append(f"#### Matched via ghcr.io path: {owner}/{repo}@{tag_prefix}")
                         filtered = _pick(data, ("tag_name", "name", "published_at", "html_url", "body"))
@@ -391,7 +450,7 @@ def render_linked_sources(
             # Compare SHA fallback
             if not found_release and compare_shas and budget.ok():
                 cmp_old, cmp_new = compare_shas
-                data = gh_api_call(f"repos/{owner}/{repo}/compare/{cmp_old}...{cmp_new}", gh_token)
+                data = cached_gh_api(f"repos/{owner}/{repo}/compare/{cmp_old}...{cmp_new}")
                 if isinstance(data, dict) and data.get("status"):
                     lines.append(f"#### Commit compare {cmp_old}...{cmp_new} (no release published for this version)")
                     filtered = {
