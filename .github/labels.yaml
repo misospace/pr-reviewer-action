@@ -66,11 +66,6 @@
 - name: blocked
   color: "e11d21"
   description: Progress is blocked.
-# Stable Agents
-- name: agent/saffron-normal
-  color: "1d76db"
-  description: Stable normal-lane Saffron worker.
-- name: agent/saffron-escalated
-  color: "0052cc"
-  description: Stable escalated-lane Saffron worker.
+# agent/<name> identity labels are created ad hoc at claim time (see AGENTS.md
+# "Label taxonomy") and are deliberately not enumerated here.
 # Repo-specific labels can be appended below. Unknown labels are not pruned.
