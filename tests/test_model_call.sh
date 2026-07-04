@@ -254,5 +254,97 @@ check "anthropic keeps max_tokens" "$(jq 'has("max_tokens")' "$REQ")" "true"
 check "anthropic ignores response_format" "$(jq 'has("response_format")' "$REQ")" "false"
 
 echo ""
+echo "=== call_model_tier: unified per-tier pipeline (#368) ==="
+# call_model_tier lives in model_call.sh but calls parse_and_validate /
+# reassemble_sse_response / truncate_clean, which are defined in
+# scripts/sections/config.sh. Stub the first two (behaviour is controlled via
+# MOCK_PARSE_RC); extract the REAL truncate_clean so the fallback truncation is
+# exercised faithfully (this is drift bug #368: fallback must not head -c).
+parse_and_validate() { return "${MOCK_PARSE_RC:-0}"; }
+reassemble_sse_response() { return 0; }
+python3 - "$ROOT_DIR/scripts/sections/config.sh" "$TMPDIR/truncate_clean.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^truncate_clean\(\) \{\n(.*?)\n\}", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract truncate_clean")
+open(sys.argv[2], "w").write("truncate_clean() {\n%s\n}\n" % m.group(1))
+PY
+# shellcheck source=/dev/null
+source "$TMPDIR/truncate_clean.sh"
+
+# Baseline profile env; each test overrides MOCK_CURL_MODE / MOCK_PARSE_RC (and
+# occasionally a retry knob) inside its own command-substitution subshell so the
+# assignments never leak between tests.
+export SYSTEM_PROMPT="sys" STREAM_BOOL="false"
+export AI_BASE_URL="http://primary/v1" AI_MODEL="primary-model" AI_API_FORMAT="openai" AI_API_KEY=""
+export AI_REQUEST_TIMEOUT_SEC="5" AI_CONNECT_TIMEOUT_SEC="2"
+export AI_PRIMARY_RETRIES="8" AI_PRIMARY_RETRY_DELAY_SEC="0"
+export AI_SMART_RETRIES="2"
+export SMART_BASE_URL="http://smart/v1" SMART_MODEL="smart-model" SMART_API_FORMAT="openai" SMART_API_KEY=""
+export AI_FALLBACK_BASE_URL="http://fb/v1" AI_FALLBACK_MODEL="fb-model" AI_FALLBACK_API_FORMAT="openai" AI_FALLBACK_API_KEY=""
+export AI_FALLBACK_STREAM="false" AI_FALLBACK_REQUEST_TIMEOUT_SEC="5" AI_FALLBACK_CONNECT_TIMEOUT_SEC="2"
+export AI_FALLBACK_RETRIES="2"
+
+CT_CORPUS="$TMPDIR/ct_corpus.md"; printf '# corpus\nbody\n' > "$CT_CORPUS"
+
+echo ""
+echo "=== Test: primary tier resolves the AI_* profile, succeeds on attempt 1 ==="
+rc=0
+LOG="$(PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok MOCK_PARSE_RC=0 \
+  call_model_tier primary "usr" "$CT_CORPUS" "$TMPDIR/req.p.json" "$TMPDIR/resp.p.json" 2>&1)" || rc=$?
+check "primary returns 0 on success" "$rc" "0"
+check "primary attempt names the AI_* profile" \
+  "$(printf '%s' "$LOG" | grep -c 'Primary model attempt 1/8: primary-model @ http://primary/v1 (openai)')" "1"
+
+echo ""
+echo "=== Test: smart tier resolves the SMART_* profile and its retry budget ==="
+rc=0
+LOG="$(PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok MOCK_PARSE_RC=0 \
+  call_model_tier smart "usr" "$CT_CORPUS" "$TMPDIR/req.s.json" "$TMPDIR/resp.s.json" 2>&1)" || rc=$?
+check "smart returns 0 on success" "$rc" "0"
+check "smart attempt names the SMART_* profile and /2 budget" \
+  "$(printf '%s' "$LOG" | grep -c 'Smart model attempt 1/2: smart-model @ http://smart/v1 (openai)')" "1"
+
+echo ""
+echo "=== Test: transport failures keep the full retry budget ==="
+rc=0
+LOG="$(PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=transport AI_PRIMARY_RETRIES=3 \
+  call_model_tier primary "usr" "$CT_CORPUS" "$TMPDIR/req.x.json" "$TMPDIR/resp.x.json" 2>&1)" || rc=$?
+check "primary returns non-zero after exhaustion" "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+check "primary made exactly 3 attempts on transport errors" \
+  "$(printf '%s' "$LOG" | grep -c 'Primary model attempt')" "3"
+
+echo ""
+echo "=== Test: parse failures are capped at 2 attempts despite a large budget ==="
+rc=0
+LOG="$(PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok MOCK_PARSE_RC=1 AI_PRIMARY_RETRIES=8 \
+  call_model_tier primary "usr" "$CT_CORPUS" "$TMPDIR/req.pf.json" "$TMPDIR/resp.pf.json" 2>&1)" || rc=$?
+check "primary returns non-zero when the response never validates" \
+  "$([ "$rc" -ne 0 ] && echo yes || echo no)" "yes"
+check "primary stopped at the parse-failure cap (2 attempts, not 8)" \
+  "$(printf '%s' "$LOG" | grep -c 'Primary model attempt')" "2"
+check "parse-failure cap is logged" \
+  "$(printf '%s' "$LOG" | grep -c 'Reached parse-failure cap')" "1"
+
+echo ""
+echo "=== Test: fallback tier truncates the corpus cleanly (no mid-multibyte split) ==="
+FBDIR="$TMPDIR/fb"; mkdir -p "$FBDIR"
+# A 3-byte char (☃ = e2 98 83) straddling the 120000-byte cap: a bare
+# `head -c 120000` would keep a partial byte sequence (invalid UTF-8);
+# truncate_clean must decode-and-drop it. The trailing newline sits past the
+# cap so no line-boundary cut masks the multibyte handling.
+{ head -c 119999 /dev/zero | tr '\0' 'a'; printf '\xe2\x98\x83\n'; } > "$FBDIR/review-corpus.md"
+(
+  cd "$FBDIR"
+  PATH="$TMPDIR/bin:$PATH" MOCK_CURL_MODE=ok MOCK_PARSE_RC=0 \
+    call_model_tier fallback "usr" review-corpus.md ai-request.fallback.json ai-response.fallback.json >/dev/null 2>&1
+) || true
+check "fallback wrote review-corpus.fallback.truncated.md" \
+  "$([ -s "$FBDIR/review-corpus.fallback.truncated.md" ] && echo yes || echo no)" "yes"
+check "fallback truncated corpus is valid UTF-8 (truncate_clean, not head -c)" \
+  "$(python3 -c 'open("'"$FBDIR"'/review-corpus.fallback.truncated.md",encoding="utf-8").read(); print("ok")')" "ok"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

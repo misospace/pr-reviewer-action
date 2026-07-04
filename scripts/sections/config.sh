@@ -22,6 +22,11 @@ AI_FALLBACK_MODEL="${AI_FALLBACK_MODEL:-}"
 AI_FALLBACK_API_KEY="${AI_FALLBACK_API_KEY:-}"
 AI_PRIMARY_RETRIES="${AI_PRIMARY_RETRIES:-8}"
 AI_PRIMARY_RETRY_DELAY_SEC="${AI_PRIMARY_RETRY_DELAY_SEC:-15}"
+# Per-tier retry budgets for call_model_tier (#368). Fallback/smart share the
+# primary's base retry delay (AI_PRIMARY_RETRY_DELAY_SEC). Fallback defaults to
+# 2 (was a single hard-coded attempt before the pipelines were unified).
+AI_FALLBACK_RETRIES="${AI_FALLBACK_RETRIES:-2}"
+AI_SMART_RETRIES="${AI_SMART_RETRIES:-2}"
 AI_STREAM="${AI_STREAM:-true}"
 AI_FALLBACK_STREAM="${AI_FALLBACK_STREAM:-$AI_STREAM}"
 ALLOWED_SOURCE_HOSTS="${ALLOWED_SOURCE_HOSTS:-github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io}"

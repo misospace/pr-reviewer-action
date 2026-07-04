@@ -111,55 +111,12 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop
 fi
 
 if [ "$NATIVE_VERDICT_USED" -ne 1 ]; then
-build_model_request \
-  "$AI_API_FORMAT" \
-  "$AI_MODEL" \
-  "$SYSTEM_PROMPT" \
-  "$USER_MESSAGE" \
-  review-corpus.truncated.md \
-  ai-request.primary.json \
-  "$STREAM_BOOL"
-
-PRIMARY_OK=0
-ATTEMPT=1
-PARSE_FAILS=0
-# A response that arrives but won't parse/validate is usually deterministic at
-# temperature 0.1 — re-sending the same corpus rarely helps. Cap those attempts
-# low and fall through to the fallback model instead of burning the full
-# transport-retry budget. Transport/HTTP failures keep the full budget.
-PARSE_FAIL_CAP=2
-RETRY_DELAY="$AI_PRIMARY_RETRY_DELAY_SEC"
-while [ "$ATTEMPT" -le "$AI_PRIMARY_RETRIES" ]; do
-  echo "Primary model attempt ${ATTEMPT}/${AI_PRIMARY_RETRIES}: $AI_MODEL @ $AI_BASE_URL ($AI_API_FORMAT)"
-  if curl_model "$AI_BASE_URL" "$AI_API_KEY" "$AI_API_FORMAT" ai-request.primary.json ai-response.primary.json "$STREAM_BOOL" "$AI_REQUEST_TIMEOUT_SEC" "$AI_CONNECT_TIMEOUT_SEC"; then
-    if { [[ "$STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.primary.json "$AI_API_FORMAT"; } && \
-      parse_and_validate ai-response.primary.json; then
-      PRIMARY_OK=1
-      break
-    fi
-
-    PARSE_FAILS=$((PARSE_FAILS + 1))
-    echo "Primary attempt $ATTEMPT: response received but parse/validate failed (parse failure ${PARSE_FAILS}/${PARSE_FAIL_CAP})" >&2
-    if [ -s ai-response.primary.json ]; then
-      printf '  response head (first 400 bytes): ' >&2
-      head -c 400 ai-response.primary.json >&2 || true
-      echo >&2
-    fi
-    if [ "$PARSE_FAILS" -ge "$PARSE_FAIL_CAP" ]; then
-      echo "Reached parse-failure cap; not retrying primary further" >&2
-      break
-    fi
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep "$RETRY_DELAY"
-  else
-    # Transport or HTTP error (curl_model already logged the details/body).
-    echo "Primary attempt $ATTEMPT failed (connection/HTTP); waiting ${RETRY_DELAY}s" >&2
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep "$RETRY_DELAY"
-    RETRY_DELAY=$((RETRY_DELAY * 2))
-    [ "$RETRY_DELAY" -gt 120 ] && RETRY_DELAY=120
+  # Standard corpus review on the primary tier. call_model_tier owns the retry
+  # loop, streaming and truncation shared by all three tiers (#368).
+  PRIMARY_OK=0
+  if call_model_tier primary "$USER_MESSAGE" review-corpus.truncated.md ai-request.primary.json ai-response.primary.json; then
+    PRIMARY_OK=1
   fi
-done
 fi  # NATIVE_VERDICT_USED guard
 
 # On total model failure, either fail the step (default, preserves prior
@@ -228,25 +185,9 @@ else
 
   if [ "$TRY_FALLBACK" -eq 1 ]; then
   echo "Primary model unavailable after retries; trying fallback: $AI_FALLBACK_MODEL @ $AI_FALLBACK_BASE_URL ($AI_FALLBACK_API_FORMAT)" >&2
-  head -c 120000 review-corpus.md > review-corpus.fallback.truncated.md
-
-  FALLBACK_STREAM_BOOL="false"
-  if [[ "$(printf '%s' "$AI_FALLBACK_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-    FALLBACK_STREAM_BOOL="true"
-  fi
-
-  build_model_request \
-    "$AI_FALLBACK_API_FORMAT" \
-    "$AI_FALLBACK_MODEL" \
-    "$SYSTEM_PROMPT" \
-    "$USER_MESSAGE" \
-    review-corpus.fallback.truncated.md \
-    ai-request.fallback.json \
-    "$FALLBACK_STREAM_BOOL"
-
-  if curl_model "$AI_FALLBACK_BASE_URL" "$AI_FALLBACK_API_KEY" "$AI_FALLBACK_API_FORMAT" ai-request.fallback.json ai-response.fallback.json "$FALLBACK_STREAM_BOOL" "$AI_FALLBACK_REQUEST_TIMEOUT_SEC" "$AI_FALLBACK_CONNECT_TIMEOUT_SEC" && \
-    { [[ "$FALLBACK_STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.fallback.json "$AI_FALLBACK_API_FORMAT"; } && \
-    parse_and_validate ai-response.fallback.json; then
+  # call_model_tier truncates review-corpus.md into review-corpus.fallback.truncated.md
+  # with the clean UTF-8 helper (not head -c) and honours AI_FALLBACK_RETRIES (#368).
+  if call_model_tier fallback "$USER_MESSAGE" review-corpus.md ai-request.fallback.json ai-response.fallback.json; then
     ANALYSIS_ENGINE="$(annotate_analysis_engine "$AI_FALLBACK_MODEL@$AI_FALLBACK_BASE_URL ($AI_FALLBACK_API_FORMAT)" fallback)"
     echo "Fallback model succeeded" >&2
   else
@@ -307,27 +248,10 @@ print('yes ' + ','.join(reasons) if escalate else 'no')
   escalated_user="$USER_MESSAGE
 This is an ESCALATED review: a preliminary review was judged insufficient (${ESCALATION_REASONS}). Review thoroughly and address every required check explicitly."
 
-  build_model_request \
-    "$SMART_API_FORMAT" \
-    "$SMART_MODEL" \
-    "$SYSTEM_PROMPT" \
-    "$escalated_user" \
-    review-corpus.truncated.md \
-    ai-request.smart.json \
-    "$STREAM_BOOL"
-
-  local attempt smart_ok=0
-  for attempt in 1 2; do
-    echo "Smart model attempt ${attempt}/2: $SMART_MODEL @ $SMART_BASE_URL ($SMART_API_FORMAT)"
-    if curl_model "$SMART_BASE_URL" "$SMART_API_KEY" "$SMART_API_FORMAT" ai-request.smart.json ai-response.smart.json "$STREAM_BOOL" "$AI_REQUEST_TIMEOUT_SEC" "$AI_CONNECT_TIMEOUT_SEC"; then
-      if { [[ "$STREAM_BOOL" != "true" ]] || reassemble_sse_response ai-response.smart.json "$SMART_API_FORMAT"; } && \
-        parse_and_validate ai-response.smart.json; then
-        smart_ok=1
-        break
-      fi
-    fi
-    sleep "$AI_PRIMARY_RETRY_DELAY_SEC"
-  done
+  local smart_ok=0
+  if call_model_tier smart "$escalated_user" review-corpus.truncated.md ai-request.smart.json ai-response.smart.json; then
+    smart_ok=1
+  fi
 
   if [[ "$smart_ok" -eq 1 ]]; then
     REVIEW_ROUTE="escalated"
