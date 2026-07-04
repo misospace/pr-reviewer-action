@@ -3,6 +3,12 @@
 # Verbatim in-order slice of the former monolith (#307); relies on globals/helpers
 # set up by the orchestrator. Not executable on its own.
 
+# Reap the advisory background phases (enrichment, image digests, evidence)
+# before their output files are read into the corpus below (#371).
+section_timer_start "advisory-phases"
+harvest_advisory_phases
+section_timer_end
+
 log "Building review corpus..."
 : > standards-context.md
 if [ -f "$STANDARDS_FILE" ]; then
