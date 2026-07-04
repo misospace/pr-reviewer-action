@@ -13,8 +13,10 @@ sys.path.insert(0, str(_REPO_ROOT))
 from pr_reviewer.conversation import (  # noqa: E402
     APPROX_BYTES_PER_TOKEN,
     TOOL_SCHEMAS,
+    VERDICT_DEDUP_NOTICE,
     WEB_SEARCH_SCHEMA,
     Conversation,
+    dedupe_verdict_corpus,
     truncate_text,
 )
 
@@ -822,6 +824,80 @@ class TestReassemblerShapeIngest:
         )
         events = [e for e in c.events if e["kind"] == "assistant_tool_calls"]
         assert events[0]["calls"][0]["name"] == "git_grep"
+
+
+class TestDedupeVerdictCorpus:
+    """dedupe_verdict_corpus (#372): drop only byte-identical corpus sections
+    that already appear verbatim in the planning context; keep everything else
+    in full so the #362 "full corpus reaches the model" invariant survives."""
+
+    def test_identical_section_is_dropped_with_placeholder(self):
+        section = "# Version Hints from Diff\n```text\nimg: app-1.2.3\n```"
+        planning = "# PR Classification\n{}\n\n" + section
+        corpus = (
+            "# PR Diff (truncated)\n```diff\n+full diff here\n```\n\n"
+            + section
+            + "\n"
+        )
+        out = dedupe_verdict_corpus(corpus, planning)
+        # The duplicate section collapses to a placeholder...
+        assert VERDICT_DEDUP_NOTICE in out
+        assert "## Version Hints from Diff" in out
+        assert "img: app-1.2.3" not in out
+        # ...while a section absent from the planning context is kept in full.
+        assert "+full diff here" in out
+
+    def test_truncated_partial_section_kept_in_full(self):
+        # The planner sends only a HEAD excerpt of the diff; the corpus carries
+        # the full diff. Partial overlap must NEVER count as a match.
+        planning = "# PR Diff (head)\n```diff\n+line one\n```"
+        corpus = "# PR Diff (truncated)\n```diff\n+line one\n+line two\n+line three\n```\n"
+        out = dedupe_verdict_corpus(corpus, planning)
+        assert out == corpus
+        assert VERDICT_DEDUP_NOTICE not in out
+
+    def test_zero_overlap_returns_input_unchanged(self):
+        corpus = "# A\nalpha\n\n# B\nbeta\n"
+        assert dedupe_verdict_corpus(corpus, "nothing in common here") == corpus
+
+    def test_empty_corpus_and_empty_planning(self):
+        assert dedupe_verdict_corpus("", "planning") == ""
+        assert dedupe_verdict_corpus("# A\nbody", "") == "# A\nbody"
+
+    def test_headerless_corpus_round_trips(self):
+        blob = "just some text\nwith no level-1 headers\n## not level 1\n"
+        assert dedupe_verdict_corpus(blob, blob) == blob
+
+    def test_subheaders_do_not_split_sections(self):
+        # "## Source N" inside a section must not be treated as a delimiter: the
+        # whole "# Linked Sources" section matches as one unit.
+        section = "# Linked Sources\n## Source 1\nURL: https://x\n### Fetched\nbody"
+        planning = "prefix\n\n" + section + "\n\nsuffix"
+        out = dedupe_verdict_corpus(section + "\n", planning)
+        assert out.count("## Source 1") == 0  # collapsed, not split out
+        assert VERDICT_DEDUP_NOTICE in out
+        assert out.startswith("## Linked Sources")
+
+    def test_section_order_preserved_for_kept_sections(self):
+        s_dup = "# Version Hints from Diff\n```text\nv1\n```"
+        corpus = (
+            "# First\nfirst body\n\n"
+            + s_dup
+            + "\n\n# Last\nlast body\n"
+        )
+        out = dedupe_verdict_corpus(corpus, "planning ... " + s_dup + " ... more")
+        # Kept sections keep their relative order; the middle one collapsed.
+        assert out.index("# First") < out.index("## Version Hints from Diff")
+        assert out.index("## Version Hints from Diff") < out.index("# Last")
+
+    def test_trailing_whitespace_tolerated(self):
+        # The corpus section has trailing blank lines the planning copy lacks;
+        # they must not defeat the match ("modulo trailing whitespace").
+        section = "# Evidence Providers\nbody line"
+        corpus = section + "\n\n\n"
+        planning = "x\n" + section + "\ny"
+        out = dedupe_verdict_corpus(corpus, planning)
+        assert VERDICT_DEDUP_NOTICE in out
 
 
 if __name__ == "__main__":

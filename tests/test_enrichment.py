@@ -502,6 +502,69 @@ class TestRunEnrichmentMain:
         assert md == ""
 
 
+class TestSkippedSourceCollapse:
+    """render_linked_sources (#372): sources that yield only a skip notice are
+    collapsed into ONE trailing summary line instead of a full ## Source N
+    block. Fetched / enriched sources keep their numbering and full sections."""
+
+    def _render(self, monkeypatch, urls, allowed_hosts, fetch_map=None):
+        from pr_reviewer import linked_sources
+
+        fetch_map = fetch_map or {}
+
+        def fake_fetch(url, timeout=25):
+            return fetch_map.get(url)
+
+        monkeypatch.setattr(linked_sources, "fetch_url", fake_fetch)
+        monkeypatch.setattr(linked_sources, "gh_api_call", lambda *a, **k: None)
+        budget = linked_sources.BudgetTracker(max_seconds=60)
+        return linked_sources.render_linked_sources(
+            urls, set(allowed_hosts), None, "", [], None, budget
+        )
+
+    def test_multiple_skipped_hosts_collapse_to_one_sorted_line(self, monkeypatch):
+        md = self._render(
+            monkeypatch,
+            ["https://evil.com/a", "https://bad.net/b", "https://evil.com/c"],
+            allowed_hosts=[],  # nothing allowlisted → all three are skips
+        )
+        # No per-source boilerplate for any of them.
+        assert "## Source" not in md
+        assert "(Skipped non-allowlisted URL" not in md
+        # One summary line, count = number of skipped sources, hosts deduped+sorted.
+        assert (
+            "(3 sources skipped — non-allowlisted or non-fetchable hosts: "
+            "bad.net, evil.com)"
+        ) in md
+
+    def test_mixed_skipped_and_fetched_ordering(self, monkeypatch):
+        md = self._render(
+            monkeypatch,
+            ["https://example.com/page", "https://evil.com/x"],
+            allowed_hosts=["example.com"],
+            fetch_map={"https://example.com/page": b"<html>hello world</html>"},
+        )
+        # The allowlisted fetched source keeps its full section and its index.
+        assert "## Source 1" in md
+        assert "URL: https://example.com/page" in md
+        # The skipped source's "## Source 2" block is gone, folded into summary.
+        assert "## Source 2" not in md
+        assert (
+            "(1 source skipped — non-allowlisted or non-fetchable hosts: evil.com)"
+            in md
+        )
+
+    def test_no_skipped_sources_leaves_summary_absent(self, monkeypatch):
+        md = self._render(
+            monkeypatch,
+            ["https://example.com/page"],
+            allowed_hosts=["example.com"],
+            fetch_map={"https://example.com/page": b"<html>hi</html>"},
+        )
+        assert "## Source 1" in md
+        assert "skipped —" not in md
+
+
 class TestSelectTargetVersionLastWins:
     """Regression: select_target_version fallback matches tail -n1 semantics."""
 

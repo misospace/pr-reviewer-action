@@ -118,6 +118,11 @@ def render_linked_sources(
             releases_cache[key] = data if isinstance(data, list) else None
         return releases_cache[key]
 
+    # Hosts whose source produced only a skip notice and no enrichment (#372):
+    # each such source would otherwise emit a full "## Source N" block of pure
+    # boilerplate. They are collapsed into one trailing summary line instead.
+    skipped_hosts: list[str] = []
+
     for i, url in enumerate(urls[:25], 1):
         if not budget.ok():
             break
@@ -125,6 +130,11 @@ def render_linked_sources(
         normalized = normalize_url(url)
         host = _extract_host(normalized)
 
+        # Mark where this source's section begins so a source that yields
+        # nothing but a skip notice can be dropped wholesale (#372). The
+        # section keeps its original 1-based `i` (tied to the fetch-phase index
+        # and the `fetched` map) — non-skipped sources are never renumbered.
+        src_start = len(lines)
         lines.append(f"## Source {i}")
         lines.append(f"URL: {url}")
         if normalized != url:
@@ -132,6 +142,7 @@ def render_linked_sources(
         lines.append("")
         lines.append("### Fetched Content (truncated)")
 
+        is_skip = False
         if host_allowed(normalized, allowed_hosts):
             if host == "github.com":
                 lines.append(
@@ -139,6 +150,7 @@ def render_linked_sources(
                 )
             elif host in SKIP_FETCH_HOSTS:
                 lines.append(f"(Raw HTML fetch skipped for known non-Forgejo host: {host})")
+                is_skip = True
             elif i in fetched and fetched[i]:
                 text = strip_source_to_text(fetched[i])
                 if text:
@@ -152,6 +164,11 @@ def render_linked_sources(
                 lines.append(f"(Failed to fetch allowlisted URL content from {host})")
         else:
             lines.append(f"(Skipped non-allowlisted URL: {host})")
+            is_skip = True
+
+        # Enrichment appended from here on; `is_skip` with no enrichment beyond
+        # this point means the section is pure boilerplate and gets collapsed.
+        enrich_start = len(lines)
 
         # GitHub release metadata
         cls = classify_url(normalized)
@@ -260,6 +277,26 @@ def render_linked_sources(
                 seen_repos.add(repo_key)
                 repo_candidates.append(repo_key)
 
+        # A pure skip notice with no enrichment (nothing non-blank appended
+        # since `enrich_start`) is dropped: rewind this section's lines and
+        # record its host for the collapsed summary (#372). github.com is never
+        # `is_skip`, so its sections (and any release/compare metadata) always
+        # survive. repo candidates are collected above regardless, so Phase 3
+        # enrichment for github.com repos is unaffected.
+        if is_skip and not any(ln.strip() for ln in lines[enrich_start:]):
+            del lines[src_start:]
+            skipped_hosts.append(host)
+        else:
+            lines.append("")
+
+    if skipped_hosts:
+        # One trailing line for every collapsed source, hosts deduped + sorted.
+        n = len(skipped_hosts)
+        uniq = ", ".join(sorted(set(skipped_hosts)))
+        lines.append(
+            f"({n} source{'s' if n != 1 else ''} skipped — "
+            f"non-allowlisted or non-fetchable hosts: {uniq})"
+        )
         lines.append("")
 
     # Phase 3: GitHub releases enrichment for candidate repos
