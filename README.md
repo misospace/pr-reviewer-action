@@ -1049,29 +1049,31 @@ Copyable workflows are included in [`examples/`](examples):
 
 ## 📌 Version pinning and releases
 
-The action is versioned via Git tags (e.g., `v1.2.4`). The examples in this README use `@v1` as a shorthand; in production workflows, pin to a specific version tag or commit SHA for reproducible runs:
+The action is versioned via Git tags (e.g., `v2.0.5`). The examples in this README use a floating major tag as a shorthand; in production workflows, pin to a specific version tag or commit SHA for reproducible runs:
 
 ```yaml
 # Pin to a specific release tag (recommended)
-- uses: misospace/pr-reviewer-action@v1.2.4
+- uses: misospace/pr-reviewer-action@v2.0.5
 
 # Pin to a specific commit (most stable during development)
-- uses: misospace/pr-reviewer-action@d1a7753252a7d9d1e999ae53824e5e43587c8130 # v1.2.4
+- uses: misospace/pr-reviewer-action@b36ea146c6563a3f49a5b9a232d411f6cf970474 # v2.0.5
 ```
 
 ### 🔒 Self-review version pinning
 
 This repository's own self-review workflow (`.github/workflows/ai-pr-review.yaml`) pins the action to a specific commit SHA rather than `@v1` or `@main`. This ensures the self-review process uses a known-good, tested version while new changes are developed on `main`. After a release is cut and tagged, the self-review workflow is updated to pin the new tag.
 
-### 🗓️ Release cadence
+### 🗓️ Versioning policy
 
-Releases are cut when features or fixes are ready. The `v1.x.y` scheme follows semver:
+Releases are cut when features or fixes are ready (no fixed cadence). Tags are `vX.Y.Z` semver, decided by the change's effect on consumers' workflows:
 
-- **Patch** (`y`): bug fixes and minor improvements
-- **Minor** (`x`): new features, backward-compatible changes
-- **Major** (`v1` → `v2`): breaking changes to inputs/outputs or behavior
+- **Patch** (`Z`): bug fixes, docs, performance work, and internal refactors. No new inputs or outputs; published review content only changes as a consequence of a fix. Safe to take blind on a floating major tag.
+- **Minor** (`Y`): new inputs, outputs, tools, or modes — always additive. New inputs default to the previous behavior (typically off), so an un-edited workflow behaves identically after upgrading.
+- **Major** (`X`): anything that can require a consumer to edit their workflow — removing or renaming inputs/outputs, changing a default that alters the published review or verdict behavior, or dropping platform support. Breaking changes are batched into majors rather than trickled through deprecation cycles.
+- **Deprecations**: a deprecated input keeps working (with a log warning) for the remainder of the current major and is removed in the next one. Deprecations and removals are always called out in the release notes.
+- **Pre-releases**: `vX.Y.Z-rc.N` tags are supported for testing a release candidate. Pre-releases are marked as such on GitHub Releases and do **not** advance the floating major tag, so `@vX` consumers never receive an RC.
 
-To publish, run **Actions → Manual Release → Run workflow** with the target version. The workflow tags protected `main`, advances the matching floating major tag (`v1`, `v2`, and so on), and creates the GitHub release.
+To publish, run **Actions → Manual Release → Run workflow** with the target version. The workflow tags protected `main`, advances the matching floating major tag (`v1`, `v2`, and so on; stable releases only), and creates the GitHub release.
 
 To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-reviewer-action/releases) or enable Renovate to track the `misospace/pr-reviewer-action` dependency.
 

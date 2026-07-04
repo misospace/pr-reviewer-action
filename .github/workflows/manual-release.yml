@@ -43,10 +43,17 @@ jobs:
             echo "Invalid version: $RAW_VERSION"
             exit 1
           fi
+          # Any suffix beyond X.Y.Z (rc, hotfix, …) is a pre-release: it must
+          # never advance the floating major tag that @vX consumers track.
+          PRERELEASE=true
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            PRERELEASE=false
+          fi
           {
             echo "tag=v$VERSION"
             echo "major_tag=v${VERSION%%.*}"
             echo "sha=$(git rev-parse HEAD)"
+            echo "prerelease=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create immutable version tag
@@ -66,6 +73,7 @@ jobs:
           fi
 
       - name: Advance floating major tag
+        if: steps.release.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MAJOR_TAG: ${{ steps.release.outputs.major_tag }}
@@ -82,10 +90,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.release.outputs.tag }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists"
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+            EXTRA_ARGS=()
+            [ "$PRERELEASE" = "true" ] && EXTRA_ARGS+=(--prerelease)
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes "${EXTRA_ARGS[@]}"
           fi

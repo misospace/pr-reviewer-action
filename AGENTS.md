@@ -132,11 +132,11 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - Reserved metadata markers (`<!-- ai-pr-review-fingerprint:... -->`, `<!-- ai-pr-review-sha:... -->`) are stripped from model output before publishing; the precheck reads only the first occurrence of each
 - The `run_command` tool never executes model-supplied shell text — only named argv definitions from a fixed read-only catalog (`git_status_short`, `git_diff_stat`, `git_diff_name_only`)
 - Adversarial fixtures for security boundaries (#252): any sanitizer or fence (untrusted-data delimiters, secret redaction, exfil guards) must have a test that feeds the boundary token / hostile delimiter *itself*, not just benign input — a mock that omits the attack encodes the same blind spot as the code (the #250 fence was escapable by content containing its own closing delimiter). See `tests/test_native_loop_exfil_redteam.py` and the outbound-UA guard (`tests/test_outbound_user_agent.py`) for the pattern; add one when introducing a new fence.
-- Versioning: `vX.Y.Z` semver tags with floating major tags — `v1` tracks the 1.3.x line, `v2` tracks 2.x. Latest release: `v2.0.0` (breaking: `plan_execute` tool modes and `ai_fast_*` inputs removed, publish steps collapsed into one). To release after CI is green on `main`, run **Actions → Manual Release** with the target version; it creates the immutable tag, advances the floating major tag, and publishes the release.
+- Versioning: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). The patch/minor/major criteria, deprecation policy, and pre-release conventions are documented in the README's "Versioning policy" section — follow it when picking a version. To release after CI is green on `main`, run **Actions → Manual Release** with the target version; it creates the immutable tag, advances the floating major tag (stable releases only), and publishes the release.
 
 ## Label taxonomy (`agent/*` and Dispatch workflow labels)
 
-Labels are defined in `.github/labels.yaml`. There are two distinct groups that agents interact with:
+Workflow labels are defined in `.github/labels.yaml`; agent identity labels are created ad hoc (see below). There are two distinct groups that agents interact with:
 
 ### Dispatch / operational labels
 These are managed by the Dispatch system (dispatch.jory.dev) and are the source of truth for issue workflow state. Agents read and set these to claim and advance work.
@@ -154,12 +154,7 @@ These are managed by the Dispatch system (dispatch.jory.dev) and are the source 
 | `blocked` | Externally blocked; agent should not pick up |
 
 ### Agent identity labels
-These tag which Dispatch worker lane handled the issue and are set by the Dispatch orchestrator, not by agents themselves.
-
-| Label | Meaning |
-|---|---|
-| `agent/saffron-normal` | Processed by the normal-lane Saffron worker (default untagged issues) |
-| `agent/saffron-escalated` | Processed by the escalated-lane Saffron worker (`needs-escalation` issues) |
+`agent/<name>` labels tag which agent or operator holds the claim on an issue (for example `agent/foreman-coder`, `agent/joryirving`, `agent/saffron`). They are created ad hoc at claim time by Dispatch or by the claiming agent, not enumerated in `.github/labels.yaml`. An issue in `status/in-progress` carries exactly one `agent/*` label; reassigning work means swapping it.
 
 ### Re-review label
 `ai-review` is a repo-internal label: adding it to an open PR triggers a fresh AI review run regardless of fingerprint. It is removed automatically by the action after publishing. This label is **not** a Dispatch workflow label.
