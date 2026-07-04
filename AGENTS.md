@@ -136,7 +136,7 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 
 ## Label taxonomy (`agent/*` and Dispatch workflow labels)
 
-Labels are defined in `.github/labels.yaml`. There are two distinct groups that agents interact with:
+Workflow labels are defined in `.github/labels.yaml`; agent identity labels are created ad hoc (see below). There are two distinct groups that agents interact with:
 
 ### Dispatch / operational labels
 These are managed by the Dispatch system (dispatch.jory.dev) and are the source of truth for issue workflow state. Agents read and set these to claim and advance work.
@@ -154,12 +154,7 @@ These are managed by the Dispatch system (dispatch.jory.dev) and are the source 
 | `blocked` | Externally blocked; agent should not pick up |
 
 ### Agent identity labels
-These tag which Dispatch worker lane handled the issue and are set by the Dispatch orchestrator, not by agents themselves.
-
-| Label | Meaning |
-|---|---|
-| `agent/saffron-normal` | Processed by the normal-lane Saffron worker (default untagged issues) |
-| `agent/saffron-escalated` | Processed by the escalated-lane Saffron worker (`needs-escalation` issues) |
+`agent/<name>` labels tag which agent or operator holds the claim on an issue (for example `agent/foreman-coder`, `agent/joryirving`, `agent/saffron`). They are created ad hoc at claim time by Dispatch or by the claiming agent, not enumerated in `.github/labels.yaml`. An issue in `status/in-progress` carries exactly one `agent/*` label; reassigning work means swapping it.
 
 ### Re-review label
 `ai-review` is a repo-internal label: adding it to an open PR triggers a fresh AI review run regardless of fingerprint. It is removed automatically by the action after publishing. This label is **not** a Dispatch workflow label.
