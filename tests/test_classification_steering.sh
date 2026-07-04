@@ -95,8 +95,11 @@ check "at most 12 check bullets" "$(printf '%s\n' "$MSG" | grep -c '^- check ')"
 
 echo ""
 echo "=== Test: wiring in the review section module and system prompt ==="
-check "primary request uses the steered message" \
-  "$(grep -c '"\$USER_MESSAGE" \\' "$ROOT_DIR/scripts/sections/review.sh")" "2"
+# The steered USER_MESSAGE reaches the model on both the primary and fallback
+# tiers (the smart tier sends escalated_user, which embeds it). The inline
+# build_model_request calls became call_model_tier call sites in #368.
+check "primary/fallback requests use the steered message" \
+  "$(grep -c 'call_model_tier \(primary\|fallback\) "\$USER_MESSAGE"' "$ROOT_DIR/scripts/sections/review.sh")" "2"
 PROMPT="$(cat "$ROOT_DIR/scripts/default_system_prompt.txt")"
 check_contains "system prompt references the PR Classification section" \
   "$PROMPT" "# PR Classification"

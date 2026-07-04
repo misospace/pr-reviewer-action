@@ -39,9 +39,12 @@ echo ""
 echo "=== review.sh routes Path A vs the native (Path B) verdict ==="
 check_contains "native verdict short-circuits the standard call" "$REVIEW" "native_loop_verdict_produced // false"
 check_contains "standard review call is guarded by NATIVE_VERDICT_USED" "$REVIEW" 'if [ "$NATIVE_VERDICT_USED" -ne 1 ]; then'
-check_contains "Path A builds the request via build_model_request" "$REVIEW" "build_model_request \\"
-check_contains "Path A sends the reviewer SYSTEM_PROMPT" "$REVIEW" '"$SYSTEM_PROMPT" \'
-check_contains "Path A sends the corpus file" "$REVIEW" "review-corpus.truncated.md \\"
+# build_model_request + SYSTEM_PROMPT moved into call_model_tier (model_call.sh)
+# when the three tier pipelines were unified (#368); the primary call site names
+# the corpus file as the tier argument.
+check_contains "Path A builds the request via build_model_request" "$MODEL_CALL" "build_model_request \\"
+check_contains "Path A sends the reviewer SYSTEM_PROMPT" "$MODEL_CALL" '"$SYSTEM_PROMPT" \'
+check_contains "Path A sends the corpus file" "$REVIEW" "call_model_tier primary \"\$USER_MESSAGE\" review-corpus.truncated.md"
 
 echo ""
 echo "=== Path A response_format is off|json_object|json_schema (shared modes) ==="

@@ -180,3 +180,112 @@ build_model_request() {
        + (if $stream then {stream_options:{include_usage:true}} else {} end)' > "$output_file"
   fi
 }
+
+# call_model_tier TIER USER_MESSAGE CORPUS_FILE REQUEST_OUT RESPONSE_OUT
+#
+# Single entry point for the primary / fallback / smart model calls, which had
+# drifted apart while copy-pasted into review.sh (#368: divergent retry, stream
+# and truncation handling). Resolves the tier profile — endpoint, model,
+# api_format, key, stream flag, request/connect timeouts, retry budget and base
+# delay — from the existing env prefixes in ONE place, then runs the shared loop:
+#   build_model_request → curl_model → (stream? reassemble_sse_response) → parse_and_validate
+# On success the validated review lands in ai-output.json (via parse_and_validate)
+# exactly as before; returns 0. Returns non-zero once the tier budget is spent.
+#
+# Retry semantics (formerly only the primary's): a parse/validate failure is
+# usually deterministic, so it is capped at 2 attempts; transport/HTTP failures
+# keep the full budget with exponential backoff capped at 120s.
+#
+# Reads globals set by config.sh / classification.sh / review.sh: SYSTEM_PROMPT,
+# STREAM_BOOL, the AI_* / AI_FALLBACK_* / SMART_* profiles and the per-tier retry
+# knobs. truncate_clean / reassemble_sse_response / parse_and_validate live in
+# config.sh and are resolved at call time (this only runs from review.sh).
+call_model_tier() {
+  local tier="$1" user_message="$2" corpus_file="$3" request_out="$4" response_out="$5"
+
+  local base_url model api_format api_key stream label
+  local request_timeout connect_timeout retries retry_delay corpus_for_request
+  case "$tier" in
+    primary)
+      label="Primary"
+      base_url="$AI_BASE_URL"; model="$AI_MODEL"; api_format="$AI_API_FORMAT"; api_key="$AI_API_KEY"
+      stream="$STREAM_BOOL"
+      request_timeout="$AI_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_CONNECT_TIMEOUT_SEC"
+      retries="$AI_PRIMARY_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
+      corpus_for_request="$corpus_file"
+      ;;
+    fallback)
+      label="Fallback"
+      base_url="$AI_FALLBACK_BASE_URL"; model="$AI_FALLBACK_MODEL"
+      api_format="$AI_FALLBACK_API_FORMAT"; api_key="$AI_FALLBACK_API_KEY"
+      stream="false"
+      if [[ "$(printf '%s' "$AI_FALLBACK_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+        stream="true"
+      fi
+      request_timeout="$AI_FALLBACK_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_FALLBACK_CONNECT_TIMEOUT_SEC"
+      # #368: the fallback used to get exactly ONE attempt (drift from the
+      # primary loop); AI_FALLBACK_RETRIES (default 2) runs it through the same
+      # retry budget.
+      retries="$AI_FALLBACK_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
+      # #368: clean UTF-8/newline-boundary truncation instead of a bare
+      # `head -c 120000`, which could split a multibyte character.
+      truncate_clean "$corpus_file" review-corpus.fallback.truncated.md 120000
+      corpus_for_request="review-corpus.fallback.truncated.md"
+      ;;
+    smart)
+      label="Smart"
+      base_url="$SMART_BASE_URL"; model="$SMART_MODEL"; api_format="$SMART_API_FORMAT"; api_key="$SMART_API_KEY"
+      stream="$STREAM_BOOL"
+      request_timeout="$AI_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_CONNECT_TIMEOUT_SEC"
+      retries="$AI_SMART_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
+      corpus_for_request="$corpus_file"
+      ;;
+    *)
+      echo "call_model_tier: unknown tier '$tier'" >&2
+      return 2
+      ;;
+  esac
+
+  build_model_request \
+    "$api_format" \
+    "$model" \
+    "$SYSTEM_PROMPT" \
+    "$user_message" \
+    "$corpus_for_request" \
+    "$request_out" \
+    "$stream"
+
+  local attempt=1 parse_fails=0 delay="$retry_delay"
+  local parse_fail_cap=2
+  while [ "$attempt" -le "$retries" ]; do
+    echo "${label} model attempt ${attempt}/${retries}: $model @ $base_url ($api_format)"
+    if curl_model "$base_url" "$api_key" "$api_format" "$request_out" "$response_out" "$stream" "$request_timeout" "$connect_timeout"; then
+      if { [[ "$stream" != "true" ]] || reassemble_sse_response "$response_out" "$api_format"; } && \
+        parse_and_validate "$response_out"; then
+        return 0
+      fi
+
+      parse_fails=$((parse_fails + 1))
+      echo "${label} attempt $attempt: response received but parse/validate failed (parse failure ${parse_fails}/${parse_fail_cap})" >&2
+      if [ -s "$response_out" ]; then
+        printf '  response head (first 400 bytes): ' >&2
+        head -c 400 "$response_out" >&2 || true
+        echo >&2
+      fi
+      if [ "$parse_fails" -ge "$parse_fail_cap" ]; then
+        echo "Reached parse-failure cap; not retrying ${tier} further" >&2
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep "$delay"
+    else
+      # Transport or HTTP error (curl_model already logged the details/body).
+      echo "${label} attempt $attempt failed (connection/HTTP); waiting ${delay}s" >&2
+      attempt=$((attempt + 1))
+      sleep "$delay"
+      delay=$((delay * 2))
+      [ "$delay" -gt 120 ] && delay=120
+    fi
+  done
+  return 1
+}
