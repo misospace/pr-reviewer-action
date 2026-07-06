@@ -1,0 +1,16 @@
+# yamllint configuration.
+#
+# Mirrors the lint command used by .github/workflows/ci.yaml
+# (`yamllint -d "{rules: {key-duplicates: enable}}" action.yml …`). CI only
+# enables the key-duplicates rule and lets the rest of the defaults fall
+# away; the harness runs `yamllint` without `-d`, so we publish the same
+# relaxed rule set here so both invocations agree. See #399.
+rules:
+  key-duplicates: enable
+  line-length: disable
+  truthy: disable
+  document-start: disable
+  comments-indentation: disable
+  comments: disable
+  braces: disable
+  octal-values: disable
