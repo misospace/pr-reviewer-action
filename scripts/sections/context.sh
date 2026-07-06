@@ -69,8 +69,10 @@ PY
 
 : > linked-issues.md
 if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
-  echo "# Linked Issue Context" >> linked-issues.md
-  echo >> linked-issues.md
+  # The "# Linked Issue Context" header is emitted by scripts/sections/corpus.sh
+  # in the incremental=false branch, so we deliberately do not prepend it
+  # here. Doing so previously produced a duplicate header in the rendered
+  # corpus whenever at least one linked issue was present (#399).
   jq -c '.[]' linked-issues.json | while IFS= read -r item; do
     issue_repo="$(printf '%s' "$item" | jq -r '.repo')"
     issue_number="$(printf '%s' "$item" | jq -r '.number')"
@@ -89,7 +91,10 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
     echo >> linked-issues.md
   done
 else
-  echo "No linked issue references found in the PR body." >> linked-issues.md
+  # Leave linked-issues.md empty when there are no linked issues so the
+  # rendered section in scripts/sections/corpus.sh is just the bare
+  # "# Linked Issue Context" header with no stray placeholder line (#399).
+  :
 fi
 section_timer_end
 
