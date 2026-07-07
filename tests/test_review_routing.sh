@@ -76,6 +76,29 @@ check "app_code with path_handling_changes flag routes smart" \
   "$(route_for auto app_code "other_flag,path_handling_changes" 1)" "smart"
 
 echo ""
+echo "=== Test: route_signals excludes content-only matches (over-escalation fix) ==="
+route_for_signals() {
+  # $1 = pr_kind, $2 = risk_flags csv, $3 = route_signals csv, $4 = smart resolved
+  local rf sig
+  rf="$(printf '%s' "$2" | python3 -c 'import json,sys; s=sys.stdin.read().strip(); print(json.dumps(s.split(",") if s else []))')"
+  sig="$(printf '%s' "$3" | python3 -c 'import json,sys; s=sys.stdin.read().strip(); print(json.dumps(s.split(",") if s else []))')"
+  printf '{"pr_kind": "%s", "risk_flags": %s, "route_signals": %s}' "$1" "$rf" "$sig" > classification.json
+  REVIEW_ROUTING_MODE=auto SMART_MODEL_RESOLVED="$4" ESCALATE_ON_RISK_FLAGS="$DEFAULT_FLAGS" \
+    resolve_review_route
+  echo "$REVIEW_ROUTE"
+}
+# risk_flags carries path_handling_changes (content-only), but route_signals is
+# empty → must stay primary even though the flag is in the escalation list.
+check "content-only risk flag does NOT route smart" \
+  "$(route_for_signals path_handling_changes "path_handling_changes" "" 1)" "primary"
+# A filename-backed signal in route_signals still routes smart.
+check "filename-backed signal routes smart" \
+  "$(route_for_signals auth_changes "auth_changes" "auth_changes" 1)" "smart"
+# Linked-issue signal routes smart.
+check "linked signal routes smart" \
+  "$(route_for_signals app_code "linked_security_issue" "linked_security_issue" 1)" "smart"
+
+echo ""
 echo "=== Test: risky PR without smart config stays primary ==="
 check "risky PR without smart model stays primary" "$(route_for auto auth_changes "" "")" "primary"
 

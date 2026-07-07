@@ -176,6 +176,11 @@ class PRClassification:
     pr_kind: str = "app_code"
     risk_flags: list[str] = field(default_factory=list)
     risk_flags_with_files: dict[str, list[str]] = field(default_factory=dict)
+    # Subset of (pr_kind + risk_flags) safe to drive smart-model routing:
+    # linked-issue flags and any file-based signal backed by an actual changed
+    # filename. Content-only pattern matches (e.g. a diff that merely mentions
+    # os.path or `token`) are excluded — they over-route benign PRs (#159 fix).
+    route_signals: list[str] = field(default_factory=list)
     changed_files_summary: list[str] = field(default_factory=list)
     linked_issue_labels: list[str] = field(default_factory=list)
     must_check: list[str] = field(default_factory=list)
@@ -437,6 +442,48 @@ FLAG_CHECKS: dict[str, list[str]] = {
 }
 
 
+# Kinds whose classification can come from diff CONTENT, not just filenames
+# (they use _filename_or_diff_matches). A content-only match of these must not
+# drive smart-model routing — only an actual changed filename should.
+_CONTENT_CAPABLE_KINDS: dict[str, list[re.Pattern]] = {
+    "file_serving_changes": FILE_SERVING_PATTERNS,
+    "path_handling_changes": PATH_HANDLING_PATTERNS,
+}
+
+
+def _route_signals(
+    pr_kind: str,
+    filenames: list[str],
+    risk_flags: list[str],
+    risk_flags_with_files: dict[str, list[str]],
+) -> list[str]:
+    """Signals eligible to route a PR straight to the smart model.
+
+    Excludes content-only matches (which over-route benign PRs): keeps
+    linked-issue flags, file-based flags backed by a real changed filename, and
+    the pr_kind unless it is a content-only file_serving/path_handling match.
+    """
+    signals: list[str] = []
+    # Linked-issue flags are explicit human signals — always route.
+    for flag in risk_flags:
+        if flag.startswith("linked_") and flag not in signals:
+            signals.append(flag)
+    # File-based risk flags only when an actual changed filename matched;
+    # content-only matches carry an empty file list.
+    for flag, files in risk_flags_with_files.items():
+        if files and flag not in signals:
+            signals.append(flag)
+    # pr_kind routes unless it is the catch-all default or a content-only
+    # file_serving/path_handling kind.
+    if pr_kind and pr_kind != DEFAULT_PR_KIND and pr_kind not in signals:
+        patterns = _CONTENT_CAPABLE_KINDS.get(pr_kind)
+        if patterns is None:
+            signals.append(pr_kind)
+        elif any(any(p.search(fn) for p in patterns) for fn in filenames):
+            signals.append(pr_kind)
+    return signals
+
+
 def _build_must_check(pr_kind: str, risk_flags: list[str]) -> list[str]:
     """Generate explicit must-check items based on classification.
 
@@ -489,6 +536,9 @@ def classify_pr(
     # Build changed files summary (just filenames, truncated)
     file_names = [f.get("filename", "") for f in pr_files]
     changed_files_summary = file_names[:max_summary_files]
+    route_signals = _route_signals(
+        pr_kind, file_names, risk_flags, risk_flags_with_files
+    )
 
     # Collect linked issue labels
     linked_issue_labels: list[str] = []
@@ -502,6 +552,7 @@ def classify_pr(
         pr_kind=pr_kind,
         risk_flags=risk_flags,
         risk_flags_with_files=risk_flags_with_files,
+        route_signals=route_signals,
         changed_files_summary=changed_files_summary,
         linked_issue_labels=linked_issue_labels,
         must_check=must_check,

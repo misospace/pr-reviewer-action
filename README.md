@@ -247,10 +247,10 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `ai_smart_base_url` | Base URL for the smart model; defaults to `ai_base_url` | No | `""` |
 | `ai_smart_api_format` | API format for the smart model; defaults to `ai_api_format` | No | `""` |
 | `ai_smart_api_key` | API key for the smart model; defaults to `ai_api_key` | No | `""` |
-| `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode | No | security/priority/auth/route/file-serving/path/secret/db list |
+| `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode. Matched against `route_signals` (linked-issue flags + file-based signals backed by an actual changed filename), so a PR whose diff merely mentions a pattern does not route | No | security/priority/auth/route/file-serving/path/secret/db list |
 | `escalate_on_incomplete_required_checks` | Escalate primary-route reviews with unaddressed required checks to the smart model (`auto` mode) | No | `true` |
 | `escalate_on_fast_request_changes` | Escalate primary-route reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
-| `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews (short relative to the diff, or populated Unknowns section) (`auto` mode) | No | `true` |
+| `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews: a stub review (below ~80 chars) or a populated Unknowns section. A concise confident review is not escalated, regardless of diff size (`auto` mode) | No | `true` |
 | `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
 | `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
 | `escalate_on_dirty_baseline` | Escalate incremental reviews whose baseline review found issues (`auto` mode) | No | `true` |
@@ -864,7 +864,7 @@ With `review_routing_mode: auto`, the deterministic classification decides which
 
 Routing rules:
 
-- A PR whose `pr_kind` **or** any `risk_flags` entry matches `escalate_on_risk_flags` routes to the **smart** model; everything else routes to the **fast** model.
+- A PR whose `route_signals` match `escalate_on_risk_flags` routes to the **smart** model; everything else routes to the **fast** model. `route_signals` are the PR's `pr_kind` plus its `risk_flags`, **excluding content-only pattern matches** — a flag or kind that fired only because the diff text mentioned a pattern (e.g. `os.path`, `token`) does not route unless an actual changed *filename* (or a linked issue) backs it. This keeps benign PRs on the fast model.
 - The fast config defaults to the primary `ai_*` inputs; the smart config's endpoint/format/key default to those same primary inputs, but the smart **model** is opt-in via `ai_smart_model` and is never the fallback model. If a risky PR is detected but no smart model is configured, the review stays on the fast model (logged, never fails).
 - `off` (the default) preserves the existing primary/fallback behavior exactly (`review_route` output reports `legacy`).
 - The retry and failure-fallback machinery is unchanged — routing only picks which model it talks to.
@@ -876,7 +876,7 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 
 - `escalate_on_fast_request_changes` — the fast model wants changes; let the smart model confirm or overturn before a human is summoned.
 - `escalate_on_incomplete_required_checks` — the fast review never discussed one of the classifier's required checks.
-- `escalate_on_fast_low_confidence` — the review is very short or carries a populated "Unknowns or Needs Verification" section. The length floor is diff-aware: a diff of ≤10 changed lines only needs an 80-char review (a correct review of a one-line renovate bump is short — escalating it wastes a smart-model run on exactly the PRs least worth one), while larger diffs keep the 200-char floor.
+- `escalate_on_fast_low_confidence` — the review is a **stub** (below ~80 chars, e.g. "LGTM.") or carries a populated "Unknowns or Needs Verification" section. A concise but real review is trusted **regardless of diff size**: the review length is no longer scaled with the diff. Escalating short-but-correct reviews of small/medium PRs was the main source of over-escalation (a confident review that simply wasn't verbose kept triggering a redundant smart-model run). Genuinely under-reviewed risky PRs are still caught by `request_changes`, the Unknowns section, blockers, and risk-flag routing.
 - `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
 - `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
