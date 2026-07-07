@@ -13,7 +13,6 @@ sys.path.insert(0, str(_REPO_ROOT))
 import pytest
 
 from pr_reviewer.escalation import (
-    count_changed_lines,
     is_low_confidence,
     should_escalate,
 )
@@ -213,22 +212,10 @@ SHORT_BUMP_REVIEW = (
 )
 
 
-class TestCountChangedLines:
-    def test_counts_only_change_lines(self, tmp_path):
-        path = tmp_path / "pr.diff"
-        path.write_text(TRIVIAL_DIFF)
-        assert count_changed_lines(str(path)) == 2
+class TestConciseReviewLowConfidence:
+    """A concise, confident review is trusted at any diff size; only stubs and
+    populated Unknowns sections escalate (over-escalation fix)."""
 
-    def test_missing_diff_is_none(self, tmp_path):
-        assert count_changed_lines(str(tmp_path / "absent.diff")) is None
-
-    def test_empty_diff_is_zero(self, tmp_path):
-        path = tmp_path / "pr.diff"
-        path.write_text("")
-        assert count_changed_lines(str(path)) == 0
-
-
-class TestTrivialDiffLowConfidence:
     def test_short_review_of_trivial_diff_does_not_escalate(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
@@ -237,7 +224,7 @@ class TestTrivialDiffLowConfidence:
         escalate, reasons = should_escalate()
         assert escalate is False and reasons == []
 
-    def test_bare_lgtm_still_escalates_on_trivial_diff(self, tmp_path, monkeypatch):
+    def test_bare_lgtm_still_escalates(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path, review="LGTM.")
         _write_classification(tmp_path)
@@ -245,21 +232,36 @@ class TestTrivialDiffLowConfidence:
         escalate, reasons = should_escalate()
         assert "fast_low_confidence" in reasons
 
-    def test_short_review_of_large_diff_still_escalates(self, tmp_path, monkeypatch):
+    def test_concise_approve_of_large_diff_does_not_escalate(self, tmp_path, monkeypatch):
+        # The core over-escalation fix: a confident, concise approval no longer
+        # escalates just because the diff is large. (Was: escalated on length.)
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
         _write_classification(tmp_path)
         big = TRIVIAL_DIFF + "".join(f"+added line {i}\n" for i in range(40))
         (tmp_path / "pr.diff").write_text(big)
         escalate, reasons = should_escalate()
+        assert "fast_low_confidence" not in reasons
+
+    def test_stub_review_of_large_diff_still_escalates(self, tmp_path, monkeypatch):
+        # A genuine non-review (below the stub floor) still escalates regardless
+        # of diff size.
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(tmp_path, review="LGTM.")
+        _write_classification(tmp_path)
+        big = TRIVIAL_DIFF + "".join(f"+added line {i}\n" for i in range(40))
+        (tmp_path / "pr.diff").write_text(big)
+        escalate, reasons = should_escalate()
         assert "fast_low_confidence" in reasons
 
-    def test_missing_diff_fails_closed_to_standard_threshold(self, tmp_path, monkeypatch):
+    def test_missing_diff_concise_approve_does_not_escalate(self, tmp_path, monkeypatch):
+        # No diff file present: a concise confident approve is still trusted
+        # (the stub floor no longer depends on diff size).
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path, review=SHORT_BUMP_REVIEW)
         _write_classification(tmp_path)
         escalate, reasons = should_escalate()
-        assert "fast_low_confidence" in reasons
+        assert "fast_low_confidence" not in reasons
 
     def test_unknowns_section_escalates_even_on_trivial_diff(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

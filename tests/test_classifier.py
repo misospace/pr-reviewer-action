@@ -529,3 +529,31 @@ class TestEdgeCases:
         result = classify_pr([], linked_issues=issues)
         # Labels should be deduplicated
         assert result.linked_issue_labels.count("priority/p1") <= 1
+
+
+class TestRouteSignals:
+    """route_signals drives smart routing and must exclude content-only matches
+    (the over-escalation fix)."""
+
+    def test_content_only_path_match_not_in_route_signals(self):
+        # A diff that merely mentions os.path in an ordinary file must not route.
+        result = classify_pr([_make_file("app.py")], diff_text="x = os.path.join(a, b)")
+        assert "path_handling_changes" in result.risk_flags       # still flagged for checks
+        assert result.route_signals == []                          # but not for routing
+
+    def test_real_auth_filename_in_route_signals(self):
+        result = classify_pr([_make_file("auth.py")], diff_text="")
+        assert "auth_changes" in result.route_signals
+
+    def test_filename_backed_file_serving_in_route_signals(self):
+        result = classify_pr([_make_file("static/handler.py")], diff_text="")
+        assert "file_serving_changes" in result.route_signals
+
+    def test_linked_security_issue_in_route_signals(self):
+        issues = [{"labels": [{"name": "security"}]}]
+        result = classify_pr([_make_file("app.py")], diff_text="", linked_issues=issues)
+        assert result.route_signals == ["linked_security_issue"]
+
+    def test_app_code_default_not_in_route_signals(self):
+        result = classify_pr([_make_file("app.py")], diff_text="print('hi')")
+        assert result.route_signals == []

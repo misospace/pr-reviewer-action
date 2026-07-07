@@ -142,8 +142,9 @@ section_timer_end
 
 # ── Model routing (#159) ─────────────────────────────────────────────
 # With review_routing_mode=auto, most PRs run on the PRIMARY model and PRs whose
-# pr_kind or risk_flags match ESCALATE_ON_RISK_FLAGS go to the smart model when
-# one is configured. Routing only rebinds which model the existing retry/fallback
+# route_signals (pr_kind + risk_flags, excluding content-only pattern matches)
+# match ESCALATE_ON_RISK_FLAGS go to the smart model when one is configured.
+# Routing only rebinds which model the existing retry/fallback
 # machinery talks to — that machinery is unchanged. (The primary model is fully
 # capable; the route is not a "fast/dumb" lane, and it gets the full tool budget.)
 resolve_review_route() {
@@ -153,12 +154,17 @@ resolve_review_route() {
     return
   fi
 
-  local kind flags candidates matched="" raw_flag flag
-  kind="$(jq -r '.pr_kind // ""' classification.json 2>/dev/null || echo "")"
-  flags="$(jq -r '(.risk_flags // []) | join(",")' classification.json 2>/dev/null || echo "")"
-  # Match against the union of pr_kind and risk_flags: the default escalation
-  # list mixes kind names (auth_changes, ...) and flag names (linked_*).
-  candidates=",${kind},${flags},"
+  local signals candidates matched="" raw_flag flag
+  # Match against route_signals: pr_kind + risk_flags, but EXCLUDING content-only
+  # pattern matches — a diff that merely mentions os.path or `token` no longer
+  # routes a benign PR to the smart model. Falls back to the old pr_kind+flags
+  # union for classification JSON written before route_signals existed.
+  signals="$(jq -r '
+      (if has("route_signals") then (.route_signals // [])
+       else ((.risk_flags // []) + [(.pr_kind // "")]) end)
+      | map(select(. != "")) | join(",")
+    ' classification.json 2>/dev/null || echo "")"
+  candidates=",${signals},"
 
   IFS=',' read -ra _esc_flags <<< "$ESCALATE_ON_RISK_FLAGS"
   for raw_flag in "${_esc_flags[@]}"; do

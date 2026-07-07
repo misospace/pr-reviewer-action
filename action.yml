@@ -175,7 +175,9 @@ inputs:
   escalate_on_risk_flags:
     description: >-
       Comma-separated pr_kind / risk_flag names that route directly to the smart model
-      when review_routing_mode=auto.
+      when review_routing_mode=auto. Matched against route_signals — linked-issue flags
+      and file-based signals backed by an actual changed filename — so a benign PR whose
+      diff merely mentions a pattern (e.g. os.path) does not route.
     required: false
     default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
   escalate_on_incomplete_required_checks:
@@ -187,7 +189,7 @@ inputs:
     required: false
     default: "true"
   escalate_on_fast_low_confidence:
-    description: Escalate when the primary-route review is low-confidence (very short, or carries a populated Unknowns/Needs Verification section). review_routing_mode=auto only.
+    description: Escalate when the primary-route review is low-confidence — a stub review (below ~80 chars) or one carrying a populated Unknowns/Needs Verification section. A concise, confident review is NOT escalated regardless of diff size. review_routing_mode=auto only.
     required: false
     default: "true"
   escalate_on_tool_or_evidence_blockers:
