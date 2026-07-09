@@ -101,64 +101,77 @@ class TestBuildPlanningContext:
         assert "[truncated]" in text
 
 
-class TestSharedPieceEmbedding:
-    """#398: shared piece files let the planner embed the EXACT corpus section
-    bytes so the verdict-turn dedup (dedupe_verdict_corpus) can drop the copy."""
-
-    # The bytes build_review_corpus writes for the classification section (header
-    # + newline + jq projection), with the blank separator living OUTSIDE the
-    # piece — i.e. exactly what dedupe_verdict_corpus sees after rstrip.
-    CLASSIFICATION_PIECE = (
+def _write_corpus(tmp_path, files_body='[{"filename":"a.py"}]', standards_tail=""):
+    """A corpus shaped like build_review_corpus's output: standards prefix
+    (self-titled, possibly with internal level-1 headers), then the body whose
+    first line is '# Changed Manifest Context'."""
+    corpus = (
+        "# Repository Standards and Conventions (AGENTS.md)\n"
+        "# Repository Standards and Conventions\n"
+        "Derived from AGENTS.md for this repository.\n"
+        + standards_tail
+        + "\n# Changed Manifest Context\n(manifest body)\n\n"
+        "# PR Metadata\n```json\n{\"number\":7}\n```\n\n"
         "# PR Classification\n"
-        '{"pr_kind":"dependency-update","risk_flags":[],"must_check":[]}'
+        '{"pr_kind":"dependency-update","risk_flags":[],"must_check":[]}\n\n'
+        "# PR Files (truncated)\n```json\n" + files_body + "\n```\n\n"
+        "# Version Hints from Diff\n```text\n+  tag: v1.2.3\n```\n\n"
+        "# PR Diff (truncated)\n```diff\n+full diff body\n```\n"
     )
+    path = tmp_path / "review-corpus.truncated.md"
+    path.write_text(corpus)
+    return path, corpus
 
-    def test_shared_piece_embedded_verbatim_and_dedups(self, tmp_path, monkeypatch):
+
+class TestCorpusSectionEmbedding:
+    """#398: the planner extracts high-signal sections straight from the review
+    corpus — the same text the verdict turn re-sends — so embedded sections are
+    byte-identical by construction and dedupe_verdict_corpus drops the copy."""
+
+    def test_corpus_sections_embedded_verbatim_and_dedup(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        (tmp_path / "section-pr-classification.md").write_text(
-            self.CLASSIFICATION_PIECE + "\n"
-        )
-        text, _ = build_planning_context(50000)
-        # Embedded verbatim: the corpus title (not the excerpt title) and the
-        # unfenced projection appear exactly as the corpus emitted them.
-        assert self.CLASSIFICATION_PIECE in text
-        # End-to-end: a corpus carrying that section verbatim gets it dropped.
-        corpus = (
-            self.CLASSIFICATION_PIECE + "\n\n"
-            "# PR Diff (truncated)\n```diff\n+kept\n```\n"
-        )
+        corpus_path, corpus = _write_corpus(tmp_path)
+        text, _ = build_planning_context(50000, corpus_path)
+        # Corpus titles (not excerpt titles) embedded verbatim.
+        assert "# PR Files (truncated)" in text
+        assert "# Changed Files" not in text
+        assert '{"pr_kind":"dependency-update"' in text
+        # Standards = the corpus prefix, internal header and all.
+        assert "# Repository Standards and Conventions (AGENTS.md)" in text
+        assert "Derived from AGENTS.md" in text
+        # End-to-end: the verdict-turn dedup drops every embedded section.
         deduped = dedupe_verdict_corpus(corpus, text)
-        assert VERDICT_DEDUP_NOTICE in deduped
-        assert "## PR Classification" in deduped
-        # The projection body is gone from the verdict corpus (lives in message 1).
+        assert deduped.count(VERDICT_DEDUP_NOTICE) >= 4
         assert '"pr_kind":"dependency-update"' not in deduped
-        # A section NOT in the planning context is kept in full.
-        assert "+kept" in deduped
+        # Sections the planner does not embed are kept in full.
+        assert "+full diff body" in deduped
+        assert "(manifest body)" in deduped
 
-    def test_oversized_shared_piece_falls_back_to_excerpt(self, tmp_path, monkeypatch):
+    def test_standards_prefix_includes_internal_headers(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        # Shared piece far larger than the budget → cannot embed whole.
-        big = "x" * 60000
-        (tmp_path / "section-pr-files.md").write_text(
-            "# PR Files (truncated)\n```json\n" + big + "\n```\n"
+        # A standards file with its own level-1 headers (e.g. home-ops's
+        # "# Home Operations - AI Assistant Guide") must embed as one region.
+        corpus_path, corpus = _write_corpus(
+            tmp_path, standards_tail="\n# Custom Guide Title\nguide body here\n"
         )
-        # Excerpt source (small) is present for the fallback.
-        (tmp_path / "pr-files.truncated.json").write_text(
-            '[{"filename": "a.py", "status": "modified"}]'
-        )
-        text, _ = build_planning_context(50000)
-        # Excerpt used: the OLD title, not the corpus title.
-        assert "# Changed Files" in text
-        assert "# PR Files (truncated)" not in text
-        # Dedup conservatively keeps the corpus section (title/content differ).
-        corpus = "# PR Files (truncated)\n```json\n[{\"filename\": \"a.py\"}]\n```\n"
+        text, _ = build_planning_context(50000, corpus_path)
+        assert "guide body here" in text
         deduped = dedupe_verdict_corpus(corpus, text)
-        assert VERDICT_DEDUP_NOTICE not in deduped
-        assert "# PR Files (truncated)" in deduped
+        assert "guide body here" not in deduped
 
-    def test_missing_shared_piece_uses_excerpt(self, tmp_path, monkeypatch):
+    def test_oversized_section_falls_back_to_budget_capped_excerpt(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        # No section-*.md files; only the old excerpt sources exist.
+        # PR Files section too big to embed whole at this budget.
+        corpus_path, corpus = _write_corpus(tmp_path, files_body='{"f":"x"},' * 4500)
+        (tmp_path / "pr-files.truncated.json").write_text('[{"filename": "a.py"}]')
+        text, _ = build_planning_context(15000, corpus_path)
+        # Excerpt used: the OLD title, so dedup keeps the corpus copy.
+        assert "# Changed Files" in text
+        deduped = dedupe_verdict_corpus(corpus, text)
+        assert '{"f":"x"}' in deduped
+
+    def test_no_corpus_falls_back_to_source_excerpts(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         (tmp_path / "pr-files.truncated.json").write_text(
             '[{"filename": "a.py", "status": "modified"}]'
         )
@@ -166,20 +179,33 @@ class TestSharedPieceEmbedding:
         assert "# Changed Files" in text
         assert "# PR Files (truncated)" not in text
 
-    def test_diff_head_appended_last_after_shared_pieces(self, tmp_path, monkeypatch):
+    def test_diff_head_survives_large_embedded_section(self, tmp_path, monkeypatch):
+        """Regression: a large embedded section must never push the excerpt
+        fallbacks past the budget and get the diff head truncated away."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / "section-pr-classification.md").write_text(
-            self.CLASSIFICATION_PIECE + "\n"
+        # ~45KB PR Files section: embeds whole at the 50KB default budget.
+        corpus_path, _ = _write_corpus(tmp_path, files_body='{"f":"x"},' * 4500)
+        (tmp_path / "classification.json").write_text('{"pr_kind":"app_code"}')
+        (tmp_path / "standards-context.capped.md").write_text(
+            "# Repository Standards and Conventions\n" + "S" * 8000
         )
-        big_diff = "\n".join(f"+line {i}" for i in range(10000))
         (tmp_path / "pr.diff.truncated").write_text(
-            "diff --git a/x b/x\n" + big_diff + "\n"
+            "diff --git a/x b/x\n" + "+line\n" * 400
         )
-        text, truncated = build_planning_context(20000)
-        # Diff head comes last and is clipped to the remaining budget.
-        assert text.index("# PR Classification") < text.index("# PR Diff (head)")
-        assert truncated is True
-        assert len(text.encode("utf-8")) <= 20100
+        text, _ = build_planning_context(50000, corpus_path)
+        assert len(text.encode("utf-8")) <= 50000
+        assert "# PR Diff (head)" in text
+        assert "+line" in text
+
+    def test_standards_excerpt_does_not_duplicate_header(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # Excerpt path (no corpus): the standards source file self-titles, so
+        # the planner must not prepend a second identical header line.
+        (tmp_path / "standards-context.capped.md").write_text(
+            "# Repository Standards and Conventions\nDerived from AGENTS.md.\nBody.\n"
+        )
+        text, _ = build_planning_context(50000)
+        assert text.count("# Repository Standards and Conventions") == 1
 
 
 if __name__ == "__main__":

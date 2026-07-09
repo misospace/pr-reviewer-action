@@ -63,28 +63,15 @@ build_review_corpus() {
     echo
 
 
-    # Shared section pieces (#398): build each section body ONCE into a file so
-    # the planner (build_planning_context) can embed the SAME bytes and the
-    # verdict-turn dedup (dedupe_verdict_corpus) can drop the corpus copy. The
-    # blank separator lives OUTSIDE the piece file, so a piece's rstripped text
-    # equals the section text the dedup matcher sees. review-corpus.md must stay
-    # byte-identical — the `cat piece; echo` below reproduces the former inline
-    # emit exactly (echo header + body, then a blank line).
-    {
-      echo "# PR Classification"
-      if [ -f classification.json ]; then
-        jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
-      else
-        echo "(Classification data unavailable for this review)"
-      fi
-    } > section-pr-classification.md
-    cat section-pr-classification.md
+    echo "# PR Classification"
+    if [ -f classification.json ]; then
+      jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
+    else
+      echo "(Classification data unavailable for this review)"
+    fi
     echo
 
     if [[ "$corpus_type" == "incremental" ]]; then
-      # Full-scope-only pieces must not linger into an incremental build (#398).
-      # A fresh workspace makes this mostly moot, but be explicit.
-      rm -f section-pr-files.md section-version-hints.md
       local head_sha
       head_sha="$(jq -r '.headRefOid' pr.json 2>/dev/null || echo 'unknown')"
       echo "# Incremental Review Delta"
@@ -123,21 +110,15 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
       echo "# Linked Issue Context"
       cat linked-issues.md
       echo
-      {
-        echo "# PR Files (truncated)"
-        echo '```json'
-        cat pr-files.truncated.json
-        echo '```'
-      } > section-pr-files.md
-      cat section-pr-files.md
+      echo "# PR Files (truncated)"
+      echo '```json'
+      cat pr-files.truncated.json
+      echo '```'
       echo
-      {
-        echo "# Version Hints from Diff"
-        echo '```text'
-        cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
-        echo '```'
-      } > section-version-hints.md
-      cat section-version-hints.md
+      echo "# Version Hints from Diff"
+      echo '```text'
+      cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
+      echo '```'
       echo
       echo "# PR Diff (truncated)"
       echo '```diff'
@@ -197,17 +178,10 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     '```
 …[review corpus truncated to fit the model context budget]'
 
-  # Standards shared piece (#398): built here, after truncate_clean produced the
-  # capped file, so the planner embeds the SAME bytes. Separator (echo) stays
-  # OUTSIDE the piece so its rstripped text matches the corpus section.
+  # Prepend the (capped) standards section, then append the truncated body
   {
     echo "# Repository Standards and Conventions ($STANDARDS_FILE)"
     cat standards-context.capped.md
-  } > section-standards.md
-
-  # Prepend the (capped) standards section, then append the truncated body
-  {
-    cat section-standards.md
     echo
     cat review-corpus.body.truncated.md
   } > review-corpus.md

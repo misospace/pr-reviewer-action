@@ -146,6 +146,16 @@ def normalize_api_format(value):
     return "openai"
 
 
+# Byte budget reserved before any section is admitted: the diff head's
+# guaranteed minimum plus a margin for join separators and title/fence
+# overhead. Both the per-section fit checks and the diff-cap floor derive
+# from these constants so a future diff-floor bump cannot silently starve
+# the reserve (or vice versa).
+PLANNING_DIFF_HEAD_MIN = 2000
+PLANNING_BUDGET_MARGIN = 200
+_PLANNING_RESERVE = PLANNING_DIFF_HEAD_MIN + PLANNING_BUDGET_MARGIN
+
+
 def build_planning_context(max_bytes, corpus_path=None):
     """Build a compact, high-signal context for tool planning.
 
@@ -153,35 +163,29 @@ def build_planning_context(max_bytes, corpus_path=None):
     standards/manifest boilerplate and often cut the diff off entirely. The
     planner needs: what kind of PR this is, which files changed, the version
     hints, the standards requirements (its contract says they are mandatory),
-    and the head of the diff. Falls back to the corpus head when the piece
-    files are unavailable (e.g. standalone invocation).
+    and the head of the diff.
 
-    Shared-piece preference (#398): each high-signal section has a shared piece
-    file written ONCE by build_review_corpus (scripts/sections/corpus.sh) that
-    holds the EXACT bytes the corpus emits for that section. When a shared piece
-    exists and fits WHOLE within the remaining budget, we embed it verbatim
-    (rstripped) — title, fences and all — so the verdict-turn dedup
-    (dedupe_verdict_corpus) can drop the byte-identical corpus copy. Full-fit
-    only: a partial/clipped embed would never match the corpus section verbatim
-    and would defeat the byte-exact dedup, so we fall back to the older
-    self-built excerpt (different title/cap/fence) instead — the excerpt then
-    just fails to dedup and the corpus section is (correctly, conservatively)
-    kept in full. A fixed 2200-byte reserve (the guaranteed 2000-byte diff head
-    + margin) is withheld from every shared-fit check so a large piece can't
-    starve the diff.
+    Corpus-section preference (#398): the review corpus (corpus_path, built
+    before this harness runs) is the SAME text the verdict turn later re-sends,
+    so a high-signal section extracted from it and embedded whole is
+    byte-identical by construction and the verdict-turn dedup
+    (dedupe_verdict_corpus) drops the corpus copy. Whole-section only: a
+    clipped embed would never match verbatim and would defeat the byte-exact
+    dedup, so a section that doesn't fit falls back to a self-built excerpt of
+    its source file (different title or cap — the corpus copy is then,
+    correctly, kept in full on the verdict turn). Every fit check and excerpt
+    cap respects the remaining budget after the _PLANNING_RESERVE, so no
+    section — embedded or excerpted — can push the diff head past max_bytes
+    and get it truncated away.
 
     Returns (text, truncated).
     """
-    # (planner_title, shared_piece_path, excerpt_source_path, excerpt_cap, fence)
-    pieces = [
-        ("PR Classification", "section-pr-classification.md", "classification.json", 4000, "json"),
-        ("Changed Files", "section-pr-files.md", "pr-files.truncated.json", 6000, "json"),
-        ("Version Hints from Diff", "section-version-hints.md", "version-hints.truncated.txt", 2500, "text"),
-        ("Repository Standards and Conventions", "section-standards.md", "standards-context.capped.md", 6000, None),
-    ]
-
     sections = []
     any_clipped = False
+
+    def _used():
+        # Bytes committed so far, counting the "\n\n" join separators.
+        return sum(len(s.encode("utf-8")) for s in sections) + 2 * len(sections)
 
     def _read_stripped(path):
         p = Path(path)
@@ -201,36 +205,73 @@ def build_planning_context(max_bytes, corpus_path=None):
             any_clipped = True
         if fence:
             return f"# {title}\n```{fence}\n{body}\n```"
+        if body.startswith(f"# {title}"):
+            # Source is self-titled (the standards file starts with its own
+            # header) — prepending would duplicate the header line.
+            return body
         return f"# {title}\n{body}"
 
-    for title, shared_path, excerpt_path, cap, fence in pieces:
-        used = sum(len(s.encode("utf-8")) for s in sections)
-        # Reserve 2200 = the 2000-byte guaranteed diff head + 200 margin.
-        avail = max_bytes - used - 2200
+    # ── Corpus-section extraction ─────────────────────────────────────────
+    # Sections are delimited by level-1 ATX headers — the same rule
+    # dedupe_verdict_corpus (pr_reviewer/conversation.py) splits on; the
+    # end-to-end coupling is pinned by tests that assert embedded sections
+    # actually dedup. The standards block is the corpus PREFIX (it is
+    # prepended before the body, whose first line is "# Changed Manifest
+    # Context" — see build_review_corpus) rather than a single section: the
+    # standards file itself may contain level-1 headers that would split it.
+    corpus_text = ""
+    if corpus_path is not None and Path(corpus_path).exists():
+        corpus_text = Path(corpus_path).read_text(encoding="utf-8", errors="replace")
+
+    regions = {}
+    if corpus_text:
+        lines = corpus_text.split("\n")
+        starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+        bounds = starts + [len(lines)]
+        for i in range(len(starts)):
+            title = lines[starts[i]][2:].strip()
+            if title in ("PR Classification", "PR Files (truncated)", "Version Hints from Diff"):
+                regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
+        if lines[0].startswith("# Repository Standards and Conventions"):
+            end = corpus_text.find("\n# Changed Manifest Context")
+            if end > 0:
+                regions["standards"] = corpus_text[:end].rstrip()
+
+    # (corpus_region_key, excerpt_title, excerpt_source_path, excerpt_cap, fence)
+    plan = [
+        ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
+        ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
+        ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
+        ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
+    ]
+
+    for region_key, title, excerpt_path, cap, fence in plan:
+        avail = max_bytes - _used() - _PLANNING_RESERVE
+        if avail < 400:
+            # Not enough room for a useful excerpt; later sections can't fit
+            # either (caps only shrink the same shared budget).
+            break
         section = None
-        shared = _read_stripped(shared_path)
-        # Embed the shared piece verbatim only when the WHOLE thing (plus the
-        # "\n\n" join separator) fits — byte-exact dedup needs every byte.
-        if shared is not None and len(shared.encode("utf-8")) + 2 <= avail:
-            section = shared
+        region = regions.get(region_key)
+        if region is not None and len(region.encode("utf-8")) + 2 <= avail:
+            section = region
         if section is None:
-            section = _excerpt(title, excerpt_path, cap, fence)
+            section = _excerpt(title, excerpt_path, min(cap, avail), fence)
         if section is not None:
             sections.append(section)
 
     if sections:
-        # Whatever budget remains goes to the head of the diff. The diff head is
-        # never a shared piece — a prefix overlap can't be deduped byte-exactly.
-        used = sum(len(s.encode("utf-8")) for s in sections)
-        diff_cap = max(2000, max_bytes - used - 200)
+        # Whatever budget remains goes to the head of the diff. The diff head
+        # is never embedded from the corpus — a prefix of the full diff can't
+        # be deduped byte-exactly.
+        diff_cap = max(PLANNING_DIFF_HEAD_MIN, max_bytes - _used() - PLANNING_BUDGET_MARGIN)
         diff_section = _excerpt("PR Diff (head)", "pr.diff.truncated", diff_cap, "diff")
         if diff_section is not None:
             sections.append(diff_section)
         text, clipped = mask_and_truncate("\n\n".join(sections), max_bytes)
         return text, clipped or any_clipped
 
-    if corpus_path is not None and Path(corpus_path).exists():
-        corpus_text = Path(corpus_path).read_text(encoding="utf-8", errors="replace")
+    if corpus_text:
         return mask_and_truncate(corpus_text, max_bytes)
 
     return "", False
@@ -667,9 +708,9 @@ def run_native_loop(
             )
             if verdict_corpus:
                 # #372/#398: the loop's first user message (corpus_text — the
-                # planning context) embeds several corpus sections verbatim via
-                # the shared piece files (build_planning_context), so their bytes
-                # match exactly. Drop only those byte-duplicates so the verdict
+                # planning context) embeds several corpus sections verbatim,
+                # extracted from this same corpus file by build_planning_context,
+                # so their bytes match exactly. Drop the byte-duplicates so the verdict
                 # turn doesn't re-send ~50KB the model already has. Dedup is
                 # section-exact and conservative (partial/truncated overlaps are
                 # kept in full), so the #362 contract invariant "the full corpus
