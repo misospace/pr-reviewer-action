@@ -107,9 +107,14 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 " 2>/dev/null || true
       fi
     else
-      echo "# Linked Issue Context"
-      cat linked-issues.md
-      echo
+      # context.sh leaves linked-issues.md empty when there's no linked issue
+      # (#399/#400) so the model sees no section boundary to react to. Gate
+      # the header the same way, matching the CI Check Results pattern below.
+      if [ -s linked-issues.md ]; then
+        echo "# Linked Issue Context"
+        cat linked-issues.md
+        echo
+      fi
       echo "# PR Files (truncated)"
       echo '```json'
       cat pr-files.truncated.json
@@ -137,9 +142,13 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     fi
     cat tool-harness.md
     echo
-    echo "# Evidence Providers"
-    cat evidence-providers.md
-    echo
+    # run_evidence_providers.py leaves evidence-providers.md empty when no
+    # providers are configured, same treatment as linked-issues.md above.
+    if [ -s evidence-providers.md ]; then
+      echo "# Evidence Providers"
+      cat evidence-providers.md
+      echo
+    fi
     # CI ran to completion in its own sandbox before this review; surface the
     # per-check outcomes so the model cites real test/lint results instead of
     # reporting them as "not verifiable". Only present when ci_status_check=true
