@@ -79,8 +79,16 @@ if [ "${#impact_terms[@]}" -gt 0 ]; then
       echo
       echo "### git grep hits"
       echo '```text'
-      awk -v pat="$esc" '{ c=$0; sub(/^[^:]*:[0-9]+:/, "", c); if (c ~ pat) print }' \
-        repo-impact.combined.txt | head -n 60 || true
+      awk -v pat="$esc" '
+        {
+          c=$0
+          sub(/^[^:]*:[0-9]+:/, "", c)
+          if (c ~ pat) {
+            print
+            if (++matches == 60) exit
+          }
+        }
+      ' repo-impact.combined.txt
       echo '```'
       echo
     } >> repo-impact.md
