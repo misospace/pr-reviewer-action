@@ -64,5 +64,34 @@ check_contains "history scans run concurrently and are reaped" \
   "$CLASSIFICATION" 'wait "$pid"'
 
 echo ""
+echo "=== Test: repo-impact caps matches without a downstream pipe ==="
+check_not_contains "repo-impact does not pipe awk into head" \
+  "$CLASSIFICATION" 'repo-impact.combined.txt | head -n 60'
+check_contains "repo-impact caps matches inside awk" \
+  "$CLASSIFICATION" 'if (++matches == 60) exit'
+
+impact_fixture="$(mktemp)"
+impact_stdout="$(mktemp)"
+impact_stderr="$(mktemp)"
+trap 'rm -f "$impact_fixture" "$impact_stdout" "$impact_stderr"' EXIT
+for i in $(seq 1 75); do
+  printf 'file.txt:%s:target match %s\n' "$i" "$i" >> "$impact_fixture"
+done
+awk -v pat='target' '
+  {
+    c=$0
+    sub(/^[^:]*:[0-9]+:/, "", c)
+    if (c ~ pat) {
+      print
+      if (++matches == 60) exit
+    }
+  }
+' "$impact_fixture" > "$impact_stdout" 2> "$impact_stderr"
+check "awk emits exactly 60 matches from an over-limit fixture" \
+  "$(wc -l < "$impact_stdout" | tr -d ' ')" "60"
+check "awk emits no broken-pipe diagnostics" \
+  "$(wc -c < "$impact_stderr" | tr -d ' ')" "0"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
