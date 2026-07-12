@@ -14,11 +14,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
 # shellcheck source=scripts/platform_api.sh
 source "${SCRIPT_DIR}/platform_api.sh"
+# shellcheck source=scripts/artifact_paths.sh
+source "${SCRIPT_DIR}/artifact_paths.sh"
 
 if [[ -z "$REPO" || -z "$PR_NUMBER" ]]; then
   echo "Missing REPO or PR_NUMBER for review precheck" >&2
   exit 1
 fi
+
+# This is the first action step that writes generated files into the reviewed
+# checkout. Guard every later artifact path before any redirect can follow a
+# PR-controlled symlink.
+assert_safe_artifact_paths
 
 # ── Platform resolution, once (#367) ──────────────────────────────────
 # Resolve the host platform a single time here — using the shared
