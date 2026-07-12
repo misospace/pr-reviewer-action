@@ -263,7 +263,14 @@ def write_outputs(summary: dict, markdown: str) -> None:
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    Path("evidence-providers.md").write_text(markdown.rstrip() + "\n", encoding="utf-8")
+    # Empty markdown (the "not configured" case) writes a truly empty file so
+    # corpus.sh's `[ -s evidence-providers.md ]` gate can omit the section
+    # header entirely, instead of the model reacting to a header with nothing
+    # under it (#399/#409). Real diagnostics (config errors, provider output)
+    # still get a trailing newline as before.
+    Path("evidence-providers.md").write_text(
+        markdown.rstrip() + "\n" if markdown.strip() else "", encoding="utf-8"
+    )
 
 
 def main() -> int:
@@ -279,7 +286,10 @@ def main() -> int:
     }
 
     if not config_path_raw:
-        write_outputs(summary, "No evidence providers configured.")
+        # Leave the markdown empty (not "not configured") — this is the normal,
+        # expected state for consumers with no evidence providers set up, not
+        # a diagnostic worth a corpus section. See #399/#409.
+        write_outputs(summary, "")
         return 0
 
     config_path = Path(config_path_raw)

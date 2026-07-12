@@ -478,6 +478,48 @@ class TestMarkdownOutput:
         assert "super_secret_value_xyz123" not in content
         assert "[REDACTED]" in content
 
+    def test_not_configured_writes_empty_markdown(self, tmp_path: Path):
+        """No EVIDENCE_PROVIDERS_FILE set: evidence-providers.md must be truly
+        empty (0 bytes) so corpus.sh's `[ -s evidence-providers.md ]` gate
+        omits the "# Evidence Providers" header entirely, rather than the
+        model reacting to a "not configured" placeholder (#399/#409)."""
+        env = os.environ.copy()
+        env.pop("EVIDENCE_PROVIDERS_FILE", None)
+        result = subprocess.run(
+            [sys.executable, str(EVIDENCE_SCRIPT)],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        md_file = tmp_path / "evidence-providers.md"
+        assert md_file.exists()
+        assert md_file.read_text(encoding="utf-8") == ""
+        data = _load_json_output(tmp_path)
+        assert data["configured"] is False
+
+    def test_config_not_found_still_reports_error(self, tmp_path: Path):
+        """A misconfigured (nonexistent) path is a real error, unlike the
+        "not configured at all" case above — it must stay visible in the
+        corpus, not be silenced by the same empty-markdown treatment."""
+        env = os.environ.copy()
+        env["EVIDENCE_PROVIDERS_FILE"] = str(tmp_path / "does-not-exist.json")
+        result = subprocess.run(
+            [sys.executable, str(EVIDENCE_SCRIPT)],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        md_file = tmp_path / "evidence-providers.md"
+        content = md_file.read_text(encoding="utf-8")
+        assert content.strip() != ""
+        assert "not found" in content.lower()
+
 
 # ── Integration tests: command format (argv vs shell string) ───────
 
