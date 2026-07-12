@@ -119,6 +119,9 @@ check_contains "append composes the repo addendum on the end" "$OUT" "REPO ADDEN
 check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
 check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
 
+echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
+check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
