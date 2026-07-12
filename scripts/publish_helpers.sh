@@ -7,8 +7,7 @@ set -euo pipefail
 # shellcheck source=scripts/platform_api.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/platform_api.sh"
 
-# Sanitize model output: strip metadata markers, neutralize upstream references,
-# and drop conditional sections the model wrote without backing corpus content.
+# Sanitize model output: strip metadata markers and neutralize upstream references.
 # Args: $1 = output file path
 # Writes sanitized markdown to the output file using $REVIEW_MARKDOWN env var.
 sanitize_review_markdown() {
@@ -16,10 +15,6 @@ sanitize_review_markdown() {
   printf '%s\n' "$REVIEW_MARKDOWN" > "$output_file"
   python3 "${GITHUB_ACTION_PATH}/scripts/strip_metadata_markers.py" "$output_file"
   python3 "${GITHUB_ACTION_PATH}/scripts/sanitize_review_markdown.py" "$output_file"
-  # linked-issues.md / evidence-providers.md / tool-harness.json are still in
-  # the job workspace from the "Run review" step (same job, no working-directory
-  # override) — reuse them as the presence signal for #409/#414.
-  python3 "${GITHUB_ACTION_PATH}/scripts/strip_empty_report_sections.py" "$output_file"
 }
 
 # Resolve cleanup flag based on input value and publish mode.
