@@ -199,5 +199,47 @@ class TestMarkdownRobustness:
         assert "## Summary" in result
 
 
+# ---------------------------------------------------------------------------
+# Edge-case inputs (path_handling_changes must_check: null bytes, etc.)
+#
+# These verify and pin behavior the must_check checklist demands — not because
+# the script is a path-handling security boundary (it isn't: it reads one
+# trusted path handed to it by publish_helpers.sh, and assert_safe_artifact_paths
+# already symlink-guards those artifact paths), but because the classifier flags
+# any file-path-accepting script and the behavior should be locked down.
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCaseInputs:
+    def test_null_byte_in_heading_is_still_stripped(self):
+        """A null byte embedded in a confabulated heading does not bypass the strip."""
+        text = "## Linked Issue Fit\x00extra\n\nfiller.\n\n## Summary\n\nreal.\n"
+        result = strip_empty_conditional_sections(text, ABSENT_ALL)
+        assert "Linked Issue Fit" not in result
+        assert "filler." not in result
+        assert "## Summary" in result
+
+    def test_seven_hashes_is_body_not_heading(self):
+        """Per CommonMark >6 '#' is not a heading; it must not be treated as a
+        section boundary, and must not be stripped as a conditional section."""
+        text = "## Summary\n\nok.\n\n####### not a heading, body text\n\n## Standards Compliance\n\nfine.\n"
+        result = strip_empty_conditional_sections(text, ABSENT_ALL)
+        assert "####### not a heading" in result  # preserved as body
+        assert "## Summary" in result
+        assert "## Standards Compliance" in result
+
+    def test_empty_file_path_via_cli(self, tmp_path):
+        """An empty input file is handled without error (in-place CLI path)."""
+        import subprocess
+        f = tmp_path / "empty.md"
+        f.write_text("")
+        r = subprocess.run(
+            ["python3", str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        assert r.returncode == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

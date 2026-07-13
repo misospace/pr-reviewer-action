@@ -40,7 +40,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`scripts/publish_helpers.sh`** — Shared publish functions: sanitize, metadata marker build, native review cleanup, finding-thread resolution
 - **`scripts/sanitize_review_markdown.py`** — Neutralizes upstream GitHub auto-links (PR/issue/commit URLs, `owner/repo#123`, bare `#123`) in review output
 - **`scripts/strip_metadata_markers.py`** — Strips reserved `<!-- ai-pr-review-*:... -->` markers from model output before publishing
-- **`scripts/strip_empty_conditional_sections.py`** — Deterministic backstop for #415: removes model-confabulated `## Linked Issue Fit` / `## Evidence Provider Findings` sections when the corpus provided no such context. Presence mirrors the exact `[ -s linked-issues.md ]` / `[ -s evidence-providers.md ]` gates `corpus.sh` uses; invoked from `sanitize_review_markdown`
+- **`scripts/strip_empty_conditional_sections.py`** — Deterministic backstop for #415: removes model-confabulated `## Linked Issue Fit` / `## Evidence Provider Findings` sections when the corpus provided no such context. Presence mirrors the exact `[ -s linked-issues.md ]` / `[ -s evidence-providers.md ]` gates `corpus.sh` uses; fence-aware (won't match `#` headings inside code blocks); invoked from `sanitize_review_markdown`
 - **`scripts/redact.py`** — Shared secret-redaction pipeline applied to tool and evidence-provider output
 - **`scripts/build_review_comments.py`** — Builds line-anchored inline review comments from structured findings, validated against the PR diff
 - **`scripts/resolve_finding_threads.py`** — Resolves/replies on existing finding threads by content fingerprint on re-review
