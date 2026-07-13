@@ -15,6 +15,18 @@ sanitize_review_markdown() {
   printf '%s\n' "$REVIEW_MARKDOWN" > "$output_file"
   python3 "${GITHUB_ACTION_PATH}/scripts/strip_metadata_markers.py" "$output_file"
   python3 "${GITHUB_ACTION_PATH}/scripts/sanitize_review_markdown.py" "$output_file"
+
+  # Deterministic backstop for #415: even with a clean, header-free corpus the
+  # model confabulates "## Linked Issue Fit" / "## Evidence Provider Findings"
+  # sections padded with "nothing was found" filler. Presence mirrors the exact
+  # [ -s file ] gates scripts/sections/corpus.sh uses to emit (or omit) those
+  # section headers, so this only ever strips sections the corpus never offered.
+  local linked_present=false evidence_present=false
+  if [ -s linked-issues.md ]; then linked_present=true; fi
+  if [ -s evidence-providers.md ]; then evidence_present=true; fi
+  LINKED_ISSUE_PRESENT="$linked_present" \
+  EVIDENCE_PROVIDER_PRESENT="$evidence_present" \
+    python3 "${GITHUB_ACTION_PATH}/scripts/strip_empty_conditional_sections.py" "$output_file"
 }
 
 # Resolve cleanup flag based on input value and publish mode.

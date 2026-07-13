@@ -121,6 +121,20 @@ check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
 
 echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
 check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"
+# Each conditional section's omit instruction is tied to its own trigger
+# condition (Linked Issue Fit → issue context, Evidence Provider Findings →
+# provider output, Tool Harness Findings → tool output), and the prompt
+# explicitly forbids the "- findings: []" placeholder the model has been
+# emitting as filler. This guards against weakening the instruction back to
+# a single generic sentence that the model ignores (#414 follow-up).
+check_contains "Linked Issue Fit trigger is named in the omit directive" \
+  "$BASE" "Linked Issue Fit section to the presence of linked issue context"
+check_contains "Evidence Provider Findings trigger is named in the omit directive" \
+  "$BASE" "Evidence Provider Findings section to the presence of evidence provider output"
+check_contains "Tool Harness Findings trigger is named in the omit directive" \
+  "$BASE" "Tool Harness Findings section to the presence of tool harness output"
+check_contains "explicit '- findings: []' filler is forbidden" \
+  "$BASE" 'no "- findings: []" filler'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
