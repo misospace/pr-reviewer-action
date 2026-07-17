@@ -1,0 +1,8 @@
+# Test and development dependencies for pr-reviewer-action.
+# Pinned so a runner-image change cannot silently break the test pipeline.
+# See issue #421.
+-r requirements.txt
+
+pytest>=9.0,<10
+pytest-cov>=7.0,<8
+yamllint>=1.38,<2

@@ -1,0 +1,7 @@
+# Runtime dependencies for pr-reviewer-action.
+#
+# The action is implemented in pure Python and deliberately avoids third-party
+# runtime dependencies so it works on stock GitHub-hosted runners out of the
+# box. New runtime dependencies MUST be added here and reviewed before merge so
+# that a runner-image change cannot silently break the review pipeline.
+# See issue #421.
