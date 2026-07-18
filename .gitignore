@@ -8,6 +8,10 @@ build/
 .venv/
 venv/
 
+# Python coverage data files (coverage.py default + parallel-mode shards)
+.coverage
+.coverage.*
+
 # Node.js (if used for testing)
 node_modules/
 npm-debug.log*
