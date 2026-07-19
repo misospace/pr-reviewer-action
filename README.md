@@ -225,7 +225,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `verdict_policy` | How the final verdict is decided: `model` (the model's own verdict) or `findings_severity_gated` (derived from structured findings: `request_changes` iff any blocker finding; falls back to the model verdict when no findings). Enforcement settings still apply afterwards | No | `model` |
+| `verdict_policy` | How the final verdict is decided: `model` (the model's own verdict) or `findings_severity_gated` (one-way escalation: model request_changes is preserved; blocker findings can escalate approve to request_changes; non-blocker findings never weaken a rejection). Enforcement settings still apply afterwards | No | `model` |
 | `inline_findings` | Attach diff-anchorable structured findings as native line-anchored review comments in `review_comment`/`review_verdict` modes. Ignored for `comment` mode | No | `false` |
 | `inline_findings_max` | Maximum inline review comments per review when `inline_findings=true` | No | `20` |
 | `validate_required_checks` | Validate the final review against the classifier's `must_check` items: `auto` (when must_check is non-empty), `true`, or `false` | No | `auto` |
@@ -364,7 +364,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
 | `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. | No | `""` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
-| `force_review` | Bypass the diff-unchanged guard and review even when the fingerprint matches. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch`. When the last managed review was not clean, a forced re-review runs at **full** scope to re-establish a clean baseline (recovers a PR wedged in *Request changes*) | No | `false` |
+| `force_review` | Bypass the diff-unchanged guard and run a full PR review even when the fingerprint matches. Every forced review uses full scope to re-establish a clean baseline. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
 | `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
 | `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
 | `ci_timeout_sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
@@ -504,13 +504,13 @@ on:
 >   cancel-in-progress: true
 > ```
 
-Nothing else changes. The action detects the label event itself: if the added label is the `rereview_label` (default `ai-review`) it forces a fresh review and then **removes the label** so adding it again re-triggers; any other label is ignored. There's no second workflow, no command parsing, and no checkout/authorization dance — labels are inherently maintainer-only (only users with write/triage permission can apply them), and the trigger rides `pull_request`, so there's no privileged-checkout exposure.
+Nothing else changes. The action detects the label event itself: if the added label is the `rereview_label` (default `ai-review`) it forces a full review and then **removes the label** so adding it again re-triggers; any other label is ignored. There's no second workflow, no command parsing, and no checkout/authorization dance — labels are inherently maintainer-only (only users with write/triage permission can apply them), and the trigger rides `pull_request`, so there's no privileged-checkout exposure.
 
 Rename the trigger label with the `rereview_label` input if `ai-review` collides with an existing label. This repository's own [`ai-pr-review.yaml`](.github/workflows/ai-pr-review.yaml) uses exactly this wiring.
 
-For non-interactive callers, `force_review: "true"` bypasses the guard directly — useful from a `workflow_dispatch` input or a `repository_dispatch` payload (both already require a write-scoped token to fire).
+For non-interactive callers, `force_review: "true"` bypasses the unchanged-diff guard and runs a full PR review. A `workflow_dispatch` or `repository_dispatch` event only does this when the consuming workflow explicitly maps its input or payload to the action's `force_review` input.
 
-**Recovering a "stuck" PR.** With `publish_mode: review_verdict`, an incremental review can only approve on top of a *trusted clean full baseline* (verdict safety). So once any full review records issues, later pushes — which are incremental — cannot approve until a clean full review re-establishes the baseline. A forced re-review (the `ai-review` label, `workflow_dispatch`, or `repository_dispatch`) now handles this automatically: when the last managed review was **not clean**, the forced re-review runs at **full** scope so it re-examines the whole PR and can clear the baseline. (A forced re-review on an already-clean baseline stays incremental — there's nothing to reset.) So a PR wedged in *Request changes* after its findings are fixed recovers with a single re-label.
+Every forced review re-establishes a full baseline by reviewing the complete PR diff at full scope. This is necessary for verdict safety: with `publish_mode: review_verdict`, an incremental review can approve only on top of a trusted clean full baseline, so any PR that needs to clear a previous request_changes requires a full review.
 
 ### 🧾 With evidence providers
 
@@ -802,7 +802,7 @@ The model may return an optional `findings` array alongside the verdict — conc
 
 Findings are normalized (severities mapped to `blocker`/`major`/`minor`/`info`, malformed entries dropped) and exposed as the `findings` output. **Absence is fine** — weaker local models that only produce `verdict`/`review_markdown` keep exactly the previous behavior.
 
-With `verdict_policy: findings_severity_gated`, the verdict is derived deterministically from the findings instead of trusting the model's headline call: `request_changes` iff any blocker-severity finding exists, otherwise `approve`. When no findings were produced, the model's verdict is used (the `verdict_source` output tells you which path applied). Enforcement settings (`evidence_blocker_enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
+With `verdict_policy: findings_severity_gated`, the policy applies one-way escalation: a model `request_changes` verdict is preserved, and `approve` is escalated to `request_changes` when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. When no findings were produced, the model's verdict stands (the `verdict_source` output tells you which path applied). Enforcement settings (`evidence_blocker_enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
 
 ```yaml
 - uses: misospace/pr-reviewer-action@v1

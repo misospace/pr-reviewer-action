@@ -39,8 +39,8 @@ index 123..456 644
 +new'
 
 # Mock gh command
-PR_HEAD_SHA="def456ghi"
-PR_BASE_SHA="base789sha"
+PR_HEAD_SHA="def456abcdef1234567890abcdef1234567890ab"
+PR_BASE_SHA="ba5e789abcdef1234567890abcdef1234567890"
 
 cat > "$TMPDIR/bin/gh" <<SHELLEOF
 #!/usr/bin/env bash
@@ -78,7 +78,7 @@ case "\$1" in
     if echo "\$*" | grep -q 'comments'; then
       RESULT="\$(cat /tmp/testfp_comments.json)"
     elif echo "\$*" | grep -q 'pulls/42'; then
-      RESULT="\$(printf '{"head":{"repo":{"full_name":"test/repo"}},"base":{"repo":{"full_name":"test/repo"},"sha":"%s"}}' "\$PR_BASE_SHA")"
+      RESULT="\$(printf '{"head":{"sha":"%s","repo":{"full_name":"test/repo"}},"base":{"repo":{"full_name":"test/repo"},"sha":"%s"}}' "\$PR_HEAD_SHA" "\$PR_BASE_SHA")"
     elif echo "\$*" | grep -q 'compare/'; then
       RESULT='{"status":"ok"}'
     else
@@ -191,42 +191,48 @@ REVIEW_SCOPE=auto RESULT="$(run_precheck)"
 check "effective_scope=full with auto and no prior metadata" \
   "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
 
-# ── Test 3: review_scope=auto, with prior metadata → full (safe fallback) ──
-# In a non-git-repo test environment, git merge-base --is-ancestor cannot
-# verify ancestry, so the implementation correctly falls back to full scope.
+# ── Test 3: review_scope=auto, with prior metadata → incremental ──
 echo ""
-echo "=== Test 3: review_scope=auto, with prior metadata → safe fallback ==="
-set_pr_data "def456ghi" "base789sha"
-set_comments_with_metadata "def456ghi" "base789sha" "full" "clean" ""
-REVIEW_SCOPE=auto RESULT="$(run_precheck)"
-check "effective_scope=full when git ancestry cannot be verified (safe fallback)" \
-  "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
+echo "=== Test 3: review_scope=auto, with prior metadata → incremental ==="
+set_pr_data "$PR_HEAD_SHA" "$PR_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$PR_BASE_SHA" "full" "clean" ""
+FORCE_REVIEW=false REVIEW_SCOPE=auto RESULT="$(run_precheck)"
+check "non-forced auto review uses incremental scope with a safe baseline" \
+  "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "incremental"
+check "safe incremental review carries previous head" \
+  "$(echo "$RESULT" | grep '^previous_head_sha=' | head -1 | cut -d= -f2)" "$PR_HEAD_SHA"
+check "safe incremental review trusts clean baseline" \
+  "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "true"
 
 # ── Test 4: baseline_clean defaults to false when scope is full ────────
 echo ""
 echo "=== Test 4: baseline_clean defaults to false on full fallback ==="
+set_empty_comments
+REVIEW_SCOPE=auto RESULT="$(run_precheck)"
 check "baseline_clean=false when falling back to full scope" \
   "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "false"
 
 # ── Test 5: baseline_clean=false when prior result had issues ─────────
 echo ""
 echo "=== Test 5: baseline_clean=false when prior had issues ==="
-set_pr_data "def456ghi" "base789sha"
-set_comments_with_metadata "def456ghi" "base789sha" "incremental" "issues" "abc123def"
-echo "abc123def" >> "$SHA_TRACK_FILE"
+set_pr_data "$PR_HEAD_SHA" "$PR_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$PR_BASE_SHA" "incremental" "issues" ""
 REVIEW_SCOPE=auto RESULT="$(run_precheck)"
 check "baseline_clean=false when prior review had issues" \
   "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "false"
 
-# ── Test 6: base SHA mismatch → fallback to full ─────────────────────
+# ── Test 6: base SHA mismatch → fallback to full ─────────────
 echo ""
 echo "=== Test 6: base SHA mismatch → fallback to full ==="
-set_pr_data "def456ghi" "different_base_sha"
-set_comments_with_metadata "def456ghi" "base789sha" "full" "clean" ""
-echo "different_base_sha" >> "$SHA_TRACK_FILE"
+MISMATCH_BASE_SHA="cccc789abcdef1234567890abcdef1234567890"
+ORIGINAL_BASE_SHA="$PR_BASE_SHA"
+set_pr_data "$PR_HEAD_SHA" "$MISMATCH_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$ORIGINAL_BASE_SHA" "full" "clean" ""
 REVIEW_SCOPE=auto RESULT="$(run_precheck)"
 check "effective_scope=full when base SHA changed" \
   "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
+# Restore globals for subsequent tests
+PR_BASE_SHA="$ORIGINAL_BASE_SHA"
 
 # ── Test 7: review_scope=incremental, no prior metadata → full fallback ──
 echo ""
@@ -236,40 +242,42 @@ REVIEW_SCOPE=incremental RESULT="$(run_precheck)"
 check "effective_scope=full when incremental but no prior metadata" \
   "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
 
-# ── Wedge recovery: a forced re-review on a DIRTY baseline escalates to full ──
-# so it can re-establish a clean baseline (incrementals can't clear one). The
-# mock-git env can't produce an incremental scope (ancestry can't be verified →
-# safe-fallback to full), so we assert on the recovery LOG LINE — which only
-# fires from the new forced-full branch — not on the scope alone.
-forced_full_logged() {
-  grep -q 'non-clean baseline' "$TMPDIR/precheck_stderr" && echo yes || echo no
-}
-
+# ── Test 7b: clean-baseline forced review → full scope ──
 echo ""
-echo "=== Test 7b: force_review + dirty baseline → forced full (wedge recovery) ==="
-set_pr_data "def456ghi" "base789sha"
-set_comments_with_metadata "def456ghi" "base789sha" "incremental" "issues" "abc123def"
-echo "abc123def" >> "$SHA_TRACK_FILE"
+echo "=== Test 7b: force_review + clean baseline → forced full ==="
+set_pr_data "$PR_HEAD_SHA" "$PR_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$PR_BASE_SHA" "full" "clean" ""
 FORCE_REVIEW=true REVIEW_SCOPE=auto RESULT="$(run_precheck)"
-check "dirty-baseline forced re-review resolves to full scope" \
+check "clean-baseline forced review uses full scope" \
   "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
-check "dirty-baseline forced re-review takes the recovery branch" "$(forced_full_logged)" "yes"
+check "clean-baseline forced review clears previous head" \
+  "$(echo "$RESULT" | grep '^previous_head_sha=' | head -1 | cut -d= -f2)" ""
+check "clean-baseline forced review resets baseline trust" \
+  "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "false"
 
+# ── Test 7c: dirty-baseline forced review → full scope ──
 echo ""
-echo "=== Test 7c: force_review + CLEAN baseline → recovery branch NOT taken ==="
-set_pr_data "def456ghi" "base789sha"
-set_comments_with_metadata "def456ghi" "base789sha" "incremental" "clean" "abc123def"
-echo "abc123def" >> "$SHA_TRACK_FILE"
+echo "=== Test 7c: force_review + dirty baseline → forced full ==="
+set_pr_data "$PR_HEAD_SHA" "$PR_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$PR_BASE_SHA" "incremental" "issues" ""
 FORCE_REVIEW=true REVIEW_SCOPE=auto RESULT="$(run_precheck)"
-check "clean-baseline forced re-review does NOT take the recovery branch" "$(forced_full_logged)" "no"
+check "dirty-baseline forced review uses full scope" \
+  "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "full"
+check "dirty-baseline forced review clears previous head" \
+  "$(echo "$RESULT" | grep '^previous_head_sha=' | head -1 | cut -d= -f2)" ""
+check "dirty-baseline forced review resets baseline trust" \
+  "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "false"
 
+# ── Test 7d: dirty baseline, no force → remains incremental (force-gated) ──
 echo ""
-echo "=== Test 7d: DIRTY baseline, no force → recovery branch NOT taken (force-gated) ==="
-set_pr_data "def456ghi" "base789sha"
-set_comments_with_metadata "def456ghi" "base789sha" "incremental" "issues" "abc123def"
-echo "abc123def" >> "$SHA_TRACK_FILE"
+echo "=== Test 7d: non-forced dirty-baseline review remains incremental ==="
+set_pr_data "$PR_HEAD_SHA" "$PR_BASE_SHA"
+set_comments_with_metadata "$PR_HEAD_SHA" "$PR_BASE_SHA" "incremental" "issues" ""
 FORCE_REVIEW=false REVIEW_SCOPE=auto RESULT="$(run_precheck)"
-check "non-forced dirty-baseline re-review does NOT take the recovery branch" "$(forced_full_logged)" "no"
+check "non-forced dirty-baseline review remains incremental" \
+  "$(echo "$RESULT" | grep '^effective_review_scope=' | head -1 | cut -d= -f2)" "incremental"
+check "non-forced dirty baseline remains untrusted" \
+  "$(echo "$RESULT" | grep '^baseline_clean=' | head -1 | cut -d= -f2)" "false"
 
 # ── Test 8: action.yml has review_scope input ────────────────────────
 echo ""
