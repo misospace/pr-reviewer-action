@@ -238,15 +238,17 @@ def apply_verdict_policy(
     policy: str = "model",
     output_path: str = "ai-output.json",
 ) -> str:
-    """Derive the verdict from structured findings when configured.
+    """Apply monotonic verdict escalation from structured findings.
 
     ``model`` (default) leaves the model's verdict untouched. With
-    ``findings_severity_gated`` the verdict is computed deterministically from
-    the findings array: ``request_changes`` iff any blocker-severity finding
-    exists, otherwise ``approve``. When the model produced no findings the
-    policy falls back to the model verdict, so weaker models degrade to
-    today's behaviour. Enforcement overlays (evidence blockers, tool-harness
-    failure) run after this and can still force ``request_changes``.
+    ``findings_severity_gated`` the policy only escalates an ``approve`` to
+    ``request_changes`` when blocker-severity findings exist. Non-blocker
+    findings never downgrade a model ``request_changes`` to ``approve``, and
+    non-blocker findings never change the verdict source from the model. When
+    the model produced no findings the policy falls back to the model verdict,
+    so weaker models degrade gracefully. Enforcement overlays (evidence
+    blockers, tool-harness failure) run after this and can still force
+    ``request_changes``.
 
     Returns the verdict source applied: ``"model"`` or ``"findings"``. The
     source is also recorded in the output JSON as ``verdict_source``.
@@ -255,27 +257,22 @@ def apply_verdict_policy(
     findings = data.get("findings")
     source = "model"
 
-    if (
-        policy == "findings_severity_gated"
-        and isinstance(findings, list)
-        and findings
-    ):
+    if policy == "findings_severity_gated" and isinstance(findings, list):
         blockers = [
-            f
-            for f in findings
-            if isinstance(f, dict) and f.get("severity") == "blocker"
+            finding
+            for finding in findings
+            if isinstance(finding, dict) and finding.get("severity") == "blocker"
         ]
-        derived = "request_changes" if blockers else "approve"
-        if derived != data.get("verdict"):
+        if blockers and data.get("verdict") != "request_changes":
             note = (
-                f"\n\n_Verdict derived from structured findings "
-                f"(verdict_policy=findings_severity_gated): "
+                "\n\n_Verdict escalated from structured findings "
+                "(verdict_policy=findings_severity_gated): "
                 f"{len(blockers)} blocker finding(s) out of {len(findings)}; "
                 f"model verdict was '{data.get('verdict')}'._"
             )
             data["review_markdown"] = str(data.get("review_markdown") or "") + note
-        data["verdict"] = derived
-        source = "findings"
+            data["verdict"] = "request_changes"
+            source = "findings"
 
     data["verdict_source"] = source
     Path(output_path).write_text(

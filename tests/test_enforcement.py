@@ -426,14 +426,25 @@ class TestApplyVerdictPolicy:
         assert source == "findings"
         assert data["verdict"] == "request_changes"
         assert data["verdict_source"] == "findings"
-        assert "derived from structured findings" in data["review_markdown"]
+        assert "escalated from structured findings" in data["review_markdown"]
 
-    def test_gated_no_blockers_approves(self, tmp_path):
+    def test_gated_non_blockers_preserve_model_request_changes(self, tmp_path):
         out = self._write(tmp_path, "request_changes", [self._minor()])
         source = apply_verdict_policy("findings_severity_gated", str(out))
         data = json.loads(out.read_text())
-        assert source == "findings"
+        assert source == "model"
+        assert data["verdict"] == "request_changes"
+        assert data["verdict_source"] == "model"
+        assert "escalated from structured findings" not in data["review_markdown"]
+
+    def test_gated_non_blockers_preserve_model_approve(self, tmp_path):
+        out = self._write(tmp_path, "approve", [self._minor()])
+        source = apply_verdict_policy("findings_severity_gated", str(out))
+        data = json.loads(out.read_text())
+        assert source == "model"
         assert data["verdict"] == "approve"
+        assert data["verdict_source"] == "model"
+        assert "escalated from structured findings" not in data["review_markdown"]
 
     def test_gated_without_findings_falls_back_to_model(self, tmp_path):
         out = self._write(tmp_path, "request_changes", [])
@@ -451,10 +462,12 @@ class TestApplyVerdictPolicy:
 
     def test_unchanged_verdict_adds_no_note(self, tmp_path):
         out = self._write(tmp_path, "request_changes", [self._blocker()])
-        apply_verdict_policy("findings_severity_gated", str(out))
+        source = apply_verdict_policy("findings_severity_gated", str(out))
         data = json.loads(out.read_text())
+        assert source == "model"
+        assert data["verdict_source"] == "model"
         assert data["verdict"] == "request_changes"
-        assert "derived from structured findings" not in data["review_markdown"]
+        assert "escalated from structured findings" not in data["review_markdown"]
 
     def test_enforcement_still_overrides_gated_approve(self, tmp_path):
         out = self._write(tmp_path, "approve", [self._minor()])

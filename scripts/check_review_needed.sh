@@ -438,18 +438,11 @@ resolve_review_scope() {
   local current_base_sha="$5"
   local last_review_result="${6:-}"
 
-  # Recovery lever for a wedged PR: a forced re-review (ai-review label /
-  # workflow_dispatch / repository_dispatch) whose last managed review was NOT
-  # clean runs at FULL scope. The incremental-approval guardrail blocks every
-  # incremental approval until a trusted clean FULL baseline exists, and nothing
-  # else re-establishes one — so a PR that ever recorded issues (even a
-  # false-positive blocker, or one since fixed) could never return to approve via
-  # pushes/labels. force_review already bypasses the diff-unchanged guard; here it
-  # also resets scope so the re-review re-examines the whole PR and can vouch it
-  # clean. A forced re-review on an already-clean baseline keeps the user's scope
-  # (cheap incremental) — there is nothing to unwedge.
-  if [[ "${FORCE_REVIEW:-false}" == "true" && -n "$last_review_result" && "$last_review_result" != "clean" ]]; then
-    echo "Forced re-review with a non-clean baseline ($last_review_result): using full scope to reset the baseline" >&2
+  # An explicit re-review must re-evaluate the complete PR, regardless of the
+  # previous result. It also clears incremental baseline state via the shared
+  # full-scope reset helper.
+  if [[ "${FORCE_REVIEW:-false}" == "true" ]]; then
+    echo "Forced re-review: using full scope" >&2
     fallback_full_scope
     return
   fi

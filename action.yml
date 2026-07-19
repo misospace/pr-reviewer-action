@@ -96,10 +96,9 @@ inputs:
   verdict_policy:
     description: >-
       How the final verdict is decided. 'model' (default) uses the model's own verdict.
-      'findings_severity_gated' derives the verdict deterministically from the structured
-      findings array: request_changes iff any blocker-severity finding exists, otherwise
-      approve. When the model returns no findings, the policy falls back to the model
-      verdict (weak models degrade gracefully). Enforcement settings (evidence blockers,
+      'findings_severity_gated' preserves request_changes from the model and escalates
+      approve to request_changes when any blocker-severity finding exists. Non-blocker
+      findings never weaken a model rejection. Enforcement settings (evidence blockers,
       tool failure) still apply afterwards and can force request_changes.
     required: false
     default: "model"
@@ -510,7 +509,11 @@ inputs:
     required: false
     default: "true"
   force_review:
-    description: If true, bypass the diff-unchanged guard and always review, even when the fingerprint matches the last managed comment. Set automatically when the rereview_label is added; can also be driven from a workflow_dispatch or repository_dispatch. Default false.
+    description: >-
+      If true, bypass the diff-unchanged guard and run a full PR review, even
+      when the fingerprint matches the last managed review. Set automatically
+      when the rereview_label is added; callers can also pass it from a
+      workflow_dispatch or repository_dispatch. Default false.
     required: false
     default: "false"
   rereview_label:
