@@ -8,6 +8,7 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 - Tool request abuse (requesting sensitive files, broad API access, or untrusted hosts)
 - Token and secret exposure in tool outputs
 - Token and secret exposure in evidence-provider stdout/stderr
+- Disclosure of private Linear issue content or the Linear API credential
 - Cross-repository pull requests attempting to run repo-defined scripts
 
 ## Controls
@@ -24,6 +25,7 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 - Tool outputs are size-limited and pass through shared secret redaction before corpus inclusion
 - Evidence provider stdout and stderr are passed through the same secret-redaction pipeline before being written to JSON summaries or markdown output
 - Tool and evidence-provider enrichment are skipped on cross-repository PRs by default (`tool_enable_for_forks=false`, `evidence_enable_for_forks=false`). This prevents forked PRs from executing arbitrary scripts defined in the destination repository's config.
+- Linear enrichment is fully opt-in (both API key and team prefixes are required), calls only the pinned Linear GraphQL endpoint, executes the action-owned adapter rather than a workspace-shadowable module, and is skipped on cross-repository PRs by default (`linear_enable_for_forks=false`).
 - Evidence providers execute in the context of the checked-out pull request code, with full access to the PR's working tree, environment variables, and installed tools. Commands run from the repository root.
 - Evidence provider blocker findings can be deterministically enforced (`evidence_blocker_enforcement=true`)
 - Tool harness failures can be made fail-closed with `tool_failure_enforcement=true` (planning failure or all tool requests failing)
@@ -67,6 +69,7 @@ See `scripts/strip_metadata_markers.py` for the implementation and `tests/test_s
 - Use self-hosted runners only when required, and isolate them from sensitive networks
 - Prefer `tool_mode=off` for public repositories unless you need tool planning
 - Keep `allowed_source_hosts` narrow
+- Use a least-privilege Linear API key and enable Linear enrichment only when its private issue content may safely appear in published reviews
 - Treat evidence provider scripts as trusted code and review changes carefully
 - Prefer argv arrays (`["python3", "scripts/check.py"]`) over shell strings (`"python3 scripts/check.py"`) for provider commands, to avoid shell injection risks from `bash -lc` execution
 - Treat additions to the named tool command catalog as security-sensitive changes; keep them read-only and avoid shells, package managers, network clients, or repo mutation
@@ -76,4 +79,5 @@ See `scripts/strip_metadata_markers.py` for the implementation and `tests/test_s
 - Secret redaction is heuristic and not guaranteed to catch all credential formats; it covers common patterns (GitHub tokens, AWS keys, bearer tokens, key=value secrets) but may miss novel or encoded credentials
 - LLM planning can still make low-quality tool choices; controls restrict blast radius but do not guarantee relevance
 - If you enable fork execution for tools/providers (`*_enable_for_forks=true`), you accept significantly higher risk: fork authors could craft PRs that exploit provider scripts or tool commands to access runner secrets, exfiltrate data, or execute arbitrary code
+- If you enable Linear enrichment for forks, private issue content can be incorporated into a public review; only opt in when that disclosure is acceptable
 - Evidence provider stdout/stderr are redacted for known secret patterns, but custom credential formats may slip through

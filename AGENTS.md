@@ -28,7 +28,8 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`escalation.py`** — Post-hoc escalation triggers for fast reviews (request_changes, low confidence, incomplete checks, blockers, dirty baseline)
 - **`carry_forward.py`** — Carried-forward open findings for incremental reviews; surviving blockers force `request_changes` (`verdict_source: carry_forward`)
 - **`metadata.py`** — Managed metadata marker (fingerprint, scope, open findings) embedded in published comments
-- **`github_context.py`** — PR metadata/linked-issue context helpers
+- **`github_context.py`** — PR metadata/GitHub and Forgejo linked-issue reference helpers
+- **`linear_context.py`** — Optional deterministic Linear adapter: recognizes configured `TEAM-123` identifiers in PR titles, fetches issue/spec context through Linear GraphQL, and normalizes it into linked-issue corpus/classification data
 - **`response_parser.py`** — Tolerant model-output parsing (JSON in fences/prose, verdict + findings extraction)
 - **`sse_reassembler.py`** — Reassembles streamed SSE responses into complete bodies (including streamed tool-call deltas; `function.arguments` is the accumulated JSON string, OpenAI non-streaming shape, per #233)
 - **`conversation.py`** — Multi-turn conversation/request builder for native tool calling (#202, 2/7 of #197 Option B): append-only neutral state, OpenAI/Anthropic wire rendering, per-API tool-schema catalogue, `truncate_oldest_tool_results` budget helper, `verdict_turn` mode that drops `tools` and switches to the strict JSON `response_format`. Its module docstring holds the authoritative **verdict-turn contract / bash↔Python divergence map** (#362): the shared invariants the native-loop verdict (Path B) and the bash `build_model_request` review (Path A) must keep in lockstep, pinned by `tests/test_verdict_contract_equivalence.py`
@@ -88,7 +89,7 @@ publish (action.yml steps)      → sanitize markdown → strip markers → buil
 2. PR Metadata (JSON from `gh pr view`)
 3. PR Classification (deterministic classifier output)
 4. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
-5. Linked Issue Context (from Fixes/Closes references in PR body)
+5. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
 6. PR Files (truncated JSON with patches)
 7. Version Hints from Diff
 8. PR Diff (truncated)
@@ -126,7 +127,7 @@ The smoke test validates: GitHub PR data collection, corpus assembly, OpenAI/Ant
 - Model responses are parsed by extracting JSON from markdown code blocks or scanning for the first valid JSON object (`pr_reviewer/response_parser.py`)
 - Verdict must be `"approve"` or `"request_changes"` with a non-empty `review_markdown` string; an optional `findings` array is normalized (severities mapped to `blocker`/`major`/`minor`/`info`, malformed entries dropped)
 - Context limit modes: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) — controls MAX_DIFF, MAX_FILES, MAX_CORPUS byte limits. `model_context_tokens` overrides these by deriving budgets from the real context window
-- Evidence providers and tool harness are disabled by default on cross-repository PRs (`*_enable_for_forks=false`)
+- Evidence providers, tool harness, and Linear issue fetching are disabled by default on cross-repository PRs (`*_enable_for_forks=false`)
 - Native approvals are off by default (`allow_approve=false`); fork approvals additionally require `approve_forks=true`
 - Standards file resolution: explicit `standards_file` → first found from `standards_file_candidates` list (default: AGENTS.md, agents.md, CLAUDE.md, claude.md, .github/ai-review-rules.md, .github/ai-review-rules.txt). Candidates support glob patterns (e.g. `.agents/*.md`); first match wins.
 - System prompt priority: inline `system_prompt` > file `system_prompt_file` > bundled default

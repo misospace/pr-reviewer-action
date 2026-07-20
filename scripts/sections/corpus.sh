@@ -72,6 +72,14 @@ build_review_corpus() {
     echo
 
     if [[ "$corpus_type" == "incremental" ]]; then
+      # Linear is opt-in. Preserve its issue/spec context across incremental
+      # reviews without changing the existing default treatment of linked
+      # GitHub or Forgejo issues when the adapter is disabled.
+      if [ -s linear-issues.md ]; then
+        echo "# Linked Issue Context"
+        cat linear-issues.md
+        echo
+      fi
       local head_sha
       head_sha="$(jq -r '.headRefOid' pr.json 2>/dev/null || echo 'unknown')"
       echo "# Incremental Review Delta"

@@ -171,6 +171,17 @@ compute_config_hash() {
     parts+=("model_context_tokens:${MODEL_CONTEXT_TOKENS}")
   fi
 
+  # Optional Linear context. Include no Linear parts at all when disabled so
+  # the default fingerprint remains identical to pre-adapter behavior. Hash
+  # only whether a key is configured, never the secret value itself.
+  if [[ "${LINEAR_API_KEY_CONFIGURED:-false}" == "true" \
+      && -n "${LINEAR_ISSUE_PREFIXES:-}" ]]; then
+    parts+=("linear_enabled:true")
+    parts+=("linear_prefixes:${LINEAR_ISSUE_PREFIXES}")
+    parts+=("linear_timeout:${LINEAR_ISSUE_TIMEOUT_SEC:-20}")
+    parts+=("linear_forks:${LINEAR_ENABLE_FOR_FORKS:-false}")
+  fi
+
   # Evidence provider config
   if [[ -n "${EVIDENCE_PROVIDERS_FILE:-}" && -f "${EVIDENCE_PROVIDERS_FILE:-}" ]]; then
     local ehash

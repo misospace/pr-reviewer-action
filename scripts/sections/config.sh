@@ -30,6 +30,10 @@ AI_SMART_RETRIES="${AI_SMART_RETRIES:-2}"
 AI_STREAM="${AI_STREAM:-true}"
 AI_FALLBACK_STREAM="${AI_FALLBACK_STREAM:-$AI_STREAM}"
 ALLOWED_SOURCE_HOSTS="${ALLOWED_SOURCE_HOSTS:-github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io}"
+LINEAR_API_KEY="${LINEAR_API_KEY:-}"
+LINEAR_ISSUE_PREFIXES="${LINEAR_ISSUE_PREFIXES:-}"
+LINEAR_ISSUE_TIMEOUT_SEC="${LINEAR_ISSUE_TIMEOUT_SEC:-20}"
+LINEAR_ENABLE_FOR_FORKS="${LINEAR_ENABLE_FOR_FORKS:-false}"
 # Implicitly trust the configured forge host as a linked source.
 if [ -n "${FORGEJO_API_URL:-}" ]; then
   _self_source_host=$(printf '%s' "$FORGEJO_API_URL" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
@@ -225,6 +229,11 @@ fi
 if [[ ! "$AI_MAX_TOKENS" =~ ^[0-9]+$ || "$AI_MAX_TOKENS" -lt 1 ]]; then
   error "Invalid AI_MAX_TOKENS '$AI_MAX_TOKENS'; defaulting to 8192"
   AI_MAX_TOKENS=8192
+fi
+
+if [[ ! "$LINEAR_ISSUE_TIMEOUT_SEC" =~ ^[0-9]+$ || "$LINEAR_ISSUE_TIMEOUT_SEC" -lt 1 ]]; then
+  error "Invalid LINEAR_ISSUE_TIMEOUT_SEC '$LINEAR_ISSUE_TIMEOUT_SEC'; defaulting to 20"
+  LINEAR_ISSUE_TIMEOUT_SEC=20
 fi
 
 # AI_TEMPERATURE: empty means "omit the field"; otherwise must be numeric.

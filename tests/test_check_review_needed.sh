@@ -97,6 +97,10 @@ run_precheck() {
     STANDARDS_FILE="${STANDARDS_FILE:-}" \
     STANDARDS_FILE_CANDIDATES="${STANDARDS_FILE_CANDIDATES:-AGENTS.md,agents.md,CLAUDE.md}" \
     CONTEXT_LIMIT_MODE="${CONTEXT_LIMIT_MODE:-normal}" \
+    LINEAR_API_KEY_CONFIGURED="${LINEAR_API_KEY_CONFIGURED:-false}" \
+    LINEAR_ISSUE_PREFIXES="${LINEAR_ISSUE_PREFIXES:-}" \
+    LINEAR_ISSUE_TIMEOUT_SEC="${LINEAR_ISSUE_TIMEOUT_SEC:-20}" \
+    LINEAR_ENABLE_FOR_FORKS="${LINEAR_ENABLE_FOR_FORKS:-false}" \
     EVIDENCE_PROVIDERS_FILE="${EVIDENCE_PROVIDERS_FILE:-}" \
     EVIDENCE_PROVIDER_TIMEOUT_SEC="${EVIDENCE_PROVIDER_TIMEOUT_SEC:-30}" \
     EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES="${EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES:-20000}" \
@@ -206,6 +210,15 @@ echo ""
 echo "=== Test 5: Changed tool mode triggers fresh review ==="
 ACTION_REF="v1.0.0" AI_MODEL="gpt-4" AI_API_FORMAT="openai" CONTEXT_LIMIT_MODE="normal" TOOL_MODE="plan_execute_once" SKIP_IF_DIFF_UNCHANGED=true RESULT="$(run_precheck)"
 check "should_review=true when tool_mode changed" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+
+# ── Test 5b: Enabling optional Linear context changes fingerprint ─────
+echo ""
+echo "=== Test 5b: Enabling Linear context triggers fresh review ==="
+LINEAR_API_KEY_CONFIGURED=true
+LINEAR_ISSUE_PREFIXES=LAB
+RESULT="$(run_precheck)"
+check "should_review=true when Linear context enabled" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+unset LINEAR_API_KEY_CONFIGURED LINEAR_ISSUE_PREFIXES
 
 # ── Test 6: skip_if_diff_unchanged=false → always review ─────────────
 echo ""

@@ -96,6 +96,37 @@ else
   # "# Linked Issue Context" header with no stray placeholder line (#399).
   :
 fi
+
+# Optional Linear adapter: deterministically discover configured TEAM-123 keys
+# in the PR title and fetch their issue/spec context before the model call. The
+# API key stays in the environment (never argv). Fork PRs are fail-closed so a
+# public review cannot disclose private tracker content unless explicitly opted in.
+: > linear-issues.md
+printf '[]\n' > linear-issues.json
+if [[ -n "$LINEAR_API_KEY" && -n "$LINEAR_ISSUE_PREFIXES" ]]; then
+  if gate_feature_for_forks "$LINEAR_ENABLE_FOR_FORKS" \
+      linear-issues.md "" linear-issues.json "[]"; then
+    : > linear-issues.md
+    log "Skipping Linear issue context for cross-repository PR"
+  elif LINEAR_API_KEY="$LINEAR_API_KEY" python3 "$SCRIPT_DIR/../pr_reviewer/linear_context.py" \
+      --pr-json pr.json \
+      --prefixes "$LINEAR_ISSUE_PREFIXES" \
+      --timeout "$LINEAR_ISSUE_TIMEOUT_SEC" \
+      --output-json linear-issues.json \
+      --output-markdown linear-issues.md; then
+    cat linear-issues.md >> linked-issues.md
+    jq -s '.[0] + .[1]' linked-issues.json linear-issues.json > linked-issues.merged.json
+    mv linked-issues.merged.json linked-issues.json
+    linear_count="$(jq 'length' linear-issues.json 2>/dev/null || echo 0)"
+    if [[ "$linear_count" -gt 0 ]]; then
+      log "Added $linear_count Linear issue(s) to linked issue context"
+    fi
+  else
+    error "Linear issue context adapter failed; continuing without Linear context"
+    printf '[]\n' > linear-issues.json
+    : > linear-issues.md
+  fi
+fi
 section_timer_end
 
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled

@@ -16,7 +16,7 @@
 
 ---
 
-The action gathers PR metadata, diff context, linked issue context from PR-closing references, linked sources, optional evidence provider output, optional tool harness output, image digest provenance, basic repository impact/history, and an optional standards file such as `CLAUDE.md`. It returns a structured verdict and markdown review body, and it can publish the result as a sticky comment or a native GitHub review.
+The action gathers PR metadata, diff context, linked issue context from PR-closing references (plus optional Linear issue context discovered from PR titles), linked sources, optional evidence provider output, optional tool harness output, image digest provenance, basic repository impact/history, and an optional standards file such as `CLAUDE.md`. It returns a structured verdict and markdown review body, and it can publish the result as a sticky comment or a native GitHub review.
 
 ## ✨ Highlights
 
@@ -294,6 +294,28 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
 | `image_digest_budget_sec` | Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. | No | `60` |
 | `allowed_source_hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
+
+</details>
+
+<details>
+<summary><b>Issue/spec context</b> — GitHub/Forgejo and optional Linear issues</summary>
+
+GitHub/Forgejo issues referenced with `Fixes`/`Closes`/`Resolves` in the PR body are fetched automatically. To also recognize Linear identifiers in PR titles, configure an API key and the allowed team prefixes:
+
+```yaml
+with:
+  linear_api_key: ${{ secrets.LINEAR_API_KEY }}
+  linear_issue_prefixes: DST,LAB
+```
+
+A title such as `LAB-123: add Linear review context` then contributes that Linear issue's title, description, state, labels, and URL to the linked-issue review corpus. The adapter is deterministic and does not require `tool_mode: native_loop`. Because review output may quote tracker content, use a least-privilege Linear key and enable this only when publishing that issue context to the PR is acceptable.
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `linear_api_key` | Linear personal API key used to fetch issue/spec context. Keep this in a GitHub Actions secret | No | `""` |
+| `linear_issue_prefixes` | Comma-separated Linear team keys recognized in PR titles, such as `DST,LAB`. Empty disables the adapter | No | `""` |
+| `linear_issue_timeout_sec` | Timeout in seconds for each Linear GraphQL issue lookup | No | `20` |
+| `linear_enable_for_forks` | Allow private Linear issue context to be fetched and published for cross-repository PRs. Disabled by default to prevent disclosure | No | `false` |
 
 </details>
 

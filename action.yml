@@ -224,6 +224,22 @@ inputs:
     description: Comma-separated list of hosts allowed for linked source fetching
     required: false
     default: github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io
+  linear_api_key:
+    description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
+    required: false
+    default: ""
+  linear_issue_prefixes:
+    description: Comma-separated Linear team keys recognized in PR titles (for example DST,LAB); empty disables the Linear adapter
+    required: false
+    default: ""
+  linear_issue_timeout_sec:
+    description: Timeout in seconds for each Linear GraphQL issue lookup
+    required: false
+    default: "20"
+  linear_enable_for_forks:
+    description: If true, allow private Linear issue context to be fetched and included for cross-repository PRs
+    required: false
+    default: "false"
   system_prompt:
     description: Optional system prompt override
     required: false
@@ -663,6 +679,10 @@ runs:
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
         MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
+        LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
+        LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
+        LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
+        LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
         EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
         EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
@@ -764,6 +784,10 @@ runs:
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
+        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
+        LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
+        LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
+        LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
         SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
