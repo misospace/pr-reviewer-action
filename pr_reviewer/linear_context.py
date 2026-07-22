@@ -24,6 +24,13 @@ MAX_LINEAR_ISSUES = 8
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_DESCRIPTION_CHARS = 12_000
 _PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}$")
+_LINEAR_PRIORITY_LABELS = {
+    0: "No priority",
+    1: "Urgent",
+    2: "High",
+    3: "Medium",
+    4: "Low",
+}
 
 _ISSUE_QUERY = """
 query PrReviewerIssue($id: String!) {
@@ -34,6 +41,7 @@ query PrReviewerIssue($id: String!) {
     description
     url
     state { name }
+    priority
     labels { nodes { name } }
   }
 }
@@ -145,6 +153,12 @@ def fetch_issue(
         if isinstance(label, dict) and label.get("name")
     ]
     resolved_identifier = str(issue.get("identifier") or identifier).upper()
+    raw_priority = issue.get("priority")
+    priority = (
+        raw_priority
+        if type(raw_priority) is int and raw_priority in _LINEAR_PRIORITY_LABELS
+        else None
+    )
     return {
         "source": "linear",
         "ref": resolved_identifier,
@@ -153,6 +167,8 @@ def fetch_issue(
         "body": str(issue.get("description") or "")[:MAX_DESCRIPTION_CHARS],
         "url": str(issue.get("url") or ""),
         "state": str((issue.get("state") or {}).get("name") or ""),
+        "priority": priority,
+        "priority_label": _LINEAR_PRIORITY_LABELS.get(priority, ""),
         "labels": normalized_labels,
     }
 

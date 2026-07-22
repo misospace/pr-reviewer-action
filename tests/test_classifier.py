@@ -255,6 +255,27 @@ class TestRiskFlags:
         flags, _ = _detect_risk_flags([], "", issues)
         assert "linked_priority_p1" in flags
 
+    @pytest.mark.parametrize(
+        ("priority", "expected_flag"),
+        [(1, "linked_priority_p0"), (2, "linked_priority_p1")],
+    )
+    def test_linear_native_priority(self, priority, expected_flag):
+        issues = [{"source": "linear", "priority": priority, "labels": []}]
+        flags, _ = _detect_risk_flags([], "", issues)
+        assert expected_flag in flags
+
+    @pytest.mark.parametrize("priority", [0, 3, 4, None, True])
+    def test_linear_non_escalating_priorities(self, priority):
+        issues = [{"source": "linear", "priority": priority, "labels": []}]
+        flags, _ = _detect_risk_flags([], "", issues)
+        assert "linked_priority_p0" not in flags
+        assert "linked_priority_p1" not in flags
+
+    def test_native_priority_is_linear_only(self):
+        issues = [{"source": "github", "priority": 1, "labels": []}]
+        flags, _ = _detect_risk_flags([], "", issues)
+        assert "linked_priority_p0" not in flags
+
     def test_no_risk_flags(self):
         issues = [{"labels": [{"name": "bug"}]}]
         flags, _ = _detect_risk_flags([], "", issues)
@@ -553,6 +574,15 @@ class TestRouteSignals:
         issues = [{"labels": [{"name": "security"}]}]
         result = classify_pr([_make_file("app.py")], diff_text="", linked_issues=issues)
         assert result.route_signals == ["linked_security_issue"]
+
+    @pytest.mark.parametrize(
+        ("priority", "expected_signal"),
+        [(1, "linked_priority_p0"), (2, "linked_priority_p1")],
+    )
+    def test_linear_native_priority_in_route_signals(self, priority, expected_signal):
+        issues = [{"source": "linear", "priority": priority, "labels": []}]
+        result = classify_pr([_make_file("app.py")], diff_text="", linked_issues=issues)
+        assert result.route_signals == [expected_signal]
 
     def test_app_code_default_not_in_route_signals(self):
         result = classify_pr([_make_file("app.py")], diff_text="print('hi')")

@@ -308,7 +308,7 @@ with:
   linear_issue_prefixes: DST,LAB
 ```
 
-A title such as `LAB-123: add Linear review context` then contributes that Linear issue's title, description, state, labels, and URL to the linked-issue review corpus. The adapter is deterministic and does not require `tool_mode: native_loop`. Because review output may quote tracker content, use a least-privilege Linear key and enable this only when publishing that issue context to the PR is acceptable.
+A title such as `LAB-123: add Linear review context` then contributes that Linear issue's title, description, state, native priority, labels, and URL to the linked-issue review corpus. The adapter is deterministic and does not require `tool_mode: native_loop`. Native Linear priorities also feed deterministic model routing: **Urgent** maps to `linked_priority_p0` and **High** maps to `linked_priority_p1`, so `review_routing_mode: auto` can select the smart model without duplicate priority labels. Because review output may quote tracker content, use a least-privilege Linear key and enable this only when publishing that issue context to the PR is acceptable.
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|

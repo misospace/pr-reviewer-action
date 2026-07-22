@@ -369,8 +369,18 @@ def _detect_risk_flags(
     filenames = [f.get("filename", "") for f in files]
 
     # Linked security/audit/priority issues (table order, deduplicated).
+    # Linear's native priority is numeric (1=Urgent, 2=High). Convert those
+    # values to the same synthetic labels recognized for linked issues so teams
+    # do not need to duplicate Linear priority as a custom label.
     for issue in linked_issues:
         labels = {lb.get("name", "").lower() for lb in issue.get("labels", [])}
+        if str(issue.get("source", "")).lower() == "linear":
+            priority = issue.get("priority")
+            if type(priority) is int:
+                if priority == 1:
+                    labels.add("priority/p0")
+                elif priority == 2:
+                    labels.add("priority/p1")
         for trigger_labels, flag in LINKED_ISSUE_RULES:
             if labels & trigger_labels and flag not in flags:
                 flags.append(flag)

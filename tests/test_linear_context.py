@@ -68,6 +68,7 @@ def test_fetch_issue_uses_identifier_and_secret_header(monkeypatch):
                         "description": "Acceptance criteria",
                         "url": "https://linear.app/acme/issue/LAB-42",
                         "state": {"name": "In Progress"},
+                        "priority": 1,
                         "labels": {"nodes": [{"name": "security"}]},
                     }
                 }
@@ -80,11 +81,14 @@ def test_fetch_issue_uses_identifier_and_secret_header(monkeypatch):
     request = captured["request"]
     body = json.loads(request.data)
     assert body["variables"] == {"id": "LAB-42"}
+    assert "priority" in body["query"]
     assert request.get_header("Authorization") == "lin_api_secret"
     assert request.get_header("User-agent") != "Python-urllib/3"
     assert captured["timeout"] == 7
     assert issue["ref"] == "LAB-42"
     assert issue["labels"] == [{"name": "security"}]
+    assert issue["priority"] == 1
+    assert issue["priority_label"] == "Urgent"
     assert issue["body"] == "Acceptance criteria"
 
 
