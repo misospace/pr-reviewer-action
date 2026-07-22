@@ -712,12 +712,15 @@ class TestNativeReviews(unittest.TestCase):
         self.assertEqual(data["comments"], [{"path": "test.txt", "new_position": 2, "body": "anchored"}])
 
     @_PATCH_FORGEJO
-    def test_create_native_review_posts_approve_event(self, mock_curl):
+    def test_create_native_review_uses_forgejo_approved_state(self, mock_curl):
         seen = {}
 
         def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
             seen.update(method=method, url=url, data=kwargs.get("data"))
-            return 201, json.dumps(dict(REVIEW, id=57, state="APPROVE"))
+            # Forgejo silently creates a PENDING draft for GitHub's `APPROVE`
+            # token. Its ReviewStateType requires `APPROVED` to submit it.
+            state = "APPROVED" if kwargs["data"]["event"] == "APPROVED" else "PENDING"
+            return 201, json.dumps(dict(REVIEW, id=57, state=state))
 
         mock_curl.side_effect = _run
 
@@ -725,7 +728,8 @@ class TestNativeReviews(unittest.TestCase):
             result = fb.create_native_review("misospace/pr-reviewer-action", 42, "APPROVE", "looks good")
 
         self.assertIsNotNone(result)
-        self.assertEqual(seen["data"], {"body": "looks good", "event": "APPROVE"})
+        self.assertEqual(seen["data"], {"body": "looks good", "event": "APPROVED"})
+        self.assertEqual(result["state"], "APPROVED")
 
     @_PATCH_FORGEJO
     def test_dismiss_review_uses_forgejo_dismissal_endpoint(self, mock_curl):

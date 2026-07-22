@@ -739,7 +739,10 @@ def _forgejo_review_to_github(review: dict[str, Any]) -> dict[str, Any]:
 def _forgejo_review_event(event: str) -> str:
     event = (event or "COMMENT").upper()
     if event in {"APPROVE", "APPROVED"}:
-        return "APPROVE"
+        # GitHub submits reviews with `APPROVE`; Forgejo's ReviewStateType uses
+        # `APPROVED`. Forgejo accepts the former without an error but creates a
+        # PENDING draft whose body the timeline hides as "No description".
+        return "APPROVED"
     if event in {"REQUEST_CHANGES", "CHANGES_REQUESTED"}:
         return "REQUEST_CHANGES"
     return "COMMENT"
