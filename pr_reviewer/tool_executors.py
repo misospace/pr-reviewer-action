@@ -59,7 +59,12 @@ def normalize_host(host):
 def allowlisted_host(host, allowlist):
     candidate = normalize_host(host)
     for item in allowlist:
-        if candidate == item:
+        norm = normalize_host(item)
+        # "'*'" is an allow-all wildcard, consistent with the gh_api repo
+        # allowlist in platform.py — so operators can set
+        # allowed_source_hosts: "*" and actually permit any host (previously
+        # the exact-match loop silently matched nothing, blocking every fetch).
+        if norm == "*" or candidate == norm:
             return True
     return False
 

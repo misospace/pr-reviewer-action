@@ -148,6 +148,25 @@ def test_web_fetch_blocks_unallowlisted_host(tmp_path, url):
     assert "not allowlisted" in str(res["result"]).lower()
 
 
+def test_allowlisted_host_wildcard_allows_any():
+    """Wildcard '*' should allow any host, mirroring gh_api's repo wildcard.
+
+    Regression guard: ``allowlisted_host`` previously did exact-match only, so
+    an operator setting ``allowed_source_hosts: "*"`` silently blocked every
+    fetch (the "*" matched no real host).
+    """
+    from pr_reviewer.tool_executors import allowlisted_host
+
+    assert allowlisted_host("registry.npmjs.org", ["*"]) is True
+    assert allowlisted_host("evil.example.com", ["*"]) is True
+    # Non-wildcard exact behaviour is unchanged.
+    assert allowlisted_host("github.com", ["github.com"]) is True
+    assert allowlisted_host("evil.example.com", ["github.com"]) is False
+    # Entries are normalised, so stray case/whitespace no longer causes a
+    # silent denial.
+    assert allowlisted_host("github.com", ["  GitHub.COM  "]) is True
+
+
 # 5. A hostile web_search query cannot smuggle in a different host: the query is
 #    URL-encoded into the operator-configured search_url, which stays fixed.
 def test_web_search_query_cannot_change_host(tmp_path, monkeypatch):
