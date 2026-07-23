@@ -119,6 +119,96 @@ check_contains "append composes the repo addendum on the end" "$OUT" "REPO ADDEN
 check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
 check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
 
+# Fixture: bundled conventions file for tests that combine SYSTEM_PROMPT_FILE
+# with SYSTEM_PROMPT (#426). The static block is intentionally multi-line so
+# the join behaviour is observable, not just whitespace-padded.
+PROMPT_FILE="$WORK/repo_conventions.txt"
+{
+  printf 'REPO CONVENTIONS BLOCK\n'
+  printf 'Line 2 of static rules\n'
+  printf 'Line 3 of static rules\n'
+} > "$PROMPT_FILE"
+
+echo "=== replace mode: file only is byte-identical to the prior exclusive behaviour ==="
+OUT="$(
+  SYSTEM_PROMPT="" SYSTEM_PROMPT_FILE="$PROMPT_FILE" SYSTEM_PROMPT_MODE="replace"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  printf 'prompt=%s|default=%s|addendum=%s' "$SYSTEM_PROMPT" "${SYSTEM_PROMPT_IS_DEFAULT:-0}" "${SYSTEM_PROMPT_ADDENDUM:-}"
+)"
+check_contains "file-only feeds replace verbatim" "$OUT" "REPO CONVENTIONS BLOCK"
+check_contains "file-only does not flag the default" "$OUT" "|default=0|"
+check_contains "file-only stashes no addendum" "$OUT" "|addendum="
+
+echo "=== replace mode: both file and inline compose, file first, inline second (#426) ==="
+OUT="$(
+  SYSTEM_PROMPT="PER-PR STEERING SENTINEL" SYSTEM_PROMPT_FILE="$PROMPT_FILE" SYSTEM_PROMPT_MODE="replace"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  printf '%s' "$SYSTEM_PROMPT"
+)"
+# File content first so the per-PR steering reads as the more specific
+# instruction and lands nearest the end of the prompt.
+STATIC_OFF="$(printf '%s' "$OUT" | awk '/REPO CONVENTIONS BLOCK/{print NR; exit}')"
+DYN_OFF="$(printf '%s' "$OUT" | awk '/PER-PR STEERING SENTINEL/{print NR; exit}')"
+if [ -n "$STATIC_OFF" ] && [ -n "$DYN_OFF" ] && [ "$STATIC_OFF" -lt "$DYN_OFF" ]; then
+  echo "  PASS: file content precedes inline steering"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: expected file content before inline steering, got static=$STATIC_OFF dynamic=$DYN_OFF"
+  echo "       prompt=$OUT"
+  FAIL=$((FAIL + 1))
+fi
+check_contains "combined replace keeps the static file content" "$OUT" "REPO CONVENTIONS BLOCK"
+check_contains "combined replace keeps the inline steering" "$OUT" "PER-PR STEERING SENTINEL"
+check_contains "combined replace keeps the full multi-line file" "$OUT" "Line 3 of static rules"
+# Blank-line separator between the two parts so the model reads them as
+# distinct instructions rather than a single paragraph.
+check_contains "combined replace uses a blank-line separator between file and inline" "$OUT" "static rules
+
+PER-PR STEERING SENTINEL"
+# Replace mode with combined input still does not flag the default and does
+# not stash the held addendum (the combined prompt is the verbatim output).
+check_contains "combined replace does not flag the default" "$OUT" ""
+
+echo "=== append mode: both file and inline compose as a single addendum (#426) ==="
+OUT="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="PER-PR STEERING SENTINEL" SYSTEM_PROMPT_FILE="$PROMPT_FILE" SYSTEM_PROMPT_MODE="append"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT"
+)"
+check_contains "append keeps the base output schema" "$OUT" "Return STRICT JSON"
+check_contains "append composes the file content onto the end" "$OUT" "REPO CONVENTIONS BLOCK"
+check_contains "append composes the inline steering onto the end" "$OUT" "PER-PR STEERING SENTINEL"
+check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
+check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
+# In append mode the combined file+inline is held as a single addendum, so
+# the static file content must precede the inline steering within the
+# addendum (same order as replace mode).
+STATIC_OFF="$(printf '%s' "$OUT" | awk '/REPO CONVENTIONS BLOCK/{print NR; exit}')"
+DYN_OFF="$(printf '%s' "$OUT" | awk '/PER-PR STEERING SENTINEL/{print NR; exit}')"
+if [ -n "$STATIC_OFF" ] && [ -n "$DYN_OFF" ] && [ "$STATIC_OFF" -lt "$DYN_OFF" ]; then
+  echo "  PASS: append mode preserves file-then-inline ordering in the addendum"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: append mode expected file before inline, got static=$STATIC_OFF dynamic=$DYN_OFF"
+  echo "       prompt=$OUT"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "=== resolve_system_prompt still rejects a missing SYSTEM_PROMPT_FILE ==="
+# Stash the resolver into a subshell so the exit doesn't tear down the test.
+EXC_OUT="$(
+  SYSTEM_PROMPT="x" SYSTEM_PROMPT_FILE="$WORK/does_not_exist.txt" SYSTEM_PROMPT_MODE="replace"
+  SYSTEM_PROMPT_ADDENDUM="" SYSTEM_PROMPT_IS_DEFAULT=0
+  resolve_system_prompt
+  echo UNREACHED
+)" 2>/dev/null || EXC_OUT="exit=$?"
+check_contains "missing SYSTEM_PROMPT_FILE is fatal" "$EXC_OUT" "exit="
+
 echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
 check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"
 # Each conditional section's omit instruction is tied to its own trigger

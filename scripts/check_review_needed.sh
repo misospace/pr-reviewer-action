@@ -129,12 +129,15 @@ compute_config_hash() {
     parts+=("anthropic_version:${ANTHROPIC_VERSION}")
   fi
 
-  # System prompt (inline content or file hash)
+  # System prompt (inline content and/or file hash). Both are hashed when
+  # both are set so a change to either still invalidates the fingerprint
+  # (#426). Inline-only and file-only are byte-identical to before.
   if [[ -n "${SYSTEM_PROMPT:-}" ]]; then
     local phash
     phash="$(printf '%s' "$SYSTEM_PROMPT" | sha256sum | awk '{print $1}')"
     parts+=("prompt:${phash}")
-  elif [[ -n "${SYSTEM_PROMPT_FILE:-}" && -f "${SYSTEM_PROMPT_FILE:-}" ]]; then
+  fi
+  if [[ -n "${SYSTEM_PROMPT_FILE:-}" && -f "${SYSTEM_PROMPT_FILE:-}" ]]; then
     local phash
     phash="$(sha256sum "$SYSTEM_PROMPT_FILE" | awk '{print $1}')"
     parts+=("prompt_file:${SYSTEM_PROMPT_FILE}:${phash}")

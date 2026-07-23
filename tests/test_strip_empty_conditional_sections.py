@@ -236,7 +236,7 @@ class TestEdgeCaseInputs:
         r = subprocess.run(
             ["python3", str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
             capture_output=True, text=True,
-            env={"PATH": "/usr/bin:/bin"},
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
         )
         assert r.returncode == 0
 

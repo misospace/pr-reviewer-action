@@ -332,16 +332,27 @@ resolve_standards_file() {
 }
 
 resolve_system_prompt() {
-  # Resolve any user-supplied prompt (inline takes precedence over file).
+  # Resolve any user-supplied prompt. When both SYSTEM_PROMPT_FILE and
+  # SYSTEM_PROMPT are set, concatenate them so a repo can keep static
+  # review conventions in a file and still steer per-PR from the inline
+  # value (#426). File first, inline second, so the per-PR steering reads
+  # as the more specific instruction and lands nearest the end of the
+  # prompt. The single-source cases are byte-identical to the prior
+  # exclusive behaviour.
   local user=""
-  if [[ -n "$SYSTEM_PROMPT" ]]; then
-    user="$SYSTEM_PROMPT"
-  elif [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
+  if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
     if [[ ! -f "$SYSTEM_PROMPT_FILE" ]]; then
       error "SYSTEM_PROMPT_FILE does not exist: $SYSTEM_PROMPT_FILE"
       exit 1
     fi
     user="$(<"$SYSTEM_PROMPT_FILE")"
+  fi
+  if [[ -n "$SYSTEM_PROMPT" ]]; then
+    if [[ -n "$user" ]]; then
+      user="${user}"$'\n\n'"${SYSTEM_PROMPT}"
+    else
+      user="$SYSTEM_PROMPT"
+    fi
   fi
 
   # replace mode (default): a supplied prompt is used verbatim — no default,
