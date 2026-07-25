@@ -234,7 +234,7 @@ class TestEdgeCaseInputs:
         f = tmp_path / "empty.md"
         f.write_text("")
         r = subprocess.run(
-            ["python3", str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
+            [sys.executable, str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
             capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin"},
         )
