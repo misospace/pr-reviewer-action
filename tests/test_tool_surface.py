@@ -120,3 +120,76 @@ def test_git_blame_blocks_sensitive_file(git_repo):
 def test_git_blame_escape_blocked(git_repo):
     res = _exec("git_blame", {"path": "../../etc/hosts"}, git_repo)
     assert res["status"] == "error"
+
+
+# ── sensitive-file blocklist expansion (#436) ────────────────────────────────
+SENSITIVE_FILES = [
+    ".netrc",
+    ".npmrc",
+    ".gitconfig",
+    ".git-credentials",
+    ".htpasswd",
+]
+
+
+@pytest.mark.parametrize("filename", SENSITIVE_FILES)
+def test_read_file_blocks_sensitive_files(tmp_path, filename):
+    (tmp_path / filename).write_text("SECRET=1\n", encoding="utf-8")
+    res = _exec("read_file", {"path": filename}, tmp_path)
+    assert res["status"] == "error"
+    assert "SECRET" not in str(res["result"])
+
+
+def test_read_file_blocks_docker_config(tmp_path):
+    docker_dir = tmp_path / ".docker"
+    docker_dir.mkdir()
+    (docker_dir / "config.json").write_text('{"auths":{}}\n', encoding="utf-8")
+    res = _exec("read_file", {"path": ".docker/config.json"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_blocks_kube_config(tmp_path):
+    kube_dir = tmp_path / ".kube"
+    kube_dir.mkdir()
+    (kube_dir / "config").write_text("apiVersion: v1\n", encoding="utf-8")
+    res = _exec("read_file", {"path": ".kube/config"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_blocks_kube_conf(tmp_path):
+    kube_dir = tmp_path / ".kube"
+    kube_dir.mkdir()
+    (kube_dir / "my-cluster.conf").write_text("apiVersion: v1\n", encoding="utf-8")
+    res = _exec("read_file", {"path": ".kube/my-cluster.conf"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_blocks_service_account_json(tmp_path):
+    (tmp_path / "my-project-service-account.json").write_text('{"type":"service_account"}\n', encoding="utf-8")
+    res = _exec("read_file", {"path": "my-project-service-account.json"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_blocks_key_json(tmp_path):
+    (tmp_path / "aws-key.json").write_text('{"key":"value"}\n', encoding="utf-8")
+    res = _exec("read_file", {"path": "aws-key.json"}, tmp_path)
+    assert res["status"] == "error"
+
+
+# ── existing sensitive files still blocked ───────────────────────────────────
+def test_read_file_still_blocks_env(tmp_path):
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    res = _exec("read_file", {"path": ".env"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_still_blocks_pem(tmp_path):
+    (tmp_path / "server.pem").write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    res = _exec("read_file", {"path": "server.pem"}, tmp_path)
+    assert res["status"] == "error"
+
+
+def test_read_file_still_blocks_key(tmp_path):
+    (tmp_path / "private.key").write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
+    res = _exec("read_file", {"path": "private.key"}, tmp_path)
+    assert res["status"] == "error"
