@@ -28,7 +28,11 @@ from pr_reviewer.platform import GH_DENY_SUBSTRINGS, USER_AGENT  # noqa: E402
 
 
 SENSITIVE_PATH_RE = re.compile(
-    r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$)",
+    r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$"
+    r"|\.netrc(\.|$)|\.npmrc(\.|$)|\.gitconfig(\.|$)|\.git-credentials(\.|$)"
+    r"|\.docker/config\.json(\.|$)|\.kube/(config|.*\.conf)(\.|$)"
+    r"|.*service-account.*\.json$|.*-key\.json$"
+    r"|\.htpasswd(\.|$))",
     re.IGNORECASE,
 )
 
@@ -97,7 +101,7 @@ def _resolve_workspace_path(path, workspace_root):
     if not resolved.is_relative_to(root):
         return None, "Path escapes workspace root"
 
-    if SENSITIVE_PATH_RE.search(resolved.name):
+    if SENSITIVE_PATH_RE.search(str(resolved)):
         return None, f"Sensitive file blocked: {resolved.name}"
 
     for deny in GH_DENY_SUBSTRINGS:
