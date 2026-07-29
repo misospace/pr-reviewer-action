@@ -843,6 +843,12 @@ def create_native_review(
     event: str,
     body: str,
 ) -> dict[str, Any] | None:
+    """Submit a body-only review. Forgejo mode only.
+
+    The event is pre-mapped to Forgejo's ReviewStateType tokens (e.g.
+    ``APPROVED``), which GitHub's review API rejects — GitHub-mode callers
+    go through ``gh pr review`` in ``scripts/platform_api.sh`` instead.
+    """
     return create_pr_review_from_payload(
         repo_full_name,
         pr_number,

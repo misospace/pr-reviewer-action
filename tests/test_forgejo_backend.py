@@ -732,6 +732,22 @@ class TestNativeReviews(unittest.TestCase):
         self.assertEqual(result["state"], "APPROVED")
 
     @_PATCH_FORGEJO
+    def test_create_native_review_maps_request_changes_state(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=58, state="REQUEST_CHANGES"))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "CHANGES_REQUESTED", "needs work")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"], {"body": "needs work", "event": "REQUEST_CHANGES"})
+
+    @_PATCH_FORGEJO
     def test_dismiss_review_uses_forgejo_dismissal_endpoint(self, mock_curl):
         seen = {}
 
