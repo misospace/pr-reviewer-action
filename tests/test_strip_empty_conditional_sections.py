@@ -231,6 +231,7 @@ class TestEdgeCaseInputs:
     def test_empty_file_path_via_cli(self, tmp_path):
         """An empty input file is handled without error (in-place CLI path)."""
         import subprocess
+        import sys
         f = tmp_path / "empty.md"
         f.write_text("")
         r = subprocess.run(
