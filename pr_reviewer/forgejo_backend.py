@@ -825,7 +825,8 @@ def create_pr_review_from_file(
     payload_file: str,
 ) -> dict[str, Any] | None:
     try:
-        payload = json.loads(open(payload_file, encoding="utf-8").read())
+        with open(payload_file, encoding="utf-8") as f:
+            payload = json.loads(f.read())
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict):
@@ -1081,7 +1082,8 @@ def main() -> None:
         if result is None:
             sys.exit(1)
     elif args.command == "create-native-review":
-        body = open(args.body_file, encoding="utf-8").read()
+        with open(args.body_file, encoding="utf-8") as f:
+            body = f.read()
         result = create_native_review(args.repo, args.pr_number, args.event, body)
         print(json.dumps(result, indent=2) if result else "null")
         if result is None:
