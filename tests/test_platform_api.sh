@@ -100,6 +100,11 @@ check "platform_review_native approve" \
 check "platform_review_native request changes" \
   "$(run_seam github "" 'platform_review_native o/r 7 REQUEST_CHANGES body.md')" \
   "gh pr review 7 --repo o/r --request-changes --body-file body.md"
+check "platform_review_native comment" \
+  "$(run_seam github "" 'platform_review_native o/r 7 COMMENT body.md')" \
+  "gh pr review 7 --repo o/r --comment --body-file body.md"
+RESULT="$(run_seam github "" 'platform_review_native o/r 7 BOGUS body.md')"
+check_contains "platform_review_native rejects unknown events" "$RESULT" "Unsupported native review event"
 check "platform_review_dismiss" \
   "$(run_seam github "" 'platform_review_dismiss o/r 7 55 superseded')" \
   "gh api repos/o/r/pulls/7/reviews/55/dismissals --method PUT -f message=superseded --jq .id"
@@ -165,6 +170,11 @@ check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_compare o/r aaa...bbb' "https://forgejo.example.com")"
 check "forgejo compare uses backend cli" "$RESULT" "forgejo compare o/r aaa...bbb"
+check "platform_authenticated_repo_permission is unknown on github" \
+  "$(run_seam github "" 'platform_authenticated_repo_permission o/r')" \
+  "unknown"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_authenticated_repo_permission o/r' "https://forgejo.example.com")"
+check "forgejo permission preflight uses backend cli" "$RESULT" "forgejo repo-permission o/r"
 # --jq passthrough: the forgejo path applies a trailing --jq to the backend's
 # JSON, mirroring `gh api --jq`, so one call site works on either platform.
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"total_commits\":3}"; }; platform_compare o/r aaa...bbb --jq .total_commits' "https://forgejo.example.com")"

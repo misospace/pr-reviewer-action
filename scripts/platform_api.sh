@@ -120,6 +120,17 @@ _forgejo_jq() {
 
 # ── Core PR I/O ─────────────────────────────────────────────────────────
 
+platform_authenticated_repo_permission() {
+  # $1=repo → read|write|admin on stdout (Forgejo), or "unknown" on GitHub:
+  # GitHub App/GITHUB_TOKEN permissions are unit-scoped and cannot be inferred
+  # from the coarse repo permission, so callers must not gate on it there.
+  if _platform_is_forgejo; then
+    _forgejo_py repo-permission "$1"
+  else
+    echo "unknown"
+  fi
+}
+
 platform_pr_get() {
   # $1=repo $2=pr_number [extra gh api flags, e.g. --jq] → PR object
   # (GitHub REST shape, or the --jq projection) on stdout
@@ -221,13 +232,18 @@ platform_review_create_json() {
 }
 
 platform_review_native() {
-  # $1=repo $2=pr_number $3=APPROVE|REQUEST_CHANGES $4=body_file
+  # $1=repo $2=pr_number $3=APPROVE|REQUEST_CHANGES|COMMENT $4=body_file
+  case "$3" in
+    APPROVE|REQUEST_CHANGES|COMMENT) ;;
+    *) echo "Unsupported native review event: $3" >&2; return 2 ;;
+  esac
   if _platform_is_forgejo; then
     _forgejo_py create-native-review "$1" "$2" "$3" "$4"
   else
     case "$3" in
-      APPROVE) gh pr review "$2" --repo "$1" --approve --body-file "$4" ;;
-      *)       gh pr review "$2" --repo "$1" --request-changes --body-file "$4" ;;
+      APPROVE)         gh pr review "$2" --repo "$1" --approve --body-file "$4" ;;
+      REQUEST_CHANGES) gh pr review "$2" --repo "$1" --request-changes --body-file "$4" ;;
+      COMMENT)         gh pr review "$2" --repo "$1" --comment --body-file "$4" ;;
     esac
   fi
 }

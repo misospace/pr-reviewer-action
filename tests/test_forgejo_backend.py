@@ -8,10 +8,12 @@ of the existing fake-gh test suites.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -202,6 +204,76 @@ def _forgejo_env_patch() -> Any:
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
+class TestAuthenticatedRepoPermission(unittest.TestCase):
+    @_PATCH_FORGEJO
+    def test_returns_effective_permission(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (200, json.dumps({"permission": "write"})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "write")
+        self.assertTrue(
+            mock_curl.call_args_list[1].args[1].endswith("/collaborators/review-bot/permission")
+        )
+
+    @_PATCH_FORGEJO
+    def test_permission_denied_fails_closed_with_sanitized_error(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (403, json.dumps({"message": "denied; token=must-not-print", "token": "also-secret"})),
+        ]
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertIsNone(result)
+        self.assertIn("HTTP 403", stderr.getvalue())
+        self.assertNotIn("must-not-print", stderr.getvalue())
+
+    @_PATCH_FORGEJO
+    def test_unresolvable_user_fails_closed(self, mock_curl):
+        mock_curl.return_value = (401, json.dumps({"message": "unauthorized"}))
+
+        with _forgejo_env_patch(), redirect_stderr(io.StringIO()):
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertIsNone(result)
+
+    @_PATCH_FORGEJO
+    def test_cli_repo_permission_prints_permission_and_exit_code(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (200, json.dumps({"permission": "admin"})),
+        ]
+
+        stdout = io.StringIO()
+        with _forgejo_env_patch(), redirect_stdout(stdout), patch.object(
+            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        ):
+            fb.main()
+
+        self.assertEqual(stdout.getvalue().strip(), "admin")
+
+    @_PATCH_FORGEJO
+    def test_cli_repo_permission_exits_nonzero_when_unknown(self, mock_curl):
+        mock_curl.return_value = (401, json.dumps({"message": "unauthorized"}))
+
+        stdout = io.StringIO()
+        with _forgejo_env_patch(), redirect_stdout(stdout), redirect_stderr(io.StringIO()), patch.object(
+            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                fb.main()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(stdout.getvalue().strip(), "none")
+
 
 class TestGetPrMetadata(unittest.TestCase):
     """Test get_pr_metadata with Forgejo fixtures."""
@@ -746,6 +818,95 @@ class TestNativeReviews(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(seen["data"], {"body": "needs work", "event": "REQUEST_CHANGES"})
+
+    @_PATCH_FORGEJO
+    def test_create_review_binds_commit_id_when_present(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=59))
+
+        mock_curl.side_effect = _run
+        payload = {"body": "review body", "event": "REQUEST_CHANGES", "commit_id": "abc123def456"}
+
+        with _forgejo_env_patch():
+            result = fb.create_pr_review_from_payload("misospace/pr-reviewer-action", 42, payload)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"]["commit_id"], "abc123def456")
+
+    @_PATCH_FORGEJO
+    def test_create_review_omits_empty_commit_id(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=60))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"body": "b", "event": "COMMENT", "commit_id": ""}
+            )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("commit_id", seen["data"])
+
+    @_PATCH_FORGEJO
+    def test_create_native_review_preserves_comment_event(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=61, state="COMMENT"))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "COMMENT", "advisory")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"], {"body": "advisory", "event": "COMMENT"})
+
+    @_PATCH_FORGEJO
+    def test_failed_review_publication_reports_sanitized_http_error(self, mock_curl):
+        mock_curl.return_value = (
+            403,
+            json.dumps(
+                {
+                    "message": "review permission denied; token=must-not-print-secret",
+                    "token": "also-must-not-print",
+                }
+            ),
+        )
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"event": "COMMENT", "body": "advisory"}
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Forgejo review publication failed (HTTP 403)", stderr.getvalue())
+        self.assertIn("review permission denied", stderr.getvalue())
+        self.assertIn("[REDACTED]", stderr.getvalue())
+        self.assertNotIn("must-not-print", stderr.getvalue())
+
+    @_PATCH_FORGEJO
+    def test_failed_review_publication_tolerates_non_json_error_body(self, mock_curl):
+        mock_curl.return_value = (502, "<html>bad gateway</html>")
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"event": "COMMENT", "body": "advisory"}
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Forgejo review publication failed (HTTP 502)", stderr.getvalue())
+        self.assertNotIn("bad gateway", stderr.getvalue())
 
     @_PATCH_FORGEJO
     def test_dismiss_review_uses_forgejo_dismissal_endpoint(self, mock_curl):

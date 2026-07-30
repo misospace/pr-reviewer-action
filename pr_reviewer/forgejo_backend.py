@@ -27,8 +27,17 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+# Shared credential redactor for remote diagnostics; scripts/ is not a
+# package, so extend sys.path the same way the scripts/ entrypoints do.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from redact import mask_secrets  # noqa: E402
 
 # Top-level import is safe: platform.py imports forgejo_backend only lazily
 # (inside _gh_api_forgejo), so there is no import cycle in this direction.
@@ -178,6 +187,20 @@ def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str
             pass
 
 
+def _report_http_error(operation: str, status_code: int, body_text: str) -> None:
+    """Emit an actionable error without echoing arbitrary response fields.
+
+    Only the API error's ``message`` field is considered, and it is
+    control-stripped, secret-masked, and truncated before printing.
+    """
+    data = _json_decode(body_text)
+    message = data.get("message") if isinstance(data, dict) else None
+    if isinstance(message, str):
+        message = mask_secrets(re.sub(r"[\x00-\x1f\x7f]", " ", message).strip())[:300]
+    detail = f": {message}" if message else ""
+    print(f"Forgejo {operation} failed (HTTP {status_code}){detail}", file=sys.stderr)
+
+
 def _parse_repo(repo_full_name: str) -> tuple[str, str]:
     """Split ``owner/repo`` into (owner, repo)."""
     parts = repo_full_name.split("/", 1)
@@ -194,6 +217,41 @@ def _json_decode(text: str) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Repository access preflight
+# ---------------------------------------------------------------------------
+
+def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
+    """Return the active token's effective repository permission, or None.
+
+    Forgejo PAT scopes are independent of repository membership, so a token
+    that can read a PR may still be unable to publish a review. The
+    collaborator-permission endpoint reports the authenticated user's
+    effective access (read|write|admin).
+    """
+    owner, repo = _parse_repo(repo_full_name)
+    if not _is_forgejo_mode():
+        return None
+
+    status_code, body_text = _curl("GET", f"{FORGEJO_API_URL}/api/v1/user")
+    user = _json_decode(body_text)
+    login = user.get("login") if status_code == 200 and isinstance(user, dict) else None
+    if not isinstance(login, str) or not login:
+        _report_http_error("review access preflight", status_code, body_text)
+        return None
+
+    status_code, body_text = _curl(
+        "GET",
+        f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/collaborators/{quote(login, safe='')}/permission",
+    )
+    data = _json_decode(body_text)
+    permission = data.get("permission") if status_code == 200 and isinstance(data, dict) else None
+    if permission not in {"read", "write", "admin"}:
+        _report_http_error("review access preflight", status_code, body_text)
+        return None
+    return str(permission)
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +847,9 @@ def create_pr_review_from_payload(
             "body": str(payload.get("body") or ""),
             "event": _forgejo_review_event(str(payload.get("event") or "COMMENT")),
         }
+        commit_id = payload.get("commit_id")
+        if isinstance(commit_id, str) and commit_id:
+            request["commit_id"] = commit_id
         comments = _normalise_review_comment_positions(repo_full_name, pr_number, payload.get("comments"))
         if comments:
             request["comments"] = comments
@@ -798,6 +859,7 @@ def create_pr_review_from_payload(
             data=request,
         )
         if status_code not in (200, 201):
+            _report_http_error("review publication", status_code, body_text)
             return None
         data = _json_decode(body_text)
         return data if isinstance(data, dict) else {"id": 0, "body": request["body"]}
@@ -969,6 +1031,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Forgejo backend CLI")
     sub = parser.add_subparsers(dest="command")
 
+    p_permission = sub.add_parser("repo-permission")
+    p_permission.add_argument("repo")
+
     p_meta = sub.add_parser("get-pr-metadata")
     p_meta.add_argument("repo")
     p_meta.add_argument("pr_number", type=int)
@@ -1040,7 +1105,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "get-pr-metadata":
+    if args.command == "repo-permission":
+        result = get_authenticated_repo_permission(args.repo)
+        print(result or "none")
+        if result is None:
+            sys.exit(1)
+    elif args.command == "get-pr-metadata":
         result = get_pr_metadata(args.repo, args.pr_number)
         print(json.dumps(result, indent=2) if result else "null")
     elif args.command == "get-pr-diff":

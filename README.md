@@ -384,7 +384,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
 | `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
-| `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. | No | `""` |
+| `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
 | `force_review` | Bypass the diff-unchanged guard and run a full PR review even when the fingerprint matches. Every forced review uses full scope to re-establish a clean baseline. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
 | `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
@@ -759,11 +759,11 @@ Even when your workflow grants `pull-requests: write`, native PR review verdicts
    - **Repository**: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
    - **Organization**: Settings → Actions → Organization permissions → "Allow GitHub Actions to create and approve pull requests"
 
-2. **Branch protection rules** — If branch protection requires a review from a specific user or team, the AI's approval may not satisfy that requirement. The PR will still show `request_changes` until the required reviewer approves.
+2. **Branch protection rules** — If branch protection requires a review from a specific user or team, the AI's approval may not satisfy that requirement even when it submits successfully.
 
 3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve_forks` is explicitly set to `"true"`.
 
-When approval is blocked, the action always submits a `request_changes` verdict with an explanation in the review body rather than failing silently.
+When a clean verdict is withheld by policy (`allow_approve: false`, a fork PR without `approve_forks`, or an incremental review without a clean baseline), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
 
 ### 💬 Non-blocking review comments
 

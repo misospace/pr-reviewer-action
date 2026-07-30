@@ -62,6 +62,30 @@ exit 0
 SHELLEOF
 chmod +x "$TMPDIR/bin/gh"
 
+# Scoped python3 shim for forgejo-mode tests: intercept only the forgejo
+# backend CLI (whose subcommands would otherwise hit the network) and delegate
+# every other python3 invocation to the real interpreter.
+REAL_PYTHON3="$(command -v python3)"
+export REAL_PYTHON3
+cat > "$TMPDIR/bin/python3" <<'SHELLEOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-m" && "${2:-}" == "pr_reviewer.forgejo_backend" ]]; then
+  case "${3:-}" in
+    list-comments|list-pr-reviews) printf '[]\n' ;;
+    get-pr-diff) cat /tmp/testfp_diff ;;
+    get-pr-metadata) cat /tmp/testfp_pr_object.json ;;
+    repo-permission)
+      printf '%s\n' "${TEST_FORGEJO_PERMISSION:-none}"
+      [[ "${TEST_FORGEJO_PERMISSION:-none}" != "none" ]]
+      ;;
+    *) echo "unexpected forgejo backend command: ${3:-}" >&2; exit 1 ;;
+  esac
+  exit $?
+fi
+exec "$REAL_PYTHON3" "$@"
+SHELLEOF
+chmod +x "$TMPDIR/bin/python3"
+
 cat > /tmp/testfp_pr_object.json <<'JSONEOF'
 {
   "number": 42,
@@ -122,6 +146,7 @@ run_precheck() {
     REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}" \
     GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" \
     GITHUB_EVENT_PATH="${GITHUB_EVENT_PATH:-}" \
+    EVENT_HEAD_SHA="${EVENT_HEAD_SHA:-}" \
     COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}" \
     PUBLISH_MODE="${PUBLISH_MODE:-comment}" \
     bash "$PRECHECK_SCRIPT"
@@ -440,6 +465,49 @@ RESULT="$(PLATFORM=auto FORGEJO_API_URL="https://forge.example.com" GITHUB_EVENT
 check "unrelated-label path still emits should_review=false" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
 check "auto+FORGEJO_API_URL resolves to forgejo" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "forgejo"
 check "effective_forgejo_api_url forwarded when forgejo" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" "https://forge.example.com"
+
+# Test 20: a queued synchronize event for an old head is skipped before any
+# model spend — the current PR head has moved on.
+echo ""
+echo "=== Test 20: superseded event head skips the review ==="
+set_empty_comments
+RESULT="$(EVENT_HEAD_SHA="cccc111122223333cccc111122223333cccc1111" run_precheck)"
+check "superseded head skips review" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "superseded head has explicit skip reason" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "superseded-head"
+check "superseded head still forwards the current head" "$(echo "$RESULT" | grep '^head_sha=' | head -1 | cut -d= -f2)" "aaaa111122223333aaaa111122223333aaaa1111"
+
+echo ""
+echo "=== Test 20b: matching event head still reviews ==="
+RESULT="$(EVENT_HEAD_SHA="aaaa111122223333aaaa111122223333aaaa1111" run_precheck)"
+check "matching event head reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+
+# Tests 21-23: Forgejo permission preflight (issue #453). Every supported
+# publish mode needs repository write access, and Forgejo exposes the
+# authenticated user's effective permission — fail before model spend when
+# the token cannot publish. GitHub mode is not gated (permissions there are
+# unit-scoped and not inferable from the coarse repo permission).
+echo ""
+echo "=== Test 21: Forgejo read-only token fails before model use ==="
+set_empty_comments
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=read run_precheck >/tmp/testfp_forgejo_read.out 2>&1; then
+  check "read-only Forgejo token is rejected" "success" "failure"
+else
+  check "read-only Forgejo token is rejected" "failure" "failure"
+  check_contains "rejection is actionable" "$(cat /tmp/testfp_forgejo_read.out)" "write permission"
+fi
+
+echo ""
+echo "=== Test 22: Forgejo unknown permission fails closed ==="
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=none run_precheck >/tmp/testfp_forgejo_none.out 2>&1; then
+  check "unknown Forgejo permission is rejected" "success" "failure"
+else
+  check "unknown Forgejo permission is rejected" "failure" "failure"
+fi
+
+echo ""
+echo "=== Test 23: Forgejo write token reviews ==="
+RESULT="$(PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=write run_precheck)"
+check "write-capable Forgejo token reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

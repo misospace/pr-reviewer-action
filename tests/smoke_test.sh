@@ -504,13 +504,13 @@ fi
 if [ "$CAN_APPROVE" = true ]; then
   COMMAND_BLOCKED="gh pr review 123 --repo owner/repo --approve --body-file $TMPDIR/review-verdict-body.md"
 else
-  COMMAND_BLOCKED="gh pr review 123 --repo owner/repo --request-changes --body-file $TMPDIR/review-verdict-body.md"
+  COMMAND_BLOCKED="gh pr review 123 --repo owner/repo --comment --body-file $TMPDIR/review-verdict-body.md"
 fi
 
-if echo "$COMMAND_BLOCKED" | grep -q '\-\-request-changes'; then
-  check "approve blocked when allow_approve=false uses --request-changes" "PASS" "PASS"
+if echo "$COMMAND_BLOCKED" | grep -q '\-\-comment'; then
+  check "approve blocked when allow_approve=false uses advisory --comment" "PASS" "PASS"
 else
-  check "approve blocked when allow_approve=false uses --request-changes" "FAIL" "PASS"
+  check "approve blocked when allow_approve=false uses advisory --comment" "FAIL" "PASS"
 fi
 
 echo ""
@@ -533,13 +533,13 @@ fi
 if [ "$CAN_APPROVE" = true ]; then
   COMMAND_FORK_BLOCKED="gh pr review 123 --repo owner/repo --approve --body-file $TMPDIR/review-verdict-body.md"
 else
-  COMMAND_FORK_BLOCKED="gh pr review 123 --repo owner/repo --request-changes --body-file $TMPDIR/review-verdict-body.md"
+  COMMAND_FORK_BLOCKED="gh pr review 123 --repo owner/repo --comment --body-file $TMPDIR/review-verdict-body.md"
 fi
 
-if echo "$COMMAND_FORK_BLOCKED" | grep -q '\-\-request-changes'; then
-  check "fork approval blocked when approve_forks=false uses --request-changes" "PASS" "PASS"
+if echo "$COMMAND_FORK_BLOCKED" | grep -q '\-\-comment'; then
+  check "fork approval blocked when approve_forks=false uses advisory --comment" "PASS" "PASS"
 else
-  check "fork approval blocked when approve_forks=false uses --request-changes" "FAIL" "PASS"
+  check "fork approval blocked when approve_forks=false uses advisory --comment" "FAIL" "PASS"
 fi
 
 echo ""

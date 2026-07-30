@@ -534,6 +534,41 @@ CURRENT_HEAD_SHA="$(jq -r '.head.sha // ""' pr-object.json 2>/dev/null || echo "
 CURRENT_BASE_SHA="$(jq -r '.base.sha // ""' pr-object.json 2>/dev/null || echo "")"
 IS_FORK_PR="$(derive_is_fork_pr pr-object.json)"
 
+# A queued synchronize run can start after a newer push (issue #451). The
+# event head is the immutable work item this run was created for; skip before
+# any model spend once the platform reports a different current head.
+if [[ -n "${EVENT_HEAD_SHA:-}" && -n "$CURRENT_HEAD_SHA" && "$EVENT_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
+  echo "Skipping superseded review event: event head $EVENT_HEAD_SHA is no longer the current head ($CURRENT_HEAD_SHA)." >&2
+  {
+    echo "effective_review_scope=full"
+    echo "previous_head_sha="
+    echo "baseline_clean=false"
+    echo "head_sha=$CURRENT_HEAD_SHA"
+    echo "base_sha=$CURRENT_BASE_SHA"
+    echo "is_fork_pr=$IS_FORK_PR"
+    echo "diff_fingerprint=$broad_fingerprint"
+    echo "should_review=false"
+    echo "skip_reason=superseded-head"
+    echo "resolved_platform=$RESOLVED_PLATFORM"
+    echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
+  } >> "$OUTPUT_FILE"
+  exit 0
+fi
+
+# Forgejo permission preflight (issue #453): every supported publish mode
+# needs repository write access, and Forgejo PAT scopes are independent of
+# repository membership — a token that can read the PR may still be unable to
+# publish. Fail here, before any model spend, with an actionable error.
+# GitHub is not gated: its token permissions are unit-scoped and cannot be
+# inferred from the coarse repo permission.
+if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
+  REPO_PERMISSION="$(platform_authenticated_repo_permission "$REPO" 2>/dev/null || true)"
+  if [[ "$REPO_PERMISSION" != "write" && "$REPO_PERMISSION" != "admin" ]]; then
+    echo "ERROR: Review token lacks Forgejo write permission for $REPO (got '${REPO_PERMISSION:-none}'); refusing to invoke a model whose review could not be published." >&2
+    exit 1
+  fi
+fi
+
 # Resolve effective review scope
 resolve_review_scope "$REVIEW_SCOPE" "$LAST_HEAD_SHA" "$LAST_BASE_SHA" \
   "$CURRENT_HEAD_SHA" "$CURRENT_BASE_SHA" "$LAST_REVIEW_RESULT"
