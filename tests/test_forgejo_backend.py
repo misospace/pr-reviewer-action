@@ -222,6 +222,18 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
         )
 
     @_PATCH_FORGEJO
+    def test_normalizes_owner_permission_to_admin(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "repo-owner"})),
+            (200, json.dumps({"permission": "owner", "role_name": "owner"})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "admin")
+
+    @_PATCH_FORGEJO
     def test_permission_denied_fails_closed_with_sanitized_error(self, mock_curl):
         mock_curl.side_effect = [
             (200, json.dumps({"login": "review-bot"})),

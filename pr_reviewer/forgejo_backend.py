@@ -248,6 +248,10 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     )
     data = _json_decode(body_text)
     permission = data.get("permission") if status_code == 200 and isinstance(data, dict) else None
+    # Forgejo reports organization owners as "owner" rather than "admin".
+    # Normalize both to the action's coarse read/write/admin vocabulary.
+    if permission == "owner":
+        return "admin"
     if permission not in {"read", "write", "admin"}:
         _report_http_error("review access preflight", status_code, body_text)
         return None
