@@ -812,6 +812,9 @@ def create_pr_review_from_payload(
             "body": str(payload.get("body") or ""),
             "event": _forgejo_review_event(str(payload.get("event") or "COMMENT")),
         }
+        commit_id = payload.get("commit_id")
+        if isinstance(commit_id, str) and commit_id:
+            request["commit_id"] = commit_id
         comments = _normalise_review_comment_positions(repo_full_name, pr_number, payload.get("comments"))
         if comments:
             request["comments"] = comments

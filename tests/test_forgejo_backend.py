@@ -750,6 +750,57 @@ class TestNativeReviews(unittest.TestCase):
         self.assertEqual(seen["data"], {"body": "needs work", "event": "REQUEST_CHANGES"})
 
     @_PATCH_FORGEJO
+    def test_create_review_binds_commit_id_when_present(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=59))
+
+        mock_curl.side_effect = _run
+        payload = {"body": "review body", "event": "REQUEST_CHANGES", "commit_id": "abc123def456"}
+
+        with _forgejo_env_patch():
+            result = fb.create_pr_review_from_payload("misospace/pr-reviewer-action", 42, payload)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"]["commit_id"], "abc123def456")
+
+    @_PATCH_FORGEJO
+    def test_create_review_omits_empty_commit_id(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=60))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"body": "b", "event": "COMMENT", "commit_id": ""}
+            )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("commit_id", seen["data"])
+
+    @_PATCH_FORGEJO
+    def test_create_native_review_preserves_comment_event(self, mock_curl):
+        seen = {}
+
+        def _run(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+            seen.update(method=method, url=url, data=kwargs.get("data"))
+            return 201, json.dumps(dict(REVIEW, id=61, state="COMMENT"))
+
+        mock_curl.side_effect = _run
+
+        with _forgejo_env_patch():
+            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "COMMENT", "advisory")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["data"], {"body": "advisory", "event": "COMMENT"})
+
+    @_PATCH_FORGEJO
     def test_failed_review_publication_reports_sanitized_http_error(self, mock_curl):
         mock_curl.return_value = (
             403,

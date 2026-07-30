@@ -759,11 +759,11 @@ Even when your workflow grants `pull-requests: write`, native PR review verdicts
    - **Repository**: Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
    - **Organization**: Settings → Actions → Organization permissions → "Allow GitHub Actions to create and approve pull requests"
 
-2. **Branch protection rules** — If branch protection requires a review from a specific user or team, the AI's approval may not satisfy that requirement. The PR will still show `request_changes` until the required reviewer approves.
+2. **Branch protection rules** — If branch protection requires a review from a specific user or team, the AI's approval may not satisfy that requirement even when it submits successfully.
 
 3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve_forks` is explicitly set to `"true"`.
 
-When approval is blocked, the action always submits a `request_changes` verdict with an explanation in the review body rather than failing silently.
+When a clean verdict is withheld by policy (`allow_approve: false`, a fork PR without `approve_forks`, or an incremental review without a clean baseline), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
 
 ### 💬 Non-blocking review comments
 

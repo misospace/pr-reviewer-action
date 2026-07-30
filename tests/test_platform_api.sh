@@ -100,6 +100,11 @@ check "platform_review_native approve" \
 check "platform_review_native request changes" \
   "$(run_seam github "" 'platform_review_native o/r 7 REQUEST_CHANGES body.md')" \
   "gh pr review 7 --repo o/r --request-changes --body-file body.md"
+check "platform_review_native comment" \
+  "$(run_seam github "" 'platform_review_native o/r 7 COMMENT body.md')" \
+  "gh pr review 7 --repo o/r --comment --body-file body.md"
+RESULT="$(run_seam github "" 'platform_review_native o/r 7 BOGUS body.md')"
+check_contains "platform_review_native rejects unknown events" "$RESULT" "Unsupported native review event"
 check "platform_review_dismiss" \
   "$(run_seam github "" 'platform_review_dismiss o/r 7 55 superseded')" \
   "gh api repos/o/r/pulls/7/reviews/55/dismissals --method PUT -f message=superseded --jq .id"
