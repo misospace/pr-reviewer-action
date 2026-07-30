@@ -1,0 +1,9 @@
+# actionlint (pinned in ci.yaml) does not yet understand GitHub's
+# self-repository `uses: $/` syntax (2026-07-30 changelog): it parses the spec
+# as {owner}/{repo}@{ref} and reports a missing ref. Scope the ignore to the
+# dogfood workflow only, and delete this block once actionlint learns the
+# syntax.
+paths:
+  .github/workflows/ai-pr-review.yaml:
+    ignore:
+      - 'specifying action "\$/[^"]*" in invalid format because ref is missing'

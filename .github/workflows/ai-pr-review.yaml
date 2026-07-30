@@ -39,7 +39,14 @@ jobs:
       - name: Review PR with reusable AI reviewer
         if: github.event_name == 'pull_request'
         id: review
-        uses: misospace/pr-reviewer-action@258ac494ff48261cba9a62dce384b35ed73404ba # v2.1.7
+        # Dogfood: `$/` resolves to this repository at the running commit, so
+        # every PR is reviewed by its own in-flight action code instead of the
+        # last release — a PR that breaks the manifest or publish path now
+        # fails its own review before it can ship. Also ends the renovate
+        # self-pin churn. Fork PRs are unchanged: they get no secrets and the
+        # job fails at the app-token step. Requires runner >= 2.336.0
+        # (github.com hosted runners qualify; not available on GHES).
+        uses: $/
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           ai_primary_retries: "3"
