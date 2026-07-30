@@ -42,22 +42,23 @@ jobs:
         uses: misospace/pr-reviewer-action@258ac494ff48261cba9a62dce384b35ed73404ba # v2.1.7
         with:
           github_token: ${{ steps.app-token.outputs.token }}
-          ai_primary_retries: "3"
-          ai_primary_retry_delay_sec: "15"
+          ai_primary_retries: "2"
+          ai_primary_retry_delay_sec: "5"
+          ai_connect_timeout_sec: "10"
           ai_base_url: ${{ vars.LITELLM_URL }}
-          ai_api_format: ${{ vars.PRIMARY_FORMAT }}
-          ai_model: ${{ vars.PRIMARY_MODEL }}
+          ai_api_format: openai
+          ai_model: qwen3.6-27b
           ai_api_key: ${{ secrets.LITELLM_API_KEY }}
           ai_response_format: json_object
           ai_fallback_base_url: ${{ vars.LITELLM_URL }}
-          ai_fallback_api_format: ${{ vars.FALLBACK_FORMAT }}
-          ai_fallback_model: ${{ vars.FALLBACK_MODEL }}
+          ai_fallback_api_format: openai
+          ai_fallback_model: gpt-5.6-sol
           ai_fallback_api_key: ${{ secrets.LITELLM_API_KEY }}
           ai_max_tokens: "32768"
           review_routing_mode: auto
           ai_smart_base_url: ${{ vars.LITELLM_URL }}
-          ai_smart_api_format: ${{ vars.SMART_FORMAT }}
-          ai_smart_model: ${{ vars.SMART_MODEL }}
+          ai_smart_api_format: openai
+          ai_smart_model: gpt-5.6-sol
           ai_smart_api_key: ${{ secrets.LITELLM_API_KEY }}
           context_limit_mode: normal
           ci_status_check: "true"
@@ -73,8 +74,11 @@ jobs:
           tool_allowed_gh_api_repos: misospace/pr-reviewer-action
           tool_request_timeout_sec: "15"
           tool_enable_for_forks: "false"
+          linear_enable_for_forks: "false"
+          evidence_enable_for_forks: "false"
           on_model_failure: notice
           inline_findings: "true"
           verdict_policy: findings_severity_gated
           publish_mode: review_verdict
           allow_approve: "true"
+          approve_forks: "false"

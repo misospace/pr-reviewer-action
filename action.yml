@@ -648,6 +648,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
         REVIEW_SCOPE: ${{ inputs.review_scope }}
@@ -734,8 +735,36 @@ runs:
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
       run: bash "${{ github.action_path }}/scripts/wait_for_ci.sh"
 
-    - name: Run AI review
+    - name: Verify pull request head is still current
+      id: head_check
       if: steps.precheck.outputs.should_review == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
+        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        REPO: ${{ inputs.repo || github.repository }}
+        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        EXPECTED_HEAD_SHA: ${{ steps.precheck.outputs.head_sha }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        set +e
+        bash "${GITHUB_ACTION_PATH}/scripts/verify_pr_head.sh"
+        VERIFY_RC=$?
+        set -e
+        case "$VERIFY_RC" in
+          0) echo "current=true" >> "$GITHUB_OUTPUT" ;;
+          3)
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=AI review skipped::A newer pull request head superseded this run before model invocation."
+            ;;
+          *) exit "$VERIFY_RC" ;;
+        esac
+
+    - name: Run AI review
+      if: steps.precheck.outputs.should_review == 'true' && steps.head_check.outputs.current == 'true'
       id: review
       shell: bash
       env:
@@ -845,7 +874,7 @@ runs:
       # block makes a duplicate-key manifest error structurally impossible.
       # All per-mode inline `${{ }}` expressions are hoisted into env so the
       # run body is pure bash dispatching on $PUBLISH_MODE.
-      if: steps.precheck.outputs.should_review == 'true' && (inputs.publish_mode == 'review_comment' || inputs.publish_mode == 'review_verdict' || (inputs.publish_mode == 'comment' && inputs.publish_review_comment == 'true'))
+      if: steps.precheck.outputs.should_review == 'true' && steps.head_check.outputs.current == 'true' && (inputs.publish_mode == 'review_comment' || inputs.publish_mode == 'review_verdict' || (inputs.publish_mode == 'comment' && inputs.publish_review_comment == 'true'))
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -882,6 +911,22 @@ runs:
       run: |
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/scripts/publish_helpers.sh"
+
+        # The model can run for minutes. Re-check at the publication boundary so
+        # no comment, request-changes review, or approval can target a newer head.
+        export EXPECTED_HEAD_SHA="$HEAD_SHA"
+        set +e
+        bash "${GITHUB_ACTION_PATH}/scripts/verify_pr_head.sh"
+        VERIFY_RC=$?
+        set -e
+        case "$VERIFY_RC" in
+          0) ;;
+          3)
+            echo "::notice title=AI review not published::A newer pull request head superseded the commit reviewed by this run."
+            exit 0
+            ;;
+          *) exit "$VERIFY_RC" ;;
+        esac
 
         case "$PUBLISH_MODE" in
           comment)
@@ -1091,8 +1136,8 @@ runs:
             submit_native_review() {
               local event="$1" body_file="$2"
               if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
-                jq -n --rawfile body "$body_file" --arg event "$event" --argjson comments "$COMMENTS_JSON" \
-                  '{body: $body, event: $event, comments: $comments}' > review-request.json
+                jq -n --rawfile body "$body_file" --arg event "$event" --arg commit_id "$HEAD_SHA" --argjson comments "$COMMENTS_JSON" \
+                  '{body: $body, event: $event, commit_id: $commit_id, comments: $comments}' > review-request.json
                 if platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json >/dev/null 2>&1; then
                   echo "Submitted native review ($event) with $(printf '%s' "$COMMENTS_JSON" | jq 'length') inline comment(s)"
                   return 0
@@ -1100,42 +1145,48 @@ runs:
                 echo "WARN: inline-comment review submission failed; falling back to plain review" >&2
               fi
               case "$event" in
-                APPROVE) platform_review_native "$REPO" "$PR_NUMBER" APPROVE "$body_file" ;;
-                *) platform_review_native "$REPO" "$PR_NUMBER" REQUEST_CHANGES "$body_file" ;;
+                APPROVE|REQUEST_CHANGES|COMMENT)
+                  jq -n --rawfile body "$body_file" --arg event "$event" --arg commit_id "$HEAD_SHA" \
+                    '{body: $body, event: $event, commit_id: $commit_id}' > review-request.json
+                  platform_review_create_json "$REPO" "$PR_NUMBER" review-request.json ;;
+                *)
+                  echo "Unsupported native review event: $event" >&2
+                  return 2 ;;
               esac
             }
 
             if [ "$CAN_APPROVE" = true ]; then
               echo "Submitting native approval for #$PR_NUMBER"
               if ! submit_native_review APPROVE "$BODY_FILE" 2>&1; then
-                echo "ERROR: Native approval failed for #$PR_NUMBER." >&2
-                echo "This may be caused by the 'Allow GitHub Actions to create and approve pull requests' setting being disabled." >&2
-                echo "Enable this setting at: Repository Settings → Actions → General → Allow GitHub Actions to create and approve pull requests" >&2
-                echo "Or at the organization level: Organization Settings → Actions → Organization permissions → Allow GitHub Actions to create and approve pull requests" >&2
-                exit 1
+                echo "WARN: Native approval failed for #$PR_NUMBER; publishing the clean verdict as an advisory COMMENT instead." >&2
+                {
+                  echo ""
+                  echo "> **Approval withheld**: the platform rejected native approval. This clean review is advisory and does not satisfy an approval requirement."
+                } >> "$BODY_FILE"
+                submit_native_review COMMENT "$BODY_FILE"
               fi
             else
-              # Block approval: submit request_changes with explanation
-              echo "Blocking native approval for #$PR_NUMBER (allow_approve=${ALLOW_APPROVE_BOOL}, approve_forks=${APPROVE_FORKS_BOOL}, is_fork=${IS_FORK_PR})"
-
               if [ "$VERDICT" = "request_changes" ]; then
+                echo "Submitting blocking findings for #$PR_NUMBER"
                 submit_native_review REQUEST_CHANGES "$BODY_FILE"
               else
-                # The review approved but a guardrail blocked native approval —
-                # explain the actual reason.
+                # A clean verdict withheld by policy remains advisory. Turning it
+                # into REQUEST_CHANGES would invent a blocker the model did not
+                # find, especially for forks where approvals are intentionally off.
+                echo "Withholding native approval for #$PR_NUMBER (allow_approve=${ALLOW_APPROVE_BOOL}, approve_forks=${APPROVE_FORKS_BOOL}, is_fork=${IS_FORK_PR})"
                 if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
                   {
                     echo ""
-                    echo "> **Approval withheld**: the previous review of this PR found blocking issues. This review's verdict is approve, but native approval is withheld until a review against a clean baseline confirms the PR as a whole."
+                    echo "> **Approval withheld**: the previous review of this PR found blocking issues. This clean incremental review is advisory until a full review against a clean baseline confirms the PR as a whole."
                   } >> "$BODY_FILE"
                 else
                   {
                     echo ""
-                    echo "> **Approval blocked by policy**: native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs)."
+                    echo "> **Approval blocked by policy**: this clean review is advisory. Native approvals require \`allow_approve: true\` and, for cross-repository PRs, \`approve_forks: true\`."
                   } >> "$BODY_FILE"
                 fi
 
-                submit_native_review REQUEST_CHANGES "$BODY_FILE"
+                submit_native_review COMMENT "$BODY_FILE"
               fi
             fi
             ;;

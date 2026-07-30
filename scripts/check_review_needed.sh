@@ -526,13 +526,59 @@ fi
 # Get the current PR object once. This is the single PR-object fetch point for
 # the whole action: the head/base SHAs drive scope resolution here, and the
 # object is saved to pr-object.json so run_review.sh (and the publish steps,
-# via the is_fork_pr output) do not have to fetch it again.
+# via the is_fork_pr output) do not have to fetch it again. An inaccessible PR
+# is a configuration/access error: continuing would spend model tokens on data
+# that cannot be safely classified or published.
 if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then
-  echo '{}' > pr-object.json
+  echo "ERROR: Could not fetch pull request $REPO#$PR_NUMBER; verify the review token has repository read access." >&2
+  exit 1
 fi
 CURRENT_HEAD_SHA="$(jq -r '.head.sha // ""' pr-object.json 2>/dev/null || echo "")"
 CURRENT_BASE_SHA="$(jq -r '.base.sha // ""' pr-object.json 2>/dev/null || echo "")"
+if [[ -z "$CURRENT_HEAD_SHA" || -z "$CURRENT_BASE_SHA" ]] || ! jq -e '.head.repo.full_name and .base.repo.full_name' pr-object.json >/dev/null 2>&1; then
+  echo "ERROR: Could not fetch a complete pull request object for $REPO#$PR_NUMBER; verify repository access before reviewing." >&2
+  exit 1
+fi
+
+# Forgejo exposes the authenticated user's effective repository permission.
+# Require write access before model invocation because every supported publish
+# mode needs to create or update PR content. GitHub App/GITHUB_TOKEN permissions
+# are unit-scoped and cannot be inferred from GitHub's coarse repo permission;
+# approval rejection there is handled by the advisory-COMMENT fallback.
+if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
+  REPO_PERMISSION="$(platform_authenticated_repo_permission "$REPO" 2>/dev/null || true)"
+  if [[ "$REPO_PERMISSION" != "write" && "$REPO_PERMISSION" != "admin" ]]; then
+    echo "ERROR: Review token lacks Forgejo write permission for $REPO; refusing to invoke a model that cannot publish its result." >&2
+    exit 1
+  fi
+  if ! platform_probe_review_publication "$REPO" "$PR_NUMBER" "$CURRENT_HEAD_SHA"; then
+    echo "ERROR: Forgejo token could not create and clean up a pending review for $REPO; verify its repository-write scope before invoking the model." >&2
+    exit 1
+  fi
+fi
+
 IS_FORK_PR="$(derive_is_fork_pr pr-object.json)"
+
+# A queued synchronize run can start after a newer push. The event head is the
+# immutable work item this run was created for; do not spend on it once Forgejo
+# or GitHub reports a different current head.
+if [[ -n "${EVENT_HEAD_SHA:-}" && "$EVENT_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
+  echo "Skipping superseded review event: event head $EVENT_HEAD_SHA is no longer current." >&2
+  {
+    echo "effective_review_scope=full"
+    echo "previous_head_sha="
+    echo "baseline_clean=false"
+    echo "head_sha=$CURRENT_HEAD_SHA"
+    echo "base_sha=$CURRENT_BASE_SHA"
+    echo "is_fork_pr=$IS_FORK_PR"
+    echo "diff_fingerprint=$broad_fingerprint"
+    echo "should_review=false"
+    echo "skip_reason=superseded-head"
+    echo "resolved_platform=$RESOLVED_PLATFORM"
+    echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
+  } >> "$OUTPUT_FILE"
+  exit 0
+fi
 
 # Resolve effective review scope
 resolve_review_scope "$REVIEW_SCOPE" "$LAST_HEAD_SHA" "$LAST_BASE_SHA" \

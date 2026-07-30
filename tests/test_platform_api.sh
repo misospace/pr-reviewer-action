@@ -55,6 +55,12 @@ check "invalid platform errors" "$(echo "$RESULT" | grep -c "unsupported PLATFOR
 
 echo ""
 echo "=== github backend: exact gh argv ==="
+check "platform_authenticated_repo_permission is unknown on github" \
+  "$(run_seam github "" 'platform_authenticated_repo_permission o/r')" \
+  "unknown"
+check "platform_probe_review_publication is a no-op on github" \
+  "$(run_seam github "" 'platform_probe_review_publication o/r 7 abc; echo ok')" \
+  "ok"
 check "platform_pr_get" \
   "$(run_seam github "" 'platform_pr_get o/r 7')" \
   "gh api repos/o/r/pulls/7"
@@ -100,6 +106,9 @@ check "platform_review_native approve" \
 check "platform_review_native request changes" \
   "$(run_seam github "" 'platform_review_native o/r 7 REQUEST_CHANGES body.md')" \
   "gh pr review 7 --repo o/r --request-changes --body-file body.md"
+check "platform_review_native comment" \
+  "$(run_seam github "" 'platform_review_native o/r 7 COMMENT body.md')" \
+  "gh pr review 7 --repo o/r --comment --body-file body.md"
 check "platform_review_dismiss" \
   "$(run_seam github "" 'platform_review_dismiss o/r 7 55 superseded')" \
   "gh api repos/o/r/pulls/7/reviews/55/dismissals --method PUT -f message=superseded --jq .id"
@@ -163,6 +172,12 @@ check "forgejo without FORGEJO_API_URL fails loudly" \
 RESULT="$(run_seam forgejo "" 'platform_graphql -f query=Q')"
 check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_authenticated_repo_permission o/r' "https://forgejo.example.com")"
+check "forgejo permission preflight uses backend cli" "$RESULT" "forgejo repo-permission o/r"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_probe_review_publication o/r 7 abc' "https://forgejo.example.com")"
+check "forgejo publication probe uses backend cli" "$RESULT" ""
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*" >&2; }; platform_probe_review_publication o/r 7 abc' "https://forgejo.example.com" 2>&1)"
+check_contains "forgejo publication probe forwards the reviewed head" "$RESULT" "forgejo probe-review-publication o/r 7 abc"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_compare o/r aaa...bbb' "https://forgejo.example.com")"
 check "forgejo compare uses backend cli" "$RESULT" "forgejo compare o/r aaa...bbb"
 # --jq passthrough: the forgejo path applies a trailing --jq to the backend's

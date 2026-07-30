@@ -747,7 +747,7 @@ jobs:
 ```
 
 > [!NOTE]
-> This workflow requires the **Allow GitHub Actions to create and approve pull requests** setting to be enabled for your repository or organization. Without it, native approvals will fail with a 403 error even though `pull-requests: write` is granted.
+> This workflow requires the **Allow GitHub Actions to create and approve pull requests** setting to be enabled for your repository or organization. Without it, the action publishes the clean result as an advisory `COMMENT`; it never converts a failed approval into `REQUEST_CHANGES`.
 
 This configuration allows the AI to submit native approvals when its verdict is `approve`. Fork PRs are still blocked from approval unless `approve_forks` is also set to `"true"`.
 
@@ -763,7 +763,7 @@ Even when your workflow grants `pull-requests: write`, native PR review verdicts
 
 3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve_forks` is explicitly set to `"true"`.
 
-When approval is blocked, the action always submits a `request_changes` verdict with an explanation in the review body rather than failing silently.
+When a clean verdict cannot be approved because of these guardrails, the action submits a non-blocking `COMMENT` review with an explanation. A real model `request_changes` verdict remains a native blocking review.
 
 ### 💬 Non-blocking review comments
 

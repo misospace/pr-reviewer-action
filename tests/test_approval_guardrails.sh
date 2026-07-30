@@ -98,19 +98,22 @@ check_exists "action.yml has the publish dispatcher step" \
 check_exists "action.yml dispatches the review_verdict publish mode" \
   "$(grep -c '^          review_verdict)' "$ACTION_YML" || echo 0)"
 
-# The native-review invocations route through the platform seam (#221):
-# action.yml calls platform_review_native, whose github backend holds the
-# actual `gh pr review --approve/--request-changes` command lines.
-PLATFORM_SEAM="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/platform_api.sh"
+# Native reviews use the JSON publication seam so every event can be bound to
+# the reviewed commit SHA on both GitHub and Forgejo.
+check_exists "action.yml routes approve through the native review helper" \
+  "$(grep -c 'submit_native_review APPROVE' "$ACTION_YML" || echo 0)"
 
-check_exists "action.yml routes approve through the seam" \
-  "$(grep -c 'platform_review_native "\$REPO" "\$PR_NUMBER" APPROVE' "$ACTION_YML" || echo 0)"
+check_exists "native review payload is commit-bound" \
+  "$(grep -c "commit_id: \\\$commit_id" "$ACTION_YML" || echo 0)"
 
-check_exists "seam github backend has gh pr review approve" \
-  "$(grep -c 'gh pr review.*--approve' "$PLATFORM_SEAM" || echo 0)"
+check_exists "native reviews use the JSON publication seam" \
+  "$(grep -c 'platform_review_create_json.*review-request.json' "$ACTION_YML" || echo 0)"
 
-check_exists "seam github backend has gh pr review request-changes" \
-  "$(grep -c 'gh pr review.*--request-changes' "$PLATFORM_SEAM" || echo 0)"
+check_exists "publication boundary rechecks the PR head" \
+  "$(grep -c 'scripts/verify_pr_head.sh' "$ACTION_YML" || echo 0)"
+
+check_exists "policy-withheld clean verdict publishes COMMENT" \
+  "$(grep -c 'submit_native_review COMMENT' "$ACTION_YML" || echo 0)"
 
 echo ""
 echo "=== README.md documentation validation ==="

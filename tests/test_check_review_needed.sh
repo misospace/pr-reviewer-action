@@ -31,6 +31,8 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/bin"
+REAL_PYTHON3="$(command -v python3)"
+export REAL_PYTHON3
 
 FIXED_DIFF='diff --git a/x b/x
 index 123..456 644
@@ -61,6 +63,28 @@ esac
 exit 0
 SHELLEOF
 chmod +x "$TMPDIR/bin/gh"
+
+cat > "$TMPDIR/bin/python3" <<'SHELLEOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-m" && "${2:-}" == "pr_reviewer.forgejo_backend" ]]; then
+  case "${3:-}" in
+    list-comments|list-pr-reviews) printf '[]\n' ;;
+    get-pr-diff) cat /tmp/testfp_diff ;;
+    get-pr-metadata) cat /tmp/testfp_pr_object.json ;;
+    repo-permission)
+      printf '%s\n' "${TEST_FORGEJO_PERMISSION:-none}"
+      [[ "${TEST_FORGEJO_PERMISSION:-none}" != "none" ]]
+      ;;
+    probe-review-publication)
+      [[ "${TEST_FORGEJO_PROBE:-fail}" == "pass" ]]
+      ;;
+    *) echo "unexpected Forgejo test command: ${3:-}" >&2; exit 1 ;;
+  esac
+  exit $?
+fi
+exec "$REAL_PYTHON3" "$@"
+SHELLEOF
+chmod +x "$TMPDIR/bin/python3"
 
 cat > /tmp/testfp_pr_object.json <<'JSONEOF'
 {
@@ -122,6 +146,7 @@ run_precheck() {
     REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}" \
     GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" \
     GITHUB_EVENT_PATH="${GITHUB_EVENT_PATH:-}" \
+    EVENT_HEAD_SHA="${EVENT_HEAD_SHA:-}" \
     COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}" \
     PUBLISH_MODE="${PUBLISH_MODE:-comment}" \
     bash "$PRECHECK_SCRIPT"
@@ -383,9 +408,9 @@ set_empty_comments
 RESULT="$(run_precheck)"
 check "fork PR forwards is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
 
-# ── Test 16: missing head.repo → fail closed (treated as fork) ───────
+# ── Test 16: incomplete fork metadata is an access error ─────────────
 echo ""
-echo "=== Test 16: missing head.repo metadata → is_fork_pr=true (fail closed) ==="
+echo "=== Test 16: missing head.repo metadata fails before model use ==="
 cat > /tmp/testfp_pr_object.json <<'JSONEOF'
 {
   "number": 42,
@@ -394,18 +419,25 @@ cat > /tmp/testfp_pr_object.json <<'JSONEOF'
 }
 JSONEOF
 set_empty_comments
-RESULT="$(run_precheck)"
-check "missing head.repo fails closed to is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
+if run_precheck >/tmp/testfp_incomplete_precheck.out 2>&1; then
+  check "missing head.repo fails precheck" "success" "failure"
+else
+  check "missing head.repo fails precheck" "failure" "failure"
+fi
 
-# ── Test 17: degraded/empty PR object → fail closed ──────────────────
+# ── Test 17: degraded/empty PR object fails before model use ─────────
 echo ""
-echo "=== Test 17: empty PR object (degraded fetch) → is_fork_pr=true (fail closed) ==="
+echo "=== Test 17: empty PR object is an access/configuration error ==="
 cat > /tmp/testfp_pr_object.json <<'JSONEOF'
 {}
 JSONEOF
 set_empty_comments
-RESULT="$(run_precheck)"
-check "empty PR object fails closed to is_fork_pr=true" "$(echo "$RESULT" | grep '^is_fork_pr=' | head -1 | cut -d= -f2)" "true"
+if run_precheck >/tmp/testfp_failed_precheck.out 2>&1; then
+  check "empty PR object fails precheck" "success" "failure"
+else
+  check "empty PR object fails precheck" "failure" "failure"
+  check_contains "failure explains PR access" "$(cat /tmp/testfp_failed_precheck.out)" "Could not fetch a complete pull request object"
+fi
 
 # Restore the default same-repo PR object for any later additions.
 cat > /tmp/testfp_pr_object.json <<'JSONEOF'
@@ -440,6 +472,40 @@ RESULT="$(PLATFORM=auto FORGEJO_API_URL="https://forge.example.com" GITHUB_EVENT
 check "unrelated-label path still emits should_review=false" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
 check "auto+FORGEJO_API_URL resolves to forgejo" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "forgejo"
 check "effective_forgejo_api_url forwarded when forgejo" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" "https://forge.example.com"
+
+# Test 20: an event for an old head is skipped before the model step.
+echo ""
+echo "=== Test 20: superseded event head is a no-op ==="
+set_empty_comments
+EVENT_HEAD_SHA="cccc111122223333cccc111122223333cccc1111" RESULT="$(run_precheck)"
+check "superseded head skips review" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "superseded head has explicit reason" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "superseded-head"
+
+# Tests 21-23: exercise the full Forgejo precheck path. Repository membership
+# and PAT scope are separate: both must pass before model invocation.
+echo ""
+echo "=== Test 21: Forgejo read-only membership fails precheck ==="
+set_empty_comments
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=read TEST_FORGEJO_PROBE=pass run_precheck >/tmp/testfp_forgejo_read.out 2>&1; then
+  check "read-only Forgejo membership is rejected" "success" "failure"
+else
+  check "read-only Forgejo membership is rejected" "failure" "failure"
+fi
+
+echo ""
+echo "=== Test 22: Forgejo PAT without publication scope fails precheck ==="
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=write TEST_FORGEJO_PROBE=fail run_precheck >/tmp/testfp_forgejo_scope.out 2>&1; then
+  check "write member with insufficient PAT scope is rejected" "success" "failure"
+else
+  check "write member with insufficient PAT scope is rejected" "failure" "failure"
+  check_contains "scope failure is actionable" "$(cat /tmp/testfp_forgejo_scope.out)" "repository-write scope"
+fi
+
+echo ""
+echo "=== Test 23: Forgejo write membership and publication scope pass ==="
+unset EVENT_HEAD_SHA
+RESULT="$(PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=write TEST_FORGEJO_PROBE=pass run_precheck)"
+check "Forgejo capability-verified token reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
