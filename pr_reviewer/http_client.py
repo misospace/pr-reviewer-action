@@ -36,6 +36,7 @@ def gh_api_call(endpoint: str, token: str | None = None) -> dict | list | None:
         env = os.environ.copy()
         if token:
             env["GH_TOKEN"] = token
+            env["GITHUB_TOKEN"] = token
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30, env=env
         )

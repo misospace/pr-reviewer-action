@@ -653,6 +653,25 @@ class TestGhApiCall:
         monkeypatch.setattr(http_client.subprocess, "run", _boom)
         assert http_client.gh_api_call("repos/o/r") is None
 
+    def test_sets_both_gh_token_and_github_token(self, monkeypatch):
+        from pr_reviewer import http_client
+
+        captured_env = None
+
+        class _R:
+            returncode = 0
+            stdout = "{}"
+
+        def _run(*a, **k):
+            nonlocal captured_env
+            captured_env = k.get("env", {})
+            return _R()
+
+        monkeypatch.setattr(http_client.subprocess, "run", _run)
+        http_client.gh_api_call("repos/o/r", token="secret-token")
+        assert captured_env["GH_TOKEN"] == "secret-token"
+        assert captured_env["GITHUB_TOKEN"] == "secret-token"
+
 
 class TestReleasesCache:
     """render_linked_sources fetches a repo's releases list at most once."""
