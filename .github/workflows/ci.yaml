@@ -24,7 +24,9 @@ jobs:
           python-version: '3.14'
 
       - name: Install test dependencies
-        run: pip install pytest pytest-cov yamllint
+        run: |
+          pip install pytest pytest-cov yamllint
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq
 
       - name: Validate action metadata YAML
         run: ruby -e 'require "yaml"; YAML.load_file("action.yml")'
