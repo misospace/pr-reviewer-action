@@ -122,6 +122,7 @@ run_precheck() {
     REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}" \
     GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" \
     GITHUB_EVENT_PATH="${GITHUB_EVENT_PATH:-}" \
+    EVENT_HEAD_SHA="${EVENT_HEAD_SHA:-}" \
     COMMENT_MARKER="${COMMENT_MARKER:-<!-- ai-pr-reviewer -->}" \
     PUBLISH_MODE="${PUBLISH_MODE:-comment}" \
     bash "$PRECHECK_SCRIPT"
@@ -440,6 +441,21 @@ RESULT="$(PLATFORM=auto FORGEJO_API_URL="https://forge.example.com" GITHUB_EVENT
 check "unrelated-label path still emits should_review=false" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
 check "auto+FORGEJO_API_URL resolves to forgejo" "$(echo "$RESULT" | grep '^resolved_platform=' | head -1 | cut -d= -f2)" "forgejo"
 check "effective_forgejo_api_url forwarded when forgejo" "$(echo "$RESULT" | grep '^effective_forgejo_api_url=' | head -1 | cut -d= -f2-)" "https://forge.example.com"
+
+# Test 20: a queued synchronize event for an old head is skipped before any
+# model spend — the current PR head has moved on.
+echo ""
+echo "=== Test 20: superseded event head skips the review ==="
+set_empty_comments
+RESULT="$(EVENT_HEAD_SHA="cccc111122223333cccc111122223333cccc1111" run_precheck)"
+check "superseded head skips review" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "superseded head has explicit skip reason" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "superseded-head"
+check "superseded head still forwards the current head" "$(echo "$RESULT" | grep '^head_sha=' | head -1 | cut -d= -f2)" "aaaa111122223333aaaa111122223333aaaa1111"
+
+echo ""
+echo "=== Test 20b: matching event head still reviews ==="
+RESULT="$(EVENT_HEAD_SHA="aaaa111122223333aaaa111122223333aaaa1111" run_precheck)"
+check "matching event head reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

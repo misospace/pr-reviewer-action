@@ -118,6 +118,9 @@ check_exists "policy-withheld clean verdict publishes COMMENT" \
 check_exists "genuine approval failure still fails the step loudly" \
   "$(grep -c 'ERROR: Native approval failed' "$ACTION_YML" || echo 0)"
 
+check_exists "publication boundary rechecks the PR head" \
+  "$(grep -c 'scripts/verify_pr_head.sh' "$ACTION_YML" || echo 0)"
+
 check_exists "seam github backend has gh pr review approve" \
   "$(grep -c 'gh pr review.*--approve' "$PLATFORM_SEAM" || echo 0)"
 
