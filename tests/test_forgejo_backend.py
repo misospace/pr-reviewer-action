@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -204,6 +204,76 @@ def _forgejo_env_patch() -> Any:
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
+class TestAuthenticatedRepoPermission(unittest.TestCase):
+    @_PATCH_FORGEJO
+    def test_returns_effective_permission(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (200, json.dumps({"permission": "write"})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "write")
+        self.assertTrue(
+            mock_curl.call_args_list[1].args[1].endswith("/collaborators/review-bot/permission")
+        )
+
+    @_PATCH_FORGEJO
+    def test_permission_denied_fails_closed_with_sanitized_error(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (403, json.dumps({"message": "denied; token=must-not-print", "token": "also-secret"})),
+        ]
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertIsNone(result)
+        self.assertIn("HTTP 403", stderr.getvalue())
+        self.assertNotIn("must-not-print", stderr.getvalue())
+
+    @_PATCH_FORGEJO
+    def test_unresolvable_user_fails_closed(self, mock_curl):
+        mock_curl.return_value = (401, json.dumps({"message": "unauthorized"}))
+
+        with _forgejo_env_patch(), redirect_stderr(io.StringIO()):
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertIsNone(result)
+
+    @_PATCH_FORGEJO
+    def test_cli_repo_permission_prints_permission_and_exit_code(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            (200, json.dumps({"permission": "admin"})),
+        ]
+
+        stdout = io.StringIO()
+        with _forgejo_env_patch(), redirect_stdout(stdout), patch.object(
+            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        ):
+            fb.main()
+
+        self.assertEqual(stdout.getvalue().strip(), "admin")
+
+    @_PATCH_FORGEJO
+    def test_cli_repo_permission_exits_nonzero_when_unknown(self, mock_curl):
+        mock_curl.return_value = (401, json.dumps({"message": "unauthorized"}))
+
+        stdout = io.StringIO()
+        with _forgejo_env_patch(), redirect_stdout(stdout), redirect_stderr(io.StringIO()), patch.object(
+            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                fb.main()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(stdout.getvalue().strip(), "none")
+
 
 class TestGetPrMetadata(unittest.TestCase):
     """Test get_pr_metadata with Forgejo fixtures."""

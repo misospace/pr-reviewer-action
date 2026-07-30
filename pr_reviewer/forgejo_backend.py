@@ -220,6 +220,41 @@ def _json_decode(text: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Repository access preflight
+# ---------------------------------------------------------------------------
+
+def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
+    """Return the active token's effective repository permission, or None.
+
+    Forgejo PAT scopes are independent of repository membership, so a token
+    that can read a PR may still be unable to publish a review. The
+    collaborator-permission endpoint reports the authenticated user's
+    effective access (read|write|admin).
+    """
+    owner, repo = _parse_repo(repo_full_name)
+    if not _is_forgejo_mode():
+        return None
+
+    status_code, body_text = _curl("GET", f"{FORGEJO_API_URL}/api/v1/user")
+    user = _json_decode(body_text)
+    login = user.get("login") if status_code == 200 and isinstance(user, dict) else None
+    if not isinstance(login, str) or not login:
+        _report_http_error("review access preflight", status_code, body_text)
+        return None
+
+    status_code, body_text = _curl(
+        "GET",
+        f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/collaborators/{quote(login, safe='')}/permission",
+    )
+    data = _json_decode(body_text)
+    permission = data.get("permission") if status_code == 200 and isinstance(data, dict) else None
+    if permission not in {"read", "write", "admin"}:
+        _report_http_error("review access preflight", status_code, body_text)
+        return None
+    return str(permission)
+
+
+# ---------------------------------------------------------------------------
 # PR Metadata
 # ---------------------------------------------------------------------------
 
@@ -996,6 +1031,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Forgejo backend CLI")
     sub = parser.add_subparsers(dest="command")
 
+    p_permission = sub.add_parser("repo-permission")
+    p_permission.add_argument("repo")
+
     p_meta = sub.add_parser("get-pr-metadata")
     p_meta.add_argument("repo")
     p_meta.add_argument("pr_number", type=int)
@@ -1067,7 +1105,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "get-pr-metadata":
+    if args.command == "repo-permission":
+        result = get_authenticated_repo_permission(args.repo)
+        print(result or "none")
+        if result is None:
+            sys.exit(1)
+    elif args.command == "get-pr-metadata":
         result = get_pr_metadata(args.repo, args.pr_number)
         print(json.dumps(result, indent=2) if result else "null")
     elif args.command == "get-pr-diff":

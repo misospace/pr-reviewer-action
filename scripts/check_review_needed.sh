@@ -555,6 +555,20 @@ if [[ -n "${EVENT_HEAD_SHA:-}" && -n "$CURRENT_HEAD_SHA" && "$EVENT_HEAD_SHA" !=
   exit 0
 fi
 
+# Forgejo permission preflight (issue #453): every supported publish mode
+# needs repository write access, and Forgejo PAT scopes are independent of
+# repository membership — a token that can read the PR may still be unable to
+# publish. Fail here, before any model spend, with an actionable error.
+# GitHub is not gated: its token permissions are unit-scoped and cannot be
+# inferred from the coarse repo permission.
+if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
+  REPO_PERMISSION="$(platform_authenticated_repo_permission "$REPO" 2>/dev/null || true)"
+  if [[ "$REPO_PERMISSION" != "write" && "$REPO_PERMISSION" != "admin" ]]; then
+    echo "ERROR: Review token lacks Forgejo write permission for $REPO (got '${REPO_PERMISSION:-none}'); refusing to invoke a model whose review could not be published." >&2
+    exit 1
+  fi
+fi
+
 # Resolve effective review scope
 resolve_review_scope "$REVIEW_SCOPE" "$LAST_HEAD_SHA" "$LAST_BASE_SHA" \
   "$CURRENT_HEAD_SHA" "$CURRENT_BASE_SHA" "$LAST_REVIEW_RESULT"

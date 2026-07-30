@@ -120,6 +120,17 @@ _forgejo_jq() {
 
 # ── Core PR I/O ─────────────────────────────────────────────────────────
 
+platform_authenticated_repo_permission() {
+  # $1=repo → read|write|admin on stdout (Forgejo), or "unknown" on GitHub:
+  # GitHub App/GITHUB_TOKEN permissions are unit-scoped and cannot be inferred
+  # from the coarse repo permission, so callers must not gate on it there.
+  if _platform_is_forgejo; then
+    _forgejo_py repo-permission "$1"
+  else
+    echo "unknown"
+  fi
+}
+
 platform_pr_get() {
   # $1=repo $2=pr_number [extra gh api flags, e.g. --jq] → PR object
   # (GitHub REST shape, or the --jq projection) on stdout

@@ -170,6 +170,11 @@ check "unimplemented forgejo op names itself" \
   "$(echo "$RESULT" | grep -c "not yet implemented")" "1"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_compare o/r aaa...bbb' "https://forgejo.example.com")"
 check "forgejo compare uses backend cli" "$RESULT" "forgejo compare o/r aaa...bbb"
+check "platform_authenticated_repo_permission is unknown on github" \
+  "$(run_seam github "" 'platform_authenticated_repo_permission o/r')" \
+  "unknown"
+RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_authenticated_repo_permission o/r' "https://forgejo.example.com")"
+check "forgejo permission preflight uses backend cli" "$RESULT" "forgejo repo-permission o/r"
 # --jq passthrough: the forgejo path applies a trailing --jq to the backend's
 # JSON, mirroring `gh api --jq`, so one call site works on either platform.
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"total_commits\":3}"; }; platform_compare o/r aaa...bbb --jq .total_commits' "https://forgejo.example.com")"
