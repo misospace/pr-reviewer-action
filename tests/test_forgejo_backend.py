@@ -8,10 +8,12 @@ of the existing fake-gh test suites.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -746,6 +748,44 @@ class TestNativeReviews(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(seen["data"], {"body": "needs work", "event": "REQUEST_CHANGES"})
+
+    @_PATCH_FORGEJO
+    def test_failed_review_publication_reports_sanitized_http_error(self, mock_curl):
+        mock_curl.return_value = (
+            403,
+            json.dumps(
+                {
+                    "message": "review permission denied; token=must-not-print-secret",
+                    "token": "also-must-not-print",
+                }
+            ),
+        )
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"event": "COMMENT", "body": "advisory"}
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Forgejo review publication failed (HTTP 403)", stderr.getvalue())
+        self.assertIn("review permission denied", stderr.getvalue())
+        self.assertIn("[REDACTED]", stderr.getvalue())
+        self.assertNotIn("must-not-print", stderr.getvalue())
+
+    @_PATCH_FORGEJO
+    def test_failed_review_publication_tolerates_non_json_error_body(self, mock_curl):
+        mock_curl.return_value = (502, "<html>bad gateway</html>")
+
+        stderr = io.StringIO()
+        with _forgejo_env_patch(), redirect_stderr(stderr):
+            result = fb.create_pr_review_from_payload(
+                "misospace/pr-reviewer-action", 42, {"event": "COMMENT", "body": "advisory"}
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Forgejo review publication failed (HTTP 502)", stderr.getvalue())
+        self.assertNotIn("bad gateway", stderr.getvalue())
 
     @_PATCH_FORGEJO
     def test_dismiss_review_uses_forgejo_dismissal_endpoint(self, mock_curl):

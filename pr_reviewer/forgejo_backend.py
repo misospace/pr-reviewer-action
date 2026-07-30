@@ -27,8 +27,17 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+# Shared credential redactor for remote diagnostics; scripts/ is not a
+# package, so extend sys.path the same way the scripts/ entrypoints do.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from redact import mask_secrets  # noqa: E402
 
 # Top-level import is safe: platform.py imports forgejo_backend only lazily
 # (inside _gh_api_forgejo), so there is no import cycle in this direction.
@@ -176,6 +185,20 @@ def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _report_http_error(operation: str, status_code: int, body_text: str) -> None:
+    """Emit an actionable error without echoing arbitrary response fields.
+
+    Only the API error's ``message`` field is considered, and it is
+    control-stripped, secret-masked, and truncated before printing.
+    """
+    data = _json_decode(body_text)
+    message = data.get("message") if isinstance(data, dict) else None
+    if isinstance(message, str):
+        message = mask_secrets(re.sub(r"[\x00-\x1f\x7f]", " ", message).strip())[:300]
+    detail = f": {message}" if message else ""
+    print(f"Forgejo {operation} failed (HTTP {status_code}){detail}", file=sys.stderr)
 
 
 def _parse_repo(repo_full_name: str) -> tuple[str, str]:
@@ -798,6 +821,7 @@ def create_pr_review_from_payload(
             data=request,
         )
         if status_code not in (200, 201):
+            _report_http_error("review publication", status_code, body_text)
             return None
         data = _json_decode(body_text)
         return data if isinstance(data, dict) else {"id": 0, "body": request["body"]}
