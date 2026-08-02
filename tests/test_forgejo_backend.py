@@ -11,12 +11,16 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
+import urllib.error
+import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
+from urllib.parse import quote as _url_quote
 
 # Ensure the project root is on sys.path so we can import pr_reviewer modules.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -247,6 +251,53 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("HTTP 403", stderr.getvalue())
         self.assertNotIn("must-not-print", stderr.getvalue())
+
+    @_PATCH_FORGEJO
+    def test_owner_not_collaborator_falls_back_to_repo_permissions(self, mock_curl):
+        """Repo owners aren't collaborators in Forgejo — the collaborator
+        endpoint 404s. Fall back to the repo endpoint's ``permissions`` object
+        (key path for JWT authorized integrations where the user IS the owner).
+        """
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "repo-owner"})),
+            (404, json.dumps({"message": "user is not a collaborator"})),
+            (200, json.dumps({"permissions": {"admin": True, "write": True, "read": True}})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "admin")
+
+    @_PATCH_FORGEJO
+    def test_owner_fallback_returns_write_from_repo_permissions(self, mock_curl):
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "dev-user"})),
+            (404, json.dumps({"message": "user is not a collaborator"})),
+            (200, json.dumps({"permissions": {"admin": False, "write": True, "read": True}})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "write")
+
+    @_PATCH_FORGEJO
+    def test_authorized_integration_uses_repo_permission_without_user_scope(self, mock_curl):
+        """JWT integrations must not need the unrelated read:user scope."""
+        mock_curl.return_value = (
+            200,
+            json.dumps({"permissions": {"admin": False, "push": True, "pull": True}}),
+        )
+
+        with _forgejo_env_patch(), patch.object(
+            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
+        ):
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "write")
+        self.assertEqual(mock_curl.call_count, 1)
+        self.assertTrue(mock_curl.call_args.args[1].endswith("/repos/misospace/pr-reviewer-action"))
 
     @_PATCH_FORGEJO
     def test_unresolvable_user_fails_closed(self, mock_curl):
@@ -1409,8 +1460,260 @@ class TestIsForgejoMode(unittest.TestCase):
             self.assertFalse(fb._is_forgejo_mode())
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ---------------------------------------------------------------------------
+# Authorized Integration JWT auth tests
+# ---------------------------------------------------------------------------
+
+_JWT_TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJ1OjE6YWJjMTIzIn0.signature"
+_AUDIENCE = "u:1:abc123-def456-ghi789"
+JW_FIXTURE_BASE = FORGEJO_BASE
+
+
+def _jwt_env_patch():
+    """Patch env for authorized_integration mode."""
+    return patch.dict(os.environ, {
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://forgejo.example.com/api/actions/oidc/token?request=1",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-request-token-secret",
+        "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE": _AUDIENCE,
+    }, clear=False)
+
+
+def _mock_oidc_response(body=None, status=200):
+    """Build a mock context manager for urllib.request.urlopen."""
+    if body is None:
+        body = json.dumps({"value": _JWT_TOKEN})
+    mock_resp = Mock()
+    mock_resp.status = status
+    mock_resp.read = Mock(return_value=body.encode("utf-8"))
+    mock_resp.__enter__ = Mock(return_value=mock_resp)
+    mock_resp.__exit__ = Mock(return_value=False)
+    return mock_resp
+
+
+class TestAuthorizedIntegrationJwtFetch(unittest.TestCase):
+    """JWT fetch from the OIDC token endpoint."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def test_fetch_jwt_success(self):
+        mock_resp = _mock_oidc_response()
+        mock_urlopen = Mock(return_value=mock_resp)
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            jwt = fb._fetch_authorized_integration_jwt()
+        self.assertEqual(jwt, _JWT_TOKEN)
+        called_request = mock_urlopen.call_args[0][0]
+        self.assertIn(f"audience={_url_quote(_AUDIENCE, safe='')}", called_request.full_url)
+
+    def test_fetch_jwt_caches_and_reuses(self):
+        mock_urlopen = Mock(return_value=_mock_oidc_response())
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            jwt1 = fb._get_jwt()
+            jwt2 = fb._get_jwt()
+        self.assertEqual(jwt1, _JWT_TOKEN)
+        self.assertEqual(jwt2, _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_fetch_jwt_refetch_after_ttl_expiry(self):
+        mock_urlopen = Mock(return_value=_mock_oidc_response())
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            fb._get_jwt()
+            fb._JWT_CACHE_TIME -= (fb._JWT_TTL_SECONDS + 1)
+            fb._get_jwt()
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    def test_fetch_jwt_missing_env_raises_actionable_error(self):
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_URL", str(ctx.exception))
+        self.assertIn("enable-openid-connect: true", str(ctx.exception))
+
+    def test_fetch_jwt_missing_audience_raises(self):
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", ""), \
+             patch.dict(os.environ, {
+                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.com/token?x=1",
+                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "tok",
+             }, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn("FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", str(ctx.exception))
+
+    def test_fetch_jwt_oidc_http_error_raises(self):
+        error = urllib.error.HTTPError(
+            "https://example.com/token", 500, "Internal Server Error",
+            {}, io.BytesIO(b'{"message":"server error"}'),
+        )
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch.object(fb, "_report_http_error"):
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn("HTTP 500", str(ctx.exception))
+
+    def test_fetch_jwt_missing_value_field_raises(self):
+        mock_resp = _mock_oidc_response(body=json.dumps({"not_value": "huh"}))
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", return_value=mock_resp), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch.object(fb, "_report_http_error"):
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn(".value", str(ctx.exception))
+
+    def test_fetch_jwt_network_error_raises(self):
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("connection refused")), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn("network error", str(ctx.exception))
+
+
+class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
+    """_resolve_auth_header and _curl produce the right Authorization header."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def test_jwt_mode_returns_bearer_header(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN):
+            header = fb._resolve_auth_header(None)
+        self.assertEqual(header, f"Bearer {_JWT_TOKEN}")
+
+    def test_jwt_mode_explicit_empty_token_unauthenticated(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            header = fb._resolve_auth_header("")
+        self.assertIsNone(header)
+
+    def test_jwt_mode_explicit_pat_override(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch():
+            header = fb._resolve_auth_header("some-pat-token")
+        self.assertEqual(header, "token some-pat-token")
+
+    def test_token_mode_default_returns_pat_header(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
+             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
+             patch.object(fb, "GH_TOKEN", ""):
+            header = fb._resolve_auth_header(None)
+        self.assertEqual(header, "token my-pat")
+
+    def test_token_mode_empty_token_unauthenticated(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
+             patch.object(fb, "FORGEJO_TOKEN", ""), \
+             patch.object(fb, "GH_TOKEN", ""):
+            header = fb._resolve_auth_header("")
+        self.assertIsNone(header)
+
+    def test_curl_uses_bearer_in_jwt_mode(self):
+        captured_headers = []
+        def fake_run(cmd, **kwargs):
+            for i, arg in enumerate(cmd):
+                if arg == "-H" and i + 1 < len(cmd) and cmd[i + 1].startswith("Authorization:"):
+                    captured_headers.append(cmd[i + 1])
+            mock_proc = Mock()
+            mock_proc.stdout = b'{"ok":true}\n200'
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN), \
+             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+            fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
+        self.assertTrue(any(h == f"Authorization: Bearer {_JWT_TOKEN}" for h in captured_headers))
+
+    def test_curl_uses_token_in_token_mode(self):
+        captured_headers = []
+        def fake_run(cmd, **kwargs):
+            for i, arg in enumerate(cmd):
+                if arg == "-H" and i + 1 < len(cmd) and cmd[i + 1].startswith("Authorization:"):
+                    captured_headers.append(cmd[i + 1])
+            mock_proc = Mock()
+            mock_proc.stdout = b'{"ok":true}\n200'
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
+             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
+             patch.object(fb, "GH_TOKEN", ""), \
+             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+            fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
+        self.assertTrue(any(h == "Authorization: token my-pat" for h in captured_headers))
+
+
+class TestEnrichTokenForHostJwtMode(unittest.TestCase):
+    """_enrich_token_for_host delegates to JWT path for configured host."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def test_configured_host_returns_none_in_jwt_mode(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE):
+            token = fb._enrich_token_for_host("forgejo.example.com")
+        self.assertIsNone(token)
+
+    def test_unconfigured_host_returns_empty_in_jwt_mode(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
+             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE):
+            token = fb._enrich_token_for_host("codeberg.org")
+        self.assertEqual(token, "")
+
+    def test_configured_host_returns_pat_in_token_mode(self):
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
+             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
+             patch.object(fb, "FORGEJO_TOKEN", "my-pat"):
+            token = fb._enrich_token_for_host("forgejo.example.com")
+        self.assertEqual(token, "my-pat")
+
+
+class TestJwtMasking(unittest.TestCase):
+    """Adversarial test (per AGENTS.md #252): the JWT must be masked in errors."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def test_jwt_does_not_leak_in_runtime_error_message(self):
+        error = urllib.error.HTTPError(
+            "https://example.com/token", 401, "Unauthorized",
+            {}, io.BytesIO(json.dumps({"value": _JWT_TOKEN}).encode()),
+        )
+        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error), \
+             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch.object(fb, "_report_http_error"):
+            with self.assertRaises(RuntimeError) as ctx:
+                fb._fetch_authorized_integration_jwt()
+        self.assertIn("401", str(ctx.exception))
+        self.assertNotIn(_JWT_TOKEN, str(ctx.exception))
 
 
 if __name__ == "__main__":

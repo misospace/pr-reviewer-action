@@ -520,6 +520,25 @@ inputs:
       the Forgejo REST API.
     required: false
     default: ""
+  forgejo_auth_method:
+    description: >-
+      Forgejo authentication method. 'token' (default) uses a static personal
+      access token via the forgejo_token input. 'authorized_integration' uses
+      Forgejo's authorized integrations flow: the action exchanges the
+      forgejo_authorized_integration_audience for a short-lived JWT via the
+      runner's OIDC token endpoint and authenticates API calls with
+      'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience
+      and that the workflow sets 'enable-openid-connect: true'.
+    required: false
+    default: "token"
+  forgejo_authorized_integration_audience:
+    description: >-
+      Audience identifier for the Forgejo Authorized Integration (the 'aud' JWT
+      claim). Not secret — safe to commit to public code. Required when
+      forgejo_auth_method is 'authorized_integration'. Ignored when
+      forgejo_auth_method is 'token'.
+    required: false
+    default: ""
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
@@ -646,6 +665,8 @@ runs:
         PLATFORM: ${{ inputs.platform }}
         FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
@@ -725,6 +746,8 @@ runs:
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -744,6 +767,8 @@ runs:
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -853,6 +878,8 @@ runs:
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -1181,6 +1208,8 @@ runs:
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         LABEL: ${{ inputs.rereview_label }}

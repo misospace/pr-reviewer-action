@@ -27,6 +27,9 @@ import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -55,10 +58,20 @@ FORGEJO_TOKEN = (
     or os.environ.get("GH_TOKEN")
     or ""
 )
+FORGEJO_AUTH_METHOD = os.environ.get("FORGEJO_AUTH_METHOD", "token").strip().lower()
+FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE = os.environ.get(
+    "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", ""
+).strip()
 COMMENT_MARKER = os.environ.get(
     "COMMENT_MARKER", "<!-- ai-pr-reviewer -->"
 )
 GH_TOKEN = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+
+# JWT cache state — module-level so it persists across _curl calls within a
+# single review run but is fresh per process invocation.
+_JWT_CACHE: str | None = None
+_JWT_CACHE_TIME: float = 0.0
+_JWT_TTL_SECONDS = 2700  # 45 min, well under Forgejo's 1h default
 
 
 def _is_forgejo_mode() -> bool:
@@ -94,6 +107,124 @@ def _is_forgejo_mode() -> bool:
     return resolve_platform(platform=platform, forgejo_api_url=FORGEJO_API_URL) == "forgejo"
 
 
+def _is_authorized_integration_mode() -> bool:
+    """Return True when the active auth method is authorized_integration (JWT)."""
+    return FORGEJO_AUTH_METHOD == "authorized_integration"
+
+
+# ---------------------------------------------------------------------------
+# Authorized Integration JWT fetch + cache
+# ---------------------------------------------------------------------------
+
+def _fetch_authorized_integration_jwt() -> str:
+    """Exchange the Forgejo Authorized Integration audience for a short-lived JWT.
+
+    Reads the OIDC token-request env vars injected by the Forgejo Actions runner
+    (when ``enable-openid-connect: true`` is set in the workflow) and the
+    configured audience, then calls the OIDC token endpoint to obtain a JWT.
+    The JWT is cached module-level with a TTL to avoid expiry mid-review.
+
+    Raises ``RuntimeError`` with an actionable message on any failure.
+    """
+    global _JWT_CACHE, _JWT_CACHE_TIME
+
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "").strip()
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "").strip()
+    audience = FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE
+
+    missing: list[str] = []
+    if not request_url:
+        missing.append("ACTIONS_ID_TOKEN_REQUEST_URL")
+    if not request_token:
+        missing.append(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN (set enable-openid-connect: true in the workflow)"
+        )
+    if not audience:
+        missing.append("FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE")
+    if missing:
+        raise RuntimeError(
+            "Forgejo authorized_integration auth requires: " + ", ".join(missing)
+        )
+
+    # Per the Forgejo docs, the request URL already carries query params, so
+    # the audience is appended with '&' (never a second '?').
+    full_url = f"{request_url}&audience={quote(audience, safe='')}"
+    req = urllib.request.Request(full_url)  # GET by default
+    req.add_header("Authorization", f"bearer {request_token}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", USER_AGENT)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            status_code = resp.status
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        status_code = exc.code
+        _report_http_error("JWT token exchange", status_code, body)
+        raise RuntimeError(
+            f"Forgejo JWT token exchange failed (HTTP {status_code})"
+        ) from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Forgejo JWT token exchange network error: {exc.reason}"
+        ) from None
+
+    data = _json_decode(body)
+    jwt = data.get("value") if isinstance(data, dict) else None
+    if not isinstance(jwt, str) or not jwt:
+        _report_http_error("JWT token exchange", status_code, body)
+        raise RuntimeError(
+            "Forgejo JWT token exchange returned no .value field"
+        )
+
+    _JWT_CACHE = jwt
+    _JWT_CACHE_TIME = time.time()
+    return jwt
+
+
+def _get_jwt() -> str:
+    """Return a valid JWT, fetching one if the cache is empty or expired."""
+    global _JWT_CACHE, _JWT_CACHE_TIME
+    if (
+        _JWT_CACHE is not None
+        and (time.time() - _JWT_CACHE_TIME) < _JWT_TTL_SECONDS
+    ):
+        return _JWT_CACHE
+    return _fetch_authorized_integration_jwt()
+
+
+def _resolve_auth_header(token: str | None) -> str | None:
+    """Resolve the ``Authorization`` header value for a ``_curl`` call.
+
+    Returns ``None`` when the request should be unauthenticated.
+
+    In authorized_integration mode:
+      * ``token=None`` (default callers + configured-host enrichment) -> JWT Bearer.
+      * ``token=""``   (unconfigured-host enrichment)                 -> unauthenticated.
+      * ``token="pat"`` (explicit override)                          -> token PAT.
+
+    In token mode (default):
+      * ``token=None`` -> ``FORGEJO_TOKEN or GH_TOKEN`` PAT, or None if both empty.
+      * ``token=""``   -> unauthenticated.
+      * ``token="pat"`` -> that PAT.
+    """
+    if _is_authorized_integration_mode() and _is_forgejo_mode():
+        if token is None:
+            jwt = _get_jwt()
+            return f"Bearer {jwt}"
+        if token == "":
+            return None
+        return f"token {token}"
+
+    # token mode (default) -- existing behavior
+    if token is None:
+        token = FORGEJO_TOKEN or GH_TOKEN
+    if token:
+        return f"token {token}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -112,17 +243,16 @@ def _curl(
     On HTTP errors the response body is written to stdout so callers can
     parse error payloads — this is the *error-body-on-stdout* discipline.
     """
-    if token is None:
-        token = FORGEJO_TOKEN or GH_TOKEN
+    auth_header = _resolve_auth_header(token)
 
     # The status code is appended after an explicit newline separator: bodies
     # are not guaranteed to end with whitespace (an empty 204 body, or compact
     # JSON without a trailing newline, would otherwise fuse with the code and
     # make it unparseable).
     cmd: list[str] = ["curl", "-sS", "-X", method.upper()]
-    # Empty token: fetch unauthenticated (don't send our token to other forges).
-    if token:
-        cmd.extend(["-H", f"Authorization: token {token}"])
+    # Empty auth: fetch unauthenticated (don't send our token to other forges).
+    if auth_header:
+        cmd.extend(["-H", f"Authorization: {auth_header}"])
     cmd.extend([
         "-H", f"Accept: {accept}",
         "-H", f"User-Agent: {USER_AGENT}",
@@ -230,9 +360,48 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     that can read a PR may still be unable to publish a review. The
     collaborator-permission endpoint reports the authenticated user's
     effective access (read|write|admin).
+
+    Repository owners are not listed as collaborators in Forgejo/Gitea, so the
+    collaborator endpoint returns 404 for them. In that case we fall back to the
+    repo endpoint, whose payload carries a ``permissions`` object
+    (``{admin, write, read}`` booleans) reflecting the authenticated user's
+    effective access — including for owners using JWT authorized integrations.
     """
     owner, repo = _parse_repo(repo_full_name)
     if not _is_forgejo_mode():
+        return None
+
+    def permission_from_repo_payload(data: Any) -> str | None:
+        """Extract effective access from a Forgejo repository response.
+
+        Forgejo/Gitea versions have used both the GitHub-shaped ``write`` /
+        ``read`` names and the older ``push`` / ``pull`` names here.
+        """
+        if not isinstance(data, dict):
+            return None
+        perms = data.get("permissions")
+        if not isinstance(perms, dict):
+            return None
+        if perms.get("admin"):
+            return "admin"
+        if perms.get("write") or perms.get("push"):
+            return "write"
+        if perms.get("read") or perms.get("pull"):
+            return "read"
+        return None
+
+    # An Authorized Integration may be granted repository/issue capabilities
+    # without read:user.  Its JWT can already read this repository (the PR
+    # fetch above proves that), so use its repository payload directly rather
+    # than requiring the unrelated /user endpoint merely to learn a login.
+    if _is_authorized_integration_mode():
+        status_code, body_text = _curl(
+            "GET", f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}"
+        )
+        permission = permission_from_repo_payload(_json_decode(body_text))
+        if status_code == 200 and permission is not None:
+            return permission
+        _report_http_error("review access preflight", status_code, body_text)
         return None
 
     status_code, body_text = _curl("GET", f"{FORGEJO_API_URL}/api/v1/user")
@@ -242,6 +411,7 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
         _report_http_error("review access preflight", status_code, body_text)
         return None
 
+    # Primary path: collaborator-permission endpoint.
     status_code, body_text = _curl(
         "GET",
         f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/collaborators/{quote(login, safe='')}/permission",
@@ -252,10 +422,25 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     # "admin". Normalize to the action's coarse read/write/admin vocabulary.
     if permission == "owner":
         permission = "admin"
-    if permission not in {"read", "write", "admin"}:
-        _report_http_error("review access preflight", status_code, body_text)
-        return None
-    return str(permission)
+    if permission in {"read", "write", "admin"}:
+        return str(permission)
+
+    # Fallback: repo owners (and users not explicitly added as collaborators)
+    # are not reachable via the collaborator endpoint. The repo payload carries
+    # a ``permissions`` object keyed by the authenticated user's login (or the
+    # deprecated top-level ``permissions`` field) with boolean admin/write/read.
+    if status_code == 404:
+        status_code, body_text = _curl(
+            "GET",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}",
+        )
+        data = _json_decode(body_text)
+        permission = permission_from_repo_payload(data)
+        if status_code == 200 and permission is not None:
+            return permission
+
+    _report_http_error("review access preflight", status_code, body_text)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -622,10 +807,21 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
 # The upstream repo may live on a different forge than the PR, so host is an
 # explicit argument (vs platform_*, which use the configured FORGEJO_API_URL).
 
-def _enrich_token_for_host(host: str) -> str:
-    """Token for *host*: the configured instance only, else empty (unauth)."""
+def _enrich_token_for_host(host: str) -> str | None:
+    """Token for *host*: the configured instance only, else empty (unauth).
+
+    In authorized_integration mode, returns ``None`` for the configured host so
+    ``_curl`` resolves to the JWT bearer path. Returns ``""`` for unconfigured
+    hosts (unauthenticated) in all modes.
+    """
     configured = re.sub(r"^https?://", "", FORGEJO_API_URL).strip("/").lower()
-    return FORGEJO_TOKEN if (configured and host.lower() == configured) else ""
+    if not configured or host.lower() != configured:
+        return ""
+    # Configured host: JWT mode delegates to _curl's JWT resolution (return
+    # None); token mode returns the PAT.
+    if _is_authorized_integration_mode():
+        return None
+    return FORGEJO_TOKEN
 
 
 def fetch_forge_release(host: str, repo_full_name: str, tag: str) -> dict[str, Any] | None:
