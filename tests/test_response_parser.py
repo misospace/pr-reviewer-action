@@ -13,6 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from pr_reviewer.response_parser import (  # noqa: E402
+    _escape_raw_newlines_in_strings,
     _extract_content,
     _strip_markdown_code_block,
     _try_decode_json,
@@ -122,6 +123,48 @@ class TestStripMarkdownCodeBlock(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _escape_raw_newlines_in_strings
+# ---------------------------------------------------------------------------
+
+class TestEscapeRawNewlinesInStrings(TestCase):
+    def test_escapes_newline_inside_string(self):
+        self.assertEqual(
+            _escape_raw_newlines_in_strings('{"a": "x\ny"}'),
+            '{"a": "x\\ny"}',
+        )
+
+    def test_leaves_newlines_outside_string_alone(self):
+        # Structural newlines between tokens must stay raw so the parser
+        # can still see the object boundaries.
+        self.assertEqual(
+            _escape_raw_newlines_in_strings('{\n  "a": "x"\n}'),
+            '{\n  "a": "x"\n}',
+        )
+
+    def test_preserves_existing_escapes(self):
+        # ``\\n``, ``\\"``, ``\\u00XX`` are valid JSON escapes — the pass
+        # must not double-escape them.
+        self.assertEqual(
+            _escape_raw_newlines_in_strings(r'{"a": "kept\nhere", "b": "\""}'),
+            r'{"a": "kept\nhere", "b": "\""}',
+        )
+
+    def test_preserves_escaped_backslash_before_quote(self):
+        # ``\\"`` inside a string keeps the string open; the trailing
+        # raw newline should still be escaped.
+        self.assertEqual(
+            _escape_raw_newlines_in_strings(r'{"a": "with \"quote\"\nrest"}'),
+            r'{"a": "with \"quote\"\nrest"}',
+        )
+
+    def test_no_op_on_text_without_strings(self):
+        self.assertEqual(
+            _escape_raw_newlines_in_strings("no strings here\njust text"),
+            "no strings here\njust text",
+        )
+
+
+# ---------------------------------------------------------------------------
 # _try_decode_json
 # ---------------------------------------------------------------------------
 
@@ -141,6 +184,52 @@ class TestTryDecodeJson(TestCase):
 
     def test_empty_string(self):
         self.assertIsNone(_try_decode_json(""))
+
+    def test_raw_newlines_inside_string(self):
+        """Models without structured-output often emit unescaped newlines
+        inside JSON string values — see issue #449.  The lenient pass
+        should repair them rather than return None."""
+        broken = '{\n  "verdict": "request_changes",\n  "review_markdown": "line1\n\nline2"\n}'
+        result = _try_decode_json(broken)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["verdict"], "request_changes")
+        self.assertEqual(result["review_markdown"], "line1\n\nline2")
+
+    def test_raw_newlines_inside_nested_string(self):
+        broken = '{"a": "first\nsecond", "b": {"c": "third\nfourth"}}'
+        result = _try_decode_json(broken)
+        self.assertEqual(result, {"a": "first\nsecond", "b": {"c": "third\nfourth"}})
+
+    def test_raw_newlines_preserve_escaped_sequences(self):
+        """Pre-existing escape sequences (``\\n``, ``\\"``, ``\\t``) must
+        survive the lenient pass — they signal a JSON escape, not a raw
+        control char.
+        """
+        # Raw string keeps the backslash literal so JSON sees ``\n``, ``\t``
+        # and ``\"`` as escape sequences; the lenient pass must leave them
+        # alone.
+        ok = r'{"a": "kept\nhere", "b": "tab\there", "c": "quote\"inside"}'
+        result = _try_decode_json(ok)
+        self.assertEqual(result["a"], "kept\nhere")
+        self.assertEqual(result["b"], "tab\there")
+        self.assertEqual(result["c"], 'quote"inside')
+
+    def test_raw_newlines_outside_string_unchanged(self):
+        """Newlines that appear between tokens (structural whitespace) must
+        be left alone so the parser can still recognise object boundaries."""
+        ok = '{\n  "a": "x",\n  "b": "y"\n}'
+        result = _try_decode_json(ok)
+        self.assertEqual(result, {"a": "x", "b": "y"})
+
+    def test_raw_newlines_in_single_item_list(self):
+        """A list wrapper whose sole item contains raw newlines should be
+        decodable so the caller can unwrap it."""
+        broken = '[\n  {"verdict": "request_changes", "review_markdown": "fix\nme"}\n]'
+        result = _try_decode_json(broken)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["verdict"], "request_changes")
+        self.assertEqual(result[0]["review_markdown"], "fix\nme")
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +266,29 @@ class TestParseResponse(TestCase):
         resp = {"choices": [{"message": {"content": f"```\n{inner}\n```"}}]}
         result = parse_response(resp)
         self.assertEqual(result["verdict"], "approve")
+
+    def test_markdown_fence_with_raw_newlines(self):
+        """Regression for issue #449: a model that wraps its verdict in a
+        triple-backtick json fence AND embeds raw (unescaped) newlines
+        inside a string value must still parse to a complete verdict
+        instead of burning a parse-failure retry."""
+        # Build the content the way the failing model actually emitted it:
+        # fenced JSON, with literal newlines inside the markdown string.
+        content = (
+            '```json\n'
+            '{\n'
+            '  "verdict": "request_changes",\n'
+            '  "review_markdown": "## Recommendation\n'
+            '\n'
+            'Request changes — fix the bug."\n'
+            '}\n'
+            '```'
+        )
+        resp = {"choices": [{"message": {"content": content}}]}
+        result = parse_response(resp)
+        self.assertEqual(result["verdict"], "request_changes")
+        self.assertIn("## Recommendation", result["review_markdown"])
+        self.assertIn("Request changes", result["review_markdown"])
 
     def test_single_item_list_wrapped(self):
         """[{"verdict": ...}] should be unwrapped to {...}."""
