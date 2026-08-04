@@ -303,6 +303,22 @@ class TestConciseReviewLowConfidence:
         escalate, reasons = should_escalate()
         assert "fast_low_confidence" in reasons
 
+    def test_unknowns_only_environment_limit_does_not_escalate(self):
+        review = SHORT_BUMP_REVIEW + (
+            "\n\n## Unknowns or Needs Verification\n"
+            "Could not verify that tests passed because CI was not configured "
+            "and no test results were available in the review corpus."
+        )
+        assert is_low_confidence(review) is False
+
+    def test_unknowns_about_code_still_escalates(self):
+        review = SHORT_BUMP_REVIEW + (
+            "\n\n## Unknowns or Needs Verification\n"
+            "Could not verify the behavior of the new state transition; the "
+            "integration tests do not cover this code path."
+        )
+        assert is_low_confidence(review) is True
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

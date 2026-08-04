@@ -34,6 +34,40 @@ _UNKNOWNS_HEADER_RE = re.compile(
 
 _EMPTY_SECTION_RE = re.compile(r"(?i)^\(?(none|n/?a|nothing)\)?[.!]?$")
 
+# Missing CI or test infrastructure is an environmental limitation, not
+# uncertainty about the change. A smart model cannot manufacture those results.
+_ENVIRONMENTAL_UNKNOWN_TERMS = (
+    "ci",
+    "check result",
+    "test",
+    "pytest",
+    "test suite",
+    "tool output",
+    "evidence",
+    "corpus",
+    "environment",
+    "not configured",
+    "not available",
+    "unavailable",
+    "not provided",
+    "missing",
+    "not executed",
+    "not run",
+)
+_SUBSTANTIVE_UNKNOWN_TERMS = (
+    "behavior",
+    "code path",
+    "correctness",
+    "data loss",
+    "invariant",
+    "logic",
+    "regression",
+    "security",
+    "state transition",
+    "upstream changelog",
+    "release notes",
+)
+
 
 def _load(path: str) -> dict:
     try:
@@ -54,7 +88,15 @@ def _has_populated_unknowns(text: str) -> bool:
         return False
     rest = text[match.end():].strip()
     section = re.split(r"(?m)^#{1,6}\s", rest, maxsplit=1)[0].strip()
-    return bool(section) and not _EMPTY_SECTION_RE.match(section) and len(section) > 40
+    if not section or _EMPTY_SECTION_RE.match(section) or len(section) <= 40:
+        return False
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", section.lower())
+    has_environmental_term = any(term in normalized for term in _ENVIRONMENTAL_UNKNOWN_TERMS)
+    has_substantive_term = any(term in normalized for term in _SUBSTANTIVE_UNKNOWN_TERMS)
+    # Unknowns that only report unavailable review infrastructure do not mean
+    # the model failed to understand the diff; re-running cannot add that data.
+    return not (has_environmental_term and not has_substantive_term)
 
 
 def is_low_confidence(review_markdown: str, min_chars: int = STUB_REVIEW_MIN_CHARS) -> bool:
