@@ -364,6 +364,25 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(markdown, str) or not markdown.strip():
         raise SystemExit(f"Parsed JSON has empty or missing 'review_markdown'{trunc}")
 
+    # Detect a flattened review_markdown: grammar-constrained decoding under
+    # ai_response_format: json_schema (observed on Fireworks, see issue #447)
+    # can strip the "\n" escapes that markdown formatting requires, producing
+    # a single-line "wall of bolded headings". A well-formed review with
+    # multiple sections always contains newlines; if we see several heading
+    # markers and zero newlines, the payload is not publishable as-is, so we
+    # fail validation and let the retry path kick in (or the user switch to
+    # ai_response_format: json_object).
+    if "\n" not in markdown and markdown.count("## ") >= 2:
+        raise SystemExit(
+            "Parsed JSON 'review_markdown' appears flattened: contains "
+            "multiple '## ' heading markers but no newlines. This is a "
+            "known artefact of grammar-constrained decoding under "
+            "ai_response_format: json_schema (e.g., Fireworks). Retry "
+            "with ai_response_format: json_object or increase "
+            "ai_max_tokens."
+            + trunc
+        )
+
     # Optional structured findings: normalised when present, empty when the
     # model (typically a weaker local one) does not produce them.
     parsed["findings"] = _normalize_findings(parsed.get("findings"))

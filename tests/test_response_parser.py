@@ -236,6 +236,51 @@ class TestParseResponse(TestCase):
             parse_response(resp)
         self.assertIn("empty or missing", str(ctx.exception))
 
+    def test_flattened_review_markdown_multiple_headings_no_newlines(self):
+        # Issue #447: grammar-constrained decoding under
+        # ai_response_format: json_schema (e.g. Fireworks) can strip the
+        # "\\n" escapes that markdown requires, yielding a wall of bolded
+        # headings on a single line. Such a payload is not publishable.
+        inner = json.dumps({
+            "verdict": "request_changes",
+            "review_markdown": (
+                "## Summary This PR looks great overall ## Strengths "
+                "Clean code and good tests ## Concerns Possible "
+                "race condition in worker startup"
+            ),
+        })
+        resp = {"choices": [{"message": {"content": inner}}]}
+        with self.assertRaises(SystemExit) as ctx:
+            parse_response(resp)
+        msg = str(ctx.exception)
+        self.assertIn("flattened", msg)
+        self.assertIn("## ", msg)
+        self.assertIn("json_object", msg)
+
+    def test_single_heading_no_newlines_still_accepted(self):
+        # Only one heading marker -> not flattened; pass through as-is.
+        inner = json.dumps({
+            "verdict": "approve",
+            "review_markdown": "## Summary Looks good to me",
+        })
+        resp = {"choices": [{"message": {"content": inner}}]}
+        result = parse_response(resp)
+        self.assertEqual(result["verdict"], "approve")
+        self.assertEqual(result["review_markdown"], "## Summary Looks good to me")
+
+    def test_multiple_headings_with_newlines_accepted(self):
+        # Well-formed review with proper newlines -> no false positive.
+        inner = json.dumps({
+            "verdict": "approve",
+            "review_markdown": (
+                "## Summary\n\nLooks good.\n\n## Details\n\nNo issues found."
+            ),
+        })
+        resp = {"choices": [{"message": {"content": inner}}]}
+        result = parse_response(resp)
+        self.assertEqual(result["verdict"], "approve")
+        self.assertIn("\n", result["review_markdown"])
+
 
 # ---------------------------------------------------------------------------
 # parse_response_file

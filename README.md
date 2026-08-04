@@ -987,6 +987,8 @@ ai_response_format: json_schema   # vLLM guided decoding, llama.cpp grammars, ne
 
 If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server does not support that mode — drop back to `json_object` or `off`. Ignored entirely for `ai_api_format: anthropic`.
 
+> **Fireworks / LiteLLM note:** grammar-constrained decoding under `json_schema` can cause some models (e.g. `glm-4p5`, `qwen3-coder`) to under-emit `\n` inside the `review_markdown` string, producing a single-line wall of bolded headings. The action validates that a payload containing multiple `## ` heading markers also contains newlines and will fail such a response into the retry path — but the reliable fix is to use `ai_response_format: json_object` for Fireworks / LiteLLM endpoints.
+
 ### ⏱️ Timeouts, streaming, and retries
 
 - **Slow prompt eval** (big corpus, CPU offload): raise `ai_request_timeout_sec` (default 300). The tool-planning call is non-streaming and has its own `tool_planning_timeout_sec` — raise it too if planning times out.
