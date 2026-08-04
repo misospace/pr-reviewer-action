@@ -98,7 +98,7 @@ def _has_planning_failure(harness: dict) -> bool:
 
 
 def should_escalate(
-    on_incomplete: bool = True,
+    on_incomplete: bool = False,
     on_request_changes: bool = True,
     on_low_confidence: bool = True,
     on_blockers: bool = True,

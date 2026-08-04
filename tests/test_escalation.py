@@ -99,8 +99,35 @@ class TestShouldEscalate:
         _write_classification(
             tmp_path, must_check=["verify file path sanitization"]
         )
-        escalate, reasons = should_escalate()
+        escalate, reasons = should_escalate(on_incomplete=True)
         assert "incomplete_required_checks" in reasons
+
+    def test_incomplete_required_checks_off_by_default(self, tmp_path, monkeypatch):
+        """A dependency_upgrade review that omits literal checklist phrases
+        must NOT escalate when incomplete-check escalation is off (the default).
+        Routine Renovate/dependency reviews stay on the primary model."""
+        monkeypatch.chdir(tmp_path)
+        _write_fast_output(
+            tmp_path,
+            review="Approve. Renovate patch bump of the requests library from "
+            "2.31.0 to 2.32.0; no functional changes in the diff, pin updated "
+            "in requirements.txt and the lockfile regenerated cleanly.",
+        )
+        _write_classification(
+            tmp_path,
+            must_check=["verify no breaking API changes in upstream release"],
+        )
+        (tmp_path / "classification.json").write_text(
+            json.dumps({
+                "pr_kind": "dependency_upgrade",
+                "risk_flags": [],
+                "route_signals": ["dependency_upgrade"],
+                "must_check": ["verify no breaking API changes in upstream release"],
+            })
+        )
+        escalate, reasons = should_escalate()
+        assert escalate is False
+        assert "incomplete_required_checks" not in reasons
 
     def test_low_confidence_trigger(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
