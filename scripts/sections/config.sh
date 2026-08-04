@@ -341,16 +341,32 @@ resolve_standards_file() {
 }
 
 resolve_system_prompt() {
-  # Resolve any user-supplied prompt (inline takes precedence over file).
+  # Resolve any user-supplied prompt by combining file + inline, file first
+  # and inline second. The order keeps the static repo conventions (file) as
+  # the base and the per-PR steering (inline) as the most specific instruction
+  # at the end of the prompt. When only one input is set the result is
+  # byte-identical to the prior single-source behavior, so existing configs
+  # that set exactly one of the two are unchanged.
   local user=""
-  if [[ -n "$SYSTEM_PROMPT" ]]; then
-    user="$SYSTEM_PROMPT"
-  elif [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
+  local -a parts=()
+  if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
     if [[ ! -f "$SYSTEM_PROMPT_FILE" ]]; then
       error "SYSTEM_PROMPT_FILE does not exist: $SYSTEM_PROMPT_FILE"
       exit 1
     fi
-    user="$(<"$SYSTEM_PROMPT_FILE")"
+    parts+=("$(<"$SYSTEM_PROMPT_FILE")")
+  fi
+  if [[ -n "$SYSTEM_PROMPT" ]]; then
+    parts+=("$SYSTEM_PROMPT")
+  fi
+  if [[ "${#parts[@]}" -gt 0 ]]; then
+    local joined="" sep=""
+    local p
+    for p in "${parts[@]}"; do
+      joined+="${sep}${p}"
+      sep=$'\n\n'
+    done
+    user="$joined"
   fi
 
   # replace mode (default): a supplied prompt is used verbatim — no default,
