@@ -90,23 +90,71 @@ def _strip_markdown_code_block(text: str) -> str:
 # JSON recovery
 # ---------------------------------------------------------------------------
 
+def _escape_raw_newlines_in_strings(text: str) -> str:
+    """Escape literal ``\\n`` characters that appear inside JSON string values.
+
+    Models without structured-output enforcement frequently emit multi-line
+    markdown fields such as ``"review_markdown": "line1\\nline2"`` with the
+    line break left as a raw newline, which is invalid JSON (control chars
+    U+0000..U+001F must be escaped inside a string).  This pass rewrites
+    those raw newlines to ``\\n`` so the parser can recover.
+
+    Backslash escapes already in the input (``\\n``, ``\\"``, ``\\\\``, ``\\uXXXX``,
+    etc.) are preserved by tracking ``escape_next`` so the embedded quote is
+    not interpreted as the end of the string.
+    """
+    result: list[str] = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+        if ch == "\\":
+            result.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if in_string and ch == "\n":
+            result.append("\\n")
+            continue
+        result.append(ch)
+    return "".join(result)
+
+
 def _try_decode_json(text: str) -> Any | None:
     """Attempt to decode a JSON object/list from *text*.
 
     Scans character-by-character for the first ``{`` or ``[`` and tries to
     parse from there, stopping at the first successful decode.  This mirrors
     the shell script's ``for start in range(len(text))`` loop.
+
+    If the raw scan finds nothing, retries with raw newlines inside string
+    values escaped — the most common failure shape for models that emit
+    fenced markdown JSON (e.g. triple-backtick json blocks with unescaped
+    line breaks inside ``review_markdown``).
     """
     decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch not in ("{", "["):
-            continue
-        try:
-            obj, _end = decoder.raw_decode(text[i:])
-            return obj
-        except json.JSONDecodeError:
-            continue
-    return None
+
+    def _scan(source: str) -> Any | None:
+        for i, ch in enumerate(source):
+            if ch not in ("{", "["):
+                continue
+            try:
+                obj, _end = decoder.raw_decode(source[i:])
+                return obj
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    parsed = _scan(text)
+    if parsed is not None:
+        return parsed
+    return _scan(_escape_raw_newlines_in_strings(text))
 
 
 # ---------------------------------------------------------------------------
