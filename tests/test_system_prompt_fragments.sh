@@ -119,16 +119,15 @@ check_contains "append composes the repo addendum on the end" "$OUT" "REPO ADDEN
 check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
 check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
 
-echo "=== resolve_system_prompt combines file + inline when both are set (#426) ==="
-# Static repo conventions live in a file; per-PR steering stays inline. The
-# combined prompt should contain both, file first and inline last, joined by a
-# blank line. With only one input the result must remain byte-identical to the
-# prior single-source behavior.
+echo "=== resolve_system_prompt: file wins over inline when both are set (#426) ==="
+# When both SYSTEM_PROMPT_FILE and SYSTEM_PROMPT are set, the file content
+# wins and the inline value is ignored. With only one input the result must
+# remain byte-identical to the prior single-source behavior.
 TMPF="$(mktemp)"; printf 'STATIC CONVENTIONS FROM FILE' > "$TMPF"
 TMPF_FILE_ONLY="$(mktemp)"; printf 'FILE ONLY SENTINEL' > "$TMPF_FILE_ONLY"
 WORKF="$WORK/CONVENTIONS.md"; printf 'FAKE CONVENTIONS SENTINEL' > "$WORKF"
 
-# Both set: file then inline, joined by a blank line. We run inside a `cd
+# Both set: file wins, inline is ignored. We run inside a `cd
 # "$WORK"` subshell the same way the existing tests do, with a few extra
 # SAFETY_DEFAULTS to keep `set -u` happy in the isolated subshell.
 run_resolve() {
@@ -147,12 +146,11 @@ run_resolve() {
 }
 
 OUT_BOTH="$( run_resolve "PER-PR STEERING" "$TMPF" )"
-check_contains "combine keeps the file content" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"
-check_contains "combine keeps the inline content" "$OUT_BOTH" "PER-PR STEERING"
-check_contains "combine puts the file before the inline" "$OUT_BOTH" \
-  "STATIC CONVENTIONS FROM FILE
-
-PER-PR STEERING"
+check_contains "file wins: keeps the file content" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"
+# Inline should be absent when file is set.
+! printf '%s' "$OUT_BOTH" | grep -q "PER-PR STEERING" \
+  && check_contains "file wins: inline is ignored" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE" \
+  || { echo "FAIL: file wins but inline content leaked through"; FAIL=$((FAIL+1)); }
 
 # Inline only: unchanged from prior behavior, no file content sneaks in.
 OUT_INLINE_ONLY="$( run_resolve "INLINE ONLY SENTINEL" "" )"
@@ -179,7 +177,7 @@ check_contains "missing file still errors when inline is also set" "$ERR_OUT" \
 
 rm -f "$TMPF" "$TMPF_FILE_ONLY"
 
-echo "=== append mode composes the combined file+inline prompt on the default ==="
+echo "=== append mode: file wins over inline, composes file on the default ==="
 OUT="$( cd "$WORK"
   printf '{"pr_kind":"app_code"}' > classification.json
   SYSTEM_PROMPT="COMBINED INLINE SENTINEL" SYSTEM_PROMPT_FILE="$WORKF" \
@@ -188,8 +186,11 @@ OUT="$( cd "$WORK"
   apply_system_prompt_fragments
   printf '%s' "$SYSTEM_PROMPT"
 )"
-check_contains "append on file+inline keeps the inline content" "$OUT" "COMBINED INLINE SENTINEL"
-check_contains "append on file+inline keeps the file content" "$OUT" "FAKE CONVENTIONS SENTINEL"
+# When file is set, inline is ignored even in append mode.
+check_contains "append on file+inline: file content present" "$OUT" "FAKE CONVENTIONS SENTINEL"
+! printf '%s' "$OUT" | grep -q "COMBINED INLINE SENTINEL" \
+  && check_contains "append on file+inline: inline dropped" "$OUT" "FAKE CONVENTIONS SENTINEL" \
+  || { echo "FAIL: append mode but inline content leaked through"; FAIL=$((FAIL+1)); }
 check_contains "append on file+inline keeps the base output schema" "$OUT" "Return STRICT JSON"
 echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
 check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"

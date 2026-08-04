@@ -241,11 +241,11 @@ inputs:
     required: false
     default: "false"
   system_prompt:
-    description: Optional system prompt override. When combined with system_prompt_file the file is read first and the inline value is appended, so static conventions can live in a file while per-PR steering stays inline.
+    description: Optional system prompt override. When both this and system_prompt_file are set, the file content wins and the inline value is ignored.
     required: false
     default: ""
   system_prompt_file:
-    description: Optional file path in the reviewed repository to use as the system prompt. When combined with system_prompt the file is read first and the inline system_prompt is appended, so static conventions can live in a file while per-PR steering stays inline.
+    description: Optional file path in the reviewed repository to use as the system prompt. When both this and system_prompt are set, the file content wins and the inline system_prompt is ignored.
     required: false
     default: ""
   system_prompt_mode:

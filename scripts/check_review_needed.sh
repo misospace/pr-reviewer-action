@@ -129,19 +129,18 @@ compute_config_hash() {
     parts+=("anthropic_version:${ANTHROPIC_VERSION}")
   fi
 
-  # System prompt (inline content or file hash). Inline and file are
-  # independent: when both are set, a change to either invalidates the
-  # fingerprint. Labels are preserved from the prior single-source layout so
-  # fingerprints for single-input configs are unchanged.
-  if [[ -n "${SYSTEM_PROMPT:-}" ]]; then
-    local phash
-    phash="$(printf '%s' "$SYSTEM_PROMPT" | sha256sum | awk '{print $1}')"
-    parts+=("prompt:${phash}")
-  fi
+  # System prompt (inline content or file hash). When both are set, the file
+  # wins so only the file hash is included in the fingerprint. Labels are
+  # preserved from the prior single-source layout so fingerprints for
+  # single-input configs are unchanged.
   if [[ -n "${SYSTEM_PROMPT_FILE:-}" && -f "${SYSTEM_PROMPT_FILE:-}" ]]; then
     local phash
     phash="$(sha256sum "$SYSTEM_PROMPT_FILE" | awk '{print $1}')"
     parts+=("prompt_file:${SYSTEM_PROMPT_FILE}:${phash}")
+  elif [[ -n "${SYSTEM_PROMPT:-}" ]]; then
+    local phash
+    phash="$(printf '%s' "$SYSTEM_PROMPT" | sha256sum | awk '{print $1}')"
+    parts+=("prompt:${phash}")
   fi
 
   # Standards file (resolved or candidate)
