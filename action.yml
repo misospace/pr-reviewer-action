@@ -62,7 +62,7 @@ inputs:
     required: false
     default: "2023-06-01"
   ai_fallback_base_url:
-    description: Optional base URL of a fallback AI API
+    description: Optional base URL of a fallback AI API; defaults to ai_base_url when blank
     required: false
     default: ""
   ai_fallback_api_format:
@@ -74,7 +74,7 @@ inputs:
     required: false
     default: ""
   ai_fallback_api_key:
-    description: Optional API key for the fallback endpoint
+    description: Optional API key for the fallback endpoint; defaults to ai_api_key when blank
     required: false
     default: ""
   ai_primary_retries:
@@ -780,10 +780,10 @@ runs:
         AI_RESPONSE_FORMAT: ${{ inputs.ai_response_format }}
         AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
         ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
-        AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url }}
-        AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format }}
+        AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url || inputs.ai_base_url }}
+        AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format || inputs.ai_api_format }}
         AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
-        AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key }}
+        AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key || inputs.ai_api_key }}
         AI_PRIMARY_RETRIES: ${{ inputs.ai_primary_retries }}
         AI_PRIMARY_RETRY_DELAY_SEC: ${{ inputs.ai_primary_retry_delay_sec }}
         ON_MODEL_FAILURE: ${{ inputs.on_model_failure }}

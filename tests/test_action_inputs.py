@@ -190,8 +190,33 @@ def test_comment_marker_input_exists():
     )
 
 
+def test_fallback_inputs_inherit_from_primary():
+    """Fallback base_url, api_format, and api_key inherit from primary when blank.
+
+    Regression test for #448: ai_fallback_base_url, ai_fallback_api_format, and
+    ai_fallback_api_key must default to their ai_* primary equivalents (matching
+    the smart-route behavior) so that a fallback model on the same gateway works
+    with zero extra config.
+    """
+    content = (_REPO_ROOT / "action.yml").read_text()
+
+    # Check AI_FALLBACK_BASE_URL inherits from ai_base_url
+    assert "AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url || inputs.ai_base_url }}" in content, (
+        "AI_FALLBACK_BASE_URL must inherit from ai_base_url when blank"
+    )
+    # Check AI_FALLBACK_API_FORMAT inherits from ai_api_format
+    assert "AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format || inputs.ai_api_format }}" in content, (
+        "AI_FALLBACK_API_FORMAT must inherit from ai_api_format when blank"
+    )
+    # Check AI_FALLBACK_API_KEY inherits from ai_api_key
+    assert "AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key || inputs.ai_api_key }}" in content, (
+        "AI_FALLBACK_API_KEY must inherit from ai_api_key when blank"
+    )
+
+
 if __name__ == "__main__":
     test_readme_inputs_in_action()
     test_action_inputs_in_readme()
     test_comment_marker_input_exists()
+    test_fallback_inputs_inherit_from_primary()
     print("All action inputs tests passed!")
