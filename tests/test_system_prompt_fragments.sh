@@ -119,24 +119,23 @@ check_contains "append composes the repo addendum on the end" "$OUT" "REPO ADDEN
 check_not_contains "append on app_code still drops irrelevant V3" "$OUT" "HOST PLATFORM"
 check_not_contains "append leaves no unsubstituted placeholder" "$OUT" "{{"
 
-echo "=== resolve_system_prompt: file wins over inline when both are set (#426) ==="
-# When both SYSTEM_PROMPT_FILE and SYSTEM_PROMPT are set, the file content
-# wins and the inline value is ignored. With only one input the result must
-# remain byte-identical to the prior single-source behavior.
+echo "=== resolve_system_prompt: file + inline are concatenated when both are set (#426) ==="
+# When both SYSTEM_PROMPT_FILE and SYSTEM_PROMPT are set, the file content is
+# read first and the inline value is appended after two newlines. With only one
+# input the result must remain byte-identical to the prior single-source
+# behavior.
 TMPF="$(mktemp)"; printf 'STATIC CONVENTIONS FROM FILE' > "$TMPF"
 TMPF_FILE_ONLY="$(mktemp)"; printf 'FILE ONLY SENTINEL' > "$TMPF_FILE_ONLY"
 WORKF="$WORK/CONVENTIONS.md"; printf 'FAKE CONVENTIONS SENTINEL' > "$WORKF"
 
-# Both set: file wins, inline is ignored. We run inside a `cd
-# "$WORK"` subshell the same way the existing tests do, with a few extra
-# SAFETY_DEFAULTS to keep `set -u` happy in the isolated subshell.
+# Both set: file first, then inline, separated by two newlines.
 run_resolve() {
   (
     cd "$WORK"
     set +u
     SYSTEM_PROMPT="$1"
     SYSTEM_PROMPT_FILE="$2"
-    SYSTEM_PROMPT_MODE="replace"
+    SYSTEM_PROMPT_MODE="$3"
     SYSTEM_PROMPT_ADDENDUM=""
     SYSTEM_PROMPT_IS_DEFAULT=0
     set -u
@@ -145,19 +144,27 @@ run_resolve() {
   )
 }
 
-OUT_BOTH="$( run_resolve "PER-PR STEERING" "$TMPF" )"
-check_contains "file wins: keeps the file content" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"
-# Inline should be absent when file is set.
-! printf '%s' "$OUT_BOTH" | grep -q "PER-PR STEERING" \
-  && check_contains "file wins: inline is ignored" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE" \
-  || { echo "FAIL: file wins but inline content leaked through"; FAIL=$((FAIL+1)); }
+OUT_BOTH="$( run_resolve "PER-PR STEERING" "$TMPF" "replace" )"
+check_contains "both set: keeps the file content" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"
+check_contains "both set: keeps the inline content" "$OUT_BOTH" "PER-PR STEERING"
+# Ordering: file content must appear before inline content.
+FILE_POS="$(printf '%s' "$OUT_BOTH" | grep -bo "STATIC CONVENTIONS FROM FILE" | head -1 | cut -d: -f1)"
+INLINE_POS="$(printf '%s' "$OUT_BOTH" | grep -bo "PER-PR STEERING" | head -1 | cut -d: -f1)"
+if [[ -n "$FILE_POS" && -n "$INLINE_POS" && "$FILE_POS" -lt "$INLINE_POS" ]]; then
+  check_contains "both set: file content precedes inline" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"
+else
+  echo "FAIL: file content does not precede inline content (file_pos=$FILE_POS, inline_pos=$INLINE_POS)"
+  FAIL=$((FAIL+1))
+fi
+# Separator: exactly two newlines between file and inline content.
+check_contains "both set: separated by two newlines" "$OUT_BOTH" "STATIC CONVENTIONS FROM FILE"$'\n\n'"PER-PR STEERING"
 
 # Inline only: unchanged from prior behavior, no file content sneaks in.
-OUT_INLINE_ONLY="$( run_resolve "INLINE ONLY SENTINEL" "" )"
+OUT_INLINE_ONLY="$( run_resolve "INLINE ONLY SENTINEL" "" "replace" )"
 check_contains "inline-only is unchanged" "$OUT_INLINE_ONLY" "INLINE ONLY SENTINEL"
 
 # File only: unchanged from prior behavior, no synthetic separators added.
-OUT_FILE_ONLY="$( run_resolve "" "$TMPF_FILE_ONLY" )"
+OUT_FILE_ONLY="$( run_resolve "" "$TMPF_FILE_ONLY" "replace" )"
 check_contains "file-only is unchanged" "$OUT_FILE_ONLY" "FILE ONLY SENTINEL"
 
 # Missing file is still a hard error even when inline is also set, so a
@@ -177,7 +184,7 @@ check_contains "missing file still errors when inline is also set" "$ERR_OUT" \
 
 rm -f "$TMPF" "$TMPF_FILE_ONLY"
 
-echo "=== append mode: file wins over inline, composes file on the default ==="
+echo "=== append mode: file + inline are concatenated, then composed onto the default ==="
 OUT="$( cd "$WORK"
   printf '{"pr_kind":"app_code"}' > classification.json
   SYSTEM_PROMPT="COMBINED INLINE SENTINEL" SYSTEM_PROMPT_FILE="$WORKF" \
@@ -186,12 +193,60 @@ OUT="$( cd "$WORK"
   apply_system_prompt_fragments
   printf '%s' "$SYSTEM_PROMPT"
 )"
-# When file is set, inline is ignored even in append mode.
+# Both file and inline content are present, file before inline.
 check_contains "append on file+inline: file content present" "$OUT" "FAKE CONVENTIONS SENTINEL"
-! printf '%s' "$OUT" | grep -q "COMBINED INLINE SENTINEL" \
-  && check_contains "append on file+inline: inline dropped" "$OUT" "FAKE CONVENTIONS SENTINEL" \
-  || { echo "FAIL: append mode but inline content leaked through"; FAIL=$((FAIL+1)); }
+check_contains "append on file+inline: inline content present" "$OUT" "COMBINED INLINE SENTINEL"
+FILE_POS="$(printf '%s' "$OUT" | grep -bo "FAKE CONVENTIONS SENTINEL" | head -1 | cut -d: -f1)"
+INLINE_POS="$(printf '%s' "$OUT" | grep -bo "COMBINED INLINE SENTINEL" | head -1 | cut -d: -f1)"
+if [[ -n "$FILE_POS" && -n "$INLINE_POS" && "$FILE_POS" -lt "$INLINE_POS" ]]; then
+  check_contains "append on file+inline: file content precedes inline" "$OUT" "FAKE CONVENTIONS SENTINEL"
+else
+  echo "FAIL: append mode file content does not precede inline (file_pos=$FILE_POS, inline_pos=$INLINE_POS)"
+  FAIL=$((FAIL+1))
+fi
 check_contains "append on file+inline keeps the base output schema" "$OUT" "Return STRICT JSON"
+
+echo "=== fingerprint includes both sources when both are set (#426) ==="
+# Extract compute_config_hash from check_review_needed.sh for fingerprint tests.
+CFUNCS="$(mktemp)"
+python3 - "$SCRIPT_DIR/check_review_needed.sh" "$CFUNCS" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^compute_config_hash\(\) \{\n(.*?)\n\}", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract compute_config_hash")
+open(sys.argv[2], "w").write("compute_config_hash() {\n%s\n}\n" % m.group(1))
+PY
+# shellcheck source=/dev/null
+source "$CFUNCS"; rm -f "$CFUNCS"
+
+TMPF_FP="$(mktemp)"; printf 'FILE CONTENT FOR FP' > "$TMPF_FP"
+
+# Both set: fingerprint must differ from file-only and inline-only.
+FP_BOTH="$(SYSTEM_PROMPT="INLINE FOR FP" SYSTEM_PROMPT_FILE="$TMPF_FP" compute_config_hash)"
+FP_FILE_ONLY="$(SYSTEM_PROMPT="" SYSTEM_PROMPT_FILE="$TMPF_FP" compute_config_hash)"
+FP_INLINE_ONLY="$(SYSTEM_PROMPT="INLINE FOR FP" SYSTEM_PROMPT_FILE="" compute_config_hash)"
+if [[ "$FP_BOTH" != "$FP_FILE_ONLY" && "$FP_BOTH" != "$FP_INLINE_ONLY" \
+   && "$FP_FILE_ONLY" != "$FP_INLINE_ONLY" ]]; then
+  echo "PASS: fingerprint differs across both/file-only/inline-only"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: fingerprint did not distinguish sources (both=$FP_BOTH file=$FP_FILE_ONLY inline=$FP_INLINE_ONLY)"
+  FAIL=$((FAIL+1))
+fi
+
+# Changing the inline content changes the combined fingerprint.
+FP_BOTH_ALT="$(SYSTEM_PROMPT="DIFFERENT INLINE" SYSTEM_PROMPT_FILE="$TMPF_FP" compute_config_hash)"
+if [[ "$FP_BOTH" != "$FP_BOTH_ALT" ]]; then
+  echo "PASS: changing inline content changes the combined fingerprint"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: changing inline content did not change the combined fingerprint"
+  FAIL=$((FAIL+1))
+fi
+
+rm -f "$TMPF_FP"
+
 echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
 check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"
 # Each conditional section's omit instruction is tied to its own trigger

@@ -342,9 +342,10 @@ resolve_standards_file() {
 
 resolve_system_prompt() {
   # Resolve any user-supplied prompt. When both SYSTEM_PROMPT_FILE and
-  # SYSTEM_PROMPT are set, the file content wins and the inline value is
-  # ignored. This lets a repo keep static conventions in a diffable file while
-  # still allowing per-PR steering via the inline value when only that is set.
+  # SYSTEM_PROMPT are set, the file content is read first and the inline value
+  # is concatenated after (separated by two newlines), so a repo can keep
+  # static conventions in a diffable file while still allowing per-PR steering
+  # via the inline value. A missing configured file remains a hard error.
   local user=""
   if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
     if [[ ! -f "$SYSTEM_PROMPT_FILE" ]]; then
@@ -352,6 +353,9 @@ resolve_system_prompt() {
       exit 1
     fi
     user="$(<"$SYSTEM_PROMPT_FILE")"
+    if [[ -n "$SYSTEM_PROMPT" ]]; then
+      user="${user}"$'\n\n'"${SYSTEM_PROMPT}"
+    fi
   elif [[ -n "$SYSTEM_PROMPT" ]]; then
     user="$SYSTEM_PROMPT"
   fi

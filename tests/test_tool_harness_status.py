@@ -587,8 +587,102 @@ def test_enforcement_fixture_no_successes():
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Main
 # ---------------------------------------------------------------------------
+# resolve_review_system_prompt — env-first assembled prompt, defensive fallback
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_env_first_no_double_compose(tmp_path):
+    """When bash exports an assembled SYSTEM_PROMPT, Python trusts it verbatim.
+
+    The production double-composition bug: both SYSTEM_PROMPT and
+    SYSTEM_PROMPT_FILE were set, but Python re-read the file and concatenated
+    inline on top — producing a prompt that contained the file content twice
+    (once from bash's assembly, once from Python's re-read).
+
+    The fix is env-first: if SYSTEM_PROMPT is non-empty, return it immediately.
+    Only fall back to file+inline when SYSTEM_PROMPT is absent (defensive direct
+    invocation for standalone tests).
+    """
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from run_tool_harness import resolve_review_system_prompt
+
+    file_path = tmp_path / "system_prompt.txt"
+    file_path.write_text("FILE CONTENT HERE")
+
+    # Case 1: SYSTEM_PROMPT set alone → returned verbatim
+    env = {"SYSTEM_PROMPT": "ASSEMBLED BY BASH", "SYSTEM_PROMPT_FILE": ""}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "ASSEMBLED BY BASH"
+
+    # Case 2: Both SYSTEM_PROMPT and SYSTEM_PROMPT_FILE set → SYSTEM_PROMPT wins
+    # (no file re-read, no concatenation)
+    env = {
+        "SYSTEM_PROMPT": "ASSEMBLED BY BASH",
+        "SYSTEM_PROMPT_FILE": str(file_path),
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "ASSEMBLED BY BASH"
+    assert file_path.read_text() not in result
+
+    # Case 3: Only SYSTEM_PROMPT_FILE set (defensive direct invocation) → file read
+    env = {"SYSTEM_PROMPT": "", "SYSTEM_PROMPT_FILE": str(file_path)}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "FILE CONTENT HERE"
+
+    # Case 4: Only SYSTEM_PROMPT set (defensive direct invocation) → inline returned
+    env = {"SYSTEM_PROMPT": "INLINE ONLY", "SYSTEM_PROMPT_FILE": ""}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "INLINE ONLY"
+
+    # Case 5: Neither set → falls back to bundled default (non-empty)
+    env = {"SYSTEM_PROMPT": "", "SYSTEM_PROMPT_FILE": ""}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_system_prompt_preserves_raw_whitespace(tmp_path):
+    """SYSTEM_PROMPT with leading/trailing whitespace must be returned verbatim.
+
+    Bash's resolve_system_prompt() uses SYSTEM_PROMPT verbatim (no strip) when
+    composing the user prompt (config.sh:360, :357), so an operator who sets
+    ``SYSTEM_PROMPT="  hello  \""` intends those spaces to reach the model.
+    Returning stripped would silently alter the review contract — a regression
+    if Python ever re-strips the value.
+    """
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from run_tool_harness import resolve_review_system_prompt
+
+    # Case 1: leading + trailing whitespace preserved verbatim
+    env = {"SYSTEM_PROMPT": "  hello  ", "SYSTEM_PROMPT_FILE": ""}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "  hello  ", f"Expected raw whitespace preserved, got: {result!r}"
+
+    # Case 2: file + inline where inline has leading whitespace → SYSTEM_PROMPT wins verbatim
+    file_path = tmp_path / "system_prompt.txt"
+    file_path.write_text("FILE CONTENT")
+    env = {
+        "SYSTEM_PROMPT": "  INLINE  ",
+        "SYSTEM_PROMPT_FILE": str(file_path),
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "  INLINE  ", f"Expected raw SYSTEM_PROMPT preserved, got: {result!r}"
+
+    # Case 3: blank-only value (e.g. "   ") must NOT be treated as set — falls through to file
+    env = {"SYSTEM_PROMPT": "   ", "SYSTEM_PROMPT_FILE": str(file_path)}
+    with mock.patch.dict(os.environ, env, clear=False):
+        result = resolve_review_system_prompt()
+    assert result == "FILE CONTENT", f"Expected file-only for blank-only SYSTEM_PROMPT, got: {result!r}"
+
 
 def main():
     tests = [
@@ -623,6 +717,8 @@ def main():
         ("enforcement fixture no successes", test_enforcement_fixture_no_successes),
         ("integration all tools fail", test_integration_all_tools_fail),
         ("integration mixed success/failure", test_integration_mixed_success_and_failure),
+        ("system_prompt env-first no double compose", test_system_prompt_env_first_no_double_compose),
+        ("system_prompt preserves raw whitespace", test_system_prompt_preserves_raw_whitespace),
     ]
 
     passed = 0

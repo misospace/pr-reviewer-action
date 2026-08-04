@@ -241,11 +241,11 @@ inputs:
     required: false
     default: "false"
   system_prompt:
-    description: Optional system prompt override. When both this and system_prompt_file are set, the file content wins and the inline value is ignored.
+    description: Optional system prompt override. When both this and system_prompt_file are set, the file content is read first and the inline value is appended (separated by two newlines), combining static repo conventions with per-PR steering.
     required: false
     default: ""
   system_prompt_file:
-    description: Optional file path in the reviewed repository to use as the system prompt. When both this and system_prompt are set, the file content wins and the inline system_prompt is ignored.
+    description: Optional file path in the reviewed repository to use as the system prompt. When both this and system_prompt are set, the file content is read first and the inline system_prompt is appended (separated by two newlines).
     required: false
     default: ""
   system_prompt_mode:

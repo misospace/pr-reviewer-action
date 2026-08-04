@@ -390,16 +390,25 @@ _SUMMARIZER_SYSTEM = (
 def resolve_review_system_prompt():
     """Resolve the reviewer system prompt for the native-loop verdict turn.
 
-    Mirrors run_review.sh's resolve_system_prompt (SYSTEM_PROMPT env, then
-    SYSTEM_PROMPT_FILE, then the bundled default) so the in-conversation verdict
-    is graded under the same reviewer instructions as the standard review call.
+    Bash's run_review.sh already assembles SYSTEM_PROMPT (substituting
+    placeholders, composing file+inline when both are set, and exporting the
+    result). Trust that assembled value directly — re-reading the file here
+    would double-compose it.
+
+    Only fall back to reading file+inline when SYSTEM_PROMPT is absent: this
+    handles direct Python invocations (e.g. standalone smoke tests) where bash
+    never ran the assembly step. Falls back to the bundled default otherwise.
     """
-    inline = os.getenv("SYSTEM_PROMPT", "")
-    if inline.strip():
-        return inline
+    raw = os.getenv("SYSTEM_PROMPT", "")
+    if raw.strip():
+        return raw
     prompt_file = os.getenv("SYSTEM_PROMPT_FILE", "").strip()
     if prompt_file and Path(prompt_file).is_file():
-        return Path(prompt_file).read_text(encoding="utf-8")
+        file_text = Path(prompt_file).read_text(encoding="utf-8")
+        raw_inline = os.getenv("SYSTEM_PROMPT", "")
+        if raw_inline.strip():
+            return file_text + "\n\n" + raw_inline
+        return file_text
     default = _SCRIPTS_DIR / "default_system_prompt.txt"
     try:
         text = default.read_text(encoding="utf-8")
