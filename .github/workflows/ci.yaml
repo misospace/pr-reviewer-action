@@ -45,8 +45,13 @@ jobs:
             .github/workflows/*.yaml \
             examples/*.yml
 
+      # actionlint only supports workflow files (.github/workflows/), not action
+      # metadata files (action.yml). Linting action.yml with actionlint produces
+      # spurious errors because it expects workflow-level keys like `on`/`jobs`.
       - name: Lint GitHub Actions workflows
         uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+        with:
+          files: .github/workflows/*.yaml
 
       - name: Check shell scripts
         run: |
