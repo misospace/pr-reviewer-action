@@ -133,10 +133,12 @@ def _try_decode_json(text: str) -> Any | None:
     each decoded value so the interior of an array is never re-scanned),
     then prefers the one that looks like the verdict object.  Reasoning
     models routed through an OpenAI-compatible proxy frequently emit
-    thinking prose in ``content`` carrying a valid but irrelevant JSON
-    array (a findings draft, a list of candidate verdicts) *before* the
-    real verdict object; the verdict is always a ``dict``, so a ``dict``
-    is preferred over a ``list``.
+    thinking prose in ``content`` carrying valid but irrelevant JSON — an
+    array, or a *partial* verdict draft like ``{"verdict": "approve"}`` —
+    *before* the real verdict object. So a complete verdict dict (both
+    ``verdict`` and ``review_markdown`` keys) is preferred over a partial
+    one, and where several complete verdicts exist the *last* wins (the
+    real answer is conventionally the final JSON the model emits).
 
     If the raw scan finds nothing, retries with raw newlines inside string
     values escaped — the most common failure shape for models that emit
@@ -153,9 +155,11 @@ def _try_decode_json(text: str) -> Any | None:
         # through an OpenAI-compatible proxy (e.g. DeepSeek V4 Flash via
         # litellm) often emit thinking prose in ``content`` that contains a
         # valid but irrelevant JSON array — a findings draft, a list of
-        # candidate verdicts, a checklist — *before* the real verdict
-        # object. Returning the first decodable value grabs that array, so
-        # the verdict (always a dict) is preferred over a list.
+        # candidate verdicts, a checklist — or a *partial* verdict draft
+        # (``{"verdict": "approve"}`` with no ``review_markdown``) before
+        # the real verdict object. Returning the first decodable value grabs
+        # that, so below we prefer a complete verdict dict (both keys) and,
+        # among complete ones, the last (the real final answer).
         candidates: list[Any] = []
         i = 0
         while i < len(source):
@@ -174,25 +178,36 @@ def _try_decode_json(text: str) -> Any | None:
             i += consumed
         if not candidates:
             return None
-        # Prefer a dict that looks like the verdict (canonical keys): a
-        # thinking preamble can draft an ancillary object (a schema example)
-        # ahead of the real verdict. Caveat: if two dicts both carry the
-        # verdict keys, the earliest wins — reasoning prose that drafts a
-        # *sample* verdict ahead of the real one will be mis-picked. Full
-        # schema-aware disambiguation isn't worth it; the alternative
-        # (failing the parse entirely) is strictly worse, and all output is
-        # still re-validated downstream in ``parse_response``.
+        # Pick the most verdict-like candidate. Reasoning models route
+        # thinking through ``content`` and frequently draft sample or
+        # *partial* verdict objects (e.g. ``{"verdict": "approve"}`` with
+        # no ``review_markdown``) in their preamble before emitting the real
+        # final answer at the end. Preference, in priority order:
+        #   1. the LAST dict carrying BOTH required keys — the real verdict;
+        #      a later complete verdict beats an earlier sample draft,
+        #   2. the LAST dict carrying either key — closest to the answer; a
+        #      partial draft that fails validation downstream to retry,
+        #   3. the first dict of any shape,
+        #   4. the first list (a single-item wrapper is unwrapped by
+        #      ``parse_response``).
+        complete: list[Any] = []
+        partial: list[Any] = []
         for cand in candidates:
-            if isinstance(cand, dict) and (
-                "verdict" in cand or "review_markdown" in cand
-            ):
-                return cand
-        # Fall back to the first dict of any shape.
+            if not isinstance(cand, dict):
+                continue
+            has_v = "verdict" in cand
+            has_m = "review_markdown" in cand
+            if has_v and has_m:
+                complete.append(cand)
+            elif has_v or has_m:
+                partial.append(cand)
+        if complete:
+            return complete[-1]
+        if partial:
+            return partial[-1]
         for cand in candidates:
             if isinstance(cand, dict):
                 return cand
-        # Only return a list when no dict exists; a single-item list
-        # wrapping a verdict is unwrapped by ``parse_response``.
         for cand in candidates:
             if isinstance(cand, list):
                 return cand

@@ -227,6 +227,34 @@ class TestTryDecodeJson(TestCase):
         result = _try_decode_json(src)
         self.assertEqual(result.get("review_markdown"), "# OK")
 
+    def test_partial_verdict_draft_skipped_for_complete(self):
+        """A reasoning preamble drafting a *partial* verdict (``verdict``
+        only, no ``review_markdown``) ahead of the real complete verdict
+        must not be picked — the complete one wins. This is the dsv4f
+        dogfood failure: after arrays were handled, the model's partial
+        draft was returned, yielding 'missing required key review_markdown'.
+        """
+        src = (
+            'Schema check: {"verdict": "approve"} '
+            'Final answer: {"verdict": "approve", "review_markdown": "# OK"}'
+        )
+        result = _try_decode_json(src)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["verdict"], "approve")
+        self.assertEqual(result["review_markdown"], "# OK")
+
+    def test_sample_complete_verdict_loses_to_last_real_one(self):
+        """Where two *complete* verdicts appear, the LAST one wins — the
+        real answer is conventionally the final JSON the model emits, so
+        an earlier sample draft must not shadow it."""
+        src = (
+            'Sample: {"verdict": "request_changes", "review_markdown": "draft"} '
+            'Real: {"verdict": "approve", "review_markdown": "# Looks good"}'
+        )
+        result = _try_decode_json(src)
+        self.assertEqual(result["verdict"], "approve")
+        self.assertEqual(result["review_markdown"], "# Looks good")
+
     def test_no_json(self):
         self.assertIsNone(_try_decode_json("just text"))
 
@@ -369,6 +397,22 @@ class TestParseResponse(TestCase):
         result = parse_response(resp)
         self.assertEqual(result["verdict"], "approve")
         self.assertEqual(result["review_markdown"], "# Looks good")
+
+    def test_reasoning_model_partial_draft_then_complete(self):
+        """Regression for the dsv4f dogfood follow-up: thinking drafts a
+        *partial* verdict (``verdict`` only) before the complete one.
+        Previously raised 'missing required key review_markdown'; now the
+        complete verdict wins."""
+        content = (
+            "Let me set the shape: "
+            + json.dumps({"verdict": "approve"})
+            + " Now the full review: "
+            + json.dumps({"verdict": "approve", "review_markdown": "# Ship it"})
+        )
+        resp = {"choices": [{"message": {"content": content}}]}
+        result = parse_response(resp)
+        self.assertEqual(result["verdict"], "approve")
+        self.assertEqual(result["review_markdown"], "# Ship it")
 
     # --- Error cases ---
 
