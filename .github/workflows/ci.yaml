@@ -18,10 +18,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          # Pinned to 3.14 to match the local dev interpreter — a version skew
-          # between local and CI is how the duplicate-key regression test first
-          # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
-          python-version: '3.14'
+          # Matrix covers stable releases to avoid bleeding-edge breakage (3.14
+          # alpha/beta can drop wheels or change stdlib). The original single-pin
+          # to 3.14 was a reaction to the duplicate-key regression that shipped
+          # broken because local and CI ran different Python versions.
+          python-version: ['3.12', '3.13']
 
       - name: Install test dependencies
         run: pip install pytest pytest-cov yamllint
