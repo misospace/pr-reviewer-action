@@ -129,9 +129,14 @@ def _escape_raw_newlines_in_strings(text: str) -> str:
 def _try_decode_json(text: str) -> Any | None:
     """Attempt to decode a JSON object/list from *text*.
 
-    Scans character-by-character for the first ``{`` or ``[`` and tries to
-    parse from there, stopping at the first successful decode.  This mirrors
-    the shell script's ``for start in range(len(text))`` loop.
+    Collects every *top-level* JSON value found in *text* (skipping past
+    each decoded value so the interior of an array is never re-scanned),
+    then prefers the one that looks like the verdict object.  Reasoning
+    models routed through an OpenAI-compatible proxy frequently emit
+    thinking prose in ``content`` carrying a valid but irrelevant JSON
+    array (a findings draft, a list of candidate verdicts) *before* the
+    real verdict object; the verdict is always a ``dict``, so a ``dict``
+    is preferred over a ``list``.
 
     If the raw scan finds nothing, retries with raw newlines inside string
     values escaped — the most common failure shape for models that emit
@@ -141,14 +146,56 @@ def _try_decode_json(text: str) -> Any | None:
     decoder = json.JSONDecoder()
 
     def _scan(source: str) -> Any | None:
-        for i, ch in enumerate(source):
+        # Collect every *top-level* JSON value in order, advancing past
+        # each decoded value so the interior of an array is never re-scanned
+        # (a nested {"verdict": ...} inside a findings array must not
+        # masquerade as the top-level verdict). Reasoning models routed
+        # through an OpenAI-compatible proxy (e.g. DeepSeek V4 Flash via
+        # litellm) often emit thinking prose in ``content`` that contains a
+        # valid but irrelevant JSON array — a findings draft, a list of
+        # candidate verdicts, a checklist — *before* the real verdict
+        # object. Returning the first decodable value grabs that array, so
+        # the verdict (always a dict) is preferred over a list.
+        candidates: list[Any] = []
+        i = 0
+        while i < len(source):
+            ch = source[i]
             if ch not in ("{", "["):
+                i += 1
                 continue
             try:
-                obj, _end = decoder.raw_decode(source[i:])
-                return obj
+                obj, consumed = decoder.raw_decode(source[i:])
             except json.JSONDecodeError:
+                i += 1
                 continue
+            candidates.append(obj)
+            # raw_decode always consumes >= 1 char (it raises on empty
+            # input), so this advances the cursor unconditionally.
+            i += consumed
+        if not candidates:
+            return None
+        # Prefer a dict that looks like the verdict (canonical keys): a
+        # thinking preamble can draft an ancillary object (a schema example)
+        # ahead of the real verdict. Caveat: if two dicts both carry the
+        # verdict keys, the earliest wins — reasoning prose that drafts a
+        # *sample* verdict ahead of the real one will be mis-picked. Full
+        # schema-aware disambiguation isn't worth it; the alternative
+        # (failing the parse entirely) is strictly worse, and all output is
+        # still re-validated downstream in ``parse_response``.
+        for cand in candidates:
+            if isinstance(cand, dict) and (
+                "verdict" in cand or "review_markdown" in cand
+            ):
+                return cand
+        # Fall back to the first dict of any shape.
+        for cand in candidates:
+            if isinstance(cand, dict):
+                return cand
+        # Only return a list when no dict exists; a single-item list
+        # wrapping a verdict is unwrapped by ``parse_response``.
+        for cand in candidates:
+            if isinstance(cand, list):
+                return cand
         return None
 
     parsed = _scan(text)
