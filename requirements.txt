@@ -1,0 +1,5 @@
+# Test dependencies — installed via `pip install -r requirements.txt`
+# Keep in sync with .github/workflows/ci.yaml "Install test dependencies" step.
+pytest
+pytest-cov
+yamllint
