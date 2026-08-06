@@ -331,6 +331,10 @@ check_contains "explicit omit-not-filler directive present" "$BASE" "omit the se
 # explicitly forbids the "- findings: []" placeholder the model has been
 # emitting as filler. This guards against weakening the instruction back to
 # a single generic sentence that the model ignores (#414 follow-up).
+check_contains "Standards Compliance trigger is named in the omit directive" \
+  "$BASE" "Standards Compliance section to the presence of a repository standards file"
+check_contains "Standards Compliance is requested conditionally, not always" \
+  "$BASE" "a Standards Compliance section when a repository standards file is provided"
 check_contains "Linked Issue Fit trigger is named in the omit directive" \
   "$BASE" "Linked Issue Fit section to the presence of linked issue context"
 check_contains "Evidence Provider Findings trigger is named in the omit directive" \

@@ -41,7 +41,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`scripts/publish_helpers.sh`** — Shared publish functions: sanitize, metadata marker build, native review cleanup, finding-thread resolution
 - **`scripts/sanitize_review_markdown.py`** — Neutralizes upstream GitHub auto-links (PR/issue/commit URLs, `owner/repo#123`, bare `#123`) in review output
 - **`scripts/strip_metadata_markers.py`** — Strips reserved `<!-- ai-pr-review-*:... -->` markers from model output before publishing
-- **`scripts/strip_empty_conditional_sections.py`** — Deterministic backstop for #415: removes model-confabulated `## Linked Issue Fit` / `## Evidence Provider Findings` sections when the corpus provided no such context. Presence mirrors the exact `[ -s linked-issues.md ]` / `[ -s evidence-providers.md ]` gates `corpus.sh` uses; fence-aware (won't match `#` headings inside code blocks); invoked from `sanitize_review_markdown`
+- **`scripts/strip_empty_conditional_sections.py`** — Deterministic backstop for #415: removes model-confabulated `## Linked Issue Fit` / `## Evidence Provider Findings` / `## Standards Compliance` sections when the corpus provided no such context. Presence mirrors the exact `[ -s linked-issues.md ]` / `[ -s evidence-providers.md ]` / `[ -s standards-present.txt ]` gates `corpus.sh` uses; fence-aware (won't match `#` headings inside code blocks); invoked from `sanitize_review_markdown`. Sections are matched by leading phrase with the trailing noun dropped (`linked issue`, `evidence provider`, `standards`), and an unreported signal defaults to present — never strip a section the caller forgot to report on
 - **`scripts/redact.py`** — Shared secret-redaction pipeline applied to tool and evidence-provider output
 - **`scripts/build_review_comments.py`** — Builds line-anchored inline review comments from structured findings, validated against the PR diff
 - **`scripts/resolve_finding_threads.py`** — Resolves/replies on existing finding threads by content fingerprint on re-review
@@ -102,6 +102,8 @@ publish (action.yml steps)      → sanitize markdown → strip markers → buil
 15. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
 
 Note: `MAX_CORPUS` truncation applies to sections 1–14; the standards section is always preserved in full.
+
+The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 
 ## Running tests
 

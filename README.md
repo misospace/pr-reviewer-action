@@ -173,6 +173,12 @@ The result is exposed as the `required_checks` output (`complete` / `incomplete`
 
 Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the review markdown to neutralize upstream GitHub references (PR URLs, issue URLs, commit URLs, compare URLs, cross-repo `owner/repo#123` references, and bare `#123` references). This prevents GitHub from auto-linking them into the reviewed repository, which would create notification noise and misleading linkbacks to unrelated projects. Sanitization is documented as P0 hygiene in [issue #132](https://github.com/misospace/pr-reviewer-action/issues/132).
 
+### 🚫 Empty conditional sections
+
+Every conditional review section is tied to a corpus trigger: **Linked Issue Fit** to linked-issue context, **Evidence Provider Findings** to provider output, **Tool Harness Findings** to tool output, **Standards Compliance** to a resolved standards file, and **Unknowns or Needs Verification** to incomplete evidence. When a trigger is unmet the section is omitted entirely rather than emitted with "No findings" filler.
+
+The prompt asks for this, and `scripts/strip_empty_conditional_sections.py` enforces it at publish time for the sections whose triggers are deterministic — reading the same `[ -s <file> ]` signals the corpus builder used, so it can only remove a section the corpus never offered. In practice, a repo with no `AGENTS.md` (or other standards file) no longer gets a Standards Compliance section explaining that no standards were available.
+
 ## 🎛️ Inputs
 
 Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. Everything else has a sensible default. Inputs are grouped by topic below — expand the sections you need.
