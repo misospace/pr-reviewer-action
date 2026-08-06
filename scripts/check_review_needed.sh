@@ -171,6 +171,13 @@ compute_config_hash() {
     done
   fi
 
+  # Output-length dial. Contributes nothing at the default, so existing
+  # fingerprints stay valid and no consumer eats a re-review on upgrade; a
+  # switch to concise changes the prompt, so it must invalidate.
+  if [[ -n "${REVIEW_VERBOSITY:-}" && "${REVIEW_VERBOSITY:-}" != "normal" ]]; then
+    parts+=("review_verbosity:${REVIEW_VERBOSITY}")
+  fi
+
   # Context limit mode
   if [[ -n "${CONTEXT_LIMIT_MODE:-}" ]]; then
     parts+=("context_limit:${CONTEXT_LIMIT_MODE}")

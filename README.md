@@ -279,6 +279,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `system_prompt` | Optional system prompt override | No | bundled prompt |
 | `system_prompt_file` | File in the reviewed repo to use as the full system prompt | No | `""` |
 | `system_prompt_mode` | How a supplied prompt combines with the bundled default: `replace` (verbatim) or `append` (repo addendum on the conditionally-assembled default — no need to copy/re-sync the default) | No | `replace` |
+| `review_verbosity` | Output length of the bundled default prompt: `normal` or `concise` (~300-word target, blocker/major in prose only, no diff restatement) | No | `normal` |
 | `standards_file` | Explicit standards file path; takes priority over candidates | No | `""` |
 | `standards_file_candidates` | Candidate files checked in order; first found is used | No | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` |
 
@@ -665,6 +666,31 @@ If a repo wants more than policy context and needs to fully control the reviewer
     system_prompt_file: .github/pr-review-prompt.md
 ```
 
+### 🪶 Shorter reviews with `review_verbosity`
+
+The bundled default prompt is written for thoroughness: it asks for a recommendation, change-by-change findings, sources, and a Standards Compliance section on every review. On a repo of small, low-risk PRs that reads as padding, and reviewers start skimming past it.
+
+```yaml
+- uses: misospace/pr-reviewer-action@v2
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    ai_base_url: https://api.openai.com/v1
+    ai_model: gpt-4.1
+    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
+    review_verbosity: concise
+```
+
+`concise` appends a brevity fragment to the assembled default: a ~300-word target, prose limited to blocker/major issues with minor and info left to the `findings` array, no restating the diff back to its author, one sentence per point, and Standards Compliance omitted unless a documented convention is actually violated.
+
+Two things are explicitly exempt, because brevity must not hide a gap:
+
+- **`must_check` coverage** — every required check still gets an explicit mention (one clause is enough). Dropping them would make the deterministic completeness validation report a false `complete`, or force an escalation.
+- **The Unknowns or Needs Verification section** — still emitted whenever evidence is incomplete. `escalate_on_fast_low_confidence` reads it, so suppressing it would silently downgrade an under-reviewed PR to a confident-looking approval.
+
+Nothing changes at `normal`: the assembled prompt is byte-identical to a run without the input, and the default contributes nothing to the config fingerprint, so upgrading does not trigger a re-review. Switching to `concise` does change the fingerprint, so the next run re-reviews under the new prompt.
+
+For repo-specific wording on top of this, combine it with `system_prompt_mode: append`. A `replace`-mode `system_prompt` (or a `system_prompt_file`) is used verbatim and ignores the dial entirely.
+
 ## 📣 Publishing & verdicts
 
 ### 📮 Publish modes
@@ -1028,6 +1054,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 - `system_prompt` takes precedence over `system_prompt_file`.
 - `system_prompt_file` takes precedence over the bundled generic prompt.
 - With `system_prompt_mode: append`, the supplied prompt does not replace the default — it is appended to the conditionally-assembled bundled default as a repo-specific addendum, so you can add conventions without copying (and re-syncing) the whole default.
+- `review_verbosity` tunes the bundled default's output length (`normal` / `concise`) without a prompt override. It is a fragment of the assembled default, so a `replace`-mode `system_prompt` ignores it; with `system_prompt_mode: append` both apply, dial first and repo addendum last.
 - `standards_file` is optional; if blank, the action checks `standards_file_candidates` in order and uses the first file found. `AGENTS.md` is checked first by default, then `CLAUDE.md`, making the action compatible with both Claude Code and non-Claude Code setups.
 - By default, the action computes a stable patch fingerprint with `git patch-id --stable` and skips the LLM call when that fingerprint matches the most recent managed review comment. This avoids token spend on rebases and other history-only changes.
 - `publish_review_comment` uses `gh pr comment --edit-last --create-if-none`, so the comment is managed by the token identity used in the workflow.

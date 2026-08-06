@@ -48,6 +48,10 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     web_search,
 )
 
+# Conditional-fragment placeholders in default_system_prompt.txt, e.g.
+# {{VERSION_BUMP_GUIDANCE}} (substituted by apply_system_prompt_fragments).
+_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+
 
 def normalize_repo_name(value):
     text = (value or "").strip().strip("/")
@@ -416,11 +420,11 @@ def resolve_review_system_prompt():
         return ""
     # run_review.sh normally exports an already-assembled SYSTEM_PROMPT (with the
     # PR-type placeholders substituted), so this file fallback is defensive only.
-    # Strip any unsubstituted placeholders so the bare base never leaks "{{...}}"
-    # tokens to the model.
-    return text.replace("{{VERSION_BUMP_GUIDANCE}}", "").replace(
-        "{{IMAGE_DIGEST_GUIDANCE}}", ""
-    )
+    # Strip any unsubstituted placeholder so the bare base never leaks "{{...}}"
+    # tokens to the model. Matched by shape, not by name: the enumerated form
+    # silently missed {{RELEASE_NOTES_GUIDANCE}} when it was added, and would
+    # miss every future fragment the same way.
+    return _PLACEHOLDER_RE.sub("", text)
 
 
 def run_native_loop(

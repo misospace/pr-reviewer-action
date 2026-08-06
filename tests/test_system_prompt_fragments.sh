@@ -69,16 +69,64 @@ check_contains "digest PR includes release-notes guidance" "$OUT" "upstream rele
 check_not_contains "digest PR drops HOST PLATFORM block" "$OUT" "HOST PLATFORM"
 check_not_contains "no placeholder remains" "$OUT" "{{"
 
+echo "=== review_verbosity=concise adds the brevity fragment ==="
+OUT="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 REVIEW_VERBOSITY=concise
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "concise includes the word budget" "$OUT" "under 300 words"
+check_contains "concise keeps the base output schema" "$OUT" "Return STRICT JSON"
+check_not_contains "concise leaves no placeholder" "$OUT" "{{"
+# Brevity must not defeat the two mechanisms that depend on the model actually
+# writing something: completeness.py keyword-matches must_check items against
+# review_markdown, and escalate_on_fast_low_confidence reads the Unknowns
+# section. A fragment that let the model drop either would trade verbosity for
+# a false "complete" or a silently under-reviewed PR.
+check_contains "concise exempts must_check coverage" "$OUT" \
+  "address every must_check item explicitly"
+check_contains "concise exempts the Unknowns section" "$OUT" \
+  "never drop an Unknowns or Needs Verification section"
+
+echo "=== review_verbosity=normal is byte-identical to the pre-dial prompt ==="
+NORMAL="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 REVIEW_VERBOSITY=normal
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+UNSET_OUT="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  unset REVIEW_VERBOSITY
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_not_contains "normal drops the brevity fragment" "$NORMAL" "under 300 words"
+check_not_contains "normal leaves no placeholder" "$NORMAL" "{{"
+check "an unset dial matches normal exactly" "$UNSET_OUT" "$NORMAL"
+
+echo "=== the dial applies without a classification (no leaked placeholder) ==="
+OUT="$( cd "$WORK"
+  rm -f classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 REVIEW_VERBOSITY=concise
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "classification-less run still applies the dial" "$OUT" "under 300 words"
+check_not_contains "classification-less run leaks no verbosity placeholder" \
+  "$OUT" "VERBOSITY_GUIDANCE"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
 RN="$(<"$SCRIPT_DIR/prompt_fragments/release_notes.txt") "
+CN="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
 RECON="${BASE/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
 RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
+RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"
 check_contains "reconstructed prompt has digest block" "$RECON" "digest-only image"
 check_contains "reconstructed prompt has release-notes block" "$RECON" "upstream release notes"
+check_contains "reconstructed prompt has brevity block" "$RECON" "under 300 words"
 check_not_contains "fully reconstructed prompt has no placeholder" "$RECON" "{{"
 
 # Extract resolve_system_prompt to test replace vs append mode end-to-end.
