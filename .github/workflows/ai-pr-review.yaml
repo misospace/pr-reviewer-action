@@ -2,7 +2,14 @@ name: AI PR Review
 
 on:
   pull_request:
-    branches: ["main"]
+    # Deliberately unfiltered by base branch. A `branches: ["main"]` filter is
+    # evaluated against the BASE ref, so a stacked PR — one opened against
+    # another in-flight branch, the normal way to split a change into reviewable
+    # parts — never matched and was silently never reviewed. No check appeared
+    # to explain the absence, and neither the `ai-review` label nor
+    # workflow_dispatch could recover it: the filter applies to every activity
+    # type, and the review step below is gated on `pull_request`.
+    #
     # `labeled` enables the one-click re-review: add the `ai-review` label to
     # force a fresh review (only write/triage can label — self-authorizing).
     types: [opened, reopened, synchronize, ready_for_review, labeled]
