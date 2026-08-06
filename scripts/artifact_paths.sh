@@ -13,7 +13,7 @@ assert_safe_artifact_paths() {
     linked-sources.md manifest-context.md image-digest-context.md
     repo-impact.md repo-impact.truncated.md repo-history.md repo-history.truncated.md
     evidence-providers.md evidence-providers.json classification.json
-    standards-context.md tool-harness.md tool-harness.json
+    standards-context.md standards-present.txt tool-harness.md tool-harness.json
     review-corpus.md review-corpus.truncated.md review-corpus.fallback.truncated.md
     ai-request.json ai-response.json ai-output.json ai-output.primary.json
     ai-request.fallback.json ai-response.fallback.json

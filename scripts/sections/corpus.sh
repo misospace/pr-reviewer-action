@@ -11,11 +11,17 @@ section_timer_end
 
 log "Building review corpus..."
 : > standards-context.md
+# standards-context.md is never empty — it carries an explicit "unavailable"
+# note when no file resolved — so it cannot double as the presence signal the
+# publish step needs. standards-present.txt is that signal, and it is truncated
+# on both paths so a persistent self-hosted runner can't leak a stale one.
+: > standards-present.txt
 if [ -f "$STANDARDS_FILE" ]; then
   echo "# Repository Standards and Conventions" >> standards-context.md
   echo "Derived from $STANDARDS_FILE for this repository." >> standards-context.md
   echo >> standards-context.md
   cat "$STANDARDS_FILE" >> standards-context.md
+  printf '%s\n' "$STANDARDS_FILE" > standards-present.txt
 else
   if [[ -n "$STANDARDS_FILE" ]]; then
     echo "($STANDARDS_FILE not found; standards context unavailable.)" >> standards-context.md

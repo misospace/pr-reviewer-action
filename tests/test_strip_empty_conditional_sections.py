@@ -28,8 +28,8 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-PRESENT_ALL = {"linked_issue": True, "evidence_provider": True}
-ABSENT_ALL = {"linked_issue": False, "evidence_provider": False}
+PRESENT_ALL = {"linked_issue": True, "evidence_provider": True, "standards": True}
+ABSENT_ALL = {"linked_issue": False, "evidence_provider": False, "standards": False}
 
 
 # ---------------------------------------------------------------------------
@@ -46,15 +46,31 @@ class TestNoOp:
         text = (
             "## Summary\n\nLooks good.\n\n"
             "## Linked Issue Fit\n\nImplements the acceptance criteria.\n\n"
-            "## Evidence Provider Findings\n\nlint: no issues.\n"
+            "## Evidence Provider Findings\n\nlint: no issues.\n\n"
+            "## Standards Compliance\n\nFollows the documented naming rules.\n"
         )
         result = strip_empty_conditional_sections(text, PRESENT_ALL)
         assert result == text
 
     def test_no_target_sections_unchanged(self):
         """Sections that are not conditional are never touched."""
-        text = "## Summary\n\nLGTM.\n\n## Standards Compliance\n\nFollows conventions.\n"
+        text = (
+            "## Summary\n\nLGTM.\n\n"
+            "## Change-by-Change Findings\n\nNothing blocking.\n\n"
+            "## Sources\n\npr.diff\n"
+        )
         assert strip_empty_conditional_sections(text, ABSENT_ALL) == text
+
+    def test_unreported_standards_signal_keeps_the_section(self):
+        """A caller that never reports on standards must not lose the section.
+
+        Missing keys default to present, so an out-of-date caller (or the
+        stdin path with no STANDARDS_PRESENT set in the dict) degrades to
+        keeping the section rather than silently deleting real content.
+        """
+        text = "## Summary\n\nLGTM.\n\n## Standards Compliance\n\nFollows conventions.\n"
+        legacy_signals = {"linked_issue": False, "evidence_provider": False}
+        assert strip_empty_conditional_sections(text, legacy_signals) == text
 
 
 # ---------------------------------------------------------------------------
@@ -68,27 +84,27 @@ class TestStripsAbsentSections:
         text = (
             "## Summary\n\nStandard dependency bump.\n\n"
             "## Linked Issue Fit\n\nNo linked issue was present.\n\n"
-            "## Standards Compliance\n\nConventions followed.\n"
+            "## Sources\n\npr.diff, AGENTS.md\n"
         )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         assert "Linked Issue Fit" not in result
         assert "No linked issue was present" not in result
         # Surrounding sections survive.
         assert "## Summary" in result
-        assert "## Standards Compliance" in result
+        assert "## Sources" in result
 
     def test_strips_evidence_provider_findings_when_absent(self):
         """Observed bug: 'No evidence provider findings were present.' removed."""
         text = (
             "## Summary\n\nStandard dependency bump.\n\n"
             "## Evidence Provider Findings\n\nNo evidence provider findings were present.\n\n"
-            "## Standards Compliance\n\nConventions followed.\n"
+            "## Sources\n\npr.diff, AGENTS.md\n"
         )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         assert "Evidence Provider Findings" not in result
         assert "No evidence provider findings were present" not in result
         assert "## Summary" in result
-        assert "## Standards Compliance" in result
+        assert "## Sources" in result
 
     def test_strips_both_filler_sections_exact_bug(self):
         """The exact two-section confabulation from the #415 report."""
@@ -121,13 +137,40 @@ class TestStripsAbsentSections:
             "## Evidence Provider Findings\n\n"
             "### lint\n\nNo findings.\n\n"
             "### audit\n\nClean.\n\n"
-            "## Standards Compliance\n\nGood.\n"
+            "## Sources\n\nGood.\n"
         )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         assert "Evidence Provider Findings" not in result
         assert "### lint" not in result
         assert "### audit" not in result
-        assert "## Standards Compliance" in result
+        assert "## Sources" in result
+
+    def test_strips_standards_compliance_when_no_standards_file(self):
+        """With no standards file resolved, the section can only be filler.
+
+        The corpus states "standards context unavailable" in that case, so a
+        Standards Compliance section has nothing to have been checked against.
+        """
+        text = (
+            "## Summary\n\nLGTM.\n\n"
+            "## Standards Compliance\n\n"
+            "No repository standards file was provided, so no conventions "
+            "could be verified.\n\n"
+            "## Sources\n\npr.diff\n"
+        )
+        result = strip_empty_conditional_sections(text, ABSENT_ALL)
+        assert "Standards Compliance" not in result
+        assert "no conventions" not in result
+        assert "## Summary" in result
+        assert "## Sources" in result
+
+    def test_strips_standards_heading_variants(self):
+        """The trailing noun is not part of the match (as with the other keys)."""
+        for heading in ("## Standards", "## Standards Notes", "### Standards Review"):
+            text = f"## Summary\n\nok.\n\n{heading}\n\nNone provided.\n"
+            result = strip_empty_conditional_sections(text, ABSENT_ALL)
+            assert "Standards" not in result, heading
+            assert "## Summary" in result
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +203,20 @@ class TestSelectiveStripping:
         assert "## Evidence Provider Findings" in result
         assert "lint: clean." in result
 
+    def test_present_standards_absent_linked(self):
+        """A repo with AGENTS.md keeps its Standards Compliance section."""
+        text = (
+            "## Standards Compliance\n\nSelectors are service-scoped per AGENTS.md.\n\n"
+            "## Linked Issue Fit\n\nNo linked issue.\n"
+        )
+        result = strip_empty_conditional_sections(
+            text,
+            {"linked_issue": False, "evidence_provider": False, "standards": True},
+        )
+        assert "## Standards Compliance" in result
+        assert "service-scoped" in result
+        assert "Linked Issue Fit" not in result
+
 
 # ---------------------------------------------------------------------------
 # Markdown robustness
@@ -171,7 +228,7 @@ class TestMarkdownRobustness:
         """A '# Linked Issue' line inside a code block is not a real heading."""
         text = (
             "## Summary\n\n```\n## Linked Issue Fit\nnot a heading\n```\n\n"
-            "## Standards Compliance\n\nok.\n"
+            "## Sources\n\nok.\n"
         )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # The line inside the fence is preserved.
@@ -183,13 +240,13 @@ class TestMarkdownRobustness:
         text = (
             "## Summary\n\nA.\n\n"
             "## Linked Issue Fit\n\nNope.\n\n"
-            "## Standards Compliance\n\nB.\n"
+            "## Sources\n\nB.\n"
         )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # No runs of 3+ newlines remain.
         assert "\n\n\n" not in result
         assert "## Summary" in result
-        assert "## Standards Compliance" in result
+        assert "## Sources" in result
 
     def test_different_heading_levels(self):
         """Matches ### level headings, not just ##."""
@@ -222,11 +279,11 @@ class TestEdgeCaseInputs:
     def test_seven_hashes_is_body_not_heading(self):
         """Per CommonMark >6 '#' is not a heading; it must not be treated as a
         section boundary, and must not be stripped as a conditional section."""
-        text = "## Summary\n\nok.\n\n####### not a heading, body text\n\n## Standards Compliance\n\nfine.\n"
+        text = "## Summary\n\nok.\n\n####### not a heading, body text\n\n## Sources\n\nfine.\n"
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         assert "####### not a heading" in result  # preserved as body
         assert "## Summary" in result
-        assert "## Standards Compliance" in result
+        assert "## Sources" in result
 
     def test_empty_file_path_via_cli(self, tmp_path):
         """An empty input file is handled without error (in-place CLI path)."""
@@ -240,6 +297,40 @@ class TestEdgeCaseInputs:
             env={"PATH": "/usr/bin:/bin"},
         )
         assert r.returncode == 0
+
+    def test_standards_present_env_is_honored_via_cli(self, tmp_path):
+        """STANDARDS_PRESENT=true keeps the section on the in-place CLI path.
+
+        publish_helpers.sh passes the signal by env, so a typo'd or unread
+        variable name would silently delete a real section on every repo that
+        has a standards file.
+        """
+        import subprocess
+        import sys
+
+        body = "## Summary\n\nok.\n\n## Standards Compliance\n\nMatches AGENTS.md.\n"
+        script = str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py")
+
+        kept = tmp_path / "kept.md"
+        kept.write_text(body)
+        r = subprocess.run(
+            [sys.executable, script, str(kept)],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "true"},
+        )
+        assert r.returncode == 0
+        assert kept.read_text() == body
+
+        stripped = tmp_path / "stripped.md"
+        stripped.write_text(body)
+        r = subprocess.run(
+            [sys.executable, script, str(stripped)],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "false"},
+        )
+        assert r.returncode == 0
+        assert "Standards Compliance" not in stripped.read_text()
+        assert "## Summary" in stripped.read_text()
 
 
 if __name__ == "__main__":

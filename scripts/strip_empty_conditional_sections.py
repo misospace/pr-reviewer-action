@@ -9,14 +9,21 @@ already recurred once, so this script is the deterministic backstop — the
 publish-time equivalent of strip_metadata_markers.py.
 
 Presence signals mirror the exact gates corpus.sh uses to decide whether to
-emit the section headers in the first place ([ -s linked-issues.md ] and
-[ -s evidence-providers.md ]). When a signal is absent, the matching output
-section is removed (header through the next heading of the same or higher
-level, or EOF). When present, the section is left untouched.
+emit the section headers in the first place ([ -s linked-issues.md ],
+[ -s evidence-providers.md ], [ -s standards-present.txt ]). When a signal is
+absent, the matching output section is removed (header through the next heading
+of the same or higher level, or EOF). When present, the section is left
+untouched.
+
+Standards Compliance is in the set because the same argument applies: when no
+standards file resolves, the corpus says so in as many words ("standards context
+unavailable"), so a Standards Compliance section can only be the filler #415
+describes. It is the one section the prompt used to request unconditionally.
 
 Usage:
   # stdin → stdout (presence via env, defaults to "present" = keep)
   LINKED_ISSUE_PRESENT=false EVIDENCE_PROVIDER_PRESENT=false \
+    STANDARDS_PRESENT=false \
     cat review.md | python3 strip_empty_conditional_sections.py
   # file in-place
   python3 strip_empty_conditional_sections.py review.md
@@ -26,6 +33,7 @@ Usage:
 Env:
   LINKED_ISSUE_PRESENT        true when linked-issues.md is non-empty
   EVIDENCE_PROVIDER_PRESENT   true when evidence-providers.md is non-empty
+  STANDARDS_PRESENT           true when a standards file resolved to a real file
 """
 
 import argparse
@@ -39,6 +47,11 @@ from pathlib import Path
 SECTION_HEADINGS = {
     "linked_issue": "linked issue",
     "evidence_provider": "evidence provider",
+    # Trailing noun dropped, as with the other two ("Linked Issue Fit" →
+    # "linked issue"), so "## Standards Compliance", "## Standards", and
+    # "## Standards Notes" all match. Over-matching is harmless here: with no
+    # standards file resolved there is nothing for any standards heading to say.
+    "standards": "standards",
 }
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -166,6 +179,7 @@ def _present_from_env(env) -> dict:
     return {
         "linked_issue": flag("LINKED_ISSUE_PRESENT"),
         "evidence_provider": flag("EVIDENCE_PROVIDER_PRESENT"),
+        "standards": flag("STANDARDS_PRESENT"),
     }
 
 
