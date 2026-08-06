@@ -104,6 +104,19 @@ check_not_contains "normal drops the brevity fragment" "$NORMAL" "under 300 word
 check_not_contains "normal leaves no placeholder" "$NORMAL" "{{"
 check "an unset dial matches normal exactly" "$UNSET_OUT" "$NORMAL"
 
+echo "=== the dial is case-insensitive at the point of substitution ==="
+# config.sh lowercases REVIEW_VERBOSITY at source time, before classification.sh
+# calls the assembler — but the assembler must not depend on that having already
+# run. An uppercase value that silently assembled the normal prompt while still
+# reading as non-default elsewhere is the failure this pins.
+OUT="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 REVIEW_VERBOSITY=CONCISE
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "uppercase CONCISE still applies the fragment" "$OUT" "under 300 words"
+check_not_contains "uppercase CONCISE leaves no placeholder" "$OUT" "{{"
+
 echo "=== the dial applies without a classification (no leaked placeholder) ==="
 OUT="$( cd "$WORK"
   rm -f classification.json
@@ -294,6 +307,21 @@ else
 fi
 
 rm -f "$TMPF_FP"
+
+echo "=== the verbosity fingerprint tracks the assembled prompt, not the raw input ==="
+# The precheck must hash the dial the review step will actually act on. Hashing
+# the raw input would force a re-review for a case change or a typo that leaves
+# the prompt identical.
+FP_NORMAL="$(REVIEW_VERBOSITY=normal compute_config_hash)"
+FP_UNSET="$(compute_config_hash)"
+FP_CONCISE="$(REVIEW_VERBOSITY=concise compute_config_hash)"
+FP_CONCISE_UPPER="$(REVIEW_VERBOSITY=CONCISE compute_config_hash)"
+FP_TYPO="$(REVIEW_VERBOSITY=verbose compute_config_hash)"
+check "normal matches an unset dial" "$FP_NORMAL" "$FP_UNSET"
+check_ne "concise invalidates the fingerprint" "$FP_CONCISE" "$FP_NORMAL"
+check "CONCISE and concise agree (same assembled prompt)" "$FP_CONCISE_UPPER" "$FP_CONCISE"
+# A typo degrades to normal in config.sh, so it must not invalidate either.
+check "an unrecognized value matches normal" "$FP_TYPO" "$FP_NORMAL"
 
 echo "=== base prompt directs the model to omit unmet conditional sections (#409/#414) ==="
 check_contains "explicit omit-not-filler directive present" "$BASE" "omit the section entirely"

@@ -174,8 +174,18 @@ compute_config_hash() {
   # Output-length dial. Contributes nothing at the default, so existing
   # fingerprints stay valid and no consumer eats a re-review on upgrade; a
   # switch to concise changes the prompt, so it must invalidate.
-  if [[ -n "${REVIEW_VERBOSITY:-}" && "${REVIEW_VERBOSITY:-}" != "normal" ]]; then
-    parts+=("review_verbosity:${REVIEW_VERBOSITY}")
+  #
+  # Hash the value the review step will assemble a prompt from, not the raw
+  # input: config.sh lowercases the dial and degrades an unrecognized value to
+  # normal. Hashing the raw input would invalidate the fingerprint for CONCISE
+  # vs concise (identical prompts) and for a typo like `verbose` (which yields
+  # the normal prompt), forcing a re-review that changes nothing.
+  if [[ -n "${REVIEW_VERBOSITY:-}" ]]; then
+    local rv
+    rv="$(printf '%s' "$REVIEW_VERBOSITY" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$rv" == "concise" ]]; then
+      parts+=("review_verbosity:${rv}")
+    fi
   fi
 
   # Context limit mode

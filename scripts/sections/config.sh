@@ -397,8 +397,14 @@ apply_system_prompt_fragments() {
   # substituted outside the classification gate — a missing classification.json
   # must not leak "{{VERBOSITY_GUIDANCE}}" into the prompt.
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" ]]; then
-    local vg=""
-    if [[ "${REVIEW_VERBOSITY:-normal}" == "concise" ]]; then
+    # Lowercased here rather than relying on the top-level normalization below:
+    # that runs at source time, before classification.sh calls this function, but
+    # a caller reaching the function by another route (a test harness, a future
+    # section reorder) would otherwise silently miss an uppercase CONCISE and
+    # assemble the normal prompt.
+    local vg="" verbosity
+    verbosity="$(printf '%s' "${REVIEW_VERBOSITY:-normal}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$verbosity" == "concise" ]]; then
       vg="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERBOSITY_GUIDANCE\}\}/$vg}"
