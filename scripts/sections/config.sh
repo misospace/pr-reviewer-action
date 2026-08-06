@@ -49,6 +49,10 @@ SYSTEM_PROMPT_MODE="${SYSTEM_PROMPT_MODE:-replace}"
 # A supplied prompt held for append mode, composed onto the default after
 # fragment assembly (see apply_system_prompt_fragments).
 SYSTEM_PROMPT_ADDENDUM=""
+# Output-length dial for the bundled default prompt. 'concise' substitutes the
+# brevity fragment; 'normal' substitutes nothing, so the assembled prompt is
+# byte-identical to pre-dial behavior. Ignored for a replace-mode override.
+REVIEW_VERBOSITY="${REVIEW_VERBOSITY:-normal}"
 STANDARDS_FILE="${STANDARDS_FILE:-}"
 STANDARDS_FILE_CANDIDATES="${STANDARDS_FILE_CANDIDATES:-AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt}"
 CONTEXT_LIMIT_MODE="${CONTEXT_LIMIT_MODE:-normal}"
@@ -389,6 +393,22 @@ resolve_system_prompt() {
 # (run_tool_harness.py, env-first) uses the same assembled prompt as the standard
 # review call rather than re-reading the file.
 apply_system_prompt_fragments() {
+  # The verbosity dial is a caller setting, not a property of this PR, so it is
+  # substituted outside the classification gate — a missing classification.json
+  # must not leak "{{VERBOSITY_GUIDANCE}}" into the prompt.
+  if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" ]]; then
+    # Lowercased here rather than relying on the top-level normalization below:
+    # that runs at source time, before classification.sh calls this function, but
+    # a caller reaching the function by another route (a test harness, a future
+    # section reorder) would otherwise silently miss an uppercase CONCISE and
+    # assemble the normal prompt.
+    local vg="" verbosity
+    verbosity="$(printf '%s' "${REVIEW_VERBOSITY:-normal}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$verbosity" == "concise" ]]; then
+      vg="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERBOSITY_GUIDANCE\}\}/$vg}"
+  fi
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" && -f classification.json ]]; then
     local kind vb="" dg="" rn=""
     kind="$(jq -r '.pr_kind // ""' classification.json 2>/dev/null || echo "")"
@@ -420,6 +440,17 @@ apply_system_prompt_fragments() {
 
 resolve_standards_file
 resolve_system_prompt
+
+# An unrecognized verbosity degrades to normal with a warning rather than
+# erroring — a typo'd dial should not cost a consumer their review.
+REVIEW_VERBOSITY="$(printf '%s' "$REVIEW_VERBOSITY" | tr '[:upper:]' '[:lower:]')"
+case "$REVIEW_VERBOSITY" in
+  normal|concise) ;;
+  *)
+    error "Invalid REVIEW_VERBOSITY '$REVIEW_VERBOSITY'; defaulting to normal"
+    REVIEW_VERBOSITY="normal"
+    ;;
+esac
 
 # native_loop is the only tool mode as of 2.0 (the plan_execute_* planner paths
 # were removed in #304). A stale plan_execute_* value degrades to off with a

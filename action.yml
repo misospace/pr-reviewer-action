@@ -257,6 +257,17 @@ inputs:
       copying (and re-syncing) the whole default.
     required: false
     default: "replace"
+  review_verbosity:
+    description: >-
+      Output-length dial for the bundled default prompt. 'normal' (default)
+      leaves the prompt unchanged. 'concise' adds a brevity fragment: a ~300-word
+      target, prose limited to blocker/major issues with minor/info left to the
+      findings array, no diff restatement, and Standards Compliance omitted unless
+      a convention is violated. must_check coverage and the Unknowns section are
+      explicitly exempt, so brevity cannot hide a gap. Applies only to the bundled
+      default — a replace-mode system_prompt override is used verbatim.
+    required: false
+    default: "normal"
   standards_file:
     description: Repository standards file path for conventions and policy context
     required: false
@@ -697,6 +708,7 @@ runs:
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
         SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
+        REVIEW_VERBOSITY: ${{ inputs.review_verbosity }}
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
@@ -817,6 +829,7 @@ runs:
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
         SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
+        REVIEW_VERBOSITY: ${{ inputs.review_verbosity }}
         STANDARDS_FILE: ${{ inputs.standards_file }}
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
