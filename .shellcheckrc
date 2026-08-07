@@ -1,0 +1,33 @@
+# ShellCheck configuration for pr-reviewer-action
+# https://www.shellcheck.net/wiki/Options
+
+# Treat all scripts as bash (we use [[, arrays, etc.)
+shell=bash
+
+# Enable all warnings except:
+#   SC2154 - variable referenced but not assigned.
+#            Many scripts receive their inputs from the calling workflow via
+#            environment variables or from sourced files; shellcheck cannot
+#            see across these boundaries and reports false positives.
+#   SC2034 - variable appears unused.
+#            PIDs (IMAGE_DIGEST_PID, EVIDENCE_PID) are written by
+#            scripts/sections/classification.sh and read by
+#            scripts/sections/common.sh. Shellcheck does not follow these
+#            cross-file references, so it flags the PIDs as unused.
+#   SC1091 - Not following sourced files.
+#            Sourced paths are resolved at runtime via ${GITHUB_ACTION_PATH}
+#            or relative to the script's directory; shellcheck cannot resolve
+#            them statically. The scripts already carry `# shellcheck source=`
+#            hints where helpful.
+#   SC2129 - Consider using { cmd1; cmd2; } >> file.
+#            Style preference only; the sequential-redirect form is intentional
+#            and widely used throughout scripts/sections/ for building
+#            context files line-by-line.
+#   SC2153 - Possible misspelling: REPO vs repo.
+#            REPO and PR_NUMBER are passed in by the caller; shellcheck
+#            cannot see the assignment in the surrounding workflow.
+#   SC2016 - Expressions don't expand in single quotes.
+#            The single-quoted GraphQL strings in scripts/publish_helpers.sh
+#            are literal queries sent verbatim to the GitHub API; expansion
+#            is intentionally suppressed.
+exclude=SC2154,SC2034,SC1091,SC2129,SC2153,SC2016
