@@ -684,6 +684,93 @@ def test_system_prompt_preserves_raw_whitespace(tmp_path):
     assert result == "FILE CONTENT", f"Expected file-only for blank-only SYSTEM_PROMPT, got: {result!r}"
 
 
+# ---------------------------------------------------------------------------
+# Tests for issue #468: restrict web_fetch URL scheme to http/https
+# ---------------------------------------------------------------------------
+
+
+def test_web_fetch_rejects_file_scheme():
+    """web_fetch rejects file:// URLs even with wildcard allowlist."""
+    web_fetch = _import_tool("web_fetch")
+
+    result = web_fetch("file:///etc/hostname", ["*"])
+    assert "error" in result, f"Expected error for file:// scheme, got: {result}"
+    assert "scheme" in result["error"].lower(), f"Error should mention scheme: {result['error']}"
+
+
+def test_web_fetch_rejects_ftp_scheme():
+    """web_fetch rejects ftp:// URLs even with wildcard allowlist."""
+    web_fetch = _import_tool("web_fetch")
+
+    result = web_fetch("ftp://example.com/file.txt", ["*"])
+    assert "error" in result, f"Expected error for ftp:// scheme, got: {result}"
+    assert "scheme" in result["error"].lower(), f"Error should mention scheme: {result['error']}"
+
+
+def test_web_fetch_rejects_gopher_scheme():
+    """web_fetch rejects gopher:// URLs even with wildcard allowlist."""
+    web_fetch = _import_tool("web_fetch")
+
+    result = web_fetch("gopher://example.com/", ["*"])
+    assert "error" in result, f"Expected error for gopher:// scheme, got: {result}"
+    assert "scheme" in result["error"].lower(), f"Error should mention scheme: {result['error']}"
+
+
+def test_web_fetch_allows_http_scheme():
+    """web_fetch allows http:// URLs under wildcard allowlist (no urlopen call)."""
+    web_fetch = _import_tool("web_fetch")
+
+    fake_response = mock.Mock()
+    fake_response.read.return_value = b"<html>ok</html>"
+    fake_response.__enter__ = mock.Mock(return_value=fake_response)
+    fake_response.__exit__ = mock.Mock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+        result = web_fetch("http://example.com/page", ["*"])
+    assert "error" not in result, f"Expected success for http:// scheme, got: {result}"
+    mock_urlopen.assert_called_once()
+
+
+def test_web_fetch_allows_https_scheme():
+    """web_fetch allows https:// URLs under wildcard allowlist (no urlopen call)."""
+    web_fetch = _import_tool("web_fetch")
+
+    fake_response = mock.Mock()
+    fake_response.read.return_value = b"<html>ok</html>"
+    fake_response.__enter__ = mock.Mock(return_value=fake_response)
+    fake_response.__exit__ = mock.Mock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+        result = web_fetch("https://example.com/page", ["*"])
+    assert "error" not in result, f"Expected success for https:// scheme, got: {result}"
+    mock_urlopen.assert_called_once()
+
+
+def test_web_search_strips_non_http_results():
+    """web_search strips non-http(s) URLs from search results."""
+    # Import directly from tool_executors since web_search is not exported by run_tool_harness
+    if str(_SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS_DIR))
+    from pr_reviewer.tool_executors import web_search
+
+    fake_response = mock.Mock()
+    fake_response.read.return_value = json.dumps({
+        "results": [
+            {"title": "Safe", "url": "https://example.com/safe", "content": "ok"},
+            {"title": "File LFI", "url": "file:///etc/passwd", "content": "bad"},
+            {"title": "FTP", "url": "ftp://evil.com/malware", "content": "bad"},
+        ]
+    }).encode()
+    fake_response.__enter__ = mock.Mock(return_value=fake_response)
+    fake_response.__exit__ = mock.Mock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_response):
+        result = web_search("test query", "https://search.example.com/search")
+    assert "error" not in result, f"Expected success, got: {result}"
+    results = result["results"]
+    assert len(results) == 3
+    assert results[0]["url"] == "https://example.com/safe"
+    assert results[1]["url"] == "", f"file:// URL should be stripped, got: {results[1]['url']}"
+    assert results[2]["url"] == "", f"ftp:// URL should be stripped, got: {results[2]['url']}"
+
+
 def main():
     tests = [
         ("old path counts zero", test_old_path_counts_zero),
@@ -719,6 +806,12 @@ def main():
         ("integration mixed success/failure", test_integration_mixed_success_and_failure),
         ("system_prompt env-first no double compose", test_system_prompt_env_first_no_double_compose),
         ("system_prompt preserves raw whitespace", test_system_prompt_preserves_raw_whitespace),
+        ("web_fetch rejects file scheme", test_web_fetch_rejects_file_scheme),
+        ("web_fetch rejects ftp scheme", test_web_fetch_rejects_ftp_scheme),
+        ("web_fetch rejects gopher scheme", test_web_fetch_rejects_gopher_scheme),
+        ("web_fetch allows http scheme", test_web_fetch_allows_http_scheme),
+        ("web_fetch allows https scheme", test_web_fetch_allows_https_scheme),
+        ("web_search strips non-http results", test_web_search_strips_non_http_results),
     ]
 
     passed = 0

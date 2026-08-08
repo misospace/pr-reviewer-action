@@ -227,8 +227,18 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     return _platform_gh_api(endpoint, allowed_repos, current_repo, request_timeout)
 
 def web_fetch(url, allowed_hosts, request_timeout=25):
-    """Fetch a URL using the same host-allowlist logic."""
+    """Fetch a URL using the same host-allowlist logic.
+
+    Only ``http`` and ``https`` schemes are permitted; all other schemes
+    (file://, ftp://, gopher://, …) are rejected to prevent LFI/SSRF attacks
+    when the model supplies URLs derived from untrusted PR/corpus content.
+    This mirrors the scheme check in :func:`mcp_client.is_safe_server_url`.
+    """
     parsed = urllib.parse.urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
+        return {"error": f"URL scheme '{parsed.scheme}' is not allowed; only http and https are permitted"}
+
     host = parsed.hostname or ""
 
     if not allowlisted_host(host, allowed_hosts):
@@ -255,6 +265,10 @@ def web_search(query, search_url, request_timeout=20, max_results=5):
     ``max_results``, or ``{"error": ...}``. The endpoint is a single trusted,
     operator-configured URL — unlike web_fetch it is not host-allowlisted,
     because the model supplies only the query string, never the host.
+
+    Result URLs containing non-http(s) schemes (file://, ftp://, gopher://, …)
+    are stripped to prevent LFI/SSRF attacks when search results are fed back
+    into the review corpus.
     """
     if not search_url:
         return {"error": "Search is not configured (no search_url)."}
@@ -274,9 +288,14 @@ def web_search(query, search_url, request_timeout=20, max_results=5):
     for item in (data.get("results") or [])[:max_results]:
         if not isinstance(item, dict):
             continue
+        url = str(item.get("url", ""))
+        # Strip non-http(s) result URLs to prevent LFI/SSRF via search results
+        parsed_url = urllib.parse.urlparse(url)
+        if parsed_url.scheme and parsed_url.scheme not in ("http", "https"):
+            url = ""
         results.append({
             "title": str(item.get("title", ""))[:300],
-            "url": str(item.get("url", "")),
+            "url": url,
             "snippet": str(item.get("content", ""))[:500],
         })
     return {"results": results}

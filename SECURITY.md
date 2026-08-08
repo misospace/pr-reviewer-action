@@ -20,7 +20,8 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 - `gh_api` can optionally include specific upstream repos via explicit allowlist (`tool_allowed_gh_api_repos`) or all repos via `*` while preserving endpoint/path denylist checks
 - Anthropic responses are parsed from `text` blocks only; non-text blocks such as `thinking` are not added to review output
 - `read_file` is constrained to workspace-relative paths and blocks sensitive path patterns
-- `web_fetch` is constrained to `allowed_source_hosts`
+- `web_fetch` is constrained to `allowed_source_hosts` and rejects non-http/https URL schemes (file://, ftp://, gopher://, …)
+- `web_search` uses an operator-configured search endpoint and strips non-http(s) URLs from results
 - `run_command` rejects raw shell text and permits only named read-only argv definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`)
 - Tool outputs are size-limited and pass through shared secret redaction before corpus inclusion
 - Evidence provider stdout and stderr are passed through the same secret-redaction pipeline before being written to JSON summaries or markdown output
