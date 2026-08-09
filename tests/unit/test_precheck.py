@@ -18,6 +18,7 @@ from pr_reviewer.precheck import (
     MIN_INCREMENTAL_RATIO,
     PrecheckResult,
     ReviewDecision,
+    _collect_config_lines,
     _detect_incremental_scope,
     _extract_previous_fingerprints,
     _format_output,
@@ -566,3 +567,97 @@ class TestEdgeCases:
         diff_fp = compute_diff_fingerprint(diff)
         result = should_review(diff, config, [diff_fp])
         assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+
+
+# ---------------------------------------------------------------------------
+# _collect_config_lines tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollectConfigLines:
+    def test_no_relevant_env_vars(self, monkeypatch):
+        """Returns empty list when no relevant env vars are set."""
+        monkeypatch.delenv("AI_MODEL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        lines = _collect_config_lines()
+        assert lines == []
+
+    def test_collects_ai_env_vars(self, monkeypatch):
+        """Collects AI_ prefixed environment variables."""
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        monkeypatch.setenv("AI_TEMPERATURE", "0.7")
+        lines = _collect_config_lines()
+        assert "AI_MODEL=gpt-4" in lines
+        assert "AI_TEMPERATURE=0.7" in lines
+
+    def test_collects_openai_env_vars(self, monkeypatch):
+        """Collects OPENAI_ prefixed environment variables."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test123")
+        monkeypatch.setenv("OPENAI_ORG_ID", "org-abc")
+        lines = _collect_config_lines()
+        assert "OPENAI_API_KEY=sk-test123" in lines
+        assert "OPENAI_ORG_ID=org-abc" in lines
+
+    def test_sorted_by_key(self, monkeypatch):
+        """Collected lines are sorted by key for determinism."""
+        monkeypatch.setenv("AI_ZEBRA", "z")
+        monkeypatch.setenv("AI_ALPHA", "a")
+        lines = _collect_config_lines()
+        ai_lines = [l for l in lines if l.startswith("AI_")]
+        assert ai_lines == ["AI_ALPHA=a", "AI_ZEBRA=z"]
+
+    def test_collects_config_files(self, monkeypatch, tmp_path):
+        """Collects content from config files specified by env vars."""
+        cfg_file = tmp_path / "config.txt"
+        cfg_file.write_text("some config")
+        monkeypatch.setenv("AI_CONFIG_FILE", str(cfg_file))
+        lines = _collect_config_lines()
+        assert any(f"file:{cfg_file}=" in l for l in lines)
+
+    def test_ignores_missing_config_files(self, monkeypatch):
+        """Doesn't fail when config file path doesn't exist."""
+        monkeypatch.setenv("AI_CONFIG_FILE", "/nonexistent/path")
+        lines = _collect_config_lines()
+        assert all("file:" not in l for l in lines)
+
+
+# ---------------------------------------------------------------------------
+# compute_config_hash no-argument tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConfigHashNoArgs:
+    def test_empty_env_returns_empty(self, monkeypatch):
+        """Returns empty string when no relevant env vars are set."""
+        monkeypatch.delenv("AI_MODEL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert compute_config_hash() == ""
+
+    def test_with_env_vars_produces_hash(self, monkeypatch):
+        """Produces a hash when relevant env vars are set."""
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        h = compute_config_hash()
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_deterministic_with_same_env(self, monkeypatch):
+        """Same env vars produce the same hash."""
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        monkeypatch.setenv("AI_TEMPERATURE", "0.7")
+        h1 = compute_config_hash()
+        h2 = compute_config_hash()
+        assert h1 == h2
+
+    def test_different_env_produces_different_hash(self, monkeypatch):
+        """Different env vars produce different hashes."""
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        h1 = compute_config_hash()
+        monkeypatch.setenv("AI_MODEL", "claude-3")
+        h2 = compute_config_hash()
+        assert h1 != h2
+
+    def test_backward_compat_with_explicit_lines(self):
+        """Still works when config_lines are passed explicitly."""
+        lines = ["MODEL=gpt-4", "TEMP=0.7"]
+        h = compute_config_hash(lines)
+        assert len(h) == 64

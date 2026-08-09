@@ -82,7 +82,50 @@ def compute_diff_fingerprint(diff_content: str) -> str:
     return hashlib.sha256(diff_content.encode("utf-8")).hexdigest()
 
 
-def compute_config_hash(config_lines: list[str]) -> str:
+def _collect_config_lines() -> list[str]:
+    """Collect configuration key=value pairs from environment and files.
+
+    Mirrors the behaviour of ``compute_config_hash`` in the original
+    ``check_review_needed.sh`` so that the Python version can be called
+    without arguments from the shell wrapper.
+    """
+    lines: list[str] = []
+
+    # Environment variables (sorted by key for determinism)
+    _CONFIG_KEYS = sorted(
+        k
+        for k in os.environ
+        if k.startswith(("AI_", "ANTHROPIC_", "AZURE_", "DEEPSEEK_", "GEMINI_",
+                         "MISTRAL_", "OPENAI_", "OPENROUTER_", "PERPLEXITY_",
+                         "TOGETHER_", "XAI_"))
+    )
+    for key in _CONFIG_KEYS:
+        lines.append(f"{key}={os.environ[key]}")
+
+    # Config files (sorted by path for determinism)
+    _CONFIG_FILES = sorted(
+        f
+        for f in (
+            os.environ.get("AI_CONFIG_FILE"),
+            os.environ.get("AI_ADDITIONAL_INSTRUCTIONS_FILE"),
+            os.environ.get("AI_EXCLUDES_FILE"),
+            os.environ.get("AI_INCLUDES_FILE"),
+            os.environ.get("AI_PROMPT_FILE"),
+            os.environ.get("AI_RULES_FILE"),
+        )
+        if f and os.path.isfile(f)
+    )
+    for path in _CONFIG_FILES:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines.append(f"file:{path}={fh.read()}")
+        except OSError:
+            pass
+
+    return lines
+
+
+def compute_config_hash(config_lines: list[str] | None = None) -> str:
     """Compute SHA256 hash of configuration key=value pairs.
 
     Sorts lines lexicographically before hashing to ensure deterministic
@@ -90,14 +133,19 @@ def compute_config_hash(config_lines: list[str]) -> str:
 
     Parameters
     ----------
-    config_lines : list[str]
+    config_lines : list[str] | None
         Lines in ``key=value`` format (may include comments and blanks).
+        If ``None``, lines are collected from the environment using
+        :func:`_collect_config_lines`.
 
     Returns
     -------
     str
         Hex-encoded SHA256 digest, or empty string if no config lines.
     """
+    if config_lines is None:
+        config_lines = _collect_config_lines()
+
     # Filter out comments and blank lines, then sort for determinism
     filtered = sorted(
         line.strip()
