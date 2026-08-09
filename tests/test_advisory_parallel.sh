@@ -77,11 +77,11 @@ trap 'rm -f "$impact_fixture" "$impact_stdout" "$impact_stderr"' EXIT
 for i in $(seq 1 75); do
   printf 'file.txt:%s:target match %s\n' "$i" "$i" >> "$impact_fixture"
 done
-awk -v pat='target' '
+IMPACT_PAT='target' awk '
   {
     c=$0
     sub(/^[^:]*:[0-9]+:/, "", c)
-    if (c ~ pat) {
+    if (c ~ ENVIRON["IMPACT_PAT"]) {
       print
       if (++matches == 60) exit
     }
@@ -90,6 +90,34 @@ awk -v pat='target' '
 check "awk emits exactly 60 matches from an over-limit fixture" \
   "$(wc -l < "$impact_stdout" | tr -d ' ')" "60"
 check "awk emits no broken-pipe diagnostics" \
+  "$(wc -c < "$impact_stderr" | tr -d ' ')" "0"
+
+echo ""
+echo "=== Test: dotted terms match literally and warn-free ==="
+# `awk -v pat='foo\.bar'` escape-processes the assignment: it warns on stderr
+# and collapses `\.` to `.`, so the term stops matching literally. ENVIRON
+# keeps the backslash, so `foo.bar` must match and `fooXbar` must not.
+check_contains "classification passes the impact pattern via ENVIRON" \
+  "$CLASSIFICATION" 'IMPACT_PAT="$esc" awk'
+check_not_contains "classification does not pass the impact pattern via -v" \
+  "$CLASSIFICATION" 'awk -v pat="$esc"'
+
+: > "$impact_fixture"
+printf 'file.txt:1:hit foo.bar here\n' >> "$impact_fixture"
+printf 'file.txt:2:miss fooXbar here\n' >> "$impact_fixture"
+IMPACT_PAT="$(printf '%s' 'foo.bar' | sed 's/\./\\./g')" awk '
+  {
+    c=$0
+    sub(/^[^:]*:[0-9]+:/, "", c)
+    if (c ~ ENVIRON["IMPACT_PAT"]) {
+      print
+      if (++matches == 60) exit
+    }
+  }
+' "$impact_fixture" > "$impact_stdout" 2> "$impact_stderr"
+check "dotted term matches only the literal hit" \
+  "$(wc -l < "$impact_stdout" | tr -d ' ')" "1"
+check "dotted term emits no awk escape-sequence warning" \
   "$(wc -c < "$impact_stderr" | tr -d ' ')" "0"
 
 echo ""

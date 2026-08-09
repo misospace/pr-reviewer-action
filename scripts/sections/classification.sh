@@ -79,11 +79,15 @@ if [ "${#impact_terms[@]}" -gt 0 ]; then
       echo
       echo "### git grep hits"
       echo '```text'
-      awk -v pat="$esc" '
+      # Pass the pattern through the environment, not `-v`: awk runs C-style
+      # escape processing on `-v` assignments, which turns our `\.` into a bare
+      # `.` (matching any character) and warns on stderr. ENVIRON values are
+      # taken verbatim, so the escaping survives and the term matches literally.
+      IMPACT_PAT="$esc" awk '
         {
           c=$0
           sub(/^[^:]*:[0-9]+:/, "", c)
-          if (c ~ pat) {
+          if (c ~ ENVIRON["IMPACT_PAT"]) {
             print
             if (++matches == 60) exit
           }
