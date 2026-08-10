@@ -68,6 +68,14 @@ class TestComputeDiffFingerprint:
         fp = compute_diff_fingerprint(diff)
         assert len(fp) == 64
 
+    def test_null_bytes_in_diff(self):
+        """Null bytes (binary diff content) hash without error and are
+        significant: dropping them must change the fingerprint."""
+        diff = "diff --git a/bin b/bin\n+payload\x00with\x00nulls\n"
+        fp = compute_diff_fingerprint(diff)
+        assert len(fp) == 64
+        assert fp != compute_diff_fingerprint(diff.replace("\x00", ""))
+
 
 # ---------------------------------------------------------------------------
 # compute_config_hash
@@ -106,6 +114,14 @@ class TestComputeConfigHash:
         h_a = compute_config_hash(["  A=1  "])
         h_b = compute_config_hash(["A=1"])
         assert h_a == h_b
+
+    def test_null_bytes_in_config_values(self):
+        """Null bytes in a config value hash without error and are
+        significant (config files can carry arbitrary bytes even though
+        the environment cannot)."""
+        h = compute_config_hash(["A=x\x00y"])
+        assert len(h) == 64
+        assert h != compute_config_hash(["A=xy"])
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +675,25 @@ class TestCollectConfigLines:
         monkeypatch.setenv("AI_CONFIG_FILE", "/nonexistent/path")
         lines = _collect_config_lines()
         assert all("file:" not in l for l in lines)
+
+    def test_broken_symlink_config_file_skipped(self, monkeypatch, tmp_path):
+        """A config path that is a broken symlink is skipped, not an error."""
+        link = tmp_path / "broken-link"
+        link.symlink_to(tmp_path / "target-does-not-exist")
+        monkeypatch.setenv("AI_CONFIG_FILE", str(link))
+        lines = _collect_config_lines()
+        assert all("file:" not in l for l in lines)
+
+    def test_symlinked_config_file_hashes_target(self, monkeypatch, tmp_path):
+        """A symlink to a real file hashes the target's content (documented
+        behaviour: isfile follows symlinks, matching the shell's sha256sum)."""
+        target = tmp_path / "real.txt"
+        target.write_text("linked config")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        monkeypatch.setenv("AI_CONFIG_FILE", str(link))
+        lines = _collect_config_lines()
+        assert any(l == f"file:{link}=linked config" for l in lines)
 
 
 # ---------------------------------------------------------------------------

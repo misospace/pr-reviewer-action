@@ -78,7 +78,7 @@ fi
 
 # ── Config hash (delegated to Python — #429) ──────────────────────────
 config_hash="$(python3 -c "
-import sys; sys.path.insert(0, '.')
+import sys
 from pr_reviewer.precheck import compute_config_hash
 print(compute_config_hash())
 ")"
@@ -129,7 +129,7 @@ if [[ "$FORCE_REVIEW" == "true" ]]; then
 elif [[ "$SKIP_IF_DIFF_UNCHANGED" == "true" && -n "$last_broad_fingerprint" ]]; then
   # Delegate fingerprint match to Python for testability
   fingerprints_match="$(python3 -c "
-import sys; sys.path.insert(0, '.')
+import sys
 from pr_reviewer.precheck import fingerprints_match
 print('yes' if fingerprints_match('$last_broad_fingerprint', '$broad_fingerprint') else 'no')
 ")"
@@ -175,7 +175,6 @@ extract_review_metadata() {
 
   printf '%s' "$comment_body" | python3 -c "
 import json, re, sys
-sys.path.insert(0, '.')
 from pr_reviewer.metadata import parse_metadata
 data = parse_metadata(sys.stdin.read())
 if data:

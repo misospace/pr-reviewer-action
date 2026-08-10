@@ -160,6 +160,11 @@ def _collect_config_lines() -> list[str]:
     # the collected line, so editing a file at an unchanged path still
     # invalidates the review — matching the original shell behaviour for
     # SYSTEM_PROMPT_FILE / STANDARDS_FILE / EVIDENCE_PROVIDERS_FILE.
+    # os.path.isfile follows symlinks, so a config path that is a symlink
+    # hashes the target's content (a broken symlink is skipped). That is
+    # intentional and matches the shell's sha256sum behaviour: whoever sets
+    # these paths already controls the workflow env, and the content only
+    # feeds a hash — it is never executed or echoed.
     _CONFIG_FILES = sorted(
         f
         for f in (
