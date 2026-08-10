@@ -1,0 +1,45 @@
+name: Agent task
+description: Work item for the autonomous coding loop (dispatch → foreman)
+labels: ["type/chore"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two fields below are load-bearing for the reviewer's automated rails.
+        See AGENTS.md ("Filing issues for the autonomous loop") for why.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters. What breaks, or what is missing, today.
+    validations:
+      required: true
+  - type: input
+    id: ask
+    attributes:
+      label: The ask (one imperative sentence)
+      description: >-
+        The reviewer quotes this verbatim to prove it read the issue. Keep it to a
+        single sentence that states what should change.
+      placeholder: Dedupe incidents on the group signature so a re-fire updates the existing issue.
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Expected files
+      description: >-
+        Concrete paths the fix should touch, one per line (backticks fine). The
+        reviewer vouches for a diff that touches a named file. Name ONLY paths you
+        are confident about — naming files the diff does not touch reads as scope
+        drift and gets the change rejected. Leave empty if unsure.
+      placeholder: |
+        internal/delivery/github.go
+        internal/triage/group.go
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How a reviewer decides this is done.
+    validations:
+      required: true
