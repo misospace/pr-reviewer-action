@@ -95,7 +95,6 @@ _EXACT_CONFIG_KEYS = frozenset((
     "ACTION_REF",
     "CONTEXT_LIMIT_MODE",
     "MODEL_CONTEXT_TOKENS",
-    "REVIEW_VERBOSITY",
     "REVIEW_ROUTING_MODE",
     "REVIEW_SCOPE",
     "ESCALATE_ON_RISK_FLAGS",
@@ -148,6 +147,14 @@ def _collect_config_lines() -> list[str]:
     )
     for key in _CONFIG_KEYS:
         lines.append(f"{key}={os.environ[key]}")
+
+    # REVIEW_VERBOSITY hashes the value the review step will assemble a
+    # prompt from, not the raw input: config.sh lowercases the dial and
+    # degrades an unrecognized value to normal, and normal contributes
+    # nothing so pre-dial fingerprints stay valid. Only a genuine switch
+    # to concise changes the prompt, so only it invalidates.
+    if os.environ.get("REVIEW_VERBOSITY", "").lower() == "concise":
+        lines.append("REVIEW_VERBOSITY=concise")
 
     # Config files (sorted by path for determinism). Content is hashed via
     # the collected line, so editing a file at an unchanged path still

@@ -579,7 +579,7 @@ def _clear_config_env(monkeypatch):
     """Remove every env var _collect_config_lines can match, so tests are
     hermetic on runners that preset provider/platform variables."""
     for key in list(os.environ):
-        if key.startswith("AI_") or key in _EXACT_CONFIG_KEYS:
+        if key.startswith("AI_") or key in _EXACT_CONFIG_KEYS or key == "REVIEW_VERBOSITY":
             monkeypatch.delenv(key, raising=False)
 
 
@@ -621,6 +621,21 @@ class TestCollectConfigLines:
         monkeypatch.setenv("AI_API_KEY", "sk-inner")
         monkeypatch.setenv("AI_FALLBACK_API_KEY", "sk-fb")
         assert _collect_config_lines() == []
+
+    def test_review_verbosity_hashes_assembled_dial(self, monkeypatch):
+        """Only a genuine switch to concise enters the hash: normal, unset,
+        and unrecognized values assemble the same prompt, so they must
+        collect identically (mirrors the original shell rule)."""
+        _clear_config_env(monkeypatch)
+        assert _collect_config_lines() == []
+        monkeypatch.setenv("REVIEW_VERBOSITY", "normal")
+        assert _collect_config_lines() == []
+        monkeypatch.setenv("REVIEW_VERBOSITY", "verbose")  # typo degrades to normal
+        assert _collect_config_lines() == []
+        monkeypatch.setenv("REVIEW_VERBOSITY", "CONCISE")
+        assert _collect_config_lines() == ["REVIEW_VERBOSITY=concise"]
+        monkeypatch.setenv("REVIEW_VERBOSITY", "concise")
+        assert _collect_config_lines() == ["REVIEW_VERBOSITY=concise"]
 
     def test_sorted_by_key(self, monkeypatch):
         """Collected lines are sorted by key for determinism."""

@@ -268,18 +268,15 @@ fi
 check_contains "append on file+inline keeps the base output schema" "$OUT" "Return STRICT JSON"
 
 echo "=== fingerprint includes both sources when both are set (#426) ==="
-# Extract compute_config_hash from check_review_needed.sh for fingerprint tests.
-CFUNCS="$(mktemp)"
-python3 - "$SCRIPT_DIR/check_review_needed.sh" "$CFUNCS" <<'PY'
-import re, sys
-src = open(sys.argv[1]).read()
-m = re.search(r"^compute_config_hash\(\) \{\n(.*?)\n\}", src, re.S | re.M)
-if not m:
-    sys.exit("could not extract compute_config_hash")
-open(sys.argv[2], "w").write("compute_config_hash() {\n%s\n}\n" % m.group(1))
-PY
-# shellcheck source=/dev/null
-source "$CFUNCS"; rm -f "$CFUNCS"
+# The config hash moved to pr_reviewer.precheck (#429); test through the
+# same entry point the production wrapper calls.
+compute_config_hash() {
+  python3 -c "
+import sys; sys.path.insert(0, '$ROOT_DIR')
+from pr_reviewer.precheck import compute_config_hash
+print(compute_config_hash())
+"
+}
 
 TMPF_FP="$(mktemp)"; printf 'FILE CONTENT FOR FP' > "$TMPF_FP"
 
