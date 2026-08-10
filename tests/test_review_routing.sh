@@ -115,8 +115,8 @@ RUN_REVIEW="$(cat "$ROOT_DIR/scripts/run_review.sh" "$ROOT_DIR"/scripts/sections
 check_contains "primary route config defaults to ai_model" "$RUN_REVIEW" 'PRIMARY_MODEL="${AI_PRIMARY_MODEL:-$AI_MODEL}"'
 check_contains "smart resolves ONLY from ai_smart_model (not the fallback)" "$RUN_REVIEW" 'SMART_MODEL="${AI_SMART_MODEL}"'
 check "review_route output emitted" "$(grep -c '^echo "review_route=' "$ROOT_DIR/scripts/sections/review.sh")" "1"
-check "precheck fingerprints routing mode" "$(grep -c 'routing_mode:' "$ROOT_DIR/scripts/check_review_needed.sh")" "1"
-check "precheck fingerprints escalate flags" "$(grep -c 'escalate_flags:' "$ROOT_DIR/scripts/check_review_needed.sh")" "1"
+check "precheck fingerprints routing mode" "$(grep -c '"REVIEW_ROUTING_MODE",' "$ROOT_DIR/pr_reviewer/precheck.py")" "1"
+check "precheck fingerprints escalate flags" "$(grep -c '"ESCALATE_ON_RISK_FLAGS",' "$ROOT_DIR/pr_reviewer/precheck.py")" "1"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
 check_contains "action.yml declares review_routing_mode" "$ACTION" "review_routing_mode:"
 check_contains "action.yml declares ai_smart_model" "$ACTION" "ai_smart_model:"
