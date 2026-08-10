@@ -82,6 +82,47 @@ def compute_diff_fingerprint(diff_content: str) -> str:
     return hashlib.sha256(diff_content.encode("utf-8")).hexdigest()
 
 
+_EXACT_CONFIG_KEYS = frozenset((
+    # Provider endpoints/versions (never the API keys themselves)
+    "ANTHROPIC_VERSION",
+    "AZURE_DEPLOYMENT_ID",
+    "AZURE_OPENAI_API_VERSION",
+    "AZURE_OPENAI_ENDPOINT",
+    "OPENAI_BASE_URL",
+    # Review-affecting settings the original shell compute_config_hash
+    # included explicitly; dropping any of these means a config change
+    # no longer invalidates a stale review.
+    "ACTION_REF",
+    "CONTEXT_LIMIT_MODE",
+    "MODEL_CONTEXT_TOKENS",
+    "REVIEW_VERBOSITY",
+    "REVIEW_ROUTING_MODE",
+    "REVIEW_SCOPE",
+    "ESCALATE_ON_RISK_FLAGS",
+    "SYSTEM_PROMPT",
+    "STANDARDS_FILE_CANDIDATES",
+    "LINEAR_API_KEY_CONFIGURED",
+    "LINEAR_ISSUE_PREFIXES",
+    "LINEAR_ISSUE_TIMEOUT_SEC",
+    "LINEAR_ENABLE_FOR_FORKS",
+    "EVIDENCE_PROVIDER_TIMEOUT_SEC",
+    "EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES",
+    "EVIDENCE_BLOCKER_ENFORCEMENT",
+    "EVIDENCE_ENABLE_FOR_FORKS",
+    "TOOL_MODE",
+    "TOOL_MAX_REQUESTS",
+    "TOOL_PLANNING_TIMEOUT_SEC",
+    "TOOL_PLANNING_MAX_CONTEXT_BYTES",
+    "TOOL_PLANNING_MAX_TOKENS",
+    "TOOL_MAX_RESPONSE_BYTES",
+    "TOOL_ALLOWED_GH_API_REPOS",
+    "TOOL_REQUEST_TIMEOUT_SEC",
+    "TOOL_FAILURE_ENFORCEMENT",
+    "TOOL_MIN_SUCCESSFUL_REQUESTS",
+    "TOOL_ENABLE_FOR_FORKS",
+))
+
+
 def _collect_config_lines() -> list[str]:
     """Collect configuration key=value pairs from environment and files.
 
@@ -91,18 +132,27 @@ def _collect_config_lines() -> list[str]:
     """
     lines: list[str] = []
 
-    # Environment variables (sorted by key for determinism)
+    # Environment variables (sorted by key for determinism). AI_ is this
+    # action's own input namespace, so a prefix sweep is safe there; every
+    # other provider var is matched by exact name because broad prefixes
+    # (AZURE_, OPENAI_, ...) also match variables the runner platform
+    # presets (e.g. AZURE_EXTENSION_DIR on GitHub-hosted runners), which
+    # would make the hash differ across runner images. Secrets are excluded
+    # entirely: a rotated key does not change review behaviour, and secret
+    # values do not belong in hash inputs.
     _CONFIG_KEYS = sorted(
         k
         for k in os.environ
-        if k.startswith(("AI_", "ANTHROPIC_", "AZURE_", "DEEPSEEK_", "GEMINI_",
-                         "MISTRAL_", "OPENAI_", "OPENROUTER_", "PERPLEXITY_",
-                         "TOGETHER_", "XAI_"))
+        if (k.startswith("AI_") and not k.endswith("_API_KEY"))
+        or k in _EXACT_CONFIG_KEYS
     )
     for key in _CONFIG_KEYS:
         lines.append(f"{key}={os.environ[key]}")
 
-    # Config files (sorted by path for determinism)
+    # Config files (sorted by path for determinism). Content is hashed via
+    # the collected line, so editing a file at an unchanged path still
+    # invalidates the review — matching the original shell behaviour for
+    # SYSTEM_PROMPT_FILE / STANDARDS_FILE / EVIDENCE_PROVIDERS_FILE.
     _CONFIG_FILES = sorted(
         f
         for f in (
@@ -112,6 +162,9 @@ def _collect_config_lines() -> list[str]:
             os.environ.get("AI_INCLUDES_FILE"),
             os.environ.get("AI_PROMPT_FILE"),
             os.environ.get("AI_RULES_FILE"),
+            os.environ.get("SYSTEM_PROMPT_FILE"),
+            os.environ.get("STANDARDS_FILE"),
+            os.environ.get("EVIDENCE_PROVIDERS_FILE"),
         )
         if f and os.path.isfile(f)
     )

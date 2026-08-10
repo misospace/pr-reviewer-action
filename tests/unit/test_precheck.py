@@ -11,6 +11,7 @@ import tempfile
 import pytest
 
 from pr_reviewer.precheck import (
+    _EXACT_CONFIG_KEYS,
     FP_DELIMITER,
     FP_PREFIX,
     MAX_INCREMENTAL_FILES,
@@ -574,11 +575,18 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+def _clear_config_env(monkeypatch):
+    """Remove every env var _collect_config_lines can match, so tests are
+    hermetic on runners that preset provider/platform variables."""
+    for key in list(os.environ):
+        if key.startswith("AI_") or key in _EXACT_CONFIG_KEYS:
+            monkeypatch.delenv(key, raising=False)
+
+
 class TestCollectConfigLines:
     def test_no_relevant_env_vars(self, monkeypatch):
         """Returns empty list when no relevant env vars are set."""
-        monkeypatch.delenv("AI_MODEL", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _clear_config_env(monkeypatch)
         lines = _collect_config_lines()
         assert lines == []
 
@@ -590,16 +598,33 @@ class TestCollectConfigLines:
         assert "AI_MODEL=gpt-4" in lines
         assert "AI_TEMPERATURE=0.7" in lines
 
-    def test_collects_openai_env_vars(self, monkeypatch):
-        """Collects OPENAI_ prefixed environment variables."""
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test123")
-        monkeypatch.setenv("OPENAI_ORG_ID", "org-abc")
+    def test_collects_exact_provider_vars(self, monkeypatch):
+        """Collects provider config vars by exact name."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://az.example.test")
         lines = _collect_config_lines()
-        assert "OPENAI_API_KEY=sk-test123" in lines
-        assert "OPENAI_ORG_ID=org-abc" in lines
+        assert "OPENAI_BASE_URL=https://example.test/v1" in lines
+        assert "AZURE_OPENAI_ENDPOINT=https://az.example.test" in lines
+
+    def test_ignores_runner_platform_vars(self, monkeypatch):
+        """Runner-preset vars sharing a provider prefix are not config."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("AZURE_EXTENSION_DIR", "/opt/az/azcliextensions")
+        monkeypatch.setenv("OPENAI_ORG_ID", "org-abc")
+        assert _collect_config_lines() == []
+
+    def test_excludes_secret_values(self, monkeypatch):
+        """API keys never enter the hash input."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("AI_API_KEY", "sk-inner")
+        monkeypatch.setenv("AI_FALLBACK_API_KEY", "sk-fb")
+        assert _collect_config_lines() == []
 
     def test_sorted_by_key(self, monkeypatch):
         """Collected lines are sorted by key for determinism."""
+        _clear_config_env(monkeypatch)
         monkeypatch.setenv("AI_ZEBRA", "z")
         monkeypatch.setenv("AI_ALPHA", "a")
         lines = _collect_config_lines()
@@ -629,8 +654,7 @@ class TestCollectConfigLines:
 class TestComputeConfigHashNoArgs:
     def test_empty_env_returns_empty(self, monkeypatch):
         """Returns empty string when no relevant env vars are set."""
-        monkeypatch.delenv("AI_MODEL", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _clear_config_env(monkeypatch)
         assert compute_config_hash() == ""
 
     def test_with_env_vars_produces_hash(self, monkeypatch):
