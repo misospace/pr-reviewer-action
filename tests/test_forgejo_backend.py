@@ -1627,11 +1627,10 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
         self.assertIsNone(header)
 
     def test_curl_uses_bearer_in_jwt_mode(self):
-        captured_headers = []
+        """JWT auth header is delivered via --config file, not argv."""
+        captured_cmd = []
         def fake_run(cmd, **kwargs):
-            for i, arg in enumerate(cmd):
-                if arg == "-H" and i + 1 < len(cmd) and cmd[i + 1].startswith("Authorization:"):
-                    captured_headers.append(cmd[i + 1])
+            captured_cmd.extend(cmd)
             mock_proc = Mock()
             mock_proc.stdout = b'{"ok":true}\n200'
             mock_proc.returncode = 0
@@ -1644,14 +1643,17 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
              patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN), \
              patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
             fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
-        self.assertTrue(any(h == f"Authorization: Bearer {_JWT_TOKEN}" for h in captured_headers))
+
+        # --config file must be present
+        self.assertTrue(any("--config" in arg for arg in captured_cmd))
+        # The raw JWT token must NOT appear in the argv
+        self.assertNotIn(_JWT_TOKEN, " ".join(captured_cmd))
 
     def test_curl_uses_token_in_token_mode(self):
-        captured_headers = []
+        """PAT auth header is delivered via --config file, not argv."""
+        captured_cmd = []
         def fake_run(cmd, **kwargs):
-            for i, arg in enumerate(cmd):
-                if arg == "-H" and i + 1 < len(cmd) and cmd[i + 1].startswith("Authorization:"):
-                    captured_headers.append(cmd[i + 1])
+            captured_cmd.extend(cmd)
             mock_proc = Mock()
             mock_proc.stdout = b'{"ok":true}\n200'
             mock_proc.returncode = 0
@@ -1662,7 +1664,36 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
              patch.object(fb, "GH_TOKEN", ""), \
              patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
             fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
-        self.assertTrue(any(h == "Authorization: token my-pat" for h in captured_headers))
+
+        # --config file must be present
+        self.assertTrue(any("--config" in arg for arg in captured_cmd))
+        # The raw PAT token must NOT appear in the argv
+        self.assertNotIn("my-pat", " ".join(captured_cmd))
+
+    def test_curl_auth_config_file_permissions(self):
+        """The --config file is created with 0600 permissions."""
+        import stat as stat_mod
+        captured_config_path = []
+        original_fchmod = os.fchmod
+        def track_fchmod(fd, mode):
+            captured_config_path.append(mode)
+            return original_fchmod(fd, mode)
+
+        def fake_run(cmd, **kwargs):
+            mock_proc = Mock()
+            mock_proc.stdout = b'{"ok":true}\n200'
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
+             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
+             patch.object(fb, "GH_TOKEN", ""), \
+             patch("os.fchmod", side_effect=track_fchmod), \
+             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+            fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
+
+        self.assertTrue(captured_config_path)
+        self.assertEqual(captured_config_path[0], 0o600)
 
 
 class TestEnrichTokenForHostJwtMode(unittest.TestCase):

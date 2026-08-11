@@ -51,7 +51,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v1
+      - uses: misospace/pr-reviewer-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: http://llama-server.internal:8080/v1
@@ -450,7 +450,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v1
+      - uses: misospace/pr-reviewer-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: https://api.openai.com/v1
@@ -463,7 +463,7 @@ jobs:
 ### 🧠 Native Anthropic-compatible endpoint
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.anthropic.com/v1
@@ -479,7 +479,7 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 ### 🛟 With a fallback model
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   id: review
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -498,7 +498,7 @@ Set `ci_status_check: true` to wait for all CI checks to reach a terminal state 
 The per-check outcomes (name, status, conclusion) are also folded into the review corpus as a **CI Check Results** section, so the model cites real test/lint results instead of reporting them as "not verifiable". The reviewer never runs your test suite itself — that would mean executing untrusted PR code with the bot's token — it consumes the results your CI already produced in its own sandbox.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   id: review
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -546,7 +546,7 @@ Every forced review re-establishes a full baseline by reviewing the complete PR 
 ### 🧾 With evidence providers
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -591,7 +591,7 @@ Evidence providers are **disabled by default on cross-repository pull requests**
 ### 🛠️ With tool harness planning
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -633,7 +633,7 @@ By default, tool harness execution is skipped on cross-repository PRs unless `to
 If the destination repo has a `CLAUDE.md`, `claude.md`, `AGENTS.md`, or `.github/ai-review-rules.md`, the action can use that as review policy context.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -645,7 +645,7 @@ If the destination repo has a `CLAUDE.md`, `claude.md`, `AGENTS.md`, or `.github
 You can also pin a specific rules file:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -663,7 +663,7 @@ If PRs are driven by detailed GitHub issues, include closing references such as 
 If a repo wants more than policy context and needs to fully control the reviewer behavior, it can provide a prompt file:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -736,7 +736,7 @@ When `publish_mode=review_verdict` is set, the action submits a native GitHub PR
 > Native approvals can affect branch protection rules and automerge pipelines. Enable `allow_approve` only when you understand the implications for your repository's merge policy.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -769,7 +769,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v1
+      - uses: misospace/pr-reviewer-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ai_base_url: https://api.openai.com/v1
@@ -804,7 +804,7 @@ When a clean verdict is withheld by policy (`allow_approve: false`, a fork PR wi
 When `publish_mode=review_comment` is set, the action submits a non-blocking native PR review comment via `gh pr review --comment`. This gives you a GitHub-native review entry in the PR's conversation thread without affecting branch protection or status checks.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: https://api.openai.com/v1
@@ -861,7 +861,7 @@ Findings are normalized (severities mapped to `blocker`/`major`/`minor`/`info`, 
 With `verdict_policy: findings_severity_gated`, the policy applies one-way escalation: a model `request_changes` verdict is preserved, and `approve` is escalated to `request_changes` when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. When no findings were produced, the model's verdict stands (the `verdict_source` output tells you which path applied). Enforcement settings (`evidence_blocker_enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -889,7 +889,7 @@ Anchors are validated against the diff before submission (GitHub only accepts co
 Best-effort throughout: API failures (e.g. read-only tokens on fork PRs) warn and never fail the publish.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1
@@ -906,7 +906,7 @@ Best-effort throughout: API failures (e.g. read-only tokens on fork PRs) warn an
 With `review_routing_mode: auto`, the deterministic classification decides which model reviews the PR — boring PRs go to a fast/local model, scary ones go straight to a smarter model:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v1
+- uses: misospace/pr-reviewer-action@v2
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     ai_base_url: http://llama-server.internal:8080/v1   # fast (default = primary)
@@ -1120,7 +1120,7 @@ The action is versioned via Git tags (e.g., `v2.0.5`). The examples in this READ
 
 ### 🔒 Self-review version pinning
 
-This repository's own self-review workflow (`.github/workflows/ai-pr-review.yaml`) pins the action to a specific commit SHA rather than `@v1` or `@main`. This ensures the self-review process uses a known-good, tested version while new changes are developed on `main`. After a release is cut and tagged, the self-review workflow is updated to pin the new tag.
+This repository's own self-review workflow (`.github/workflows/ai-pr-review.yaml`) dogfoods the action via `uses: $/` — a GitHub Actions shorthand that resolves to the current repository's checked-out commit. This means every PR review runs against the exact code under test, catching regressions in the action itself before they reach users.
 
 ### 🗓️ Versioning policy
 
