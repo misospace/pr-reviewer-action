@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -250,9 +251,24 @@ def _curl(
     # JSON without a trailing newline, would otherwise fuse with the code and
     # make it unparseable).
     cmd: list[str] = ["curl", "-sS", "-X", method.upper()]
-    # Empty auth: fetch unauthenticated (don't send our token to other forges).
+
+    # Route the Authorization header through a 0600 --config file so the
+    # credential never appears in /proc/<pid>/cmdline or ``ps`` output on
+    # shared runners.  Mirrors the pattern in ``scripts/model_call.sh``.
+    auth_config_path: str | None = None
     if auth_header:
-        cmd.extend(["-H", f"Authorization: {auth_header}"])
+        auth_config_fd, auth_config_path = tempfile.mkstemp(prefix="forgejo_auth_", suffix=".conf")
+        try:
+            os.fchmod(auth_config_fd, 0o600)
+            os.write(auth_config_fd, f'header = "Authorization: {auth_header}"\n'.encode("utf-8"))
+            os.close(auth_config_fd)
+            auth_config_fd = -1  # mark as closed so finally doesn't double-close
+            cmd.extend(["--config", auth_config_path])
+        except BaseException:
+            if auth_config_fd >= 0:
+                os.close(auth_config_fd)
+            raise
+
     cmd.extend([
         "-H", f"Accept: {accept}",
         "-H", f"User-Agent: {USER_AGENT}",
@@ -270,6 +286,13 @@ def _curl(
         proc = subprocess.run(cmd, input=body_bytes, capture_output=True, timeout=timeout)
     else:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+
+    # Clean up the auth config file after curl has finished.
+    if auth_config_path is not None:
+        try:
+            os.unlink(auth_config_path)
+        except OSError:
+            pass
 
     raw = proc.stdout.decode("utf-8", errors="replace")
 

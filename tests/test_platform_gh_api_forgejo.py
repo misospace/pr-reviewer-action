@@ -264,7 +264,7 @@ def test_forgejo_search_prefix_check_passes(monkeypatch):
 
 
 def test_forgejo_uses_forgejo_token_not_github_token(monkeypatch):
-    """The Authorization header carries the FORGEJO_TOKEN, not GH_TOKEN."""
+    """The Authorization header is delivered via --config; neither token leaks to argv."""
     _exec_forgejo(monkeypatch, f"repos/{_REPO}/pulls/1")
     # _exec_forgejo already patched and captured; redo to read the cmd cleanly.
     monkeypatch.setenv("PLATFORM", "forgejo")
@@ -281,10 +281,10 @@ def test_forgejo_uses_forgejo_token_not_github_token(monkeypatch):
         gh_api(f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO)
 
     cmd = captured["cmd"]
-    auths = [tok for tok in cmd if "Authorization" in tok]
-    assert auths, cmd
-    assert any("fj-correct-token" in tok for tok in auths), cmd
-    # The GitHub token must not appear anywhere in the curl argv.
+    # --config file must be present (auth is delivered via config, not argv)
+    assert any("--config" in arg for arg in cmd), cmd
+    # Neither token should appear in the curl argv.
+    assert not any("fj-correct-token" in tok for tok in cmd), cmd
     assert not any("gh-leakage-token" in tok for tok in cmd), cmd
 
 
