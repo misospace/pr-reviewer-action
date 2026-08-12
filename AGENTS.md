@@ -201,3 +201,62 @@ what survives a paraphrased ask.
 Name only paths you are confident about. An issue that names files the diff does *not*
 touch is read as scope drift and also gets the change rejected — so when unsure, name
 none rather than guessing.
+
+## Eval harness runbook
+
+The evaluation harness (`scripts/eval_harness.py`) and its graded corpus
+(`evals/corpus-agentic.json`) are wired into CI by the `eval-harness`
+workflow (`.github/workflows/eval-harness.yaml`). Use this runbook for manual
+runs or when triaging a failing scheduled regression sweep.
+
+### Prerequisites
+
+| What | Why |
+|---|---|
+| Python 3.12+ | Runs `scripts/eval_harness.py` |
+| `AI_MODEL`, `AI_BASE_URL`, `AI_API_KEY` (env or repo secrets) | Target model endpoint for the review pass |
+| `GITHUB_TOKEN` (env or repo secrets) | Lets the harness fetch PR diffs from the corpus |
+| A writable directory for `eval-report/eval-report.json` | Holds the JSON report (also uploaded as an Actions artifact) |
+
+### Run locally
+
+```bash
+python scripts/eval_harness.py \
+    --corpus evals/corpus-agentic.json \
+    --modes tools_off native_loop \
+    --runs-per-mode 10 \
+    --model "$AI_MODEL" \
+    --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" \
+    --github-token "$GITHUB_TOKEN" \
+    --output eval-report/eval-report.json
+```
+
+The `--modes` flag accepts one or more modes (space-separated on the shell
+line, repeated `--modes x --modes y` works too). The default is
+`tools_off native_loop`.
+
+### Run via CI
+
+The `eval-harness` workflow has two triggers:
+
+- **`workflow_dispatch`** — runs on demand from the Actions tab. Inputs:
+  `corpus` (default `evals/corpus-agentic.json`), `modes` (default
+  `tools_off native_loop`), `runs-per-mode` (default `10`), `max-prs`
+  (blank = corpus default).
+- **`schedule`** — weekly Monday 06:00 UTC sweep against `main`. The
+  scheduled run additionally posts a Markdown summary to
+  `GITHUB_STEP_SUMMARY` and as a comment on issue #472 so regressions are
+  discoverable from the issue tracker.
+
+The JSON report is uploaded as the `eval-report` artifact on every run
+(including failed runs) so regressions can be diffed week-over-week.
+
+### Interpreting the report
+
+The harness prints per-mode `pass_rate` (fraction of expected-evidence
+checks that fired) and a `regressions` list naming checks that newly
+failed vs. the previous baseline. A pass rate below `0.95` or any
+non-empty `regressions` list should block the release; inspect the
+artifact, reproduce locally with the command above, then fix the prompt or
+routing regression in the action before re-running.

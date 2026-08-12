@@ -1,0 +1,174 @@
+name: Eval Harness
+
+# Runs scripts/eval_harness.py against evals/corpus-agentic.json so that
+# review-quality regressions (routing, prompt drift, tool-loop behavior)
+# surface before they ship. The harness itself lives in
+# scripts/eval_harness.py; this workflow only wires it into CI.
+#
+# Acceptance reference: issue #472.
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: "Path to the evaluation corpus JSON"
+        required: false
+        default: "evals/corpus-agentic.json"
+        type: string
+      modes:
+        description: "Space-separated review modes (default 'tools_off native_loop')"
+        required: false
+        default: "tools_off native_loop"
+        type: string
+      runs-per-mode:
+        description: "Number of runs per mode"
+        required: false
+        default: "10"
+        type: string
+      max-prs:
+        description: "Maximum PRs to evaluate (blank = corpus default)"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    # Weekly Monday 06:00 UTC regression sweep on main.
+    - cron: "0 6 * * 1"
+
+# Don't cancel an in-flight eval run; these are infrequent and we want
+# every artifact to complete so we can compare across weeks.
+concurrency:
+  group: eval-harness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  run-eval-harness:
+    name: Run eval harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run eval harness
+        env:
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          CORPUS="${{ inputs.corpus || 'evals/corpus-agentic.json' }}"
+          MODES="${{ inputs.modes || 'tools_off native_loop' }}"
+          RUNS_PER_MODE="${{ inputs.runs-per-mode || 10 }}"
+          MAX_PRS="${{ inputs.max-prs || '' }}"
+
+          OUT_DIR="eval-report"
+          mkdir -p "$OUT_DIR"
+
+          # Split space-separated MODES into a bash array so we can pass each
+          # mode as its own argv element without triggering shellcheck SC2206
+          # (word-splitting inside an unquoted array element).
+          IFS=' ' read -ra MODES_ARR <<<"$MODES"
+
+          CMD=(python scripts/eval_harness.py --corpus "$CORPUS" --modes "${MODES_ARR[@]}" \
+               --model "${AI_MODEL}" --base-url "${AI_BASE_URL}" --api-key "${AI_API_KEY}" \
+               --github-token "${GITHUB_TOKEN}")
+          if [ -n "$MAX_PRS" ]; then
+            CMD+=(--max-prs "$MAX_PRS")
+          fi
+          CMD+=(--runs-per-mode "$RUNS_PER_MODE" --output "$OUT_DIR/eval-report.json")
+
+          echo "Running: ${CMD[*]}"
+          "${CMD[@]}"
+
+      - name: Upload eval-report.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report/eval-report.json
+          if-no-files-found: warn
+
+      - name: Summarize weekly run
+        if: github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_PATH: eval-report/eval-report.json
+        run: |
+          set -euo pipefail
+          python - <<'PYEOF'
+          import json, os, sys, datetime
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_PATH"])
+          token = os.environ["GITHUB_TOKEN"]
+
+          if not report_path.exists():
+              print(f"No report at {report_path}; skipping summary.")
+              sys.exit(0)
+
+          report = json.loads(report_path.read_text())
+          modes = report.get("metadata", {}).get("modes_tested", [])
+          summary_lines = ["## Weekly eval-harness regression summary", ""]
+          summary_lines.append(f"_Run: {datetime.datetime.utcnow().isoformat(timespec='seconds')}Z_")
+          summary_lines.append("")
+          summary_lines.append(f"- **Modes tested:** {', '.join(modes) if modes else '_none reported_'}")
+          summary_lines.append(f"- **PRs evaluated:** {report.get('metadata', {}).get('pr_count', 'n/a')}")
+
+          any_regression = False
+          for mode in modes:
+              block = report.get("modes", {}).get(mode, {})
+              pass_rate = block.get("pass_rate")
+              regressions = block.get("regressions", [])
+              emoji = "✅" if pass_rate is not None and pass_rate >= 0.95 else ("⚠️" if pass_rate is not None else "❓")
+              summary_lines.append(f"- {emoji} **{mode}** pass_rate={pass_rate}")
+              if regressions:
+                  any_regression = True
+                  summary_lines.append(f"  - regressions: {', '.join(regressions)}")
+
+          if any_regression:
+              summary_lines.append("")
+              summary_lines.append("> ⚠️ One or more modes show regressions vs. last weekly baseline.")
+
+          body = "\n".join(summary_lines)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write(body + "\n")
+
+          # Also post the summary as a comment on the tracking issue (issue
+          # #472) so the weekly run is discoverable from the issue tracker.
+          from urllib.request import Request, urlopen
+
+          gh_repo = os.environ["GITHUB_REPOSITORY"]
+          summary_url = (
+              f"https://api.github.com/repos/{gh_repo}/issues/472/comments"
+          )
+          payload = json.dumps({"body": body}).encode("utf-8")
+          req = Request(
+              summary_url,
+              data=payload,
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          try:
+              urlopen(req, timeout=15).read()
+              print(f"Posted regression summary to {summary_url}.")
+          except Exception as exc:
+              # Posting the summary is best-effort; don't fail the whole job
+              # just because the issue tracker was unavailable.
+              print(f"Failed to post summary to {summary_url}: {exc}", file=sys.stderr)
+          PYEOF
