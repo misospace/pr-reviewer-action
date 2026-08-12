@@ -437,15 +437,22 @@ def test_gh_api_uses_custom_timeout():
 
 
 def test_web_fetch_uses_custom_timeout():
-    """web_fetch passes the timeout value to urllib.request.urlopen."""
+    """web_fetch passes the timeout value to opener.open()."""
     web_fetch = _import_tool("web_fetch")
 
     fake_response = mock.Mock()
     fake_response.read.return_value = b"content"
-    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+    fake_response.__enter__ = mock.Mock(return_value=fake_response)
+    fake_response.__exit__ = mock.Mock(return_value=False)
+
+    mock_opener = mock.Mock()
+    mock_opener.open.return_value.__enter__ = mock.Mock(return_value=fake_response)
+    mock_opener.open.return_value.__exit__ = mock.Mock(return_value=False)
+
+    with mock.patch("urllib.request.build_opener", return_value=mock_opener):
         web_fetch("https://github.com/test", ["github.com"], request_timeout=42)
-    mock_urlopen.assert_called_once()
-    args, kwargs = mock_urlopen.call_args
+    mock_opener.open.assert_called_once()
+    args, kwargs = mock_opener.open.call_args
     assert kwargs.get("timeout") == 42, (
         f"Expected timeout=42, got {kwargs}"
     )
@@ -457,10 +464,17 @@ def test_web_fetch_default_timeout():
 
     fake_response = mock.Mock()
     fake_response.read.return_value = b"content"
-    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+    fake_response.__enter__ = mock.Mock(return_value=fake_response)
+    fake_response.__exit__ = mock.Mock(return_value=False)
+
+    mock_opener = mock.Mock()
+    mock_opener.open.return_value.__enter__ = mock.Mock(return_value=fake_response)
+    mock_opener.open.return_value.__exit__ = mock.Mock(return_value=False)
+
+    with mock.patch("urllib.request.build_opener", return_value=mock_opener):
         web_fetch("https://github.com/test", ["github.com"])
-    mock_urlopen.assert_called_once()
-    args, kwargs = mock_urlopen.call_args
+    mock_opener.open.assert_called_once()
+    args, kwargs = mock_opener.open.call_args
     assert kwargs.get("timeout") == 25, (
         f"Expected timeout=25, got {kwargs}"
     )
@@ -717,31 +731,41 @@ def test_web_fetch_rejects_gopher_scheme():
 
 
 def test_web_fetch_allows_http_scheme():
-    """web_fetch allows http:// URLs under wildcard allowlist (no urlopen call)."""
+    """web_fetch allows http:// URLs under wildcard allowlist."""
     web_fetch = _import_tool("web_fetch")
 
     fake_response = mock.Mock()
     fake_response.read.return_value = b"<html>ok</html>"
     fake_response.__enter__ = mock.Mock(return_value=fake_response)
     fake_response.__exit__ = mock.Mock(return_value=False)
-    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+
+    mock_opener = mock.Mock()
+    mock_opener.open.return_value.__enter__ = mock.Mock(return_value=fake_response)
+    mock_opener.open.return_value.__exit__ = mock.Mock(return_value=False)
+
+    with mock.patch("urllib.request.build_opener", return_value=mock_opener):
         result = web_fetch("http://example.com/page", ["*"])
     assert "error" not in result, f"Expected success for http:// scheme, got: {result}"
-    mock_urlopen.assert_called_once()
+    mock_opener.open.assert_called_once()
 
 
 def test_web_fetch_allows_https_scheme():
-    """web_fetch allows https:// URLs under wildcard allowlist (no urlopen call)."""
+    """web_fetch allows https:// URLs under wildcard allowlist."""
     web_fetch = _import_tool("web_fetch")
 
     fake_response = mock.Mock()
     fake_response.read.return_value = b"<html>ok</html>"
     fake_response.__enter__ = mock.Mock(return_value=fake_response)
     fake_response.__exit__ = mock.Mock(return_value=False)
-    with mock.patch("urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+
+    mock_opener = mock.Mock()
+    mock_opener.open.return_value.__enter__ = mock.Mock(return_value=fake_response)
+    mock_opener.open.return_value.__exit__ = mock.Mock(return_value=False)
+
+    with mock.patch("urllib.request.build_opener", return_value=mock_opener):
         result = web_fetch("https://example.com/page", ["*"])
     assert "error" not in result, f"Expected success for https:// scheme, got: {result}"
-    mock_urlopen.assert_called_once()
+    mock_opener.open.assert_called_once()
 
 
 def test_web_search_strips_non_http_results():

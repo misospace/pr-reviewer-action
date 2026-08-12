@@ -10,6 +10,7 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -233,6 +234,9 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
     (file://, ftp://, gopher://, …) are rejected to prevent LFI/SSRF attacks
     when the model supplies URLs derived from untrusted PR/corpus content.
     This mirrors the scheme check in :func:`mcp_client.is_safe_server_url`.
+
+    Re-validates each redirect hop against the allowlist so a 30x on an
+    allowlisted host cannot pivot to IMDS or internal networks.
     """
     parsed = urllib.parse.urlparse(url)
 
@@ -244,12 +248,40 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
     if not allowlisted_host(host, allowed_hosts):
         return {"error": f"Host not allowlisted: {host}"}
 
+    # Build an opener that re-validates each redirect hop against the allowlist.
+    class _AllowListRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def __init__(self, allowed_hosts, max_redirects=10):
+            super().__init__()
+            self._allowed_hosts = {normalize_host(h) for h in allowed_hosts}
+            self._max_redirects = max_redirects
+            self._redirect_count = 0
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if self._redirect_count >= self._max_redirects:
+                raise urllib.error.HTTPError(
+                    newurl, code, "Too many redirects", {}, None
+                )
+            parsed = urllib.parse.urlparse(newurl)
+            hop_host = parsed.hostname or ""
+            if not allowlisted_host(normalize_host(hop_host), allowed_hosts):
+                raise urllib.error.URLError(
+                    f"Redirect to disallowed host: {hop_host}"
+                )
+            self._redirect_count += 1
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        _AllowListRedirectHandler(allowed_hosts),
+    )
+
     try:
         req = urllib.request.Request(
             url,
             headers={"User-Agent": USER_AGENT},
         )
-        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+        with opener.open(req, timeout=request_timeout) as resp:
             raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
             return {"content": text[:10000]}
