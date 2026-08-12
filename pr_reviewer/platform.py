@@ -69,8 +69,19 @@ GH_DENY_SUBSTRINGS = (
     "/environments/",
     "/dispatches",
 )
+# Repo-scoped endpoint prefixes (path starts with ``/repos/owner/repo/...``).
+# These require the ``owner/repo`` to be in the allowlist.
 GH_API_ALLOWED_PREFIXES = (
     "/repos/",
+)
+# Root-level endpoint prefixes (path starts with ``/<root>/...`` without an
+# owner/repo segment). These are NOT scoped to a repository: e.g.
+# ``/search/code?q=foo`` hits ``https://api.github.com/search/code?q=foo``
+# and is implicitly allowed whenever the *user has any* repo allowlist
+# configured (i.e. is permitted to call ``gh_api`` at all). Each prefix
+# also needs a matching branch in ``_forgejo_translate``; the test suite
+# enforces parity on both backends.
+GH_API_ROOT_PREFIXES = (
     "/issues/",
     "/search/",
     "/releases/",
@@ -150,17 +161,53 @@ def _validate_endpoint(endpoint, allowed_repos, current_repo):
     Returns ``(full_path, repo_key)`` on success, or ``{"error": ...}``. The
     caller is responsible for picking the host and issuing the request —
     this function makes the security decisions for **both** backends.
+
+    For repo-scoped paths (``/repos/owner/repo/...`` or the bare
+    ``owner/repo/...`` form) the repo key must be in the allowlist (or the
+    allowlist contains ``*``). For root-level paths (``/search/``,
+    ``/issues/``, ``/releases/``, ``/git/`` — see ``GH_API_ROOT_PREFIXES``)
+    the repo allowlist is bypassed (they aren't tied to any repo) and the
+    URL is built without a ``/repos/`` prefix, e.g.
+    ``search/code?q=foo`` → ``/search/code?q=foo`` (the GitHub call
+    becomes ``https://api.github.com/search/code?q=foo``, not the
+    previously mangled ``/repos/search/code?q=foo``). See issue #469.
     """
     if not GH_SAFE_PATH_RE.match(endpoint or ""):
         return {"error": "Endpoint contains disallowed characters"}
 
     parts = (endpoint or "").strip("/").split("/")
-    if len(parts) < 2:
-        return {"error": "Invalid endpoint format: expected owner/repo/..."}
+    # Root-level endpoints bypass the minimum-length check (e.g.
+    # ``/releases`` and ``/issues`` are valid GitHub root endpoints with
+    # a single segment). Repo-scoped endpoints require at least owner +
+    # repo, enforced below.
+    if len(parts) < 1 or parts == [""]:
+        return {"error": "Invalid endpoint format: expected a non-empty path"}
 
     for part in parts:
         if part in ("", ".", ".."):
             return {"error": f"Dot-segment not allowed in path: {part or '(empty)'}"}
+
+    # Root-level endpoints bypass the repo-key check entirely. We detect
+    # them by the first path segment: ``search``, ``issues``, ``releases``,
+    # ``git`` are API-root namespaces on GitHub (and on Forgejo, where the
+    # same shape is mounted under ``/api/v1``). The dot-segment check above
+    # already rejects ``..`` smuggling, and the deny substrings below
+    # still gate the actual URL.
+    is_root_level = ("/" + parts[0] + "/") in GH_API_ROOT_PREFIXES
+
+    if is_root_level:
+        full_path = "/" + "/".join(parts)
+        lower = full_path.lower()
+        for deny in GH_DENY_SUBSTRINGS:
+            if deny in lower:
+                return {"error": f"Path segment denied: {deny}"}
+        # ``repo_key`` is empty for root endpoints: there is no repo to
+        # attribute the call to. Forgejo translation keys off this to
+        # know it must use the GitHub-shaped path directly.
+        return {"full_path": full_path, "repo_key": ""}
+
+    if len(parts) < 2:
+        return {"error": "Invalid endpoint format: expected owner/repo/..."}
 
     # GitHub's prompt format is "repos/owner/repo/..."; the direct format
     # "owner/repo/..." is also accepted. Either way, the repo key is
@@ -236,18 +283,20 @@ def _forgejo_translate(full_path, repo_key):
     host. Anything not in this table is reported as ``Endpoint not supported
     on PLATFORM=forgejo`` so callers can fail loudly and stop guessing.
     """
-    repos = f"/repos/{repo_key}"
-    if not full_path.startswith(repos):
-        # The allowed-prefix list also includes /search/ and /git/ at the
-        # root (no repo segment). Those are handled below.
+    # Root-level endpoints (no /repos/owner/repo/ segment) carry an empty
+    # ``repo_key`` and reach the translator verbatim. ``/search/`` mirrors
+    # GitHub under /api/v1; ``/issues/``, ``/releases/``, and ``/git/`` at
+    # the root have no Forgejo equivalent and so return None so the call
+    # fails closed with a clear error rather than silently routing to the
+    # wrong URL. This is the Forgejo side of the parity the test suite
+    # asserts in ``TestGhApiRootEndpoints``.
+    if not repo_key:
         if full_path.startswith("/search/"):
             return f"/api/v1{full_path}"
-        if full_path.startswith("/releases/"):
-            # /releases/owner/repo/tags  →  /api/v1/repos/owner/repo/releases/tags
-            tail = full_path[len("/releases/"):]
-            if "/" in tail:
-                owner, repo = tail.split("/", 1)
-                return f"/api/v1/repos/{owner}/{repo}/releases/tags"
+        return None
+
+    repos = f"/repos/{repo_key}"
+    if not full_path.startswith(repos):
         return None
 
     rest = full_path[len(repos):]  # begins with "/"
