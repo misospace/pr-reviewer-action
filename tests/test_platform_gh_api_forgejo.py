@@ -244,22 +244,78 @@ def test_forgejo_curl_sends_user_agent(monkeypatch):
     assert any("User-Agent: ai-pr-reviewer/1.0" in tok for tok in cmd), cmd
 
 
-def test_forgejo_search_prefix_check_passes(monkeypatch):
-    """``search/...`` (no repo key) passes the prefix check on both backends.
+def test_forgejo_root_search_routes_to_api_v1(monkeypatch):
+    """``/search/code?q=foo`` (with leading slash) is a root-level endpoint.
 
-    Search endpoints do not have a repo key, so the repo-allowlist check
-    rejects them (the same way the pre-seam code did — see
-    ``tests/test_gh_api.py::TestGhApiPathValidation::test_allowed_search_prefix_passes``).
-    The Forgejo backend must not weaken that: the error must be about the
-    repo allowlist, not a translation failure.
+    Issue #469: under the old validator this either failed with "Repo not
+    allowed: search/code?q=foo" (because the repo-key check ran first and
+    computed ``search/code?q=foo`` as the repo key) or — under ``*`` —
+    mangled into ``/repos/search/code?q=foo``. The fix routes it to
+    ``/api/v1/search/code?q=foo`` on the Forgejo backend without ever
+    touching the /repos/ prefix.
+    """
+    result, captured = _exec_forgejo(monkeypatch, "/search/code?q=foo")
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(
+        _FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd
+    ), cmd
+    assert not any("api.github.com" in tok for tok in cmd), cmd
+    # And the URL must NOT have been mangled to /repos/search/...
+    assert not any("/repos/search/" in tok for tok in cmd), cmd
+
+
+def test_forgejo_root_search_without_leading_slash_routes_to_api_v1(monkeypatch):
+    """``search/code?q=foo`` (no leading slash) is normalised by the
+    validator and routes the same as ``/search/code?q=foo`` — the
+    leading slash is purely cosmetic, the validator strips it before
+    matching against ``GH_API_ROOT_PREFIXES``. This is the documented
+    shape the GitHub/Forgejo tool descriptors give the model.
+    """
+    result, captured = _exec_forgejo(monkeypatch, "search/code?q=foo")
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(
+        _FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd
+    ), cmd
+    assert not any("/repos/search/" in tok for tok in cmd), cmd
+
+
+def test_forgejo_root_git_endpoint_rejected(monkeypatch):
+    """``/git/refs/...`` has no Forgejo equivalent at the root and must
+    fail closed with a clear ``Endpoint not supported`` rather than silently
+    being routed to the wrong URL.
     """
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
     with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
-        result = gh_api("search/code?q=foo", allowed_repos=set(), current_repo=_REPO)
-    # Fails on the repo allowlist — the prefix check still passed.
-    assert "not allowed" in result.get("error", "").lower(), result
+        result = gh_api(
+            "/git/refs/heads/main", allowed_repos=set(), current_repo=_REPO
+        )
+    assert "not supported" in result.get("error", "").lower(), result
+    mock_run.assert_not_called()
+
+
+def test_forgejo_root_releases_endpoint_rejected(monkeypatch):
+    """``/releases`` at the root has no Forgejo equivalent and must fail closed."""
+    monkeypatch.setenv("PLATFORM", "forgejo")
+    monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
+    monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
+        result = gh_api("/releases", allowed_repos=set(), current_repo=_REPO)
+    assert "not supported" in result.get("error", "").lower(), result
+    mock_run.assert_not_called()
+
+
+def test_forgejo_root_issues_endpoint_rejected(monkeypatch):
+    """``/issues`` at the root has no Forgejo equivalent and must fail closed."""
+    monkeypatch.setenv("PLATFORM", "forgejo")
+    monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
+    monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
+    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
+        result = gh_api("/issues", allowed_repos=set(), current_repo=_REPO)
+    assert "not supported" in result.get("error", "").lower(), result
     mock_run.assert_not_called()
 
 
