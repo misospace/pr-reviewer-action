@@ -16,10 +16,19 @@ assert_safe_artifact_paths() {
     standards-context.md standards-present.txt tool-harness.md tool-harness.json
     review-corpus.md review-corpus.truncated.md review-corpus.fallback.truncated.md
     ai-request.json ai-response.json ai-output.json ai-output.primary.json
-    ai-request.fallback.json ai-response.fallback.json
+    ai-request.fallback.json ai-response.fallback.json ai-response.primary.json
     verdict.txt analysis_engine.txt review-markdown.raw.md
     review-comment-markdown.raw.md review-comment.md review-comment-body.md
     review-body.md inline-comments.json
+    findings.json review-request.json
+    review-verdict-body.md inline-findings-body.md
+    review-comments.json finding-threads.json resolve-findings.json
+    pr-files.json pr-files.raw.json
+    linked-issue.raw.json linked-issues.json linked-issues.merged.json
+    linked-issue.filtered.json
+    linear-issues.json linear-issues.md
+    terms.txt terms.all.txt
+    review-corpus.body.md repo-impact.combined.txt
   )
 
   for path in "${artifact_paths[@]}"; do
