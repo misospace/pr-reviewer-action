@@ -248,6 +248,7 @@ emit_review_markers() {
   echo "$COMMENT_MARKER"
   echo "$METADATA_MARKER"
   if [ -n "${HEAD_SHA:-}" ]; then
+    # The value is the PR head SHA (a git commit hash), not a fingerprint.
     echo "<!-- ai-pr-review-sha:${HEAD_SHA} -->"
   fi
   if [ -n "${BROAD_FINGERPRINT:-}" ]; then
