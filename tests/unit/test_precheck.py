@@ -12,6 +12,8 @@ import pytest
 
 from pr_reviewer.precheck import (
     _EXACT_CONFIG_KEYS,
+    CONFIG_HASH_MARKER,
+    EMPTY_DIFF_FINGERPRINT,
     FP_DELIMITER,
     FP_PREFIX,
     MAX_INCREMENTAL_FILES,
@@ -19,16 +21,22 @@ from pr_reviewer.precheck import (
     MIN_INCREMENTAL_RATIO,
     PrecheckResult,
     ReviewDecision,
+    ScopeResolution,
     _collect_config_lines,
+    _decision_to_outputs,
     _detect_incremental_scope,
     _extract_previous_fingerprints,
     _format_output,
     _parse_diff_stats,
     build_broad_fingerprint,
+    build_marker_fingerprint,
+    build_precheck_payload,
     compute_config_hash,
     compute_diff_fingerprint,
+    evaluate_precheck,
     extract_config_lines,
     fingerprints_match,
+    resolve_review_scope,
     should_review,
 )
 
@@ -735,3 +743,293 @@ class TestComputeConfigHashNoArgs:
         lines = ["MODEL=gpt-4", "TEMP=0.7"]
         h = compute_config_hash(lines)
         assert len(h) == 64
+
+
+# ---------------------------------------------------------------------------
+# build_marker_fingerprint
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMarkerFingerprint:
+    def test_both_present(self):
+        result = build_marker_fingerprint("abc123", "cfg_hash")
+        assert result == "abc123|cfg:cfg_hash"
+
+    def test_empty_diff_fp_uses_placeholder(self):
+        result = build_marker_fingerprint("", "cfg_hash")
+        assert result == f"{EMPTY_DIFF_FINGERPRINT}|cfg:cfg_hash"
+
+    def test_empty_config_hash_still_has_cfg_marker(self):
+        result = build_marker_fingerprint("abc123", "")
+        assert result == "abc123|cfg:"
+
+    def test_both_empty(self):
+        result = build_marker_fingerprint("", "")
+        assert result == f"{EMPTY_DIFF_FINGERPRINT}|cfg:"
+
+    def test_delimiter_and_marker_present(self):
+        result = build_marker_fingerprint("fp", "hash")
+        assert FP_DELIMITER in result
+        assert CONFIG_HASH_MARKER in result
+
+
+# ---------------------------------------------------------------------------
+# resolve_review_scope
+# ---------------------------------------------------------------------------
+
+
+class TestResolveReviewScope:
+    def test_force_review_returns_full(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base", force_review=True
+        )
+        assert scope.effective_review_scope == "full"
+        assert scope.previous_head_sha == ""
+        assert scope.baseline_clean is False
+
+    def test_explicit_full_scope(self):
+        scope = resolve_review_scope("full", "prev_head", "prev_base")
+        assert scope.effective_review_scope == "full"
+
+    def test_missing_previous_head_returns_full(self):
+        scope = resolve_review_scope("auto", "", "prev_base")
+        assert scope.effective_review_scope == "full"
+
+    def test_missing_previous_base_returns_full(self):
+        scope = resolve_review_scope("auto", "prev_head", "")
+        assert scope.effective_review_scope == "full"
+
+    def test_ancestor_false_falls_back_to_full(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            previous_head_is_ancestor=False,
+        )
+        assert scope.effective_review_scope == "full"
+
+    def test_compare_range_false_falls_back_to_full(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            compare_range_ok=False,
+        )
+        assert scope.effective_review_scope == "full"
+
+    def test_incremental_with_valid_metadata(self):
+        scope = resolve_review_scope("auto", "prev_head", "prev_base")
+        assert scope.effective_review_scope == "incremental"
+        assert scope.previous_head_sha == "prev_head"
+
+    def test_incremental_baseline_clean_when_result_clean(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            previous_review_result="clean",
+        )
+        assert scope.baseline_clean is True
+
+    def test_incremental_baseline_clean_when_result_empty(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            previous_review_result="",
+        )
+        assert scope.baseline_clean is True
+
+    def test_incremental_baseline_dirty_when_result_request_changes(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            previous_review_result="request_changes",
+        )
+        assert scope.baseline_clean is False
+
+    def test_none_validation_does_not_gate(self):
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base",
+            previous_head_is_ancestor=None,
+            compare_range_ok=None,
+        )
+        assert scope.effective_review_scope == "incremental"
+
+    def test_invalid_scope_degrades_to_auto(self):
+        scope = resolve_review_scope("bogus", "prev_head", "prev_base")
+        assert scope.effective_review_scope == "incremental"
+
+    def test_force_overrides_incremental_metadata(self):
+        scope = resolve_review_scope(
+            "incremental", "prev_head", "prev_base", force_review=True
+        )
+        assert scope.effective_review_scope == "full"
+
+
+# ---------------------------------------------------------------------------
+# evaluate_precheck
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluatePrecheck:
+    def _diff(self, content="test"):
+        return (
+            f"diff --git a/f.txt b/f.txt\n"
+            f"--- a/f.txt\n+++ b/f.txt\n"
+            f"@@ -1 +1 @@\n-{content}\n+new\n"
+        )
+
+    def test_new_review_needed(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        result = evaluate_precheck(self._diff(), [], config_hash="cfg")
+        assert result.decision == ReviewDecision.REVIEW_NEEDED
+        assert result.diff_fingerprint != ""
+        assert result.diff_fingerprint != EMPTY_DIFF_FINGERPRINT
+
+    def test_matching_fingerprint_skips(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        diff = self._diff()
+        cfg = "cfg_hash"
+        diff_fp = compute_diff_fingerprint(diff)
+        marker = build_marker_fingerprint(diff_fp, cfg)
+        result = evaluate_precheck(diff, [marker], config_hash=cfg)
+        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+        assert result.diff_fingerprint == diff_fp
+
+    def test_empty_diff_uses_placeholder(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        cfg = "cfg_hash"
+        marker = build_marker_fingerprint("", cfg)
+        result = evaluate_precheck("", [marker], config_hash=cfg)
+        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+        assert result.diff_fingerprint == EMPTY_DIFF_FINGERPRINT
+
+    def test_empty_diff_new_review(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        result = evaluate_precheck("", [], config_hash="cfg")
+        assert result.decision == ReviewDecision.REVIEW_NEEDED
+        assert result.diff_fingerprint == EMPTY_DIFF_FINGERPRINT
+        assert result.broad_fingerprint.startswith(EMPTY_DIFF_FINGERPRINT)
+
+    def test_force_review_bypasses_skip(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        diff = self._diff()
+        cfg = "cfg_hash"
+        diff_fp = compute_diff_fingerprint(diff)
+        marker = build_marker_fingerprint(diff_fp, cfg)
+        result = evaluate_precheck(
+            diff, [marker], config_hash=cfg, force_review=True
+        )
+        assert result.decision == ReviewDecision.REVIEW_NEEDED
+
+    def test_skip_disabled_bypasses_skip(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        diff = self._diff()
+        cfg = "cfg_hash"
+        diff_fp = compute_diff_fingerprint(diff)
+        marker = build_marker_fingerprint(diff_fp, cfg)
+        result = evaluate_precheck(
+            diff, [marker], config_hash=cfg, skip_if_diff_unchanged=False
+        )
+        assert result.decision == ReviewDecision.REVIEW_NEEDED
+
+    def test_config_hash_computed_when_none(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gpt-4")
+        result = evaluate_precheck(self._diff(), [])
+        assert len(result.config_hash) == 64
+
+
+# ---------------------------------------------------------------------------
+# build_precheck_payload / _decision_to_outputs
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPrecheckPayload:
+    def test_review_needed_payload(self):
+        result = PrecheckResult(
+            decision=ReviewDecision.REVIEW_NEEDED,
+            diff_fingerprint="fp",
+            config_hash="cfg",
+            broad_fingerprint="fp|cfg:cfg",
+            reason="New changes",
+        )
+        scope = ScopeResolution(
+            effective_review_scope="incremental",
+            previous_head_sha="prev",
+            baseline_clean=True,
+        )
+        payload = build_precheck_payload(result, scope)
+        assert payload["should_review"] is True
+        assert payload["skip_reason"] == ""
+        assert payload["effective_review_scope"] == "incremental"
+        assert payload["previous_head_sha"] == "prev"
+        assert payload["baseline_clean"] is True
+        assert payload["diff_fingerprint"] == "fp"
+        assert payload["broad_fingerprint"] == "fp|cfg:cfg"
+        assert payload["config_hash"] == "cfg"
+
+    def test_skip_resets_scope_to_full(self):
+        result = PrecheckResult(
+            decision=ReviewDecision.SKIP_ALREADY_REVIEWED,
+            diff_fingerprint="fp",
+            config_hash="cfg",
+            broad_fingerprint="fp|cfg:cfg",
+            reason="Unchanged",
+        )
+        scope = ScopeResolution(
+            effective_review_scope="incremental",
+            previous_head_sha="prev",
+            baseline_clean=True,
+        )
+        payload = build_precheck_payload(result, scope)
+        assert payload["should_review"] is False
+        assert payload["skip_reason"] == "diff-unchanged"
+        assert payload["effective_review_scope"] == "full"
+        assert payload["previous_head_sha"] == ""
+        assert payload["baseline_clean"] is False
+
+    def test_skip_no_changes_reason(self):
+        result = PrecheckResult(
+            decision=ReviewDecision.SKIP_NO_CHANGES,
+            diff_fingerprint="",
+            config_hash="",
+            broad_fingerprint="",
+            reason="No diff",
+        )
+        payload = build_precheck_payload(result, ScopeResolution())
+        assert payload["should_review"] is False
+        assert payload["skip_reason"] == "no-changes"
+
+    def test_decision_to_outputs_review_needed(self):
+        should, reason = _decision_to_outputs(ReviewDecision.REVIEW_NEEDED)
+        assert should is True
+        assert reason == ""
+
+    def test_decision_to_outputs_skip_already_reviewed(self):
+        should, reason = _decision_to_outputs(
+            ReviewDecision.SKIP_ALREADY_REVIEWED
+        )
+        assert should is False
+        assert reason == "diff-unchanged"
+
+    def test_decision_to_outputs_skip_no_changes(self):
+        should, reason = _decision_to_outputs(ReviewDecision.SKIP_NO_CHANGES)
+        assert should is False
+        assert reason == "no-changes"
+
+    def test_decision_to_outputs_skip_incremental_still_reviews(self):
+        should, reason = _decision_to_outputs(ReviewDecision.SKIP_INCREMENTAL)
+        assert should is True
+        assert reason == ""
+
+    def test_payload_keys_complete(self):
+        result = PrecheckResult(
+            decision=ReviewDecision.REVIEW_NEEDED,
+            diff_fingerprint="fp",
+            config_hash="cfg",
+            broad_fingerprint="fp|cfg:cfg",
+        )
+        payload = build_precheck_payload(result, ScopeResolution())
+        expected_keys = {
+            "should_review",
+            "skip_reason",
+            "effective_review_scope",
+            "previous_head_sha",
+            "baseline_clean",
+            "diff_fingerprint",
+            "broad_fingerprint",
+            "config_hash",
+        }
+        assert set(payload.keys()) == expected_keys

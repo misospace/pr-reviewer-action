@@ -4,6 +4,42 @@ Core functions for diff fingerprinting, incremental scope detection,
 config hash computation, and review metadata transport.
 
 These replace the shell implementations with testable Python code.
+
+CLI contract (``python3 -m pr_reviewer.precheck``)
+---------------------------------------------------
+
+The module entry point (``main``) reads its inputs from the environment
+and writes a single JSON object to stdout with the keys ``should_review``,
+``skip_reason``, ``effective_review_scope``, ``previous_head_sha``,
+``baseline_clean``, ``diff_fingerprint``, ``broad_fingerprint`` and
+``config_hash``. It is the decision half of the action precheck; the shell
+wrapper performs platform I/O (diff/PR/comment fetches) and forwards the
+result to ``$GITHUB_OUTPUT``.
+
+Environment inputs:
+
+- ``PRECHECK_DIFF_PATH`` / ``DIFF_PATH``: path to the PR diff file
+  (``PRECHECK_DIFF_PATH`` wins; ``DIFF_CONTENT`` is the fallback when
+  neither file is set).
+- ``PREV_FINGERPRINTS``: comma-separated fingerprints stored in previous
+  managed reviews (``PREV_FP_PATH`` file with ``diff-fp:`` lines is also
+  honoured).
+- ``FORCE_REVIEW``: ``true`` bypasses the diff-unchanged guard.
+- ``SKIP_IF_DIFF_UNCHANGED``: ``true`` (default) enables the guard.
+- ``REVIEW_SCOPE``: user scope request (``full`` / ``incremental`` /
+  ``auto``); ``auto`` is the default.
+- ``PREVIOUS_HEAD_SHA`` / ``PREVIOUS_BASE_SHA`` / ``PREVIOUS_REVIEW_RESULT``:
+  metadata from the last managed review.
+- ``PREVIOUS_HEAD_IS_ANCESTOR`` / ``COMPARE_RANGE_OK``: caller-supplied
+  validation verdicts for the previous→current range (ancestorship and
+  compare/base continuity). Unset means "not asserted" (the check does
+  not gate the baseline); ``false`` forces a full-scope fallback.
+
+``diff_fingerprint`` is the diff's own fingerprint (``empty-diff``
+placeholder for an empty diff); ``broad_fingerprint`` is the marker form
+``<diff_fingerprint>|cfg:<config_hash>`` stored in the
+``ai-pr-review-fingerprint`` comment marker, so a published fingerprint
+round-trips into the diff-unchanged comparison on the next run.
 """
 
 import hashlib
@@ -27,6 +63,14 @@ FP_PREFIX = "diff-fp:"
 
 # Delimiter separating diff fingerprint from config hash in broad fingerprint
 FP_DELIMITER = "|"
+
+# Placeholder fingerprint for an empty diff, so the stored-marker
+# comparison has a stable value to match on re-runs.
+EMPTY_DIFF_FINGERPRINT = "empty-diff"
+
+# Suffix marking the config-hash half of a marker fingerprint, as stored in
+# the ai-pr-review-fingerprint comment marker: `<diff_fp>|cfg:<config_hash>`.
+CONFIG_HASH_MARKER = "cfg:"
 
 # Incremental scope detection constants
 MAX_INCREMENTAL_FILES = 20
@@ -57,6 +101,19 @@ class PrecheckResult:
     total_files: int = 0
     total_lines: int = 0
     reason: str = ""
+
+
+@dataclass
+class ScopeResolution:
+    """Outcome of metadata-based review scope resolution.
+
+    A full scope always clears the carried incremental baseline: no
+    previous head is forwarded and the baseline is untrusted.
+    """
+
+    effective_review_scope: str = "full"
+    previous_head_sha: str = ""
+    baseline_clean: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +299,36 @@ def build_broad_fingerprint(diff_fp: str, config_hash: str) -> str:
     if not config_hash:
         return diff_fp
     return f"{diff_fp}{FP_DELIMITER}{config_hash}"
+
+
+def build_marker_fingerprint(diff_fp: str, config_hash: str) -> str:
+    """Build the marker-compatible broad fingerprint.
+
+    Unlike :func:`build_broad_fingerprint` (the library-internal
+    ``<diff_fp>|<config_hash>`` form), this is the exact string stored in
+    the ``ai-pr-review-fingerprint`` comment marker and compared against
+    ``PREV_FINGERPRINTS`` on the next run:
+
+    - an empty ``diff_fp`` becomes the ``empty-diff`` placeholder, so an
+      empty diff still yields a stable, matchable fingerprint;
+    - the config hash is always present in ``|cfg:<hash>`` form, matching
+      the shell's synthesis and keeping the marker parseable even when the
+      hash is empty.
+
+    Parameters
+    ----------
+    diff_fp : str
+        Diff fingerprint (empty string for an empty diff).
+    config_hash : str
+        Config hash from ``compute_config_hash`` (may be empty).
+
+    Returns
+    -------
+    str
+        ``<diff_fp or empty-diff>|cfg:<config_hash>``.
+    """
+    fp = diff_fp or EMPTY_DIFF_FINGERPRINT
+    return f"{fp}{FP_DELIMITER}{CONFIG_HASH_MARKER}{config_hash}"
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +637,214 @@ def should_review(
 
 
 # ---------------------------------------------------------------------------
+# Action precheck contract (scope resolution, decision mapping, payload)
+# ---------------------------------------------------------------------------
+
+
+def resolve_review_scope(
+    review_scope: str,
+    previous_head_sha: str,
+    previous_base_sha: str,
+    previous_review_result: str = "",
+    *,
+    force_review: bool = False,
+    previous_head_is_ancestor: Optional[bool] = None,
+    compare_range_ok: Optional[bool] = None,
+) -> ScopeResolution:
+    """Resolve the effective review scope from explicit metadata inputs.
+
+    Python-side port of the scope logic that used to live in
+    ``check_review_needed.sh``: no git or API calls are made here. The
+    range validations the shell used to run itself (``git merge-base
+    --is-ancestor`` and the compare API) are passed in as verdicts:
+
+    - ``previous_head_is_ancestor``: whether the previous head is an
+      ancestor of the current head (force-push/rebase detection).
+    - ``compare_range_ok``: whether the previous→current range is still
+      comparable, which subsumes base-branch continuity (a changed base
+      makes the stored incremental range invalid).
+
+    ``None`` means the caller did not assert the check (it does not gate
+    the baseline, mirroring the old shell skipping a check it could not
+    run); ``True`` is a passing verdict; ``False`` forces a full-scope
+    fallback.
+
+    Rules, in order:
+
+    1. ``force_review`` or a ``full`` scope request → full scope.
+    2. An unrecognized ``review_scope`` degrades to ``auto`` (with a
+       warning) and continues through the safety gates.
+    3. Missing previous head or base metadata → full scope (no baseline
+       to increment from).
+    4. A failing validation verdict → full scope.
+    5. Otherwise → incremental scope carrying ``previous_head_sha``;
+       ``baseline_clean`` is true only when the previous review result
+       was ``clean`` or absent.
+
+    Parameters
+    ----------
+    review_scope : str
+        User scope request (``full`` / ``incremental`` / ``auto``).
+    previous_head_sha : str
+        Head SHA recorded in the last managed review marker.
+    previous_base_sha : str
+        Base SHA recorded in the last managed review marker.
+    previous_review_result : str
+        Review result recorded in the last managed review marker.
+    force_review : bool
+        Explicit re-review (label-driven or input); always full scope.
+    previous_head_is_ancestor : bool | None
+        Caller verdict for previous-head ancestorship (see above).
+    compare_range_ok : bool | None
+        Caller verdict for range comparability (see above).
+
+    Returns
+    -------
+    ScopeResolution
+    """
+    full = ScopeResolution()
+
+    if force_review:
+        logger.info("Forced re-review: using full scope")
+        return full
+
+    scope = (review_scope or "").strip().lower()
+    if scope == "full":
+        return full
+    if scope not in ("", "auto", "incremental"):
+        logger.warning(
+            "Invalid REVIEW_SCOPE %r; defaulting to auto", review_scope
+        )
+
+    if not previous_head_sha or not previous_base_sha:
+        return full
+    if previous_head_is_ancestor is False:
+        logger.info(
+            "Review scope fallback: previous head %s is not an ancestor of "
+            "the current head (possible force-push/rebase)",
+            previous_head_sha,
+        )
+        return full
+    if compare_range_ok is False:
+        logger.info(
+            "Review scope fallback: previous→current range is not comparable"
+        )
+        return full
+
+    return ScopeResolution(
+        effective_review_scope="incremental",
+        previous_head_sha=previous_head_sha,
+        baseline_clean=(previous_review_result or "").strip().lower()
+        in ("", "clean"),
+    )
+
+
+def evaluate_precheck(
+    diff_content: str,
+    previous_fingerprints: list[str],
+    *,
+    config_hash: Optional[str] = None,
+    force_review: bool = False,
+    skip_if_diff_unchanged: bool = True,
+) -> PrecheckResult:
+    """Run the action's should-review decision over a diff.
+
+    The action's guard is narrower than the library-level
+    :func:`should_review`: the only skip is a marker fingerprint match
+    (diff unchanged since the last managed review), and an empty diff is
+    not a skip — it fingerprinted as ``empty-diff`` so that the marker
+    round-trip can skip *subsequent* runs. Scope selection is out of
+    scope here (see :func:`resolve_review_scope`).
+
+    Parameters
+    ----------
+    diff_content : str
+        Raw PR diff (may be empty).
+    previous_fingerprints : list[str]
+        Marker fingerprints stored in previous managed reviews.
+    config_hash : str | None
+        Config hash; computed from the environment when ``None`` (the
+        shell wrapper computes the same value independently, so both
+        sides hash the identical config).
+    force_review : bool
+        Bypasses the diff-unchanged guard.
+    skip_if_diff_unchanged : bool
+        Enables the diff-unchanged guard.
+
+    Returns
+    -------
+    PrecheckResult
+        ``REVIEW_NEEDED`` or ``SKIP_ALREADY_REVIEWED``; the
+        ``diff_fingerprint`` field carries the marker form's diff half
+        (``empty-diff`` placeholder for an empty diff) and
+        ``broad_fingerprint`` the full marker string.
+    """
+    if config_hash is None:
+        config_hash = compute_config_hash()
+    diff_fp = compute_diff_fingerprint(diff_content)
+    marker_fp = diff_fp or EMPTY_DIFF_FINGERPRINT
+    broad = build_marker_fingerprint(marker_fp, config_hash)
+
+    if (
+        not force_review
+        and skip_if_diff_unchanged
+        and fingerprints_match(broad, previous_fingerprints)
+    ):
+        return PrecheckResult(
+            decision=ReviewDecision.SKIP_ALREADY_REVIEWED,
+            diff_fingerprint=marker_fp,
+            config_hash=config_hash,
+            broad_fingerprint=broad,
+            reason="Diff unchanged since last review",
+        )
+
+    return PrecheckResult(
+        decision=ReviewDecision.REVIEW_NEEDED,
+        diff_fingerprint=marker_fp,
+        config_hash=config_hash,
+        broad_fingerprint=broad,
+        reason="New or forced changes detected",
+    )
+
+
+def _decision_to_outputs(decision: ReviewDecision) -> tuple[bool, str]:
+    """Map a ReviewDecision to the action's (should_review, skip_reason).
+
+    ``SKIP_INCREMENTAL`` still runs a review: in the action, incremental
+    is a scope (resolved from metadata), not a reason to skip.
+    """
+    if decision is ReviewDecision.SKIP_ALREADY_REVIEWED:
+        return False, "diff-unchanged"
+    if decision is ReviewDecision.SKIP_NO_CHANGES:
+        return False, "no-changes"
+    return True, ""
+
+
+def build_precheck_payload(
+    result: PrecheckResult, scope: ScopeResolution
+) -> dict:
+    """Assemble the JSON payload the CLI writes to stdout.
+
+    When the decision does not run a review the scope fields are reset to
+    the full-scope defaults, so the payload is internally consistent
+    (the shell wrapper re-applies the same reset defensively).
+    """
+    should_review, skip_reason = _decision_to_outputs(result.decision)
+    if not should_review:
+        scope = ScopeResolution()
+    return {
+        "should_review": should_review,
+        "skip_reason": skip_reason,
+        "effective_review_scope": scope.effective_review_scope,
+        "previous_head_sha": scope.previous_head_sha,
+        "baseline_clean": scope.baseline_clean,
+        "diff_fingerprint": result.diff_fingerprint,
+        "broad_fingerprint": result.broad_fingerprint,
+        "config_hash": result.config_hash,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point (for shell wrapper invocation)
 # ---------------------------------------------------------------------------
 
@@ -573,32 +868,61 @@ def _format_output(result: PrecheckResult) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
-    """CLI entry point for the precheck module.
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean env flag the way the shell compared it (``== true``).
 
-    Reads inputs from environment variables and files, writes structured
-    output to stdout. Designed to be called from a thin shell wrapper.
+    Unset falls back to ``default``; only a case-insensitive ``true``
+    counts as true, so a mistyped value degrades to the safe side of each
+    flag (force off, guard on via the caller's default).
     """
-    # Read diff content
-    diff_path = os.environ.get("DIFF_PATH")
-    if diff_path and os.path.exists(diff_path):
-        with open(diff_path, "r", encoding="utf-8") as f:
-            diff_content = f.read()
-    else:
-        diff_content = os.environ.get("DIFF_CONTENT", "")
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() == "true"
 
-    # Read config lines from environment
-    config_lines = extract_config_lines(dict(os.environ))
 
-    # Optionally read config from file
-    config_path = os.environ.get("CONFIG_PATH")
-    if config_path and os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_lines.extend(f.read().splitlines())
+def _env_validation_flag(name: str) -> Optional[bool]:
+    """Read a caller-supplied range-validation verdict.
 
-    # Read previous fingerprints
+    Unset/empty means the caller did not assert the check (returns
+    ``None``; the check does not gate the baseline). ``true``/``false``
+    (case-insensitive, plus ``1``/``0``) are the verdicts. An unparseable
+    value fails closed to ``False``: a broken verdict must not certify a
+    baseline it cannot vouch for.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value in ("true", "1"):
+        return True
+    if value in ("false", "0"):
+        return False
+    logger.warning("Unparseable %s=%r; treating validation as failed", name, raw)
+    return False
+
+
+def _read_diff_content() -> str:
+    """Read the PR diff from the first set, readable path env var."""
+    for var in ("PRECHECK_DIFF_PATH", "DIFF_PATH"):
+        path = os.environ.get(var)
+        if path and os.path.exists(path):
+            try:
+                # errors="replace" keeps binary-ish diffs hashable without
+                # crashing the precheck; the replacement is deterministic,
+                # so re-runs fingerprint identically.
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except OSError:
+                logger.warning("Could not read diff file %s", path)
+    return os.environ.get("DIFF_CONTENT", "")
+
+
+def _read_previous_fingerprints() -> list[str]:
+    """Collect stored marker fingerprints from env and optional file."""
+    fingerprints: list[str] = []
+
     prev_fp_path = os.environ.get("PREV_FP_PATH")
-    previous_fingerprints: list[str] = []
     if prev_fp_path and os.path.exists(prev_fp_path):
         with open(prev_fp_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -606,7 +930,7 @@ def main() -> None:
                 if line.startswith(FP_PREFIX):
                     fp = line[len(FP_PREFIX) :].strip()
                     if fp:
-                        previous_fingerprints.append(fp)
+                        fingerprints.append(fp)
 
     # Also accept fingerprints from env var (comma-separated)
     prev_fps_env = os.environ.get("PREV_FINGERPRINTS", "")
@@ -614,19 +938,44 @@ def main() -> None:
         for fp in prev_fps_env.split(","):
             fp = fp.strip()
             if fp:
-                previous_fingerprints.append(fp)
+                fingerprints.append(fp)
 
-    # Run decision logic
-    enable_incremental = os.environ.get("ENABLE_INCREMENTAL_DETECTION", "true").lower() != "false"
-    result = should_review(
+    return fingerprints
+
+
+def main() -> None:
+    """CLI entry point for the precheck module.
+
+    Reads the action precheck inputs from the environment (see the module
+    docstring for the contract) and writes a single JSON object to stdout
+    with the keys ``should_review``, ``skip_reason``,
+    ``effective_review_scope``, ``previous_head_sha``, ``baseline_clean``,
+    ``diff_fingerprint``, ``broad_fingerprint`` and ``config_hash``.
+    Designed to be called from a thin shell wrapper; library callers use
+    :func:`evaluate_precheck` / :func:`resolve_review_scope` directly.
+    """
+    diff_content = _read_diff_content()
+    previous_fingerprints = _read_previous_fingerprints()
+    force_review = _env_flag("FORCE_REVIEW", default=False)
+    skip_if_diff_unchanged = _env_flag("SKIP_IF_DIFF_UNCHANGED", default=True)
+
+    result = evaluate_precheck(
         diff_content,
-        config_lines,
         previous_fingerprints,
-        enable_incremental_detection=enable_incremental,
+        force_review=force_review,
+        skip_if_diff_unchanged=skip_if_diff_unchanged,
+    )
+    scope = resolve_review_scope(
+        os.environ.get("REVIEW_SCOPE", "auto"),
+        os.environ.get("PREVIOUS_HEAD_SHA", ""),
+        os.environ.get("PREVIOUS_BASE_SHA", ""),
+        os.environ.get("PREVIOUS_REVIEW_RESULT", ""),
+        force_review=force_review,
+        previous_head_is_ancestor=_env_validation_flag("PREVIOUS_HEAD_IS_ANCESTOR"),
+        compare_range_ok=_env_validation_flag("COMPARE_RANGE_OK"),
     )
 
-    # Output structured result
-    print(_format_output(result))
+    print(json.dumps(build_precheck_payload(result, scope), indent=2))
 
 
 if __name__ == "__main__":
