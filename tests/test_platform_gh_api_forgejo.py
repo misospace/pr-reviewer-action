@@ -138,6 +138,31 @@ def test_forgejo_blocks_disallowed_characters(tmp_path, monkeypatch):
     mock_run.assert_not_called()
 
 
+def test_forgejo_compare_endpoint_routes_to_api_v1(monkeypatch):
+    """``repos/{o}/{r}/compare/{base}...{head}`` is rewritten to
+    ``/api/v1/repos/{o}/{r}/compare/{base}...{head}`` and dispatched to
+    the configured Forgejo host.
+
+    Issue #438 lists ``compare`` as one of the endpoint patterns the
+    translation table must cover; this guards against a future
+    refactor silently regressing the entry.
+    """
+    result, captured = _exec_forgejo(
+        monkeypatch,
+        f"repos/{_REPO}/compare/main...feature-branch",
+        body='{"commits": []}',
+    )
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert cmd[0] == "curl"
+    # Translation table rewrote repos/.../compare/... → /api/v1/repos/.../compare/...
+    expected_url = _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/compare/main...feature-branch"
+    assert any(expected_url in tok for tok in cmd), cmd
+    # The configured Forgejo host is the one being hit, not api.github.com
+    assert "api.github.com" not in " ".join(cmd), cmd
+    assert result == {"data": {"commits": []}}
+
+
 # ---------------------------------------------------------------------------
 # 2. The translated URL goes to the configured Forgejo host — never to
 #    api.github.com — and uses the FORGEJO_TOKEN.
