@@ -68,6 +68,36 @@ def _commit_summaries(commits: list, with_author: bool = False) -> list[dict]:
     return out
 
 
+def _repo_allowed(
+    owner: str,
+    repo: str,
+    current_repo: str | None,
+    allowed_repos: set[str] | None,
+) -> bool:
+    """Whether a (owner, repo) is in the operator-defined allowlist.
+
+    Matches the protection in ``platform.gh_api``: a repo key is only
+    eligible for enrichment ``gh api`` calls if it equals the repo under
+    review (``current_repo``) or appears in ``TOOL_ALLOWED_GH_API_REPOS``
+    (``allowed_repos``). Without this gate, a PR body containing links
+    to any other repo would let the operator token reach that repo.
+    """
+    key = f"{owner}/{repo}".lower()
+    if current_repo and key == current_repo.lower():
+        return True
+    if allowed_repos:
+        for ar in allowed_repos:
+            if not ar:
+                continue
+            if key == ar.lower():
+                return True
+            if ar.lower().endswith("/*") and key == ar.lower()[:-2]:
+                return True
+            if ar.lower() == "*":
+                return True
+    return False
+
+
 def render_linked_sources(
     urls: list[str],
     allowed_hosts: set[str],
@@ -76,12 +106,22 @@ def render_linked_sources(
     ghcr_images: list[str],
     compare_shas: tuple[str, str] | None,
     budget: BudgetTracker,
+    current_repo: str | None = None,
+    allowed_repos: set[str] | None = None,
 ) -> str:
     """Render linked-sources.md content."""
     lines: list[str] = []
 
     if not urls:
         return ""
+
+    # Security: linked-source enrichment must not reach repos outside the
+    # operator's allowlist, regardless of what URLs appear in the PR body.
+    # Mirror platform.gh_api's gate: only current_repo / allowed_repos may
+    # be queried with the operator token. Repos that fail the check are
+    # rendered with a visible "not authorized" note and skipped.
+    blocked_repos: dict[str, list[str]] = {}
+    authorized_repos: set[str] = set()
 
     # Phase 1: parallel fetch of allowlisted URLs
     fetch_urls: list[tuple[int, str]] = []
@@ -116,6 +156,17 @@ def render_linked_sources(
     api_cache: dict[str, dict | list | None] = {}
 
     def cached_gh_api(endpoint: str) -> dict | list | None:
+        # Security gate (#509): refuse any gh_api call whose owner/repo is
+        # outside the operator's allowlist (current_repo or allowed_repos).
+        # This mirrors the protection in platform.gh_api so that the
+        # enrichment path cannot be used to reach arbitrary other repos.
+        m = re.match(r"^repos/([^/]+)/([^/]+)/", endpoint)
+        if m:
+            key = f"{m.group(1)}/{m.group(2)}".lower()
+            if not _repo_allowed(m.group(1), m.group(2), current_repo, allowed_repos):
+                blocked_repos.setdefault(key, []).append(endpoint)
+                return None
+            authorized_repos.add(key)
         with api_lock:
             if endpoint in api_cache:
                 return api_cache[endpoint]
@@ -127,6 +178,15 @@ def render_linked_sources(
         # One releases fetch per unique repo (#366), shared between the per-URL
         # "Recent Releases" rendering (Phase 2) and the releases enrichment
         # (Phase 3); dedup + thread-safety come from cached_gh_api.
+        # Gate: only call gh_api for repos the operator has authorized via
+        # current_repo / allowed_repos (issue #509). Without this check, a
+        # PR body linking to any other repo would let the operator token
+        # query that repo's releases.
+        key = f"{owner}/{repo}".lower()
+        if not _repo_allowed(owner, repo, current_repo, allowed_repos):
+            blocked_repos.setdefault(key, []).append(f"releases")
+            return None
+        authorized_repos.add(key)
         data = cached_gh_api(f"repos/{owner}/{repo}/releases?per_page=30")
         return data if isinstance(data, list) else None
 
@@ -141,6 +201,15 @@ def render_linked_sources(
     _gh_repo_keys: set[str] = set()
 
     def _queue(endpoint: str) -> None:
+        # Gate (#509): refuse to enqueue a gh_api call whose owner/repo is
+        # outside the operator's allowlist. Without this, a PR body could
+        # make the action issue gh_api against arbitrary other repos.
+        m = re.match(r"^repos/([^/]+)/([^/]+)/", endpoint)
+        if m:
+            if not _repo_allowed(m.group(1), m.group(2), current_repo, allowed_repos):
+                key = f"{m.group(1)}/{m.group(2)}".lower()
+                blocked_repos.setdefault(key, []).append(endpoint)
+                return
         if endpoint not in _seen_prewarm:
             _seen_prewarm.add(endpoint)
             prewarm_endpoints.append(endpoint)
@@ -472,6 +541,22 @@ def render_linked_sources(
                     lines.append(json.dumps(file_list, indent=2)[:5000])
                     lines.append("")
                     lines.append("```")
+
+    # Surface the repos we refused to query so reviewers see why they were
+    # skipped rather than missing context. issue #509.
+    if blocked_repos:
+        lines.append("### Not Authorized for Enrichment")
+        lines.append("")
+        lines.append(
+            "These repos were linked from the PR body but are not the repo "
+            "under review (and were not listed in "
+            "`TOOL_ALLOWED_GH_API_REPOS`), so the action did not query "
+            "them with the operator token:"
+        )
+        lines.append("")
+        for key in sorted(blocked_repos.keys()):
+            lines.append(f"- `{key}`")
+        lines.append("")
 
     return "\n".join(lines) + ("\n" if lines else "")
 

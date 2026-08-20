@@ -119,6 +119,110 @@ def test_render_linked_sources_respects_budget_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Repo allowlist (#509): linked-source enrichment must not reach arbitrary
+# repos extracted from the PR body. Only current_repo / allowed_repos are
+# eligible for the operator-token ``gh api`` call.
+# ---------------------------------------------------------------------------
+
+
+def test_render_linked_sources_blocks_non_current_repo_by_default() -> None:
+    """With no allowlist, a link to another repo must not trigger gh_api."""
+    captured: list[str] = []
+
+    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+        captured.append(endpoint)
+        return None
+
+    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
+         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+        out = linked_sources.render_linked_sources(
+            urls=["https://github.com/other-org/other-repo/releases/tag/v1.0"],
+            allowed_hosts={"github.com"},
+            gh_token="fake",
+            target_version="",
+            ghcr_images=[],
+            compare_shas=None,
+            budget=budget.BudgetTracker(max_seconds=5),
+            current_repo="current-org/current-repo",
+            allowed_repos=None,
+        )
+
+    # The link points at other-org/other-repo, which is neither current_repo
+    # nor in allowed_repos → no gh_api call should have been issued.
+    assert all(not ep.startswith("repos/other-org/other-repo/") for ep in captured), (
+        f"unexpected gh_api call to other repo: {captured}"
+    )
+    # Reviewers must see a visible "not authorized" note.
+    assert "Not Authorized for Enrichment" in out
+    assert "other-org/other-repo" in out
+
+
+def test_render_linked_sources_allows_current_repo() -> None:
+    """current_repo itself remains eligible for enrichment."""
+    captured: list[str] = []
+
+    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+        captured.append(endpoint)
+        return None
+
+    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
+         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+        linked_sources.render_linked_sources(
+            urls=["https://github.com/cur-org/cur-repo/releases/tag/v1.0"],
+            allowed_hosts={"github.com"},
+            gh_token="fake",
+            target_version="",
+            ghcr_images=[],
+            compare_shas=None,
+            budget=budget.BudgetTracker(max_seconds=5),
+            current_repo="cur-org/cur-repo",
+            allowed_repos=None,
+        )
+
+    # At least one call should have been issued to current_repo.
+    assert any(ep.startswith("repos/cur-org/cur-repo/") for ep in captured), (
+        f"expected gh_api call to current_repo, got: {captured}"
+    )
+
+
+def test_render_linked_sources_allows_explicit_allowlist_repo() -> None:
+    """A repo listed in allowed_repos is eligible even if not current_repo."""
+    captured: list[str] = []
+
+    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+        captured.append(endpoint)
+        return None
+
+    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+        return None
+
+    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
+         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+        linked_sources.render_linked_sources(
+            urls=["https://github.com/allowed-org/allowed-repo/releases/tag/v1.0"],
+            allowed_hosts={"github.com"},
+            gh_token="fake",
+            target_version="",
+            ghcr_images=[],
+            compare_shas=None,
+            budget=budget.BudgetTracker(max_seconds=5),
+            current_repo="cur-org/cur-repo",
+            allowed_repos={"allowed-org/allowed-repo"},
+        )
+
+    # The allowed_repos entry should have been reached.
+    assert any(ep.startswith("repos/allowed-org/allowed-repo/") for ep in captured), (
+        f"expected gh_api call to allowed_repos entry, got: {captured}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # BudgetTracker / DeadlineBudget light smoke tests
 # ---------------------------------------------------------------------------
 
