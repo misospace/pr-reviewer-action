@@ -6,7 +6,9 @@ Consumed by scripts/run_enrichment.py CLI and optionally sourced by shell sectio
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from urllib.parse import urlparse
 
 
@@ -55,9 +57,81 @@ def _url_host(url: str) -> str:
     return (parsed.hostname or "").lower()
 
 
+def _is_public_ip(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    """Return True only for IP addresses safe to fetch from.
+
+    Rejects loopback, link-local (incl. cloud IMDS 169.254.169.254),
+    private (RFC-1918 / ULA), multicast, reserved, and unspecified ranges.
+    """
+    return not (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_host_ips(host: str) -> list[str]:
+    """Resolve *host* to a list of IP literal strings.
+
+    If *host* is itself an IP literal, return [host]. Resolution failures
+    return an empty list so the caller treats the host as untrusted.
+    """
+    if not host:
+        return []
+    try:
+        # If host is already an IP literal, return it directly without DNS.
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return []
+    ips: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr:
+            ips.append(sockaddr[0])
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for ip in ips:
+        if ip not in seen:
+            seen.add(ip)
+            unique.append(ip)
+    return unique
+
+
+def _host_ips_are_public(host: str) -> bool:
+    """Return True iff every resolved IP for *host* is publicly routable.
+
+    Any private/loopback/link-local resolution is treated as unsafe; this
+    closes the DNS-rebinding / IMDS arc where an allowlisted hostname is
+    pointed at 169.254.169.254 or RFC-1918 space.
+    """
+    ips = _resolve_host_ips(host)
+    if not ips:
+        return False
+    for ip_str in ips:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        if not _is_public_ip(ip):
+            return False
+    return True
+
+
 def host_allowed(url: str, allowed: set[str]) -> bool:
-    """Check if a URL's host is in the allowlist."""
-    return _url_host(url) in allowed
+    """Check if a URL's host is in the allowlist AND resolves only to public IPs."""
+    host = _url_host(url)
+    if host not in allowed:
+        return False
+    return _host_ips_are_public(host)
 
 
 # --- Version hints ---

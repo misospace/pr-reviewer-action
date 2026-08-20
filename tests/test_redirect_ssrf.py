@@ -6,8 +6,10 @@ Verifies that both ``web_fetch`` (tool_executors) and ``fetch_url``
 """
 
 import http.server
+import socket
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -18,6 +20,23 @@ from pr_reviewer.tool_executors import web_fetch
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _stub_public_resolution(monkeypatch, ip="93.184.216.34"):
+    """Patch the resolved-IP gate so loopback / private test addresses
+    are treated as publicly routable.
+
+    These tests exercise the redirect handler; they should not depend on
+    the SSRF resolved-IP gate (covered separately in
+    tests/test_resolved_ip_ssrf.py). Issue #510 closes the SSRF arc; the
+    gate runs alongside the hostname allowlist.
+    """
+    def fake_resolve(host):
+        return [ip]
+    monkeypatch.setattr(
+        "pr_reviewer.enrichment._resolve_host_ips", fake_resolve
+    )
+
 
 class _RedirectHandler(http.server.BaseHTTPRequestHandler):
     """Sends a redirect to *target*."""
@@ -77,8 +96,9 @@ def _start_server(handler_cls, port):
 class TestWebFetchRedirect:
     """web_fetch must re-validate redirect targets against the allowlist."""
 
-    def test_allowlisted_to_allowlisted_succeeds(self):
+    def test_allowlisted_to_allowlisted_succeeds(self, monkeypatch):
         """Allowlisted → allowlisted redirect should succeed."""
+        _stub_public_resolution(monkeypatch)
         srv1 = _start_server(_RedirectHandler, 0)
         port1 = srv1.server_address[1]
         srv2 = _start_server(_OkHandler, 0)
@@ -91,8 +111,9 @@ class TestWebFetchRedirect:
         assert "content" in result, f"Expected success but got: {result}"
         assert "OK-DATA" in result["content"]
 
-    def test_allowlisted_to_imds_fails(self):
+    def test_allowlisted_to_imds_fails(self, monkeypatch):
         """Allowlisted → 169.254.169.254 redirect should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         _RedirectHandler.target = "http://169.254.169.254/latest/meta-data/"
@@ -102,8 +123,9 @@ class TestWebFetchRedirect:
         assert "error" in result, f"Expected error but got: {result}"
         assert "disallowed host" in result["error"].lower() or "redirect" in result["error"].lower()
 
-    def test_allowlisted_to_localhost_fails(self):
+    def test_allowlisted_to_localhost_fails(self, monkeypatch):
         """Allowlisted → localhost redirect should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         _RedirectHandler.target = "http://localhost:9999/secret"
@@ -114,8 +136,9 @@ class TestWebFetchRedirect:
         assert "error" in result, f"Expected error but got: {result}"
         assert "disallowed host" in result["error"].lower() or "redirect" in result["error"].lower()
 
-    def test_too_many_redirects_fails(self):
+    def test_too_many_redirects_fails(self, monkeypatch):
         """A chain of >10 redirects should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         # Redirect to itself (same host, so always allowlisted).
@@ -134,8 +157,9 @@ class TestWebFetchRedirect:
 class TestFetchUrlRedirect:
     """fetch_url must re-validate redirect targets against the allowlist."""
 
-    def test_allowlisted_to_allowlisted_succeeds(self):
+    def test_allowlisted_to_allowlisted_succeeds(self, monkeypatch):
         """Allowlisted → allowlisted redirect should succeed."""
+        _stub_public_resolution(monkeypatch)
         srv1 = _start_server(_RedirectHandler, 0)
         port1 = srv1.server_address[1]
         srv2 = _start_server(_OkHandler, 0)
@@ -149,8 +173,9 @@ class TestFetchUrlRedirect:
         assert result is not None, f"Expected bytes but got: {result}"
         assert b"OK-DATA" in result
 
-    def test_allowlisted_to_imds_fails(self):
+    def test_allowlisted_to_imds_fails(self, monkeypatch):
         """Allowlisted → 169.254.169.254 redirect should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         _RedirectHandler.target = "http://169.254.169.254/latest/meta-data/"
@@ -159,8 +184,9 @@ class TestFetchUrlRedirect:
 
         assert result is None, f"Expected None but got: {result}"
 
-    def test_allowlisted_to_localhost_fails(self):
+    def test_allowlisted_to_localhost_fails(self, monkeypatch):
         """Allowlisted → localhost redirect should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         _RedirectHandler.target = "http://localhost:9999/secret"
@@ -169,8 +195,9 @@ class TestFetchUrlRedirect:
 
         assert result is None, f"Expected None but got: {result}"
 
-    def test_too_many_redirects_fails(self):
+    def test_too_many_redirects_fails(self, monkeypatch):
         """A chain of >10 redirects should be rejected."""
+        _stub_public_resolution(monkeypatch)
         srv = _start_server(_RedirectHandler, 0)
         port = srv.server_address[1]
         _RedirectHandler.target = f"http://127.0.0.1:{port}/loop"
