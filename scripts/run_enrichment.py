@@ -54,6 +54,14 @@ from pr_reviewer.enrichment import (  # noqa: E402
 # them as run_enrichment.<name>; render_linked_sources looks them up in the
 # pr_reviewer.linked_sources namespace.
 from pr_reviewer.http_client import fetch_url, gh_api_call  # noqa: E402,F401
+
+
+def _parse_allowed_repos(raw: str | None) -> set[str] | None:
+    """Parse TOOL_ALLOWED_GH_API_REPOS (comma/newline separated) into a set."""
+    if not raw:
+        return None
+    items = {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
+    return items or None
 from pr_reviewer.linked_sources import render_linked_sources  # noqa: E402
 
 
@@ -122,6 +130,8 @@ def main() -> None:
         ghcr_images,
         compare_shas,
         budget,
+        current_repo=os.environ.get("GITHUB_REPOSITORY"),
+        allowed_repos=_parse_allowed_repos(os.environ.get("TOOL_ALLOWED_GH_API_REPOS")),
     )
     write_file("linked-sources.md", md)
 

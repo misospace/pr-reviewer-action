@@ -702,7 +702,7 @@ class TestParallelExecution:
     def test_model_api_keys_scrubbed_from_provider_env(self, tmp_path: Path):
         config = {
             "providers": [
-                {"id": "env-probe", "command": "echo \"key=[${AI_API_KEY:-}] fb=[${AI_FALLBACK_API_KEY:-}] gh=[${GH_TOKEN:-}]\""}
+                {"id": "env-probe", "command": "echo \"key=[${AI_API_KEY:-}] fb=[${AI_FALLBACK_API_KEY:-}] primary=[${AI_PRIMARY_API_KEY:-}] smart=[${AI_SMART_API_KEY:-}] linear=[${LINEAR_API_KEY:-}] gh=[${GH_TOKEN:-}]\""}
             ]
         }
         result = _run_caps(
@@ -711,17 +711,49 @@ class TestParallelExecution:
             {
                 "AI_API_KEY": "sk-should-never-leak",
                 "AI_FALLBACK_API_KEY": "sk-fallback-never-leak",
+                "AI_PRIMARY_API_KEY": "sk-primary-never-leak",
+                "AI_SMART_API_KEY": "sk-smart-never-leak",
+                "LINEAR_API_KEY": "lin_api_never_leak",
                 "GH_TOKEN": "gh-token-ok",
             },
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         data = _load_json_output(tmp_path)
         stdout = data["providers"][0]["stdout"]
-        # Model keys are scrubbed before the provider runs (not just redacted
-        # after); GH_TOKEN stays available for gh-based providers.
+        # Model keys and the Linear PAT are scrubbed before the provider runs
+        # (not just redacted after); GH_TOKEN stays available for gh-based
+        # providers.
         assert "key=[]" in stdout
         assert "fb=[]" in stdout
+        assert "primary=[]" in stdout
+        assert "smart=[]" in stdout
+        assert "linear=[]" in stdout
         assert "gh-token-ok" not in stdout or "gh=[" in stdout
+
+    def test_provider_env_drops_injected_credentials(self):
+        from run_evidence_providers import provider_env
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AI_API_KEY": "sk-a",
+                "AI_FALLBACK_API_KEY": "sk-b",
+                "AI_PRIMARY_API_KEY": "sk-c",
+                "AI_SMART_API_KEY": "sk-d",
+                "LINEAR_API_KEY": "lin-e",
+                "GH_TOKEN": "gh-token-ok",
+            },
+        ):
+            env = provider_env()
+        for key in (
+            "AI_API_KEY",
+            "AI_FALLBACK_API_KEY",
+            "AI_PRIMARY_API_KEY",
+            "AI_SMART_API_KEY",
+            "LINEAR_API_KEY",
+        ):
+            assert key not in env, f"{key} leaked into provider env"
+        assert env.get("GH_TOKEN") == "gh-token-ok"
 
     def test_blocker_flag_still_aggregates(self, tmp_path: Path):
         helper = tmp_path / "blocker.py"

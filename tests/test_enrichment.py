@@ -702,6 +702,8 @@ class TestReleasesCache:
             [],
             None,
             budget,
+            current_repo="owner/repo",
+            allowed_repos=None,
         )
 
         # Phase 2 ("Recent Releases") and Phase 3 (repo-candidate enrichment)
@@ -739,6 +741,7 @@ class TestLinkedSourcesFanout:
         budget = linked_sources.BudgetTracker(max_seconds=60)
         return linked_sources.render_linked_sources(
             self.URLS, {"github.com"}, None, "", [], None, budget,
+            current_repo="o1/r1", allowed_repos={"o2/r2"},
         )
 
     def test_output_identical_when_calls_complete_out_of_order(self, monkeypatch):
