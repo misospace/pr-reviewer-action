@@ -95,11 +95,18 @@ def parse_findings(payload: object) -> tuple[str, list[dict[str, str]]]:
     return highest, findings[:40]
 
 
-# Model API keys are stripped from provider subprocess environments: providers
-# talk to the repo, not the model, so they have no legitimate use for them,
-# and this keeps a misbehaving provider command from echoing them into
-# captured output. GH_TOKEN is intentionally kept — providers commonly use gh.
-_SCRUBBED_ENV_KEYS = ("AI_API_KEY", "AI_FALLBACK_API_KEY")
+# Model API keys and other injected credentials are stripped from provider
+# subprocess environments: providers talk to the repo, not the model, so they
+# have no legitimate use for them, and this keeps a misbehaving provider
+# command from echoing them into captured output. GH_TOKEN is intentionally
+# kept — providers commonly use gh.
+_SCRUBBED_ENV_KEYS = (
+    "AI_API_KEY",
+    "AI_FALLBACK_API_KEY",
+    "AI_PRIMARY_API_KEY",
+    "AI_SMART_API_KEY",
+    "LINEAR_API_KEY",
+)
 
 
 def provider_env() -> dict:
