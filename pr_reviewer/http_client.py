@@ -23,8 +23,27 @@ from pr_reviewer.platform import USER_AGENT
 
 
 def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:
-    """Check whether *host* is in the allowlist (case-insensitive)."""
+    """Hostname allowlist check (case-insensitive, no DNS check).
+
+    Use ``_host_resolves_safely`` after this for the resolved-IP gate.
+    """
     return host.lower() in {h.lower() for h in allowed_hosts}
+
+
+def _host_resolves_safely(host: str) -> bool:
+    """Return True iff *host* resolves only to publicly routable IPs.
+
+    Reuses the same predicate as ``pr_reviewer.enrichment.host_allowed`` so
+    the initial fetch and every redirect hop share the SSRF gate. Any
+    link-local / loopback / private resolution is treated as unsafe.
+    """
+    if not host:
+        return False
+    try:
+        from pr_reviewer.enrichment import _host_ips_are_public
+    except ImportError:
+        return True
+    return _host_ips_are_public(host)
 
 
 class _AllowListRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -33,6 +52,10 @@ class _AllowListRedirectHandler(urllib.request.HTTPRedirectHandler):
     If a redirect target's host is not in the allowlist, raise
     ``URLError`` so the caller sees a clean error instead of silently
     fetching from an arbitrary host (e.g. cloud IMDS).
+
+    The same resolved-IP gate used for the initial URL is re-applied on
+    every hop so a DNS-rebinding redirect cannot smuggle a private or
+    link-local address past the hostname allowlist.
     """
 
     def __init__(self, allowed_hosts: set[str], max_redirects: int = 10):
@@ -53,6 +76,10 @@ class _AllowListRedirectHandler(urllib.request.HTTPRedirectHandler):
         if not _host_allowed(host, self._allowed_hosts):
             raise urllib.error.URLError(
                 f"Redirect to disallowed host: {host}"
+            )
+        if not _host_resolves_safely(host):
+            raise urllib.error.URLError(
+                f"Redirect host {host!r} resolves to a non-public IP"
             )
 
         self._redirect_count += 1
@@ -76,6 +103,10 @@ def fetch_url(
     Validates the host against an allowlist (defaulting to common trusted hosts).
     Re-validates on every redirect hop to prevent SSRF via redirect.
     Returns parsed body bytes on success, or ``None`` on any error.
+
+    Before opening the socket, the hostname is resolved and any
+    link-local / loopback / private address is rejected so DNS-rebinding
+    or an IP-literal allowlisted host cannot reach cloud IMDS.
     """
     if allowed_hosts is None:
         allowed_hosts = {
@@ -93,6 +124,9 @@ def fetch_url(
         return None
 
     if not _host_allowed(host, allowed_hosts):
+        return None
+
+    if not _host_resolves_safely(host):
         return None
 
     try:
