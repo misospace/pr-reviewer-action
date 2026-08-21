@@ -160,6 +160,28 @@ if [[ "$should_review_decision" != "true" ]]; then
     echo "skip_reason=$skip_reason"
     echo "resolved_platform=$RESOLVED_PLATFORM"
     echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
+    if [[ "$skip_reason" == "diff-unchanged" ]]; then
+      # Carry the previous review's verdict forward so a downstream gate
+      # cannot flip red→green on re-run: the last managed comment's marker
+      # already carries review_result, parsed here from last_comment_body
+      # (no new API call). No marker / unparseable marker → verdict stays
+      # empty, preserving current behaviour.
+      carried_verdict="$(printf '%s' "$last_comment_body" | python3 -c '
+import sys
+from pr_reviewer.metadata import parse_metadata
+data = parse_metadata(sys.stdin.read())
+if data:
+    result = str(data.get("review_result") or "").lower()
+    if result == "issues":
+        print("request_changes")
+    elif result == "clean":
+        print("approve")
+')"
+      if [[ -n "$carried_verdict" ]]; then
+        echo "verdict=$carried_verdict"
+        echo "verdict_source=carry_forward"
+      fi
+    fi
   } >> "$OUTPUT_FILE"
   exit 0
 fi
