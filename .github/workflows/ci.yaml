@@ -48,6 +48,19 @@ jobs:
       - name: Lint GitHub Actions workflows
         uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
 
+      # Secret scan: this action forwards operator PATs and AI_API_KEYs, so a
+      # hardcoded credential in a committed diff is exactly the regression class
+      # the redaction work (#471, #360) guards against. gitleaks scans the PR
+      # diff on pull_request and the full history on push, failing the build on
+      # any detection. .gitleaks.toml allowlists the intentionally fake
+      # credential fixtures in the redaction test suites.
+      - name: Scan for leaked secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@1938557f6a58837331b99822ab17b8e536e7bef9 # v2.3.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config: .gitleaks.toml
+
       - name: Check shell scripts
         run: |
           set -euo pipefail

@@ -1,0 +1,15 @@
+# Gitleaks config for the CI secret-scan step (.github/workflows/ci.yaml).
+#
+# The redaction and redteam test suites carry intentionally fake credentials
+# as fixtures (e.g. "ghp_..." strings that must match the redaction rules,
+# plus "sk-..." keys, AWS "AKIA..." identifiers, and Slack "xox..." tokens
+# used as redact-targets). Allowlisting the tests tree by path keeps the
+# push (full-history) scan green while still catching any real secret
+# committed anywhere else in the tree.
+title = "pr-reviewer-action gitleaks config"
+
+[allowlist]
+description = "Intentionally fake credential fixtures under tests/"
+paths = [
+  '''(^|/)tests/.*''',
+]
