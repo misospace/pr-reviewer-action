@@ -8,6 +8,11 @@
 # committed anywhere else in the tree.
 title = "pr-reviewer-action gitleaks config"
 
+# Merge in gitleaks' built-in rules; without this this file defines no rules
+# and would detect nothing.
+[extend]
+useDefault = true
+
 [allowlist]
 description = "Intentionally fake credential fixtures under tests/"
 paths = [

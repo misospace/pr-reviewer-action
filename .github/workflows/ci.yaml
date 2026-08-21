@@ -14,6 +14,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the gitleaks CLI below can scan every commit, not
+          # just the PR merge ref of a shallow checkout.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -50,16 +54,15 @@ jobs:
 
       # Secret scan: this action forwards operator PATs and AI_API_KEYs, so a
       # hardcoded credential in a committed diff is exactly the regression class
-      # the redaction work (#471, #360) guards against. gitleaks scans the PR
-      # diff on pull_request and the full history on push, failing the build on
-      # any detection. .gitleaks.toml allowlists the intentionally fake
+      # the redaction work (#471, #360) guards against. The official license-free
+      # gitleaks CLI (image pinned by digest) scans the full checkout history —
+      # the checkout above uses fetch-depth 0 — on every run, failing the build
+      # on any detection. .gitleaks.toml allowlists the intentionally fake
       # credential fixtures in the redaction test suites.
       - name: Scan for leaked secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@1938557f6a58837331b99822ab17b8e536e7bef9 # v2.3.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: docker://ghcr.io/gitleaks/gitleaks@sha256:090a2715530bd6592342e6a66c3f35eafcaaf2a3227a312482504f9c854997e3
         with:
-          config: .gitleaks.toml
+          args: git --config /github/workspace/.gitleaks.toml --no-banner --redact /github/workspace
 
       - name: Check shell scripts
         run: |
