@@ -24,6 +24,44 @@ from run_evidence_providers import (  # noqa: E402
 
 EVIDENCE_SCRIPT = _SCRIPTS_DIR / "run_evidence_providers.py"
 
+
+def test_run_provider_argv_json_and_truncation():
+    entry = run_provider(
+        {"id": "argv", "command": [sys.executable, "-c", "print('x' * 20)"], "max_output_bytes": 10},
+        default_timeout=5,
+        default_max_output=1024,
+    )
+    assert entry["status"] == "ok"
+    assert entry["exit_code"] == 0
+    assert entry["output_format"] == "text"
+    assert entry["stdout_truncated"] is True
+
+
+def test_run_provider_shell_string_json():
+    entry = run_provider(
+        {"id": "shell", "command": "printf '{\\\"severity\\\":\\\"warning\\\"}'", "output_format": "json"},
+        default_timeout=5,
+        default_max_output=1024,
+    )
+    assert entry["status"] == "ok"
+    assert entry["exit_code"] == 0
+    assert entry["output_format"] == "json"
+    assert entry["provider_severity"] == "warning"
+
+
+def test_run_provider_timeout_shape():
+    entry = run_provider(
+        {"id": "timeout", "command": [sys.executable, "-c", "import time; time.sleep(1)"], "timeout_sec": 1},
+        default_timeout=1,
+        default_max_output=1024,
+    )
+    assert entry["status"] == "timeout"
+    assert entry["exit_code"] is None
+    assert entry["stdout_truncated"] is False
+    assert entry["output_format"] == "text"
+
+
+
 HELPER_JSON_FINDINGS = """\
 #!/usr/bin/env python3
 import json, sys
