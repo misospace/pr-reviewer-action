@@ -513,16 +513,24 @@ check "write-capable Forgejo token reviews" "$(echo "$RESULT" | grep '^should_re
 # The precheck short-circuits on an unchanged diff, but the last managed
 # review comment's marker already carries review_result — parse it and stamp
 # verdict/verdict_source so a downstream gate cannot flip red→green on re-run.
+# Seed the real current fingerprint; a metadata-only marker must not trigger
+# the diff-unchanged path by itself.
 echo ""
 echo "=== Test 24: diff-unchanged skip carries forward request_changes ==="
-set_comments '<!-- ai-pr-reviewer: {"review_result": "issues", "fingerprint": "same"} -->'
+set_empty_comments
+CARRY_FORWARD_FP="$(run_precheck | grep '^diff_fingerprint=' | head -1 | cut -d= -f2-)"
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${CARRY_FORWARD_FP} -->
+<!-- ai-pr-reviewer: {\"review_result\": \"issues\"} -->"
 RESULT="$(run_precheck)"
 check "diff-unchanged skip carries request_changes" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "request_changes"
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
 
 echo ""
 echo "=== Test 25: diff-unchanged skip carries forward approve ==="
-set_comments '<!-- ai-pr-reviewer: {"review_result": "clean", "fingerprint": "same"} -->'
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${CARRY_FORWARD_FP} -->
+<!-- ai-pr-reviewer: {\"review_result\": \"clean\"} -->"
 RESULT="$(run_precheck)"
 check "diff-unchanged skip carries approve" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "approve"
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
