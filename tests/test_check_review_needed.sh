@@ -515,18 +515,14 @@ check "write-capable Forgejo token reviews" "$(echo "$RESULT" | grep '^should_re
 # verdict/verdict_source so a downstream gate cannot flip red→green on re-run.
 echo ""
 echo "=== Test 24: diff-unchanged skip carries forward request_changes ==="
-cat > "$TMPDIR/comments.json" <<'JSONEOF'
-[{"body": "<!-- ai-pr-reviewer: {\"review_result\": \"issues\", \"fingerprint\": \"same\"} -->"}]
-JSONEOF
+set_comments '<!-- ai-pr-reviewer: {"review_result": "issues", "fingerprint": "same"} -->'
 RESULT="$(run_precheck)"
 check "diff-unchanged skip carries request_changes" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "request_changes"
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
 
 echo ""
 echo "=== Test 25: diff-unchanged skip carries forward approve ==="
-cat > "$TMPDIR/comments.json" <<'JSONEOF'
-[{"body": "<!-- ai-pr-reviewer: {\"review_result\": \"clean\", \"fingerprint\": \"same\"} -->"}]
-JSONEOF
+set_comments '<!-- ai-pr-reviewer: {"review_result": "clean", "fingerprint": "same"} -->'
 RESULT="$(run_precheck)"
 check "diff-unchanged skip carries approve" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "approve"
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
