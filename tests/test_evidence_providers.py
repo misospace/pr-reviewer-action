@@ -63,7 +63,6 @@ def test_run_provider_timeout_shape():
     assert entry["stdout_truncated"] is False
     assert entry["output_format"] == "text"
 
-
 HELPER_JSON_FINDINGS = """\
 #!/usr/bin/env python3
 import json, sys
