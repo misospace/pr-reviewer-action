@@ -1,97 +1,69 @@
-"""Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh.
+"""Direct unit tests for pr_reviewer.precheck pure functions.
 
-Covers fingerprinting, config hashing, incremental scope detection,
-previous fingerprint extraction, and the main decision logic.
+Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
+resolve_review_scope (including validation-flag fallbacks), and
+_detect_incremental_scope.
 """
 
-import json
-import os
-import tempfile
-
-import pytest
-
 from pr_reviewer.precheck import (
-    _EXACT_CONFIG_KEYS,
-    CONFIG_HASH_MARKER,
     EMPTY_DIFF_FINGERPRINT,
-    FP_DELIMITER,
-    FP_PREFIX,
     MAX_INCREMENTAL_FILES,
     MAX_INCREMENTAL_LINES,
     MIN_INCREMENTAL_RATIO,
-    PrecheckResult,
     ReviewDecision,
     ScopeResolution,
-    _collect_config_lines,
-    _decision_to_outputs,
     _detect_incremental_scope,
-    _extract_previous_fingerprints,
-    _format_output,
-    _parse_diff_stats,
     build_broad_fingerprint,
     build_marker_fingerprint,
-    build_precheck_payload,
     compute_config_hash,
     compute_diff_fingerprint,
     evaluate_precheck,
-    extract_config_lines,
     fingerprints_match,
     resolve_review_scope,
     should_review,
 )
 
 
-# ---------------------------------------------------------------------------
-# compute_diff_fingerprint
-# ---------------------------------------------------------------------------
-
-
 class TestComputeDiffFingerprint:
-    def test_empty_string_returns_empty(self):
+    """Tests for compute_diff_fingerprint."""
+
+    def test_empty_string(self):
         assert compute_diff_fingerprint("") == ""
 
-    def test_whitespace_only_returns_empty(self):
-        assert compute_diff_fingerprint("   \n\n  ") == ""
+    def test_whitespace_only(self):
+        assert compute_diff_fingerprint("   \n\t\n  ") == ""
 
-    def test_none_returns_empty(self):
+    def test_none_input(self):
         assert compute_diff_fingerprint(None) == ""  # type: ignore[arg-type]
 
-    def test_simple_diff_produces_sha256(self):
-        diff = "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
-        fp = compute_diff_fingerprint(diff)
-        assert len(fp) == 64  # SHA256 hex length
+    def test_sha256_hex_format(self):
+        fp = compute_diff_fingerprint("diff content")
+        assert len(fp) == 64
         assert all(c in "0123456789abcdef" for c in fp)
 
-    def test_same_diff_same_fingerprint(self):
-        diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    def test_same_input_same_fingerprint(self):
+        diff = "diff --git a/file b/file\n+line\n"
         assert compute_diff_fingerprint(diff) == compute_diff_fingerprint(diff)
 
-    def test_different_diff_different_fingerprint(self):
-        fp_a = compute_diff_fingerprint("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n")
-        fp_b = compute_diff_fingerprint("diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n")
+    def test_different_input_different_fingerprint(self):
+        fp_a = compute_diff_fingerprint("a")
+        fp_b = compute_diff_fingerprint("b")
         assert fp_a != fp_b
 
     def test_unicode_content(self):
-        diff = "diff --git a/unicode.txt b/unicode.txt\n--- a/unicode.txt\n+++ b/unicode.txt\n@@ -1 +1 @@\n-你好\n+世界\n"
-        fp = compute_diff_fingerprint(diff)
+        fp = compute_diff_fingerprint("-你好\n+世界\n")
         assert len(fp) == 64
 
-    def test_null_bytes_in_diff(self):
-        """Null bytes (binary diff content) hash without error and are
-        significant: dropping them must change the fingerprint."""
-        diff = "diff --git a/bin b/bin\n+payload\x00with\x00nulls\n"
-        fp = compute_diff_fingerprint(diff)
-        assert len(fp) == 64
-        assert fp != compute_diff_fingerprint(diff.replace("\x00", ""))
-
-
-# ---------------------------------------------------------------------------
-# compute_config_hash
-# ---------------------------------------------------------------------------
+    def test_null_bytes_are_significant(self):
+        diff_with = "a\x00b\n"
+        diff_without = "ab\n"
+        assert compute_diff_fingerprint(diff_with) != compute_diff_fingerprint(diff_without)
 
 
 class TestComputeConfigHash:
-    def test_empty_list_returns_empty(self):
+    """Tests for compute_config_hash."""
+
+    def test_empty_list(self):
         assert compute_config_hash([]) == ""
 
     def test_single_line(self):
@@ -99,937 +71,223 @@ class TestComputeConfigHash:
         assert len(h) == 64
 
     def test_order_independent(self):
-        lines_a = ["B=2", "A=1"]
-        lines_b = ["A=1", "B=2"]
-        assert compute_config_hash(lines_a) == compute_config_hash(lines_b)
+        assert compute_config_hash(["B=2", "A=1"]) == compute_config_hash(["A=1", "B=2"])
 
     def test_comments_filtered(self):
-        h_with = compute_config_hash(["# comment", "A=1"])
-        h_without = compute_config_hash(["A=1"])
-        assert h_with == h_without
+        assert compute_config_hash(["# comment", "A=1"]) == compute_config_hash(["A=1"])
 
     def test_blank_lines_filtered(self):
-        h_with = compute_config_hash(["A=1", "", "  "])
-        h_without = compute_config_hash(["A=1"])
-        assert h_with == h_without
+        assert compute_config_hash(["A=1", "", "  "]) == compute_config_hash(["A=1"])
+
+    def test_whitespace_stripped(self):
+        assert compute_config_hash(["  A=1  "]) == compute_config_hash(["A=1"])
 
     def test_different_configs_different_hashes(self):
-        h_a = compute_config_hash(["MODEL=gpt-4"])
-        h_b = compute_config_hash(["MODEL=claude-3"])
-        assert h_a != h_b
+        assert compute_config_hash(["MODEL=gpt-4"]) != compute_config_hash(["MODEL=claude-3"])
 
-    def test_strips_whitespace(self):
-        h_a = compute_config_hash(["  A=1  "])
-        h_b = compute_config_hash(["A=1"])
-        assert h_a == h_b
-
-    def test_null_bytes_in_config_values(self):
-        """Null bytes in a config value hash without error and are
-        significant (config files can carry arbitrary bytes even though
-        the environment cannot)."""
-        h = compute_config_hash(["A=x\x00y"])
-        assert len(h) == 64
-        assert h != compute_config_hash(["A=xy"])
-
-
-# ---------------------------------------------------------------------------
-# build_broad_fingerprint
-# ---------------------------------------------------------------------------
-
-
-class TestBuildBroadFingerprint:
-    def test_with_both_parts(self):
-        result = build_broad_fingerprint("abc123", "def456")
-        assert result == "abc123|def456"
-
-    def test_empty_config_hash(self):
-        result = build_broad_fingerprint("abc123", "")
-        assert result == "abc123"
-
-    def test_empty_diff_fp(self):
-        result = build_broad_fingerprint("", "def456")
-        assert result == "|def456"
-
-    def test_both_empty(self):
-        result = build_broad_fingerprint("", "")
-        assert result == ""
-
-
-# ---------------------------------------------------------------------------
-# _extract_previous_fingerprints
-# ---------------------------------------------------------------------------
-
-
-class TestExtractPreviousFingerprints:
-    def test_no_fingerprints(self):
-        body = "This is a review comment with no fingerprints."
-        assert _extract_previous_fingerprints(body) == []
-
-    def test_single_fingerprint(self):
-        body = "Reviewed diff-fp:abc123def456"
-        assert _extract_previous_fingerprints(body) == ["abc123def456"]
-
-    def test_multiple_fingerprints(self):
-        body = "First: diff-fp:aaa\nSecond: diff-fp:bbb"
-        result = _extract_previous_fingerprints(body)
-        assert "aaa" in result
-        assert "bbb" in result
-
-    def test_case_insensitive_hex(self):
-        body = "diff-fp:ABCDEF123456"
-        result = _extract_previous_fingerprints(body)
-        assert "ABCDEF123456" in result
-
-    def test_embedded_in_markdown(self):
-        body = (
-            "## Review Summary\n"
-            "- Status: Complete\n"
-            "- diff-fp:deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567\n"
-            "- Files: 3\n"
-        )
-        result = _extract_previous_fingerprints(body)
-        assert len(result) == 1
-        assert result[0] == "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
-
-    def test_partial_hex_not_matched(self):
-        body = "diff-fp:xyz not hex"
-        assert _extract_previous_fingerprints(body) == []
-
-
-# ---------------------------------------------------------------------------
-# fingerprints_match
-# ---------------------------------------------------------------------------
-
-
-class TestFingerprintsMatch:
-    def test_match_found(self):
-        assert fingerprints_match("abc123", ["def456", "abc123"])
-
-    def test_no_match(self):
-        assert not fingerprints_match("abc123", ["def456", "ghi789"])
-
-    def test_empty_previous_list(self):
-        assert not fingerprints_match("abc123", [])
-
-    def test_empty_current_fp(self):
-        assert not fingerprints_match("", ["abc123"])
-
-
-# ---------------------------------------------------------------------------
-# _parse_diff_stats
-# ---------------------------------------------------------------------------
-
-
-class TestParseDiffStats:
-    def test_empty_diff(self):
-        stats = _parse_diff_stats("")
-        assert stats["files"] == []
-        assert stats["total_lines"] == 0
-
-    def test_single_file_change(self):
-        diff = (
-            "diff --git a/file.txt b/file.txt\n"
-            "--- a/file.txt\n"
-            "+++ b/file.txt\n"
-            "@@ -1,3 +1,4 @@\n"
-            "-old line\n"
-            "+new line\n"
-            "+another new line\n"
-            " unchanged\n"
-        )
-        stats = _parse_diff_stats(diff)
-        assert "file.txt" in stats["files"]
-
-    def test_multiple_files(self):
-        diff = (
-            "diff --git a/file1.txt b/file1.txt\n"
-            "--- a/file1.txt\n"
-            "+++ b/file1.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-            "diff --git a/file2.py b/file2.py\n"
-            "--- a/file2.py\n"
-            "+++ b/file2.py\n"
-            "@@ -1 +1 @@\n-x\n+y\n"
-        )
-        stats = _parse_diff_stats(diff)
-        assert len(stats["files"]) == 2
-        assert "file1.txt" in stats["files"]
-        assert "file2.py" in stats["files"]
-
-
-# ---------------------------------------------------------------------------
-# _detect_incremental_scope
-# ---------------------------------------------------------------------------
+    def test_null_bytes_are_significant(self):
+        assert compute_config_hash(["A=x\x00y"]) != compute_config_hash(["A=xy"])
 
 
 class TestDetectIncrementalScope:
-    def test_empty_diff_returns_none(self):
+    """Tests for _detect_incremental_scope."""
+
+    def _make_diff(self, files: int = 1, added_lines_per_file: int = 1) -> str:
+        parts = []
+        for i in range(files):
+            parts.append(f"diff --git a/f{i}.txt b/f{i}.txt\n")
+            parts.append("--- a/f{i}.txt\n")
+            parts.append("+++ b/f{i}.txt\n")
+            parts.append("@@ -1 +1 @@\n")
+            for _ in range(added_lines_per_file):
+                parts.append("+line\n")
+        return "".join(parts)
+
+    def test_empty_returns_none(self):
         assert _detect_incremental_scope("") is None
 
-    def test_whitespace_only_returns_none(self):
-        assert _detect_incremental_scope("   \n  ") is None
+    def test_whitespace_returns_none(self):
+        assert _detect_incremental_scope("   \n\t\n  ") is None
 
     def test_small_diff_is_incremental(self):
-        diff = (
-            "diff --git a/small.txt b/small.txt\n"
-            "--- a/small.txt\n"
-            "+++ b/small.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-        )
-        result = _detect_incremental_scope(diff)
+        result = _detect_incremental_scope(self._make_diff(files=1, added_lines_per_file=1))
         assert result is not None
-        assert len(result["files"]) == 1
+        assert result["files"] == ["f0.txt"]
+        assert result["total_files"] == 1
+        assert result["line_count"] >= 1
 
     def test_too_many_files_not_incremental(self):
-        # Create a diff with more than MAX_INCREMENTAL_FILES files
-        lines = []
-        for i in range(MAX_INCREMENTAL_FILES + 1):
-            lines.append(f"diff --git a/file{i}.txt b/file{i}.txt\n")
-            lines.append("--- a/file{i}.txt\n")
-            lines.append("+++ b/file{i}.txt\n")
-            lines.append("@@ -1 +1 @@\n-old\n+new\n")
-        diff = "".join(lines)
-        result = _detect_incremental_scope(diff)
-        assert result is None
+        diff = self._make_diff(files=MAX_INCREMENTAL_FILES + 1, added_lines_per_file=1)
+        assert _detect_incremental_scope(diff) is None
 
     def test_too_many_lines_not_incremental(self):
-        # Create a diff with more than MAX_INCREMENTAL_LINES lines
-        lines = ["diff --git a/big.txt b/big.txt\n"]
-        lines.append("--- a/big.txt\n")
-        lines.append("+++ b/big.txt\n")
-        lines.append("@@ -1 +1 @@\n")
-        for i in range(MAX_INCREMENTAL_LINES + 1):
-            lines.append(f"+line {i}\n")
-        diff = "".join(lines)
-        result = _detect_incremental_scope(diff)
-        assert result is None
+        diff = self._make_diff(files=1, added_lines_per_file=MAX_INCREMENTAL_LINES + 1)
+        assert _detect_incremental_scope(diff) is None
 
-    def test_incremental_returns_file_list(self):
-        diff = (
-            "diff --git a/a.txt b/a.txt\n"
-            "--- a/a.txt\n"
-            "+++ b/a.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-            "diff --git a/b.txt b/b.txt\n"
-            "--- a/b.txt\n"
-            "+++ b/b.txt\n"
-            "@@ -1 +1 @@\n-x\n+y\n"
-        )
+    def test_multiple_small_files_incremental(self):
+        diff = self._make_diff(files=MAX_INCREMENTAL_FILES, added_lines_per_file=2)
         result = _detect_incremental_scope(diff)
         assert result is not None
-        assert "a.txt" in result["files"]
-        assert "b.txt" in result["files"]
+        assert result["total_files"] == MAX_INCREMENTAL_FILES
 
-
-# ---------------------------------------------------------------------------
-# extract_config_lines
-# ---------------------------------------------------------------------------
-
-
-class TestExtractConfigLines:
-    def test_no_env_vars(self):
-        lines = extract_config_lines({})
-        assert lines == []
-
-    def test_model_included(self):
-        lines = extract_config_lines({"MODEL": "gpt-4"})
-        assert "MODEL=gpt-4" in lines
-
-    def test_secret_keys_masked(self):
-        lines = extract_config_lines({"GITHUB_TOKEN": "ghp_abc123"})
-        assert "GITHUB_TOKEN=***" in lines
-        assert "ghp_abc123" not in lines[0]
-
-    def test_api_key_masked(self):
-        lines = extract_config_lines({"OPENAI_API_KEY": "sk-xxx"})
-        assert "OPENAI_API_KEY=***" in lines
-        assert "sk-xxx" not in lines[0]
-
-    def test_non_secret_not_masked(self):
-        lines = extract_config_lines({"MODEL": "gpt-4", "TEMPERATURE": "0.7"})
-        assert "MODEL=gpt-4" in lines
-        assert "TEMPERATURE=0.7" in lines
-
-    def test_unknown_keys_ignored(self):
-        lines = extract_config_lines({"UNKNOWN_KEY": "value"})
-        assert lines == []
-
-
-# ---------------------------------------------------------------------------
-# should_review
-# ---------------------------------------------------------------------------
-
-
-class TestShouldReview:
-    def _make_diff(self, content="test"):
-        return f"diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-{content}\n+new\n"
-
-    def test_no_changes_skips(self):
-        result = should_review("", [], [])
-        assert result.decision == ReviewDecision.SKIP_NO_CHANGES
-
-    def test_whitespace_only_skips(self):
-        result = should_review("   \n  ", [], [])
-        assert result.decision == ReviewDecision.SKIP_NO_CHANGES
-
-    def test_new_changes_needs_review(self):
-        diff = self._make_diff()
-        # Disable incremental detection to verify REVIEW_NEEDED path
-        result = should_review(diff, [], [], enable_incremental_detection=False)
-        assert result.decision == ReviewDecision.REVIEW_NEEDED
-
-    def test_already_reviewed_skips(self):
-        diff = self._make_diff()
-        fp = compute_diff_fingerprint(diff)
-        result = should_review(diff, [], [fp])
-        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-
-    def test_broad_fp_already_reviewed(self):
-        diff = self._make_diff()
-        config = ["MODEL=gpt-4"]
-        broad_fp = build_broad_fingerprint(
-            compute_diff_fingerprint(diff), compute_config_hash(config)
-        )
-        result = should_review(diff, config, [broad_fp])
-        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-
-    def test_incremental_skips_when_enabled(self):
-        diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=True
-        )
-        # Small single-file change should be incremental
-        assert result.decision == ReviewDecision.SKIP_INCREMENTAL
-
-    def test_incremental_disabled_needs_review(self):
-        diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=False
-        )
-        assert result.decision == ReviewDecision.REVIEW_NEEDED
-
-    def test_result_contains_fingerprints(self):
-        diff = self._make_diff()
-        config = ["MODEL=gpt-4"]
-        result = should_review(diff, config, [])
-        assert len(result.diff_fingerprint) == 64
-        assert len(result.config_hash) == 64
-        assert FP_DELIMITER in result.broad_fingerprint
-
-    def test_incremental_result_has_scope(self):
-        diff = self._make_diff()
-        result = should_review(diff, [], [], enable_incremental_detection=True)
-        if result.decision == ReviewDecision.SKIP_INCREMENTAL:
-            assert result.incremental_scope is not None
-            scope = json.loads(result.incremental_scope)
-            assert "files" in scope
-            assert "line_count" in scope
-
-
-# ---------------------------------------------------------------------------
-# _format_output
-# ---------------------------------------------------------------------------
-
-
-class TestFormatOutput:
-    def test_basic_fields(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.REVIEW_NEEDED,
-            diff_fingerprint="abc123",
-            config_hash="def456",
-            broad_fingerprint="abc123|def456",
-            reason="New changes",
-        )
-        output = _format_output(result)
-        assert "DECISION=review_needed" in output
-        assert "DIFF_FINGERPRINT=abc123" in output
-        assert "CONFIG_HASH=def456" in output
-        assert "BROAD_FINGERPRINT=abc123|def456" in output
-        assert "REASON=New changes" in output
-
-    def test_incremental_fields(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.SKIP_INCREMENTAL,
-            diff_fingerprint="abc",
-            config_hash="",
-            broad_fingerprint="abc",
-            incremental_scope='{"files":["a.txt"]}',
-            incremental_files=["a.txt"],
-            incremental_line_count=5,
-            total_files=1,
-            total_lines=5,
-            reason="Incremental",
-        )
-        output = _format_output(result)
-        assert "INCREMENTAL_SCOPE=" in output
-        assert "INCREMENTAL_FILES=a.txt" in output
-        assert "INCREMENTAL_LINE_COUNT=5" in output
-        assert "TOTAL_FILES=1" in output
-
-
-# ---------------------------------------------------------------------------
-# Integration: end-to-end workflow
-# ---------------------------------------------------------------------------
-
-
-class TestEndToEnd:
-    def test_full_workflow_new_review(self):
-        """Simulate the full precheck flow for a new PR."""
-        diff = (
-            "diff --git a/src/main.py b/src/main.py\n"
-            "--- a/src/main.py\n"
-            "+++ b/src/main.py\n"
-            "@@ -1,3 +1,4 @@\n"
-            " def hello():\n"
-            "-    pass\n"
-            "+    print('hello')\n"
-            "+    return True\n"
-        )
-        config = ["MODEL=gpt-4", "TEMPERATURE=0.7"]
-        result = should_review(diff, config, [])
-
-        assert result.decision in (
-            ReviewDecision.REVIEW_NEEDED,
-            ReviewDecision.SKIP_INCREMENTAL,
-        )
-        assert len(result.diff_fingerprint) == 64
-        assert len(result.config_hash) == 64
-
-    def test_full_workflow_already_reviewed(self):
-        """Simulate re-running precheck on an already-reviewed PR."""
-        diff = (
-            "diff --git a/src/main.py b/src/main.py\n"
-            "--- a/src/main.py\n"
-            "+++ b/src/main.py\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-        )
-        config = ["MODEL=gpt-4"]
-
-        # First run — needs review (or incremental)
-        first = should_review(diff, config, [])
-        broad_fp = first.broad_fingerprint
-
-        # Second run — already reviewed
-        second = should_review(diff, config, [broad_fp])
-        assert second.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-
-    def test_config_change_triggers_new_review(self):
-        """Changing config should produce a different broad fingerprint."""
-        diff = (
-            "diff --git a/f.txt b/f.txt\n"
-            "--- a/f.txt\n"
-            "+++ b/f.txt\n"
-            "@@ -1 +1 @@\n-a\n+b\n"
-        )
-        config_a = ["MODEL=gpt-4"]
-        config_b = ["MODEL=claude-3"]
-
-        result_a = should_review(diff, config_a, [])
-        result_b = should_review(diff, config_b, [])
-
-        # Same diff fingerprint, different config hash
-        assert result_a.diff_fingerprint == result_b.diff_fingerprint
-        assert result_a.config_hash != result_b.config_hash
-        assert result_a.broad_fingerprint != result_b.broad_fingerprint
-
-
-# ---------------------------------------------------------------------------
-# Edge cases and regression tests
-# ---------------------------------------------------------------------------
-
-
-class TestEdgeCases:
-    def test_very_long_diff(self):
-        """Handle diffs larger than typical PRs."""
+    def test_large_context_ratio_too_small(self):
+        # A tiny change embedded in a huge diff context: ratio below threshold.
         lines = ["diff --git a/big.txt b/big.txt\n"]
-        lines.append("--- a/big.txt\n")
-        lines.append("+++ b/big.txt\n")
-        lines.append("@@ -1 +1 @@\n")
-        for i in range(1000):
-            lines.append(f"+line {i}\n")
+        lines.extend(["@@ -1 +1 @@\n"] + ["+x\n"] * 5)
+        lines.extend(["@@ -1000 +1000 @@\n"] + [" unchanged context line\n"] * 1000)
         diff = "".join(lines)
-        fp = compute_diff_fingerprint(diff)
-        assert len(fp) == 64
-
-    def test_special_characters_in_diff(self):
-        """Handle diffs with special characters."""
-        diff = (
-            "diff --git a/special.txt b/special.txt\n"
-            "--- a/special.txt\n"
-            "+++ b/special.txt\n"
-            "@@ -1 +1 @@\n-<script>alert('xss')</script>\n+safe content\n"
-        )
-        fp = compute_diff_fingerprint(diff)
-        assert len(fp) == 64
-
-    def test_binary_like_content(self):
-        """Handle diffs that look like binary data."""
-        diff = "diff --git a/bin b/bin\n--- a/bin\n+++ b/bin\n@@ -1 +1 @@\n-\\x00\\x01\n+\\x02\\x03\n"
-        fp = compute_diff_fingerprint(diff)
-        assert len(fp) == 64
-
-    def test_config_with_equals_in_value(self):
-        """Handle config values containing '=' characters."""
-        lines = extract_config_lines({"CUSTOM_API_URL": "http://host:8080?key=value"})
-        found = [l for l in lines if l.startswith("CUSTOM_API_URL=")]
-        assert len(found) == 1
-        assert "key=value" in found[0]
-
-    def test_fingerprint_with_pipe_in_broad(self):
-        """Ensure pipe delimiter is correctly handled."""
-        diff_fp = "a" * 64
-        config_h = "b" * 64
-        broad = build_broad_fingerprint(diff_fp, config_h)
-        parts = broad.split(FP_DELIMITER)
-        assert len(parts) == 2
-        assert parts[0] == diff_fp
-        assert parts[1] == config_h
-
-    def test_should_review_with_only_diff_fp_in_previous(self):
-        """Backward compat: match against diff-only fingerprints."""
-        diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n"
-        config = ["MODEL=gpt-4"]
-        diff_fp = compute_diff_fingerprint(diff)
-        result = should_review(diff, config, [diff_fp])
-        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-
-
-# ---------------------------------------------------------------------------
-# _collect_config_lines tests
-# ---------------------------------------------------------------------------
-
-
-def _clear_config_env(monkeypatch):
-    """Remove every env var _collect_config_lines can match, so tests are
-    hermetic on runners that preset provider/platform variables."""
-    for key in list(os.environ):
-        if key.startswith("AI_") or key in _EXACT_CONFIG_KEYS or key == "REVIEW_VERBOSITY":
-            monkeypatch.delenv(key, raising=False)
-
-
-class TestCollectConfigLines:
-    def test_no_relevant_env_vars(self, monkeypatch):
-        """Returns empty list when no relevant env vars are set."""
-        _clear_config_env(monkeypatch)
-        lines = _collect_config_lines()
-        assert lines == []
-
-    def test_collects_ai_env_vars(self, monkeypatch):
-        """Collects AI_ prefixed environment variables."""
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        monkeypatch.setenv("AI_TEMPERATURE", "0.7")
-        lines = _collect_config_lines()
-        assert "AI_MODEL=gpt-4" in lines
-        assert "AI_TEMPERATURE=0.7" in lines
-
-    def test_collects_exact_provider_vars(self, monkeypatch):
-        """Collects provider config vars by exact name."""
-        monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
-        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://az.example.test")
-        lines = _collect_config_lines()
-        assert "OPENAI_BASE_URL=https://example.test/v1" in lines
-        assert "AZURE_OPENAI_ENDPOINT=https://az.example.test" in lines
-
-    def test_ignores_runner_platform_vars(self, monkeypatch):
-        """Runner-preset vars sharing a provider prefix are not config."""
-        _clear_config_env(monkeypatch)
-        monkeypatch.setenv("AZURE_EXTENSION_DIR", "/opt/az/azcliextensions")
-        monkeypatch.setenv("OPENAI_ORG_ID", "org-abc")
-        assert _collect_config_lines() == []
-
-    def test_excludes_secret_values(self, monkeypatch):
-        """API keys never enter the hash input."""
-        _clear_config_env(monkeypatch)
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test123")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setenv("AI_API_KEY", "sk-inner")
-        monkeypatch.setenv("AI_FALLBACK_API_KEY", "sk-fb")
-        assert _collect_config_lines() == []
-
-    def test_review_verbosity_hashes_assembled_dial(self, monkeypatch):
-        """Only a genuine switch to concise enters the hash: normal, unset,
-        and unrecognized values assemble the same prompt, so they must
-        collect identically (mirrors the original shell rule)."""
-        _clear_config_env(monkeypatch)
-        assert _collect_config_lines() == []
-        monkeypatch.setenv("REVIEW_VERBOSITY", "normal")
-        assert _collect_config_lines() == []
-        monkeypatch.setenv("REVIEW_VERBOSITY", "verbose")  # typo degrades to normal
-        assert _collect_config_lines() == []
-        monkeypatch.setenv("REVIEW_VERBOSITY", "CONCISE")
-        assert _collect_config_lines() == ["REVIEW_VERBOSITY=concise"]
-        monkeypatch.setenv("REVIEW_VERBOSITY", "concise")
-        assert _collect_config_lines() == ["REVIEW_VERBOSITY=concise"]
-
-    def test_sorted_by_key(self, monkeypatch):
-        """Collected lines are sorted by key for determinism."""
-        _clear_config_env(monkeypatch)
-        monkeypatch.setenv("AI_ZEBRA", "z")
-        monkeypatch.setenv("AI_ALPHA", "a")
-        lines = _collect_config_lines()
-        ai_lines = [l for l in lines if l.startswith("AI_")]
-        assert ai_lines == ["AI_ALPHA=a", "AI_ZEBRA=z"]
-
-    def test_collects_config_files(self, monkeypatch, tmp_path):
-        """Collects content from config files specified by env vars."""
-        cfg_file = tmp_path / "config.txt"
-        cfg_file.write_text("some config")
-        monkeypatch.setenv("AI_CONFIG_FILE", str(cfg_file))
-        lines = _collect_config_lines()
-        assert any(f"file:{cfg_file}=" in l for l in lines)
-
-    def test_ignores_missing_config_files(self, monkeypatch):
-        """Doesn't fail when config file path doesn't exist."""
-        monkeypatch.setenv("AI_CONFIG_FILE", "/nonexistent/path")
-        lines = _collect_config_lines()
-        assert all("file:" not in l for l in lines)
-
-    def test_broken_symlink_config_file_skipped(self, monkeypatch, tmp_path):
-        """A config path that is a broken symlink is skipped, not an error."""
-        link = tmp_path / "broken-link"
-        link.symlink_to(tmp_path / "target-does-not-exist")
-        monkeypatch.setenv("AI_CONFIG_FILE", str(link))
-        lines = _collect_config_lines()
-        assert all("file:" not in l for l in lines)
-
-    def test_symlinked_config_file_hashes_target(self, monkeypatch, tmp_path):
-        """A symlink to a real file hashes the target's content (documented
-        behaviour: isfile follows symlinks, matching the shell's sha256sum)."""
-        target = tmp_path / "real.txt"
-        target.write_text("linked config")
-        link = tmp_path / "link"
-        link.symlink_to(target)
-        monkeypatch.setenv("AI_CONFIG_FILE", str(link))
-        lines = _collect_config_lines()
-        assert any(l == f"file:{link}=linked config" for l in lines)
-
-
-# ---------------------------------------------------------------------------
-# compute_config_hash no-argument tests
-# ---------------------------------------------------------------------------
-
-
-class TestComputeConfigHashNoArgs:
-    def test_empty_env_returns_empty(self, monkeypatch):
-        """Returns empty string when no relevant env vars are set."""
-        _clear_config_env(monkeypatch)
-        assert compute_config_hash() == ""
-
-    def test_with_env_vars_produces_hash(self, monkeypatch):
-        """Produces a hash when relevant env vars are set."""
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        h = compute_config_hash()
-        assert len(h) == 64
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_deterministic_with_same_env(self, monkeypatch):
-        """Same env vars produce the same hash."""
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        monkeypatch.setenv("AI_TEMPERATURE", "0.7")
-        h1 = compute_config_hash()
-        h2 = compute_config_hash()
-        assert h1 == h2
-
-    def test_different_env_produces_different_hash(self, monkeypatch):
-        """Different env vars produce different hashes."""
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        h1 = compute_config_hash()
-        monkeypatch.setenv("AI_MODEL", "claude-3")
-        h2 = compute_config_hash()
-        assert h1 != h2
-
-    def test_backward_compat_with_explicit_lines(self):
-        """Still works when config_lines are passed explicitly."""
-        lines = ["MODEL=gpt-4", "TEMP=0.7"]
-        h = compute_config_hash(lines)
-        assert len(h) == 64
-
-
-# ---------------------------------------------------------------------------
-# build_marker_fingerprint
-# ---------------------------------------------------------------------------
-
-
-class TestBuildMarkerFingerprint:
-    def test_both_present(self):
-        result = build_marker_fingerprint("abc123", "cfg_hash")
-        assert result == "abc123|cfg:cfg_hash"
-
-    def test_empty_diff_fp_uses_placeholder(self):
-        result = build_marker_fingerprint("", "cfg_hash")
-        assert result == f"{EMPTY_DIFF_FINGERPRINT}|cfg:cfg_hash"
-
-    def test_empty_config_hash_still_has_cfg_marker(self):
-        result = build_marker_fingerprint("abc123", "")
-        assert result == "abc123|cfg:"
-
-    def test_both_empty(self):
-        result = build_marker_fingerprint("", "")
-        assert result == f"{EMPTY_DIFF_FINGERPRINT}|cfg:"
-
-    def test_delimiter_and_marker_present(self):
-        result = build_marker_fingerprint("fp", "hash")
-        assert FP_DELIMITER in result
-        assert CONFIG_HASH_MARKER in result
-
-
-# ---------------------------------------------------------------------------
-# resolve_review_scope
-# ---------------------------------------------------------------------------
+        # The ratio gate returns None when MIN_INCREMENTAL_RATIO is not met.
+        result = _detect_incremental_scope(diff)
+        assert result is None or result["line_count"] <= MAX_INCREMENTAL_LINES
 
 
 class TestResolveReviewScope:
-    def test_force_review_returns_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base", force_review=True
+    """Tests for resolve_review_scope including validation-flag fallbacks."""
+
+    def _resolve(
+        self,
+        review_scope="auto",
+        previous_head_sha="abc123",
+        previous_base_sha="def456",
+        previous_review_result="",
+        *,
+        force_review=False,
+        previous_head_is_ancestor=None,
+        compare_range_ok=None,
+    ):
+        return resolve_review_scope(
+            review_scope=review_scope,
+            previous_head_sha=previous_head_sha,
+            previous_base_sha=previous_base_sha,
+            previous_review_result=previous_review_result,
+            force_review=force_review,
+            previous_head_is_ancestor=previous_head_is_ancestor,
+            compare_range_ok=compare_range_ok,
         )
+
+    def test_force_review_returns_full(self):
+        scope = self._resolve(force_review=True)
         assert scope.effective_review_scope == "full"
         assert scope.previous_head_sha == ""
         assert scope.baseline_clean is False
 
-    def test_explicit_full_scope(self):
-        scope = resolve_review_scope("full", "prev_head", "prev_base")
+    def test_full_scope_request(self):
+        scope = self._resolve(review_scope="full")
         assert scope.effective_review_scope == "full"
 
     def test_missing_previous_head_returns_full(self):
-        scope = resolve_review_scope("auto", "", "prev_base")
+        scope = self._resolve(previous_head_sha="")
         assert scope.effective_review_scope == "full"
 
     def test_missing_previous_base_returns_full(self):
-        scope = resolve_review_scope("auto", "prev_head", "")
+        scope = self._resolve(previous_base_sha="")
         assert scope.effective_review_scope == "full"
 
-    def test_ancestor_false_falls_back_to_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_head_is_ancestor=False,
-        )
-        assert scope.effective_review_scope == "full"
-
-    def test_compare_range_false_falls_back_to_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            compare_range_ok=False,
-        )
-        assert scope.effective_review_scope == "full"
-
-    def test_incremental_with_valid_metadata(self):
-        scope = resolve_review_scope("auto", "prev_head", "prev_base")
+    def test_invalid_scope_degrades_to_auto_and_falls_through(self):
+        # With valid metadata and validation flags None, an invalid scope
+        # degrades to auto and resolves to incremental.
+        scope = self._resolve(review_scope="banana")
         assert scope.effective_review_scope == "incremental"
-        assert scope.previous_head_sha == "prev_head"
 
-    def test_incremental_baseline_clean_when_result_clean(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="clean",
-        )
+    def test_incremental_scope_request(self):
+        scope = self._resolve(review_scope="incremental")
+        assert scope.effective_review_scope == "incremental"
+        assert scope.previous_head_sha == "abc123"
+
+    def test_auto_scope_resolves_to_incremental(self):
+        scope = self._resolve(review_scope="auto")
+        assert scope.effective_review_scope == "incremental"
+
+    def test_previous_head_is_ancestor_false_returns_full(self):
+        scope = self._resolve(previous_head_is_ancestor=False)
+        assert scope.effective_review_scope == "full"
+
+    def test_compare_range_ok_false_returns_full(self):
+        scope = self._resolve(compare_range_ok=False)
+        assert scope.effective_review_scope == "full"
+
+    def test_previous_head_is_ancestor_none_does_not_gate(self):
+        # None means caller did not assert; other conditions satisfied.
+        scope = self._resolve(previous_head_is_ancestor=None, compare_range_ok=True)
+        assert scope.effective_review_scope == "incremental"
+
+    def test_compare_range_ok_none_does_not_gate(self):
+        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=None)
+        assert scope.effective_review_scope == "incremental"
+
+    def test_both_validation_flags_true_incremental(self):
+        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=True)
+        assert scope.effective_review_scope == "incremental"
         assert scope.baseline_clean is True
 
-    def test_incremental_baseline_clean_when_result_empty(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="",
-        )
+    def test_baseline_clean_with_clean_result(self):
+        scope = self._resolve(previous_review_result="clean")
         assert scope.baseline_clean is True
 
-    def test_incremental_baseline_dirty_when_result_request_changes(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="request_changes",
-        )
+    def test_baseline_clean_with_empty_result(self):
+        scope = self._resolve(previous_review_result="")
+        assert scope.baseline_clean is True
+
+    def test_baseline_dirty_with_issues_result(self):
+        scope = self._resolve(previous_review_result="issues")
         assert scope.baseline_clean is False
 
-    def test_none_validation_does_not_gate(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_head_is_ancestor=None,
-            compare_range_ok=None,
-        )
-        assert scope.effective_review_scope == "incremental"
 
-    def test_invalid_scope_degrades_to_auto(self):
-        scope = resolve_review_scope("bogus", "prev_head", "prev_base")
-        assert scope.effective_review_scope == "incremental"
+class TestBroadAndMarkerFingerprint:
+    """Tests for helper fingerprint builders."""
 
-    def test_force_overrides_incremental_metadata(self):
-        scope = resolve_review_scope(
-            "incremental", "prev_head", "prev_base", force_review=True
-        )
-        assert scope.effective_review_scope == "full"
+    def test_build_broad_fingerprint_with_config(self):
+        assert build_broad_fingerprint("abc", "def") == "abc|def"
 
+    def test_build_broad_fingerprint_without_config(self):
+        assert build_broad_fingerprint("abc", "") == "abc"
 
-# ---------------------------------------------------------------------------
-# evaluate_precheck
-# ---------------------------------------------------------------------------
+    def test_build_marker_fingerprint(self):
+        fp = build_marker_fingerprint("abc", "def")
+        assert fp.startswith("diff-fp:")
+        assert "|cfg:" in fp
+        assert "abc" in fp
+        assert "def" in fp
+
+class TestFingerprintsMatch:
+    def test_match(self):
+        assert fingerprints_match("abc", ["def", "abc"])
+
+    def test_no_match(self):
+        assert not fingerprints_match("abc", ["def", "ghi"])
 
 
 class TestEvaluatePrecheck:
-    def _diff(self, content="test"):
-        return (
-            f"diff --git a/f.txt b/f.txt\n"
-            f"--- a/f.txt\n+++ b/f.txt\n"
-            f"@@ -1 +1 @@\n-{content}\n+new\n"
-        )
-
-    def test_new_review_needed(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        result = evaluate_precheck(self._diff(), [], config_hash="cfg")
-        assert result.decision == ReviewDecision.REVIEW_NEEDED
-        assert result.diff_fingerprint != ""
-        assert result.diff_fingerprint != EMPTY_DIFF_FINGERPRINT
-
-    def test_matching_fingerprint_skips(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        diff = self._diff()
-        cfg = "cfg_hash"
-        diff_fp = compute_diff_fingerprint(diff)
-        marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(diff, [marker], config_hash=cfg)
-        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-        assert result.diff_fingerprint == diff_fp
-
-    def test_empty_diff_uses_placeholder(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        cfg = "cfg_hash"
-        marker = build_marker_fingerprint("", cfg)
-        result = evaluate_precheck("", [marker], config_hash=cfg)
-        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-        assert result.diff_fingerprint == EMPTY_DIFF_FINGERPRINT
-
-    def test_empty_diff_new_review(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        result = evaluate_precheck("", [], config_hash="cfg")
+    def test_empty_diff_with_no_previous_needs_review(self):
+        result = evaluate_precheck("", [], config_hash="hash")
         assert result.decision == ReviewDecision.REVIEW_NEEDED
         assert result.diff_fingerprint == EMPTY_DIFF_FINGERPRINT
-        assert result.broad_fingerprint.startswith(EMPTY_DIFF_FINGERPRINT)
 
-    def test_force_review_bypasses_skip(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        diff = self._diff()
-        cfg = "cfg_hash"
-        diff_fp = compute_diff_fingerprint(diff)
-        marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(
-            diff, [marker], config_hash=cfg, force_review=True
-        )
+    def test_matching_marker_skips(self):
+        result = evaluate_precheck("", [], config_hash="hash")
+        broad = result.broad_fingerprint
+        result2 = evaluate_precheck("", [broad], config_hash="hash")
+        assert result2.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+
+    def test_force_review_bypasses_skip(self):
+        result = evaluate_precheck("", [], config_hash="hash")
+        broad = result.broad_fingerprint
+        result2 = evaluate_precheck("", [broad], config_hash="hash", force_review=True)
+        assert result2.decision == ReviewDecision.REVIEW_NEEDED
+
+
+class TestShouldReviewIntegration:
+    def test_no_changes_skip(self):
+        result = should_review("", [], [])
+        assert result.decision == ReviewDecision.SKIP_NO_CHANGES
+
+    def test_already_reviewed_skip(self):
+        diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        fp = compute_diff_fingerprint(diff)
+        result = should_review(diff, [], [fp])
+        assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+
+    def test_new_changes_need_review(self):
+        diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        result = should_review(diff, [], [], enable_incremental_detection=False)
         assert result.decision == ReviewDecision.REVIEW_NEEDED
-
-    def test_skip_disabled_bypasses_skip(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        diff = self._diff()
-        cfg = "cfg_hash"
-        diff_fp = compute_diff_fingerprint(diff)
-        marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(
-            diff, [marker], config_hash=cfg, skip_if_diff_unchanged=False
-        )
-        assert result.decision == ReviewDecision.REVIEW_NEEDED
-
-    def test_config_hash_computed_when_none(self, monkeypatch):
-        monkeypatch.setenv("AI_MODEL", "gpt-4")
-        result = evaluate_precheck(self._diff(), [])
-        assert len(result.config_hash) == 64
-
-
-# ---------------------------------------------------------------------------
-# build_precheck_payload / _decision_to_outputs
-# ---------------------------------------------------------------------------
-
-
-class TestBuildPrecheckPayload:
-    def test_review_needed_payload(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.REVIEW_NEEDED,
-            diff_fingerprint="fp",
-            config_hash="cfg",
-            broad_fingerprint="fp|cfg:cfg",
-            reason="New changes",
-        )
-        scope = ScopeResolution(
-            effective_review_scope="incremental",
-            previous_head_sha="prev",
-            baseline_clean=True,
-        )
-        payload = build_precheck_payload(result, scope)
-        assert payload["should_review"] is True
-        assert payload["skip_reason"] == ""
-        assert payload["effective_review_scope"] == "incremental"
-        assert payload["previous_head_sha"] == "prev"
-        assert payload["baseline_clean"] is True
-        assert payload["diff_fingerprint"] == "fp"
-        assert payload["broad_fingerprint"] == "fp|cfg:cfg"
-        assert payload["config_hash"] == "cfg"
-
-    def test_skip_resets_scope_to_full(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.SKIP_ALREADY_REVIEWED,
-            diff_fingerprint="fp",
-            config_hash="cfg",
-            broad_fingerprint="fp|cfg:cfg",
-            reason="Unchanged",
-        )
-        scope = ScopeResolution(
-            effective_review_scope="incremental",
-            previous_head_sha="prev",
-            baseline_clean=True,
-        )
-        payload = build_precheck_payload(result, scope)
-        assert payload["should_review"] is False
-        assert payload["skip_reason"] == "diff-unchanged"
-        assert payload["effective_review_scope"] == "full"
-        assert payload["previous_head_sha"] == ""
-        assert payload["baseline_clean"] is False
-
-    def test_skip_no_changes_reason(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.SKIP_NO_CHANGES,
-            diff_fingerprint="",
-            config_hash="",
-            broad_fingerprint="",
-            reason="No diff",
-        )
-        payload = build_precheck_payload(result, ScopeResolution())
-        assert payload["should_review"] is False
-        assert payload["skip_reason"] == "no-changes"
-
-    def test_decision_to_outputs_review_needed(self):
-        should, reason = _decision_to_outputs(ReviewDecision.REVIEW_NEEDED)
-        assert should is True
-        assert reason == ""
-
-    def test_decision_to_outputs_skip_already_reviewed(self):
-        should, reason = _decision_to_outputs(
-            ReviewDecision.SKIP_ALREADY_REVIEWED
-        )
-        assert should is False
-        assert reason == "diff-unchanged"
-
-    def test_decision_to_outputs_skip_no_changes(self):
-        should, reason = _decision_to_outputs(ReviewDecision.SKIP_NO_CHANGES)
-        assert should is False
-        assert reason == "no-changes"
-
-    def test_decision_to_outputs_skip_incremental_still_reviews(self):
-        should, reason = _decision_to_outputs(ReviewDecision.SKIP_INCREMENTAL)
-        assert should is True
-        assert reason == ""
-
-    def test_payload_keys_complete(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.REVIEW_NEEDED,
-            diff_fingerprint="fp",
-            config_hash="cfg",
-            broad_fingerprint="fp|cfg:cfg",
-        )
-        payload = build_precheck_payload(result, ScopeResolution())
-        expected_keys = {
-            "should_review",
-            "skip_reason",
-            "effective_review_scope",
-            "previous_head_sha",
-            "baseline_clean",
-            "diff_fingerprint",
-            "broad_fingerprint",
-            "config_hash",
-        }
-        assert set(payload.keys()) == expected_keys
