@@ -27,7 +27,8 @@ EVIDENCE_SCRIPT = _SCRIPTS_DIR / "run_evidence_providers.py"
 
 def test_run_provider_argv_json_and_truncation():
     entry = run_provider(
-        {"id": "argv", "command": [sys.executable, "-c", "print('x' * 20)"], "max_output_bytes": 10},
+        1,
+        {"id": "argv", "command": [sys.executable, "-c", "print('x' * 300)"], "max_output_bytes": 256},
         default_timeout=5,
         default_max_output=1024,
     )
@@ -39,6 +40,7 @@ def test_run_provider_argv_json_and_truncation():
 
 def test_run_provider_shell_string_json():
     entry = run_provider(
+        2,
         {"id": "shell", "command": "printf '{\\\"severity\\\":\\\"warning\\\"}'", "output_format": "json"},
         default_timeout=5,
         default_max_output=1024,
@@ -51,7 +53,8 @@ def test_run_provider_shell_string_json():
 
 def test_run_provider_timeout_shape():
     entry = run_provider(
-        {"id": "timeout", "command": [sys.executable, "-c", "import time; time.sleep(1)"], "timeout_sec": 1},
+        3,
+        {"id": "timeout", "command": [sys.executable, "-c", "import time; time.sleep(2)"], "timeout_sec": 1},
         default_timeout=1,
         default_max_output=1024,
     )
@@ -59,7 +62,6 @@ def test_run_provider_timeout_shape():
     assert entry["exit_code"] is None
     assert entry["stdout_truncated"] is False
     assert entry["output_format"] == "text"
-
 
 
 HELPER_JSON_FINDINGS = """\
