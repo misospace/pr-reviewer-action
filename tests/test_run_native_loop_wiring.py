@@ -648,3 +648,131 @@ class TestResolveMcpToolName:
 
     def test_empty_routes_returns_none(self):
         assert rth.resolve_mcp_tool_name("mcp_konflate_get_pr_diff", {}) is None
+
+
+# ── Verdict-corpus Tool Harness Findings section ──────────────────────────────
+# The corpus the verdict turn re-sends is built BEFORE the harness runs, so its
+# Tool Harness Findings section holds the pre-harness scaffold placeholder.
+# run_review.sh rebuilds the corpus afterwards, but that rebuild only feeds the
+# separate review call the in-conversation verdict replaces — so without a
+# substitution the verdict reads "Tool harness planning pending." on every
+# successful native_loop review and reports that no evidence was gathered
+# (observed on misospace/llmkube-images#216).
+
+_PLACEHOLDER_CORPUS = (
+    "# PR Diff (truncated)\n"
+    "```diff\n+bump\n```\n"
+    "\n"
+    "# Tool Harness Findings\n"
+    "Tool harness planning pending.\n"
+    "\n"
+    "# Image Digest Provenance\n"
+    "(none)\n"
+)
+
+
+def _verdict_user_text(payloads):
+    return "\n".join(
+        m.get("content") or "" for m in payloads[-1]["messages"] if m["role"] == "user"
+    )
+
+
+def test_verdict_corpus_reports_real_harness_findings(monkeypatch, tmp_path):
+    """A successful loop must not hand the verdict turn the pending placeholder."""
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_object")
+    (tmp_path / "review-corpus.truncated.md").write_text(
+        _PLACEHOLDER_CORPUS, encoding="utf-8"
+    )
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
+    )
+    verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("Evidence gathered: Talos v1.13.4."),
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    assert handled is True
+    assert result.get("native_loop_verdict_produced") is True
+
+    user_text = _verdict_user_text(payloads)
+    assert "Tool harness planning pending." not in user_text
+    assert "1 tool call(s) executed" in user_text
+    assert "`read_file`" in user_text
+    # The surrounding corpus sections are untouched by the substitution.
+    assert "# Image Digest Provenance" in user_text
+    assert "+bump" in user_text
+
+
+def test_verdict_path_still_writes_real_harness_outputs(monkeypatch, tmp_path):
+    """Moving the summary ahead of the verdict turn must not lose the outputs:
+    tool-harness.md/json still carry the real findings and counts afterwards."""
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_object")
+    (tmp_path / "review-corpus.truncated.md").write_text(
+        _PLACEHOLDER_CORPUS, encoding="utf-8"
+    )
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
+    )
+    verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
+    _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
+            _openai_text("Evidence gathered: Talos v1.13.4."),
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict_json}}]},
+        ],
+    )
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    assert harness["mode"] == "native_loop"
+    assert harness["executed_request_count"] == 1
+    assert harness["planned_request_count"] == 1
+    assert harness["usage"]["cache_hit_ratio"] == 0.0
+    md = (tmp_path / "tool-harness.md").read_text()
+    assert "read_file" in md
+    assert "v1.13.4" in md
+    assert "Evidence summary" in md
+
+
+class TestReplaceHarnessFindingsSection:
+    def test_replaces_body_and_keeps_header(self):
+        out = rth.replace_harness_findings_section(_PLACEHOLDER_CORPUS, "real body\n")
+        assert "# Tool Harness Findings\nreal body\n\n# Image Digest Provenance" in out
+        assert "planning pending" not in out
+
+    def test_incremental_header_suffix_is_preserved(self):
+        corpus = "# Tool Harness Findings (incremental review)\nplaceholder\n\n# Next\nx\n"
+        out = rth.replace_harness_findings_section(corpus, "real body\n")
+        assert out.startswith("# Tool Harness Findings (incremental review)\nreal body")
+        assert out.endswith("# Next\nx\n")
+
+    def test_absent_section_returns_corpus_unchanged(self):
+        corpus = "# PR Diff\n```diff\n+x\n```\n"
+        assert rth.replace_harness_findings_section(corpus, "body") == corpus
+
+    def test_headerless_corpus_returns_unchanged(self):
+        assert rth.replace_harness_findings_section("no headers here", "body") == "no headers here"
+
+
+def test_verdict_harness_body_indexes_every_executed_call():
+    class _R:
+        def __init__(self, tool, args, status):
+            self.tool = tool
+            self.args = args
+            self.result = {"status": status}
+
+    class _Outcome:
+        executed = [_R("read_file", {"path": "a.yaml"}, "ok"),
+                    _R("web_fetch", {"url": "https://x.test/y"}, "error")]
+        rounds = 2
+        tool_calls_issued = 3
+        stop_reason = "tool-call-budget-exhausted"
+
+    body = rth.verdict_harness_findings_body(_Outcome())
+    assert "2 tool call(s) executed across 2 round(s)" in body
+    assert "3 issued; stop reason: tool-call-budget-exhausted" in body
+    assert "1. `read_file` (ok)" in body
+    assert "2. `web_fetch` (error)" in body
