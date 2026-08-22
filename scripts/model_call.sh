@@ -260,8 +260,12 @@ call_model_tier() {
   while [ "$attempt" -le "$retries" ]; do
     echo "${label} model attempt ${attempt}/${retries}: $model @ $base_url ($api_format)"
     if curl_model "$base_url" "$api_key" "$api_format" "$request_out" "$response_out" "$stream" "$request_timeout" "$connect_timeout"; then
-      if { [[ "$stream" != "true" ]] || reassemble_sse_response "$response_out" "$api_format"; } && \
-        parse_and_validate "$response_out"; then
+      local parse_rc=1
+      if { [[ "$stream" != "true" ]] || reassemble_sse_response "$response_out" "$api_format"; }; then
+        parse_and_validate "$response_out"
+        parse_rc=$?
+      fi
+      if [ "$parse_rc" -eq 0 ]; then
         return 0
       fi
 
@@ -271,6 +275,13 @@ call_model_tier() {
         printf '  response head (first 400 bytes): ' >&2
         head -c 400 "$response_out" >&2 || true
         echo >&2
+      fi
+      # An empty completion is deterministic for a given input: the same model
+      # returns the same nothing. Escalate now rather than spending the
+      # parse-failure budget (and another full-corpus prompt) on a repeat.
+      if [ "$parse_rc" -eq 3 ]; then
+        echo "${label}: model returned an empty completion; not retrying ${tier}" >&2
+        break
       fi
       if [ "$parse_fails" -ge "$parse_fail_cap" ]; then
         echo "Reached parse-failure cap; not retrying ${tier} further" >&2

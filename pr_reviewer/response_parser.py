@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from typing import Any
 
 
@@ -225,6 +226,23 @@ def _try_decode_json(text: str) -> Any | None:
 
 # finish_reason / stop_reason values that indicate the model hit the token cap.
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens"}
+
+
+# Exit code for "the model returned nothing at all", distinct from a parse
+# failure so the caller can skip retrying a model that produced no output.
+EMPTY_COMPLETION_EXIT = 3
+
+
+def _completion_tokens(response: dict[str, Any]) -> int | None:
+    """Completion/output token count, across OpenAI and Anthropic shapes."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    for key in ("completion_tokens", "output_tokens"):
+        v = usage.get(key)
+        if isinstance(v, int):
+            return v
+    return None
 
 _APPROVE_VERDICTS = {"approve", "approved", "approval", "lgtm"}
 _REQUEST_CHANGES_VERDICTS = {
@@ -448,6 +466,18 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
         if finish in _TRUNCATION_REASONS
         else ""
     )
+
+    # An empty body with zero completion tokens is the upstream accepting the
+    # prompt and generating nothing -- not a malformed answer. Retrying the same
+    # model with the same input cannot fix it, so exit distinctly and let the
+    # caller escalate immediately instead of burning the parse-failure budget.
+    if not text and _completion_tokens(response) == 0:
+        print(
+            "Model returned an empty completion (0 completion tokens, "
+            f"finish_reason={finish!r}). Nothing to parse.",
+            file=sys.stderr,
+        )
+        raise SystemExit(EMPTY_COMPLETION_EXIT)
 
     if not isinstance(parsed, dict):
         raise SystemExit(

@@ -322,6 +322,55 @@ def tool_result_md_lines(index, tool_name, args, tool_result):
     return lines
 
 
+def verdict_harness_findings_body(outcome):
+    """Render the Tool Harness Findings section body for the verdict turn.
+
+    Deliberately compact: every tool result is already in the verdict turn's
+    conversation as a tool message, so re-sending the full tool-harness.md here
+    would duplicate tens of kilobytes the model already has. What the corpus
+    section must carry is that the harness ran, and an index of what it ran.
+    """
+    lines = [
+        f"The tool harness ran for this review: {len(outcome.executed)} tool call(s) "
+        f"executed across {outcome.rounds} round(s) "
+        f"({outcome.tool_calls_issued} issued; stop reason: {outcome.stop_reason}).",
+        "",
+        "The full results are the tool messages earlier in this conversation. "
+        "Treat them as this review's tool harness evidence and report what they "
+        "showed under Tool Harness Findings.",
+        "",
+    ]
+    for index, executed in enumerate(outcome.executed, 1):
+        status = executed.result.get("status", "error")
+        args = json.dumps(executed.args, ensure_ascii=False)
+        if len(args) > 300:
+            args = args[:300] + "…"
+        lines.append(f"{index}. `{executed.tool}` ({status}) — {args}")
+    lines.append("")
+    return mask_secrets("\n".join(lines))
+
+
+def replace_harness_findings_section(corpus, body):
+    """Swap the body of the corpus's Tool Harness Findings section.
+
+    Sections are delimited by level-1 ATX headers — the same rule
+    build_review_corpus emits and dedupe_verdict_corpus splits on. The header
+    line itself is preserved (it carries the "(incremental review)" suffix on
+    delta reviews). Returns the corpus unchanged when the section is absent.
+    """
+    lines = corpus.split("\n")
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+    if not starts:
+        return corpus
+    bounds = starts + [len(lines)]
+    for idx, start in enumerate(starts):
+        if lines[start][2:].strip().startswith("Tool Harness Findings"):
+            return "\n".join(
+                lines[: start + 1] + body.split("\n") + lines[bounds[idx + 1] :]
+            )
+    return corpus
+
+
 def write_outputs(summary, markdown):
     """Write JSON and markdown outputs from the tool harness."""
     Path("tool-harness.json").write_text(
@@ -696,6 +745,13 @@ def run_native_loop(
         result["native_loop_usage"] = _usage_with_cache_ratio(usage_acc)
         return False
 
+    # Fold the outcome into `result` and build tool-harness.md now, before the
+    # verdict turn — the verdict re-sends a corpus built before this harness ran,
+    # and its Tool Harness Findings section still holds the pre-harness
+    # placeholder. Substituting a real section there (below) is what stops the
+    # review from reporting "planning pending" on a run that gathered evidence.
+    harness_markdown = _summarize_loop_outcome(result, outcome, build_evidence_digest)
+
     # ── In-conversation verdict (#205, Option 1) ─────────────────────────────
     # The loop's final turn produces the review verdict itself — preserving the
     # multi-hop reasoning trajectory — instead of flattening evidence into the
@@ -720,6 +776,15 @@ def run_native_loop(
                 else ""
             )
             if verdict_corpus:
+                # The corpus was assembled before this harness ran, so its Tool
+                # Harness Findings section is the scaffold placeholder ("Tool
+                # harness planning pending."). run_review.sh rebuilds the corpus
+                # after the harness, but that rebuild only feeds the separate
+                # review call this verdict turn replaces — so the placeholder is
+                # what the verdict reads unless we substitute it here.
+                verdict_corpus = replace_harness_findings_section(
+                    verdict_corpus, verdict_harness_findings_body(outcome)
+                )
                 # #372/#398: the loop's first user message (corpus_text — the
                 # planning context) embeds several corpus sections verbatim,
                 # extracted from this same corpus file by build_planning_context,
@@ -772,6 +837,18 @@ def run_native_loop(
     # prompt-cache-effectiveness signal (0.0 when the backend doesn't report it).
     result["usage"] = _usage_with_cache_ratio(usage_acc)
 
+    write_outputs(result, harness_markdown)
+    return True
+
+
+def _summarize_loop_outcome(result, outcome, build_evidence_digest):
+    """Fold the loop outcome into `result` and return the harness markdown.
+
+    Runs BEFORE the verdict turn so the verdict corpus can be corrected with
+    real findings; the outputs themselves are written after it, once the
+    verdict's token usage has been accumulated. build_evidence_digest is passed
+    in because run_native_loop imports the pr_reviewer package lazily.
+    """
     result["mode"] = "native_loop"
     result["rounds"] = outcome.rounds
     result["stop_reason"] = outcome.stop_reason
@@ -833,8 +910,7 @@ def run_native_loop(
         md_lines.append(summary_text)
         md_lines.append("")
 
-    write_outputs(result, "\n".join(md_lines))
-    return True
+    return "\n".join(md_lines)
 
 
 def main():

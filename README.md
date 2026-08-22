@@ -232,6 +232,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `verdict_policy` | How the final verdict is decided: `model` (the model's own verdict) or `findings_severity_gated` (one-way escalation: model request_changes is preserved; blocker findings can escalate approve to request_changes; non-blocker findings never weaken a rejection). Enforcement settings still apply afterwards | No | `model` |
+| `fail_on_request_changes` | Fail the action step when the final verdict is `request_changes`, so the review can act as a CI merge gate without a GitHub App. Runs **after** publishing, so the review comment and inline findings still land on the PR. Reads the same final verdict the `verdict` output reports (post-`verdict_policy`, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. `on_model_failure: notice` still passes — a model outage produces no verdict and must not wedge merges; only an actual `request_changes` fails the step | No | `false` |
 | `inline_findings` | Attach diff-anchorable structured findings as native line-anchored review comments in `review_comment`/`review_verdict` modes. Ignored for `comment` mode | No | `false` |
 | `inline_findings_max` | Maximum inline review comments per review when `inline_findings=true` | No | `20` |
 | `validate_required_checks` | Validate the final review against the classifier's `must_check` items: `auto` (when must_check is non-empty), `true`, or `false` | No | `auto` |

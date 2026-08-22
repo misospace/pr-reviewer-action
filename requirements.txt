@@ -1,5 +1,10 @@
-# Test dependencies — installed via `pip install -r requirements.txt`
-# Keep in sync with .github/workflows/ci.yaml "Install test dependencies" step.
-pytest
-pytest-cov
-yamllint
+# CI test dependencies — pinned for reproducible, supply-chain-fingerprintable builds.
+#
+# Every CI run must resolve to exactly this set. To bump a version, update the
+# pin below, run the full test suite locally, and commit the change so the
+# diff records what moved (a supply-chain regression can be diffed against it).
+#
+# Pinned 2026-08-22 against Python 3.14 (the CI validate job's interpreter).
+pytest==9.1.1
+pytest-cov==7.1.0
+yamllint==1.38.0

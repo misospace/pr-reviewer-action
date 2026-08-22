@@ -79,7 +79,7 @@ jobs:
           find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck
 
       - name: Check Python scripts
-        run: python3 -m py_compile scripts/image_digest_analysis.py scripts/run_evidence_providers.py scripts/run_tool_harness.py tests/mock_openai_server.py tests/test_model_parsing.py tests/test_redact.py tests/test_strip_metadata_markers.py tests/test_evidence_providers.py pr_reviewer/forgejo_backend.py
+        run: find scripts pr_reviewer tests -name '*.py' -print0 | xargs -0 python3 -m py_compile
 
       - name: Verify smoke test helper is executable
         run: test -x tests/smoke_test.sh

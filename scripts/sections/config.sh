@@ -497,7 +497,7 @@ from pr_reviewer.response_parser import parse_response_file
 
 result = parse_response_file('$response_file')
 Path('ai-output.json').write_text(json.dumps(result, ensure_ascii=False) + '\n', encoding='utf-8')
-" || return 1
+" || return $?
 }
 
 apply_all_enforcement_wrapper() {
