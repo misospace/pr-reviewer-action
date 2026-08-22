@@ -244,10 +244,7 @@ class TestBroadAndMarkerFingerprint:
 
     def test_build_marker_fingerprint(self):
         fp = build_marker_fingerprint("abc", "def")
-        assert fp.startswith("diff-fp:")
-        assert "|cfg:" in fp
-        assert "abc" in fp
-        assert "def" in fp
+        assert fp == "abc|cfg:def"
 
 class TestFingerprintsMatch:
     def test_match(self):
