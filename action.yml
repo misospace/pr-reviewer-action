@@ -93,6 +93,18 @@ inputs:
       so reviewers see an explanation instead of only a red check.
     required: false
     default: "fail"
+  fail_on_request_changes:
+    description: >-
+      If true, fail the action step when the final verdict is request_changes,
+      so the review can act as a CI merge gate without a GitHub App. The gate
+      runs after publishing, so the review comment and inline findings still
+      land on the PR. It reads the same final verdict the `verdict` output
+      reports (post-verdict_policy, post-evidence-blocker and tool-failure
+      enforcement), not the raw model verdict. on_model_failure=notice still
+      passes: a model outage produces no verdict and must not wedge merges.
+      Default false — existing consumers see no behaviour change.
+    required: false
+    default: "false"
   verdict_policy:
     description: >-
       How the final verdict is decided. 'model' (default) uses the model's own verdict.
@@ -1227,3 +1239,21 @@ runs:
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         LABEL: ${{ inputs.rereview_label }}
       run: gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${LABEL}" --silent 2>/dev/null || true
+
+    - name: Fail on request_changes
+      # Gate the merge on the final verdict. Runs after publishing, so the
+      # review comment and inline findings have already landed on the PR.
+      # Reads the same value the `verdict` output reports (post-verdict_policy,
+      # post-evidence-blocker and tool-failure enforcement) from the output
+      # file, so the gate never re-derives the verdict from the raw model
+      # output. A model outage (on_model_failure=notice) writes no
+      # request_changes verdict, so it does not wedge merges.
+      if: ${{ inputs.fail_on_request_changes == 'true' }}
+      shell: bash
+      run: |
+        verdict="$(grep '^verdict=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
+        if [ "$verdict" = "request_changes" ]; then
+          echo "::error::Final verdict is request_changes; failing the step (fail_on_request_changes=true)."
+          exit 1
+        fi
+        echo "Final verdict is '${verdict:-<none>}'; not blocking (fail_on_request_changes=true)."
