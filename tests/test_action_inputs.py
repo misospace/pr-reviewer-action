@@ -214,9 +214,67 @@ def test_fallback_inputs_inherit_from_primary():
     )
 
 
+def test_fail_on_request_changes_input():
+    """fail_on_request_changes gates merges without a GitHub App (issue #518).
+
+    - Declared with default "false" so existing consumers see no change.
+    - The gate step reads the final verdict from $GITHUB_OUTPUT (the same
+      value the `verdict` output reports) and exits non-zero only on
+      request_changes.
+    - The gate runs after the publish step, so the review comment and inline
+      findings land on the PR before the step goes red.
+    """
+    content = (_REPO_ROOT / "action.yml").read_text()
+
+    # Declared with a "false" default.
+    m = re.search(
+        r"^  fail_on_request_changes:\n(?:^    .*\n)*?^    default: \"false\"\s*$",
+        content,
+        re.MULTILINE,
+    )
+    assert m, (
+        "fail_on_request_changes must be declared in action.yml inputs with "
+        'default "false" so existing consumers see no behaviour change.'
+    )
+
+    # The gate step exists, is conditional on the input, and reads the final
+    # verdict from the output file rather than re-deriving it.
+    gate = re.search(
+        r"^    - name: Fail on request_changes\n"
+        r"(?:^      .*\n)*?^      if: \$\{\{ inputs\.fail_on_request_changes == 'true' \}\}\n"
+        r"(?:^      .*\n)*?^      run: \|\n"
+        r"(?:^        .*\n)*?^          exit 1\n",
+        content,
+        re.MULTILINE,
+    )
+    assert gate, (
+        "action.yml must contain a 'Fail on request_changes' step that is "
+        "conditional on inputs.fail_on_request_changes and exits non-zero."
+    )
+    gate_body = gate.group(0)
+    assert '"$GITHUB_OUTPUT"' in gate_body, (
+        "the gate must read the final verdict from $GITHUB_OUTPUT (the same "
+        "value the `verdict` output reports), not re-derive it."
+    )
+    assert 'verdict' in gate_body and 'request_changes' in gate_body
+
+    # The gate runs after the publish step (a red check with no explanation
+    # attached is worse than no gate).
+    publish_idx = content.find("Publish review")
+    gate_idx = content.find("Fail on request_changes")
+    assert publish_idx != -1 and gate_idx != -1, (
+        "both the publish step and the fail_on_request_changes gate step must exist."
+    )
+    assert gate_idx > publish_idx, (
+        "the fail_on_request_changes gate must run after the publish step so "
+        "the review comment and inline findings land on the PR first."
+    )
+
+
 if __name__ == "__main__":
     test_readme_inputs_in_action()
     test_action_inputs_in_readme()
     test_comment_marker_input_exists()
     test_fallback_inputs_inherit_from_primary()
+    test_fail_on_request_changes_input()
     print("All action inputs tests passed!")
