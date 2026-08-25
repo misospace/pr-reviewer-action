@@ -115,7 +115,10 @@ AUTH_PATTERNS = [
 
 # Public route changes
 PUBLIC_ROUTE_PATTERNS = [
-    re.compile(r"(routes?|urls?|api|endpoints?|controller)\." + _SRC_EXT + r"$",
+    # NB: `routes` (plural) only — a bare `route.<ext>` is the mandated name of
+    # every Next.js App Router API handler (src/app/api/**/route.ts), so it
+    # carries no routing-layer signal and must not match. See #531.
+    re.compile(r"(routes|urls?|api|endpoints?|controller)\." + _SRC_EXT + r"$",
                re.IGNORECASE),
     re.compile(r"router[_.-]?py$"),
     re.compile(r"urlpatterns"),

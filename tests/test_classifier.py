@@ -168,10 +168,28 @@ class TestPRKindPublicRouteChanges:
         "routes.py",
         "urls.py",
         "api/endpoints.py",
-        "router.py",
+        "api.go",
+        "controller.py",
     ])
     def test_route_file_patterns(self, fname):
         files = [_make_file(fname)]
+        kind = _classify_pr_kind(files, "")
+        assert kind == "public_route_changes"
+
+    def test_bare_route_ts_is_not_public_route(self):
+        # Next.js App Router mandates the name `route.ts` for every API
+        # handler, so the filename carries no routing-layer signal and must
+        # not match. See #531.
+        files = [
+            _make_file("src/app/api/groomer/route.ts"),
+            _make_file("src/app/api/status/route.ts"),
+        ]
+        kind = _classify_pr_kind(files, "")
+        assert kind != "public_route_changes"
+
+    def test_routes_ts_still_public_route(self):
+        # The plural `routes.<ext>` is a chosen name and still matches.
+        files = [_make_file("src/routes.ts")]
         kind = _classify_pr_kind(files, "")
         assert kind == "public_route_changes"
 
