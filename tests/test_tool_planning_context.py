@@ -100,6 +100,23 @@ class TestBuildPlanningContext:
         assert truncated is True
         assert "[truncated]" in text
 
+    def test_oversized_standards_keep_late_requirements(self, tmp_path, monkeypatch):
+        """A late standards rule must survive the planner excerpt cap."""
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        (tmp_path / "standards-context.capped.md").write_text(
+            "# Repository Standards and Conventions\n"
+            + "background guidance\n" * 900
+            + "\n## Upstream compatibility\n"
+            + "When a version changes, you MUST read config/platform.yaml and "
+            + "search the web for the published support matrix.\n",
+            encoding="utf-8",
+        )
+        text, truncated = build_planning_context(12000)
+        assert truncated is True
+        assert "config/platform.yaml" in text
+        assert "published support matrix" in text
+
 
 def _write_corpus(tmp_path, files_body='[{"filename":"a.py"}]', standards_tail=""):
     """A corpus shaped like build_review_corpus's output: standards prefix

@@ -159,6 +159,14 @@ PLANNING_DIFF_HEAD_MIN = 2000
 PLANNING_BUDGET_MARGIN = 200
 _PLANNING_RESERVE = PLANNING_DIFF_HEAD_MIN + PLANNING_BUDGET_MARGIN
 
+_STANDARDS_REQUIREMENT_RE = re.compile(
+    r"(?i)\b(?:must|always|never|required|verify|confirm|cite|"
+    r"search|fetch|consult|read|inspect|before approving|do not approve)\b"
+)
+_STANDARDS_PATH_RE = re.compile(
+    r"(?:^|[\s`(])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_.-]+)"
+)
+
 
 def build_planning_context(max_bytes, corpus_path=None):
     """Build a compact, high-signal context for tool planning.
@@ -215,6 +223,56 @@ def build_planning_context(max_bytes, corpus_path=None):
             return body
         return f"# {title}\n{body}"
 
+    def _standards_excerpt(title, path, cap):
+        """Keep standards requirements visible when the planner must clip them.
+
+        The full review preserves the standards file, but the native tool
+        planner receives a smaller context. A head-only excerpt can lose the
+        repository's actionable rules when they live in a later section (the
+        common AGENTS.md layout). Preserve matching requirement lines, their
+        nearby context, and the nearest headings so the planner sees the
+        evidence obligations without making any repository-specific assumptions.
+        """
+        nonlocal any_clipped
+        body = _read_stripped(path)
+        if body is None:
+            return None
+        raw = body.encode("utf-8")
+        if len(raw) <= cap:
+            return body
+
+        lines = body.splitlines()
+        selected: set[int] = set()
+        for index, line in enumerate(lines):
+            if not (_STANDARDS_REQUIREMENT_RE.search(line) or _STANDARDS_PATH_RE.search(line)):
+                continue
+            selected.update(range(max(0, index - 1), min(len(lines), index + 2)))
+            heading = index
+            while heading >= 0 and not lines[heading].startswith("# "):
+                heading -= 1
+            if heading >= 0:
+                selected.add(heading)
+
+        if selected:
+            focused = "\n".join(lines[index] for index in sorted(selected))
+        else:
+            focused = body
+
+        marker = "\n…[standards excerpt: non-requirement text omitted]\n"
+        focused_raw = focused.encode("utf-8")
+        marker_raw = marker.encode("utf-8")
+        if len(focused_raw) + len(marker_raw) <= cap:
+            clipped = focused + marker
+        else:
+            budget = max(cap - len(marker_raw), 0)
+            head_budget = budget // 2
+            tail_budget = budget - head_budget
+            head = focused_raw[:head_budget].decode("utf-8", errors="ignore")
+            tail = focused_raw[-tail_budget:].decode("utf-8", errors="ignore") if tail_budget else ""
+            clipped = head + marker + tail
+        any_clipped = True
+        return clipped
+
     # ── Corpus-section extraction ─────────────────────────────────────────
     # Sections are delimited by level-1 ATX headers — the same rule
     # dedupe_verdict_corpus (pr_reviewer/conversation.py) splits on; the
@@ -260,7 +318,10 @@ def build_planning_context(max_bytes, corpus_path=None):
         if region is not None and len(region.encode("utf-8")) + 2 <= avail:
             section = region
         if section is None:
-            section = _excerpt(title, excerpt_path, min(cap, avail), fence)
+            if region_key == "standards":
+                section = _standards_excerpt(title, excerpt_path, min(cap, avail))
+            else:
+                section = _excerpt(title, excerpt_path, min(cap, avail), fence)
         if section is not None:
             sections.append(section)
 
@@ -392,7 +453,8 @@ NATIVE_LOOP_SYSTEM = (
     "section, its requirements are mandatory: when a standard requires "
     "upstream verification (release notes, changelogs, security advisories, "
     "compatibility matrices), gather that evidence with your tools before "
-    "concluding. When you have sufficient evidence, stop calling tools and "
+    "concluding. Prioritize exact repository paths and upstream sources named "
+    "by those standards before broad discovery calls. When you have sufficient evidence, stop calling tools and "
     "reply with a short plain-text summary of the key evidence found."
 )
 
@@ -413,7 +475,9 @@ TOOL_USE_PREAMBLE = (
     "inside it. Never request secrets, credentials, keys, or environment files. "
     "When a repository standard requires upstream verification (release notes, "
     "changelogs, security advisories, compatibility matrices), gather that "
-    "evidence with your tools before concluding. When you have gathered "
+    "evidence with your tools before concluding. Prioritize exact repository "
+    "paths and upstream sources named by those standards before broad "
+    "discovery calls. When you have gathered "
     "sufficient evidence, stop calling tools; you will then be asked to produce "
     "the final review verdict."
 )
