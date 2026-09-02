@@ -82,7 +82,7 @@ class TestApplyCarryForward:
     def test_noop_without_carried_findings(self, tmp_path):
         out = _output(tmp_path)
         summary = apply_carry_forward(str(tmp_path / "absent.json"), out)
-        assert summary == {"carried": 0, "resolved": 0, "open": 0, "forced_request_changes": False}
+        assert summary == {"carried": 0, "resolved": 0, "open": 0, "dismissed": 0, "forced_request_changes": False}
         assert json.loads(open(out).read())["verdict"] == "approve"
 
     def test_resolved_blocker_keeps_approve(self, tmp_path):
@@ -151,7 +151,7 @@ class TestApplyCarryForward:
             ],
         )
         summary = apply_carry_forward(carried, out)
-        assert summary == {"carried": 3, "resolved": 1, "open": 2, "forced_request_changes": True}
+        assert summary == {"carried": 3, "resolved": 1, "open": 2, "dismissed": 0, "forced_request_changes": True}
         data = json.loads(open(out).read())
         # P3 (unanswered blocker) merged; P2 was re-reported by the model itself
         merged_ids = {f.get("id") for f in data["findings"] if f.get("carried_over")}
