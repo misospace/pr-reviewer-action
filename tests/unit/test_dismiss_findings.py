@@ -234,6 +234,51 @@ def test_load_dismissed_findings_rejects_path_escape(tmp_path):
     assert out == []
 
 
+def test_load_dismissed_findings_rejects_symlink_escape(tmp_path):
+    """Symlink under workspace_root whose target lies outside it must be
+    rejected. Path.resolve() collapses the symlink so is_relative_to drops
+    it. Without this fixture, a sibling-file-only test would pass even if
+    the resolver ignored symlinks (PR 499 / PR 252 adversarial standard)."""
+    outside_dir = tmp_path.parent / "outside-symlink-dir"
+    outside_dir.mkdir()
+    target = outside_dir / "real-dismissals.json"
+    target.write_text("[]")
+    link = tmp_path / "previous-dismissals.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover — fs-only
+        target.unlink(missing_ok=True)
+        outside_dir.rmdir()
+        pytest.skip("symlinks unsupported on this filesystem")
+    try:
+        out = carry_forward.load_dismissed_findings(
+            "previous-dismissals.json",
+            "previous-findings.json",
+            workspace_root=tmp_path,
+        )
+        assert out == []
+    finally:
+        link.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        outside_dir.rmdir()
+
+
+def test_load_dismissed_findings_rejects_embedded_null_byte(tmp_path):
+    """Embedded null byte in the dismissals_path string must drop the
+    file (PR 499 / PR 252 boundary-token fixture for the loader's null-
+    byte check)."""
+    dismissals = tmp_path / "previous-dismissals.json"
+    dismissals.write_text("[]")
+    carried = tmp_path / "previous-findings.json"
+    carried.write_text("[]")
+    out = carry_forward.load_dismissed_findings(
+        "previous-dismissals\x00.json",
+        "previous-findings.json",
+        workspace_root=tmp_path,
+    )
+    assert out == []
+
+
 # ---------------------------------------------------------------------------
 # apply_carry_forward (integration via file paths)
 # ---------------------------------------------------------------------------

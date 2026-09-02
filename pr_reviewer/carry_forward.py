@@ -100,6 +100,11 @@ def parse_dismiss_directive(comment_body: str) -> list[dict]:
     """
     if not isinstance(comment_body, str) or not comment_body:
         return []
+    # Comment bodies are attacker-influenceable (per module docstring); reject
+    # embedded null bytes explicitly rather than letting them flow into the
+    # parsed directive. Mirrors the _DENY_NULL boundary on the artifact loader.
+    if _DENY_NULL in comment_body:
+        return []
     out: list[dict] = []
     seen: set[str] = set()
     for raw_line in comment_body.splitlines():
