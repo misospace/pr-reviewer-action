@@ -369,10 +369,26 @@ def apply_carry_forward(
         if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
 
+    # Track findings the model marked not_verifiable_from_delta separately.
+    # Under the carry-forward fail-closed rule these are counted as open
+    # (#536 Case 2), but the *cause* matters: a verdict of
+    # not_verifiable_from_delta means the resolving change is outside the
+    # incremental diff the model could see, so re-running an incremental
+    # review cannot clear them either. Escalate to a full review and tell
+    # the reader why the PR is still blocked.
+    unverifiable_ids: set[str] = set(
+        f["id"]
+        for f in findings
+        if isinstance(f, dict)
+        and isinstance(f.get("id"), str)
+        and f.get("resolution") == "not_verifiable_from_delta"
+    )
+
     dismissed_ids = {d["id"] for d in dismissed}
     resolved_items: list[dict] = []
     open_items: list[dict] = []
     dismissed_items: list[dict] = []
+    unverifiable_items: list[dict] = []
     for item in carried:
         if item["id"] in dismissed_ids:
             # A maintainer with write/triage permission dismissed this
@@ -381,11 +397,19 @@ def apply_carry_forward(
             continue
         if resolutions.get(item["id"]) == "resolved":
             resolved_items.append(item)
+        elif item["id"] in unverifiable_ids:
+            # Carried finding whose resolving change is outside the
+            # incremental diff. Counted as open for fail-closed purposes,
+            # but flagged so a full review is requested (#536 Case 2).
+            unverifiable_items.append(item)
+            open_items.append(item)
         else:
             open_items.append(item)
     summary["resolved"] = len(resolved_items)
     summary["open"] = len(open_items)
     summary["dismissed"] = len(dismissed_items)
+    summary["unverifiable"] = len(unverifiable_items)
+    summary["needs_full_review"] = bool(unverifiable_items)
 
     # Merge surviving carried findings the model did not re-report itself.
     answered_ids = set(resolutions)
