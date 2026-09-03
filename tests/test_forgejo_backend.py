@@ -12,9 +12,11 @@ import io
 import json
 import os
 import subprocess
+import sys
+import threading
+import time
 import unittest
 from unittest import mock
-import sys
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
@@ -1890,6 +1892,92 @@ class TestGhTimeout(unittest.TestCase):
         self.assertEqual(out, '{"id": 7}')
         self.assertEqual(len(unlinked), 1)
         self.assertFalse(os.path.exists(unlinked[0]))
+
+
+class TestJwtCacheConcurrency(unittest.TestCase):
+    """Concurrent _get_jwt() calls must not race-write the JWT cache (#538)."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def _run_concurrent_get_jwt(self, n=10):
+        """Run n threads through _get_jwt() and return (results, urlopen_mock)."""
+        barrier = threading.Barrier(n)
+        results = [None] * n
+        errors = []
+
+        def worker(i):
+            try:
+                barrier.wait()
+                results[i] = fb._get_jwt()
+            except Exception as exc:  # noqa: BLE001 - surfaced via errors list
+                errors.append(exc)
+
+        # A small delay in the token-exchange widens the race window so the
+        # test deterministically fails if the lock is removed (N threads would
+        # all pass the expiry check before any repopulates the cache).
+        def slow_urlopen(*args, **kwargs):
+            time.sleep(0.05)
+            return _mock_oidc_response()
+
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   side_effect=slow_urlopen) as mock_urlopen:
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+        self.assertEqual(errors, [])
+        return results, mock_urlopen
+
+    def test_concurrent_calls_cleared_cache_single_fetch(self):
+        """(a) 10 concurrent _get_jwt() calls with a cleared cache -> exactly 1 urlopen."""
+        results, mock_urlopen = self._run_concurrent_get_jwt(10)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(results, [_JWT_TOKEN] * 10)
+
+    def test_concurrent_calls_past_ttl_single_fetch(self):
+        """(b) 10 concurrent calls landing just past the TTL -> exactly 1 fetch."""
+        fb._JWT_CACHE = "stale-token"
+        fb._JWT_CACHE_TIME = time.time() - fb._JWT_TTL_SECONDS - 10
+        results, mock_urlopen = self._run_concurrent_get_jwt(10)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(results, [_JWT_TOKEN] * 10)
+
+    def test_serial_cache_hit_no_fetch(self):
+        """(c) Serial cache-hit / cache-miss / TTL-expiry behaviour is preserved."""
+        # Cache hit: fresh cache -> no fetch
+        fb._JWT_CACHE = _JWT_TOKEN
+        fb._JWT_CACHE_TIME = time.time()
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 0)
+
+        # Cache miss: cleared cache -> exactly one fetch
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+        # TTL expiry: stale cache -> exactly one fetch
+        fb._JWT_CACHE = "stale-token"
+        fb._JWT_CACHE_TIME = time.time() - fb._JWT_TTL_SECONDS - 10
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 1)
 
 
 if __name__ == "__main__":
