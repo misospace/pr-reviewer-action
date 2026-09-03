@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -73,6 +74,12 @@ GH_TOKEN = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
 _JWT_CACHE: str | None = None
 _JWT_CACHE_TIME: float = 0.0
 _JWT_TTL_SECONDS = 2700  # 45 min, well under Forgejo's 1h default
+# Guards the read-check and write of the cache above so concurrent _get_jwt()
+# calls (e.g. from the linked_sources prewarm ThreadPoolExecutor) cannot
+# race-write the cache or both pass the expiry check and both fetch.
+# RLock (reentrant) because _get_jwt holds the lock across the fetch and
+# _fetch_authorized_integration_jwt re-acquires it to publish the result.
+_JWT_LOCK = threading.RLock()
 
 
 def _is_forgejo_mode() -> bool:
@@ -179,20 +186,28 @@ def _fetch_authorized_integration_jwt() -> str:
             "Forgejo JWT token exchange returned no .value field"
         )
 
-    _JWT_CACHE = jwt
-    _JWT_CACHE_TIME = time.time()
+    with _JWT_LOCK:
+        _JWT_CACHE = jwt
+        _JWT_CACHE_TIME = time.time()
     return jwt
 
 
 def _get_jwt() -> str:
-    """Return a valid JWT, fetching one if the cache is empty or expired."""
+    """Return a valid JWT, fetching one if the cache is empty or expired.
+
+    The lock guards both the expiry check and the fetch so that N concurrent
+    callers landing just past the TTL window issue exactly one token-exchange
+    request: the first to acquire the lock fetches and repopulates the cache,
+    and the rest re-check under the lock and hit the fresh entry.
+    """
     global _JWT_CACHE, _JWT_CACHE_TIME
-    if (
-        _JWT_CACHE is not None
-        and (time.time() - _JWT_CACHE_TIME) < _JWT_TTL_SECONDS
-    ):
-        return _JWT_CACHE
-    return _fetch_authorized_integration_jwt()
+    with _JWT_LOCK:
+        if (
+            _JWT_CACHE is not None
+            and (time.time() - _JWT_CACHE_TIME) < _JWT_TTL_SECONDS
+        ):
+            return _JWT_CACHE
+        return _fetch_authorized_integration_jwt()
 
 
 def _resolve_auth_header(token: str | None) -> str | None:
