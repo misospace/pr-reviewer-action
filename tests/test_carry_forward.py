@@ -151,7 +151,17 @@ class TestApplyCarryForward:
             ],
         )
         summary = apply_carry_forward(carried, out)
-        assert summary == {"carried": 3, "resolved": 1, "open": 2, "dismissed": 0, "forced_request_changes": True}
+        assert summary == {
+            "carried": 3,
+            "resolved": 1,
+            "open": 2,
+            "dismissed": 0,
+            "forced_request_changes": True,
+            # No finding was marked not_verifiable_from_delta, so an
+            # incremental re-review can still assess these. (#536)
+            "unverifiable": 0,
+            "needs_full_review": False,
+        }
         data = json.loads(open(out).read())
         # P3 (unanswered blocker) merged; P2 was re-reported by the model itself
         merged_ids = {f.get("id") for f in data["findings"] if f.get("carried_over")}

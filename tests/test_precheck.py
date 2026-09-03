@@ -288,3 +288,85 @@ class TestShouldReviewIntegration:
         diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n"
         result = should_review(diff, [], [], enable_incremental_detection=False)
         assert result.decision == ReviewDecision.REVIEW_NEEDED
+
+
+# ── #536 Case 1: a CI-state finding must survive the diff-unchanged guard ────
+
+def test_looks_like_ci_state_finding_matches_a_ci_blocker():
+    from pr_reviewer.precheck import looks_like_ci_state_finding
+
+    assert looks_like_ci_state_finding(
+        {"message": "CI is in a terminal failure state for this commit: 'npm audit' failed"}
+    )
+    assert looks_like_ci_state_finding({"message": "The Build check is failing on this commit"})
+
+
+def test_looks_like_ci_state_finding_ignores_ordinary_findings():
+    from pr_reviewer.precheck import looks_like_ci_state_finding
+
+    assert not looks_like_ci_state_finding({"message": "This function returns the wrong type"})
+    assert not looks_like_ci_state_finding({"message": ""})
+    assert not looks_like_ci_state_finding({"message": None})
+    assert not looks_like_ci_state_finding("not a dict")
+    assert not looks_like_ci_state_finding(None)
+
+
+def test_has_ci_state_findings_tolerates_junk():
+    from pr_reviewer.precheck import has_ci_state_findings
+
+    assert has_ci_state_findings([{"message": "checks are failing"}])
+    assert not has_ci_state_findings([])
+    assert not has_ci_state_findings(None)
+    assert not has_ci_state_findings("nope")
+    assert not has_ci_state_findings([{"message": "a normal bug"}, 7, None])
+
+
+def test_evaluate_precheck_skips_when_diff_unchanged():
+    """Baseline: the guard still works when no CI-state finding is open."""
+    from pr_reviewer.precheck import evaluate_precheck, ReviewDecision
+
+    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
+    again = evaluate_precheck(
+        "diff --git a/x b/x\n+one\n", [first.broad_fingerprint], config_hash="c"
+    )
+    assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+
+
+def test_evaluate_precheck_reviews_anyway_when_a_ci_state_finding_is_open():
+    """A CI-state blocker can clear without the diff moving, so an unchanged
+    fingerprint must not short-circuit the re-review. (#536 Case 1)"""
+    from pr_reviewer.precheck import evaluate_precheck, ReviewDecision
+
+    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
+    again = evaluate_precheck(
+        "diff --git a/x b/x\n+one\n",
+        [first.broad_fingerprint],
+        config_hash="c",
+        ci_state_findings_open=True,
+    )
+    assert again.decision == ReviewDecision.REVIEW_NEEDED
+    assert "CI-state" in again.reason
+    # the fingerprint itself is unchanged; only the decision differs
+    assert again.broad_fingerprint == first.broad_fingerprint
+
+
+# ── #536 Case 2: an unassessable carried finding forces a full review ────────
+
+def test_resolve_review_scope_forces_full_when_previous_needed_it():
+    """An incremental review would reach the same not_verifiable verdict for the
+    same reason, and fail-closed would keep the PR blocked. (#536 Case 2)"""
+    from pr_reviewer.precheck import resolve_review_scope
+
+    r = resolve_review_scope(
+        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=True
+    )
+    assert r.effective_review_scope == "full"
+
+
+def test_resolve_review_scope_still_increments_without_the_flag():
+    from pr_reviewer.precheck import resolve_review_scope
+
+    r = resolve_review_scope(
+        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False
+    )
+    assert r.effective_review_scope == "incremental"
