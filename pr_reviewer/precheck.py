@@ -651,6 +651,7 @@ def resolve_review_scope(
     force_review: bool = False,
     previous_head_is_ancestor: Optional[bool] = None,
     compare_range_ok: Optional[bool] = None,
+    previous_needs_full_review: bool = False,
 ) -> ScopeResolution:
     """Resolve the effective review scope from explicit metadata inputs.
 
@@ -678,6 +679,10 @@ def resolve_review_scope(
     3. Missing previous head or base metadata → full scope (no baseline
        to increment from).
     4. A failing validation verdict → full scope.
+    4a. The previous review could not assess a carried finding from its
+        delta (``previous_needs_full_review``) → full scope. An incremental
+        review would reach the same verdict for the same reason, and the
+        fail-closed carry-forward rule would keep the PR blocked (#536).
     5. Otherwise → incremental scope carrying ``previous_head_sha``;
        ``baseline_clean`` is true only when the previous review result
        was ``clean`` or absent.
@@ -731,6 +736,12 @@ def resolve_review_scope(
             "Review scope fallback: previous→current range is not comparable"
         )
         return full
+    if previous_needs_full_review:
+        logger.info(
+            "Review scope fallback: the previous review carried a finding it "
+            "could not assess from its delta"
+        )
+        return full
 
     return ScopeResolution(
         effective_review_scope="incremental",
@@ -740,6 +751,40 @@ def resolve_review_scope(
     )
 
 
+
+# Findings about CI state describe the *run*, not the diff. The diff-unchanged
+# guard compares a fingerprint of the diff, so a red-to-green CI transition
+# leaves the fingerprint identical and the review short-circuits — the PR then
+# stays blocked on a condition that has since cleared. Detecting them from the
+# carried finding is heuristic, and deliberately biased toward re-reviewing: a
+# false positive costs one extra review, a false negative strands the PR.
+_CI_STATE_PATTERN = re.compile(
+    r"\bci\b.*\b(?:fail(?:ed|ing|ure)?|red|pending|not green|terminal)\b"
+    r"|\b(?:check|workflow|job)s?\b.*\b(?:fail(?:ed|ing|ure)?|pending)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def looks_like_ci_state_finding(finding: object) -> bool:
+    """True when a carried finding is about CI state rather than the diff.
+
+    Such a finding can be resolved without the diff changing at all, so it must
+    not be short-circuited by the diff-unchanged guard.
+    """
+    if not isinstance(finding, dict):
+        return False
+    message = finding.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return False
+    return bool(_CI_STATE_PATTERN.search(message))
+
+
+def has_ci_state_findings(findings: object) -> bool:
+    """True when any carried finding is about CI state."""
+    if not isinstance(findings, list):
+        return False
+    return any(looks_like_ci_state_finding(f) for f in findings)
+
 def evaluate_precheck(
     diff_content: str,
     previous_fingerprints: list[str],
@@ -747,6 +792,7 @@ def evaluate_precheck(
     config_hash: Optional[str] = None,
     force_review: bool = False,
     skip_if_diff_unchanged: bool = True,
+    ci_state_findings_open: bool = False,
 ) -> PrecheckResult:
     """Run the action's should-review decision over a diff.
 
@@ -771,6 +817,10 @@ def evaluate_precheck(
         Bypasses the diff-unchanged guard.
     skip_if_diff_unchanged : bool
         Enables the diff-unchanged guard.
+    ci_state_findings_open : bool
+        The previous review left a finding about CI state open. Such a finding
+        can clear without the diff changing, so the diff-unchanged guard must
+        not short-circuit it (#536).
 
     Returns
     -------
@@ -788,6 +838,7 @@ def evaluate_precheck(
 
     if (
         not force_review
+        and not ci_state_findings_open
         and skip_if_diff_unchanged
         and fingerprints_match(broad, previous_fingerprints)
     ):
@@ -799,12 +850,15 @@ def evaluate_precheck(
             reason="Diff unchanged since last review",
         )
 
+    reason = "New or forced changes detected"
+    if ci_state_findings_open and fingerprints_match(broad, previous_fingerprints):
+        reason = "Diff unchanged, but a CI-state finding is still open"
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=marker_fp,
         config_hash=config_hash,
         broad_fingerprint=broad,
-        reason="New or forced changes detected",
+        reason=reason,
     )
 
 
@@ -944,6 +998,21 @@ def _read_previous_fingerprints() -> list[str]:
     return fingerprints
 
 
+
+def _read_previous_findings() -> list:
+    """Carried findings the shell wrapper wrote from the last review's marker.
+
+    Absent or unreadable is treated as "none": the guard then behaves exactly
+    as it did before, which is the safe direction for a file that only ever
+    adds reasons to review.
+    """
+    try:
+        with open("previous-findings.json", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
 def main() -> None:
     """CLI entry point for the precheck module.
 
@@ -965,6 +1034,7 @@ def main() -> None:
         previous_fingerprints,
         force_review=force_review,
         skip_if_diff_unchanged=skip_if_diff_unchanged,
+        ci_state_findings_open=has_ci_state_findings(_read_previous_findings()),
     )
     scope = resolve_review_scope(
         os.environ.get("REVIEW_SCOPE", "auto"),
@@ -974,6 +1044,9 @@ def main() -> None:
         force_review=force_review,
         previous_head_is_ancestor=_env_validation_flag("PREVIOUS_HEAD_IS_ANCESTOR"),
         compare_range_ok=_env_validation_flag("COMPARE_RANGE_OK"),
+        previous_needs_full_review=_env_flag(
+            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
+        ),
     )
 
     print(json.dumps(build_precheck_payload(result, scope), indent=2))
