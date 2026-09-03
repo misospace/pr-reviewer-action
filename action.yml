@@ -562,6 +562,16 @@ inputs:
       forgejo_auth_method is 'token'.
     required: false
     default: ""
+  forgejo_skip_permission_preflight:
+    description: >-
+      If true, allow the review to proceed when the Forgejo preflight reports
+      an unrecognized ("unknown") permission — i.e. the server returned 200 but
+      no recognizable permissions field. Distinct from granting write access:
+      this only suppresses the unknown-payload error and logs a warning. Do
+      not enable unless you have verified separately that the token can in fact
+      publish reviews, otherwise the model output will be lost.
+    required: false
+    default: "false"
   skip_if_diff_unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
@@ -693,6 +703,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
@@ -775,6 +786,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -796,6 +808,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -908,6 +921,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
@@ -1238,6 +1252,7 @@ runs:
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         LABEL: ${{ inputs.rereview_label }}

@@ -23,6 +23,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -377,7 +378,7 @@ def _json_decode(text: str) -> Any:
 # ---------------------------------------------------------------------------
 
 def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
-    """Return the active token's effective repository permission, or None.
+    """Return the active token's effective repository permission.
 
     Forgejo PAT scopes are independent of repository membership, so a token
     that can read a PR may still be unable to publish a review. The
@@ -389,6 +390,17 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     repo endpoint, whose payload carries a ``permissions`` object
     (``{admin, write, read}`` booleans) reflecting the authenticated user's
     effective access — including for owners using JWT authorized integrations.
+
+    Returns:
+        * ``"read" | "write" | "admin"`` when the token's effective permission
+          was successfully resolved against a recognized Forgejo schema;
+        * ``"unknown"`` when Forgejo returned ``200`` but the payload did not
+          expose any recognizable permission field. An actionable warning is
+          logged. This is distinct from a hard failure so the caller (the
+          shell preflight) can surface it as a different error mode — a token
+          that may well have write access, but whose permission we can't
+          actually read out of the response;
+        * ``None`` on transport, authentication, or non-200 HTTP failure.
     """
     owner, repo = _parse_repo(repo_full_name)
     if not _is_forgejo_mode():
@@ -424,6 +436,15 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
         permission = permission_from_repo_payload(_json_decode(body_text))
         if status_code == 200 and permission is not None:
             return permission
+        if status_code == 200:
+            logging.warning(
+                "Forgejo review access preflight: API returned 200 but no "
+                "recognizable permissions field in repo payload for %s; "
+                "treating as unknown. Check the token's effective access and "
+                "the Forgejo/Gitea server version.",
+                repo_full_name,
+            )
+            return "unknown"
         _report_http_error("review access preflight", status_code, body_text)
         return None
 
@@ -431,6 +452,12 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     user = _json_decode(body_text)
     login = user.get("login") if status_code == 200 and isinstance(user, dict) else None
     if not isinstance(login, str) or not login:
+        if status_code == 200:
+            logging.warning(
+                "Forgejo review access preflight: /user returned 200 but no "
+                "recognizable 'login' field; treating as unknown."
+            )
+            return "unknown"
         _report_http_error("review access preflight", status_code, body_text)
         return None
 
@@ -461,6 +488,32 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
         permission = permission_from_repo_payload(data)
         if status_code == 200 and permission is not None:
             return permission
+        if status_code == 200:
+            logging.warning(
+                "Forgejo review access preflight: repo payload returned 200 "
+                "but no recognizable permissions field for %s; treating as "
+                "unknown. Check the token's effective access and the "
+                "Forgejo/Gitea server version.",
+                repo_full_name,
+            )
+            return "unknown"
+
+    # Final fallthrough: we got 200 but the collaborator endpoint reported a
+    # value outside our {read, write, admin} whitelist (e.g. "maintain" from a
+    # newer Gitea, or "none" from an admin-restricted token). The token's true
+    # capability is ambiguous from this payload, so log and return "unknown"
+    # rather than collapsing it onto a transport error.
+    if status_code == 200:
+        logging.warning(
+            "Forgejo review access preflight: collaborator payload returned "
+            "200 but permission value %r is outside the recognized "
+            "read/write/admin whitelist for %s; treating as unknown. Check "
+            "the token's effective access and the Forgejo/Gitea server "
+            "version.",
+            permission,
+            repo_full_name,
+        )
+        return "unknown"
 
     _report_http_error("review access preflight", status_code, body_text)
     return None

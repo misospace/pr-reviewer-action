@@ -291,13 +291,35 @@ if [[ -n "${EVENT_HEAD_SHA:-}" && -n "$CURRENT_HEAD_SHA" && "$EVENT_HEAD_SHA" !=
   exit 0
 fi
 
-# Forgejo permission preflight (#453)
+# Forgejo permission preflight (#453, #539)
+#
+# Three known outcomes from get_authenticated_repo_permission:
+#   write|admin  — token can publish; proceed.
+#   read         — token is read-only; refuse (cannot publish).
+#   unknown      — Forgejo returned 200 but no recognizable permissions
+#                  field. The token may well be fine; surface a distinct
+#                  message and allow an explicit operator opt-in via
+#                  FORGEJO_SKIP_PERMISSION_PREFLIGHT=true.
+#   (anything else, e.g. 'none' from a transport failure) — also refuse.
 if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
   REPO_PERMISSION="$(platform_authenticated_repo_permission "$REPO" 2>/dev/null || true)"
-  if [[ "$REPO_PERMISSION" != "write" && "$REPO_PERMISSION" != "admin" ]]; then
-    echo "ERROR: Review token lacks Forgejo write permission for $REPO (got '${REPO_PERMISSION:-none}'); refusing to invoke a model whose review could not be published." >&2
-    exit 1
-  fi
+  case "$REPO_PERMISSION" in
+    write|admin)
+      : # token can publish, proceed
+      ;;
+    unknown)
+      if [[ "${FORGEJO_SKIP_PERMISSION_PREFLIGHT:-false}" == "true" ]]; then
+        echo "WARN: Could not determine Forgejo permission for $REPO (server returned 200 but no recognizable permissions field). FORGEJO_SKIP_PERMISSION_PREFLIGHT=true is set; proceeding — confirm the token can publish reviews, otherwise the model output will be lost." >&2
+      else
+        echo "ERROR: Could not determine Forgejo permission for $REPO (server returned 200 but no recognizable permissions field). To proceed anyway, set the 'forgejo_skip_permission_preflight' action input (or the FORGEJO_SKIP_PERMISSION_PREFLIGHT=true env var) to true after verifying the token can publish reviews. Otherwise the model output would be lost." >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "ERROR: Review token lacks Forgejo write permission for $REPO (got '${REPO_PERMISSION:-none}'); refusing to invoke a model whose review could not be published." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # ── Range-validation probes → verdicts for Python scope resolution ────
