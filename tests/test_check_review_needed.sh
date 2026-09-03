@@ -497,11 +497,25 @@ else
 fi
 
 echo ""
-echo "=== Test 22: Forgejo unknown permission fails closed ==="
-if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=none run_precheck >/tmp/testfp_forgejo_none.out 2>&1; then
+echo "=== Test 22: Forgejo 'unknown' (200-without-permissions) fails closed with a distinct message ==="
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=unknown run_precheck >/tmp/testfp_forgejo_unknown.out 2>&1; then
   check "unknown Forgejo permission is rejected" "success" "failure"
 else
   check "unknown Forgejo permission is rejected" "failure" "failure"
+  check_contains "rejection distinguishes 'could not determine' from 'lacks write'" \
+    "$(cat /tmp/testfp_forgejo_unknown.out)" "Could not determine Forgejo permission"
+  check_contains "rejection mentions the opt-in input" \
+    "$(cat /tmp/testfp_forgejo_unknown.out)" "forgejo_skip_permission_preflight"
+fi
+
+echo ""
+echo "=== Test 23: Forgejo 'unknown' with forgejo_skip_permission_preflight=true proceeds with a warning ==="
+if PLATFORM=forgejo FORGEJO_API_URL="https://forge.example.com" TEST_FORGEJO_PERMISSION=unknown FORGEJO_SKIP_PERMISSION_PREFLIGHT=true run_precheck >/tmp/testfp_forgejo_unknown_skip.out 2>&1; then
+  check "unknown-permission with opt-in proceeds past the preflight" "success" "success"
+  check_contains "opt-in path still warns about the preflight" \
+    "$(cat /tmp/testfp_forgejo_unknown_skip.out)" "WARN"
+else
+  check "unknown-permission with opt-in proceeds past the preflight" "failure" "success"
 fi
 
 echo ""

@@ -341,6 +341,258 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
         self.assertEqual(stdout.getvalue().strip(), "none")
 
 
+class TestAuthenticatedRepoPermissionUnknownPayload(unittest.TestCase):
+    """Issue #539: distinguish a 200-with-unrecognized-payload ('unknown') from
+    a transport failure (None) so the shell preflight can refuse (or be
+    explicitly overridden) on the right grounds."""
+
+    @_PATCH_FORGEJO
+    def test_200_missing_permissions_field_returns_unknown_and_logs(self, mock_curl):
+        """A 200 response without a recognizable ``permissions`` field on the
+        authorized-integration repo endpoint must not silently fail with None —
+        it returns ``"unknown"`` and emits an actionable warning."""
+        # Newer Forgejo/Gitea occasionally omit the permissions object for
+        # private repos when the bearer lacks the right scope.
+        mock_curl.return_value = (200, json.dumps({"id": 1, "full_name": "misospace/pr-reviewer-action"}))
+
+        with _forgejo_env_patch(), patch.object(
+            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
+        ):
+            with self.assertLogs(level="WARNING") as captured:
+                result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "unknown")
+        joined = "\n".join(captured.output)
+        self.assertIn("review access preflight", joined)
+        self.assertIn("no recognizable permissions field", joined)
+        self.assertIn("Check the token", joined)
+
+    @_PATCH_FORGEJO
+    def test_200_unexpected_permission_value_returns_unknown_not_none(self, mock_curl):
+        """A 200 collaborator response with a permission value outside the
+        recognized {read, write, admin, owner} whitelist (e.g. a future
+        Gitea "maintain" value, or a "none" string from a restricted token)
+        must surface as ``"unknown"`` instead of being silently collapsed onto
+        a transport failure."""
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "review-bot"})),
+            # Newer Gitea returns "maintain" for organization maintainers.
+            (200, json.dumps({"permission": "maintain"})),
+            # Guard against regression: the fallback repo endpoint must NOT
+            # be consulted on a non-404 collaborator response.
+            (200, json.dumps({"permissions": {"admin": True, "write": True, "read": True}})),
+        ]
+
+        with _forgejo_env_patch(), self.assertLogs(level="WARNING") as captured:
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "unknown")
+        joined = "\n".join(captured.output)
+        self.assertIn("outside the recognized", joined)
+        # Two calls: /user, then collaborator (no fallback because status=200
+        # means the 404-branch is not entered and the new "unknown" branch
+        # short-circuits the repo endpoint).
+        self.assertEqual(mock_curl.call_count, 2)
+
+    @_PATCH_FORGEJO
+    def test_200_owner_collaborator_permission_still_normalizes_to_admin(self, mock_curl):
+        """Regression for issue #539: the long-standing owner->admin
+        normalization must still work after the new ``"unknown"`` branch."""
+        mock_curl.side_effect = [
+            (200, json.dumps({"login": "dev-user"})),
+            (200, json.dumps({"permission": "owner"})),
+        ]
+
+        with _forgejo_env_patch():
+            result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
+
+        self.assertEqual(result, "admin")
+
+    @_PATCH_FORGEJO
+    def test_cli_repo_permission_prints_unknown_for_unrecognized_payload(self, mock_curl):
+        """When the in-process function returns ``"unknown"`` the CLI must
+        surface it verbatim on stdout with exit code 0 — the shell preflight
+        relies on that to distinguish it from a transport failure."""
+        mock_curl.return_value = (
+            200,
+            json.dumps({"id": 1, "full_name": "misospace/pr-reviewer-action"}),
+        )
+
+        stdout = io.StringIO()
+        with _forgejo_env_patch(), patch.object(
+            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
+        ), redirect_stdout(stdout), redirect_stderr(io.StringIO()), patch.object(
+            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        ):
+            # main() should return without SystemExit: "unknown" is not None.
+            fb.main()
+
+        self.assertEqual(stdout.getvalue().strip(), "unknown")
+
+
+class TestAuthenticatedRepoPermissionPreflightScript(unittest.TestCase):
+    """The shell preflight in scripts/check_review_needed.sh must distinguish
+    ``"unknown"`` (no recognizable permission) from ``"read"`` (definitively
+    read-only) so that a token whose response simply lacks a permissions field
+    is not conflated with a token that has only read access.
+
+    We invoke the preflight gate in isolation by re-running the script body
+    with a stubbed ``platform_authenticated_repo_permission`` definition that
+    emits a configurable permission string. The script's preflight runs
+    unconditionally at the top of execution, so we can drive it with just the
+    bits the gate inspects (``RESOLVED_PLATFORM``, ``REPO``, ``REPO_PERMISSION``,
+    ``FORGEJO_SKIP_PERMISSION_PREFLIGHT``)."""
+
+    @staticmethod
+    def _resolve_script_path():
+        import os
+
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir)
+        )
+        return os.path.join(repo_root, "scripts", "check_review_needed.sh")
+
+    def _extract_preflight_gate_block(self):
+        """Extract the post-source preflight gate block from the real script.
+
+        The block is between the `# Forgejo permission preflight (#453, #539)`
+        comment and the `fi` that closes the ``if [[ $RESOLVED_PLATFORM ==
+        forgejo ]]`` block. We slice it directly rather than copy/paste so the
+        test follows whatever evolves in the real script.
+        """
+        import re
+
+        script_path = self._resolve_script_path()
+        with open(script_path, "r") as f:
+            script = f.read()
+
+        match = re.search(
+            # Outer `if [[ $RESOLVED_PLATFORM == "forgejo" ]]` is at indent 0;
+            # the nested `if` for the opt-in is indented. Match the top-level
+            # closing `fi` specifically.
+            r"(# Forgejo permission preflight \(#453, #539\).*?^fi\s*$)",
+            script,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "preflight gate block not found in script")
+        return match.group(1)
+
+    def _run_preflight_gate(self, permission_value: str, skip_opt: str | None = None):
+        """Run the preflight gate in isolation with a stubbed permission read.
+
+        Returns a ``subprocess.CompletedProcess``.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        gate_block = self._extract_preflight_gate_block()
+
+        with tempfile.TemporaryDirectory() as td:
+            gate_file = os.path.join(td, "gate.sh")
+            with open(gate_file, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    "set -euo pipefail\n"
+                    "RESOLVED_PLATFORM=forgejo\n"
+                    "REPO=misospace/pr-reviewer-action\n"
+                    f"PR_REVIEWER_FORGEJO_PERMISSION_VALUE={permission_value!s}\n"
+                    "platform_authenticated_repo_permission() {\n"
+                    "  printf '%s\\n' \"${PR_REVIEWER_FORGEJO_PERMISSION_VALUE}\"\n"
+                    "  return 0\n"
+                    "}\n"
+                )
+                if skip_opt is not None:
+                    f.write(
+                        f"export FORGEJO_SKIP_PERMISSION_PREFLIGHT="
+                        f"$(printf %q '{skip_opt}')\n"
+                    )
+                f.write(gate_block + "\n")
+                f.write('echo "gate_passed"\n')
+
+            env = os.environ.copy()
+            env["RESOLVED_PLATFORM"] = "forgejo"
+            env["PR_REVIEWER_FORGEJO_PERMISSION_VALUE"] = permission_value
+            if skip_opt is not None:
+                env["FORGEJO_SKIP_PERMISSION_PREFLIGHT"] = skip_opt
+
+            return subprocess.run(
+                ["/bin/bash", gate_file],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+    def test_preflight_treats_unknown_distinct_from_read(self):
+        script_path = self._resolve_script_path()
+        with open(script_path, "r") as f:
+            script = f.read()
+
+        # Sanity: the script does the Forgejo preflight at all.
+        self.assertIn("RESOLVED_PLATFORM", script)
+        self.assertIn("FORGEJO_SKIP_PERMISSION_PREFLIGHT", script)
+        self.assertIn("unknown", script)
+
+        # Sanity: it does not just reject an unknown value silently — the old
+        # gate collapsed "unknown" onto "read" and emitted the same
+        # "lacks Forgejo write permission" error for both.
+        import re
+
+        self.assertNotRegex(
+            re.escape(script),
+            r"REPO_PERMISSION\s*!=\s*['\"]write['\"]\s*&&\s*REPO_PERMISSION\s*!=\s*['\"]admin['\"]",
+        )
+
+        # "read" must be refused with the original insufficient-permission error.
+        read_proc = self._run_preflight_gate("read")
+        self.assertEqual(read_proc.returncode, 1)
+        self.assertIn("lacks Forgejo write permission", read_proc.stderr)
+        self.assertNotIn("Could not determine Forgejo permission", read_proc.stderr)
+
+        # "unknown" without opt-in must be refused with a *different* error
+        # string so operators can tell the two cases apart.
+        unk_proc = self._run_preflight_gate("unknown")
+        self.assertEqual(unk_proc.returncode, 1)
+        self.assertIn("Could not determine Forgejo permission", unk_proc.stderr)
+        self.assertIn("forgejo_skip_permission_preflight", unk_proc.stderr)
+        self.assertNotIn("lacks Forgejo write permission", unk_proc.stderr)
+
+    def test_preflight_admits_unknown_with_opt_in(self):
+        """``"unknown"`` with the explicit operator opt-in must proceed past
+        the preflight (we expect to reach the trailing ``echo "gate_passed"``
+        marker) without failing on the gate."""
+        proc = self._run_preflight_gate("unknown", skip_opt="true")
+        self.assertEqual(
+            proc.returncode,
+            0,
+            msg=(
+                f"preflight with opt-in should proceed; stderr was:\n"
+                f"{proc.stderr}"
+            ),
+        )
+        self.assertIn("gate_passed", proc.stdout)
+        # And the opt-in path must still emit a warning so operators notice.
+        self.assertIn("WARN", proc.stderr)
+        self.assertIn("FORGEJO_SKIP_PERMISSION_PREFLIGHT", proc.stderr)
+
+    def test_preflight_admits_write_and_admin(self):
+        """Sanity: a recognized write/admin capability lets the preflight
+        pass through the gate without refusing."""
+        for permission_value in ("write", "admin"):
+            with self.subTest(permission=permission_value):
+                proc = self._run_preflight_gate(permission_value)
+                self.assertEqual(
+                    proc.returncode,
+                    0,
+                    msg=(
+                        f"preflight refused recognized {permission_value!r}; "
+                        f"stderr:\n{proc.stderr}"
+                    ),
+                )
+                self.assertIn("gate_passed", proc.stdout)
+
+
 class TestGetPrMetadata(unittest.TestCase):
     """Test get_pr_metadata with Forgejo fixtures."""
 
