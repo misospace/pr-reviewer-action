@@ -172,6 +172,23 @@ def _resolve_artifact_path(path_str: str, workspace_root: str | Path | None) -> 
     return resolved
 
 
+def write_dismissed_findings(
+    rows: list[dict], target_path: str | Path = "previous-dismissals.json"
+) -> int:
+    """Persist parsed PR-comment dismissal rows for ``apply_carry_forward`` to read.
+
+    The writer side of the feature that #534/#535 shipped read-only: a
+    maintainer dismissal only takes effect if the precheck has actually
+    written this file. ``rows`` is a list of dicts with at minimum
+    ``{"id", "reason", "dismissed_by"}`` (the optional ``category``/``file``
+    keys are preserved verbatim). Returns the number of rows written.
+    """
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    return len(rows)
+
+
 def load_dismissed_findings(
     dismissals_path: str = "previous-dismissals.json",
     carried_path: str = "previous-findings.json",

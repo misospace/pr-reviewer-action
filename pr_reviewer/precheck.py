@@ -54,8 +54,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
 
 
@@ -1081,6 +1081,110 @@ def main() -> None:
     )
 
     print(json.dumps(build_precheck_payload(result, scope), indent=2))
+
+    pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get(
+        "GITHUB_PR_NUMBER", ""
+    )
+    if pr_number:
+        try:
+            comments = _load_pr_comments(pr_number)
+            _write_previous_dismissals(
+                comments,
+                _resolve_maintainers(),
+                output_path=os.environ.get(
+                    "PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logging.getLogger(__name__).warning(
+                "Dismissal write skipped: %s", exc
+            )
+
+
+def _write_previous_dismissals(
+    comments: list[dict],
+    maintainers: set[str],
+    output_path: str = "previous-dismissals.json",
+) -> int:
+    """Parse `@ai-reviewer dismiss <id>: <reason>` directives from PR comments.
+
+    Each parsed row is enriched with ``dismissed_by`` (the comment author)
+    when the author appears in ``maintainers``. Returns the number of
+    dismissals written.
+    """
+    from pr_reviewer.carry_forward import parse_dismiss_directive
+
+    rows: list[dict] = []
+    for c in comments or []:
+        author = (c.get("author") or "").strip()
+        body = c.get("body") or ""
+        match = parse_dismiss_directive(body)
+        if match is None:
+            continue
+        if maintainers and author and author not in maintainers:
+            # Non-maintainer authors are ignored — directive must come from a maintainer.
+            continue
+        finding_id, reason = match
+        rows.append(
+            {
+                "id": finding_id,
+                "reason": reason,
+                "dismissed_by": author,
+                "comment_id": c.get("id"),
+            }
+        )
+    try:
+        Path(output_path).write_text(json.dumps(rows, indent=2))
+    except OSError:
+        logging.getLogger(__name__).warning(
+            "Failed to write %s", output_path, exc_info=True
+        )
+        return 0
+    return len(rows)
+
+
+def _load_pr_comments(pr_number: str) -> list[dict]:
+    """Fetch issue comments for ``pr_number`` via the GitHub API.
+
+    Returns an empty list on any failure (no token, network error, etc.) —
+    carry-forward is best-effort and must never break the precheck.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not (token and repo and pr_number):
+        return []
+    try:
+        from github import Github
+
+        gh = Github(token, per_page=100)
+        issue = gh.get_repo(repo).get_issue(int(pr_number))
+        return [
+            {
+                "id": c.id,
+                "author": c.user.login if c.user else "",
+                "body": c.body or "",
+            }
+            for c in issue.get_comments()
+        ]
+    except ImportError:
+        return []
+    except Exception as exc:  # noqa: BLE001 — best-effort fetch
+        logging.getLogger(__name__).warning(
+            "PR comment fetch failed for #%s: %s", pr_number, exc
+        )
+        return []
+
+
+def _resolve_maintainers() -> set[str]:
+    """Return the set of GitHub usernames permitted to dismiss findings.
+
+    Falls back to ``GITHUB_REPOSITORY_OWNER`` when no explicit list is set.
+    """
+    explicit = os.environ.get("DISMISSAL_MAINTAINERS", "")
+    if explicit:
+        return {u.strip() for u in explicit.split(",") if u.strip()}
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+    return {owner} if owner else set()
 
 
 if __name__ == "__main__":
