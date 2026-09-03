@@ -32,6 +32,7 @@ sync if the publish-step cap changes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -173,7 +174,9 @@ def _resolve_artifact_path(path_str: str, workspace_root: str | Path | None) -> 
 
 
 def write_dismissed_findings(
-    rows: list[dict], target_path: str | Path = "previous-dismissals.json"
+    rows: list[dict],
+    target_path: str | Path = "previous-dismissals.json",
+    workspace_root: str | Path | None = None,
 ) -> int:
     """Persist parsed PR-comment dismissal rows for ``apply_carry_forward`` to read.
 
@@ -182,8 +185,44 @@ def write_dismissed_findings(
     written this file. ``rows`` is a list of dicts with at minimum
     ``{"id", "reason", "dismissed_by"}`` (the optional ``category``/``file``
     keys are preserved verbatim). Returns the number of rows written.
+
+    Symmetric to the reader-side guard in ``_resolve_artifact_path``: when
+    ``workspace_root`` is provided, ``target_path`` must resolve inside it,
+    must not traverse via ``..`` segments, and must not be a symlink that
+    points outside the workspace. This blocks operator-controlled env vars
+    (e.g. ``PREVIOUS_DISMISSALS_PATH``) from writing outside the runner
+    workspace.
     """
-    target = Path(target_path)
+    if workspace_root is not None:
+        resolved_root = Path(workspace_root).resolve()
+        # Reject null bytes (Python raises before resolution, but be explicit).
+        target_str = os.fspath(target_path)
+        if "\x00" in target_str:
+            raise ValueError(f"target_path contains null byte: {target_path!r}")
+        target = Path(target_str).resolve()
+        # Reject symlinks pointing outside the workspace, even when the
+        # symlink itself lives inside the workspace root.
+        if target.is_symlink():
+            link_target = target.resolve()
+        else:
+            link_target = target
+        if not (link_target == resolved_root or resolved_root in link_target.parents):
+            raise ValueError(
+                f"target_path {target_path!r} resolves outside "
+                f"workspace_root {workspace_root!r}"
+            )
+        if "\x00" in str(target_path):
+            raise ValueError(f"target_path contains null byte: {target_path!r}")
+        for part in Path(target_str).parts:
+            if part == "..":
+                raise ValueError(
+                    f"target_path {target_path!r} contains '..' segment"
+                )
+    else:
+        target_str = os.fspath(target_path)
+        if "\x00" in target_str:
+            raise ValueError(f"target_path contains null byte: {target_path!r}")
+        target = Path(target_str)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
     return len(rows)
