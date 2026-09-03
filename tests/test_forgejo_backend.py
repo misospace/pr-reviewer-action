@@ -13,7 +13,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
@@ -882,7 +885,10 @@ class TestCompareCommits(unittest.TestCase):
              patch.object(fb, "_gh", return_value=(0, json.dumps(self._COMPARE))) as mock_gh:
             result = fb.compare_commits("misospace/pr-reviewer-action", "abc...def")
 
-        mock_gh.assert_called_once_with("api", "repos/misospace/pr-reviewer-action/compare/abc...def")
+        mock_gh.assert_called_once_with(
+            "api", "repos/misospace/pr-reviewer-action/compare/abc...def",
+            timeout_sec=fb.GH_API_TIMEOUT_SEC,
+        )
         self.assertEqual(result["commits"][0]["sha"], "def")
 
 
@@ -958,7 +964,10 @@ class TestGitHubMode(unittest.TestCase):
              patch.object(fb, "_gh", return_value=(0, json.dumps(self.GH_REST_PR))) as mock_gh:
             result = fb.get_pr_metadata("misospace/pr-reviewer-action", 42)
 
-        mock_gh.assert_called_once_with("api", "repos/misospace/pr-reviewer-action/pulls/42")
+        mock_gh.assert_called_once_with(
+            "api", "repos/misospace/pr-reviewer-action/pulls/42",
+            timeout_sec=fb.GH_API_TIMEOUT_SEC,
+        )
         self.assertEqual(result["number"], 42)
         self.assertEqual(result["head"]["repo"]["full_name"], "outsider/pr-reviewer-action")
 
@@ -1014,7 +1023,7 @@ class TestGitHubMode(unittest.TestCase):
         ]
         patched = {"id": 1, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-1", "body": "updated"}
 
-        def _fake_gh(*args):
+        def _fake_gh(*args, timeout_sec=None):
             if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments"):
                 # list_comments consumes gh's --jq output, which is one JSON
                 # object per line (JSONL), not a JSON array.
@@ -1036,7 +1045,7 @@ class TestGitHubMode(unittest.TestCase):
     def test_edit_last_comment_falls_back_to_create_when_no_marker(self):
         created = {"id": 3, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-3", "body": "fresh"}
 
-        def _fake_gh(*args):
+        def _fake_gh(*args, timeout_sec=None):
             # The list (no --method) and the create (--method POST) both
             # target .../issues/42/comments, so disambiguate on --method.
             if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments") \
@@ -1997,6 +2006,230 @@ class TestJwtMasking(unittest.TestCase):
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("401", str(ctx.exception))
         self.assertNotIn(_JWT_TOKEN, str(ctx.exception))
+
+
+class TestGhTimeout(unittest.TestCase):
+    """Issue #537: _gh / _gh_api_json must bound subprocess.run with a
+    timeout so a hung ``gh`` process cannot freeze the action."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_default_timeout_is_bounded(self):
+        self.assertGreater(fb.GH_API_TIMEOUT_SEC, 0)
+        self.assertLessEqual(fb.GH_API_TIMEOUT_SEC, 300)
+
+    def test_gh_timeout_fires_and_returns_sentinel(self):
+        """(a) A hung ``gh`` process is killed and (-1, "") is returned,
+        mirroring safe_run's TimeoutExpired pattern."""
+        with mock.patch.object(
+            fb.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
+        ) as mock_run:
+            rc, out = fb._gh("pr", "view", "1", timeout_sec=1)
+        self.assertEqual(rc, -1)
+        self.assertEqual(out, "")
+        mock_run.assert_called_once_with(
+            ["gh", "pr", "view", "1"],
+            capture_output=True,
+            timeout=1,
+        )
+
+    def test_gh_real_subprocess_timeout_fires(self):
+        """(a) A genuinely hung ``gh`` child process is killed by the timeout
+        and (-1, "") is returned — no mock involved."""
+        import stat
+        import time
+
+        fake_gh = os.path.join(self.tmpdir, "gh")
+        with open(fake_gh, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nsleep 30\n")
+        os.chmod(fake_gh, os.stat(fake_gh).st_mode | stat.S_IEXEC)
+
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = self.tmpdir + os.pathsep + old_path
+        try:
+            start = time.monotonic()
+            rc, out = fb._gh("pr", "view", "1", timeout_sec=1)
+            elapsed = time.monotonic() - start
+        finally:
+            os.environ["PATH"] = old_path
+        self.assertEqual(rc, -1)
+        self.assertEqual(out, "")
+        self.assertLess(elapsed, 10, "timeout must fire well before the child's sleep")
+
+    def test_gh_fast_call_still_works(self):
+        """(b) A successful fast call returns (returncode, stdout) and the
+        timeout kwarg is forwarded to subprocess.run."""
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.stdout = b'{"ok": true}'
+        with mock.patch.object(fb.subprocess, "run", return_value=proc) as mock_run:
+            rc, out = fb._gh("api", "repos/o/r", timeout_sec=5)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, '{"ok": true}')
+        mock_run.assert_called_once_with(
+            ["gh", "api", "repos/o/r"],
+            capture_output=True,
+            timeout=5,
+        )
+
+    def test_gh_api_json_timeout_fires_and_returns_sentinel(self):
+        """(a) _gh_api_json forwards the timeout and returns (-1, "") on
+        TimeoutExpired."""
+        with mock.patch.object(
+            fb.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
+        ) as mock_run:
+            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1)
+        self.assertEqual(rc, -1)
+        self.assertEqual(out, "")
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs["timeout"], 1)
+        self.assertIn("capture_output", kwargs)
+
+    def test_gh_api_json_timeout_does_not_leak_temp_payload(self):
+        """(c) The temp payload file is unlinked in the finally block even
+        when the subprocess times out."""
+        import tempfile as _tempfile
+
+        # Pre-warm the tempdir probe (tempfile lazily unlinks a probe file on
+        # first use) so it doesn't hit the patched os.unlink below.
+        _tempfile.gettempdir()
+        real_unlink = os.unlink
+        unlinked = []
+
+        def tracking_unlink(path):
+            real_unlink(path)
+            unlinked.append(path)
+
+        with mock.patch.object(
+            fb.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
+        ), mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink):
+            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1)
+        self.assertEqual(rc, -1)
+        self.assertEqual(out, "")
+        self.assertEqual(len(unlinked), 1, "temp payload file must be unlinked on timeout")
+        self.assertFalse(os.path.exists(unlinked[0]))
+
+    def test_gh_api_json_fast_call_still_works(self):
+        """(b) A successful fast _gh_api_json call returns the parsed
+        response and unlinks the temp payload file."""
+        import tempfile as _tempfile
+
+        # Pre-warm the tempdir probe (tempfile lazily unlinks a probe file on
+        # first use) so it doesn't hit the patched os.unlink below.
+        _tempfile.gettempdir()
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.stdout = b'{"id": 7}'
+        real_unlink = os.unlink
+        unlinked = []
+
+        def tracking_unlink(path):
+            real_unlink(path)
+            unlinked.append(path)
+
+        with mock.patch.object(fb.subprocess, "run", return_value=proc), \
+                mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink):
+            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=5)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, '{"id": 7}')
+        self.assertEqual(len(unlinked), 1)
+        self.assertFalse(os.path.exists(unlinked[0]))
+
+
+class TestJwtCacheConcurrency(unittest.TestCase):
+    """Concurrent _get_jwt() calls must not race-write the JWT cache (#538)."""
+
+    def setUp(self):
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+
+    def _run_concurrent_get_jwt(self, n=10):
+        """Run n threads through _get_jwt() and return (results, urlopen_mock)."""
+        barrier = threading.Barrier(n)
+        results = [None] * n
+        errors = []
+
+        def worker(i):
+            try:
+                barrier.wait()
+                results[i] = fb._get_jwt()
+            except Exception as exc:  # noqa: BLE001 - surfaced via errors list
+                errors.append(exc)
+
+        # A small delay in the token-exchange widens the race window so the
+        # test deterministically fails if the lock is removed (N threads would
+        # all pass the expiry check before any repopulates the cache).
+        def slow_urlopen(*args, **kwargs):
+            time.sleep(0.05)
+            return _mock_oidc_response()
+
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   side_effect=slow_urlopen) as mock_urlopen:
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+        self.assertEqual(errors, [])
+        return results, mock_urlopen
+
+    def test_concurrent_calls_cleared_cache_single_fetch(self):
+        """(a) 10 concurrent _get_jwt() calls with a cleared cache -> exactly 1 urlopen."""
+        results, mock_urlopen = self._run_concurrent_get_jwt(10)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(results, [_JWT_TOKEN] * 10)
+
+    def test_concurrent_calls_past_ttl_single_fetch(self):
+        """(b) 10 concurrent calls landing just past the TTL -> exactly 1 fetch."""
+        fb._JWT_CACHE = "stale-token"
+        fb._JWT_CACHE_TIME = time.time() - fb._JWT_TTL_SECONDS - 10
+        results, mock_urlopen = self._run_concurrent_get_jwt(10)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(results, [_JWT_TOKEN] * 10)
+
+    def test_serial_cache_hit_no_fetch(self):
+        """(c) Serial cache-hit / cache-miss / TTL-expiry behaviour is preserved."""
+        # Cache hit: fresh cache -> no fetch
+        fb._JWT_CACHE = _JWT_TOKEN
+        fb._JWT_CACHE_TIME = time.time()
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 0)
+
+        # Cache miss: cleared cache -> exactly one fetch
+        fb._JWT_CACHE = None
+        fb._JWT_CACHE_TIME = 0.0
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+        # TTL expiry: stale cache -> exactly one fetch
+        fb._JWT_CACHE = "stale-token"
+        fb._JWT_CACHE_TIME = time.time() - fb._JWT_TTL_SECONDS - 10
+        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
+             _jwt_env_patch(), \
+             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                   return_value=_mock_oidc_response()) as mock_urlopen:
+            self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
+        self.assertEqual(mock_urlopen.call_count, 1)
 
 
 if __name__ == "__main__":
