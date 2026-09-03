@@ -309,14 +309,35 @@ def _curl(
     return http_code, body_text
 
 
-def _gh(*args: str) -> tuple[int, str]:
-    """Execute a ``gh`` CLI command and return (returncode, stdout)."""
+# Bounded wall-clock for every ``gh`` CLI invocation. A hung ``gh`` process
+# (interactive auth prompt on a 2FA account, stuck network read against
+# api.github.com, an OAuth token refresh that never returns) must not freeze
+# the action for the full GitHub Actions workflow timeout. Mirrors the
+# ``AI_REQUEST_TIMEOUT_SEC`` bound used for model calls; override via env.
+GH_API_TIMEOUT_SEC = float(os.environ.get("AI_REQUEST_TIMEOUT_SEC", "30"))
+
+
+def _gh(*args: str, timeout_sec: float = GH_API_TIMEOUT_SEC) -> tuple[int, str]:
+    """Execute a ``gh`` CLI command and return (returncode, stdout).
+
+    ``timeout_sec`` bounds the wall-clock so a hung ``gh`` process cannot
+    freeze the action. On ``subprocess.TimeoutExpired`` the child is killed
+    and ``(-1, "")`` is returned, mirroring ``safe_run``'s pattern.
+    """
     cmd = ["gh"] + list(args)
-    proc = subprocess.run(cmd, capture_output=True)
-    return proc.returncode, proc.stdout.decode("utf-8", errors="replace")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
+        return proc.returncode, proc.stdout.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return -1, ""
 
 
-def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str]:
+def _gh_api_json(
+    method: str,
+    path: str,
+    data: dict[str, Any],
+    timeout_sec: float = GH_API_TIMEOUT_SEC,
+) -> tuple[int, str]:
     """POST/PATCH JSON to the GitHub REST API via ``gh api`` and return
     (returncode, stdout) — the structured JSON response, not human-oriented
     text.
@@ -325,6 +346,10 @@ def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str
     than as a ``-f field=value`` argv entry — the same pattern already used
     by ``create_pr_review_from_payload`` — because comment bodies can be
     large markdown blobs.
+
+    ``timeout_sec`` is forwarded to ``_gh`` so a hung ``gh api`` call cannot
+    freeze the action; the temp payload file is always unlinked in the
+    ``finally`` block, including on timeout.
     """
     import tempfile
 
@@ -332,7 +357,7 @@ def _gh_api_json(method: str, path: str, data: dict[str, Any]) -> tuple[int, str
         json.dump(data, tmp)
         tmp_path = tmp.name
     try:
-        return _gh("api", path, "--method", method, "--input", tmp_path)
+        return _gh("api", path, "--method", method, "--input", tmp_path, timeout_sec=timeout_sec)
     finally:
         try:
             os.unlink(tmp_path)
@@ -496,6 +521,7 @@ def get_pr_metadata(repo_full_name: str, pr_number: int) -> dict[str, Any] | Non
     # it has no user/head/base keys at all.
     status_code, body = _gh(
         "api", f"repos/{owner}/{repo}/pulls/{pr_number}",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body.strip():
         return None
@@ -565,7 +591,10 @@ def get_pr_diff(repo_full_name: str, pr_number: int) -> str:
         return body
 
     # GitHub via gh CLI
-    status_code, body = _gh("pr", "diff", str(pr_number), "--repo", repo_full_name)
+    status_code, body = _gh(
+        "pr", "diff", str(pr_number), "--repo", repo_full_name,
+        timeout_sec=GH_API_TIMEOUT_SEC,
+    )
     if status_code != 0:
         return ""
     return body
@@ -608,6 +637,7 @@ def list_comments(repo_full_name: str, issue_number: int) -> list[dict[str, Any]
         "api", f"repos/{owner}/{repo}/issues/{issue_number}/comments",
         "--paginate",
         "--jq", ".[] | {id: .id, body: .body, created_at: .created_at, updated_at: .updated_at, user: .user.login}",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body.strip():
         return []
@@ -684,6 +714,7 @@ def create_comment(
     # blob. The REST endpoint returns real JSON we can decode structurally.
     status_code, body_text = _gh_api_json(
         "POST", f"repos/{owner}/{repo}/issues/{issue_number}/comments", {"body": body},
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
         return None
@@ -744,6 +775,7 @@ def edit_last_comment(
     # comment (the last one authored by the current gh user).
     status_code, body_text = _gh_api_json(
         "PATCH", f"repos/{owner}/{repo}/issues/comments/{target['id']}", {"body": new_body},
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
         return None
@@ -779,6 +811,7 @@ def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None
         # GitHub via gh CLI
         status_code, body_text = _gh(
             "api", f"repos/{owner}/{repo}/issues/{issue_number}",
+            timeout_sec=GH_API_TIMEOUT_SEC,
         )
         if status_code != 0:
             return None
@@ -817,7 +850,10 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
             return None
         return data
 
-    status_code, body_text = _gh("api", f"repos/{owner}/{repo}/compare/{spec}")
+    status_code, body_text = _gh(
+        "api", f"repos/{owner}/{repo}/compare/{spec}",
+        timeout_sec=GH_API_TIMEOUT_SEC,
+    )
     if status_code != 0 or not body_text.strip():
         return None
     data = _json_decode(body_text)
@@ -917,6 +953,7 @@ def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
         "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
         "--paginate",
         "--jq", ".[] | {filename: .filename, status: .status, additions: .additions, deletions: .deletions, changes: .changes}",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
         return []
@@ -994,6 +1031,7 @@ def list_pr_reviews(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]
 
     status_code, body_text = _gh(
         "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--paginate",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
         return []
@@ -1095,6 +1133,7 @@ def create_pr_review_from_payload(
     try:
         status_code, body_text = _gh(
             "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--method", "POST", "--input", tmp_path,
+            timeout_sec=GH_API_TIMEOUT_SEC,
         )
     finally:
         try:
@@ -1160,6 +1199,7 @@ def dismiss_pr_review(repo_full_name: str, pr_number: int, review_id: int, messa
     status_code, body_text = _gh(
         "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
         "--method", "PUT", "-f", f"message={message}", "--jq", ".id",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0:
         return None
@@ -1237,6 +1277,7 @@ def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
     # GitHub via gh CLI — already returns the right shape.
     status_code, body_text = _gh(
         "api", f"repos/{owner}/{repo}/commits/{sha}/status",
+        timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
         return None
