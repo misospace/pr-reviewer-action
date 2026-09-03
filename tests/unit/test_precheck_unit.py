@@ -730,6 +730,16 @@ class TestComputeConfigHashNoArgs:
         h2 = compute_config_hash()
         assert h1 == h2
 
+    def test_tool_round_budget_changes_config_hash(self, monkeypatch):
+        """Changing native-loop rounds must force a fresh review."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("TOOL_MODE", "native_loop")
+        monkeypatch.setenv("TOOL_MAX_ROUNDS", "2")
+        h1 = compute_config_hash()
+        monkeypatch.setenv("TOOL_MAX_ROUNDS", "4")
+        h2 = compute_config_hash()
+        assert h1 != h2
+
     def test_different_env_produces_different_hash(self, monkeypatch):
         """Different env vars produce different hashes."""
         monkeypatch.setenv("AI_MODEL", "gpt-4")

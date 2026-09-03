@@ -40,6 +40,7 @@ source "$FUNC"
 
 cd "$TMP"
 echo '{"verdict":"request_changes","review_markdown":"x"}' > ai-output.json
+echo '{"executed_request_count":2,"tool_calls":[{"tool":"read_file","status":"ok"},{"tool":"web_fetch","status":"error"}]}' > tool-harness.json
 # 100-byte diff with a small cap → should report truncation
 printf 'd%.0s' $(seq 1 100) > pr.diff
 printf 'c%.0s' $(seq 1 50) > review-corpus.md
@@ -63,6 +64,8 @@ check "summary flags diff truncation" \
   "$(grep -qi 'Diff bytes' "$GITHUB_STEP_SUMMARY" && grep -qi 'truncated: yes' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 check "summary shows the budget mode" \
   "$(grep -qi 'context_limit_mode=normal' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+check "summary shows tool call counts" \
+  "$(grep -qi '2 executed (1 successful)' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

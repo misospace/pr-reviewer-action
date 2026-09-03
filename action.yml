@@ -666,6 +666,9 @@ outputs:
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
+  tool_calls:
+    description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
+    value: ${{ steps.review.outputs.tool_calls }}
 
 runs:
   using: composite

@@ -318,6 +318,16 @@ ED_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   echo "$ED_DELIM"
 } >> "$OUTPUT_FILE"
 
+# Compact tool trace output: expose which read-only tools ran without copying
+# model-controlled arguments into action outputs. Full, redacted arguments and
+# results remain in tool-harness.md for the review corpus and runner logs.
+TC_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+{
+  echo "tool_calls<<$TC_DELIM"
+  jq -c '[.tool_calls[]? | {tool, status}]' tool-harness.json 2>/dev/null || echo '[]'
+  echo "$TC_DELIM"
+} >> "$OUTPUT_FILE"
+
 log "Analysis complete. Writing outputs..."
 jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
@@ -373,12 +383,14 @@ write_step_summary() {
     budget_desc="context_limit_mode=${CONTEXT_LIMIT_MODE:-normal}"
   fi
 
-  local findings_count blockers_count verdict_source
+  local findings_count blockers_count verdict_source tool_call_count tool_success_count
   findings_count="$(jq -r '.findings | length' ai-output.json 2>/dev/null || echo 0)"
   blockers_count="$(jq -r '[.findings[]? | select(.severity == "blocker")] | length' ai-output.json 2>/dev/null || echo 0)"
   verdict_source="$(jq -r '.verdict_source // "model"' ai-output.json 2>/dev/null || echo model)"
   local required_checks_status
   required_checks_status="$(jq -r '.required_checks // "none"' ai-output.json 2>/dev/null || echo none)"
+  tool_call_count="$(jq -r '.executed_request_count // 0' tool-harness.json 2>/dev/null || echo 0)"
+  tool_success_count="$(jq '[.tool_calls[]? | select(.status == "ok")] | length' tool-harness.json 2>/dev/null || echo 0)"
 
   {
     echo "### AI PR Review"
@@ -389,6 +401,7 @@ write_step_summary() {
     echo "| Verdict | ${verdict} (source: ${verdict_source}) |"
     echo "| Findings | ${findings_count} (blockers: ${blockers_count}) |"
     echo "| Required checks | ${required_checks_status} |"
+    echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
     echo "| Scope | ${EFFECTIVE_SCOPE} |"
     echo "| Budget | ${budget_desc} |"
