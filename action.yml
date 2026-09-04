@@ -676,6 +676,9 @@ outputs:
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
+  needs_full_review:
+    description: Whether this incremental review could not assess a carried finding from its delta (true → the next run resolves full scope)
+    value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
     value: ${{ steps.review.outputs.tool_calls }}
@@ -933,6 +936,7 @@ runs:
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
         EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+        NEEDS_FULL_REVIEW: ${{ steps.review.outputs.needs_full_review }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}

@@ -179,7 +179,9 @@ resolve_finding_threads() {
 # Build metadata marker JSON string.
 # Requires env: HEAD_SHA, EFFECTIVE_SCOPE, REVIEW_RESULT; optional FINDINGS
 # (JSON array — persisted as open_findings when the review found issues, so
-# the next incremental review can carry them forward, #193).
+# the next incremental review can carry them forward, #193) and NEEDS_FULL_REVIEW
+# (true when a carried finding could not be assessed from this delta, so the
+# next run's precheck resolves full scope, #544).
 # Args: $1 = base_sha, $2 = previous_head_sha (optional, empty if not incremental)
 # Outputs: metadata marker string to stdout
 build_metadata_marker() {
@@ -217,6 +219,7 @@ build_metadata_marker() {
     --arg evmem "$evmem" \
     --argjson findings "$findings_json" \
     --arg chr "${CACHE_HIT_RATIO:-}" \
+    --arg nfr "$(printf '%s' "${NEEDS_FULL_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" \
     '{version: 1, head_sha: $head, base_sha: $base, review_scope: $scope, review_result: $result}
      + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
      + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
@@ -229,6 +232,7 @@ build_metadata_marker() {
               | {severity, category, file, line, message: ((.message // "") | tostring | .[0:200])})
           | .[0:20])}
         else {} end)
+     + (if $nfr == "true" then {needs_full_review: true} else {} end)
      + (if $chr != "" and $chr != "-" then {cache_hit_ratio: ($chr | tonumber)} else {} end)')"
   printf '<!-- ai-pr-reviewer:%s -->' "$marker_json"
 }

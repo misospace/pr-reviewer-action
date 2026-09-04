@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pr_reviewer.carry_forward import (  # noqa: E402
     apply_carry_forward,
     load_carried_findings,
+    read_needs_full_review,
     render_carried_findings_section,
 )
 
@@ -82,7 +83,15 @@ class TestApplyCarryForward:
     def test_noop_without_carried_findings(self, tmp_path):
         out = _output(tmp_path)
         summary = apply_carry_forward(str(tmp_path / "absent.json"), out)
-        assert summary == {"carried": 0, "resolved": 0, "open": 0, "dismissed": 0, "forced_request_changes": False}
+        assert summary == {
+            "carried": 0,
+            "resolved": 0,
+            "open": 0,
+            "dismissed": 0,
+            "unverifiable": 0,
+            "needs_full_review": False,
+            "forced_request_changes": False,
+        }
         assert json.loads(open(out).read())["verdict"] == "approve"
 
     def test_resolved_blocker_keeps_approve(self, tmp_path):
@@ -166,6 +175,81 @@ class TestApplyCarryForward:
         # P3 (unanswered blocker) merged; P2 was re-reported by the model itself
         merged_ids = {f.get("id") for f in data["findings"] if f.get("carried_over")}
         assert "P3" in merged_ids and "P2" in merged_ids
+
+
+class TestNeedsFullReviewPropagation:
+    """#544: the needs_full_review signal must reach the bash consumer.
+
+    The contract the reviewer step (scripts/sections/review.sh) and the
+    publish step (build_metadata_marker) rely on: apply_carry_forward
+    writes needs-full-review.json next to the output file when a carried
+    finding is marked not_verifiable_from_delta, and read_needs_full_review
+    is the helper the bash side imports to consume it.
+    """
+
+    def test_unverifiable_writes_flag_file(self, tmp_path):
+        carried = _carried(tmp_path, [BLOCKER, MINOR])
+        out = _output(
+            tmp_path,
+            verdict="approve",
+            findings=[
+                dict(BLOCKER, id="P1", resolution="not_verifiable_from_delta"),
+                dict(MINOR, id="P2", resolution="still_open"),
+            ],
+        )
+        summary = apply_carry_forward(carried, out)
+        assert summary["unverifiable"] == 1
+        assert summary["needs_full_review"] is True
+
+        flag_path = tmp_path / "needs-full-review.json"
+        assert flag_path.exists()
+        flag = json.loads(flag_path.read_text(encoding="utf-8"))
+        assert flag["needs_full_review"] is True
+        assert flag["unverifiable"] == 1
+        assert flag["ids"] == ["P1"]
+
+        # The helper the bash side imports sees the same contract.
+        read = read_needs_full_review(str(flag_path))
+        assert read["needs_full_review"] is True
+        assert read["unverifiable"] == 1
+        assert read["ids"] == ["P1"]
+
+    def test_no_unverifiable_removes_stale_flag(self, tmp_path):
+        # A stale flag from an earlier run in the same workspace must not
+        # leak into this one.
+        (tmp_path / "needs-full-review.json").write_text(
+            json.dumps({"needs_full_review": True, "unverifiable": 1, "ids": ["P9"]}),
+            encoding="utf-8",
+        )
+        carried = _carried(tmp_path, [MINOR])
+        out = _output(
+            tmp_path,
+            verdict="approve",
+            findings=[dict(MINOR, id="P1", resolution="still_open")],
+        )
+        summary = apply_carry_forward(carried, out)
+        assert summary["needs_full_review"] is False
+        assert not (tmp_path / "needs-full-review.json").exists()
+        assert read_needs_full_review(str(tmp_path / "needs-full-review.json")) == {
+            "needs_full_review": False,
+            "unverifiable": 0,
+            "ids": [],
+        }
+
+    def test_no_carried_findings_no_flag(self, tmp_path):
+        out = _output(tmp_path, verdict="approve", findings=[])
+        summary = apply_carry_forward(str(tmp_path / "absent.json"), out)
+        assert summary["needs_full_review"] is False
+        assert not (tmp_path / "needs-full-review.json").exists()
+
+    def test_reader_tolerates_missing_and_malformed(self, tmp_path):
+        empty = {"needs_full_review": False, "unverifiable": 0, "ids": []}
+        assert read_needs_full_review(str(tmp_path / "absent.json")) == empty
+        bad = tmp_path / "needs-full-review.json"
+        bad.write_text("{not json", encoding="utf-8")
+        assert read_needs_full_review(str(bad)) == empty
+        bad.write_text("[1, 2]", encoding="utf-8")
+        assert read_needs_full_review(str(bad)) == empty
 
 
 if __name__ == "__main__":
