@@ -15,18 +15,20 @@ FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-ACTION_YML="$(cd "$SCRIPT_DIR/.." && pwd)/action.yml"
 HELPERS="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/publish_helpers.sh"
+# The publish dispatcher shell was extracted from action.yml into
+# scripts/publish.sh (#541); the wiring assertions target that script.
+PUBLISH_SH="$(cd "$SCRIPT_DIR/.." && pwd)/scripts/publish.sh"
 
 echo "=== resolve_finding_threads action wiring ==="
 
-# Both publish steps call resolve_finding_threads
-count=$(grep -c "resolve_finding_threads" "$ACTION_YML")
-check "both publish steps resolve threads" "$count" "2"
+# Both review_comment and review_verdict arms call resolve_finding_threads
+count=$(grep -c "resolve_finding_threads" "$PUBLISH_SH")
+check "both publish modes resolve threads" "$count" "2"
 
-# Resolution precedes comment build in both publish steps
-first_build=$(grep -n "build_review_comments.py" "$ACTION_YML" | head -1 | cut -d: -f1)
-first_resolve=$(grep -n "resolve_finding_threads" "$ACTION_YML" | head -1 | cut -d: -f1)
+# Resolution precedes comment build in both publish modes
+first_build=$(grep -n "build_review_comments.py" "$PUBLISH_SH" | head -1 | cut -d: -f1)
+first_resolve=$(grep -n "resolve_finding_threads" "$PUBLISH_SH" | head -1 | cut -d: -f1)
 if [[ "$first_resolve" -lt "$first_build" ]]; then
   echo "  PASS: resolution precedes comment build (first pair)"
   PASS=$((PASS + 1))
@@ -35,8 +37,8 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-second_build=$(grep -n "build_review_comments.py" "$ACTION_YML" | tail -1 | cut -d: -f1)
-second_resolve=$(grep -n "resolve_finding_threads" "$ACTION_YML" | tail -1 | cut -d: -f1)
+second_build=$(grep -n "build_review_comments.py" "$PUBLISH_SH" | tail -1 | cut -d: -f1)
+second_resolve=$(grep -n "resolve_finding_threads" "$PUBLISH_SH" | tail -1 | cut -d: -f1)
 if [[ "$second_resolve" -lt "$second_build" ]]; then
   echo "  PASS: resolution precedes comment build (second pair)"
   PASS=$((PASS + 1))
@@ -46,7 +48,7 @@ else
 fi
 
 # Builders receive suppression file
-supp_count=$(grep -c "SUPPRESS_FINDINGS_FILE=finding-threads.json" "$ACTION_YML")
+supp_count=$(grep -c "SUPPRESS_FINDINGS_FILE=finding-threads.json" "$PUBLISH_SH")
 check "both builders receive suppression file" "$supp_count" "2"
 
 # Helper gates on inline findings and carryover

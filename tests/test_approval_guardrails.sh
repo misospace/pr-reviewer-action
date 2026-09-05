@@ -95,31 +95,38 @@ check_contains "allow_approve default is false" \
 
 check_exists "action.yml has the publish dispatcher step" \
   "$(grep -c '^    - name: Publish review$' "$ACTION_YML" || echo 0)"
-check_exists "action.yml dispatches the review_verdict publish mode" \
-  "$(grep -c '^          review_verdict)' "$ACTION_YML" || echo 0)"
+check_exists "action.yml publish step delegates to scripts/publish.sh" \
+  "$(grep -c 'run: bash "${{ github.action_path }}/scripts/publish.sh"' "$ACTION_YML" || echo 0)"
 
-# Native reviews are commit-bound: action.yml builds a JSON payload carrying
+# The dispatcher shell was extracted from action.yml into scripts/publish.sh
+# (#541); the per-mode assertions below target that script.
+PUBLISH_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/publish.sh"
+
+check_exists "publish.sh dispatches the review_verdict publish mode" \
+  "$(grep -c '^  review_verdict)' "$PUBLISH_SH" || echo 0)"
+
+# Native reviews are commit-bound: publish.sh builds a JSON payload carrying
 # commit_id and posts it through platform_review_create_json, falling back to
 # the plain platform_review_native seam (#221) only if that fails.
 PLATFORM_SEAM="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/platform_api.sh"
 
-check_exists "action.yml routes approve through the native review helper" \
-  "$(grep -c 'submit_native_review APPROVE' "$ACTION_YML" || echo 0)"
+check_exists "publish.sh routes approve through the native review helper" \
+  "$(grep -c 'submit_native_review APPROVE' "$PUBLISH_SH" || echo 0)"
 
 check_exists "native review payload is commit-bound" \
-  "$(grep -c 'commit_id: \$commit_id' "$ACTION_YML" || echo 0)"
+  "$(grep -c 'commit_id: \$commit_id' "$PUBLISH_SH" || echo 0)"
 
-check_exists "action.yml falls back through the seam" \
-  "$(grep -c 'platform_review_native "\$REPO" "\$PR_NUMBER" "\$event"' "$ACTION_YML" || echo 0)"
+check_exists "publish.sh falls back through the seam" \
+  "$(grep -c 'platform_review_native "\$REPO" "\$PR_NUMBER" "\$event"' "$PUBLISH_SH" || echo 0)"
 
 check_exists "policy-withheld clean verdict publishes COMMENT" \
-  "$(grep -c 'submit_native_review COMMENT' "$ACTION_YML" || echo 0)"
+  "$(grep -c 'submit_native_review COMMENT' "$PUBLISH_SH" || echo 0)"
 
 check_exists "genuine approval failure still fails the step loudly" \
-  "$(grep -c 'ERROR: Native approval failed' "$ACTION_YML" || echo 0)"
+  "$(grep -c 'ERROR: Native approval failed' "$PUBLISH_SH" || echo 0)"
 
 check_exists "publication boundary rechecks the PR head" \
-  "$(grep -c 'scripts/verify_pr_head.sh' "$ACTION_YML" || echo 0)"
+  "$(grep -c 'scripts/verify_pr_head.sh' "$PUBLISH_SH" || echo 0)"
 
 check_exists "seam github backend has gh pr review approve" \
   "$(grep -c 'gh pr review.*--approve' "$PLATFORM_SEAM" || echo 0)"

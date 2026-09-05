@@ -86,17 +86,20 @@ check "INCREMENTAL scope not matched (case-sensitive)" "$result" "true"
 echo ""
 echo "=== action.yml integration checks ==="
 ACTION_YML="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/action.yml"
+# The verdict-step shell was extracted from action.yml into scripts/publish.sh
+# (#541); the per-mode text assertions target that script.
+PUBLISH_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/publish.sh"
 
 check_exists "action.yml has EFFECTIVE_SCOPE reference in verdict step" \
   "$(grep -c 'EFFECTIVE_SCOPE' "$ACTION_YML" || echo 0)"
 check_exists "action.yml has BASELINE_CLEAN reference in verdict step" \
   "$(grep -c 'BASELINE_CLEAN' "$ACTION_YML" || echo 0)"
-check_exists "action.yml marks incremental reviews in the header" \
-  "$(grep -c 'AI Automated Review (incremental)' "$ACTION_YML" || echo 0)"
-check_exists "action.yml has carried-forward disclaimer text" \
-  "$(grep -c 'carried forward' "$ACTION_YML" || echo 0)"
-check_exists "action.yml explains dirty-baseline withheld approvals" \
-  "$(grep -c 'Approval withheld' "$ACTION_YML" || echo 0)"
+check_exists "publish.sh marks incremental reviews in the header" \
+  "$(grep -c 'AI Automated Review (incremental)' "$PUBLISH_SH" || echo 0)"
+check_exists "publish.sh has carried-forward disclaimer text" \
+  "$(grep -c 'carried forward' "$PUBLISH_SH" || echo 0)"
+check_exists "publish.sh explains dirty-baseline withheld approvals" \
+  "$(grep -c 'Approval withheld' "$PUBLISH_SH" || echo 0)"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -10,7 +10,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 ### Action definition and orchestration
 
-- **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). Publishing is a single `Publish review` step with one superset `env:` block that dispatches on `$PUBLISH_MODE` (comment / review_comment / review_verdict), using helpers from `scripts/publish_helpers.sh`.
+- **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). Publishing is a single `Publish review` step with one superset `env:` block; the step body is a one-liner that runs `scripts/publish.sh`, which dispatches on `$PUBLISH_MODE` (comment / review_comment / review_verdict) using helpers from `scripts/publish_helpers.sh`.
 - **`scripts/platform_api.sh`** — Platform seam (#221): every host-forge API call goes through `platform_*` functions (github backend = the exact pre-seam `gh` invocations; forgejo backend = `pr_reviewer/forgejo_backend.py`, rolling out across 1.4.x). `github_enrich_*` functions are for linked-source enrichment and always target github.com. `pr_reviewer/platform.py` is the Python mirror for script consumers.
 - **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment (unless `force_review=true`)
 - **Re-review trigger** — adding the `rereview_label` (default `ai-review`) to a PR forces a fresh review (`check_review_needed.sh` reads the `labeled` event from `GITHUB_EVENT_PATH`, sets `force_review`, and skips unrelated labels; the label is removed post-publish in `action.yml`). Labels are maintainer-only, so no command-auth gate is needed.
@@ -38,6 +38,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 ### Publishing and output hygiene
 
+- **`scripts/publish.sh`** — Publish dispatcher (extracted from the `Publish review` step's inline `run:` block in #541): the `verify_pr_head.sh` publication-boundary pre-guard plus the three `PUBLISH_MODE` case arms (comment / review_comment / review_verdict), parametrized on the env the step exports. Sourced helpers come from `scripts/publish_helpers.sh`; unit-tested by `tests/test_publish_dispatch.sh`
 - **`scripts/publish_helpers.sh`** — Shared publish functions: sanitize, metadata marker build, native review cleanup, finding-thread resolution
 - **`scripts/sanitize_review_markdown.py`** — Neutralizes upstream GitHub auto-links (PR/issue/commit URLs, `owner/repo#123`, bare `#123`) in review output
 - **`scripts/strip_metadata_markers.py`** — Strips reserved `<!-- ai-pr-review-*:... -->` markers from model output before publishing
@@ -75,7 +76,7 @@ run_review.sh                   → collects context → classifies → builds c
   ├─ model_call.sh              → Fast/smart routing, retries, streaming, fallback
   └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward,conversation}
                                  → required-check validation, verdict policy, escalation, carried findings
-publish (action.yml steps)      → sanitize markdown → strip markers → build managed body → publish
+publish (scripts/publish.sh)    → sanitize markdown → strip markers → build managed body → publish
   ├─ publish_mode=comment        → gh pr comment --edit-last --create-if-none (sticky)
   ├─ publish_mode=review_comment → sticky comment + optional inline-findings COMMENT review
   └─ publish_mode=review_verdict → native approve/request_changes (guardrailed) + inline comments

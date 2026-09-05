@@ -293,6 +293,9 @@ class TestMainCli:
 
 class TestActionWiring:
     ACTION = (_REPO_ROOT / "action.yml").read_text()
+    # The publish dispatcher shell was extracted from action.yml into
+    # scripts/publish.sh (#541); the per-mode assertions target that script.
+    PUBLISH = (_REPO_ROOT / "scripts" / "publish.sh").read_text()
 
     def test_inline_findings_input_declared(self):
         assert "inline_findings:" in self.ACTION
@@ -308,14 +311,14 @@ class TestActionWiring:
         assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline_findings }}") == 1
 
     def test_review_verdict_falls_back_on_failure(self):
-        assert "falling back to plain review" in self.ACTION
-        assert "submit_native_review APPROVE" in self.ACTION
-        assert "submit_native_review REQUEST_CHANGES" in self.ACTION
+        assert "falling back to plain review" in self.PUBLISH
+        assert "submit_native_review APPROVE" in self.PUBLISH
+        assert "submit_native_review REQUEST_CHANGES" in self.PUBLISH
 
     def test_inline_review_carries_managed_marker(self):
         # The extra COMMENT review in review_comment mode must carry the
         # marker so cleanup supersedes it on the next run.
-        assert "inline-findings-body.md" in self.ACTION
+        assert "inline-findings-body.md" in self.PUBLISH
 
 
 if __name__ == "__main__":
