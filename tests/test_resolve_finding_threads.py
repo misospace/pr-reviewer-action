@@ -407,16 +407,18 @@ class TestMainEndToEnd:
 
 
 class TestActionWiring:
-    ACTION = (_REPO_ROOT / "action.yml").read_text()
+    # The publish dispatcher shell was extracted from action.yml into
+    # scripts/publish.sh (#541); the wiring assertions target that script.
+    PUBLISH = (_REPO_ROOT / "scripts" / "publish.sh").read_text()
     HELPERS = (_REPO_ROOT / "scripts" / "publish_helpers.sh").read_text()
 
     def test_both_publish_steps_resolve_threads(self):
-        assert self.ACTION.count("resolve_finding_threads") == 2
+        assert self.PUBLISH.count("resolve_finding_threads") == 2
 
     def test_resolution_precedes_comment_build(self):
         # The suppression file must exist before comments are built, in both
-        # publish steps.
-        action = self.ACTION
+        # publish modes.
+        action = self.PUBLISH
         first_build = action.find("build_review_comments.py")
         first_resolve = action.find("resolve_finding_threads")
         assert -1 < first_resolve < first_build
@@ -425,7 +427,7 @@ class TestActionWiring:
         assert -1 < second_resolve < second_build
 
     def test_builders_receive_suppression_file(self):
-        assert self.ACTION.count("SUPPRESS_FINDINGS_FILE=finding-threads.json") == 2
+        assert self.PUBLISH.count("SUPPRESS_FINDINGS_FILE=finding-threads.json") == 2
 
     def test_helper_gates_on_inline_findings_and_carryover(self):
         assert "resolve_finding_threads()" in self.HELPERS

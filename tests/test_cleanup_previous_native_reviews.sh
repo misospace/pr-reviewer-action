@@ -124,14 +124,16 @@ echo "=== Review body marker validation ==="
 
 ACTION_YML="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/action.yml"
 
-# The three publish modes are now case arms inside a single "Publish review"
+# The three publish modes are case arms inside a single "Publish review"
 # dispatcher step (#303): one superset env block, dispatching on $PUBLISH_MODE.
-# Extract each arm by its case label so the per-mode assertions still target
-# the right body.
+# The dispatcher shell was extracted from action.yml into scripts/publish.sh
+# (#541); extract each arm by its case label so the per-mode assertions still
+# target the right body.
 PUBLISH_STEP_BODY=$(awk '/^    - name: Publish review$/,/^    - name: Clear re-review label/' "$ACTION_YML")
-STICKY_COMMENT_BODY=$(awk '/^          comment\)/,/^          review_comment\)/' "$ACTION_YML")
-BODY_CONTENT_REVIEW_COMMENT=$(awk '/^          review_comment\)/,/^          review_verdict\)/' "$ACTION_YML")
-BODY_CONTENT_REVIEW_VERDICT=$(awk '/^          review_verdict\)/,/^          \*\)/' "$ACTION_YML")
+PUBLISH_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/publish.sh"
+STICKY_COMMENT_BODY=$(awk '/^  comment\)/,/^  review_comment\)/' "$PUBLISH_SH")
+BODY_CONTENT_REVIEW_COMMENT=$(awk '/^  review_comment\)/,/^  review_verdict\)/' "$PUBLISH_SH")
+BODY_CONTENT_REVIEW_VERDICT=$(awk '/^  review_verdict\)/,/^  \*\)/' "$PUBLISH_SH")
 
 check_contains "review_comment arm uses METADATA_MARKER in body" \
   "$BODY_CONTENT_REVIEW_COMMENT" "METADATA_MARKER"
@@ -183,10 +185,13 @@ check_contains "helper contains build_metadata_marker function" \
 echo ""
 echo "=== Cleanup logic presence validation ==="
 
-# The dispatcher sources the helper script once (before the case); the
-# review_comment / review_verdict arms each run the cleanup.
-check_contains "publish step sources publish_helpers.sh" \
-  "$PUBLISH_STEP_BODY" "publish_helpers.sh"
+# The publish step delegates to scripts/publish.sh, which sources the helper
+# script once (before the case); the review_comment / review_verdict arms each
+# run the cleanup.
+check_contains "publish step delegates to scripts/publish.sh" \
+  "$PUBLISH_STEP_BODY" "scripts/publish.sh"
+check_contains "publish.sh sources publish_helpers.sh" \
+  "$(cat "$PUBLISH_SH")" "publish_helpers.sh"
 
 check_contains "review_comment arm calls cleanup_native_reviews" \
   "$BODY_CONTENT_REVIEW_COMMENT" "cleanup_native_reviews"
