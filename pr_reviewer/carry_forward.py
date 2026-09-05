@@ -340,7 +340,16 @@ def apply_carry_forward(
     forced to request_changes (verdict_source: carry_forward).
 
     Returns a summary dict: {"carried": n, "resolved": n, "open": n,
-    "dismissed": n, "forced_request_changes": bool}.
+    "dismissed": n, "unverifiable": n, "needs_full_review": bool,
+    "forced_request_changes": bool}.
+
+    Propagation contract (#544): when ``needs_full_review`` is true, the
+    module also writes ``needs-full-review.json`` (next to ``output_path``)
+    so the bash reviewer step can detect it after enforcement, and the
+    publish step persists it into the metadata marker so the NEXT run's
+    precheck resolves full scope (``PREVIOUS_NEEDS_FULL_REVIEW``). When the
+    flag is false the file is removed so a stale flag from an earlier run
+    in the same workspace cannot leak into this one.
     """
     carried = load_carried_findings(carried_path)
     dismissed = load_dismissed_findings(
@@ -353,9 +362,16 @@ def apply_carry_forward(
         "resolved": 0,
         "open": 0,
         "dismissed": 0,
+        "unverifiable": 0,
+        "needs_full_review": False,
         "forced_request_changes": False,
     }
     if not carried:
+        # No carried findings → nothing can be unverifiable; clear any stale
+        # flag from an earlier run in the same workspace (#544).
+        _write_needs_full_review_flag(
+            Path(output_path).parent / "needs-full-review.json", False, 0, set()
+        )
         return summary
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
@@ -475,4 +491,66 @@ def apply_carry_forward(
     Path(output_path).write_text(
         json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+
+    # Surface the escalation signal to the bash side (#544): the reviewer
+    # step reads the file after enforcement, and the publish step persists
+    # it into the metadata marker for the next run's precheck.
+    _write_needs_full_review_flag(
+        Path(output_path).parent / "needs-full-review.json",
+        summary["needs_full_review"],
+        summary["unverifiable"],
+        unverifiable_ids,
+    )
     return summary
+
+
+def _write_needs_full_review_flag(
+    flag_path: Path, needs_full_review: bool, unverifiable: int, ids: set[str]
+) -> None:
+    """Write (or clear) the escalation flag file the bash side reads (#544)."""
+    if needs_full_review:
+        flag_path.write_text(
+            json.dumps(
+                {
+                    "needs_full_review": True,
+                    "unverifiable": unverifiable,
+                    "ids": sorted(ids),
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        try:
+            flag_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def read_needs_full_review(path: str = "needs-full-review.json") -> dict:
+    """Read the escalation flag written by :func:`apply_carry_forward`.
+
+    Returns ``{"needs_full_review": bool, "unverifiable": int, "ids":
+    [str, ...]}``; a missing, unreadable, or malformed file yields
+    ``{"needs_full_review": False, "unverifiable": 0, "ids": []}`` so a
+    broken flag can never force a full review (the fail-closed carry-forward
+    verdict already blocks the PR in that case).
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {"needs_full_review": False, "unverifiable": 0, "ids": []}
+    if not isinstance(data, dict):
+        return {"needs_full_review": False, "unverifiable": 0, "ids": []}
+    ids = data.get("ids")
+    if not isinstance(ids, list):
+        ids = []
+    unverifiable = data.get("unverifiable")
+    if not isinstance(unverifiable, int) or isinstance(unverifiable, bool):
+        unverifiable = len(ids)
+    return {
+        "needs_full_review": bool(data.get("needs_full_review")),
+        "unverifiable": unverifiable,
+        "ids": [str(i) for i in ids],
+    }

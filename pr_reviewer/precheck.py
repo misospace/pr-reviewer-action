@@ -34,6 +34,11 @@ Environment inputs:
   validation verdicts for the previous→current range (ancestorship and
   compare/base continuity). Unset means "not asserted" (the check does
   not gate the baseline); ``false`` forces a full-scope fallback.
+- ``PREVIOUS_NEEDS_FULL_REVIEW``: ``true`` when the last review's
+  carry-forward step flagged a carried finding it could not assess from
+  its delta (``needs_full_review`` in the metadata marker, #544). Forces
+  a full-scope fallback so the next run can actually clear the finding
+  instead of looping on the same incremental diff.
 
 ``diff_fingerprint`` is the diff's own fingerprint (``empty-diff``
 placeholder for an empty diff); ``broad_fingerprint`` is the marker form
@@ -168,6 +173,13 @@ _EXACT_CONFIG_KEYS = frozenset((
     "TOOL_MODE",
     "TOOL_MAX_REQUESTS",
     "TOOL_MAX_ROUNDS",
+    # #540: renamed from TOOL_PLANNING_* (the plan_execute planner they were
+    # named for was removed in #304). The legacy names stay in the allowlist
+    # for one release so a workflow still passing them keeps a stable
+    # fingerprint (removed in v3.0.0).
+    "TOOL_TURN_TIMEOUT_SEC",
+    "TOOL_CORPUS_MAX_BYTES",
+    "TOOL_MAX_TOKENS_PER_TURN",
     "TOOL_PLANNING_TIMEOUT_SEC",
     "TOOL_PLANNING_MAX_CONTEXT_BYTES",
     "TOOL_PLANNING_MAX_TOKENS",
@@ -793,6 +805,7 @@ def evaluate_precheck(
     force_review: bool = False,
     skip_if_diff_unchanged: bool = True,
     ci_state_findings_open: bool = False,
+    previous_needs_full_review: bool = False,
 ) -> PrecheckResult:
     """Run the action's should-review decision over a diff.
 
@@ -821,6 +834,12 @@ def evaluate_precheck(
         The previous review left a finding about CI state open. Such a finding
         can clear without the diff changing, so the diff-unchanged guard must
         not short-circuit it (#536).
+    previous_needs_full_review : bool
+        The previous review flagged a carried finding it could not assess
+        from its delta (#544). The diff-unchanged guard must not
+        short-circuit it either: the only way to clear the finding is the
+        full review this flag requests, and skipping would strand the PR
+        on the same incremental diff forever.
 
     Returns
     -------
@@ -839,6 +858,7 @@ def evaluate_precheck(
     if (
         not force_review
         and not ci_state_findings_open
+        and not previous_needs_full_review
         and skip_if_diff_unchanged
         and fingerprints_match(broad, previous_fingerprints)
     ):
@@ -853,6 +873,14 @@ def evaluate_precheck(
     reason = "New or forced changes detected"
     if ci_state_findings_open and fingerprints_match(broad, previous_fingerprints):
         reason = "Diff unchanged, but a CI-state finding is still open"
+    elif (
+        previous_needs_full_review
+        and fingerprints_match(broad, previous_fingerprints)
+    ):
+        reason = (
+            "Diff unchanged, but a carried finding needs a full review "
+            "to be assessed (#544)"
+        )
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=marker_fp,
@@ -1035,6 +1063,9 @@ def main() -> None:
         force_review=force_review,
         skip_if_diff_unchanged=skip_if_diff_unchanged,
         ci_state_findings_open=has_ci_state_findings(_read_previous_findings()),
+        previous_needs_full_review=_env_flag(
+            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
+        ),
     )
     scope = resolve_review_scope(
         os.environ.get("REVIEW_SCOPE", "auto"),

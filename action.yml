@@ -425,18 +425,30 @@ inputs:
       one-call-per-turn chains and repair turns. Ignored when tool_mode=off.
     required: false
     default: "3"
-  tool_planning_timeout_sec:
-    description: Timeout in seconds for the model planning call used by tool harness. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts.
+  tool_turn_timeout_sec:
+    description: Timeout in seconds for each model turn of the tool_mode=native_loop exchange. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts.
     required: false
     default: "60"
-  tool_planning_max_context_bytes:
-    description: Maximum corpus bytes passed to the planning model
+  tool_corpus_max_bytes:
+    description: Maximum corpus bytes passed into the native_loop conversation's first turn
     required: false
     default: "50000"
-  tool_planning_max_tokens:
-    description: Maximum completion tokens for tool harness planning model call
+  tool_max_tokens_per_turn:
+    description: Maximum completion tokens for each model turn of the tool_mode=native_loop exchange
     required: false
     default: "400"
+  tool_planning_timeout_sec:
+    description: "DEPRECATED (removed in v3.0.0): use tool_turn_timeout_sec. Still honored as a fallback when tool_turn_timeout_sec is left at its default."
+    required: false
+    default: ""
+  tool_planning_max_context_bytes:
+    description: "DEPRECATED (removed in v3.0.0): use tool_corpus_max_bytes. Still honored as a fallback when tool_corpus_max_bytes is left at its default."
+    required: false
+    default: ""
+  tool_planning_max_tokens:
+    description: "DEPRECATED (removed in v3.0.0): use tool_max_tokens_per_turn. Still honored as a fallback when tool_max_tokens_per_turn is left at its default."
+    required: false
+    default: ""
   tool_max_response_bytes:
     description: Maximum bytes captured from each tool execution result
     required: false
@@ -676,6 +688,9 @@ outputs:
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
+  needs_full_review:
+    description: Whether this incremental review could not assess a carried finding from its delta (true → the next run resolves full scope)
+    value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
     value: ${{ steps.review.outputs.tool_calls }}
@@ -757,9 +772,11 @@ runs:
         TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
-        TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
-        TOOL_PLANNING_MAX_CONTEXT_BYTES: ${{ inputs.tool_planning_max_context_bytes }}
-        TOOL_PLANNING_MAX_TOKENS: ${{ inputs.tool_planning_max_tokens }}
+        # #540: new names take precedence; the deprecated tool_planning_* inputs
+        # still work as a fallback for one release (removed in v3.0.0).
+        TOOL_TURN_TIMEOUT_SEC: ${{ inputs.tool_turn_timeout_sec != '' && inputs.tool_turn_timeout_sec || inputs.tool_planning_timeout_sec }}
+        TOOL_CORPUS_MAX_BYTES: ${{ inputs.tool_corpus_max_bytes != '' && inputs.tool_corpus_max_bytes || inputs.tool_planning_max_context_bytes }}
+        TOOL_MAX_TOKENS_PER_TURN: ${{ inputs.tool_max_tokens_per_turn != '' && inputs.tool_max_tokens_per_turn || inputs.tool_planning_max_tokens }}
         TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
         TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
         TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
@@ -879,9 +896,11 @@ runs:
         TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
-        TOOL_PLANNING_TIMEOUT_SEC: ${{ inputs.tool_planning_timeout_sec }}
-        TOOL_PLANNING_MAX_CONTEXT_BYTES: ${{ inputs.tool_planning_max_context_bytes }}
-        TOOL_PLANNING_MAX_TOKENS: ${{ inputs.tool_planning_max_tokens }}
+        # #540: new names take precedence; the deprecated tool_planning_* inputs
+        # still work as a fallback for one release (removed in v3.0.0).
+        TOOL_TURN_TIMEOUT_SEC: ${{ inputs.tool_turn_timeout_sec != '' && inputs.tool_turn_timeout_sec || inputs.tool_planning_timeout_sec }}
+        TOOL_CORPUS_MAX_BYTES: ${{ inputs.tool_corpus_max_bytes != '' && inputs.tool_corpus_max_bytes || inputs.tool_planning_max_context_bytes }}
+        TOOL_MAX_TOKENS_PER_TURN: ${{ inputs.tool_max_tokens_per_turn != '' && inputs.tool_max_tokens_per_turn || inputs.tool_planning_max_tokens }}
         TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
         TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
         TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
@@ -933,6 +952,7 @@ runs:
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
         EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
+        NEEDS_FULL_REVIEW: ${{ steps.review.outputs.needs_full_review }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}

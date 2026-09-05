@@ -64,9 +64,13 @@ EVIDENCE_ENABLE_FOR_FORKS="${EVIDENCE_ENABLE_FOR_FORKS:-false}"
 TOOL_MODE="${TOOL_MODE:-off}"
 TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-4}"
 TOOL_MAX_RESPONSE_BYTES="${TOOL_MAX_RESPONSE_BYTES:-12000}"
-TOOL_PLANNING_TIMEOUT_SEC="${TOOL_PLANNING_TIMEOUT_SEC:-60}"
-TOOL_PLANNING_MAX_CONTEXT_BYTES="${TOOL_PLANNING_MAX_CONTEXT_BYTES:-50000}"
-TOOL_PLANNING_MAX_TOKENS="${TOOL_PLANNING_MAX_TOKENS:-400}"
+# #540: the tool_planning_* names (from the removed plan_execute planner, #304)
+# were renamed to describe what they actually control. action.yml forwards the
+# resolved value under the new names; the legacy names are kept as a fallback
+# for one release (removed in v3.0.0).
+TOOL_TURN_TIMEOUT_SEC="${TOOL_TURN_TIMEOUT_SEC:-${TOOL_PLANNING_TIMEOUT_SEC:-60}}"
+TOOL_CORPUS_MAX_BYTES="${TOOL_CORPUS_MAX_BYTES:-${TOOL_PLANNING_MAX_CONTEXT_BYTES:-50000}}"
+TOOL_MAX_TOKENS_PER_TURN="${TOOL_MAX_TOKENS_PER_TURN:-${TOOL_PLANNING_MAX_TOKENS:-400}}"
 TOOL_REQUEST_TIMEOUT_SEC="${TOOL_REQUEST_TIMEOUT_SEC:-20}"
 TOOL_ALLOWED_GH_API_REPOS="${TOOL_ALLOWED_GH_API_REPOS:-}"
 TOOL_FAILURE_ENFORCEMENT="${TOOL_FAILURE_ENFORCEMENT:-false}"
@@ -518,7 +522,7 @@ from pr_reviewer.enforcement import apply_all_enforcement, apply_verdict_policy
 # completeness validation, then enforcement overlays.
 if '$carry_forward' == 'true':
     summary = apply_carry_forward()
-    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} forced_request_changes={summary['forced_request_changes']}\")
+    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} unverifiable={summary['unverifiable']} needs_full_review={summary['needs_full_review']} forced_request_changes={summary['forced_request_changes']}\")
 apply_verdict_policy('$verdict_policy')
 apply_required_check_validation('$validate_checks', '$validation_mode')
 apply_all_enforcement(
