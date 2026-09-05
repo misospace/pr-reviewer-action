@@ -513,6 +513,7 @@ apply_all_enforcement_wrapper() {
   local validation_mode="$6"
   local carry_forward="$7"
   PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
+import os
 from pr_reviewer.carry_forward import apply_carry_forward
 from pr_reviewer.completeness import apply_required_check_validation
 from pr_reviewer.enforcement import apply_all_enforcement, apply_verdict_policy
@@ -521,8 +522,8 @@ from pr_reviewer.enforcement import apply_all_enforcement, apply_verdict_policy
 # force request_changes on surviving blockers), then verdict policy, then
 # completeness validation, then enforcement overlays.
 if '$carry_forward' == 'true':
-    summary = apply_carry_forward()
-    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} unverifiable={summary['unverifiable']} needs_full_review={summary['needs_full_review']} forced_request_changes={summary['forced_request_changes']}\")
+    summary = apply_carry_forward(workspace_root=os.environ.get('GITHUB_WORKSPACE') or os.getcwd())
+    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} unverifiable={summary['unverifiable']} needs_full_review={summary['needs_full_review']} forced_request_changes={summary['forced_request_changes']} dismissed={summary.get('dismissed', 0)}\")
 apply_verdict_policy('$verdict_policy')
 apply_required_check_validation('$validate_checks', '$validation_mode')
 apply_all_enforcement(

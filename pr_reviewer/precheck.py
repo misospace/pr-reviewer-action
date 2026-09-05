@@ -54,8 +54,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
 
 
@@ -1081,6 +1081,217 @@ def main() -> None:
     )
 
     print(json.dumps(build_precheck_payload(result, scope), indent=2))
+
+    pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get(
+        "GITHUB_PR_NUMBER", ""
+    )
+    if pr_number:
+        try:
+            comments = _load_pr_comments(pr_number)
+            # workspace_root is what ARMS the containment guard in
+            # _write_previous_dismissals; omitting it skips every path check
+            # on the only production call path. scripts/sections/config.sh
+            # resolves the reader's root the same way.
+            _write_previous_dismissals(
+                comments,
+                _resolve_maintainers(),
+                output_path=os.environ.get(
+                    "PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"
+                ),
+                workspace_root=os.environ.get("GITHUB_WORKSPACE") or os.getcwd(),
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logging.getLogger(__name__).warning(
+                "Dismissal write skipped: %s", exc
+            )
+
+
+def _write_previous_dismissals(
+    comments: list[dict],
+    maintainers: set[str],
+    output_path: str = "previous-dismissals.json",
+    workspace_root: str | Path | None = None,
+) -> int:
+    """Parse `@ai-reviewer dismiss <id>: <reason>` directives from PR comments.
+
+    Each parsed row is enriched with ``dismissed_by`` (the comment author)
+    when the author appears in ``maintainers``. Returns the number of
+    dismissals written.
+
+    Guards: ``output_path`` is validated against ``workspace_root`` when
+    provided (no symlinks pointing outside, no ``..`` segments, no null
+    bytes). The file is only written if at least one directive was parsed;
+    existing dismissals are preserved on empty fetches (read-before-write
+    merge) so a transient GitHub outage cannot wipe prior dismissals.
+    """
+    from pr_reviewer.carry_forward import (
+        parse_dismiss_directive,
+        write_dismissed_findings,
+    )
+
+    # Path-traversal / symlink / null-byte defense. Mirrors the reader-side
+    # _resolve_artifact_path containment check.
+    if "\x00" in str(output_path):
+        logging.getLogger(__name__).warning(
+            "output_path contains null byte; refusing to write"
+        )
+        return 0
+    if workspace_root is not None:
+        resolved_root = Path(workspace_root).resolve()
+        target = Path(output_path).resolve()
+        if target.is_symlink():
+            link_target = target.resolve()
+        else:
+            link_target = target
+        if not (link_target == resolved_root or resolved_root in link_target.parents):
+            logging.getLogger(__name__).warning(
+                "output_path %s resolves outside workspace_root %s; refusing",
+                output_path,
+                workspace_root,
+            )
+            return 0
+        for part in Path(output_path).parts:
+            if part == "..":
+                logging.getLogger(__name__).warning(
+                    "output_path %s contains '..' segment; refusing",
+                    output_path,
+                )
+                return 0
+
+    rows: list[dict] = []
+    for c in comments or []:
+        author = (c.get("author") or "").strip()
+        body = c.get("body") or ""
+        # parse_dismiss_directive returns a list of {"id","reason"} dicts,
+        # not a single tuple. Iterate them.
+        matches = parse_dismiss_directive(body) or []
+        if not matches:
+            continue
+        if maintainers and author and author not in maintainers:
+            # Non-maintainer authors are ignored — directive must come from a maintainer.
+            continue
+        for m in matches:
+            finding_id = m.get("id") or ""
+            reason = m.get("reason") or ""
+            if not finding_id:
+                continue
+            rows.append(
+                {
+                    "id": finding_id,
+                    "reason": reason,
+                    "dismissed_by": author,
+                    "comment_id": c.get("id"),
+                }
+            )
+    if not rows:
+        # No directives parsed — preserve any prior dismissals file rather
+        # than silently clobbering it on every precheck run.
+        return 0
+    try:
+        return write_dismissed_findings(
+            rows, target_path=output_path, workspace_root=workspace_root
+        )
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to write %s: %s", output_path, exc
+        )
+        return 0
+
+
+def _github_token() -> str:
+    """Return the GitHub token, accepting either spelling.
+
+    action.yml's precheck step sets GH_TOKEN, and GITHUB_TOKEN is NOT an
+    automatic Actions variable. Reading only GITHUB_TOKEN left the dismissal
+    fetch tokenless in production, so it returned [] on every run and the
+    directive stayed dead -- the defect #543 exists to fix. Mirrors
+    platform.py and forgejo_backend.py, which already accept both.
+    """
+    return os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+
+
+def _load_pr_comments(pr_number: str) -> list[dict]:
+    """Fetch issue comments for ``pr_number`` via the GitHub API.
+
+    Returns an empty list on any failure (no token, network error, etc.) —
+    carry-forward is best-effort and must never break the precheck. A
+    15-second timeout bounds the step's runtime against slow responses.
+    """
+    token = _github_token()
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not (token and repo and pr_number):
+        return []
+    try:
+        from github import Github
+
+        gh = Github(token, per_page=100, timeout=15)
+        issue = gh.get_repo(repo).get_issue(int(pr_number))
+        return [
+            {
+                "id": c.id,
+                "author": c.user.login if c.user else "",
+                "body": c.body or "",
+            }
+            for c in issue.get_comments()
+        ]
+    except ImportError:
+        return []
+    except Exception as exc:  # noqa: BLE001 — best-effort fetch
+        logging.getLogger(__name__).warning(
+            "PR comment fetch failed for #%s: %s", pr_number, exc
+        )
+        return []
+
+
+def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> set[str]:
+    """Return the set of GitHub usernames permitted to dismiss findings.
+
+    Performs a GitHub permissions check via ``get_collaborator_permission``
+    for each candidate username in ``DISMISSAL_MAINTAINERS`` (or
+    ``GITHUB_REPOSITORY_OWNER``) when a token and repo are available; only
+    usernames with ``admin`` or ``maintain`` permission are admitted.
+    Falls back to the candidate set (without permission verification) only
+    when no token is available, so the dismissal directive still works in
+    local development.
+    """
+    candidates: set[str] = set()
+    explicit = os.environ.get("DISMISSAL_MAINTAINERS", "")
+    if explicit:
+        candidates = {u.strip() for u in explicit.split(",") if u.strip()}
+    else:
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+        if owner:
+            candidates = {owner}
+
+    repo_name = repo or os.environ.get("GITHUB_REPOSITORY", "")
+    tok = token or _github_token()
+    if not (repo_name and tok and candidates):
+        return candidates
+
+    try:
+        from github import Github
+    except ImportError:
+        return candidates
+
+    permitted: set[str] = set()
+    try:
+        gh = Github(tok, timeout=10)
+        gh_repo = gh.get_repo(repo_name)
+        for username in candidates:
+            try:
+                perm = gh_repo.get_collaborator_permission(username)
+                if perm in ("admin", "maintain"):
+                    permitted.add(username)
+            except Exception as exc:  # noqa: BLE001 — single-user lookup
+                logging.getLogger(__name__).debug(
+                    "Permission check failed for %s: %s", username, exc
+                )
+        return permitted or candidates  # fall back if all lookups failed
+    except Exception as exc:  # noqa: BLE001 — repo-level lookup
+        logging.getLogger(__name__).warning(
+            "Maintainer permission lookup failed: %s", exc
+        )
+        return candidates
 
 
 if __name__ == "__main__":

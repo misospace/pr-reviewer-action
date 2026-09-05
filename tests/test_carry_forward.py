@@ -251,6 +251,104 @@ class TestNeedsFullReviewPropagation:
         bad.write_text("[1, 2]", encoding="utf-8")
         assert read_needs_full_review(str(bad)) == empty
 
+class TestDismissalPath:
+    """End-to-end path: comment + previous-findings + previous-dismissals → summary."""
+
+    def test_end_to_end_dismiss_via_workspace_root(self, tmp_path):
+        from pr_reviewer.carry_forward import write_dismissed_findings
+
+        carried = _carried(tmp_path, [dict(BLOCKER, id="P1", resolution="still_open")])
+        dismiss_path = _write(
+            tmp_path,
+            "previous-dismissals.json",
+            [
+                {
+                    "id": "P1",
+                    "reason": "handled in PR #123",
+                    "dismissed_by": "octocat",
+                    "category": "security",
+                    "file": "auth.go",
+                }
+            ],
+        )
+        # The production file lives in tmp_path, so workspace_root=tmp_path is required.
+        # (A workspace_root of None drops the file — that is the bug this test pins down.)
+        out = _output(tmp_path)
+        summary = apply_carry_forward(
+            carried, out, dismissals_path=dismiss_path, workspace_root=tmp_path
+        )
+        assert summary["dismissed"] >= 1
+        assert summary["open"] == 0  # P1 was dismissed, not carried open
+        # And confirm the bug shape: a None workspace_root silently drops dismissals.
+        summary_no_root = apply_carry_forward(
+            carried, out, dismissals_path=dismiss_path, workspace_root=None
+        )
+        assert summary_no_root["dismissed"] == 0
+
+    def test_workspace_root_guard_refuses_outside_file(self, tmp_path):
+        """A previous-dismissals.json outside the workspace must be ignored."""
+        # Write the file *outside* tmp_path (i.e. outside the workspace root we'll pass).
+        outside = tmp_path.parent / "outside-dismissals.json"
+        outside.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "P1",
+                        "reason": "leak",
+                        "dismissed_by": "attacker",
+                        "category": "security",
+                        "file": "auth.go",
+                    }
+                ]
+            )
+        )
+        try:
+            carried = _carried(tmp_path, [dict(BLOCKER, id="P1")])
+            out = _output(tmp_path)
+            summary = apply_carry_forward(
+                carried,
+                out,
+                dismissals_path=str(outside),
+                workspace_root=tmp_path,
+            )
+            assert summary["dismissed"] == 0
+        finally:
+            outside.unlink(missing_ok=True)
+
+    def test_writer_helper_round_trips(self, tmp_path):
+        from pr_reviewer.carry_forward import load_dismissed_findings, write_dismissed_findings
+
+        carried = _carried(tmp_path, [dict(BLOCKER, id="P1")])
+        target = tmp_path / "previous-dismissals.json"
+        write_dismissed_findings(
+            [
+                {
+                    "id": "P1",
+                    "reason": "false positive",
+                    "dismissed_by": "octocat",
+                    "category": "security",
+                    "file": "auth.go",
+                }
+            ],
+            target,
+        )
+        assert json.loads(target.read_text())[0]["id"] == "P1"
+        loaded = load_dismissed_findings(
+            str(target),
+            carried_path=carried,
+            workspace_root=tmp_path,
+        )
+        assert len(loaded) == 1 and loaded[0]["id"] == "P1"
+        # workspace_root=None must drop the file — that is the bug this test pins down.
+        assert (
+            load_dismissed_findings(
+                str(target),
+                carried_path=carried,
+                workspace_root=None,
+            )
+            == []
+        )
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
