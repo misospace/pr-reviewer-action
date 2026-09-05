@@ -1088,12 +1088,17 @@ def main() -> None:
     if pr_number:
         try:
             comments = _load_pr_comments(pr_number)
+            # workspace_root is what ARMS the containment guard in
+            # _write_previous_dismissals; omitting it skips every path check
+            # on the only production call path. scripts/sections/config.sh
+            # resolves the reader's root the same way.
             _write_previous_dismissals(
                 comments,
                 _resolve_maintainers(),
                 output_path=os.environ.get(
                     "PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"
                 ),
+                workspace_root=os.environ.get("GITHUB_WORKSPACE") or os.getcwd(),
             )
         except Exception as exc:  # noqa: BLE001 — best-effort
             logging.getLogger(__name__).warning(
@@ -1193,6 +1198,18 @@ def _write_previous_dismissals(
         return 0
 
 
+def _github_token() -> str:
+    """Return the GitHub token, accepting either spelling.
+
+    action.yml's precheck step sets GH_TOKEN, and GITHUB_TOKEN is NOT an
+    automatic Actions variable. Reading only GITHUB_TOKEN left the dismissal
+    fetch tokenless in production, so it returned [] on every run and the
+    directive stayed dead -- the defect #543 exists to fix. Mirrors
+    platform.py and forgejo_backend.py, which already accept both.
+    """
+    return os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+
+
 def _load_pr_comments(pr_number: str) -> list[dict]:
     """Fetch issue comments for ``pr_number`` via the GitHub API.
 
@@ -1200,7 +1217,7 @@ def _load_pr_comments(pr_number: str) -> list[dict]:
     carry-forward is best-effort and must never break the precheck. A
     15-second timeout bounds the step's runtime against slow responses.
     """
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = _github_token()
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not (token and repo and pr_number):
         return []
@@ -1247,7 +1264,7 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
             candidates = {owner}
 
     repo_name = repo or os.environ.get("GITHUB_REPOSITORY", "")
-    tok = token or os.environ.get("GITHUB_TOKEN", "")
+    tok = token or _github_token()
     if not (repo_name and tok and candidates):
         return candidates
 

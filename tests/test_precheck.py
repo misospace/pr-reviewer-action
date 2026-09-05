@@ -404,3 +404,92 @@ def test_diff_unchanged_guard_still_skips_without_the_flag():
         previous_needs_full_review=False,
     )
     assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+
+
+# --- #543: the dismissal writer must actually be reachable in production ---
+
+
+class TestDismissalWiring:
+    """Both defects here are 'the code exists but never runs', which is the
+    same failure mode #543 was filed about. Unit tests on the helpers pass
+    either way, so these pin the wiring instead."""
+
+    def test_token_accepts_the_spelling_action_yml_provides(self, monkeypatch):
+        # action.yml's precheck step sets GH_TOKEN. GITHUB_TOKEN is not an
+        # automatic Actions variable, so reading only GITHUB_TOKEN left the
+        # fetch tokenless in production and it returned [] on every run.
+        from pr_reviewer.precheck import _github_token
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GH_TOKEN", "gh-token-value")
+        assert _github_token() == "gh-token-value"
+
+        monkeypatch.setenv("GITHUB_TOKEN", "github-token-value")
+        assert _github_token() == "github-token-value"
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        assert _github_token() == ""
+
+    def test_load_pr_comments_does_not_bail_on_gh_token_alone(self, monkeypatch):
+        # The early return is `not (token and repo and pr_number)`. With only
+        # GH_TOKEN set this used to short-circuit before any fetch, which is
+        # indistinguishable from "no dismissals" downstream.
+        import pr_reviewer.precheck as precheck
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+
+        reached = {}
+
+        class _Boom(Exception):
+            pass
+
+        def _explode(*a, **kw):
+            reached["fetch"] = True
+            raise _Boom()
+
+        monkeypatch.setattr(precheck, "_github_token", lambda: "t")
+        # Any import of github inside the function is fine; we only need to
+        # know the guard let us past it.
+        monkeypatch.setitem(
+            __import__("sys").modules, "github", type("m", (), {"Github": _explode})
+        )
+        assert precheck._load_pr_comments("7") == []
+        assert reached.get("fetch"), "guard returned before attempting the fetch"
+
+    def test_writer_guard_is_armed_on_the_production_path(self, tmp_path, monkeypatch):
+        # _write_previous_dismissals only checks containment when
+        # workspace_root is passed. main() omitting it left every path check
+        # inert -- the same shape as #543's defect 2 on the reader side.
+        import inspect
+
+        import pr_reviewer.precheck as precheck
+
+        src = inspect.getsource(precheck.main)
+        assert "_write_previous_dismissals(" in src
+        call = src[src.index("_write_previous_dismissals(") :]
+        call = call[: call.index("\n            )") + 1]
+        assert "workspace_root=" in call, (
+            "main() must pass workspace_root or the containment guard in "
+            "_write_previous_dismissals never runs in production"
+        )
+
+    def test_writer_refuses_a_path_outside_the_workspace(self, tmp_path):
+        from pr_reviewer.precheck import _write_previous_dismissals
+
+        outside = tmp_path.parent / "escaped-dismissals.json"
+        if outside.exists():
+            outside.unlink()
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss P1: nope"}
+        ]
+        written = _write_previous_dismissals(
+            comments,
+            {"owner"},
+            output_path=str(outside),
+            workspace_root=str(tmp_path),
+        )
+        assert written == 0
+        assert not outside.exists()
