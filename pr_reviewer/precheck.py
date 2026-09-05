@@ -173,6 +173,13 @@ _EXACT_CONFIG_KEYS = frozenset((
     "TOOL_MODE",
     "TOOL_MAX_REQUESTS",
     "TOOL_MAX_ROUNDS",
+    # #540: renamed from TOOL_PLANNING_* (the plan_execute planner they were
+    # named for was removed in #304). The legacy names stay in the allowlist
+    # for one release so a workflow still passing them keeps a stable
+    # fingerprint (removed in v3.0.0).
+    "TOOL_TURN_TIMEOUT_SEC",
+    "TOOL_CORPUS_MAX_BYTES",
+    "TOOL_MAX_TOKENS_PER_TURN",
     "TOOL_PLANNING_TIMEOUT_SEC",
     "TOOL_PLANNING_MAX_CONTEXT_BYTES",
     "TOOL_PLANNING_MAX_TOKENS",

@@ -353,9 +353,12 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
 | `tool_loop_summarize_max_tokens` | Maximum completion tokens for each result-summarization call when `tool_loop_summarize` is enabled | No | `512` |
 | `tool_evidence_memory` | Carry the evidence a `native_loop` review gathers across incremental reviews of the same PR: a compact digest of what it read/fetched is stored in the metadata marker and reused by the next incremental review (re-verifying only what the delta touched) instead of re-gathering. On by default; `false` to disable. No effect on full reviews or non-native modes | No | `true` |
-| `tool_planning_timeout_sec` | Timeout in seconds for tool harness planning model call | No | `60` |
-| `tool_planning_max_context_bytes` | Maximum corpus bytes passed to planning | No | `50000` |
-| `tool_planning_max_tokens` | Maximum completion tokens for tool harness planning call | No | `400` |
+| `tool_turn_timeout_sec` | Timeout in seconds for each model turn of the `tool_mode=native_loop` exchange | No | `60` |
+| `tool_corpus_max_bytes` | Maximum corpus bytes passed into the `native_loop` conversation's first turn | No | `50000` |
+| `tool_max_tokens_per_turn` | Maximum completion tokens for each model turn of the `tool_mode=native_loop` exchange | No | `400` |
+| `tool_planning_timeout_sec` | **Deprecated** (removed in v3.0.0): use `tool_turn_timeout_sec`. Still honored as a fallback when the new input is left at its default | No | `""` |
+| `tool_planning_max_context_bytes` | **Deprecated** (removed in v3.0.0): use `tool_corpus_max_bytes`. Still honored as a fallback when the new input is left at its default | No | `""` |
+| `tool_planning_max_tokens` | **Deprecated** (removed in v3.0.0): use `tool_max_tokens_per_turn`. Still honored as a fallback when the new input is left at its default | No | `""` |
 | `tool_max_response_bytes` | Maximum bytes captured from each tool response | No | `12000` |
 | `tool_allowed_gh_api_repos` | Comma-separated owner/repo allowlist for `gh_api`; use `*` to allow any repo endpoint still permitted by the tool path allowlist (empty = current repo only) | No | `""` |
 | `tool_request_timeout_sec` | Timeout in seconds for each tool execution request | No | `20` |
@@ -601,9 +604,9 @@ Evidence providers are **disabled by default on cross-repository pull requests**
     ai_model: qwen3-32b
     tool_mode: native_loop
     tool_max_requests: "4"
-    tool_planning_timeout_sec: "30"
-    tool_planning_max_context_bytes: "50000"
-    tool_planning_max_tokens: "400"
+    tool_turn_timeout_sec: "30"
+    tool_corpus_max_bytes: "50000"
+    tool_max_tokens_per_turn: "400"
     tool_max_response_bytes: "12000"
     tool_allowed_gh_api_repos: "siderolabs/kubelet,siderolabs/talos"
     tool_request_timeout_sec: "20"
@@ -1027,7 +1030,7 @@ If the endpoint rejects the request after enabling this (HTTP 400 mentioning `re
 
 ### ⏱️ Timeouts, streaming, and retries
 
-- **Slow prompt eval** (big corpus, CPU offload): raise `ai_request_timeout_sec` (default 300). The tool-planning call is non-streaming and has its own `tool_planning_timeout_sec` — raise it too if planning times out.
+- **Slow prompt eval** (big corpus, CPU offload): raise `ai_request_timeout_sec` (default 300). Each `tool_mode=native_loop` model turn has its own `tool_turn_timeout_sec` — raise it too if loop turns time out.
 - **Proxies with idle-read timeouts** (e.g. Cloudflare's ~100s edge timer): keep `ai_stream: "true"` (the default) so bytes flow before the timer fires.
 - **Models that reject sampling params**: set `ai_temperature: ""` to omit the field entirely; set `ai_tokens_param: max_completion_tokens` for newer OpenAI reasoning models.
 - **Endpoint not always up** (homelab): configure `ai_fallback_base_url`/`ai_fallback_model` (e.g. a small cloud model) or set `on_model_failure: notice` so the PR gets a visible explanation instead of a bare red check.
@@ -1077,7 +1080,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 - Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction. The `run_command` tool does not execute arbitrary shell text; it accepts only named read-only command definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`) and runs them argv-only without `bash -lc`.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).
 - `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos, or `*` to allow any repository while keeping the path denylist and endpoint allowlist active.
-- For local models, reduce `tool_planning_max_context_bytes` and `tool_planning_max_tokens`, and increase `tool_planning_timeout_sec` as needed.
+- For local models, reduce `tool_corpus_max_bytes` and `tool_max_tokens_per_turn`, and increase `tool_turn_timeout_sec` as needed.
 - Set `tool_failure_enforcement=true` to fail closed when tool harness planning fails or when every tool request fails.
 - Use `tool_min_successful_requests` (for example `1`) to enforce a minimum successful tool-evidence threshold when the planner attempted tool requests.
 - Model requests use `curl -q` so user-level `.curlrc` timeouts do not unexpectedly cancel long-running local model calls.

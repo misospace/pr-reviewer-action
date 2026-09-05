@@ -76,8 +76,8 @@ def _run(monkeypatch, tmp_path, responses):
         12000,
         15,
         4,  # max_requests
-        45,  # planning_timeout
-        400,  # planning_max_tokens
+        45,  # turn_timeout
+        400,  # max_tokens_per_turn
         result,
     )
     return handled, result

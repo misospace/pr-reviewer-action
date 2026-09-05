@@ -553,8 +553,8 @@ def run_native_loop(
     max_response_bytes,
     request_timeout,
     max_requests,
-    planning_timeout,
-    planning_max_tokens,
+    turn_timeout,
+    max_tokens_per_turn,
     result,
 ):
     """Drive the native tool-calling loop (#203) and write harness outputs.
@@ -677,7 +677,7 @@ def run_native_loop(
         response = None
         try:
             response = run_chat_request(
-                base_url, api_format, payload, api_key, planning_timeout
+                base_url, api_format, payload, api_key, turn_timeout
             )
             usable = not (payload.get("stream") and response.get("error"))
         except Exception:
@@ -692,7 +692,7 @@ def run_native_loop(
             fallback = {k: v for k, v in payload.items() if k != "stream_options"}
             fallback["stream"] = False
             response = run_chat_request(
-                base_url, api_format, fallback, api_key, planning_timeout
+                base_url, api_format, fallback, api_key, turn_timeout
             )
         _accumulate_usage(usage_acc, response, api_format)
         return response
@@ -776,7 +776,7 @@ def run_native_loop(
         api_format=api_format,
         model=model,
         budgets=budgets,
-        max_tokens=planning_max_tokens,
+        max_tokens=max_tokens_per_turn,
         stream=stream,
         tokens_param=tokens_param,
         cache_prefix=True,
@@ -979,8 +979,18 @@ def _summarize_loop_outcome(result, outcome, build_evidence_digest):
 
 def main():
     max_response_bytes = int(os.getenv("TOOL_MAX_RESPONSE_BYTES", "12000"))
-    planning_timeout = int(os.getenv("TOOL_PLANNING_TIMEOUT_SEC", "60"))
-    planning_max_context = int(os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000"))
+    # #540: the tool_planning_* env names (from the removed plan_execute
+    # planner, #304) were renamed to describe what they actually control.
+    # The legacy names are read as a fallback for one release (removed in
+    # v3.0.0); the new name takes precedence.
+    turn_timeout = int(
+        os.getenv("TOOL_TURN_TIMEOUT_SEC")
+        or os.getenv("TOOL_PLANNING_TIMEOUT_SEC", "60")
+    )
+    corpus_max_bytes = int(
+        os.getenv("TOOL_CORPUS_MAX_BYTES")
+        or os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000")
+    )
     max_requests = env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)
     request_timeout = env_int_bounded("TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300)
 
@@ -1018,7 +1028,7 @@ def main():
 
     # Build the planning context from the high-signal corpus pieces (falls back
     # to the corpus head when they are unavailable).
-    corpus_text, _corpus_truncated = build_planning_context(planning_max_context, corpus_path)
+    corpus_text, _corpus_truncated = build_planning_context(corpus_max_bytes, corpus_path)
 
     current_repo_norm = normalize_repo_name(repo)
     allowed_gh_api_repos = set()
@@ -1045,8 +1055,11 @@ def main():
         max_response_bytes,
         request_timeout,
         max_requests,
-        planning_timeout,
-        int(os.getenv("TOOL_PLANNING_MAX_TOKENS", "400")),
+        turn_timeout,
+        int(
+            os.getenv("TOOL_MAX_TOKENS_PER_TURN")
+            or os.getenv("TOOL_PLANNING_MAX_TOKENS", "400")
+        ),
         result,
     )
     if not handled:
