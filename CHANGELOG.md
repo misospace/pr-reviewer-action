@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.3.1](https://github.com/misospace/pr-reviewer-action/compare/v2.3.0...v2.3.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **carry-forward:** propagate needs_full_review so unverifiable carried findings trigger a full review next run ([#551](https://github.com/misospace/pr-reviewer-action/issues/551)) ([845427e](https://github.com/misospace/pr-reviewer-action/commit/845427e4bd4faffc8e64887f5676c537b3e0f678)), closes [#544](https://github.com/misospace/pr-reviewer-action/issues/544)
+* **forgejo:** bound gh CLI subprocess calls with a timeout ([#548](https://github.com/misospace/pr-reviewer-action/issues/548)) ([d7f5670](https://github.com/misospace/pr-reviewer-action/commit/d7f5670f19d310f26ff9efae98d7f3fb8bb2fb57)), closes [#537](https://github.com/misospace/pr-reviewer-action/issues/537)
+* **forgejo:** distinguish "unknown" permission from transport failure in preflight ([#545](https://github.com/misospace/pr-reviewer-action/issues/545)) ([dd27aaf](https://github.com/misospace/pr-reviewer-action/commit/dd27aaf8e71939721a8d32487a80b85ef38b0fbf)), closes [#539](https://github.com/misospace/pr-reviewer-action/issues/539)
+* **forgejo:** make the Authorized Integration JWT cache thread-safe ([#547](https://github.com/misospace/pr-reviewer-action/issues/547)) ([57944ac](https://github.com/misospace/pr-reviewer-action/commit/57944ac4018ad7ff3f2cd1fd8da7481e673ee8cb)), closes [#538](https://github.com/misospace/pr-reviewer-action/issues/538)
+* **precheck:** re-review on an unchanged diff when the blocker was CI state ([#550](https://github.com/misospace/pr-reviewer-action/issues/550)) ([267b862](https://github.com/misospace/pr-reviewer-action/commit/267b8628cc680c18c01390d5f0de1a2d3b2b3e1a))
+* **precheck:** wire the [@ai-reviewer](https://github.com/ai-reviewer) dismiss directive into production ([#554](https://github.com/misospace/pr-reviewer-action/issues/554)) ([dd13151](https://github.com/misospace/pr-reviewer-action/commit/dd1315130eabe79480c42ae5355f444331e63e0e))
+
+
+### Chores
+
+* **tools:** rename dead tool_planning_* inputs to their actual purpose ([#552](https://github.com/misospace/pr-reviewer-action/issues/552)) ([75eefbc](https://github.com/misospace/pr-reviewer-action/commit/75eefbcb0bcfc396c86177ee31f4ca0369bfc046)), closes [#540](https://github.com/misospace/pr-reviewer-action/issues/540)
+
+
+### Refactors
+
+* **publish:** extract Publish step inline bash dispatcher to scripts/publish.sh ([#553](https://github.com/misospace/pr-reviewer-action/issues/553)) ([5b6b2cf](https://github.com/misospace/pr-reviewer-action/commit/5b6b2cf658ce634ba3e5b8eafe83ec2504600534)), closes [#541](https://github.com/misospace/pr-reviewer-action/issues/541)
+
 ## [2.3.0](https://github.com/misospace/pr-reviewer-action/compare/v2.2.1...v2.3.0) (2026-09-03)
 
 
