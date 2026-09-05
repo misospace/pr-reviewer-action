@@ -123,6 +123,80 @@ case "$(printf '%s' "$PUBLISH_MODE" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+# ── extract_review_metadata (restored plumbing) ───────────────────────
+# Roundtrip test (tests/test_carry_forward_roundtrip.sh) extracts this via
+# regex and sources it; this is the live implementation it exercises. Logic
+# remains in shell because it parses a stored published comment body that
+# contains reviewer-emitted metadata (not actionable config inputs),
+# independent of precheck decision logic. Writes previous-review-meta.json
+# plus the carried-forward state the review step consumes:
+# previous-findings.json (open findings) and previous-evidence.json
+# (evidence digest, tagged with the gathered-at head SHA).
+extract_review_metadata() {
+  local comment_body="$1"
+
+  LAST_HEAD_SHA=""
+  LAST_BASE_SHA=""
+  LAST_REVIEW_SCOPE=""
+  LAST_REVIEW_RESULT=""
+
+  rm -f previous-review-meta.json previous-findings.json previous-evidence.json
+
+  printf '%s' "$comment_body" | python3 -c "
+import json, re, sys
+from pr_reviewer.metadata import parse_metadata
+data = parse_metadata(sys.stdin.read())
+if data:
+    def hexsan(v):
+        return re.sub(r'[^0-9a-fA-F]', '', str(v or ''))[:64]
+    def enumsan(v):
+        return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
+    meta = {
+        'head_sha': hexsan(data.get('head_sha')),
+        'base_sha': hexsan(data.get('base_sha')),
+        'review_scope': enumsan(data.get('review_scope')),
+        'review_result': enumsan(data.get('review_result')),
+        # #544: the previous review could not assess a carried finding from
+        # its delta; the next run must be full scope (PREVIOUS_NEEDS_FULL_REVIEW).
+        'needs_full_review': bool(data.get('needs_full_review')),
+    }
+    with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, ensure_ascii=False)
+    raw = data.get('open_findings')
+    sanitized = []
+    if isinstance(raw, list):
+        for item in raw[:20]:
+            if not isinstance(item, dict):
+                continue
+            message = item.get('message')
+            if not isinstance(message, str) or not message.strip():
+                continue
+            line = item.get('line')
+            sanitized.append({
+                'severity': enumsan(item.get('severity')),
+                'category': enumsan(item.get('category')),
+                'file': str(item.get('file'))[:200] if isinstance(item.get('file'), str) else None,
+                'line': line if isinstance(line, int) and not isinstance(line, bool) and line > 0 else None,
+                'message': re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', message)[:200],
+            })
+    with open('previous-findings.json', 'w', encoding='utf-8') as fh:
+        json.dump(sanitized, fh, ensure_ascii=False)
+    digest = data.get('evidence_digest')
+    if isinstance(digest, str) and digest.strip():
+        clean = re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', digest)[:2000]
+        with open('previous-evidence.json', 'w', encoding='utf-8') as fh:
+            json.dump({'digest': clean, 'head_sha': hexsan(data.get('head_sha'))}, fh, ensure_ascii=False)
+" 2>/dev/null || true
+
+  if [[ -f previous-review-meta.json ]]; then
+    LAST_HEAD_SHA="$(jq -r '.head_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_BASE_SHA="$(jq -r '.base_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_REVIEW_SCOPE="$(jq -r '.review_scope // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
+    LAST_NEEDS_FULL_REVIEW="$(jq -r '.needs_full_review // false' previous-review-meta.json 2>/dev/null || echo false)"
+  fi
+}
+
 # Extract the PR head SHA and broad fingerprint from the last published comment.
 last_pr_sha="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-sha:\([^>]*\) -->$/\1/p' | head -n 1)"
 last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | head -n 1)"
@@ -136,7 +210,25 @@ fi
 # path (call #2 below); make sure nothing from the runner environment
 # leaks into call #1.
 unset PREVIOUS_HEAD_SHA PREVIOUS_BASE_SHA PREVIOUS_REVIEW_RESULT \
+  PREVIOUS_NEEDS_FULL_REVIEW \
   PREVIOUS_HEAD_IS_ANCESTOR COMPARE_RANGE_OK 2>/dev/null || true
+
+# Extract the last review's metadata BEFORE call #1: the needs_full_review
+# flag (#544) must reach the should-review decision, not just the scope
+# decision — otherwise the diff-unchanged guard would skip the very full
+# review the flag requests, and the PR would loop on the same incremental
+# diff forever.
+LAST_HEAD_SHA=""
+LAST_BASE_SHA=""
+LAST_REVIEW_SCOPE=""
+LAST_REVIEW_RESULT=""
+LAST_NEEDS_FULL_REVIEW="false"
+if [[ -n "$last_comment_body" ]]; then
+  extract_review_metadata "$last_comment_body"
+fi
+if [[ "$LAST_NEEDS_FULL_REVIEW" == "true" ]]; then
+  export PREVIOUS_NEEDS_FULL_REVIEW="true"
+fi
 
 # ── precheck call #1: marker-only should-review decision ──────────────
 # Runs before the PR object fetch so a diff-unchanged skip costs no
@@ -186,83 +278,8 @@ if data:
   exit 0
 fi
 
-# ── extract_review_metadata (restored plumbing) ───────────────────────
-# Roundtrip test (tests/test_carry_forward_roundtrip.sh) extracts this via
-# regex and sources it; this is the live implementation it exercises. Logic
-# remains in shell because it parses a stored published comment body that
-# contains reviewer-emitted metadata (not actionable config inputs),
-# independent of precheck decision logic. Writes previous-review-meta.json
-# plus the carried-forward state the review step consumes:
-# previous-findings.json (open findings) and previous-evidence.json
-# (evidence digest, tagged with the gathered-at head SHA).
-extract_review_metadata() {
-  local comment_body="$1"
-
-  LAST_HEAD_SHA=""
-  LAST_BASE_SHA=""
-  LAST_REVIEW_SCOPE=""
-  LAST_REVIEW_RESULT=""
-
-  rm -f previous-review-meta.json previous-findings.json previous-evidence.json
-
-  printf '%s' "$comment_body" | python3 -c "
-import json, re, sys
-from pr_reviewer.metadata import parse_metadata
-data = parse_metadata(sys.stdin.read())
-if data:
-    def hexsan(v):
-        return re.sub(r'[^0-9a-fA-F]', '', str(v or ''))[:64]
-    def enumsan(v):
-        return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
-    meta = {
-        'head_sha': hexsan(data.get('head_sha')),
-        'base_sha': hexsan(data.get('base_sha')),
-        'review_scope': enumsan(data.get('review_scope')),
-        'review_result': enumsan(data.get('review_result')),
-    }
-    with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
-        json.dump(meta, fh, ensure_ascii=False)
-    raw = data.get('open_findings')
-    sanitized = []
-    if isinstance(raw, list):
-        for item in raw[:20]:
-            if not isinstance(item, dict):
-                continue
-            message = item.get('message')
-            if not isinstance(message, str) or not message.strip():
-                continue
-            line = item.get('line')
-            sanitized.append({
-                'severity': enumsan(item.get('severity')),
-                'category': enumsan(item.get('category')),
-                'file': str(item.get('file'))[:200] if isinstance(item.get('file'), str) else None,
-                'line': line if isinstance(line, int) and not isinstance(line, bool) and line > 0 else None,
-                'message': re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', message)[:200],
-            })
-    with open('previous-findings.json', 'w', encoding='utf-8') as fh:
-        json.dump(sanitized, fh, ensure_ascii=False)
-    digest = data.get('evidence_digest')
-    if isinstance(digest, str) and digest.strip():
-        clean = re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', digest)[:2000]
-        with open('previous-evidence.json', 'w', encoding='utf-8') as fh:
-            json.dump({'digest': clean, 'head_sha': hexsan(data.get('head_sha'))}, fh, ensure_ascii=False)
-" 2>/dev/null || true
-
-  if [[ -f previous-review-meta.json ]]; then
-    LAST_HEAD_SHA="$(jq -r '.head_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_BASE_SHA="$(jq -r '.base_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_REVIEW_SCOPE="$(jq -r '.review_scope // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
-  fi
-}
-
-LAST_HEAD_SHA=""
-LAST_BASE_SHA=""
-LAST_REVIEW_SCOPE=""
-LAST_REVIEW_RESULT=""
-if [[ -n "$last_comment_body" ]]; then
-  extract_review_metadata "$last_comment_body"
-fi
+# (The last review's metadata was extracted before precheck call #1 above,
+# so the needs_full_review flag can reach the should-review decision, #544.)
 
 # ── Get the PR object once (review path only) ─────────────────────────
 if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then
@@ -365,6 +382,9 @@ fi
 export PREVIOUS_HEAD_SHA="$LAST_HEAD_SHA"
 export PREVIOUS_BASE_SHA="$LAST_BASE_SHA"
 export PREVIOUS_REVIEW_RESULT="$LAST_REVIEW_RESULT"
+# #544: the previous review flagged carried findings it could not assess from
+# its delta; precheck.py resolves full scope for this run (rule 4a).
+export PREVIOUS_NEEDS_FULL_REVIEW="$LAST_NEEDS_FULL_REVIEW"
 
 # ── precheck call #2: scope / baseline with validation verdicts ───────
 python3 -m pr_reviewer.precheck > precheck-result.json

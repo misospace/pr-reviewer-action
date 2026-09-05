@@ -135,5 +135,34 @@ check_not_contains "angle brackets stripped from digest by precheck" "$HOSTILE_D
 check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.13.4"
 
 echo ""
+echo "=== Incremental-insufficient escalation (#544): marker persists → precheck extracts → review reads ==="
+# Publish: the review step's needs_full_review output is persisted in the marker.
+MARKER_NFR="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=true build_metadata_marker "b" "p")"
+check_contains "marker carries needs_full_review" "$MARKER_NFR" '"needs_full_review":true'
+
+MARKER_NFR_OFF="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=false build_metadata_marker "b" "p")"
+check_not_contains "flag omitted when false" "$MARKER_NFR_OFF" "needs_full_review"
+
+# Precheck: extraction surfaces LAST_NEEDS_FULL_REVIEW for the scope resolver.
+BODY_NFR="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_NFR")"
+extract_review_metadata "$BODY_NFR"
+check "precheck extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
+
+# Review side: the helper the bash reviewer step imports reads the flag file.
+NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "
+from pr_reviewer.carry_forward import read_needs_full_review
+import json
+print(json.dumps(read_needs_full_review('needs-full-review.json')))
+")"
+check "missing flag file reads as not-needed" "$NFR_READ" '{"needs_full_review": false, "unverifiable": 0, "ids": []}'
+printf '{"needs_full_review": true, "unverifiable": 2, "ids": ["P1", "P2"]}\n' > needs-full-review.json
+NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "
+from pr_reviewer.carry_forward import read_needs_full_review
+import json
+print(json.dumps(read_needs_full_review('needs-full-review.json')))
+")"
+check "flag file reads as needed" "$NFR_READ" '{"needs_full_review": true, "unverifiable": 2, "ids": ["P1", "P2"]}'
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

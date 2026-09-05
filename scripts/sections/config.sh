@@ -522,7 +522,7 @@ from pr_reviewer.enforcement import apply_all_enforcement, apply_verdict_policy
 # completeness validation, then enforcement overlays.
 if '$carry_forward' == 'true':
     summary = apply_carry_forward()
-    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} forced_request_changes={summary['forced_request_changes']}\")
+    print(f\"Carry-forward: carried={summary['carried']} resolved={summary['resolved']} open={summary['open']} unverifiable={summary['unverifiable']} needs_full_review={summary['needs_full_review']} forced_request_changes={summary['forced_request_changes']}\")
 apply_verdict_policy('$verdict_policy')
 apply_required_check_validation('$validate_checks', '$validation_mode')
 apply_all_enforcement(

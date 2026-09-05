@@ -370,3 +370,37 @@ def test_resolve_review_scope_still_increments_without_the_flag():
         "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False
     )
     assert r.effective_review_scope == "incremental"
+
+
+# ── #544: the flag must also defeat the diff-unchanged skip guard ──────────
+
+def test_diff_unchanged_guard_deferred_when_previous_needed_full_review():
+    """The only way to clear a not_verifiable_from_delta finding is the full
+    review the flag requests; skipping would strand the PR on the same
+    incremental diff forever. (#544)"""
+    from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
+
+    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
+    again = evaluate_precheck(
+        "diff --git a/x b/x\n+one\n",
+        [first.broad_fingerprint],
+        config_hash="c",
+        previous_needs_full_review=True,
+    )
+    assert again.decision == ReviewDecision.REVIEW_NEEDED
+    assert "full review" in again.reason
+    # the fingerprint itself is unchanged; only the decision differs
+    assert again.broad_fingerprint == first.broad_fingerprint
+
+
+def test_diff_unchanged_guard_still_skips_without_the_flag():
+    from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
+
+    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
+    again = evaluate_precheck(
+        "diff --git a/x b/x\n+one\n",
+        [first.broad_fingerprint],
+        config_hash="c",
+        previous_needs_full_review=False,
+    )
+    assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
