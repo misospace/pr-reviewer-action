@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2](https://github.com/misospace/pr-reviewer-action/compare/v2.3.1...v2.3.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **config:** let a single-provider configuration start ([#555](https://github.com/misospace/pr-reviewer-action/issues/555)) ([47385d4](https://github.com/misospace/pr-reviewer-action/commit/47385d40fd7488cf822018bcfc9ba380d652f2ce))
+
 ## [2.3.1](https://github.com/misospace/pr-reviewer-action/compare/v2.3.0...v2.3.1) (2026-09-05)
 
 
