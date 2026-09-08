@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.3](https://github.com/misospace/pr-reviewer-action/compare/v2.3.2...v2.3.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **action:** read fail_on_request_changes gate verdict from the output context ([#558](https://github.com/misospace/pr-reviewer-action/issues/558)) ([6cfa5bf](https://github.com/misospace/pr-reviewer-action/commit/6cfa5bfa29e68ed426bf943c9072e752eeefa313)), closes [#557](https://github.com/misospace/pr-reviewer-action/issues/557)
+* **corpus:** gate the Tool Harness Findings section on harness output ([#560](https://github.com/misospace/pr-reviewer-action/issues/560)) ([243336a](https://github.com/misospace/pr-reviewer-action/commit/243336ad3dc2a9974320365ed15f300284fd6873))
+
 ## [2.3.2](https://github.com/misospace/pr-reviewer-action/compare/v2.3.1...v2.3.2) (2026-09-07)
 
 
