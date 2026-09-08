@@ -993,16 +993,21 @@ runs:
       # Gate the merge on the final verdict. Runs after publishing, so the
       # review comment and inline findings have already landed on the PR.
       # Reads the same value the `verdict` output reports (post-verdict_policy,
-      # post-evidence-blocker and tool-failure enforcement) from the output
-      # file, so the gate never re-derives the verdict from the raw model
-      # output. A model outage (on_model_failure=notice) writes no
+      # post-evidence-blocker and tool-failure enforcement) from the step
+      # output context — the same expression the top-level `verdict` output
+      # uses, so the carry-forward / diff-unchanged paths that flow through
+      # steps.precheck.outputs.verdict are gated too. It must NOT read
+      # $GITHUB_OUTPUT: in composite actions that is a per-step file reset
+      # between steps, so a grep there always returns empty and the gate is a
+      # no-op (#557). A model outage (on_model_failure=notice) writes no
       # request_changes verdict, so it does not wedge merges.
       if: ${{ inputs.fail_on_request_changes == 'true' }}
       shell: bash
+      env:
+        FINAL_VERDICT: ${{ steps.review.outputs.verdict || steps.precheck.outputs.verdict }}
       run: |
-        verdict="$(grep '^verdict=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
-        if [ "$verdict" = "request_changes" ]; then
+        if [ "$FINAL_VERDICT" = "request_changes" ]; then
           echo "::error::Final verdict is request_changes; failing the step (fail_on_request_changes=true)."
           exit 1
         fi
-        echo "Final verdict is '${verdict:-<none>}'; not blocking (fail_on_request_changes=true)."
+        echo "Final verdict is '${FINAL_VERDICT:-<none>}'; not blocking (fail_on_request_changes=true)."

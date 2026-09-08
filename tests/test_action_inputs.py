@@ -214,13 +214,52 @@ def test_fallback_inputs_inherit_from_primary():
     )
 
 
+def _extract_gate_step(content: str):
+    """Return the full text of the 'Fail on request_changes' step.
+
+    The step spans from its ``- name:`` line to the line before the next
+    step (``- name:``) or the end of the runs section.
+    """
+    m = re.search(r"^    - name: Fail on request_changes\n", content, re.MULTILINE)
+    assert m, "action.yml must contain a 'Fail on request_changes' step."
+    start = m.start()
+    nxt = re.search(r"^    - name: ", content[m.end():], re.MULTILINE)
+    end = m.end() + nxt.start() if nxt else len(content)
+    return content[start:end]
+
+
+def _extract_gate_run_body(gate_step: str) -> str:
+    """Return the bash body of the gate step's ``run: |`` block."""
+    m = re.search(r"^      run: \|\n((?:^        .*\n?)+)", gate_step, re.MULTILINE)
+    assert m, "the gate step must have a 'run: |' block."
+    return m.group(1)
+
+
+def _run_gate_body(body: str, final_verdict: str) -> int:
+    """Execute the gate's run body in bash with FINAL_VERDICT set.
+
+    Simulates the runner: the step's env: block is materialized as an
+    environment variable, and the body runs under bash. Returns the exit
+    code (0 = gate passed, 1 = gate fired).
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        ["bash", "-c", body],
+        env={"FINAL_VERDICT": final_verdict, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode
+
+
 def test_fail_on_request_changes_input():
     """fail_on_request_changes gates merges without a GitHub App (issue #518).
 
     - Declared with default "false" so existing consumers see no change.
-    - The gate step reads the final verdict from $GITHUB_OUTPUT (the same
-      value the `verdict` output reports) and exits non-zero only on
-      request_changes.
+    - The gate step reads the final verdict from the step output context
+      (the same expression the top-level `verdict` output uses) and exits
+      non-zero only on request_changes.
     - The gate runs after the publish step, so the review comment and inline
       findings land on the PR before the step goes red.
     """
@@ -237,26 +276,44 @@ def test_fail_on_request_changes_input():
         'default "false" so existing consumers see no behaviour change.'
     )
 
-    # The gate step exists, is conditional on the input, and reads the final
-    # verdict from the output file rather than re-deriving it.
-    gate = re.search(
-        r"^    - name: Fail on request_changes\n"
-        r"(?:^      .*\n)*?^      if: \$\{\{ inputs\.fail_on_request_changes == 'true' \}\}\n"
-        r"(?:^      .*\n)*?^      run: \|\n"
-        r"(?:^        .*\n)*?^          exit 1\n",
-        content,
-        re.MULTILINE,
+    # The gate step exists, is conditional on the input, and exits non-zero.
+    gate_step = _extract_gate_step(content)
+    assert (
+        "if: ${{ inputs.fail_on_request_changes == 'true' }}" in gate_step
+    ), "the gate step must be conditional on inputs.fail_on_request_changes."
+    assert "exit 1" in gate_step, (
+        "the gate step must exit non-zero when the verdict is request_changes."
     )
-    assert gate, (
-        "action.yml must contain a 'Fail on request_changes' step that is "
-        "conditional on inputs.fail_on_request_changes and exits non-zero."
+
+    # The gate must consume the action-level verdict output context — the
+    # same expression the top-level `verdict` output uses, so the
+    # carry-forward / diff-unchanged paths that flow through
+    # steps.precheck.outputs.verdict are gated too.
+    assert (
+        "steps.review.outputs.verdict || steps.precheck.outputs.verdict" in gate_step
+    ), (
+        "the gate must read the final verdict from the step output context "
+        "(steps.review.outputs.verdict || steps.precheck.outputs.verdict), "
+        "the same expression the top-level `verdict` output uses."
     )
-    gate_body = gate.group(0)
-    assert '"$GITHUB_OUTPUT"' in gate_body, (
-        "the gate must read the final verdict from $GITHUB_OUTPUT (the same "
-        "value the `verdict` output reports), not re-derive it."
+
+    # Simulate both verdict states by executing the gate's run body in bash
+    # with the env: block materialized as FINAL_VERDICT.
+    run_body = _extract_gate_run_body(gate_step)
+    assert "$GITHUB_OUTPUT" not in run_body, (
+        "the gate's run body must not read $GITHUB_OUTPUT: in composite "
+        "actions it is a per-step file reset between steps, so the grep "
+        "always returns empty and the gate never fires (#557)."
     )
-    assert 'verdict' in gate_body and 'request_changes' in gate_body
+    assert _run_gate_body(run_body, "request_changes") == 1, (
+        "the gate must exit non-zero when the final verdict is request_changes."
+    )
+    assert _run_gate_body(run_body, "approve") == 0, (
+        "the gate must pass when the final verdict is approve."
+    )
+    assert _run_gate_body(run_body, "") == 0, (
+        "the gate must pass when there is no verdict (e.g. on_model_failure=notice)."
+    )
 
     # The gate runs after the publish step (a red check with no explanation
     # attached is worse than no gate).
