@@ -14,7 +14,12 @@ sanitize_review_markdown() {
   local output_file="$1"
   printf '%s\n' "$REVIEW_MARKDOWN" > "$output_file"
   python3 "${GITHUB_ACTION_PATH}/scripts/strip_metadata_markers.py" "$output_file"
-  python3 "${GITHUB_ACTION_PATH}/scripts/sanitize_review_markdown.py" "$output_file"
+  # UPSTREAM_LINK_MODE (#561): "inert" (default) rewrites upstream
+  # PR/issue/commit/compare URLs to plain text; "togithub" rewrites them to
+  # https://togithub.com/... so they stay clickable without notification or
+  # auto-link noise.
+  UPSTREAM_LINK_MODE="${UPSTREAM_LINK_MODE:-inert}" \
+    python3 "${GITHUB_ACTION_PATH}/scripts/sanitize_review_markdown.py" "$output_file"
 
   # Deterministic backstop for #415: even with a clean, header-free corpus the
   # model confabulates "## Linked Issue Fit" / "## Evidence Provider Findings" /

@@ -155,7 +155,14 @@ def finding_to_body(finding: dict) -> str:
     suffix = f" ({category})" if category and category != "other" else ""
     message = str(finding.get("message") or "").strip()
     body = f"**{label}{suffix}:** {message}\n\n_Automated finding from AI PR review._"
-    return sanitize_markdown(mask_secrets(body))
+    # UPSTREAM_LINK_MODE (#561) keeps inline findings consistent with the
+    # summary comment's upstream-link handling. Inline comment building is
+    # best-effort, so an unrecognized mode falls back to inert rather than
+    # failing the publish.
+    link_mode = os.environ.get("UPSTREAM_LINK_MODE", "inert")
+    if link_mode not in ("inert", "togithub"):
+        link_mode = "inert"
+    return sanitize_markdown(mask_secrets(body), link_mode=link_mode)
 
 
 def load_suppressed_fingerprints(path) -> set:

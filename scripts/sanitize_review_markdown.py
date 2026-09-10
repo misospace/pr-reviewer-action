@@ -12,9 +12,22 @@ Usage:
   cat review-body.md | python3 sanitize_review_markdown.py          # stdin → stdout
   python3 sanitize_review_markdown.py review-body.md                 # file in-place
   python3 sanitize_review_markdown.py --dry-run review-body.md      # preview only
+  python3 sanitize_review_markdown.py --link-mode togithub f.md     # keep links clickable
+
+Link modes (#561):
+  inert    (default) — upstream references become plain text.
+  togithub — PR/issue/commit/compare URLs are rewritten to
+             https://togithub.com/... so they stay clickable without
+             triggering GitHub notifications or cross-repo auto-linking.
+             Ambiguous shorthand references (owner/repo#123, bare #123)
+             stay inert in both modes because a #N alone cannot be
+             disambiguated between a PR and an issue.
 """
 
+from __future__ import annotations
+
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -75,32 +88,54 @@ _RE_MENTION = re.compile(
 )
 
 
-def sanitize_pr_url(match: re.Match) -> str:
+def _togithub_url(match: re.Match) -> str:
+    """Rewrite a github.com URL to its togithub.com equivalent.
+
+    togithub.com redirects to the same page but does not trigger GitHub
+    notifications or cross-repository auto-linking (#561).
+    """
+    return match.group(0).replace("github.com", "togithub.com", 1)
+
+
+def _inert_pr_url(match: re.Match) -> str:
     """Convert GitHub PR URL to inert text."""
-    owner_repo = match.group(1)
-    pr_num = match.group(2)
-    return f"upstream {owner_repo} PR {pr_num}"
+    return f"upstream {match.group(1)} PR {match.group(2)}"
 
 
-def sanitize_issue_url(match: re.Match) -> str:
+def _inert_issue_url(match: re.Match) -> str:
     """Convert GitHub issue URL to inert text."""
-    owner_repo = match.group(1)
-    issue_num = match.group(2)
-    return f"upstream {owner_repo} issue {issue_num}"
+    return f"upstream {match.group(1)} issue {match.group(2)}"
 
 
-def sanitize_commit_url(match: re.Match) -> str:
+def _inert_commit_url(match: re.Match) -> str:
     """Convert GitHub commit URL to inert text."""
-    owner_repo = match.group(1)
-    sha = match.group(2)
-    return f"upstream {owner_repo} commit {sha}"
+    return f"upstream {match.group(1)} commit {match.group(2)}"
 
 
-def sanitize_compare_url(match: re.Match) -> str:
+def _inert_compare_url(match: re.Match) -> str:
     """Convert GitHub compare URL to inert text."""
-    owner_repo = match.group(1)
-    spec = match.group(2)
-    return f"upstream {owner_repo} compare {spec}"
+    return f"upstream {match.group(1)} compare {match.group(2)}"
+
+
+def _url_replacements(link_mode: str) -> list:
+    """Return (pattern, replacement) pairs for upstream URLs in *link_mode*.
+
+    "inert" rewrites each URL to plain text; "togithub" rewrites it to a
+    clickable https://togithub.com/... link (#561).
+    """
+    if link_mode == "togithub":
+        return [
+            (_RE_GH_PR_URL, _togithub_url),
+            (_RE_GH_ISSUE_URL, _togithub_url),
+            (_RE_GH_COMMIT_URL, _togithub_url),
+            (_RE_GH_COMPARE_URL, _togithub_url),
+        ]
+    return [
+        (_RE_GH_PR_URL, _inert_pr_url),
+        (_RE_GH_ISSUE_URL, _inert_issue_url),
+        (_RE_GH_COMMIT_URL, _inert_commit_url),
+        (_RE_GH_COMPARE_URL, _inert_compare_url),
+    ]
 
 
 def sanitize_cross_repo_ref(match: re.Match) -> str:
@@ -133,14 +168,20 @@ def sanitize_mention(match: re.Match) -> str:
 # higher-risk failure.
 _RE_CODE_SEGMENT = re.compile(r"(`[^`\n]+`)")
 
+# Link modes for upstream references (#561): "inert" (default) rewrites
+# references to plain text; "togithub" rewrites PR/issue/commit/compare URLs
+# to https://togithub.com/... so they stay clickable without notification or
+# auto-link noise. Shorthand references (owner/repo#123, bare #123) stay
+# inert in both modes — a #N alone cannot be disambiguated between a PR and
+# an issue, so there is no unambiguous togithub.com target for them.
+LINK_MODES = ("inert", "togithub")
 
-def _sanitize_prose(text: str) -> str:
+
+def _sanitize_prose(text: str, link_mode: str) -> str:
     """Apply all substitutions to a prose (non-code) segment."""
     # 1. Sanitize URLs first (most specific patterns)
-    text = _RE_GH_PR_URL.sub(sanitize_pr_url, text)
-    text = _RE_GH_ISSUE_URL.sub(sanitize_issue_url, text)
-    text = _RE_GH_COMMIT_URL.sub(sanitize_commit_url, text)
-    text = _RE_GH_COMPARE_URL.sub(sanitize_compare_url, text)
+    for pattern, replacement in _url_replacements(link_mode):
+        text = pattern.sub(replacement, text)
 
     # 2. Sanitize cross-repo references (owner/repo#123)
     text = _RE_CROSS_REPO_REF.sub(sanitize_cross_repo_ref, text)
@@ -154,8 +195,14 @@ def _sanitize_prose(text: str) -> str:
     return text
 
 
-def sanitize_markdown(text: str) -> str:
+def sanitize_markdown(text: str, link_mode: str = "inert") -> str:
     """Return *text* with upstream references neutralized.
+
+    *link_mode* controls how upstream PR/issue/commit/compare URLs are
+    handled: "inert" (default) rewrites them to plain text; "togithub"
+    rewrites them to https://togithub.com/... so they stay clickable without
+    triggering notifications or cross-repo auto-linking (#561). Shorthand
+    references (owner/repo#123, bare #123) are inert in both modes.
 
     Substitutions skip inline code spans — GitHub does not auto-link or ping
     there, and rewriting quoted code (e.g. `#123` in a YAML example) corrupts
@@ -167,10 +214,12 @@ def sanitize_markdown(text: str) -> str:
     - Release URLs (not sanitized — they are safe single links)
     - Local repo references that are part of the review context
     """
+    if link_mode not in LINK_MODES:
+        raise ValueError(f"unknown upstream link mode: {link_mode!r} (expected one of {', '.join(LINK_MODES)})")
     parts = _RE_CODE_SEGMENT.split(text)
     # re.split with one capture group alternates prose / code segments.
     return "".join(
-        part if index % 2 else _sanitize_prose(part)
+        part if index % 2 else _sanitize_prose(part, link_mode)
         for index, part in enumerate(parts)
     )
 
@@ -185,6 +234,17 @@ def main() -> None:
         action="store_true",
         help="Print the sanitized output without modifying the file.",
     )
+    parser.add_argument(
+        "--link-mode",
+        choices=("inert", "togithub"),
+        default=os.environ.get("UPSTREAM_LINK_MODE", "inert"),
+        help=(
+            "How upstream PR/issue/commit/compare URLs are handled: 'inert' "
+            "rewrites them to plain text (default); 'togithub' rewrites them "
+            "to https://togithub.com/... so they stay clickable without "
+            "notification or auto-link noise (#561)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.file:
@@ -192,7 +252,7 @@ def main() -> None:
     else:
         content = sys.stdin.read()
 
-    sanitized = sanitize_markdown(content)
+    sanitized = sanitize_markdown(content, link_mode=args.link_mode)
 
     if args.dry_run:
         print(sanitized)

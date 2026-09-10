@@ -173,6 +173,8 @@ The result is exposed as the `required_checks` output (`complete` / `incomplete`
 
 Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the review markdown to neutralize upstream GitHub references (PR URLs, issue URLs, commit URLs, compare URLs, cross-repo `owner/repo#123` references, and bare `#123` references). This prevents GitHub from auto-linking them into the reviewed repository, which would create notification noise and misleading linkbacks to unrelated projects. Sanitization is documented as P0 hygiene in [issue #132](https://github.com/misospace/pr-reviewer-action/issues/132).
 
+By default upstream PR/issue/commit/compare URLs are rewritten to inert text. Set `upstream_link_mode: togithub` to instead rewrite them to `https://togithub.com/...` — the links stay clickable (togithub.com redirects to the same GitHub page) but do not trigger notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) stay inert in both modes because a `#N` alone cannot be disambiguated between a PR and an issue.
+
 ### 🚫 Empty conditional sections
 
 Every conditional review section is tied to a corpus trigger: **Linked Issue Fit** to linked-issue context, **Evidence Provider Findings** to provider output, **Tool Harness Findings** to tool output, **Standards Compliance** to a resolved standards file, and **Unknowns or Needs Verification** to incomplete evidence. When a trigger is unmet the section is omitted entirely rather than emitted with "No findings" filler.
@@ -274,6 +276,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `allow_approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
 | `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
 | `cleanup_previous_native_reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
+| `upstream_link_mode` | How upstream GitHub PR/issue/commit/compare URLs in the published review are handled: `inert` (default) rewrites them to plain text; `togithub` rewrites them to `https://togithub.com/...` so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) are inert in both modes. | No | `inert` |
 | `comment_marker` | HTML marker for the managed PR comment | No | `<!-- ai-pr-reviewer -->` |
 
 </details>

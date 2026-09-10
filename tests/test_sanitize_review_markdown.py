@@ -306,3 +306,76 @@ class TestInlineCodeSpansPreserved:
         result = sanitize_markdown("a stray ` here, then #123 and @user")
         assert "PR 123" in result
         assert "@user" not in result
+
+
+class TestTogithubLinkMode:
+    """togithub mode (#561): upstream PR/issue/commit/compare URLs are
+    rewritten to https://togithub.com/... so they stay clickable without
+    triggering notifications or cross-repo auto-linking. Shorthand refs
+    (owner/repo#123, bare #123) stay inert in both modes."""
+
+    def test_pr_url_becomes_togithub_link(self):
+        text = "See https://github.com/itzg/mc-router/pull/552 for details."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://togithub.com/itzg/mc-router/pull/552" in result
+        assert "https://github.com/itzg/mc-router/pull/552" not in result
+
+    def test_issue_url_becomes_togithub_link(self):
+        text = "Check https://github.com/itzg/mc-router/issues/552."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://togithub.com/itzg/mc-router/issues/552" in result
+        assert "https://github.com/itzg/mc-router/issues/552" not in result
+
+    def test_commit_url_becomes_togithub_link(self):
+        text = "Commit https://github.com/owner/repo/commit/abc1234 is relevant."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://togithub.com/owner/repo/commit/abc1234" in result
+        assert "https://github.com/owner/repo/commit/abc1234" not in result
+
+    def test_compare_url_becomes_togithub_link(self):
+        text = "Diff https://github.com/owner/repo/compare/v1.42.1...v1.43.0."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://togithub.com/owner/repo/compare/v1.42.1...v1.43.0" in result
+        assert "https://github.com/owner/repo/compare/v1.42.1...v1.43.0" not in result
+
+    def test_http_url_becomes_togithub_link(self):
+        text = "See http://github.com/owner/repo/pull/7."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "http://togithub.com/owner/repo/pull/7" in result
+
+    def test_release_url_stays_github_in_togithub_mode(self):
+        """Release URLs are preserved as-is in both modes (safe single links)."""
+        text = "See https://github.com/itzg/mc-router/releases/tag/v1.43.0."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://github.com/itzg/mc-router/releases/tag/v1.43.0" in result
+
+    def test_shorthand_refs_stay_inert_in_togithub_mode(self):
+        """owner/repo#123 and bare #123 have no unambiguous togithub target."""
+        text = "itzg/mc-router#552 and related #527."
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "itzg/mc-router PR 552" in result
+        assert "PR 527" in result
+        assert "togithub.com" not in result
+
+    def test_mentions_still_neutralized_in_togithub_mode(self):
+        result = sanitize_markdown("Thanks @octocat", link_mode="togithub")
+        assert "@​octocat" in result
+        assert "@octocat" not in result
+
+    def test_inert_mode_is_default(self):
+        text = "See https://github.com/owner/repo/pull/9."
+        assert "upstream owner/repo PR 9" in sanitize_markdown(text)
+        assert "togithub.com" not in sanitize_markdown(text)
+
+    def test_explicit_inert_mode_matches_default(self):
+        text = "See https://github.com/owner/repo/pull/9."
+        assert sanitize_markdown(text) == sanitize_markdown(text, link_mode="inert")
+
+    def test_unknown_link_mode_rejected(self):
+        with pytest.raises(ValueError):
+            sanitize_markdown("x", link_mode="bogus")
+
+    def test_togithub_url_in_code_block(self):
+        text = "```\nhttps://github.com/owner/repo/pull/99\n```"
+        result = sanitize_markdown(text, link_mode="togithub")
+        assert "https://togithub.com/owner/repo/pull/99" in result

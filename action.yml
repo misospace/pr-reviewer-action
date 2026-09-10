@@ -323,6 +323,15 @@ inputs:
       is attempted when permissions allow but is secondary to visual cleanup.
     required: false
     default: "auto"
+  upstream_link_mode:
+    description: >-
+      How upstream GitHub PR/issue/commit/compare URLs in the published review are handled.
+      `inert` (default) rewrites them to plain text so GitHub never auto-links them.
+      `togithub` rewrites them to https://togithub.com/... so they stay clickable without
+      triggering notifications or cross-repository auto-linking. Shorthand references
+      (owner/repo#123, bare #123) are inert in both modes.
+    required: false
+    default: "inert"
   context_limit_mode:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
@@ -960,6 +969,7 @@ runs:
         INLINE_FINDINGS: ${{ inputs.inline_findings }}
         INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
         CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
+        UPSTREAM_LINK_MODE: ${{ inputs.upstream_link_mode }}
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
