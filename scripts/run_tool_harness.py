@@ -355,10 +355,18 @@ def normalize_tool_request(raw_req):
     args = raw_req.get("args")
     if not isinstance(args, dict):
         args = {}
-    # Promote known top-level params when "args" wasn't nested.
+    # Promote known top-level string params when "args" wasn't nested.
     for key in ("path", "endpoint", "url", "pattern", "command", "query"):
         if key not in args and isinstance(raw_req.get(key), str):
             args[key] = raw_req[key]
+    # max_results is an integer param (git_grep); promote a top-level int so a
+    # model that flattened it the same way as string params still forwards it.
+    if (
+        tool_name == "git_grep"
+        and "max_results" not in args
+        and isinstance(raw_req.get("max_results"), int)
+    ):
+        args["max_results"] = raw_req["max_results"]
     # gh_api accepts "path" as an alias for "endpoint".
     if tool_name == "gh_api" and "endpoint" not in args and isinstance(args.get("path"), str):
         args["endpoint"] = args["path"]

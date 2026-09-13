@@ -247,15 +247,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "git_grep",
         "description": (
-            "Search the repository for a literal pattern using git grep. "
-            "Returns up to 60 matching lines with file:lineno:content."
+            "Search the repository's file contents with git grep. Returns up "
+            "to 60 matching lines as file:lineno:content (fewer when "
+            "max_results is set, at most 200). Patterns use basic-regex "
+            "semantics, so metacharacters such as '.' and '*' are active — "
+            "escape them (e.g. '\\.env') to search literally. The optional "
+            "path scopes the search to a repository subtree."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Literal pattern (no regex metachars).",
+                    "description": (
+                        "Basic-regex pattern (metacharacters such as '.' and "
+                        "'*' are active; escape them for a literal search)."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional repository-relative directory to search "
+                        "(default: the whole repository). Must stay inside the "
+                        "workspace; traversal, symlink escapes, and sensitive "
+                        "paths are rejected."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": (
+                        "Optional maximum number of matching lines to return "
+                        "(clamped to 1..200; default 60)."
+                    ),
                 },
             },
             "required": ["pattern"],

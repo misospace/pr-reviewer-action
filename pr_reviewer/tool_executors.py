@@ -139,11 +139,79 @@ def read_file(path, workspace_root, offset=None, limit=None):
         "range": {"offset": start + 1, "lines": len(lines[start:end]), "total_lines": len(lines)},
     }
 
-def git_grep(pattern, workspace_root, request_timeout=15):
-    """Run git grep and return matched lines."""
+# Result-cap bounds for git_grep (issue #568). The default (60) is the
+# historical cap so callers that don't pass max_results are behaviour-
+# compatible; the upper bound keeps any single tool response bounded before
+# it reaches the model (a weak model can ask for "10000" without blowing the
+# response budget).
+GIT_GREP_DEFAULT_MAX_RESULTS = 60
+GIT_GREP_MAX_RESULTS_LIMIT = 200
+
+
+def clamp_grep_max_results(value, default=GIT_GREP_DEFAULT_MAX_RESULTS):
+    """Clamp an optional max_results arg to ``[1, GIT_GREP_MAX_RESULTS_LIMIT]``.
+
+    ``None`` (argument absent) and non-integer values both fall back to the
+    default so a malformed model value degrades to the historical behaviour
+    rather than failing the call.
+    """
+    n = _opt_int(value)
+    if n is None:
+        return default
+    return max(1, min(n, GIT_GREP_MAX_RESULTS_LIMIT))
+
+
+def _grep_pathspec(resolved, workspace_root):
+    """Turn a resolved path into a git pathspec string.
+
+    Prefer a repo-relative pathspec (shorter, and what the model would name);
+    fall back to the absolute path only when the workspace root is itself a
+    symlink and no longer normalises to its target.
+    """
+    root = Path(workspace_root).resolve()
+    try:
+        rel = resolved.relative_to(root).as_posix()
+    except ValueError:
+        rel = ""
+    return rel or "."
+
+
+def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results=None):
+    """Run git grep and return matched lines as ``file:lineno:content``.
+
+    ``path`` optionally scopes the search to a repo-relative subtree. It is
+    validated through the shared workspace resolver, so traversal (``../``),
+    symlink escapes, and sensitive files (``.env``/``.pem``/credentials) are
+    rejected exactly like ``read_file``/``git_blame``. ``max_results`` bounds
+    how many matched lines are returned (clamped to 1..200; default 60 = the
+    historical cap).
+
+    Patterns use git's default (basic regular expression) matching, so
+    metacharacters like ``.`` and ``*`` are active — escape them for a literal
+    search. Both the pattern and the path are placed after ``--`` in an argv
+    list (never a shell string), so neither can be re-read as a git option.
+    """
+    max_results = clamp_grep_max_results(max_results)
+    args = ["git", "grep", "-n", "--", pattern]
+    if path is None:
+        # No explicit path: preserve the historical whole-worktree
+        # invocation byte-for-byte (single ``--`` before the pattern, ``.``
+        # pathspec) so existing callers and argv assertions are unchanged.
+        args.append(".")
+    else:
+        text = str(path).strip()
+        if not text:
+            # A model-emitted blank path means "whole worktree", matching the
+            # no-argument behaviour.
+            args.append(".")
+        else:
+            resolved, err = _resolve_workspace_path(text, workspace_root)
+            if err:
+                return {"error": err}
+            args += ["--", _grep_pathspec(resolved, workspace_root)]
     try:
         result = subprocess.run(
-            ["git", "grep", "-n", "--", pattern, "."],
+            args,
             cwd=workspace_root,
             capture_output=True,
             text=True,
@@ -151,7 +219,7 @@ def git_grep(pattern, workspace_root, request_timeout=15):
         )
         if result.returncode not in (0, 1):
             return {"error": f"git grep failed: {result.stderr.strip()}"}
-        lines = result.stdout.strip().splitlines()[:60]
+        lines = result.stdout.strip().splitlines()[:max_results]
         return {"matches": lines}
     except subprocess.TimeoutExpired:
         return {"error": f"git grep timed out after {request_timeout}s"}
@@ -440,13 +508,25 @@ def execute_tool_request(
             pattern = args.get("pattern", "")
             if not pattern:
                 raise ValueError("Missing 'pattern' argument")
-            res = git_grep(pattern, workspace_root, request_timeout)
+            # Clamp/normalise here (not just in git_grep) so the response the
+            # model receives is bounded by exactly the same cap the executor
+            # used when it produced the matches — the two can't drift apart.
+            max_results = clamp_grep_max_results(
+                args.get("max_results"), GIT_GREP_DEFAULT_MAX_RESULTS
+            )
+            res = git_grep(
+                pattern,
+                workspace_root,
+                request_timeout,
+                path=args.get("path"),
+                max_results=max_results,
+            )
             if res.get("error"):
                 raise ValueError(res["error"])
             matches = res.get("matches", [])
             text = "\n".join(matches)
             text, _ = mask_and_truncate(text, max_response_bytes)
-            tool_result["result"] = {"matches": matches[:60]}
+            tool_result["result"] = {"matches": matches[:max_results]}
 
         elif tool_name == "gh_api":
             endpoint = args.get("endpoint", "")

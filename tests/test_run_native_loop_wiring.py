@@ -7,6 +7,7 @@ path that writes nothing so the caller falls back to the planner.
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -776,3 +777,60 @@ def test_verdict_harness_body_indexes_every_executed_call():
     assert "3 issued; stop reason: tool-call-budget-exhausted" in body
     assert "1. `read_file` (ok)" in body
     assert "2. `web_fetch` (error)" in body
+
+
+# ---------------------------------------------------------------------------
+# #568: model-emitted git_grep optional args (path/max_results) must survive
+# normalization and reach the executor, and the scoped result must come back.
+# ---------------------------------------------------------------------------
+
+def test_native_loop_forwards_git_grep_optional_args(monkeypatch, tmp_path):
+    # A real throwaway repo in tmp_path so the scoped grep runs for real.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "root.txt").write_text("needle at root\n", encoding="utf-8")
+    (sub / "a.txt").write_text("needle in sub\n", encoding="utf-8")
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "Tester"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "seed"],
+    ):
+        subprocess.run(cmd, cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    # The model issues a scoped git_grep with BOTH new optional args, then stops.
+    handled, result = _run(
+        monkeypatch,
+        tmp_path,
+        [
+            _openai_call(
+                "c1",
+                "git_grep",
+                '{"pattern": "needle", "path": "sub", "max_results": 5}',
+            ),
+            _openai_text("found it in the subtree"),
+        ],
+    )
+    assert handled is True
+    assert result["mode"] == "native_loop"
+    assert result["stop_reason"] == "model-stopped"
+
+    # The executor must have received the optional args (forwarded by
+    # normalize_tool_request), and the scoped result must reflect ONLY the
+    # sub/ subtree — proving the args reached git and were respected.
+    grep_call = next(c for c in result["tool_calls"] if c["tool"] == "git_grep")
+    assert grep_call["args"] == {"pattern": "needle", "path": "sub", "max_results": 5}
+    grep_result = next(r for r in result["tool_results"] if r["tool"] == "git_grep")
+    assert grep_result["status"] == "ok"
+    matches = grep_result["result"]["matches"]
+    assert matches == ["sub/a.txt:1:needle in sub"]
+    # The unscoped root match must NOT appear — scoping is in effect.
+    assert not any(m.startswith("root.txt:") for m in matches)
+
+    # And the normalized request that reached the executor carries both args.
+    tool, args = rth.normalize_tool_request(
+        {"tool": "git_grep", "args": {"pattern": "needle", "path": "sub", "max_results": 5}}
+    )
+    assert tool == "git_grep"
+    assert args == {"pattern": "needle", "path": "sub", "max_results": 5}

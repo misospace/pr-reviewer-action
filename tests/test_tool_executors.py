@@ -137,6 +137,56 @@ def test_execute_tool_request_git_grep_missing_pattern() -> None:
     assert "pattern" in res.get("result", {}).get("error", "").lower()
 
 
+def test_execute_tool_request_git_grep_forwards_optional_args() -> None:
+    """Model-emitted optional args (path / max_results) must reach the
+    executor — the whole point of the #568 contract is that they flow through
+    execute_tool_request to git_grep unchanged."""
+    fake_grep = {"matches": ["sub/a.py:1:foo"]}
+    with patch.object(tool_executors, "git_grep", return_value=fake_grep) as gg:
+        res = _call("git_grep", {"pattern": "foo", "path": "pr_reviewer", "max_results": 40})
+    assert gg.called
+    # git_grep is called as (pattern, workspace_root, request_timeout,
+    # path=..., max_results=...). The two new options must be present (clamped
+    # at the executor boundary) when the subprocess runs.
+    (pattern, _ws, _timeout) = gg.call_args[0]
+    assert pattern == "foo"
+    assert gg.call_args.kwargs.get("path") == "pr_reviewer"
+    assert gg.call_args.kwargs.get("max_results") == 40
+    assert res.get("status") == "ok"
+    assert res["result"]["matches"] == ["sub/a.py:1:foo"]
+
+
+def test_execute_tool_request_git_grep_clamps_oversized_max_results() -> None:
+    """An oversized max_results is clamped to 200 both at the executor boundary
+    and in the returned payload — schema/normalization/executor agree."""
+    fake_grep = {"matches": ["f.py:%d:x" % i for i in range(1, 202)]}
+    with patch.object(tool_executors, "git_grep", return_value=fake_grep) as gg:
+        res = _call("git_grep", {"pattern": "x", "max_results": 10000})
+    assert gg.call_args.kwargs.get("max_results") == 200
+    assert res.get("status") == "ok"
+    assert len(res["result"]["matches"]) <= 200
+
+
+def test_execute_tool_request_git_grep_default_max_results_preserved() -> None:
+    """No max_results → the historical default of 60 is forwarded."""
+    fake_grep = {"matches": []}
+    with patch.object(tool_executors, "git_grep", return_value=fake_grep) as gg:
+        _call("git_grep", {"pattern": "x"})
+    assert gg.call_args.kwargs.get("max_results") == 60
+
+
+def test_clamp_grep_max_results() -> None:
+    clamp = tool_executors.clamp_grep_max_results
+    assert clamp(None) == 60          # absent → default
+    assert clamp(40) == 40            # in range → unchanged
+    assert clamp("25") == 25          # string → coerced
+    assert clamp(0) == 1              # below floor → clamped up
+    assert clamp(-3) == 1
+    assert clamp(200) == 200          # at ceiling
+    assert clamp(1000) == 200         # over ceiling → clamped down
+    assert clamp("not-an-int") == 60  # malformed → default (degrade, don't fail)
+
+
 def test_execute_tool_request_gh_api_returns_dict_for_known_tool() -> None:
     """gh_api tool: mock gh_api to avoid any live subprocess call."""
     fake_res: Dict[str, Any] = {"data": {"login": "octocat"}, "error": None}

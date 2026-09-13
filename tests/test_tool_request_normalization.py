@@ -52,6 +52,39 @@ def test_non_dict_returns_empty():
     assert normalize_tool_request(None) == ("", {})
 
 
+def test_git_grep_nested_optional_args_preserved():
+    # #568: model-emitted git_grep optional args (path/max_results) must pass
+    # through normalization untouched so they reach the executor.
+    tool, args = normalize_tool_request(
+        {
+            "tool": "git_grep",
+            "args": {"pattern": "load_config", "path": "pr_reviewer", "max_results": 40},
+        }
+    )
+    assert tool == "git_grep"
+    assert args == {"pattern": "load_config", "path": "pr_reviewer", "max_results": 40}
+
+
+def test_git_grep_top_level_max_results_promoted():
+    # A model that flattens params to the top level (like the string params)
+    # still has its integer max_results forwarded.
+    tool, args = normalize_tool_request(
+        {"tool": "git_grep", "args": {"pattern": "x"}, "max_results": 25}
+    )
+    assert tool == "git_grep"
+    assert args["max_results"] == 25
+
+
+def test_git_grep_max_results_only_promoted_for_git_grep():
+    # The top-level max_results promotion is scoped to git_grep so it can't
+    # leak into other tools' args.
+    tool, args = normalize_tool_request(
+        {"tool": "read_file", "args": {"path": "a.yaml"}, "max_results": 25}
+    )
+    assert tool == "read_file"
+    assert "max_results" not in args
+
+
 def test_explicit_endpoint_not_overwritten_by_path():
     tool, args = normalize_tool_request(
         {"tool": "gh_api", "args": {"endpoint": "repos/a/b/pulls/1", "path": "repos/x/y/pulls/2"}}

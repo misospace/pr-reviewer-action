@@ -7,9 +7,11 @@ git_log/git_blame run against a throwaway git repo built in tmp_path.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -18,6 +20,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import run_tool_harness as rth  # noqa: E402
+from pr_reviewer import tool_executors  # noqa: E402
 
 _REPO = "owner/repo"
 
@@ -193,3 +196,196 @@ def test_read_file_still_blocks_key(tmp_path):
     (tmp_path / "private.key").write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
     res = _exec("read_file", {"path": "private.key"}, tmp_path)
     assert res["status"] == "error"
+
+
+# ── git_grep path scoping + result limits (#568) ─────────────────────────────
+#
+# git_grep runs git for real against a throwaway repo, so these cover the
+# actual scoping / clamping / ordering behaviour end-to-end, not just the
+# mocked argv. The executor's path/containment guards and the sensitive-path
+# policy are shared with read_file/git_blame (see test_tool_executors.py).
+
+
+def _grep_repo(tmp_path, files):
+    """Build a committed git repo in tmp_path from a {relative_path: text} map."""
+    _git(["init", "-q"], tmp_path)
+    _git(["config", "user.email", "t@example.com"], tmp_path)
+    _git(["config", "user.name", "Tester"], tmp_path)
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-q", "-m", "seed"], tmp_path)
+    return tmp_path
+
+
+def test_git_grep_no_path_no_max_results_preserves_behavior(git_repo):
+    # Whole-repo search, no path and no max_results: matches the historical
+    # ``git grep -n -- pattern .`` behaviour.
+    res = _exec("git_grep", {"pattern": "line"}, git_repo)
+    assert res["status"] == "ok"
+    assert all(m.startswith("app.py:") for m in res["result"]["matches"])
+    assert len(res["result"]["matches"]) == 20  # 20 lines, all match "line"
+
+
+def test_git_grep_scoped_path_returns_only_subtree(git_repo):
+    (git_repo / "sub").mkdir()
+    (git_repo / "sub" / "deep.py").write_text("deep needle here\n", encoding="utf-8")
+    _git(["add", "-A"], git_repo)
+    _git(["commit", "-q", "-m", "add sub"], git_repo)
+    res = _exec("git_grep", {"pattern": "line", "path": "sub"}, git_repo)
+    assert res["status"] == "ok"
+    # Every match is under sub/ and none leak from the repo root.
+    assert res["result"]["matches"] == []
+    res2 = _exec("git_grep", {"pattern": "needle", "path": "sub"}, git_repo)
+    assert res2["result"]["matches"] == ["sub/deep.py:1:deep needle here"]
+
+
+def test_git_grep_max_results_below_default(git_repo):
+    res = _exec("git_grep", {"pattern": "line", "max_results": 3}, git_repo)
+    assert res["status"] == "ok"
+    assert len(res["result"]["matches"]) == 3
+    # Deterministic line ordering: the first three lines, in order.
+    assert res["result"]["matches"] == [
+        "app.py:1:line 1",
+        "app.py:2:line 2",
+        "app.py:3:line 3",
+    ]
+
+
+def test_git_grep_max_results_clamped_to_200(git_repo):
+    # An oversized request is clamped to the 200 upper bound, not honoured.
+    mock_result = mock.Mock(
+        returncode=0, stderr="",
+        stdout="\n".join(f"f.py:{i}:x" for i in range(1, 202)),
+    )
+    with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
+        res = tool_executors.git_grep("x", str(git_repo), 15, max_results=1000)
+    assert mock_run.call_args[1]["timeout"] == 15
+    assert len(res["matches"]) == 200
+    # The clamp is exercised at the executor boundary too: an explicit
+    # >200 value still returns at most 200 lines.
+    res2 = _exec("git_grep", {"pattern": "line", "max_results": 5000}, git_repo)
+    assert res2["status"] == "ok"
+    assert len(res2["result"]["matches"]) <= 200
+
+
+def test_git_grep_max_results_clamped_to_1_for_tiny(tmp_path):
+    repo = _grep_repo(tmp_path, {"a.txt": "n1\nn2\nn3\n"})
+    res = _exec("git_grep", {"pattern": "n", "max_results": 1}, repo)
+    assert res["status"] == "ok"
+    assert res["result"]["matches"] == ["a.txt:1:n1"]
+
+
+def test_git_grep_max_results_string_coerced(git_repo):
+    # Weak models emit numbers as strings; the executor clamps/coerces them.
+    res = _exec("git_grep", {"pattern": "line", "max_results": "2"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["matches"] == ["app.py:1:line 1", "app.py:2:line 2"]
+
+
+def test_git_grep_default_argv_preserved(git_repo):
+    """No path → the historical argv is preserved byte-for-byte (single ``--``
+    before the pattern, ``.`` pathspec), so existing callers/tests are
+    unchanged and the pattern can never be re-read as an option."""
+    mock_result = mock.Mock(returncode=0, stderr="", stdout="")
+    with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
+        res = tool_executors.git_grep("pattern", str(git_repo))
+    assert res == {"matches": []}
+    mock_run.assert_called_once_with(
+        ["git", "grep", "-n", "--", "pattern", "."],
+        cwd=str(git_repo),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert "shell" not in mock_run.call_args[1]  # argv list, never a shell string
+
+
+def test_git_grep_double_dash_argv_with_path(git_repo):
+    """An explicit path is appended after a SECOND ``--`` so a model cannot
+    turn it into a git option (and it stays out of pattern position)."""
+    mock_result = mock.Mock(returncode=0, stderr="", stdout="")
+    with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
+        tool_executors.git_grep("p", str(git_repo), 15, path="sub")
+    args = mock_run.call_args[0][0]
+    assert args[:5] == ["git", "grep", "-n", "--", "p"]
+    assert args[5] == "--"  # pathspec separator: a dash-leading path is safe
+    expected = [
+        "sub",
+        (git_repo / "sub").resolve().as_posix(),
+        str(git_repo / "sub"),
+    ]
+    assert args[6] in expected
+    assert "shell" not in mock_run.call_args[1]
+
+
+def test_git_grep_dash_path_is_not_an_option(tmp_path):
+    """A path beginning with ``-`` is still treated as a path (via the ``--``
+    pathspec), never as a git flag — so a dash-leading directory is searchable
+    and the model can't turn a path into a git option."""
+    repo = _grep_repo(tmp_path, {"-odd/a.txt": "dashy needle\n"})
+    res = _exec("git_grep", {"pattern": "needle", "path": "-odd"}, repo)
+    assert res["status"] == "ok", f"dash-leading path should be searchable, got {res}"
+    assert res["result"]["matches"] == ["-odd/a.txt:1:dashy needle"]
+
+
+def test_git_grep_path_traversal_rejected(git_repo):
+    res = _exec("git_grep", {"pattern": "needle", "path": "../"}, git_repo)
+    assert res["status"] == "error"
+    assert "escapes" in res["result"]["error"]
+    res2 = _exec("git_grep", {"pattern": "line", "path": "../../etc"}, git_repo)
+    assert res2["status"] == "error"
+
+
+def test_git_grep_path_null_byte_rejected(git_repo):
+    res = _exec("git_grep", {"pattern": "x", "path": "a\x00b"}, git_repo)
+    assert res["status"] == "error"
+
+
+def test_git_grep_symlink_escape_rejected(git_repo):
+    """A symlinked directory pointing outside the workspace must not leak
+    content through a scoped git grep."""
+    outside = git_repo.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_text("leaked secret\n", encoding="utf-8")
+    os.symlink(str(outside), str(git_repo / "link_out"))
+    res = _exec("git_grep", {"pattern": "secret", "path": "link_out"}, git_repo)
+    assert res["status"] == "error"
+    assert "leaked secret" not in str(res["result"])
+
+
+def test_git_grep_sensitive_path_rejected(git_repo):
+    (git_repo / ".env").write_text("TOKEN=supersecret\n", encoding="utf-8")
+    _git(["add", "-A"], git_repo)
+    _git(["commit", "-q", "-m", "env"], git_repo)
+    res = _exec("git_grep", {"pattern": "supersecret", "path": ".env"}, git_repo)
+    assert res["status"] == "error"
+    assert "supersecret" not in str(res["result"])
+    # Same policy via read_file for parity.
+    res2 = _exec("read_file", {"path": ".env"}, git_repo)
+    assert res2["status"] == "error"
+
+
+def test_git_grep_timeout_error_clean(tmp_path):
+    repo = _grep_repo(tmp_path, {"a.txt": "needle\n"})
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 1)):
+        res = _exec("git_grep", {"pattern": "needle", "path": ".", "max_results": 5}, repo)
+    assert res["status"] == "error"
+    assert "timed out" in res["result"]["error"]
+
+
+def test_git_grep_git_error_is_clean_not_crash(tmp_path):
+    # A git failure (e.g. not a repo) surfaces as a clean error dict, never a
+    # raised exception out of the executor.
+    res = _exec("git_grep", {"pattern": "needle", "path": "nope"}, tmp_path)
+    assert res["status"] in ("ok", "error")
+    if res["status"] == "error":
+        assert "error" in res["result"]
+
+
+def test_git_grep_no_match_ok_empty(git_repo):
+    res = _exec("git_grep", {"pattern": "definitely-not-present-xyz", "path": "sub"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["matches"] == []

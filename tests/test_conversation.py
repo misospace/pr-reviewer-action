@@ -54,6 +54,20 @@ class TestToolSchemas:
         # The allowlist in scripts/run_tool_harness.py (ALLOWED_COMMANDS).
         assert set(enum) == {"git_status_short", "git_diff_stat", "git_diff_name_only"}
 
+    def test_git_grep_schema_advertises_optional_args(self):
+        # #568: the advertised git_grep schema must expose the new optional
+        # path/max_results args, keep pattern required, and stay
+        # additionalProperties-free (matching the executor surface).
+        git_grep = next(s for s in TOOL_SCHEMAS if s["name"] == "git_grep")
+        props = git_grep["parameters"]["properties"]
+        assert set(props) == {"pattern", "path", "max_results"}
+        assert git_grep["parameters"]["required"] == ["pattern"]
+        assert git_grep["parameters"]["additionalProperties"] is False
+        assert props["max_results"]["type"] == "integer"
+        # The description must not promise "literal" matching — git grep uses
+        # basic-regex semantics, so the surface documents that.
+        assert "literal pattern" not in git_grep["description"].lower()
+
     def test_structured_api_steering_present(self):
         # Guards the gh_api-over-web_fetch steering: the model should reach for
         # the structured API (gh_api / a forge's /api/v1) rather than scraping
