@@ -195,7 +195,6 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
 
     root = Path(workspace_root).resolve()
     matches: list[str] = []
-    truncated = False
     # followlinks=False: a symlinked directory (even one pointing outside the
     # workspace) is never descended into, so the walk cannot escape.
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
@@ -210,17 +209,21 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
             rel = full.relative_to(root).as_posix()
             if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(name, pattern):
                 matches.append(rel)
-                if len(matches) >= cap:
-                    truncated = True
-                    break
-        if truncated:
-            break
 
+    # Sort BEFORE applying the cap. os.walk yields files in filesystem
+    # enumeration order, which is nondeterministic across platforms and runs,
+    # so breaking out of the walk at `cap` would return whichever matches
+    # happened to be enumerated first rather than a stable result set.
+    # Sorting the complete match list first and then taking the head makes the
+    # returned window the lexicographic head of ALL matches — identical on
+    # every run.
     matches.sort()
+    total = len(matches)
+    files = matches[:cap]
     return {
-        "files": matches[:cap],
-        "total": len(matches),
-        "truncated": truncated,
+        "files": files,
+        "total": len(files),
+        "truncated": total > cap,
     }
 
 
