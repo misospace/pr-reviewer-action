@@ -858,15 +858,14 @@ class TestCLI:
 
             env = dict(os.environ)
             env["PYTHONPATH"] = str(_REPO_ROOT)
-            # Run the subprocess from the tmpdir so the output path lives
-            # inside the default workspace-root (cwd). The CLI's
-            # containment guard then accepts the write without needing
-            # --workspace-root.
+            # Pass the temporary workspace explicitly: GitHub Actions sets
+            # GITHUB_WORKSPACE, which otherwise overrides this subprocess cwd.
             proc = subprocess.run(
                 [sys.executable, "-m", "pr_reviewer.change_anchors",
                  "--diff", str(diff_path),
                  "--files", str(files_path),
-                 "--output", str(out_path)],
+                 "--output", str(out_path),
+                 "--workspace-root", tmp],
                 capture_output=True, text=True, env=env, cwd=tmp, timeout=60,
             )
             assert proc.returncode == 0, proc.stderr
