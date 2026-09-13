@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read-only tool executors for the tool harness (#304 split).
 
-The model-plannable tools (read_file, git_*, gh_api, web_fetch, web_search,
-run_command) plus the path/host guards and result-shaping helpers they need.
+The model-plannable tools (read_file, list_tree, git_*, gh_api, web_fetch,
+web_search, run_command) plus the path/host guards and result-shaping
+helpers they need.
 Split out of scripts/run_tool_harness.py with no behaviour change.
 """
 
@@ -138,6 +139,108 @@ def read_file(path, workspace_root, offset=None, limit=None):
         "content": window[:12000],
         "range": {"offset": start + 1, "lines": len(lines[start:end]), "total_lines": len(lines)},
     }
+
+def list_tree(path, workspace_root, depth=2, max_entries=200):
+    """List repository entries (names only) bounded by depth and entry count.
+
+    ``path`` is the workspace-relative directory to start from (defaults to
+    the workspace root). The walk is top-down: entries at each level are
+    emitted in sorted name order, directories are recursed into in that
+    same order, and both the depth cap and the entry cap are enforced as
+    entries are generated (pre-order) — so an oversized tree returns a
+    deterministic, sorted, *prefix* of the full listing instead of buffering
+    everything first. This keeps output size bounded and byte-stable across
+    runs (tests, prompt caching, and repeated reviews all see identical
+    bytes).
+
+    Security model (this tool is part of the prompt-injection boundary —
+    untrusted PR content can shape the arguments the model emits):
+
+    * ``path`` goes through the same :func:`_resolve_workspace_path` guard
+      as ``read_file``: null bytes, escapes outside the workspace root, and
+      sensitive path patterns are all rejected before any filesystem access.
+    * Symlinked directories are listed but never descended into, so a
+      symlink inside the repo pointing outside it cannot be traversed.
+    * ``.git`` is never traversed.
+    * Only names and ``file``/``dir`` types are returned — never contents.
+
+    Returns ``{"entries": [{path, type}], "truncated": bool}`` where
+    ``path`` is the repo-relative POSIX path, or ``{"error": ...}``.
+    """
+    if isinstance(path, str) and path:
+        rel_path = path
+    elif path is None or path == "":
+        rel_path = "."
+    else:
+        return {"error": "Invalid path"}
+
+    # Same containment + sensitive-file policy as read_file/git_log/git_blame.
+    resolved, err = _resolve_workspace_path(rel_path, workspace_root)
+    if err:
+        return {"error": err}
+
+    root = Path(workspace_root).resolve()
+    if not resolved.exists():
+        return {"error": f"Path not found: {rel_path}"}
+
+    try:
+        depth = max(1, min(_opt_int(depth) or 2, 4))
+        cap = max(1, min(_opt_int(max_entries) or 200, 500))
+    except Exception:
+        return {"error": "Invalid depth or max_entries"}
+
+    if not resolved.is_dir():
+        # A file is a valid single-row listing, consistent with read_file's
+        # behaviour of reading the file rather than erroring on a file path.
+        return {
+            "entries": [
+                {
+                    "path": resolved.relative_to(root).as_posix(),
+                    "type": "file",
+                }
+            ],
+            "truncated": False,
+        }
+
+    entries = []
+    truncated = False
+
+    def rel(d: Path) -> str:
+        if d == resolved:
+            return "."
+        return d.relative_to(root).as_posix()
+
+    def walk(directory: Path, level: int) -> None:
+        nonlocal truncated
+        if level > depth:
+            return
+        try:
+            children = sorted(directory.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for child in children:
+            if len(entries) >= cap:
+                truncated = True
+                return
+            name = child.name
+            is_dir = not child.is_symlink() and child.is_dir()
+            # .git internals are never exposed through traversal.
+            if name == ".git":
+                continue
+            if not is_dir and child.is_symlink():
+                # A symlinked file: report it (name only) but never read it.
+                child_type = "file"
+            elif is_dir:
+                child_type = "dir"
+            else:
+                child_type = "file"
+            entries.append({"path": rel(child), "type": child_type})
+            if is_dir:
+                walk(child, level + 1)
+
+    walk(resolved, 1)
+    return {"entries": entries, "truncated": truncated}
+
 
 def git_grep(pattern, workspace_root, request_timeout=15):
     """Run git grep and return matched lines."""
@@ -412,6 +515,32 @@ def execute_tool_request(
             if res.get("range"):
                 result_payload["range"] = res["range"]
             tool_result["result"] = result_payload
+
+        elif tool_name == "list_tree":
+            path = args.get("path") or "."
+            res = list_tree(
+                path, workspace_root, _opt_int(args.get("depth")),
+                _opt_int(args.get("max_entries")),
+            )
+            if res.get("error"):
+                raise ValueError(res["error"])
+            entries = res.get("entries", [])
+            # The harness's normal output-size cap, applied at row boundaries
+            # (each entry is one deterministic line) so the result stays
+            # bounded AND valid, and a byte cut never splits an entry.
+            truncated = res.get("truncated", False)
+            if max_response_bytes and max_response_bytes > 0:
+                kept = []
+                total = 0
+                for e in entries:
+                    cost = len(e["path"]) + len(e["type"]) + 4
+                    if kept and total + cost > max_response_bytes:
+                        truncated = True
+                        break
+                    kept.append(e)
+                    total += cost
+                entries = kept
+            tool_result["result"] = {"entries": entries, "truncated": truncated}
 
         elif tool_name == "git_log":
             max_count = max(1, min(_opt_int(args.get("max_count")) or 20, 100))
