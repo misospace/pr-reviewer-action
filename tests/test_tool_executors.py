@@ -212,3 +212,222 @@ def test_execute_tool_request_run_command_missing_command() -> None:
     res = _call("run_command", {})
     assert res.get("status") == "error"
     assert "command" in res.get("result", {}).get("error", "").lower()
+
+
+# ── find_files (#567) ────────────────────────────────────────────────────────
+# These exercise the real executor against a throwaway workspace in tmp_path
+# (no mocks) so the matching semantics and security boundaries are pinned.
+
+
+def _ff(pattern, workspace, path=".", max_results=None):
+    """Call the find_files executor directly with a real workspace."""
+    kwargs = {"pattern": pattern, "workspace_root": str(workspace), "path": path}
+    if max_results is not None:
+        kwargs["max_results"] = max_results
+    return tool_executors.find_files(**kwargs)
+
+
+def _ff_exec(pattern, workspace, path=".", max_results=None):
+    """Call find_files through execute_tool_request (the loop's execute_fn)."""
+    args = {"pattern": pattern, "path": path}
+    if max_results is not None:
+        args["max_results"] = max_results
+    return _call("find_files", args, workspace_root=str(workspace))
+
+
+def _make_tree(tmp_path):
+    """Build a small deterministic tree with a .git dir and a symlink."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "config.sh").write_text("x", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_foo.py").write_text("x", encoding="utf-8")
+    (tmp_path / "tests" / "test_bar.py").write_text("x", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "route.ts").write_text("x", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("x", encoding="utf-8")
+    (tmp_path / "README.md").write_text("x", encoding="utf-8")
+    # A .git dir that must never be descended into.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("x", encoding="utf-8")
+    (tmp_path / ".git" / "objects").mkdir()
+    (tmp_path / ".git" / "objects" / "config").write_text("x", encoding="utf-8")
+    return tmp_path
+
+
+def test_find_files_exact_basename_match(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("pyproject.toml", tmp_path)
+    assert res == {"files": ["pyproject.toml"], "total": 1, "truncated": False}
+
+
+def test_find_files_wildcard_filename_match(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*config*", tmp_path)
+    # Matches the basename anywhere in the tree; .git/config is excluded.
+    assert res["files"] == ["scripts/config.sh"]
+    assert res["total"] == 1
+
+
+def test_find_files_nested_path_match(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*/route.ts", tmp_path)
+    assert res["files"] == ["src/route.ts"]
+
+
+def test_find_files_scoped_under_path(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("test_*.py", tmp_path, path="tests")
+    assert res["files"] == ["tests/test_bar.py", "tests/test_foo.py"]
+    # Scoped search returns repo-relative paths, not paths relative to `path`.
+    assert all(p.startswith("tests/") for p in res["files"])
+
+
+def test_find_files_scoped_path_is_repo_relative(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*.py", tmp_path, path="tests")
+    assert res["files"] == ["tests/test_bar.py", "tests/test_foo.py"]
+
+
+def test_find_files_deterministic_ordering(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*.py", tmp_path)
+    assert res["files"] == sorted(res["files"])
+    # Repeated calls are stable.
+    assert _ff("*.py", tmp_path)["files"] == res["files"]
+
+
+def test_find_files_result_cap(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x", encoding="utf-8")
+    res = _ff("f*.txt", tmp_path, max_results=3)
+    assert res["files"] == ["f00.txt", "f01.txt", "f02.txt"]
+    assert res["total"] == 3
+    assert res["truncated"] is True
+
+
+def test_find_files_cap_clamped_to_max(tmp_path):
+    for i in range(5):
+        (tmp_path / f"g{i}.txt").write_text("x", encoding="utf-8")
+    # A model-supplied cap above the hard ceiling is clamped to 300.
+    res = _ff("g*.txt", tmp_path, max_results=9999)
+    assert res["total"] == 5
+    assert res["truncated"] is False
+
+
+def test_find_files_no_matches_returns_empty_not_error(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("does_not_exist_*.xyz", tmp_path)
+    assert res == {"files": [], "total": 0, "truncated": False}
+
+
+def test_find_files_nonexistent_root_returns_clean_error(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*.py", tmp_path, path="no_such_dir")
+    assert "error" in res
+    assert "files" not in res
+
+
+def test_find_files_path_escape_rejected(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*.py", tmp_path, path="../")
+    assert "error" in res
+    assert "escapes workspace" in res["error"]
+
+
+def test_find_files_null_byte_rejected(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*.py", tmp_path, path="a\x00b")
+    assert "error" in res
+    assert "Null byte" in res["error"]
+
+
+def test_find_files_does_not_descend_into_git(tmp_path):
+    _make_tree(tmp_path)
+    # .git/config and .git/objects/config both match "*config*" by basename,
+    # but neither may be returned.
+    res = _ff("*config*", tmp_path)
+    assert all(not p.startswith(".git/") for p in res["files"])
+    assert res["files"] == ["scripts/config.sh"]
+
+
+def test_find_files_rejects_git_metadata_roots(tmp_path):
+    _make_tree(tmp_path)
+    for path in (".git", ".git/objects"):
+        res = _ff("*", tmp_path, path=path)
+        assert "error" in res
+        assert ".git" in res["error"]
+
+
+def test_find_files_does_not_follow_symlinked_dir(tmp_path):
+    _make_tree(tmp_path)
+    # A symlinked directory pointing outside the workspace must not be
+    # descended into (followlinks=False), so its files are never returned.
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.py").write_text("x", encoding="utf-8")
+    link = tmp_path / "linkdir"
+    link.symlink_to(outside, target_is_directory=True)
+    res = _ff("*.py", tmp_path)
+    assert all(not p.startswith("linkdir/") for p in res["files"])
+    assert "secret.py" not in res["files"]
+
+
+def test_find_files_skips_symlinked_file(tmp_path):
+    _make_tree(tmp_path)
+    # A symlinked file (even inside the workspace) is not reported.
+    target = tmp_path / "real_target.txt"
+    target.write_text("x", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(target)
+    res = _ff("*.txt", tmp_path)
+    assert "link.txt" not in res["files"]
+    assert "real_target.txt" in res["files"]
+
+
+def test_find_files_directories_not_returned(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff("*", tmp_path)
+    # Only files, never directories, even when the pattern matches a dir name.
+    assert "scripts" not in res["files"]
+    assert "tests" not in res["files"]
+    assert "src" not in res["files"]
+
+
+def test_find_files_missing_pattern_via_executor(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff_exec("", tmp_path)
+    assert res.get("status") == "error"
+    assert "pattern" in res.get("result", {}).get("error", "").lower()
+
+
+def test_find_files_via_executor_happy_path(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff_exec("*.toml", tmp_path)
+    assert res.get("status") == "ok"
+    assert res["result"]["files"] == ["pyproject.toml"]
+    assert res["result"]["total"] == 1
+    assert res["result"]["truncated"] is False
+
+
+def test_find_files_via_executor_no_matches_ok(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff_exec("nope_*.xyz", tmp_path)
+    assert res.get("status") == "ok"
+    assert res["result"]["files"] == []
+    assert res["result"]["total"] == 0
+
+
+def test_find_files_via_executor_zero_cap_clamps_to_one(tmp_path):
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+    res = _ff_exec("f*.txt", tmp_path, max_results=0)
+    assert res.get("status") == "ok"
+    assert res["result"]["files"] == ["f0.txt"]
+    assert res["result"]["total"] == 1
+    assert res["result"]["truncated"] is True
+
+
+def test_find_files_via_executor_bad_path_error(tmp_path):
+    _make_tree(tmp_path)
+    res = _ff_exec("*.py", tmp_path, path="../")
+    assert res.get("status") == "error"
+    assert "escapes workspace" in res.get("result", {}).get("error", "")

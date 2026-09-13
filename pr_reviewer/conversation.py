@@ -173,6 +173,47 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "find_files",
+        "description": (
+            "Locate repository files by filename/path pattern without first "
+            "knowing an exact path. Use it to answer 'where is the config "
+            "loader / auth middleware / matching test / package manifest?' in "
+            "one call instead of several list_tree calls. The pattern is a "
+            "glob matched (case-sensitively, no shell) against both the "
+            "repo-relative path and the basename: a pattern with '/' matches "
+            "the relative path (e.g. '*/route.ts'); a bare pattern matches the "
+            "basename anywhere in the tree (e.g. '*config*', '*.toml'). "
+            "Returns sorted repo-relative file paths only (no directories, no "
+            "contents), capped at max_results (default 100, max 300). "
+            "Never descends into .git and never follows symlinks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        "Glob-style pattern, e.g. '*config*', 'test_*.py', "
+                        "'*.toml', '*/route.ts'."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional workspace-relative directory to scope the "
+                        "search to (default: repository root)."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Optional max results (default 100, clamped to 300).",
+                },
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "git_log",
         "description": (
             "Read-only recent commit history (oneline: hash date author "

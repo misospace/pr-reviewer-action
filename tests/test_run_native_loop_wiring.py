@@ -566,6 +566,71 @@ def test_native_loop_accumulates_token_usage(monkeypatch, tmp_path):
     assert u["cache_hit_ratio"] == round(340 / 450, 3)
 
 
+def test_native_loop_advertises_find_files_schema(monkeypatch, tmp_path):
+    """#567: find_files is advertised in the loop request for both API formats,
+    with the schema/executor in sync (pattern required, path/max_results optional)."""
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    for api_format in ("openai", "anthropic"):
+        handled, _result, payloads = _run_capturing(
+            monkeypatch, tmp_path, api_format,
+            [_openai_text("done")],
+        )
+        # The first (loop) request advertises the built-in tool set.
+        tools = payloads[0]["tools"]
+        if api_format == "openai":
+            names = [t["function"]["name"] for t in tools]
+            ff = next(t for t in tools if t["function"]["name"] == "find_files")
+            params = ff["function"]["parameters"]
+        else:
+            names = [t["name"] for t in tools]
+            ff = next(t for t in tools if t["name"] == "find_files")
+            params = ff["input_schema"]
+        assert "find_files" in names
+        assert params["type"] == "object"
+        assert params["required"] == ["pattern"]
+        assert "pattern" in params["properties"]
+        assert "path" in params["properties"]
+        assert "max_results" in params["properties"]
+        assert params.get("additionalProperties") is False
+
+
+def test_native_loop_dispatches_find_files_to_executor(monkeypatch, tmp_path):
+    """#567 end-to-end: the model issues a find_files call and the executor runs
+    for real against the workspace, returning the matching repo-relative paths."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "config.sh").write_text("x", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_foo.py").write_text("x", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("x", encoding="utf-8")
+
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "find_files", '{"pattern": "*.toml"}'),
+            _openai_text("Found the manifest."),
+        ],
+    )
+    assert handled is True
+    assert result["mode"] == "native_loop"
+    assert result["planned_request_count"] == 1
+
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    ff_calls = [tc for tc in harness.get("tool_calls", []) if tc["tool"] == "find_files"]
+    assert ff_calls and ff_calls[0]["status"] == "ok"
+
+    # The executor ran for real: the result carries the actual matching path.
+    ff_result = next(
+        tr for tr in harness["tool_results"] if tr.get("tool") == "find_files"
+    )
+    assert ff_result["result"]["files"] == ["pyproject.toml"]
+    assert ff_result["result"]["total"] == 1
+
+    # The tool result is folded into the harness markdown as evidence.
+    md = (tmp_path / "tool-harness.md").read_text()
+    assert "find_files" in md
+    assert "pyproject.toml" in md
+
+
 def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
     """#245: an allowlisted read-only MCP tool is advertised in the loop request
     and routed to the MCP client; its result folds into the harness output."""
