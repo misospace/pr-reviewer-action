@@ -668,6 +668,25 @@ class TestResolveMaintainersFailsClosed:
         # No token in any spelling -> documented local-dev branch.
         assert precheck._resolve_maintainers() == self._candidates()
 
+    def test_token_with_candidates_but_no_repo_fails_closed(self, monkeypatch):
+        # Token + candidates but no GITHUB_REPOSITORY: the permission check
+        # cannot run against an unknown repository, so this path must fail
+        # closed (return set()) rather than fall back to the unfiltered
+        # candidate set (#581 / review feedback). The old combined guard
+        # ``if not (repo_name and tok and candidates): return candidates``
+        # failed open on exactly this combination.
+        import pr_reviewer.precheck as precheck
+
+        # Defensive: if a stray PyGithub mock were loaded by a previous
+        # test, the import branch must still not silently admit candidates.
+        # We do NOT set GITHUB_REPOSITORY here.
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        # Sanity: a token really is present (the env fixture clears it).
+        assert precheck._github_token() == "t"
+
+        assert precheck._resolve_maintainers() == set()
+
     def test_no_token_owner_default_returns_unfiltered_candidate(self, monkeypatch):
         # Local-dev branch when the candidate set is the bare owner.
         import pr_reviewer.precheck as precheck

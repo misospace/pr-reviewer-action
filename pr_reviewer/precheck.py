@@ -1286,8 +1286,20 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
 
     repo_name = repo or os.environ.get("GITHUB_REPOSITORY", "")
     tok = token or _github_token()
-    if not (repo_name and tok and candidates):
+    # Fail closed on each verification-impossible condition separately so the
+    # semantics are explicit (#581 / review feedback):
+    #   - no candidates       -> set()        nothing to verify, nobody may dismiss
+    #   - no token            -> candidates   documented local-dev fallback
+    #   - token present, no repo -> set()      cannot verify against a missing
+    #                                          repository identity, so nobody
+    #                                          may dismiss
+    # Only when all three are present do we proceed to the live permission check.
+    if not candidates:
+        return set()
+    if not tok:
         return candidates
+    if not repo_name:
+        return set()
 
     try:
         from github import Github
