@@ -621,6 +621,7 @@ In `native_loop` mode the reviewing model uses its provider's native tool-callin
 
 - `gh_api` with a repo-local path like `repos/owner/repo/pulls/123/files`
 - `read_file` for files inside the checked-out repository
+- `find_files` to locate files by filename/path glob pattern (e.g. `*config*`, `*.toml`, `*/route.ts`) without first knowing an exact path — returns sorted repo-relative file paths only, capped at `max_results` (default 100, max 300); never descends into `.git` or follows symlinks
 - `web_fetch` for allowlisted hosts from `allowed_source_hosts`
 - `git_grep` for local repository content search (`pattern` is required; an optional `path` scopes the search to a repository subtree and an optional `max_results` (1–200, default 60) caps how many matched lines are returned)
 - `run_command` for a fixed catalog of named read-only commands

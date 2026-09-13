@@ -30,12 +30,15 @@ from pr_reviewer.transport import (  # noqa: E402
 )
 from pr_reviewer.tool_executors import (  # noqa: E402
     ALLOWED_COMMANDS,
+    FIND_FILES_DEFAULT_MAX,
+    FIND_FILES_MAX_CAP,
     SENSITIVE_PATH_RE,
     _opt_int,
     _resolve_workspace_path,
     allowlisted_host,
     command_catalog_markdown,
     execute_tool_request,
+    find_files,
     gh_api,
     git_blame,
     git_grep,

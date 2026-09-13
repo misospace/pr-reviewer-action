@@ -32,6 +32,7 @@ class TestToolSchemas:
         assert _tool_names() == {
             "gh_api",
             "read_file",
+            "find_files",
             "web_fetch",
             "git_grep",
             "git_log",

@@ -6,7 +6,9 @@ run_command) plus the path/host guards and result-shaping helpers they need.
 Split out of scripts/run_tool_harness.py with no behaviour change.
 """
 
+import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -138,6 +140,98 @@ def read_file(path, workspace_root, offset=None, limit=None):
         "content": window[:12000],
         "range": {"offset": start + 1, "lines": len(lines[start:end]), "total_lines": len(lines)},
     }
+
+# find_files result cap: the default the model gets when it omits max_results,
+# and the hard ceiling a model-supplied value is clamped to (the issue asks for
+# a "safe maximum such as 300").
+FIND_FILES_DEFAULT_MAX = 100
+FIND_FILES_MAX_CAP = 300
+
+
+def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT_MAX):
+    """Locate repository files by filename/path pattern (read-only, #567).
+
+    ``list_tree`` answers "what is around here?"; this answers "where is the
+    config loader / auth middleware / matching test / package manifest?" in a
+    single call. It is a filename/path discovery primitive, not semantic code
+    search (``git_grep`` covers content search).
+
+    Matching contract (deliberately small and pinned by tests):
+
+    * ``pattern`` is a glob-style pattern matched with ``fnmatch.fnmatchcase``
+      (case-sensitive, no shell involved) against BOTH the repo-relative path
+      (``/``-separated) and the basename. A pattern containing ``/`` therefore
+      matches the relative path (e.g. ``*/route.ts``); a bare pattern matches
+      the basename anywhere in the tree (e.g. ``*config*``, ``*.toml``).
+    * ``path`` is an optional workspace-relative directory to scope the search
+      to; it defaults to the repository root.
+    * ``max_results`` defaults to 100 and is clamped to 1..300.
+    * Results are repo-relative file paths only (directories are omitted —
+      ``list_tree`` covers directory discovery), sorted, and capped.
+    * The walk never descends into ``.git`` and never follows symlinked
+      directories, so it cannot escape the workspace.
+
+    Returns ``{"files": [...], "total": N, "truncated": bool}`` (empty list
+    when nothing matches) or ``{"error": ...}`` for a bad ``path``.
+    """
+    if not pattern or not isinstance(pattern, str):
+        return {"error": "Missing 'pattern' argument"}
+
+    # Reuse the shared containment guard (null-byte, traversal, symlink,
+    # sensitive-file, deny-substring) so find_files enforces the identical
+    # boundaries as read_file rather than a second containment implementation.
+    resolved_root, err = _resolve_workspace_path(path, workspace_root)
+    if err:
+        return {"error": err}
+    if not resolved_root.is_dir():
+        return {"error": f"Path is not a directory: {path}"}
+
+    # Pruning child .git directories is insufficient when the requested root
+    # itself is inside Git metadata; reject that scope before walking it.
+    root = Path(workspace_root).resolve()
+    if ".git" in resolved_root.relative_to(root).parts:
+        return {"error": "Path inside .git is not searchable"}
+
+    # Clamp the model-supplied cap into the safe range.
+    try:
+        cap = int(max_results)
+    except (TypeError, ValueError):
+        cap = FIND_FILES_DEFAULT_MAX
+    cap = max(1, min(cap, FIND_FILES_MAX_CAP))
+
+    matches: list[str] = []
+    # followlinks=False: a symlinked directory (even one pointing outside the
+    # workspace) is never descended into, so the walk cannot escape.
+    for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
+        # Never descend into .git at any depth (deterministic + bounded).
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in filenames:
+            full = Path(dirpath) / name
+            # Skip symlinks entirely (a symlinked file could point outside the
+            # workspace); only regular files are reported.
+            if full.is_symlink():
+                continue
+            rel = full.relative_to(root).as_posix()
+            if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(name, pattern):
+                matches.append(rel)
+
+    # Sort BEFORE applying the cap. os.walk yields files in filesystem
+    # enumeration order, which is nondeterministic across platforms and runs,
+    # so breaking out of the walk at `cap` would return whichever matches
+    # happened to be enumerated first rather than a stable result set.
+    # Sorting the complete match list first and then taking the head makes the
+    # returned window the lexicographic head of ALL matches — identical on
+    # every run.
+    matches.sort()
+    total = len(matches)
+    files = matches[:cap]
+    return {
+        "files": files,
+        "total": len(files),
+        "truncated": total > cap,
+    }
+
+
 
 # Result-cap bounds for git_grep (issue #568). The default (60) is the
 # historical cap so callers that don't pass max_results are behaviour-
@@ -480,6 +574,31 @@ def execute_tool_request(
             if res.get("range"):
                 result_payload["range"] = res["range"]
             tool_result["result"] = result_payload
+
+        elif tool_name == "find_files":
+            pattern = args.get("pattern", "")
+            if not pattern:
+                raise ValueError("Missing 'pattern' argument")
+            raw_max_results = args.get("max_results")
+            max_results = (
+                FIND_FILES_DEFAULT_MAX
+                if raw_max_results is None
+                else _opt_int(raw_max_results)
+            )
+            res = find_files(
+                pattern,
+                workspace_root,
+                args.get("path", "") or ".",
+                max_results,
+            )
+            if res.get("error"):
+                raise ValueError(res["error"])
+            files = res.get("files", [])
+            tool_result["result"] = {
+                "files": files,
+                "total": res.get("total", len(files)),
+                "truncated": res.get("truncated", False),
+            }
 
         elif tool_name == "git_log":
             max_count = max(1, min(_opt_int(args.get("max_count")) or 20, 100))
