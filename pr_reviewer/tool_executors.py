@@ -186,6 +186,12 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
     if not resolved_root.is_dir():
         return {"error": f"Path is not a directory: {path}"}
 
+    # Pruning child .git directories is insufficient when the requested root
+    # itself is inside Git metadata; reject that scope before walking it.
+    root = Path(workspace_root).resolve()
+    if ".git" in resolved_root.relative_to(root).parts:
+        return {"error": "Path inside .git is not searchable"}
+
     # Clamp the model-supplied cap into the safe range.
     try:
         cap = int(max_results)
@@ -193,7 +199,6 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
         cap = FIND_FILES_DEFAULT_MAX
     cap = max(1, min(cap, FIND_FILES_MAX_CAP))
 
-    root = Path(workspace_root).resolve()
     matches: list[str] = []
     # followlinks=False: a symlinked directory (even one pointing outside the
     # workspace) is never descended into, so the walk cannot escape.

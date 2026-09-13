@@ -350,6 +350,14 @@ def test_find_files_does_not_descend_into_git(tmp_path):
     assert res["files"] == ["scripts/config.sh"]
 
 
+def test_find_files_rejects_git_metadata_roots(tmp_path):
+    _make_tree(tmp_path)
+    for path in (".git", ".git/objects"):
+        res = _ff("*", tmp_path, path=path)
+        assert "error" in res
+        assert ".git" in res["error"]
+
+
 def test_find_files_does_not_follow_symlinked_dir(tmp_path):
     _make_tree(tmp_path)
     # A symlinked directory pointing outside the workspace must not be
