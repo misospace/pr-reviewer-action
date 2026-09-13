@@ -505,11 +505,17 @@ def execute_tool_request(
             pattern = args.get("pattern", "")
             if not pattern:
                 raise ValueError("Missing 'pattern' argument")
+            raw_max_results = args.get("max_results")
+            max_results = (
+                FIND_FILES_DEFAULT_MAX
+                if raw_max_results is None
+                else _opt_int(raw_max_results)
+            )
             res = find_files(
                 pattern,
                 workspace_root,
                 args.get("path", "") or ".",
-                _opt_int(args.get("max_results")) or FIND_FILES_DEFAULT_MAX,
+                max_results,
             )
             if res.get("error"):
                 raise ValueError(res["error"])

@@ -408,6 +408,16 @@ def test_find_files_via_executor_no_matches_ok(tmp_path):
     assert res["result"]["total"] == 0
 
 
+def test_find_files_via_executor_zero_cap_clamps_to_one(tmp_path):
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+    res = _ff_exec("f*.txt", tmp_path, max_results=0)
+    assert res.get("status") == "ok"
+    assert res["result"]["files"] == ["f0.txt"]
+    assert res["result"]["total"] == 1
+    assert res["result"]["truncated"] is True
+
+
 def test_find_files_via_executor_bad_path_error(tmp_path):
     _make_tree(tmp_path)
     res = _ff_exec("*.py", tmp_path, path="../")
