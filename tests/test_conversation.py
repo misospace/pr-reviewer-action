@@ -33,6 +33,7 @@ class TestToolSchemas:
             "gh_api",
             "read_file",
             "find_files",
+            "list_tree",
             "web_fetch",
             "git_grep",
             "git_log",

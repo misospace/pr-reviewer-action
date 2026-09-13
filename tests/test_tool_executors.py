@@ -8,6 +8,7 @@ patched so no live subprocess or network call is made.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 from unittest.mock import patch
 
@@ -431,3 +432,257 @@ def test_find_files_via_executor_bad_path_error(tmp_path):
     res = _ff_exec("*.py", tmp_path, path="../")
     assert res.get("status") == "error"
     assert "escapes workspace" in res.get("result", {}).get("error", "")
+
+
+# ── list_tree (#566) ─────────────────────────────────────────────────────────
+# Mirrors the find_files battery: the real executor against a throwaway
+# workspace in tmp_path (no mocks), pinning the listing semantics and the
+# security boundaries (.git, symlinks, traversal, null bytes, hostile names).
+
+
+def _lt(path, workspace, depth=None, max_entries=None):
+    """Call the list_tree executor directly with a real workspace."""
+    kwargs = {"path": path, "workspace_root": workspace}
+    if depth is not None:
+        kwargs["depth"] = depth
+    if max_entries is not None:
+        kwargs["max_entries"] = max_entries
+    return tool_executors.list_tree(**kwargs)
+
+
+def _lt_exec(path, workspace, depth=None, max_entries=None):
+    """Call list_tree through execute_tool_request (the loop's execute_fn)."""
+    args = {"path": path}
+    if depth is not None:
+        args["depth"] = depth
+    if max_entries is not None:
+        args["max_entries"] = max_entries
+    return _call("list_tree", args, workspace_root=str(workspace))
+
+
+def test_list_tree_root_default_depth(tmp_path):
+    _make_tree(tmp_path)
+    # Pre-order: each level emitted in sorted name order, dirs recursed in that
+    # same order. .git is pruned; the result is the exact, stable prefix.
+    res = _lt(".", tmp_path)
+    assert res == {
+        "entries": [
+            {"path": "README.md", "type": "file"},
+            {"path": "pyproject.toml", "type": "file"},
+            {"path": "scripts", "type": "dir"},
+            {"path": "scripts/config.sh", "type": "file"},
+            {"path": "src", "type": "dir"},
+            {"path": "src/route.ts", "type": "file"},
+            {"path": "tests", "type": "dir"},
+            {"path": "tests/test_bar.py", "type": "file"},
+            {"path": "tests/test_foo.py", "type": "file"},
+        ],
+        "total": 9,
+        "truncated": False,
+    }
+
+
+def test_list_tree_nested_path_is_repo_relative(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt("tests", tmp_path)
+    assert res["entries"] == [
+        {"path": "tests/test_bar.py", "type": "file"},
+        {"path": "tests/test_foo.py", "type": "file"},
+    ]
+    assert res["total"] == 2
+    assert res["truncated"] is False
+    # Repo-relative paths, not paths relative to the requested `path`.
+    assert all(e["path"].startswith("tests/") for e in res["entries"])
+
+
+def test_list_tree_deterministic_ordering(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt(".", tmp_path)
+    # For this fixture the pre-order listing equals the full path sort.
+    assert res["entries"] == sorted(res["entries"], key=lambda e: e["path"])
+    # Repeated calls are byte-stable (prompt-cache / repeat-review friendly).
+    assert _lt(".", tmp_path) == res
+
+
+def test_list_tree_depth_clamped(tmp_path):
+    _make_tree(tmp_path)
+    # depth=1: only the direct children of the root (dirs not expanded).
+    d1 = _lt(".", tmp_path, depth=1)
+    assert d1["entries"] == [
+        {"path": "README.md", "type": "file"},
+        {"path": "pyproject.toml", "type": "file"},
+        {"path": "scripts", "type": "dir"},
+        {"path": "src", "type": "dir"},
+        {"path": "tests", "type": "dir"},
+    ]
+    assert d1["total"] == 5
+    assert d1["truncated"] is False
+    # depth=0 clamps to the low bound (1) — same listing as depth=1.
+    assert _lt(".", tmp_path, depth=0) == d1
+    # depth=99 clamps to the high bound (4); the fixture is only 2 deep, so it
+    # equals the default depth=2 listing.
+    assert _lt(".", tmp_path, depth=99) == _lt(".", tmp_path, depth=2)
+    # A model-supplied string depth is coerced through _opt_int.
+    assert _lt(".", tmp_path, depth="2") == _lt(".", tmp_path, depth=2)
+
+
+def test_list_tree_max_entries_cap(tmp_path):
+    _make_tree(tmp_path)
+    # cap=3: the first 3 pre-order rows, with a truncated flag.
+    res3 = _lt(".", tmp_path, max_entries=3)
+    assert res3["entries"] == [
+        {"path": "README.md", "type": "file"},
+        {"path": "pyproject.toml", "type": "file"},
+        {"path": "scripts", "type": "dir"},
+    ]
+    assert res3["total"] == 3
+    assert res3["truncated"] is True
+    # cap=0 clamps to the low bound (1): one row, truncated.
+    res0 = _lt(".", tmp_path, max_entries=0)
+    assert res0["entries"] == [{"path": "README.md", "type": "file"}]
+    assert res0["total"] == 1
+    assert res0["truncated"] is True
+    # cap=9999 clamps to the high bound (500): the whole listing, not
+    # truncated, no error.
+    res_big = _lt(".", tmp_path, depth=1, max_entries=9999)
+    assert res_big["total"] == 5
+    assert res_big["truncated"] is False
+
+
+def test_list_tree_nonexistent_path_returns_clean_error(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt("no_such_dir", tmp_path)
+    assert "error" in res
+    assert "entries" not in res
+    assert "not found" in res["error"].lower()
+
+
+def test_list_tree_path_escape_rejected(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt("../", tmp_path)
+    assert "error" in res
+    assert "escapes workspace" in res["error"]
+
+
+def test_list_tree_null_byte_rejected(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt("a\x00b", tmp_path)
+    assert "error" in res
+    assert "Null byte" in res["error"]
+
+
+def test_list_tree_does_not_descend_into_git(tmp_path):
+    _make_tree(tmp_path)
+    # .git/config and .git/objects/config exist, but neither may be listed.
+    res = _lt(".", tmp_path)
+    paths = [e["path"] for e in res["entries"]]
+    assert ".git" not in paths
+    assert all(not p.startswith(".git/") for p in paths)
+
+
+def test_list_tree_rejects_git_metadata_roots(tmp_path):
+    _make_tree(tmp_path)
+    for path in (".git", ".git/objects"):
+        res = _lt(path, tmp_path)
+        assert "error" in res
+        assert ".git" in res["error"]
+
+
+def test_list_tree_does_not_follow_symlinked_dir(tmp_path):
+    _make_tree(tmp_path)
+    # A symlinked directory pointing outside the workspace is skipped entirely
+    # — never listed and never descended into, so its files are unreachable.
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.py").write_text("x", encoding="utf-8")
+    link = tmp_path / "linkdir"
+    link.symlink_to(outside, target_is_directory=True)
+    res = _lt(".", tmp_path)
+    paths = [e["path"] for e in res["entries"]]
+    assert "linkdir" not in paths
+    assert all(not p.startswith("linkdir/") for p in paths)
+    assert "secret.py" not in paths
+
+
+def test_list_tree_skips_symlinked_file(tmp_path):
+    _make_tree(tmp_path)
+    # A symlinked file (even inside the workspace) is not listed — consistent
+    # with find_files, so a symlink pointing outside cannot be traversed.
+    target = tmp_path / "real_target.txt"
+    target.write_text("x", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(target)
+    res = _lt(".", tmp_path)
+    paths = [e["path"] for e in res["entries"]]
+    assert "link.txt" not in paths
+    assert "real_target.txt" in paths
+
+
+def test_list_tree_file_as_path_returns_single_row(tmp_path):
+    _make_tree(tmp_path)
+    # A file passed as path is a valid one-row listing (not an error).
+    res = _lt("README.md", tmp_path)
+    assert res == {
+        "entries": [{"path": "README.md", "type": "file"}],
+        "total": 1,
+        "truncated": False,
+    }
+
+
+def test_list_tree_hostile_name_with_newline(tmp_path):
+    """#252 convention: a hostile filename carrying a newline must not inject a
+    raw newline into the serialized tool result — json.dumps escapes it."""
+    _make_tree(tmp_path)
+    (tmp_path / "scripts" / "bad\nname.txt").write_text("x", encoding="utf-8")
+    res = _lt(".", tmp_path)
+    assert "scripts/bad\nname.txt" in [e["path"] for e in res["entries"]]
+    blob = json.dumps(res, separators=(",", ":"))
+    # The embedded newline is escaped by json.dumps, so no raw control char
+    # survives into a single-line serialized result.
+    assert "\n" not in blob
+    assert "\\n" in blob
+
+
+def test_list_tree_via_executor_happy_path(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt_exec(".", tmp_path)
+    assert res.get("status") == "ok"
+    assert res["result"]["total"] == 9
+    assert res["result"]["truncated"] is False
+    assert res["result"]["entries"][0] == {"path": "README.md", "type": "file"}
+    assert res["result"]["entries"][-1] == {
+        "path": "tests/test_foo.py",
+        "type": "file",
+    }
+
+
+def test_list_tree_via_executor_bad_path_error(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt_exec("../", tmp_path)
+    assert res.get("status") == "error"
+    assert "escapes workspace" in res.get("result", {}).get("error", "")
+
+
+def test_list_tree_via_executor_zero_cap_clamps_to_one(tmp_path):
+    _make_tree(tmp_path)
+    res = _lt_exec(".", tmp_path, max_entries=0)
+    assert res.get("status") == "ok"
+    assert res["result"]["entries"] == [{"path": "README.md", "type": "file"}]
+    assert res["result"]["total"] == 1
+    assert res["result"]["truncated"] is True
+
+
+def test_list_tree_via_executor_byte_cap(tmp_path):
+    _make_tree(tmp_path)
+    # A tiny max_response_bytes truncates at row boundaries: a deterministic
+    # pre-order prefix is kept, a byte cut never splits an entry, and
+    # truncated is set (driven directly via _call to inject the small cap).
+    res = _call(
+        "list_tree",
+        {"path": "."},
+        workspace_root=str(tmp_path),
+        max_response_bytes=20,
+    )
+    assert res.get("status") == "ok"
+    entries = res["result"]["entries"]
+    assert entries == [{"path": "README.md", "type": "file"}]
+    assert res["result"]["truncated"] is True

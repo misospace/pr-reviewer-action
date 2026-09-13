@@ -214,6 +214,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "list_tree",
+        "description": (
+            "List repository entries (names only, no contents) bounded by "
+            "depth and entry count. Use it to answer 'what is around here?' "
+            "in an unfamiliar repo — discover structure before read_file. "
+            "Returns sorted repo-relative {path, type} rows (type is 'file' "
+            "or 'dir'), capped at max_entries (default 200, max 500). "
+            "path defaults to the repository root; a file passed as path "
+            "returns a one-row listing for that file. depth defaults to 2 "
+            "and is clamped to 1..4. Never descends into .git and never "
+            "follows symlinks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional workspace-relative directory to list (default: "
+                        "repository root). A file passed as path returns a "
+                        "one-row listing for that file."
+                    ),
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": (
+                        "Optional max depth to descend (default 2, clamped to "
+                        "1..4). depth=1 shows only the direct children of path."
+                    ),
+                },
+                "max_entries": {
+                    "type": "integer",
+                    "description": (
+                        "Optional max entries (default 200, clamped to 500)."
+                    ),
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "git_log",
         "description": (
             "Read-only recent commit history (oneline: hash date author "

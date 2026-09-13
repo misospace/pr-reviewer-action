@@ -232,6 +232,147 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
     }
 
 
+def list_tree(path, workspace_root, depth=2, max_entries=200):
+    """List repository entries (names only) bounded by depth and entry count.
+
+    ``list_tree`` answers "what is around here?"; ``find_files`` answers
+    "where is the config loader / auth middleware / matching test?". It is a
+    structural discovery primitive, not content search (``git_grep`` covers
+    that).
+
+    ``path`` is the workspace-relative directory to start from (defaults to
+    the workspace root). The walk is top-down: entries at each level are
+    emitted in sorted name order, directories are recursed into in that
+    same order, and both the depth cap and the entry cap are enforced as
+    entries are generated (pre-order) — so an oversized tree returns a
+    deterministic, sorted, *prefix* of the full listing instead of buffering
+    everything first. This keeps output size bounded and byte-stable across
+    runs (tests, prompt caching, and repeated reviews all see identical
+    bytes).
+
+    Matching contract (deliberately small and pinned by tests):
+
+    * ``path`` is an optional workspace-relative directory to scope the walk
+      to; it defaults to the repository root. A file passed as ``path``
+      returns a one-row listing for that file (not an error).
+    * ``depth`` defaults to 2 and is clamped to 1..4. ``depth=1`` shows only
+      the direct children of ``path``; ``depth=2`` adds their children, and
+      so on.
+    * ``max_entries`` defaults to 200 and is clamped to 1..500.
+    * Results are repo-relative ``{path, type}`` rows (``type`` is ``"file"``
+      or ``"dir"``), sorted pre-order, capped at ``max_entries``, with a
+      ``truncated`` flag when more entries existed. ``total`` is the number
+      of entries actually returned (mirrors ``find_files``).
+    * The walk never descends into ``.git`` and never follows symlinked
+      directories, so it cannot escape the workspace. Symlinks (both files
+      and directories) are skipped — consistent with ``find_files``, so a
+      symlink pointing outside the workspace cannot be traversed or listed.
+
+    Security model (this tool is part of the prompt-injection boundary —
+    untrusted PR content can shape the arguments the model emits):
+
+    * ``path`` goes through the same :func:`_resolve_workspace_path` guard
+      as ``read_file``: null bytes, escapes outside the workspace root, and
+      sensitive path patterns are all rejected before any filesystem access.
+    * ``.git`` is never traversed (and a path inside ``.git`` is rejected
+      outright, consistent with ``find_files``).
+    * Symlinks (both files and directories) are skipped entirely — never
+      followed and never listed, so a symlink pointing outside the
+      workspace cannot be traversed or listed.
+    * Only names and ``file``/``dir`` types are returned — never contents.
+
+    Returns ``{"entries": [{path, type}], "total": N, "truncated": bool}`` where
+    ``path`` is the repo-relative POSIX path, or ``{"error": ...}``.
+    """
+    if isinstance(path, str) and path:
+        rel_path = path
+    elif path is None or path == "":
+        rel_path = "."
+    else:
+        return {"error": "Invalid path"}
+
+    # Same containment + sensitive-file policy as read_file/git_log/git_blame.
+    resolved, err = _resolve_workspace_path(rel_path, workspace_root)
+    if err:
+        return {"error": err}
+
+    root = Path(workspace_root).resolve()
+    if not resolved.exists():
+        return {"error": f"Path not found: {rel_path}"}
+
+    # Pruning child .git directories is insufficient when the requested root
+    # itself is inside Git metadata; reject that scope before walking it.
+    if ".git" in resolved.relative_to(root).parts:
+        return {"error": "Path inside .git is not listable"}
+
+    # Distinguish "unset" (None → the default) from an explicit out-of-range
+    # value (0 → clamped to the low bound), mirroring find_files' clamping.
+    # _opt_int is used for model string tolerance (e.g. depth="2" or "junk").
+    try:
+        raw_depth = _opt_int(depth)
+        if raw_depth is None:
+            raw_depth = 2
+        depth = max(1, min(raw_depth, 4))
+        raw_cap = _opt_int(max_entries)
+        if raw_cap is None:
+            raw_cap = 200
+        cap = max(1, min(raw_cap, 500))
+    except Exception:
+        return {"error": "Invalid depth or max_entries"}
+
+    if not resolved.is_dir():
+        # A file is a valid single-row listing, consistent with read_file's
+        # behaviour of reading the file rather than erroring on a file path.
+        return {
+            "entries": [
+                {
+                    "path": resolved.relative_to(root).as_posix(),
+                    "type": "file",
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        }
+
+    entries = []
+    truncated = False
+
+    def rel(d: Path) -> str:
+        if d == resolved:
+            return "."
+        return d.relative_to(root).as_posix()
+
+    def walk(directory: Path, level: int) -> None:
+        nonlocal truncated
+        if level > depth:
+            return
+        try:
+            children = sorted(directory.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for child in children:
+            if len(entries) >= cap:
+                truncated = True
+                return
+            name = child.name
+            # .git internals are never exposed through traversal.
+            if name == ".git":
+                continue
+            # Symlinks (both files and directories) are skipped entirely —
+            # consistent with find_files, so a symlink pointing outside the
+            # workspace cannot be traversed or listed.
+            if child.is_symlink():
+                continue
+            is_dir = child.is_dir()
+            child_type = "dir" if is_dir else "file"
+            entries.append({"path": rel(child), "type": child_type})
+            if is_dir:
+                walk(child, level + 1)
+
+    walk(resolved, 1)
+    return {"entries": entries, "total": len(entries), "truncated": truncated}
+
+
 def git_grep(pattern, workspace_root, request_timeout=15):
     """Run git grep and return matched lines."""
     try:
@@ -529,6 +670,36 @@ def execute_tool_request(
                 "files": files,
                 "total": res.get("total", len(files)),
                 "truncated": res.get("truncated", False),
+            }
+
+        elif tool_name == "list_tree":
+            path = args.get("path") or "."
+            res = list_tree(
+                path, workspace_root, _opt_int(args.get("depth")),
+                _opt_int(args.get("max_entries")),
+            )
+            if res.get("error"):
+                raise ValueError(res["error"])
+            entries = res.get("entries", [])
+            # The harness's normal output-size cap, applied at row boundaries
+            # (each entry is one deterministic line) so the result stays
+            # bounded AND valid, and a byte cut never splits an entry.
+            truncated = res.get("truncated", False)
+            if max_response_bytes and max_response_bytes > 0:
+                kept = []
+                total = 0
+                for e in entries:
+                    cost = len(e["path"]) + len(e["type"]) + 4
+                    if kept and total + cost > max_response_bytes:
+                        truncated = True
+                        break
+                    kept.append(e)
+                    total += cost
+                entries = kept
+            tool_result["result"] = {
+                "entries": entries,
+                "total": res.get("total", len(entries)),
+                "truncated": truncated,
             }
 
         elif tool_name == "git_log":
