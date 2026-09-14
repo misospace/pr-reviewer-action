@@ -630,6 +630,15 @@ class TestCollectConfigLines:
         assert "OPENAI_BASE_URL=https://example.test/v1" in lines
         assert "AZURE_OPENAI_ENDPOINT=https://az.example.test" in lines
 
+    def test_collects_repository_map_context_vars(self, monkeypatch):
+        """Map context settings invalidate reviews generated with another map."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("REPO_MAP_CONTEXT", "true")
+        monkeypatch.setenv("REPO_MAP_MAX_BYTES", "12000")
+        lines = _collect_config_lines()
+        assert "REPO_MAP_CONTEXT=true" in lines
+        assert "REPO_MAP_MAX_BYTES=12000" in lines
+
     def test_ignores_runner_platform_vars(self, monkeypatch):
         """Runner-preset vars sharing a provider prefix are not config."""
         _clear_config_env(monkeypatch)
@@ -737,6 +746,16 @@ class TestComputeConfigHashNoArgs:
         monkeypatch.setenv("TOOL_MAX_ROUNDS", "2")
         h1 = compute_config_hash()
         monkeypatch.setenv("TOOL_MAX_ROUNDS", "4")
+        h2 = compute_config_hash()
+        assert h1 != h2
+
+    def test_repository_map_settings_change_config_hash(self, monkeypatch):
+        """Changing map context must force a fresh review."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("REPO_MAP_CONTEXT", "true")
+        monkeypatch.setenv("REPO_MAP_MAX_BYTES", "12000")
+        h1 = compute_config_hash()
+        monkeypatch.setenv("REPO_MAP_MAX_BYTES", "8000")
         h2 = compute_config_hash()
         assert h1 != h2
 

@@ -51,9 +51,23 @@ jq -c --argjson total "${TOTAL_CHANGED_FILES:-0}" \
 truncate_clean pr-files.json pr-files.truncated.json "$MAX_FILES" '…[file list truncated]'
 
 jq -r '.body // ""' pr.json > pr-body.txt
+
+: > repo-map.json repo-map.md
+if [[ "$REPO_MAP_CONTEXT" == "true" ]]; then
+  if ! python3 "$SCRIPT_DIR/build_repo_map.py" \
+      --workspace "${GITHUB_WORKSPACE:-$PWD}" \
+      --json repo-map.json \
+      --markdown repo-map.md \
+      --max-markdown-bytes "$REPO_MAP_MAX_BYTES"; then
+    error "Repository map generation failed; continuing without repository map context"
+    : > repo-map.json repo-map.md
+  fi
+fi
 section_timer_end
 
 section_timer_start "linked-issues"
+
+
 log "Gathering linked issue context..."
 REPO="$REPO" python3 - <<'PY' > linked-issues.json
 import json

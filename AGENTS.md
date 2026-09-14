@@ -92,20 +92,21 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 1. Changed Manifest Context (Helm/K8s manifests)
 2. PR Metadata (JSON from `gh pr view`)
 3. PR Classification (deterministic classifier output)
-4. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
-5. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
-6. PR Files (truncated JSON with patches)
-7. Version Hints from Diff
-8. PR Diff (truncated)
-9. Tool Harness Findings (planned + executed tool results)
-10. Evidence Providers (user-defined command output)
-11. Image Digest Provenance
-12. Linked Sources (fetched URLs, GitHub releases/compare metadata)
-13. Repository Impact Scan (git grep hits for extracted terms)
-14. Repository History (git log context for extracted terms)
-15. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
+4. Repository Map (bounded deterministic structure of Git-tracked paths)
+5. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
+6. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
+7. PR Files (truncated JSON with patches)
+8. Version Hints from Diff
+9. PR Diff (truncated)
+10. Tool Harness Findings (planned + executed tool results)
+11. Evidence Providers (user-defined command output)
+12. Image Digest Provenance
+13. Linked Sources (fetched URLs, GitHub releases/compare metadata)
+14. Repository Impact Scan (git grep hits for extracted terms)
+15. Repository History (git log context for extracted terms)
+16. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
 
-Note: `MAX_CORPUS` truncation applies to sections 1–14; the standards section is always preserved in full.
+Note: `MAX_CORPUS` truncation applies to sections 1–15; the standards section is always preserved in full.
 
 The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 
