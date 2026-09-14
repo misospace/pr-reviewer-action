@@ -1118,6 +1118,11 @@ def _write_previous_dismissals(
     when the author appears in ``maintainers``. Returns the number of
     dismissals written.
 
+    Fails closed on an empty ``maintainers`` set: when the precheck's
+    ``_resolve_maintainers()`` could not verify anyone (PyGithub missing,
+    a lookup error) it returns ``set()``, and the directive must be
+    honoured by *nobody* then — not by everyone (#581).
+
     Guards: ``output_path`` is validated against ``workspace_root`` when
     provided (no symlinks pointing outside, no ``..`` segments, no null
     bytes). The file is only written if at least one directive was parsed;
@@ -1128,6 +1133,15 @@ def _write_previous_dismissals(
         parse_dismiss_directive,
         write_dismissed_findings,
     )
+
+    # Fail closed on an empty maintainer set. The ``if maintainers and ...``
+    # gate below treats an *empty* set as "honor everyone", which would let
+    # any author dismiss findings the moment verification degrades. An
+    # unverified maintainer set must dismiss nothing, not all of them
+    # (#581). A non-empty (verified or local-dev) set proceeds to the
+    # per-comment author check.
+    if not maintainers:
+        return 0
 
     # Path-traversal / symlink / null-byte defense. Mirrors the reader-side
     # _resolve_artifact_path containment check.
@@ -1250,9 +1264,16 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
     for each candidate username in ``DISMISSAL_MAINTAINERS`` (or
     ``GITHUB_REPOSITORY_OWNER``) when a token and repo are available; only
     usernames with ``admin`` or ``maintain`` permission are admitted.
-    Falls back to the candidate set (without permission verification) only
-    when no token is available, so the dismissal directive still works in
-    local development.
+
+    This is the security gate for the ``@ai-reviewer dismiss`` directive,
+    so it fails closed: it returns an empty set whenever the permission
+    check cannot actually be performed — PyGithub is not installed, the
+    repo lookup errors, or a candidate's own lookup errors. An unverified
+    candidate set would let any listed login dismiss findings, so those
+    paths yield ``set()`` instead of the candidates. The unverified
+    candidate set is returned only from the documented local-development
+    branch (no token: verification is impossible by definition, and local
+    development has no external reviewers to exploit it).
     """
     candidates: set[str] = set()
     explicit = os.environ.get("DISMISSAL_MAINTAINERS", "")
@@ -1265,13 +1286,28 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
 
     repo_name = repo or os.environ.get("GITHUB_REPOSITORY", "")
     tok = token or _github_token()
-    if not (repo_name and tok and candidates):
+    # Fail closed on each verification-impossible condition separately so the
+    # semantics are explicit (#581 / review feedback):
+    #   - no candidates       -> set()        nothing to verify, nobody may dismiss
+    #   - no token            -> candidates   documented local-dev fallback
+    #   - token present, no repo -> set()      cannot verify against a missing
+    #                                          repository identity, so nobody
+    #                                          may dismiss
+    # Only when all three are present do we proceed to the live permission check.
+    if not candidates:
+        return set()
+    if not tok:
         return candidates
+    if not repo_name:
+        return set()
 
     try:
         from github import Github
     except ImportError:
-        return candidates
+        # PyGithub is not installed, so the permission check cannot run.
+        # Fail closed: an empty set means no dismissal is honoured rather
+        # than treating the unfiltered candidate set as verified (#581).
+        return set()
 
     permitted: set[str] = set()
     try:
@@ -1283,15 +1319,20 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
                 if perm in ("admin", "maintain"):
                     permitted.add(username)
             except Exception as exc:  # noqa: BLE001 — single-user lookup
+                # Fail closed: an error on this user's lookup means their
+                # permission could not be verified, so they are not
+                # admitted (#581).
                 logging.getLogger(__name__).debug(
                     "Permission check failed for %s: %s", username, exc
                 )
-        return permitted or candidates  # fall back if all lookups failed
+        return permitted
     except Exception as exc:  # noqa: BLE001 — repo-level lookup
+        # Fail closed: if the repo lookup itself failed, no candidate's
+        # permission is verified, so nobody may dismiss (#581).
         logging.getLogger(__name__).warning(
             "Maintainer permission lookup failed: %s", exc
         )
-        return candidates
+        return set()
 
 
 if __name__ == "__main__":

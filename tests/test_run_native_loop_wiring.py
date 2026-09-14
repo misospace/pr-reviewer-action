@@ -632,6 +632,76 @@ def test_native_loop_dispatches_find_files_to_executor(monkeypatch, tmp_path):
     assert "pyproject.toml" in md
 
 
+def test_native_loop_advertises_list_tree_schema(monkeypatch, tmp_path):
+    """#566: list_tree is advertised in the loop request for both API formats,
+    with the schema/executor in sync (path/depth/max_entries all optional)."""
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
+    for api_format in ("openai", "anthropic"):
+        handled, _result, payloads = _run_capturing(
+            monkeypatch, tmp_path, api_format,
+            [_openai_text("done")],
+        )
+        # The first (loop) request advertises the built-in tool set.
+        tools = payloads[0]["tools"]
+        if api_format == "openai":
+            names = [t["function"]["name"] for t in tools]
+            lt = next(t for t in tools if t["function"]["name"] == "list_tree")
+            params = lt["function"]["parameters"]
+        else:
+            names = [t["name"] for t in tools]
+            lt = next(t for t in tools if t["name"] == "list_tree")
+            params = lt["input_schema"]
+        assert "list_tree" in names
+        assert params["type"] == "object"
+        assert params["required"] == []
+        assert "path" in params["properties"]
+        assert "depth" in params["properties"]
+        assert "max_entries" in params["properties"]
+        assert params.get("additionalProperties") is False
+
+
+def test_native_loop_dispatches_list_tree_to_executor(monkeypatch, tmp_path):
+    """#566 end-to-end: the model issues a list_tree call and the executor runs
+    for real against the workspace, returning the sorted repo-relative rows."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "config.sh").write_text("x", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_foo.py").write_text("x", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("x", encoding="utf-8")
+
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "list_tree", '{"path": ".", "depth": 1}'),
+            _openai_text("Mapped the layout."),
+        ],
+    )
+    assert handled is True
+    assert result["mode"] == "native_loop"
+    assert result["planned_request_count"] == 1
+
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    lt_calls = [tc for tc in harness.get("tool_calls", []) if tc["tool"] == "list_tree"]
+    assert lt_calls and lt_calls[0]["status"] == "ok"
+
+    # The executor ran for real: depth=1 returns only the direct children.
+    lt_result = next(
+        tr for tr in harness["tool_results"] if tr.get("tool") == "list_tree"
+    )
+    assert lt_result["result"]["entries"] == [
+        {"path": "pyproject.toml", "type": "file"},
+        {"path": "scripts", "type": "dir"},
+        {"path": "tests", "type": "dir"},
+    ]
+    assert lt_result["result"]["total"] == 3
+    assert lt_result["result"]["truncated"] is False
+
+    # The tool result is folded into the harness markdown as evidence.
+    md = (tmp_path / "tool-harness.md").read_text()
+    assert "list_tree" in md
+    assert "pyproject.toml" in md
+
+
 def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
     """#245: an allowlisted read-only MCP tool is advertised in the loop request
     and routed to the MCP client; its result folds into the harness output."""

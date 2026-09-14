@@ -5,6 +5,10 @@ resolve_review_scope (including validation-flag fallbacks), and
 _detect_incremental_scope.
 """
 
+import sys
+
+import pytest
+
 from pr_reviewer.precheck import (
     EMPTY_DIFF_FINGERPRINT,
     MAX_INCREMENTAL_FILES,
@@ -493,3 +497,239 @@ class TestDismissalWiring:
         )
         assert written == 0
         assert not outside.exists()
+
+
+class TestResolveMaintainersFailsClosed:
+    """#581: ``_resolve_maintainers`` is the security gate for the
+    ``@ai-reviewer dismiss`` directive, so it must fail closed. The old
+    code returned the *unfiltered* candidate set whenever GitHub
+    permission verification was impossible (missing PyGithub, a repo-level
+    error, or every per-user lookup failing) — which let any login the
+    operator listed in ``DISMISSAL_MAINTAINERS`` / the bare
+    ``GITHUB_REPOSITORY_OWNER`` dismiss findings in production, because the
+    action runs bare ``python3`` with no ``pip install`` and PyGithub was
+    never pinned. Only the documented local-development branch (no token)
+    may return the unfiltered set, and no other path may."""
+
+    # Env is cleared per test so the function never sees a stray token /
+    # repo from the surrounding shell; tests set exactly what they assert on.
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for var in (
+            "DISMISSAL_MAINTAINERS",
+            "GITHUB_REPOSITORY_OWNER",
+            "GITHUB_REPOSITORY",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def _candidates(self):
+        return {"alice", "bob"}
+
+    def test_import_error_fails_closed(self, monkeypatch):
+        # PyGithub missing -> the check cannot run -> nobody may dismiss.
+        # The old code returned the unfiltered candidates here.
+        import pr_reviewer.precheck as precheck
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", None)
+
+        assert precheck._resolve_maintainers() == set()
+
+    def test_import_error_with_owner_candidate_fails_closed(self, monkeypatch):
+        # Same, but the candidate set comes from GITHUB_REPOSITORY_OWNER
+        # (the default) rather than an explicit DISMISSAL_MAINTAINERS.
+        import pr_reviewer.precheck as precheck
+
+        monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "owner")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", None)
+
+        assert precheck._resolve_maintainers() == set()
+
+    def test_repo_level_error_fails_closed(self, monkeypatch):
+        # PyGithub is importable but the repo lookup itself blows up.
+        import pr_reviewer.precheck as precheck
+
+        class _Repo:
+            def get_collaborator_permission(self, _u):
+                return "admin"
+
+        class _BoomRepo(Exception):
+            pass
+
+        class _Github:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_repo(self, _name):
+                raise _BoomRepo("transient 5xx")
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
+
+        assert precheck._resolve_maintainers() == set()
+
+    def test_all_per_user_lookups_fail_fails_closed(self, monkeypatch):
+        # PyGithub and the repo are fine, but every candidate's own
+        # get_collaborator_permission raises (404 / secondary rate limit).
+        # The old code did ``return permitted or candidates`` here, i.e. it
+        # fell back to the unfiltered set; now nobody is admitted.
+        import pr_reviewer.precheck as precheck
+
+        class _UserLookupError(Exception):
+            pass
+
+        class _Repo:
+            def get_collaborator_permission(self, _u):
+                raise _UserLookupError("404 not a collaborator")
+
+        class _Github:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_repo(self, _name):
+                return _Repo()
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
+
+        assert precheck._resolve_maintainers() == set()
+
+    def test_partial_failure_admits_only_verified(self, monkeypatch):
+        # One candidate verifies as admin, the other's lookup raises. The
+        # verified one is admitted; the unverifiable one is dropped rather
+        # than let through by a fallback to the candidate set.
+        import pr_reviewer.precheck as precheck
+
+        class _UserLookupError(Exception):
+            pass
+
+        class _Repo:
+            def get_collaborator_permission(self, username):
+                if username == "alice":
+                    return "admin"
+                raise _UserLookupError("404")
+
+        class _Github:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_repo(self, _name):
+                return _Repo()
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
+
+        assert precheck._resolve_maintainers() == {"alice"}
+
+    def test_verified_maintain_and_admin_are_admitted(self, monkeypatch):
+        # Happy path: admin/maintain are admitted, none/read are not.
+        import pr_reviewer.precheck as precheck
+
+        perms = {"admin_u": "admin", "maintain_u": "maintain", "read_u": "read"}
+
+        class _Repo:
+            def get_collaborator_permission(self, username):
+                return perms[username]
+
+        class _Github:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_repo(self, _name):
+                return _Repo()
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "admin_u,maintain_u,read_u")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
+
+        assert precheck._resolve_maintainers() == {"admin_u", "maintain_u"}
+
+    def test_no_token_local_dev_returns_unfiltered_candidates(self, monkeypatch):
+        # The one intended fail-open path: no token means verification is
+        # impossible by definition, so the (operator-configured) candidate
+        # set is returned unchanged for local development.
+        import pr_reviewer.precheck as precheck
+
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        # No token in any spelling -> documented local-dev branch.
+        assert precheck._resolve_maintainers() == self._candidates()
+
+    def test_token_with_candidates_but_no_repo_fails_closed(self, monkeypatch):
+        # Token + candidates but no GITHUB_REPOSITORY: the permission check
+        # cannot run against an unknown repository, so this path must fail
+        # closed (return set()) rather than fall back to the unfiltered
+        # candidate set (#581 / review feedback). The old combined guard
+        # ``if not (repo_name and tok and candidates): return candidates``
+        # failed open on exactly this combination.
+        import pr_reviewer.precheck as precheck
+
+        # Defensive: if a stray PyGithub mock were loaded by a previous
+        # test, the import branch must still not silently admit candidates.
+        # We do NOT set GITHUB_REPOSITORY here.
+        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
+        monkeypatch.setenv("GH_TOKEN", "t")
+        # Sanity: a token really is present (the env fixture clears it).
+        assert precheck._github_token() == "t"
+
+        assert precheck._resolve_maintainers() == set()
+
+    def test_no_token_owner_default_returns_unfiltered_candidate(self, monkeypatch):
+        # Local-dev branch when the candidate set is the bare owner.
+        import pr_reviewer.precheck as precheck
+
+        monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "owner")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        assert precheck._resolve_maintainers() == {"owner"}
+
+    def test_writer_dismisses_nothing_on_empty_maintainers(self, tmp_path, monkeypatch):
+        # The security boundary: _write_previous_dismissals is only ever
+        # called by main(), which feeds it _resolve_maintainers(). When that
+        # is empty (verification impossible in production) the directive
+        # must dismiss NOTHING, not "everyone" — the old ``if maintainers
+        # and ...`` gate treated an empty set as no-op and let any author
+        # through, widening the #581 hole past the candidate set.
+        import pr_reviewer.precheck as precheck
+
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: bogus"}
+        ]
+        written = precheck._write_previous_dismissals(
+            comments,
+            set(),
+            output_path=str(tmp_path / "previous-dismissals.json"),
+            workspace_root=str(tmp_path),
+        )
+        assert written == 0
+        assert not (tmp_path / "previous-dismissals.json").exists()
+
+    def test_writer_still_honours_verified_maintainer(self, tmp_path, monkeypatch):
+        # Sanity: a non-empty (verified) maintainer set still lets the
+        # matching author's directive through, so the fail-closed empty-set
+        # guard above does not over-broaden.
+        import pr_reviewer.precheck as precheck
+
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: legit"}
+        ]
+        written = precheck._write_previous_dismissals(
+            comments,
+            {"owner"},
+            output_path=str(tmp_path / "previous-dismissals.json"),
+            workspace_root=str(tmp_path),
+        )
+        assert written == 1
+        assert (tmp_path / "previous-dismissals.json").exists()

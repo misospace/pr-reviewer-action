@@ -43,6 +43,7 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     git_blame,
     git_grep,
     git_log,
+    list_tree,
     mask_and_truncate,
     normalize_host,
     read_file,
