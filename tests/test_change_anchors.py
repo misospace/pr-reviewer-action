@@ -160,6 +160,55 @@ class TestPython:
         assert "unchanged_func" not in _anchor_values(result, "symbol")
         assert "removed_func" not in _anchor_values(result, "symbol")
 
+    def test_from_block_opened_in_context(self):
+        # A from-import block opened on an *unchanged* context line carries
+        # block state: a member added inside it must be recognized as an
+        # import, while the block's pre-existing members and the closing
+        # paren must not become anchors (#571 review: block state from
+        # context lines).
+        diff = _diff(
+            "diff --git a/mod.py b/mod.py",
+            "--- a/mod.py",
+            "+++ b/mod.py",
+            "@@ -1,5 +1,6 @@",
+            " from os import (",
+            "     path,",
+            "+    sep,",
+            " )",
+            " import sys",
+        )
+        result = extract_change_anchors(diff)
+        file = result["files"][0]
+        names = {s["name"]: s["kind"] for s in file["symbols"]}
+        assert names == {"sep": "import"}
+        # Pre-existing member and pre-existing single-line import are not
+        # anchors — only the added member is.
+        assert "path" not in names
+        assert file["imports"] == []
+
+    def test_from_block_opened_in_context_multi_hunk(self):
+        # The from-block opener and a member live in *separate* hunks of the
+        # same file; block state must survive the hunk boundary (hunk headers
+        # are not part of the line stream, so the extractor's state persists).
+        diff = _diff(
+            "diff --git a/mod.py b/mod.py",
+            "--- a/mod.py",
+            "+++ b/mod.py",
+            "@@ -1,3 +1,3 @@",
+            " from os import (",
+            "     path,",
+            " )",
+            "@@ -5,2 +5,3 @@",
+            " def other():",
+            "+    x = 1",
+        )
+        # The block opened and closed in the first hunk, so the second
+        # hunk's added line is ordinary code, not a from-block member.
+        result = extract_change_anchors(diff)
+        names = {s["name"] for s in result["files"][0]["symbols"]}
+        assert names == set()  # `x = 1` is not a declaration
+        assert result["files"][0]["imports"] == []
+
     def test_deleted_only_symbols_omitted(self):
         # Documented behavior: deleted-only declarations are omitted.
         diff = _diff(
@@ -273,6 +322,28 @@ class TestGo:
         assert file["imports"] == [
             "context", "net/http", "github.com/example/pkg",
         ]
+
+    def test_import_block_opened_in_context(self):
+        # An import block opened on an *unchanged* context line carries block
+        # state: a quoted path added inside it must be recognized as an
+        # import, while the block's pre-existing members and any context-only
+        # func must not (#571 review: block state from context lines).
+        diff = _diff(
+            "diff --git a/pkg/main.go b/pkg/main.go",
+            "--- a/pkg/main.go",
+            "+++ b/pkg/main.go",
+            "@@ -1,5 +1,6 @@",
+            " import (",
+            '\t"context"',
+            '+\t"encoding/json"',
+            " )",
+            " func main() {}",
+        )
+        result = extract_change_anchors(diff)
+        file = result["files"][0]
+        assert file["imports"] == ["encoding/json"]
+        # `main` appears only as unchanged context — not an anchor.
+        assert [s["name"] for s in file["symbols"]] == []
 
     def test_single_line_import(self):
         diff = _py_file("a.go", [
@@ -464,6 +535,43 @@ class TestDiffStructure:
         assert len(result["files"]) == 1
         assert result["files"][0]["path"] == actual
         assert [s["name"] for s in result["files"][0]["symbols"]] == ["quoted"]
+
+    def test_diff_path_quoted_octal_utf8(self):
+        # Git quotes a non-ASCII path with octal byte escapes: ``é`` (U+00E9,
+        # 0xC3 0xA9 in UTF-8) arrives as ``caf\303\251`` — the parser must
+        # decode the octal runs back to the real name (#571 review: octal path
+        # quoting).
+        diff = (
+            'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+            '--- "a/caf\\303\\251.py"\n'
+            '+++ "b/caf\\303\\251.py"\n'
+            "@@ -0,0 +1,1 @@\n"
+            "+def accented():\n"
+        )
+        result = extract_change_anchors(diff)
+        file = result["files"][0]
+        assert file["path"] == "café.py"
+        assert file["language"] == "python"
+        assert [s["name"] for s in file["symbols"]] == ["accented"]
+        # The file-level anchor carries the decoded path too.
+        file_anchor = next(a for a in result["anchors"] if a["kind"] == "file")
+        assert file_anchor["value"] == "café.py"
+
+    def test_diff_path_quoted_octal_malformed(self):
+        # An octal escape exceeding 255 (e.g. ``\777``) is never emitted by
+        # Git; the decoder keeps the backslash literal and re-reads the
+        # digits instead of raising or producing a garbage byte.
+        diff = (
+            'diff --git "a/x\\777y.py" "b/x\\777y.py"\n'
+            '--- "a/x\\777y.py"\n'
+            '+++ "b/x\\777y.py"\n'
+            "@@ -0,0 +1,1 @@\n"
+            "+def f():\n"
+        )
+        result = extract_change_anchors(diff)
+        # 511 is not a valid byte: backslash kept literally, digits re-read as
+        # plain data → ``x\\777y.py`` (a literal backslash, never an error).
+        assert result["files"][0]["path"] == "x\\777y.py"
 
     def test_diff_path_with_spaces_and_renames(self):
         # Rename headers may also contain spaces or quotes.

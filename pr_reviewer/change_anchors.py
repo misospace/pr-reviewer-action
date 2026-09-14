@@ -353,12 +353,19 @@ class _FileState:
     new_line: int = 0
     # (new_file_line_number, content) for added lines only
     added_lines: list[tuple[int, str]] = field(default_factory=list)
+    # (new_file_line_number, content) for context lines that open or close an
+    # import block (Python ``from x import (`` / Go ``import (`` and their
+    # closers). They carry block state so a member added inside a pre-existing
+    # block is still recognized, but contribute no anchors of their own.
+    # Recorded only for Python and Go (the only block-state languages).
+    context_lines: list[tuple[int, str]] = field(default_factory=list)
 
 
 # Mapping of C-style backslash escapes produced by ``quote_c_style_counted`` in
 # Git diff output. ``\\`` and ``\"`` are also escape sequences (literal
 # backslash and double-quote respectively). Any other backslash-escaped
-# character is treated as a literal of the following character.
+# character is treated as a literal of the following character. Octal byte
+# escapes (``\ooo``) are handled by ``_decode_c_quoted``.
 _PATH_ESCAPES = {
     "n": "\n",
     "t": "\t",
@@ -370,6 +377,57 @@ _PATH_ESCAPES = {
     "\\": "\\",
     '"': '"',
 }
+
+
+def _decode_c_quoted(inner: str) -> str:
+    """Decode the body of a C-style quoted diff path token.
+
+    ``inner`` is the text between the quotes (after the ``a/``/``b/`` prefix).
+    Git emits ``\\ooo`` octal byte escapes for bytes outside its safe set, so a
+    UTF-8 name arrives as e.g. ``caf\\303\\251`` (``é`` = 0xC3 0xA9) — the octal
+    runs are decoded byte-wise and the buffer reassembled as UTF-8 (a
+    ``latin-1`` fallback keeps a pathological non-UTF-8 name a usable string
+    rather than an error). Named escapes map via ``_PATH_ESCAPES``; any other
+    escaped character degrades to the character itself.
+    """
+    out: list[int] = []
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if c == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt in "01234567":
+                # Octal byte escape: up to 3 digits, one byte.
+                digits = nxt
+                j = i + 2
+                while (
+                    j < len(inner)
+                    and len(digits) < 3
+                    and inner[j] in "01234567"
+                ):
+                    digits += inner[j]
+                    j += 1
+                val = int(digits, 8)
+                if val <= 255:
+                    out.append(val)
+                    i = j
+                    continue
+                # > 255 (e.g. ``\777``) is never emitted by Git: keep the
+                # backslash literally and let the digits re-read as data.
+                out.append(0x5C)
+                i += 1
+                continue
+            out.extend(
+                _PATH_ESCAPES.get(nxt, nxt).encode("utf-8", errors="surrogateescape")
+            )
+            i += 2
+            continue
+        out.extend(c.encode("utf-8", errors="surrogateescape"))
+        i += 1
+    try:
+        return bytes(out).decode("utf-8")
+    except UnicodeDecodeError:
+        return bytes(out).decode("latin-1")
 
 
 def _parse_path_token(text: str) -> tuple[str | None, str]:
@@ -389,17 +447,16 @@ def _parse_path_token(text: str) -> tuple[str | None, str]:
         return None, text
     if text.startswith('"'):
         i = 1
-        out: list[str] = []
         while i < len(text):
             c = text[i]
             if c == "\\" and i + 1 < len(text):
-                nxt = text[i + 1]
-                out.append(_PATH_ESCAPES.get(nxt, nxt))
+                # Skip the escape pair so a ``\`` never terminates the quote;
+                # any octal digits it introduces are decoded by
+                # ``_decode_c_quoted`` once the closing quote is found.
                 i += 2
                 continue
             if c == '"':
-                return "".join(out), text[i + 1:]
-            out.append(c)
+                return _decode_c_quoted(text[1:i]), text[i + 1:]
             i += 1
         # Unterminated quote — give up cleanly rather than guessing.
         return None, text
@@ -501,22 +558,11 @@ def _clean_diff_path(p: str) -> str:
     if p.startswith(("a/", "b/")):
         return p[2:]
     if p.startswith(('"a/', '"b/')) and p.endswith('"'):
-        # Decode C-style escape sequences inside the quoted path so the
-        # result is the literal path Git means (``weird\\tname.py`` becomes
-        # ``weird<TAB>name.py``).
-        inner = p[3:-1]
-        out: list[str] = []
-        i = 0
-        while i < len(inner):
-            c = inner[i]
-            if c == "\\" and i + 1 < len(inner):
-                nxt = inner[i + 1]
-                out.append(_PATH_ESCAPES.get(nxt, nxt))
-                i += 2
-                continue
-            out.append(c)
-            i += 1
-        return "".join(out)
+        # Decode C-style escape sequences (named and ``\\ooo`` octal) inside
+        # the quoted path so the result is the literal path Git means
+        # (``weird\\tname.py`` becomes ``weird<TAB>name.py``; ``caf\\303\\251``
+        # becomes ``café``).
+        return _decode_c_quoted(p[3:-1])
     if p == '"/dev/null"':
         return "/dev/null"
     return p
@@ -615,6 +661,21 @@ def parse_diff(diff_text: str) -> list[_FileState]:
             # "\ No newline at end of file"
             continue
         if line.startswith(" "):
+            # Record context lines that open or close an import block so a
+            # member added inside a pre-existing ``from x import (`` /
+            # ``import (`` block is still recognized (see
+            # ``_extract_file_anchors``). Only openers/closers are kept —
+            # in-block members do not change block state — so the recorded
+            # list stays small regardless of hunk size.
+            content = line[1:]
+            stripped = content.strip()
+            lang = detect_language(current.path)
+            if lang == "python":
+                if _PY_FROM_BLOCK_RE.match(content) or stripped.startswith(")"):
+                    current.context_lines.append((current.new_line, content))
+            elif lang == "go":
+                if _GO_IMPORT_BLOCK_RE.match(content) or stripped == ")":
+                    current.context_lines.append((current.new_line, content))
             current.new_line += 1
             continue
         # Any other line inside a hunk is malformed; skip it.
@@ -639,6 +700,27 @@ class FileAnchors:
     # ``truncated`` flag can reflect silent omission.
     symbols_truncated: bool = False
     imports_truncated: bool = False
+
+
+def _merge_with_context(state: _FileState) -> list[tuple[int, str, bool]]:
+    """Merge added lines with block-state context lines in new-file order.
+
+    The extractors track import-block state (Python ``from x import (`` / Go
+    ``import (``) across a run of lines, so a member *added* inside a block
+    whose *opener* is unchanged context must see that opener first. The
+    merged stream interleaves the two lists by new-file line number; each
+    line number appears in at most one list, so a stable sort reproduces the
+    file's true order. The third tuple element marks a context line: the
+    caller advances block state from it but emits no anchors.
+    """
+    merged: list[tuple[int, str, bool]] = [
+        (line_no, content, False) for line_no, content in state.added_lines
+    ]
+    merged.extend(
+        (line_no, content, True) for line_no, content in state.context_lines
+    )
+    merged.sort(key=lambda item: item[0])
+    return merged
 
 
 def _extract_file_anchors(state: _FileState) -> FileAnchors:
@@ -669,19 +751,27 @@ def _extract_file_anchors(state: _FileState) -> FileAnchors:
 
     if fa.language == "go":
         in_block = False
-        for line_no, content in state.added_lines:
+        for line_no, content, is_context in _merge_with_context(state):
             imps, in_block = _extract_imports_go(content, in_block)
+            if is_context:
+                # Block-state line only: its members are existing imports,
+                # not additions — advance the block state, emit nothing.
+                continue
             for imp in imps:
                 _add_import(imp)
             for name, kind, confidence in _extract_go(content):
                 _add_symbol(name, kind, confidence, line_no)
     elif fa.language in ("python", "javascript", "typescript"):
         in_from_block = False
-        for line_no, content in state.added_lines:
+        for line_no, content, is_context in _merge_with_context(state):
             if fa.language == "python":
                 symbols, imps, in_from_block = _extract_python(content, in_from_block)
             else:
                 symbols, imps = _extract_js(content)
+            if is_context:
+                # Block-state line only: its members are existing imports,
+                # not additions — advance the from-block state, emit nothing.
+                continue
             for imp in imps:
                 _add_import(imp)
             for name, kind, confidence in symbols:
@@ -751,6 +841,7 @@ def extract_change_anchors(
             for existing in merged:
                 if existing.path == state.path:
                     existing.added_lines.extend(state.added_lines)
+                    existing.context_lines.extend(state.context_lines)
                     existing.binary = state.binary
                     existing.deleted = state.deleted or existing.deleted
                     existing.old_path = state.old_path or existing.old_path
