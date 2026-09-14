@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Read-only tool executors for the tool harness (#304 split).
 
-The model-plannable tools (read_file, git_*, gh_api, web_fetch, web_search,
-run_command) plus the path/host guards and result-shaping helpers they need.
-Split out of scripts/run_tool_harness.py with no behaviour change.
+The model-plannable tools (read_file, git_*, gh_api, repo_contents, web_fetch,
+web_search, run_command) plus the path/host guards and result-shaping helpers
+they need. Split out of scripts/run_tool_harness.py with no behaviour change.
 """
 
+import base64
+import binascii
 import fnmatch
 import json
 import os
@@ -461,6 +463,311 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     from pr_reviewer.platform import gh_api as _platform_gh_api
     return _platform_gh_api(endpoint, allowed_repos, current_repo, request_timeout)
 
+
+# Default + hard cap on directory entries returned by ``repo_contents`` (the
+# 27B-friendly count ceiling). Mirrors the cap discipline ``list_tree`` and
+# ``find_files`` already use.
+REPO_CONTENTS_DEFAULT_MAX_ENTRIES = 200
+REPO_CONTENTS_MAX_ENTRIES_CAP = 500
+# Cap on the decoded file content the executor returns (bytes). Matches the
+# executor's existing ``read_file`` text cap (~12 KB) so the model gets the
+# same general size of payload regardless of which tool it picks.
+REPO_CONTENTS_FILE_MAX_BYTES = 12000
+
+# Pattern that controls which characters are allowed inside the ``path``
+# argument. Deliberately stricter than ``GH_SAFE_PATH_RE`` — a Contents API
+# ``path`` is a real file/directory path, not a freeform API endpoint, and
+# ``..``-segment smuggling must be caught here too. The validation in
+# ``_validate_endpoint`` would also catch traversal segments, but rejecting
+# early produces a clearer error message for the model.
+_REPO_CONTENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._~/+:,-]+$")
+
+
+def _validate_repo_contents_path(path):
+    """Sanitize the model-supplied ``path`` for the repo_contents tool.
+
+    Returns the cleaned path (empty string is valid — it means "repo root")
+    or ``{"error": ...}``. The character set and the empty/``..`` rejection
+    mirror the GH-API path discipline so a ``repo_contents`` call never
+    smuggles segments past the existing platform seam.
+    """
+    if path is None:
+        return ""
+    if not isinstance(path, str):
+        return {"error": "Invalid 'path' argument: must be a string"}
+    # Reject NUL bytes and other control characters up-front: pathlib / urllib
+    # would either raise or silently truncate, and a hostile model output must
+    # not be able to terminate the path early.
+    if "\x00" in path or any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return {"error": "Invalid 'path' argument: contains control characters"}
+    # Drop a leading slash so the URL stays at ``/repos/{o}/{r}/contents/...``.
+    # The endpoint concatenation is symmetric for both backends; stripping
+    # here keeps the seam logic untouched.
+    stripped = path.strip().lstrip("/")
+    if not stripped:
+        return ""
+    if not _REPO_CONTENTS_PATH_RE.match(stripped):
+        return {
+            "error": (
+                "Invalid 'path' argument: only letters, digits, '.', '_', "
+                "'~', '/', '+', ':', ',' and '-' are permitted"
+            )
+        }
+    parts = stripped.split("/")
+    for part in parts:
+        if part in ("", ".", ".."):
+            return {"error": f"Invalid 'path' segment: {part or '(empty)'}"}
+    return stripped
+
+
+def _resolve_repo_contents_repo(repo_value, allowed_repos, current_repo):
+    """Normalize + authorize the model-supplied ``repo`` argument.
+
+    Returns the canonical ``owner/name`` string, or ``{"error": ...}``. The
+    repo allowlist is the existing ``tool_allowed_gh_api_repos`` set; the
+    model-supplied ``repo`` cannot become a host (we never read a URL from
+    it — the host is fixed by the active platform backend).
+    """
+    raw = (repo_value or "").strip().strip("/")
+    if not raw:
+        # Default to the current repo so a model that omits ``repo`` still
+        # gets a useful result for the workspace under review.
+        return current_repo
+    parts = [p for p in raw.split("/") if p]
+    if len(parts) != 2:
+        return {
+            "error": f"Invalid 'repo' argument: expected 'owner/name', got {repo_value!r}"
+        }
+    owner, name = parts
+    if not re.match(r"^[A-Za-z0-9_.-]+$", owner) or not re.match(
+        r"^[A-Za-z0-9_.-]+$", name
+    ):
+        return {"error": f"Invalid 'repo' argument: {repo_value!r}"}
+    repo_key = f"{owner}/{name}"
+    allowed_set = set(allowed_repos or [])
+    if (
+        repo_key != current_repo
+        and "*" not in allowed_set
+        and repo_key not in allowed_set
+    ):
+        return {"error": f"Repo not allowed: {repo_key}"}
+    return repo_key
+
+
+def _build_repo_contents_endpoint(repo_key, path, ref):
+    """Build the GitHub-style endpoint for the Contents API.
+
+    Returns the endpoint string suitable for :func:`pr_reviewer.platform.gh_api`.
+    ``ref`` is appended as a ``?ref=...`` query when present. The endpoint is
+    re-validated by the platform seam (which also rewrites it to the
+    Forgejo ``/api/v1`` form on the Forgejo backend).
+    """
+    endpoint = f"repos/{repo_key}/contents"
+    if path:
+        endpoint += f"/{path}"
+    if ref:
+        # Strict ref character set: a Git ref can't contain a query string
+        # boundary, and the seam's validator rejects ``?`` inside the path.
+        # We use a minimal query parameter instead.
+        ref_clean = re.sub(r"[^A-Za-z0-9._~/+-]", "", ref)
+        if ref_clean != ref:
+            return None  # caller maps to a clean error
+        endpoint += f"?ref={ref_clean}"
+    return endpoint
+
+
+def _decode_repo_contents_content(payload):
+    """Decode a Contents-API file payload to text, or detect non-text.
+
+    Both GitHub (``{"content": <base64>, "encoding": "base64"}``) and
+    Forgejo (the same shape) base64-encode file content. We attempt a
+    UTF-8 decode so binary content can be surfaced as a metadata-only
+    result rather than flooding the model with raw bytes.
+
+    Returns ``(text_or_none, is_binary)``: ``text_or_none`` is the decoded
+    string when the content is text, otherwise ``None``; ``is_binary`` is
+    ``True`` when the payload looks non-text. A missing/empty ``content``
+    field is treated as binary (empty text-only payload is still
+    surfaced as an empty string).
+    """
+    if not isinstance(payload, dict):
+        return None, True
+    encoding = (payload.get("encoding") or "base64").lower()
+    raw_content = payload.get("content")
+    if not isinstance(raw_content, str) or not raw_content:
+        return None, True
+    if encoding != "base64":
+        # Forgejo could return ``encoding: "utf-8"`` in some configurations;
+        # treat that as already-decoded text but still attempt a strict
+        # decode so a malformed payload surfaces cleanly.
+        try:
+            return raw_content, False
+        except Exception:
+            return None, True
+    try:
+        decoded = base64.b64decode(raw_content, validate=False)
+    except (binascii.Error, ValueError):
+        return None, True
+    try:
+        text = decoded.decode("utf-8")
+        return text, False
+    except (UnicodeDecodeError, AttributeError):
+        return None, True
+
+
+def repo_contents(repo, path, allowed_repos, current_repo, ref="", request_timeout=25):
+    """List a directory or read a text file from an allowlisted related repo.
+
+    One normalized related-repo primitive on top of the platform seam
+    (issue #576). The model supplies ``repo`` (default = current repo),
+    ``path`` (default = root), and an optional ``ref`` (branch/tag/SHA).
+    The endpoint is dispatched through :func:`pr_reviewer.platform.gh_api`
+    so the existing repo allowlist, path allowlist, and platform
+    translation all apply unchanged. There is no second auth gate, no
+    second host-resolution path: the host is whatever the active platform
+    backend is configured to use, and the model cannot specify one.
+
+    Response shapes (stable across GitHub and Forgejo):
+
+    * Directory: ``{"repo": "...", "path": "...", "type": "directory",
+      "entries": [{"path", "type"}, ...], "truncated": bool}``
+    * File:     ``{"repo": "...", "path": "...", "type": "file",
+      "content": "...bounded text...", "truncated": bool}``
+    * Binary/non-text file: ``{"repo": "...", "path": "...", "type": "file",
+      "binary": True, "size": N, "truncated": False}``
+
+    Returns ``{"error": ...}`` for: missing/invalid ``repo``, missing
+    repo in the allowlist, traversal/control-char in ``path``, API
+    timeout, unsupported endpoint on the active platform, or a network
+    error.
+    """
+    # Resolve + authorize ``repo`` (single source of truth: tool_allowed_gh_api_repos).
+    repo_key = _resolve_repo_contents_repo(repo, allowed_repos, current_repo)
+    if isinstance(repo_key, dict):
+        return repo_key
+    if not repo_key:
+        return {"error": "Repo not allowed: (empty)"}
+
+    # Sanitize ``path``. An empty path is valid — it lists the repo root.
+    cleaned_path = _validate_repo_contents_path(path)
+    if isinstance(cleaned_path, dict):
+        return cleaned_path
+    norm_path = cleaned_path or ""
+
+    endpoint = _build_repo_contents_endpoint(repo_key, norm_path, ref)
+    if endpoint is None:
+        return {
+            "error": "Invalid 'ref' argument: only letters, digits, '.', '_', '~', '/', '+', and '-' are permitted"
+        }
+
+    # Route through the existing seam: the platform validator runs again on
+    # the endpoint (defence in depth — the validator's allowed_repos and
+    # deny-substring checks execute identically on both backends), then the
+    # per-backend translator maps ``/repos/.../contents/...`` to the matching
+    # URL. A Forgejo backend that can't service the operation returns
+    # ``Endpoint not supported on PLATFORM=forgejo`` rather than falling
+    # through to api.github.com.
+    api_result = gh_api(endpoint, allowed_repos, current_repo, request_timeout)
+    if api_result.get("error"):
+        return api_result
+
+    data = api_result.get("data")
+    if not isinstance(data, (dict, list)):
+        return {"error": "Unexpected contents response shape"}
+
+    # Directory listing — GitHub/Forgejo return a JSON array under
+    # ``/repos/{o}/{r}/contents/{dir}/``. ``type`` per row is "file" or
+    # "dir"; symlinks/submodules are skipped (not actionable for a
+    # text-reviewer).
+    if isinstance(data, list):
+        entries: list[dict[str, str]] = []
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            row_type = (row.get("type") or "").lower()
+            # Only the repo-relative ``path`` is honored: falling back to
+            # ``name`` would let a missing-path row appear with a basename
+            # that is no longer repo-relative, breaking the contract.
+            row_path = row.get("path")
+            if (
+                row_type not in ("file", "dir")
+                or not isinstance(row_path, str)
+                or not row_path
+            ):
+                continue
+            entries.append({"path": row_path, "type": row_type})
+        entries.sort(key=lambda e: e["path"])
+        # Apply the entry cap; truncation is visible to the model.
+        if len(entries) > REPO_CONTENTS_DEFAULT_MAX_ENTRIES:
+            entries = entries[:REPO_CONTENTS_DEFAULT_MAX_ENTRIES]
+            truncated = True
+        else:
+            truncated = False
+        return {
+            "repo": repo_key,
+            "path": norm_path,
+            "type": "directory",
+            "entries": entries,
+            "total": len(entries),
+            "truncated": truncated,
+        }
+
+    # File response — GitHub/Forgejo return a single object with
+    # ``type == "file"`` (or "symlink"/"submodule" for non-files; those are
+    # surfaced as a clean error since the tool only handles real files).
+    payload_type = (data.get("type") or "").lower()
+    if payload_type == "dir":
+        # Some backends normalize a directory path with a trailing slash
+        # into a single object instead of an array. Re-emit the same shape
+        # as the array branch above so the model sees one canonical form.
+        return {
+            "repo": repo_key,
+            "path": norm_path,
+            "type": "directory",
+            "entries": [],
+            "total": 0,
+            "truncated": False,
+        }
+    if payload_type != "file":
+        return {
+            "error": (f"Unsupported contents payload type: {payload_type or '(unset)'}")
+        }
+
+    text, is_binary = _decode_repo_contents_content(data)
+    if is_binary:
+        return {
+            "repo": repo_key,
+            "path": norm_path,
+            "type": "file",
+            "binary": True,
+            "size": data.get("size"),
+            "truncated": False,
+        }
+    # Byte-cap on a UTF-8 newline boundary so we never split a code line. A
+    # blob with no newline falls through to a codepoint-safe cut (the
+    # ``decode(errors="replace")`` substitutes U+FFFD for the partial byte,
+    # so the result is valid UTF-8 either way).
+    encoded = (text or "").encode("utf-8", errors="ignore")
+    if len(encoded) <= REPO_CONTENTS_FILE_MAX_BYTES:
+        bounded, was_truncated = text or "", False
+    else:
+        clip = encoded[:REPO_CONTENTS_FILE_MAX_BYTES]
+        nl = clip.rfind(b"\n")
+        if nl > 0:
+            clip = clip[:nl]
+            if clip.endswith(b"\n"):
+                clip = clip[:-1]
+        bounded = clip.decode("utf-8", errors="replace")
+        was_truncated = True
+    return {
+        "repo": repo_key,
+        "path": norm_path,
+        "type": "file",
+        "content": bounded,
+        "truncated": was_truncated,
+    }
+
+
 def web_fetch(url, allowed_hosts, request_timeout=25):
     """Fetch a URL using the same host-allowlist logic.
 
@@ -764,6 +1071,27 @@ def execute_tool_request(
                 # compacting fits ~25% more real data under max_response_bytes.
                 text = json.dumps(data, separators=(",", ":"))[:max_response_bytes]
             tool_result["result"] = {"response": text}
+
+        elif tool_name == "repo_contents":
+            repo_value = args.get("repo", current_repo)
+            path_value = args.get("path", "") or ""
+            ref_value = args.get("ref", "") or ""
+            res = repo_contents(
+                repo_value,
+                path_value,
+                allowed_gh_repos,
+                current_repo,
+                ref_value,
+                request_timeout,
+            )
+            if res.get("error"):
+                raise ValueError(res["error"])
+            # Serialise with the same compact-JSON discipline as gh_api so the
+            # model sees a single self-contained object that the per-turn
+            # envelope can carry verbatim. The directory/file/binary branches
+            # all flow through one canonical JSON object — no separate shape
+            # the model has to learn.
+            tool_result["result"] = json.loads(json.dumps(res, separators=(",", ":")))
 
         elif tool_name == "web_fetch":
             url = args.get("url", "")

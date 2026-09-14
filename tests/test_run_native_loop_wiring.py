@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -911,3 +912,136 @@ def test_verdict_harness_body_indexes_every_executed_call():
     assert "3 issued; stop reason: tool-call-budget-exhausted" in body
     assert "1. `read_file` (ok)" in body
     assert "2. `web_fetch` (error)" in body
+
+
+# ── repo_contents wiring (#576) ───────────────────────────────────────────────
+# The repo_contents tool (#576) is advertised in the loop request and routed
+# to the executor via execute_tool_request. The platform seam and the existing
+# repo allowlist remain the single source of truth — there is no second gate.
+
+
+def test_native_loop_advertises_repo_contents_schema(monkeypatch, tmp_path):
+    """repo_contents is advertised on the loop request for both API formats,
+    with the schema/executor in sync (repo required-defaults-to-current, path
+    and ref optional; no additionalProperties)."""
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: v1.13.4\n", encoding="utf-8"
+    )
+    for api_format in ("openai", "anthropic"):
+        handled, _result, payloads = _run_capturing(
+            monkeypatch, tmp_path, api_format, [_openai_text("done")]
+        )
+        tools = payloads[0]["tools"]
+        if api_format == "openai":
+            names = [t["function"]["name"] for t in tools]
+            rc = next(t for t in tools if t["function"]["name"] == "repo_contents")
+            params = rc["function"]["parameters"]
+        else:
+            names = [t["name"] for t in tools]
+            rc = next(t for t in tools if t["name"] == "repo_contents")
+            params = rc["input_schema"]
+        assert "repo_contents" in names
+        assert params["type"] == "object"
+        assert params["required"] == []
+        # Each documented arg is present (additionalProperties: False guarantees
+        # the model cannot smuggle a host through here).
+        for prop in ("repo", "path", "ref"):
+            assert prop in params["properties"]
+        assert params.get("additionalProperties") is False
+
+
+def test_native_loop_dispatches_repo_contents_to_executor(monkeypatch, tmp_path):
+    """The loop's execute_fn reaches repo_contents with the right arg flow
+    and the executor's normalized shape is what the harness trace records."""
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: v1.13.4\n", encoding="utf-8"
+    )
+    fake = {
+        "repo": "other/repo",
+        "path": "src/client.py",
+        "type": "file",
+        "content": "print('hi')\n",
+        "truncated": False,
+    }
+    with patch("pr_reviewer.tool_executors.repo_contents", return_value=fake) as rc:
+        handled, result, _payloads = _run_capturing(
+            monkeypatch,
+            tmp_path,
+            "openai",
+            [
+                _openai_call(
+                    "c1",
+                    "repo_contents",
+                    '{"repo": "other/repo", "path": "src/client.py"}',
+                ),
+                _openai_text("Inspected the related repo."),
+            ],
+        )
+    assert handled is True
+    assert result["planned_request_count"] == 1
+    rc.assert_called_once()
+
+    # The executor saw the model-supplied repo + path (and the auth boundary
+    # is the caller-supplied allowed_repos / current_repo).
+    args, kwargs = rc.call_args
+    assert args[0] == "other/repo"
+    assert args[1] == "src/client.py"
+    # The dispatch site in execute_tool_request forwards allowed_repos
+    # positionally as the 3rd arg and current_repo as the 4th.
+    assert "owner/repo" in args[2]
+    assert args[3] == "owner/repo"
+
+    # The executor's normalized shape flows into the harness trace.
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    rc_calls = [
+        tc for tc in harness.get("tool_calls", []) if tc["tool"] == "repo_contents"
+    ]
+    assert rc_calls and rc_calls[0]["status"] == "ok"
+    rc_result = next(
+        tr for tr in harness["tool_results"] if tr.get("tool") == "repo_contents"
+    )
+    assert rc_result["result"]["type"] == "file"
+    assert rc_result["result"]["content"] == "print('hi')\n"
+
+    # Evidence summary mentions the related repo so a human reviewing the
+    # harness output can see the tool hit an external repo (not just the
+    # current workspace).
+    md = (tmp_path / "tool-harness.md").read_text()
+    assert "repo_contents" in md
+    assert "other/repo" in md
+
+
+def test_native_loop_repo_contents_unlisted_repo_rejected(monkeypatch, tmp_path):
+    """The allowlist is the single source of truth: a repo outside
+    tool_allowed_gh_api_repos is rejected by the executor, surfaced as a
+    status=error tool result, and never reaches the network."""
+    (tmp_path / "machineconfig.yaml.j2").write_text(
+        "install: v1.13.4\n", encoding="utf-8"
+    )
+    with patch(
+        "pr_reviewer.tool_executors.repo_contents",
+        return_value={"error": "Repo not allowed: attacker/evil"},
+    ):
+        handled, result, _payloads = _run_capturing(
+            monkeypatch,
+            tmp_path,
+            "openai",
+            [
+                _openai_call(
+                    "c1",
+                    "repo_contents",
+                    '{"repo": "attacker/evil", "path": "x"}',
+                ),
+                _openai_text("Given the boundary, no related repo is reachable."),
+            ],
+        )
+    assert handled is True
+    harness = json.loads((tmp_path / "tool-harness.json").read_text())
+    rc_calls = [
+        tc for tc in harness.get("tool_calls", []) if tc["tool"] == "repo_contents"
+    ]
+    assert rc_calls and rc_calls[0]["status"] == "error"
+    rc_result = next(
+        tr for tr in harness["tool_results"] if tr.get("tool") == "repo_contents"
+    )
+    assert "not allowed" in rc_result["result"]["error"].lower()

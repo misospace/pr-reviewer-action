@@ -339,6 +339,17 @@ def _forgejo_translate(full_path, repo_key):
     if rest == "/commits" or rest.startswith("/commits/"):
         return f"/api/v1/repos/{repo_key}{rest}"
 
+    # Repository contents (read-only; the repo_contents tool — issue #576).
+    # The GitHub ``GET /repos/{o}/{r}/contents/{path}`` shape is mirrored by
+    # Forgejo under ``/api/v1/repos/{o}/{r}/contents/{path}``. Path-only is
+    # valid (root directory listing); an empty path also works. The base64
+    # ``content`` payload differs in detail (GitHub wraps the encoded bytes
+    # in a ``"content" + "encoding"`` pair, Forgejo returns the same shape),
+    # but the call surface is identical — normalization happens in the tool
+    # executor.
+    if rest == "/contents" or rest.startswith("/contents/"):
+        return f"/api/v1/repos/{repo_key}{rest}"
+
     return None
 
 

@@ -745,3 +745,455 @@ def test_list_tree_via_executor_byte_cap_array_separators(tmp_path):
     assert res["result"]["entries"] == [{"path": "a.txt", "type": "file"}]
     assert res["result"]["total"] == 1
     assert res["result"]["truncated"] is True
+
+
+# ── repo_contents (#576) ──────────────────────────────────────────────────────
+# The repo_contents tool is the read-only related-repo primitive on top of the
+# platform seam: gh_api carries the call (with the existing repo allowlist and
+# path prefix denylist), and the executor normalizes the GitHub / Forgejo
+# Contents API response into one bounded shape. We mock gh_api so the tests
+# exercise the executor's logic (allowlist reuse, path/repo validation, output
+# normalization, byte cap, binary detection) without any real network call.
+
+
+import base64 as _b64
+
+_REPO = "example/repo"
+
+
+def _rc(**kwargs):
+    """Call the repo_contents executor with sensible defaults.
+
+    Default allowlist matches the executor's auth boundary: the current repo
+    plus a deliberately explicit second repo, so we can assert both are
+    accepted (current) and that an unlisted one is rejected (below).
+    """
+    defaults = dict(
+        repo=kwargs.pop("repo", _REPO),
+        path=kwargs.pop("path", ""),
+        allowed_repos=kwargs.pop("allowed_repos", {_REPO, "allowed/other"}),
+        current_repo=_REPO,
+        ref=kwargs.pop("ref", ""),
+        request_timeout=1,
+    )
+    defaults.update(kwargs)
+    return tool_executors.repo_contents(**defaults)
+
+
+def _rc_exec(args, **kwargs):
+    """Call repo_contents through execute_tool_request."""
+    return _call("repo_contents", args, **kwargs)
+
+
+def _b64_text(s):
+    return _b64.b64encode(s.encode("utf-8")).decode("ascii")
+
+
+def test_repo_contents_current_repo_directory_listing():
+    """A directory response is normalized to sorted {path,type} entries."""
+    fake_data = [
+        {"name": "z.py", "path": "src/z.py", "type": "file", "size": 10},
+        {"name": "a", "path": "src/a", "type": "dir"},
+        {"name": "B", "path": "src/B", "type": "dir"},
+        {"name": "skip", "path": "src/skip", "type": "submodule"},  # filtered out
+        {"name": "broken", "path": "", "type": "file"},  # filtered out (no path)
+    ]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = _rc(path="src")
+    assert "error" not in res, res
+    # Symlinks/submodules/no-path rows are dropped. The rest is sorted by path.
+    assert res["type"] == "directory"
+    assert res["repo"] == _REPO
+    assert res["path"] == "src"
+    assert res["entries"] == [
+        {"path": "src/B", "type": "dir"},
+        {"path": "src/a", "type": "dir"},
+        {"path": "src/z.py", "type": "file"},
+    ]
+    assert res["total"] == 3
+    assert res["truncated"] is False
+    # gh_api was called with the repo-scoped contents endpoint (no host
+    # anywhere in the model-supplied args).
+    assert gh.called
+    args, kwargs = gh.call_args
+    assert args[0] == "repos/example/repo/contents/src"
+
+
+def test_repo_contents_empty_path_lists_repo_root():
+    """An empty path routes to /repos/{o}/{r}/contents (no trailing slash)."""
+    fake_data = [{"name": "README.md", "path": "README.md", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = _rc(path="")
+    assert "error" not in res, res
+    assert res["path"] == ""
+    assert res["entries"] == [{"path": "README.md", "type": "file"}]
+    args, _ = gh.call_args
+    assert args[0] == "repos/example/repo/contents"
+
+
+def test_repo_contents_directory_payload_with_trailing_slash_normalizes():
+    """Some backends normalize a directory into a {type: "dir"} object; the
+    executor surfaces it as an empty directory listing rather than failing."""
+    fake_data = {"type": "dir", "name": "src", "path": "src"}
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        res = _rc(path="src")
+    assert res["type"] == "directory"
+    assert res["entries"] == []
+
+
+def test_repo_contents_text_file_is_decoded_and_byte_capped():
+    """A file response is base64-decoded to UTF-8 text, then byte-capped."""
+    body = "alpha\n" * 5000  # ~30k bytes
+    fake_data = {
+        "name": "client.py",
+        "path": "src/client.py",
+        "type": "file",
+        "encoding": "base64",
+        "content": _b64_text(body),
+        "size": len(body),
+    }
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        res = _rc(path="src/client.py")
+    assert "error" not in res, res
+    assert res["type"] == "file"
+    assert res["repo"] == _REPO
+    assert res["path"] == "src/client.py"
+    # Capped at REPO_CONTENTS_FILE_MAX_BYTES; the cut is on a newline boundary
+    # so the text is well-formed.
+    assert res["truncated"] is True
+    content_bytes = res["content"].encode("utf-8")
+    assert len(content_bytes) <= tool_executors.REPO_CONTENTS_FILE_MAX_BYTES
+    assert "alpha" in res["content"]
+
+
+def test_repo_contents_small_file_returns_full_text():
+    """A small text file under the cap is returned in full."""
+    fake_data = {
+        "name": "client.py",
+        "path": "src/client.py",
+        "type": "file",
+        "encoding": "base64",
+        "content": _b64_text("print('hi')\n"),
+        "size": 11,
+    }
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        res = _rc(path="src/client.py")
+    assert res["content"] == "print('hi')\n"
+    assert res["truncated"] is False
+
+
+def test_repo_contents_binary_file_returns_metadata_only():
+    """Binary content is detected and surfaced as metadata, never raw bytes."""
+    binary = bytes(range(256))  # arbitrary non-UTF-8 byte sequence
+    fake_data = {
+        "name": "logo.png",
+        "path": "assets/logo.png",
+        "type": "file",
+        "encoding": "base64",
+        "content": _b64.b64encode(binary).decode("ascii"),
+        "size": len(binary),
+    }
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        res = _rc(path="assets/logo.png")
+    assert res["type"] == "file"
+    assert res["binary"] is True
+    assert res["size"] == len(binary)
+    assert "content" not in res
+    assert res["truncated"] is False
+
+
+def test_repo_contents_symlink_response_is_clean_error():
+    """A symlink/submodule payload type is not actionable; return a clean error."""
+    fake_data = {
+        "name": "link",
+        "path": "link",
+        "type": "symlink",
+        "target": "/elsewhere",
+    }
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        res = _rc(path="link")
+    assert "error" in res
+    assert "Unsupported" in res["error"] or "symlink" in res["error"].lower()
+
+
+def test_repo_contents_current_repo_allowed_by_default():
+    """The current repo is always allowlisted (single source of truth)."""
+    fake_data = [{"name": "x", "path": "x", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}):
+        # Empty allowed_repos + explicit current_repo: still permitted.
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="x",
+            allowed_repos=set(),
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" not in res, res
+
+
+def test_repo_contents_explicitly_allowlisted_second_repo_allowed():
+    """A second repo from tool_allowed_gh_api_repos is accepted."""
+    fake_data = [{"name": "y", "path": "y", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = tool_executors.repo_contents(
+            repo="other/repo",
+            path="y",
+            allowed_repos={"other/repo"},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" not in res, res
+    args, _ = gh.call_args
+    assert args[0] == "repos/other/repo/contents/y"
+
+
+def test_repo_contents_unlisted_repo_rejected():
+    """A repo outside the allowlist is rejected before any network call."""
+    with patch.object(tool_executors, "gh_api") as gh:
+        res = tool_executors.repo_contents(
+            repo="attacker/evil",
+            path="x",
+            allowed_repos={"other/repo"},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "not allowed" in res["error"].lower()
+    gh.assert_not_called()
+
+
+def test_repo_contents_wildcard_allows_any_repo():
+    """The '*' wildcard in the allowlist is honoured (no second gate)."""
+    fake_data = [{"name": "y", "path": "y", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = tool_executors.repo_contents(
+            repo="any-org/any-repo",
+            path="y",
+            allowed_repos={"*"},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" not in res, res
+    args, _ = gh.call_args
+    assert args[0] == "repos/any-org/any-repo/contents/y"
+
+
+def test_repo_contents_path_traversal_rejected():
+    """A '..' path segment is rejected before any network call."""
+    with patch.object(tool_executors, "gh_api") as gh:
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="../etc/passwd",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "segment" in res["error"].lower() or "invalid" in res["error"].lower()
+    gh.assert_not_called()
+
+
+def test_repo_contents_null_byte_in_path_rejected():
+    """An embedded NUL byte is rejected (no syscall truncation)."""
+    with patch.object(tool_executors, "gh_api") as gh:
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="a\x00b",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "control" in res["error"].lower() or "invalid" in res["error"].lower()
+    gh.assert_not_called()
+
+
+def test_repo_contents_leading_slash_stripped():
+    """A leading '/' on the path is normalised away so the URL stays at
+    /repos/{o}/{r}/contents/path (no double slash)."""
+    fake_data = [{"name": "x", "path": "x", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="/src/x",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" not in res, res
+    args, _ = gh.call_args
+    assert args[0] == "repos/example/repo/contents/src/x"
+
+
+def test_repo_contents_ref_appended_as_query():
+    """A 'ref' branch/tag/SHA is appended as ?ref=... (no path smuggling)."""
+    fake_data = [{"name": "x", "path": "x", "type": "file"}]
+    with patch.object(tool_executors, "gh_api", return_value={"data": fake_data}) as gh:
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="x",
+            ref="v1.2.3",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" not in res, res
+    args, _ = gh.call_args
+    assert args[0] == "repos/example/repo/contents/x?ref=v1.2.3"
+
+
+def test_repo_contents_bad_ref_rejected():
+    """A ref with disallowed characters is rejected before any network call."""
+    with patch.object(tool_executors, "gh_api") as gh:
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="x",
+            ref="v1; rm -rf /",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "ref" in res["error"].lower()
+    gh.assert_not_called()
+
+
+def test_repo_contents_api_error_propagated():
+    """An error from gh_api (404, timeout, unsupported) is surfaced intact."""
+    with patch.object(
+        tool_executors,
+        "gh_api",
+        return_value={"error": "Forgejo API error: 404 not found"},
+    ):
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="missing",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "404" in res["error"]
+
+
+def test_repo_contents_api_timeout_propagated():
+    """A timeout from gh_api reaches the model as a clean error."""
+    with patch.object(
+        tool_executors,
+        "gh_api",
+        return_value={"error": "Forgejo API timed out after 25s"},
+    ):
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="x",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=25,
+        )
+    assert "error" in res
+    assert "timed out" in res["error"].lower()
+
+
+def test_repo_contents_forgejo_unsupported_explicitly_reported():
+    """When Forgejo cannot service the endpoint, the seam returns a clear
+    'Endpoint not supported on PLATFORM=forgejo' rather than silently
+    routing to api.github.com."""
+    with patch.object(
+        tool_executors,
+        "gh_api",
+        return_value={
+            "error": "Endpoint not supported on PLATFORM=forgejo: /repos/o/r/contents"
+        },
+    ):
+        res = tool_executors.repo_contents(
+            repo=_REPO,
+            path="",
+            allowed_repos={_REPO},
+            current_repo=_REPO,
+            request_timeout=1,
+        )
+    assert "error" in res
+    assert "not supported" in res["error"].lower()
+    assert "forgejo" in res["error"].lower()
+    assert "api.github.com" not in res["error"]
+
+
+def test_repo_contents_directory_sorted_deterministic():
+    """Directory entries come out sorted on every call (stable ordering)."""
+    rows = [
+        {"name": f"f{i}", "path": f"src/f{i}", "type": "file"} for i in range(20, 0, -1)
+    ]
+    with patch.object(tool_executors, "gh_api", return_value={"data": rows}):
+        out1 = _rc(path="src")
+    with patch.object(tool_executors, "gh_api", return_value={"data": rows}):
+        out2 = _rc(path="src")
+    paths = [e["path"] for e in out1["entries"]]
+    assert paths == sorted(paths)
+    assert out1 == out2  # byte-stable across calls (prompt-cache friendly)
+
+
+def test_repo_contents_directory_capped_at_default():
+    """Large directories are truncated to REPO_CONTENTS_DEFAULT_MAX_ENTRIES."""
+    rows = [
+        {"name": f"f{i:04d}", "path": f"src/f{i:04d}.txt", "type": "file"}
+        for i in range(500)
+    ]
+    with patch.object(tool_executors, "gh_api", return_value={"data": rows}):
+        res = _rc(path="src")
+    assert res["total"] == tool_executors.REPO_CONTENTS_DEFAULT_MAX_ENTRIES
+    assert res["truncated"] is True
+    # The prefix is the lexicographic head (sort happened before the cap).
+    assert res["entries"][0]["path"] == "src/f0000.txt"
+
+
+# ── execute_tool_request dispatch (#576) ────────────────────────────────────
+
+
+def test_execute_tool_request_repo_contents_dispatches_to_executor():
+    """The loop's execute_fn reaches repo_contents with the right arg flow."""
+    fake = {
+        "repo": _REPO,
+        "path": "x",
+        "type": "directory",
+        "entries": [{"path": "x/y", "type": "file"}],
+        "total": 1,
+        "truncated": False,
+    }
+    with patch.object(tool_executors, "repo_contents", return_value=fake) as rc:
+        res = _rc_exec({"repo": _REPO, "path": "x"}, current_repo=_REPO)
+    assert rc.called
+    assert res.get("status") == "ok"
+    assert res["result"] == fake
+
+
+def test_execute_tool_request_repo_contents_error_propagates():
+    """A repo not in the allowlist surfaces as a clean error status."""
+    with patch.object(
+        tool_executors,
+        "repo_contents",
+        return_value={"error": "Repo not allowed: attacker/evil"},
+    ):
+        res = _rc_exec(
+            {"repo": "attacker/evil", "path": "x"},
+            current_repo=_REPO,
+            allowed_gh_repos={_REPO},
+        )
+    assert res.get("status") == "error"
+    assert "not allowed" in res["result"]["error"].lower()
+
+
+def test_execute_tool_request_repo_contents_default_repo():
+    """Omitting 'repo' defaults to the current repo (the executor's call site)."""
+    fake = {
+        "repo": _REPO,
+        "path": "",
+        "type": "directory",
+        "entries": [],
+        "total": 0,
+        "truncated": False,
+    }
+    with patch.object(tool_executors, "repo_contents", return_value=fake) as rc:
+        res = _rc_exec({"path": ""}, current_repo=_REPO)
+    assert res.get("status") == "ok"
+    args, _ = rc.call_args
+    assert args[0] == _REPO  # default repo argument

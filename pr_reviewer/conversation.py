@@ -144,6 +144,57 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "repo_contents",
+        "description": (
+            "List a directory or read a text file from an explicitly "
+            "allowlisted related repository (issue #576). Use it to inspect "
+            "an explicitly related API/client/shared-library repo, or to "
+            "verify a cross-repo interface/manifest/version contract — not "
+            "for speculative browsing of unrelated repositories. The active "
+            "platform backend (GitHub or Forgejo) is the only host this tool "
+            "ever contacts; the model-supplied repo is owner/name only and "
+            "must be the current repository, an entry in "
+            "tool_allowed_gh_api_repos, or covered by the '*' wildcard. "
+            "Directories return a sorted listing capped at 200 entries; text "
+            "files return decoded text capped at ~12 KB; binary/non-text "
+            "files return metadata only (no raw bytes)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "owner/name of the related repository. Defaults to "
+                        "the current repository when omitted. Must be the "
+                        "current repository or an explicitly allowlisted "
+                        "owner/name; the model never picks the host."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative path to list or read. Empty (or "
+                        "omitted) means the repository root. Path traversal "
+                        "and control characters are rejected before any "
+                        "network call."
+                    ),
+                },
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "Optional branch, tag, or SHA to read the path at. "
+                        "Defaults to the API/branch default. Only "
+                        "letters, digits, '.', '_', '~', '/', '+', '-' are "
+                        "permitted; anything else is rejected."
+                    ),
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "read_file",
         "description": (
             "Read a file from the workspace. Path-traversal and sensitive "

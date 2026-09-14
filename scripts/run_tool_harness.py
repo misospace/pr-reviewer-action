@@ -639,7 +639,7 @@ def run_native_loop(
     conversation.add_user(
         f"Repository: {repo}\n"
         f"Review scope: {os.getenv('EFFECTIVE_SCOPE', 'full')}\n"
-        f"Allowed repos for gh_api: "
+        f"Allowed repos for gh_api / repo_contents: "
         f"{', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: "
         f"{', '.join(allowed_hosts) if allowed_hosts else '(none)'}\n"

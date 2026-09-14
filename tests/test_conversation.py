@@ -34,6 +34,7 @@ class TestToolSchemas:
             "read_file",
             "find_files",
             "list_tree",
+            "repo_contents",
             "web_fetch",
             "git_grep",
             "git_log",

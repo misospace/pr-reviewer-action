@@ -27,6 +27,7 @@ which is the part the model-injection threat model cares about.
 
 from __future__ import annotations
 
+import base64 as _b64
 import json
 import os
 import subprocess
@@ -496,3 +497,63 @@ def test_auto_platform_with_forgejo_server_url_uses_forgejo_backend(monkeypatch)
     assert "error" not in result, result
     assert any(_FORGEJO_BASE in tok for tok in captured["cmd"]), captured["cmd"]
     assert not any("api.github.com" in tok for tok in captured["cmd"]), captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# 6. Contents endpoint translation (#576) — the repo_contents tool's seam.
+# ---------------------------------------------------------------------------
+
+
+def test_forgejo_contents_directory_routes_to_api_v1(monkeypatch):
+    """``repos/{o}/{r}/contents/{path}`` is rewritten to the matching
+    ``/api/v1/repos/{o}/{r}/contents/{path}`` form and dispatched to the
+    configured Forgejo host. The repo_contents tool relies on this shape."""
+    listing = (
+        '[{"name":"a.py","path":"src/a.py","type":"file"},'
+        '{"name":"b","path":"src/b","type":"dir"}]'
+    )
+    result, captured = _exec_forgejo(
+        monkeypatch, f"repos/{_REPO}/contents/src", body=listing
+    )
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(
+        _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/contents/src" in tok for tok in cmd
+    ), cmd
+    assert not any("api.github.com" in tok for tok in cmd), cmd
+
+
+def test_forgejo_contents_root_routes_to_api_v1(monkeypatch):
+    """An empty path on /contents (root listing) is also rewritten under
+    /api/v1 — the trailing path is empty, not absent."""
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/contents", body="[]")
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(
+        _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/contents" in tok for tok in cmd
+    ), cmd
+    assert not any("api.github.com" in tok for tok in cmd), cmd
+
+
+def test_forgejo_contents_file_routes_to_api_v1(monkeypatch):
+    """A file-shaped Contents response (with ``encoding: base64``) is fetched
+    via the same /api/v1 endpoint — the executor decodes the base64 payload
+    itself, so the seam does not need to know the contents payload shape."""
+    encoded = _b64.b64encode(b"print('hi')\n").decode("ascii")
+    body = (
+        '{"name":"client.py","path":"src/client.py","type":"file",'
+        f'"encoding":"base64","content":"{encoded}","size":11}}'
+    )
+    result, captured = _exec_forgejo(
+        monkeypatch, f"repos/{_REPO}/contents/src/client.py", body=body
+    )
+    assert "error" not in result, result
+    cmd = captured["cmd"]
+    assert any(
+        _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/contents/src/client.py" in tok
+        for tok in cmd
+    ), cmd
+    # The base64 content survived to the executor — that is what the tool
+    # decodes (in pr_reviewer.tool_executors.repo_contents).
+    assert "encoding" in result["data"]
+    assert result["data"]["encoding"] == "base64"
