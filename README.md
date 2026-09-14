@@ -331,6 +331,26 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 </details>
 
 <details>
+<summary><b>PR thread context</b> — bounded recent top-level conversation comments</summary>
+
+Opt-in source that adds the PR's **recent top-level conversation comments** to the review corpus as a standalone, conditional "PR Discussion Thread" section. Only top-level comments are included — inline review threads and review bodies are out of scope. The action's own managed/control comments (those carrying a reserved `ai-pr-review-*` marker) are filtered out, so the corpus receives only external discussion; bodies are secret-redacted and rendered fence-safe, and the section is treated as **untrusted claims**, never instructions.
+
+```yaml
+with:
+  pr_thread_context: "true"
+```
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `pr_thread_context` | Add a bounded PR-thread (conversation) context source: the PR's recent top-level comments (managed comments filtered out) rendered as a conditional "PR Discussion Thread" corpus section. Fetches through the platform seam (GitHub `gh api` / Forgejo backend). | No | `false` |
+| `pr_thread_enable_for_forks` | Allow PR-thread context on cross-repository PRs. Fail-closed by default: a public comment thread on someone else's repo is untrusted content, so the same fork-gate as the other context sources applies. | No | `false` |
+| `pr_thread_max_comments` | Maximum number of (most recent) PR conversation comments included. Bounded by a hard maximum in the adapter. | No | `12` |
+| `pr_thread_max_body_chars` | Maximum body characters per included PR comment. Bounded by a hard maximum in the adapter. | No | `1500` |
+| `pr_thread_max_total_bytes` | Maximum rendered bytes for the whole section; older comments are dropped first (with a visible omission note) when exceeded. Bounded by a hard maximum in the adapter. | No | `24000` |
+
+</details>
+
+<details>
 <summary><b>Evidence providers</b> — repo-defined check commands</summary>
 
 | Input | Description | Required | Default |

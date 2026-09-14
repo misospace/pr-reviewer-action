@@ -252,6 +252,40 @@ inputs:
     description: If true, allow private Linear issue context to be fetched and included for cross-repository PRs
     required: false
     default: "false"
+  pr_thread_context:
+    description: >-
+      If true, add a bounded PR-thread (conversation) context source to the
+      review corpus: the PR's recent top-level conversation comments, with the
+      action's own managed/control comments filtered out. Only top-level
+      comments are included (inline review threads and review bodies are
+      excluded). Disabled by default; when enabled it fetches the PR's
+      comment thread through the platform seam (gh on GitHub, the Forgejo
+      backend on Forgejo) and renders at most `pr_thread_max_comments` of the
+      most recent comments into a conditional "PR Discussion Thread" corpus
+      section. Comment bodies are secret-redacted and fence-safe, and the
+      source is treated as untrusted discussion, not verified facts.
+    required: false
+    default: "false"
+  pr_thread_enable_for_forks:
+    description: >-
+      If true, allow bounded PR-thread context to be fetched and included for
+      cross-repository PRs. Fail-closed by default: a public comment thread on
+      someone else's repo is untrusted content, so the same fork-gate as the
+      other context sources applies.
+    required: false
+    default: "false"
+  pr_thread_max_comments:
+    description: Maximum number of (most recent) PR conversation comments included in the PR-thread context when `pr_thread_context=true`. Bounded by a hard maximum in the adapter.
+    required: false
+    default: "12"
+  pr_thread_max_body_chars:
+    description: Maximum body characters per included PR comment when `pr_thread_context=true`. Bounded by a hard maximum in the adapter.
+    required: false
+    default: "1500"
+  pr_thread_max_total_bytes:
+    description: Maximum rendered bytes for the whole PR-thread context section when `pr_thread_context=true`; older comments are dropped first (with a visible omission note) when the budget is exceeded. Bounded by a hard maximum in the adapter.
+    required: false
+    default: "24000"
   system_prompt:
     description: Optional system prompt override. When both this and system_prompt_file are set, the file content is read first and the inline value is appended (separated by two newlines), combining static repo conventions with per-PR steering.
     required: false
@@ -880,6 +914,11 @@ runs:
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
         LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
+        PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
+        PR_THREAD_ENABLE_FOR_FORKS: ${{ inputs.pr_thread_enable_for_forks }}
+        PR_THREAD_MAX_COMMENTS: ${{ inputs.pr_thread_max_comments }}
+        PR_THREAD_MAX_BODY_CHARS: ${{ inputs.pr_thread_max_body_chars }}
+        PR_THREAD_MAX_TOTAL_BYTES: ${{ inputs.pr_thread_max_total_bytes }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
         SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}

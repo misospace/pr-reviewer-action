@@ -129,6 +129,59 @@ if [[ -n "$LINEAR_API_KEY" && -n "$LINEAR_ISSUE_PREFIXES" ]]; then
 fi
 section_timer_end
 
+section_timer_start "pr-thread-context"
+log "Gathering PR thread (conversation) context..."
+# Bounded, filtered PR-thread context source (#578 / #579).
+#
+# Reuse the platform seam for the fetch (github = `gh api .../comments`,
+# forgejo = the Forgejo backend) so a single call site works on both hosts,
+# then hand the raw comment list to the pure adapter, which filters out the
+# action's own managed/control comments, redacts secrets, caps to the most
+# recent N bodies, and renders a fence-safe document. This is a NEW standalone
+# section (it does NOT merge into linked-issues.md): it is top-level
+# discussion, not linked-issue context, and it is rendered at a different
+# position in the corpus.
+#
+# Fail-closed for cross-repo PRs (PR_THREAD_ENABLE_FOR_FORKS): a public
+# comment thread on someone else's repo is untrusted content, so the same
+# fork-gate discipline the tool harness / evidence / Linear adapters use
+# applies here.
+#
+# Every generated artifact is reset up front (truncated to empty) so a
+# reused/self-hosted workspace cannot leak a stale document into this
+# review's corpus. The .md is the corpus signal: empty = no context (and the
+# corpus section is then omitted, not fabricated).
+: > pr-thread-context.md
+: > pr-thread-comments.json
+if [[ "$PR_THREAD_CONTEXT" == "true" ]]; then
+  if gate_feature_for_forks "$PR_THREAD_ENABLE_FOR_FORKS" \
+      pr-thread-context.md "PR thread context was skipped for a cross-repository pull request. Set pr_thread_enable_for_forks=true to override." \
+      pr-thread-comments.json "[]"; then
+    log "Skipping PR thread context for cross-repository PR"
+  else
+    if platform_issue_comments "$REPO" "$PR_NUMBER" > pr-thread-comments.raw.json 2>/dev/null; then
+      PR_THREAD_MAX_COMMENTS="$PR_THREAD_MAX_COMMENTS" \
+      PR_THREAD_MAX_BODY_CHARS="$PR_THREAD_MAX_BODY_CHARS" \
+      PR_THREAD_MAX_TOTAL_BYTES="$PR_THREAD_MAX_TOTAL_BYTES" \
+      python3 "$SCRIPT_DIR/../pr_reviewer/pr_thread_context.py" \
+        --input-json pr-thread-comments.raw.json \
+        --output-markdown pr-thread-context.md \
+        --output-json pr-thread-comments.json
+      pr_thread_count="$(jq 'length' pr-thread-comments.json 2>/dev/null || echo 0)"
+      if [[ "$pr_thread_count" -gt 0 ]]; then
+        log "Added $pr_thread_count PR-thread comment(s) to PR thread context"
+      else
+        log "No external PR-thread comments to include (none, or all are the action's own)"
+      fi
+    else
+      error "PR thread context fetch failed; continuing without it"
+    fi
+  fi
+else
+  log "PR thread context is disabled (pr_thread_context=false); skipping fetch"
+fi
+section_timer_end
+
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
 # by scripts/run_enrichment.py which runs in the enrichment section below.
 # This avoids brittle grep pipelines under set -euo pipefail (#7892).

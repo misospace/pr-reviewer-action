@@ -99,12 +99,13 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 9. Tool Harness Findings (planned + executed tool results)
 10. Evidence Providers (user-defined command output)
 11. Image Digest Provenance
-12. Linked Sources (fetched URLs, GitHub releases/compare metadata)
-13. Repository Impact Scan (git grep hits for extracted terms)
-14. Repository History (git log context for extracted terms)
-15. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
+12. PR Discussion Thread (bounded, filtered top-level PR conversation comments — untrusted; opt-in `pr_thread_context`)
+13. Linked Sources (fetched URLs, GitHub releases/compare metadata)
+14. Repository Impact Scan (git grep hits for extracted terms)
+15. Repository History (git log context for extracted terms)
+16. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
 
-Note: `MAX_CORPUS` truncation applies to sections 1–14; the standards section is always preserved in full.
+Note: `MAX_CORPUS` truncation applies to sections 1–15; the standards section (16) is always preserved in full. Section 12 is a standalone, conditional source (rendered only when opt-in `pr_thread_context=true` produced at least one non-managed comment) and is placed before the lowest-value sections so it survives truncation.
 
 The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 

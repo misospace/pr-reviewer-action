@@ -34,6 +34,17 @@ LINEAR_API_KEY="${LINEAR_API_KEY:-}"
 LINEAR_ISSUE_PREFIXES="${LINEAR_ISSUE_PREFIXES:-}"
 LINEAR_ISSUE_TIMEOUT_SEC="${LINEAR_ISSUE_TIMEOUT_SEC:-20}"
 LINEAR_ENABLE_FOR_FORKS="${LINEAR_ENABLE_FOR_FORKS:-false}"
+# PR-thread (conversation) context source (#578 / #579). Opt-in: when false
+# (default) no PR-thread context is fetched or emitted, matching the other
+# context sources. PR_THREAD_ENABLE_FOR_FORKS gates it against cross-repo PRs,
+# where a public comment thread is untrusted content — fail-closed by default.
+# The byte/char/count budgets are all capped to their hard maxima in the
+# adapter (pr_reviewer/pr_thread_context.py); these are the caller-side defaults.
+PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-false}"
+PR_THREAD_ENABLE_FOR_FORKS="${PR_THREAD_ENABLE_FOR_FORKS:-false}"
+PR_THREAD_MAX_COMMENTS="${PR_THREAD_MAX_COMMENTS:-12}"
+PR_THREAD_MAX_BODY_CHARS="${PR_THREAD_MAX_BODY_CHARS:-1500}"
+PR_THREAD_MAX_TOTAL_BYTES="${PR_THREAD_MAX_TOTAL_BYTES:-24000}"
 # Implicitly trust the configured forge host as a linked source.
 if [ -n "${FORGEJO_API_URL:-}" ]; then
   _self_source_host=$(printf '%s' "$FORGEJO_API_URL" | sed -E 's#^https?://([^/]+).*#\1#' | tr '[:upper:]' '[:lower:]')
@@ -243,6 +254,37 @@ if [[ ! "$LINEAR_ISSUE_TIMEOUT_SEC" =~ ^[0-9]+$ || "$LINEAR_ISSUE_TIMEOUT_SEC" -
   error "Invalid LINEAR_ISSUE_TIMEOUT_SEC '$LINEAR_ISSUE_TIMEOUT_SEC'; defaulting to 20"
   LINEAR_ISSUE_TIMEOUT_SEC=20
 fi
+
+# PR-thread context (#578): normalize the boolean gate and the numeric budgets.
+# A typo degrades to the safe default rather than erroring — this is an
+# opt-in, advisory context source and a mis-set dial should not cost a review.
+PR_THREAD_CONTEXT="$(printf '%s' "${PR_THREAD_CONTEXT}" | tr '[:upper:]' '[:lower:]')"
+case "$PR_THREAD_CONTEXT" in
+  true|false) ;;
+  *)
+    error "Invalid PR_THREAD_CONTEXT '$PR_THREAD_CONTEXT'; defaulting to false"
+    PR_THREAD_CONTEXT="false"
+    ;;
+esac
+PR_THREAD_ENABLE_FOR_FORKS="$(printf '%s' "${PR_THREAD_ENABLE_FOR_FORKS}" | tr '[:upper:]' '[:lower:]')"
+case "$PR_THREAD_ENABLE_FOR_FORKS" in
+  true|false) ;;
+  *)
+    error "Invalid PR_THREAD_ENABLE_FOR_FORKS '$PR_THREAD_ENABLE_FOR_FORKS'; defaulting to false"
+    PR_THREAD_ENABLE_FOR_FORKS="false"
+    ;;
+esac
+for _pt_var in PR_THREAD_MAX_COMMENTS PR_THREAD_MAX_BODY_CHARS PR_THREAD_MAX_TOTAL_BYTES; do
+  if [[ ! "${!_pt_var}" =~ ^[0-9]+$ || "${!_pt_var}" -lt 1 ]]; then
+    case "$_pt_var" in
+      PR_THREAD_MAX_COMMENTS) _pt_default=12 ;;
+      PR_THREAD_MAX_BODY_CHARS) _pt_default=1500 ;;
+      *) _pt_default=24000 ;;
+    esac
+    error "Invalid $_pt_var '${!_pt_var}'; defaulting to $_pt_default"
+    printf -v "$_pt_var" '%s' "$_pt_default"
+  fi
+done
 
 # AI_TEMPERATURE: empty means "omit the field"; otherwise must be numeric.
 if [[ -n "$AI_TEMPERATURE" && ! "$AI_TEMPERATURE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then

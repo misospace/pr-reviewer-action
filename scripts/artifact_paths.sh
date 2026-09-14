@@ -27,6 +27,7 @@ assert_safe_artifact_paths() {
     linked-issue.raw.json linked-issues.json linked-issues.merged.json
     linked-issue.filtered.json
     linear-issues.json linear-issues.md
+    pr-thread-context.md pr-thread-comments.json pr-thread-comments.raw.json
     terms.txt terms.all.txt
     review-corpus.body.md repo-impact.combined.txt
   )

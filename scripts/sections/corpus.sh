@@ -199,6 +199,21 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     cat image-digest-context.md
     echo
 
+    # PR-thread (conversation) context (#578 / #579): a NEW standalone section
+    # rendered only when the adapter produced non-empty context (opt-in
+    # pr_thread_context=true, not fork-gated, and there was at least one
+    # external comment). It is treated as high-value signal and placed BEFORE
+    # the lowest-value sections (linked sources / repo scans / history) so it
+    # survives MAX_CORPUS truncation the way linked-issue evidence does. The
+    # document already carries its own untrusted-content framing; the section
+    # is fully omitted (no header, no placeholder) when there is nothing to
+    # show, matching the linked-issues / evidence-providers pattern.
+    if [ -s pr-thread-context.md ]; then
+      echo "# PR Discussion Thread"
+      cat pr-thread-context.md
+      echo
+    fi
+
     # Lowest-value sections last — first to be dropped on truncation.
     echo "# Linked Sources"
     cat linked-sources.md
