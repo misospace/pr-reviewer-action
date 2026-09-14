@@ -334,36 +334,46 @@ def build_planning_context(max_bytes, corpus_path=None):
         return prefix + body
 
 
-    # (corpus_region_key, excerpt_title, excerpt_source_path, excerpt_cap, fence)
     plan = [
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
-        ("Repository Map", "Repository Map", "repo-map.md", repo_map_max_bytes, None),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
         ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
         ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
     ]
 
-
     for region_key, title, excerpt_path, cap, fence in plan:
-
         avail = max_bytes - _used() - _PLANNING_RESERVE
         if avail < 400:
-            # Not enough room for a useful excerpt; later sections can't fit
-            # either (caps only shrink the same shared budget).
-            break
+            continue
         section = None
         region = regions.get(region_key)
-        if region is not None and len(region.encode("utf-8")) + 2 <= avail:
+        region_cap = min(cap, avail)
+        if region is not None and len(region.encode("utf-8")) + 2 <= region_cap:
             section = region
         if section is None:
             if region_key == "standards":
-                section = _standards_excerpt(title, excerpt_path, min(cap, avail))
-            elif region_key == "Repository Map":
-                section = _repo_map_excerpt(title, excerpt_path, min(cap, avail))
+                section = _standards_excerpt(title, excerpt_path, region_cap)
             else:
-                section = _excerpt(title, excerpt_path, min(cap, avail), fence)
+                section = _excerpt(title, excerpt_path, region_cap, fence)
         if section is not None:
             sections.append(section)
+
+    map_section = None
+    map_avail = max_bytes - _used() - _PLANNING_RESERVE
+    if map_avail >= 400:
+        map_region = regions.get("Repository Map")
+        map_cap = min(repo_map_max_bytes, map_avail)
+        if map_region is not None and len(map_region.encode("utf-8")) + 2 <= map_cap:
+            map_section = map_region
+        if map_section is None:
+            map_section = _repo_map_excerpt("Repository Map", "repo-map.md", map_cap)
+        if map_section is not None:
+            classification_index = next(
+                (index for index, section in enumerate(sections)
+                 if section.startswith("# PR Classification")),
+                -1,
+            )
+            sections.insert(classification_index + 1 if classification_index >= 0 else 0, map_section)
 
     if sections:
         # Whatever budget remains goes to the head of the diff. The diff head
