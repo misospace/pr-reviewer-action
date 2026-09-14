@@ -692,16 +692,21 @@ def execute_tool_request(
             truncated = res.get("truncated", False)
             if max_response_bytes and max_response_bytes > 0:
                 kept = []
-                total_bytes = 0
+                # The cap is on the serialized `entries` array: 2 brackets +
+                # each row's serialized size + (n-1) inter-row commas. We
+                # measure the actual payload shape, not just sum of row sizes,
+                # so a cap of 68 with two 34-byte rows drops the second row
+                # (the serialized array is [a,b] = 71 > 68).
+                array_bytes = 2  # the `[]` brackets
                 for e in entries:
-                    # Exact serialized row size (UTF-8 bytes, not char count).
-                    # This includes the JSON keys, quotes, and separators.
-                    cost = len(json.dumps(e, separators=(",", ":")).encode("utf-8"))
-                    if total_bytes + cost > max_response_bytes:
+                    row = json.dumps(e, separators=(",", ":"))
+                    row_bytes = len(row.encode("utf-8"))
+                    added = row_bytes + (1 if kept else 0)  # +1 for the comma
+                    if array_bytes + added > max_response_bytes:
                         truncated = True
                         break
                     kept.append(e)
-                    total_bytes += cost
+                    array_bytes += added
                 entries = kept
             tool_result["result"] = {
                 "entries": entries,

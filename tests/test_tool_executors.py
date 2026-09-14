@@ -724,3 +724,24 @@ def test_list_tree_via_executor_byte_cap_no_first_row_slip(tmp_path):
     assert res["result"]["entries"] == []
     assert res["result"]["total"] == 0
     assert res["result"]["truncated"] is True
+
+
+def test_list_tree_via_executor_byte_cap_array_separators(tmp_path):
+    # Regression: the byte cap applies to the serialized `entries` array,
+    # including the `[` `]` brackets and the `,` between rows. Two 30-byte
+    # rows with a 60-byte cap: sum(row_sizes) = 60 <= 60, but the serialized
+    # array is [a,b] = 63 > 60. The second row must be dropped.
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("x", encoding="utf-8")
+    res = _call(
+        "list_tree",
+        {"path": "."},
+        workspace_root=str(tmp_path),
+        max_response_bytes=60,
+    )
+    assert res.get("status") == "ok"
+    # Both rows are 30 bytes. The first fits (2 + 30 = 32 <= 60), the second
+    # does not (32 + 30 + 1 = 63 > 60). So only the first row is retained.
+    assert res["result"]["entries"] == [{"path": "a.txt", "type": "file"}]
+    assert res["result"]["total"] == 1
+    assert res["result"]["truncated"] is True
