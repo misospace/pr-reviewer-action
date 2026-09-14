@@ -375,7 +375,7 @@ def test_git_grep_uses_custom_timeout():
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         git_grep("pattern", "/tmp", request_timeout=42)
     mock_run.assert_called_once_with(
-        ["git", "grep", "-n", "--", "pattern", "."],
+        ["git", "grep", "-n", "-z", "--", "pattern", "."],
         cwd="/tmp",
         capture_output=True,
         text=True,
@@ -390,7 +390,7 @@ def test_git_grep_default_timeout():
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         git_grep("pattern", "/tmp")
     mock_run.assert_called_once_with(
-        ["git", "grep", "-n", "--", "pattern", "."],
+        ["git", "grep", "-n", "-z", "--", "pattern", "."],
         cwd="/tmp",
         capture_output=True,
         text=True,

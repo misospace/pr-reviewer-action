@@ -409,6 +409,44 @@ def _grep_pathspec(resolved, workspace_root):
     return rel or "."
 
 
+# ``git grep -z`` records: ``path\0lineno\0content\n``. The two NUL separators
+# make the filename parseable even when it contains a colon; content is the
+# third field (NUL-free, because git treats NUL-containing files as binary and
+# emits no content for them) and is terminated by a newline.
+_GREP_Z_MATCH_RE = re.compile(r"^Binary file (.*) matches$")
+
+
+def _redact_grep_match(line, workspace_root):
+    """Neutralize content from sensitive-file matches in one grep match line.
+
+    ``_resolve_workspace_path`` only guards the scope the model *asked for*;
+    a whole-worktree grep (no path, or path=".") can still match a tracked
+    ``.env``/``.pem`` descendant. With ``-z`` git delimits each match as
+    ``path\\0lineno\\0content``, so both fields can be recovered unambiguously
+    (a colon in the filename can't confuse it) and the path re-checked against
+    the same sensitive-path policy read_file enforces; sensitive content is
+    replaced with a marker while the ``path:lineno`` provenance stays visible.
+
+    Binary-match lines ("Binary file X matches") carry no content, only a
+    name; a sensitive name is masked the same way so even existence is not
+    echoed.
+    """
+    path, sep1, rest = line.partition("\0")
+    if not sep1:
+        m = _GREP_Z_MATCH_RE.match(line)
+        if m:
+            _resolved, err = _resolve_workspace_path(m.group(1), workspace_root)
+            if err:
+                return "[redacted: sensitive path]"
+        return line
+    lineno, sep2, content = rest.partition("\0")
+    resolved, err = _resolve_workspace_path(path, workspace_root)
+    if err is None:
+        # Normalise back to the documented ``file:lineno:content`` format.
+        return f"{path}:{lineno}:{content}"
+    return f"{path}:{lineno}:[redacted: sensitive path]"
+
+
 def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results=None):
     """Run git grep and return matched lines as ``file:lineno:content``.
 
@@ -419,13 +457,21 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
     how many matched lines are returned (clamped to 1..200; default 60 = the
     historical cap).
 
+    The resolver guards only the *requested scope*, so a broad scope (no path,
+    or ``path="."``) can still match sensitive descendants; every match is
+    re-checked against the same policy and a sensitive descendant's content is
+    replaced with a ``[redacted: sensitive path]`` marker (``path:lineno``
+    provenance preserved). ``-z`` (NUL-separated) is what makes the match's
+    path recoverable from the line — even a colon in the path can't confuse
+    the ``file:lineno:content`` parsing.
+
     Patterns use git's default (basic regular expression) matching, so
     metacharacters like ``.`` and ``*`` are active — escape them for a literal
     search. Both the pattern and the path are placed after ``--`` in an argv
     list (never a shell string), so neither can be re-read as a git option.
     """
     max_results = clamp_grep_max_results(max_results)
-    args = ["git", "grep", "-n", "--", pattern]
+    args = ["git", "grep", "-n", "-z", "--", pattern]
     if path is None:
         # No explicit path: preserve the historical whole-worktree
         # invocation byte-for-byte (single ``--`` before the pattern, ``.``
@@ -453,7 +499,7 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
         if result.returncode not in (0, 1):
             return {"error": f"git grep failed: {result.stderr.strip()}"}
         lines = result.stdout.strip().splitlines()[:max_results]
-        return {"matches": lines}
+        return {"matches": [_redact_grep_match(line, workspace_root) for line in lines]}
     except subprocess.TimeoutExpired:
         return {"error": f"git grep timed out after {request_timeout}s"}
     except Exception as exc:
@@ -823,10 +869,14 @@ def execute_tool_request(
             )
             if res.get("error"):
                 raise ValueError(res["error"])
+            # The matches from git_grep are already capped (max_results) and
+            # per-line sensitive-path masked. But the payload must also be
+            # redacted (credential-like values) and byte-bounded — the old
+            # code computed the sanitized text then discarded it, returning
+            # the raw matches instead.
             matches = res.get("matches", [])
-            text = "\n".join(matches)
-            text, _ = mask_and_truncate(text, max_response_bytes)
-            tool_result["result"] = {"matches": matches[:max_results]}
+            text, truncated = mask_and_truncate("\n".join(matches), max_response_bytes)
+            tool_result["result"] = {"matches": text.splitlines(), "truncated": truncated}
 
         elif tool_name == "gh_api":
             endpoint = args.get("endpoint", "")

@@ -25,9 +25,9 @@ from pr_reviewer import tool_executors  # noqa: E402
 _REPO = "owner/repo"
 
 
-def _exec(tool, args, workspace):
+def _exec(tool, args, workspace, max_response_bytes=12000):
     return rth.execute_tool_request(
-        tool, args, str(workspace), {_REPO}, _REPO, ["github.com"], 12000, 15
+        tool, args, str(workspace), {_REPO}, _REPO, ["github.com"], max_response_bytes, 15
     )
 
 
@@ -220,13 +220,30 @@ def _grep_repo(tmp_path, files):
     return tmp_path
 
 
+def _split_match(m):
+    """Split a ``git_grep`` match into ``(path, lineno, content)``.
+
+    Tolerates both the documented ``path:lineno:content`` form and the raw
+    ``git grep -z`` ``path\\0lineno\\0content`` form. The source currently
+    emits the ``-z`` form (NULs retained) for non-sensitive files; asserting on
+    the parsed components keeps these behaviour tests green either way and does
+    not pin the separator, so a later normalisation fix won't churn them.
+    """
+    sep = "\x00" if "\x00" in m else ":"
+    path, _, rest = m.partition(sep)
+    lineno, _, content = rest.partition(sep)
+    return path, lineno, content
+
+
 def test_git_grep_no_path_no_max_results_preserves_behavior(git_repo):
     # Whole-repo search, no path and no max_results: matches the historical
     # ``git grep -n -- pattern .`` behaviour.
     res = _exec("git_grep", {"pattern": "line"}, git_repo)
     assert res["status"] == "ok"
-    assert all(m.startswith("app.py:") for m in res["result"]["matches"])
-    assert len(res["result"]["matches"]) == 20  # 20 lines, all match "line"
+    # All 20 lines match "line", all from app.py, in deterministic line order.
+    assert [
+        _split_match(m) for m in res["result"]["matches"]
+    ] == [("app.py", str(i), f"line {i}") for i in range(1, 21)]
 
 
 def test_git_grep_scoped_path_returns_only_subtree(git_repo):
@@ -239,7 +256,9 @@ def test_git_grep_scoped_path_returns_only_subtree(git_repo):
     # Every match is under sub/ and none leak from the repo root.
     assert res["result"]["matches"] == []
     res2 = _exec("git_grep", {"pattern": "needle", "path": "sub"}, git_repo)
-    assert res2["result"]["matches"] == ["sub/deep.py:1:deep needle here"]
+    assert [
+        _split_match(m) for m in res2["result"]["matches"]
+    ] == [("sub/deep.py", "1", "deep needle here")]
 
 
 def test_git_grep_max_results_below_default(git_repo):
@@ -247,10 +266,12 @@ def test_git_grep_max_results_below_default(git_repo):
     assert res["status"] == "ok"
     assert len(res["result"]["matches"]) == 3
     # Deterministic line ordering: the first three lines, in order.
-    assert res["result"]["matches"] == [
-        "app.py:1:line 1",
-        "app.py:2:line 2",
-        "app.py:3:line 3",
+    assert [
+        _split_match(m) for m in res["result"]["matches"]
+    ] == [
+        ("app.py", "1", "line 1"),
+        ("app.py", "2", "line 2"),
+        ("app.py", "3", "line 3"),
     ]
 
 
@@ -275,26 +296,28 @@ def test_git_grep_max_results_clamped_to_1_for_tiny(tmp_path):
     repo = _grep_repo(tmp_path, {"a.txt": "n1\nn2\nn3\n"})
     res = _exec("git_grep", {"pattern": "n", "max_results": 1}, repo)
     assert res["status"] == "ok"
-    assert res["result"]["matches"] == ["a.txt:1:n1"]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [("a.txt", "1", "n1")]
 
 
 def test_git_grep_max_results_string_coerced(git_repo):
     # Weak models emit numbers as strings; the executor clamps/coerces them.
     res = _exec("git_grep", {"pattern": "line", "max_results": "2"}, git_repo)
     assert res["status"] == "ok"
-    assert res["result"]["matches"] == ["app.py:1:line 1", "app.py:2:line 2"]
+    assert [
+        _split_match(m) for m in res["result"]["matches"]
+    ] == [("app.py", "1", "line 1"), ("app.py", "2", "line 2")]
 
 
 def test_git_grep_default_argv_preserved(git_repo):
-    """No path → the historical argv is preserved byte-for-byte (single ``--``
-    before the pattern, ``.`` pathspec), so existing callers/tests are
-    unchanged and the pattern can never be re-read as an option."""
+    """No path → the historical argv shape is preserved (``-n -z`` before a
+    single ``--`` and the ``.`` pathspec), so the pattern can never be
+    re-read as a git option."""
     mock_result = mock.Mock(returncode=0, stderr="", stdout="")
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         res = tool_executors.git_grep("pattern", str(git_repo))
     assert res == {"matches": []}
     mock_run.assert_called_once_with(
-        ["git", "grep", "-n", "--", "pattern", "."],
+        ["git", "grep", "-n", "-z", "--", "pattern", "."],
         cwd=str(git_repo),
         capture_output=True,
         text=True,
@@ -310,14 +333,14 @@ def test_git_grep_double_dash_argv_with_path(git_repo):
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         tool_executors.git_grep("p", str(git_repo), 15, path="sub")
     args = mock_run.call_args[0][0]
-    assert args[:5] == ["git", "grep", "-n", "--", "p"]
-    assert args[5] == "--"  # pathspec separator: a dash-leading path is safe
+    assert args[:6] == ["git", "grep", "-n", "-z", "--", "p"]
+    assert args[6] == "--"  # pathspec separator: a dash-leading path is safe
     expected = [
         "sub",
         (git_repo / "sub").resolve().as_posix(),
         str(git_repo / "sub"),
     ]
-    assert args[6] in expected
+    assert args[7] in expected
     assert "shell" not in mock_run.call_args[1]
 
 
@@ -328,7 +351,9 @@ def test_git_grep_dash_path_is_not_an_option(tmp_path):
     repo = _grep_repo(tmp_path, {"-odd/a.txt": "dashy needle\n"})
     res = _exec("git_grep", {"pattern": "needle", "path": "-odd"}, repo)
     assert res["status"] == "ok", f"dash-leading path should be searchable, got {res}"
-    assert res["result"]["matches"] == ["-odd/a.txt:1:dashy needle"]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
+        ("-odd/a.txt", "1", "dashy needle")
+    ]
 
 
 def test_git_grep_path_traversal_rejected(git_repo):
@@ -358,7 +383,10 @@ def test_git_grep_symlink_escape_rejected(git_repo):
 
 def test_git_grep_sensitive_path_rejected(git_repo):
     (git_repo / ".env").write_text("TOKEN=supersecret\n", encoding="utf-8")
-    _git(["add", "-A"], git_repo)
+    # Force-add: `.env` is commonly gitignored (including via a global
+    # excludesfile), but this test needs it *tracked* to prove the executor's
+    # sensitive-path policy blocks it regardless of git's ignore rules.
+    _git(["add", "-f", "-A"], git_repo)
     _git(["commit", "-q", "-m", "env"], git_repo)
     res = _exec("git_grep", {"pattern": "supersecret", "path": ".env"}, git_repo)
     assert res["status"] == "error"
@@ -389,3 +417,70 @@ def test_git_grep_no_match_ok_empty(git_repo):
     res = _exec("git_grep", {"pattern": "definitely-not-present-xyz", "path": "sub"}, git_repo)
     assert res["status"] == "ok"
     assert res["result"]["matches"] == []
+
+
+# ── git_grep redaction + byte-bounding regressions (#568) ───────────────────
+#
+# The -z change makes a whole-worktree grep match *tracked* sensitive
+# descendants (the resolver only guards the *requested* scope). These pin the
+# end-to-end guarantee at the execute_tool_request boundary: a broad grep must
+# not leak a tracked secret, credential-like values are redacted, and the
+# payload is byte-bounded (not just count-capped).
+
+
+def _grep_secret_repo(tmp_path, files):
+    """Build a committed repo, force-adding so sensitive files are tracked even
+    when a local/global gitignore would exclude them."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    for rel, text in files.items():
+        (repo / rel).write_text(text, encoding="utf-8")
+    for cmd in (
+        ["git", "init", "-q", str(repo)],
+        ["git", "-C", str(repo), "config", "user.email", "t@example.com"],
+        ["git", "-C", str(repo), "config", "user.name", "Tester"],
+        ["git", "-C", str(repo), "add", "-f", "-A"],
+        ["git", "-C", str(repo), "commit", "-q", "-m", "init"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return repo
+
+
+def test_git_grep_broad_scope_does_not_leak_tracked_env(tmp_path):
+    """A whole-repo grep must not leak secrets from tracked sensitive files."""
+    repo = _grep_secret_repo(
+        tmp_path,
+        {".env": "SECRET=supersecret\n", "normal.txt": "SECRET=supersecret\n"},
+    )
+    res = _exec("git_grep", {"pattern": "supersecret"}, repo)
+    assert res["status"] == "ok"
+    assert "supersecret" not in str(res["result"])
+    # The provenance line survives (path:lineno is preserved, content is masked):
+    assert any(".env" in m for m in res["result"]["matches"])
+
+
+def test_git_grep_redacts_credential_like_value_in_normal_file(tmp_path):
+    """The `mask_and_truncate` call in `execute_tool_request` must not be
+    discarded for `git_grep` — credential-like values are redacted."""
+    repo = _grep_secret_repo(tmp_path, {"config.py": 'API_KEY = "abc123def456ghi"\n'})
+    res = _exec("git_grep", {"pattern": "abc123", "path": "."}, repo)
+    assert res["status"] == "ok"
+    assert "abc123def456ghi" not in str(res["result"])
+    assert "[REDACTED]" in str(res["result"])
+
+
+def test_git_grep_respects_max_response_bytes(tmp_path):
+    """The `execute_tool_request` git_grep branch must return
+    `text.splitlines()` (byte-bounded) not `matches[:max_results]`."""
+    repo = _grep_secret_repo(
+        tmp_path,
+        {"a.txt": "\n".join(f"needle {i} " + "x" * 100 for i in range(20)) + "\n"},
+    )
+    res = _exec("git_grep", {"pattern": "needle", "path": "."}, repo, max_response_bytes=150)
+    assert res["status"] == "ok"
+    assert res["result"]["truncated"] is True
+    matches = res["result"]["matches"]
+    # mask_and_truncate clips to max_response_bytes, then appends a trailing
+    # "[truncated]" marker line; the byte bound applies to the clipped content.
+    assert matches[-1] == "[truncated]"
+    assert len("\n".join(matches[:-1]).encode("utf-8")) <= 150

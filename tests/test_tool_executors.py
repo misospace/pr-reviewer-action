@@ -158,9 +158,11 @@ def test_execute_tool_request_git_grep_forwards_optional_args() -> None:
 
 
 def test_execute_tool_request_git_grep_clamps_oversized_max_results() -> None:
-    """An oversized max_results is clamped to 200 both at the executor boundary
-    and in the returned payload — schema/normalization/executor agree."""
-    fake_grep = {"matches": ["f.py:%d:x" % i for i in range(1, 202)]}
+    """An oversized max_results is clamped to 200 at the executor boundary (the
+    arg git_grep receives). The fake git_grep returns exactly that post-clamp
+    count, mirroring a real clamped ``git grep``; the executor now byte-bounds
+    the payload via mask_and_truncate (not a count cap), so those 200 survive."""
+    fake_grep = {"matches": ["f.py:%d:x" % i for i in range(1, 201)]}
     with patch.object(tool_executors, "git_grep", return_value=fake_grep) as gg:
         res = _call("git_grep", {"pattern": "x", "max_results": 10000})
     assert gg.call_args.kwargs.get("max_results") == 200

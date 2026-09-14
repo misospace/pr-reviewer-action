@@ -959,9 +959,15 @@ def test_native_loop_forwards_git_grep_optional_args(monkeypatch, tmp_path):
     grep_result = next(r for r in result["tool_results"] if r["tool"] == "git_grep")
     assert grep_result["status"] == "ok"
     matches = grep_result["result"]["matches"]
-    assert matches == ["sub/a.txt:1:needle in sub"]
+    # The -z change returns `path\0lineno\0content`; parse tolerantly so this
+    # pins the *scoping* behaviour, not the exact separator.
+    assert len(matches) == 1
+    sep = "\x00" if "\x00" in matches[0] else ":"
+    path, _, rest = matches[0].partition(sep)
+    lineno, _, content = rest.partition(sep)
+    assert (path, lineno, content) == ("sub/a.txt", "1", "needle in sub")
     # The unscoped root match must NOT appear — scoping is in effect.
-    assert not any(m.startswith("root.txt:") for m in matches)
+    assert not any(m.startswith("root.txt") for m in matches)
 
     # And the normalized request that reached the executor carries both args.
     tool, args = rth.normalize_tool_request(
