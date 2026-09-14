@@ -409,38 +409,84 @@ def _grep_pathspec(resolved, workspace_root):
     return rel or "."
 
 
-# ``git grep -z`` records: ``path\0lineno\0content\n``. The two NUL separators
-# make the filename parseable even when it contains a colon; content is the
-# third field (NUL-free, because git treats NUL-containing files as binary and
-# emits no content for them) and is terminated by a newline.
+# ``git grep -z`` text records: ``path\0lineno\0content\n``. The two NUL
+# separators make the filename parseable even when it contains a colon;
+# content is the third field (NUL-free, because git treats NUL-containing
+# files as binary and emits no content for them) and is terminated by a
+# newline. Binary matches emit ``Binary file X matches\n`` (no NUL at all).
 _GREP_Z_MATCH_RE = re.compile(r"^Binary file (.*) matches$")
 
 
-def _redact_grep_match(line, workspace_root):
-    """Neutralize content from sensitive-file matches in one grep match line.
+def _parse_grep_z_records(stdout):
+    """Consume a raw ``git grep -z`` stream into match records.
+
+    A text record is ``path\\0lineno\\0content\\n``: the first NUL ends the
+    path, the second ends the line number, and the record ends at the
+    newline that terminates the content. Newlines are NOT record boundaries
+    — a path may itself contain a newline — so records are located by
+    locating the first and second NULs first. A binary match (``Binary file
+    X matches\\n``) carries no NUL and no content; it is kept whole for
+    the redaction pass.
+
+    Returns a list of tuples: ``("text", path, lineno, content)`` for text
+    matches and ``("binary", line)`` for binary matches.
+    """
+    records = []
+    i, n = 0, len(stdout)
+    while i < n:
+        # Binary output carries no NUL. Recognize and consume it before
+        # scanning for a later text record's NUL pair.
+        if stdout.startswith("Binary file ", i):
+            newline = stdout.find("\n", i)
+            binary_line = stdout[i:newline if newline != -1 else n]
+            if _GREP_Z_MATCH_RE.match(binary_line):
+                records.append(("binary", binary_line))
+                i = n if newline == -1 else newline + 1
+                continue
+        nul1 = stdout.find("\0", i)
+        nul2 = stdout.find("\0", nul1 + 1) if nul1 != -1 else -1
+        if nul2 == -1:
+            # Malformed trailing output cannot be safely attributed to a path.
+            # Keep it as a binary-style record so the redaction pass fails
+            # closed if it resembles a sensitive binary-match name.
+            newline = stdout.find("\n", i)
+            records.append(("binary", stdout[i:newline if newline != -1 else n]))
+            i = n if newline == -1 else newline + 1
+            continue
+        newline = stdout.find("\n", nul2 + 1)
+        if newline == -1:
+            newline = n
+        records.append(("text", stdout[i:nul1], stdout[nul1 + 1:nul2], stdout[nul2 + 1:newline]))
+        i = newline + 1
+    return records
+
+
+def _redact_grep_record(rec, workspace_root):
+    """Redact a record parsed from ``git grep -z`` output.
 
     ``_resolve_workspace_path`` only guards the scope the model *asked for*;
-    a whole-worktree grep (no path, or path=".") can still match a tracked
-    ``.env``/``.pem`` descendant. With ``-z`` git delimits each match as
-    ``path\\0lineno\\0content``, so both fields can be recovered unambiguously
-    (a colon in the filename can't confuse it) and the path re-checked against
-    the same sensitive-path policy read_file enforces; sensitive content is
-    replaced with a marker while the ``path:lineno`` provenance stays visible.
+    a broad scope (no path, or path=".") can still match a tracked
+    ``.env``/``.pem`` descendant. A parsed record's path is recovered
+    unambiguously (even a colon or a newline in the path can't fool it) and
+    re-checked against the same sensitive-path policy read_file enforces;
+    sensitive content is replaced with a marker while the ``path:lineno``
+    provenance stays visible.
 
-    Binary-match lines ("Binary file X matches") carry no content, only a
+    Binary-match records (``("binary", line)``) carry no content, only a
     name; a sensitive name is masked the same way so even existence is not
     echoed.
     """
-    path, sep1, rest = line.partition("\0")
-    if not sep1:
+    kind = rec[0]
+    if kind == "binary":
+        line = rec[1]
         m = _GREP_Z_MATCH_RE.match(line)
         if m:
             _resolved, err = _resolve_workspace_path(m.group(1), workspace_root)
             if err:
                 return "[redacted: sensitive path]"
         return line
-    lineno, sep2, content = rest.partition("\0")
-    resolved, err = _resolve_workspace_path(path, workspace_root)
+    _, path, lineno, content = rec
+    _resolved, err = _resolve_workspace_path(path, workspace_root)
     if err is None:
         # Normalise back to the documented ``file:lineno:content`` format.
         return f"{path}:{lineno}:{content}"
@@ -498,8 +544,12 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
         )
         if result.returncode not in (0, 1):
             return {"error": f"git grep failed: {result.stderr.strip()}"}
-        lines = result.stdout.strip().splitlines()[:max_results]
-        return {"matches": [_redact_grep_match(line, workspace_root) for line in lines]}
+        # Parse all raw -z records before applying max_results. A path may
+        # contain a newline, so splitting stdout into lines first would let a
+        # sensitive descendant lose its path boundary before redaction.
+        records = _parse_grep_z_records(result.stdout)
+        matches = [_redact_grep_record(rec, workspace_root) for rec in records]
+        return {"matches": matches[:max_results]}
     except subprocess.TimeoutExpired:
         return {"error": f"git grep timed out after {request_timeout}s"}
     except Exception as exc:

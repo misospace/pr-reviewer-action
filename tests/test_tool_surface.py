@@ -484,3 +484,34 @@ def test_git_grep_respects_max_response_bytes(tmp_path):
     # "[truncated]" marker line; the byte bound applies to the clipped content.
     assert matches[-1] == "[truncated]"
     assert len("\n".join(matches[:-1]).encode("utf-8")) <= 150
+
+
+def test_git_grep_newline_named_sensitive_file_is_path_redacted(tmp_path):
+    """A sensitive path ending in a newline must not lose its path boundary.
+
+    The marker is deliberately not a credential/key-value shape, so this
+    proves the sensitive-path guard — not mask_secrets() — blocks the content.
+    """
+    marker = "unstructured-marker"
+    repo = _grep_secret_repo(tmp_path, {".env\n": f"{marker}\n"})
+
+    # git_grep itself preserves the complete newline-containing path long
+    # enough to apply the per-match sensitive-file policy.
+    raw = tool_executors.git_grep(marker, str(repo))
+    assert raw == {"matches": [".env\n:1:[redacted: sensitive path]"]}
+
+    # The executor boundary must not leak the arbitrary marker either.
+    res = _exec("git_grep", {"pattern": marker}, repo)
+    assert res["status"] == "ok"
+    assert marker not in str(res["result"])
+    assert "[redacted: sensitive path]" in str(res["result"])
+
+
+def test_git_grep_newline_named_normal_file_preserves_provenance(tmp_path):
+    """A non-sensitive filename with a newline stays one parsed grep record."""
+    marker = "ordinary-marker"
+    filename = "ordinary\nname.txt"
+    repo = _grep_secret_repo(tmp_path, {filename: f"{marker}\n"})
+
+    raw = tool_executors.git_grep(marker, str(repo))
+    assert raw == {"matches": [f"{filename}:1:{marker}"]}
