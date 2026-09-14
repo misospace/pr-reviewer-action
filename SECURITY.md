@@ -15,7 +15,7 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 
 - Tool harness defaults to `off` (`tool_mode=off`)
 - Tool harness treats corpus text as untrusted and does not follow corpus instructions
-- Tool harness uses a strict read-only allowlist (`gh_api`, `read_file`, `web_fetch`, `git_grep`, and named-only `run_command`)
+- Tool harness uses a strict read-only allowlist (`gh_api`, `read_file`, `find_files`, `list_tree`, `web_fetch`, `git_grep`, `git_log`, `git_blame`, and named-only `run_command`)
 - `gh_api` validates endpoint characters against a safe-character regex, rejects dot-segments, enforces a repo allowlist (same-repo or explicit), restricts calls to read-only API prefixes (`/repos/`, `/issues/`, `/search/`, `/releases/`, `/git/`), and blocks sensitive path substrings (`/actions/secrets`, `/dependabot/secrets`, etc.)
 - `gh_api` can optionally include specific upstream repos via explicit allowlist (`tool_allowed_gh_api_repos`) or all repos via `*` while preserving endpoint/path denylist checks
 - Anthropic responses are parsed from `text` blocks only; non-text blocks such as `thinking` are not added to review output
