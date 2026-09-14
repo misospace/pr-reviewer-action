@@ -681,24 +681,31 @@ def execute_tool_request(
             if res.get("error"):
                 raise ValueError(res["error"])
             entries = res.get("entries", [])
-            # The harness's normal output-size cap, applied at row boundaries
-            # (each entry is one deterministic line) so the result stays
-            # bounded AND valid, and a byte cut never splits an entry.
+            # Byte cap applied at row boundaries: each entry is one JSON
+            # row, so we measure the serialized row size and never split an
+            # entry at a byte cut. Unlike find_files (where the cap is a
+            # count cap), list_tree's output is variable-length rows, so a
+            # byte cap is the only way to keep the response bounded. The cap
+            # is applied at the row level, not the entry level — a single
+            # sufficiently large entry can exceed the cap, in which case the
+            # result is empty and truncated is True.
             truncated = res.get("truncated", False)
             if max_response_bytes and max_response_bytes > 0:
                 kept = []
-                total = 0
+                total_bytes = 0
                 for e in entries:
-                    cost = len(e["path"]) + len(e["type"]) + 4
-                    if kept and total + cost > max_response_bytes:
+                    # Exact serialized row size (UTF-8 bytes, not char count).
+                    # This includes the JSON keys, quotes, and separators.
+                    cost = len(json.dumps(e, separators=(",", ":")).encode("utf-8"))
+                    if total_bytes + cost > max_response_bytes:
                         truncated = True
                         break
                     kept.append(e)
-                    total += cost
+                    total_bytes += cost
                 entries = kept
             tool_result["result"] = {
                 "entries": entries,
-                "total": res.get("total", len(entries)),
+                "total": len(entries),
                 "truncated": truncated,
             }
 

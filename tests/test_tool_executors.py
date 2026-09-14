@@ -676,6 +676,26 @@ def test_list_tree_via_executor_byte_cap(tmp_path):
     # A tiny max_response_bytes truncates at row boundaries: a deterministic
     # pre-order prefix is kept, a byte cut never splits an entry, and
     # truncated is set (driven directly via _call to inject the small cap).
+    # {"path":"README.md","type":"file"} = 34 bytes; {"path":"pyproject.toml",...} = 60+ bytes.
+    # A cap of 70 fits the first row (34) but not the second (34+60=94 > 70).
+    res = _call(
+        "list_tree",
+        {"path": "."},
+        workspace_root=str(tmp_path),
+        max_response_bytes=70,
+    )
+    assert res.get("status") == "ok"
+    entries = res["result"]["entries"]
+    assert entries == [{"path": "README.md", "type": "file"}]
+    assert res["result"]["total"] == len(entries)
+    assert res["result"]["truncated"] is True
+
+
+def test_list_tree_via_executor_byte_cap_multibyte_filename(tmp_path):
+    # Regression: the byte cap must measure UTF-8 bytes, not char count.
+    # A multibyte filename (e.g. "café.txt" = 9 bytes) must not slip past a
+    # tiny cap that would have accepted it under the old char-count logic.
+    (tmp_path / "café.txt").write_text("x", encoding="utf-8")
     res = _call(
         "list_tree",
         {"path": "."},
@@ -683,6 +703,24 @@ def test_list_tree_via_executor_byte_cap(tmp_path):
         max_response_bytes=20,
     )
     assert res.get("status") == "ok"
-    entries = res["result"]["entries"]
-    assert entries == [{"path": "README.md", "type": "file"}]
+    # {"path":"café.txt","type":"file"} = 34 bytes UTF-8 (the "é" is 2 bytes)
+    # > 20, so the entry is dropped and truncated is set.
+    assert res["result"]["entries"] == []
+    assert res["result"]["total"] == 0
+    assert res["result"]["truncated"] is True
+
+
+def test_list_tree_via_executor_byte_cap_no_first_row_slip(tmp_path):
+    # Regression: the first row must not be admitted unconditionally. A
+    # single row that exceeds the cap yields an empty result with truncated.
+    (tmp_path / ("a" * 100)).write_text("x", encoding="utf-8")
+    res = _call(
+        "list_tree",
+        {"path": "."},
+        workspace_root=str(tmp_path),
+        max_response_bytes=10,
+    )
+    assert res.get("status") == "ok"
+    assert res["result"]["entries"] == []
+    assert res["result"]["total"] == 0
     assert res["result"]["truncated"] is True
