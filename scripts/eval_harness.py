@@ -331,6 +331,15 @@ def evaluate_capability(
         elif ctype == "review_mentions":
             any_of = check.get("any_of", [])
             passed = any(str(s).lower() in review_lc for s in any_of)
+        elif ctype == "max_tool_calls":
+            maximum = check.get("max")
+            # Every emitted request consumes budget, including failed requests.
+            passed = (
+                isinstance(maximum, int)
+                and not isinstance(maximum, bool)
+                and isinstance(run.tool_calls, list)
+                and len(run.tool_calls) <= maximum
+            )
 
         results.append({"id": cid, "type": ctype, "passed": passed})
 

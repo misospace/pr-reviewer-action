@@ -72,6 +72,15 @@ def test_eval_harness_workflow_exists() -> None:
     )
 
 
+def test_run_eval_harness_step_forwards_selected_corpus() -> None:
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    run_block = _extract_run_block("Run eval harness", workflow_text)
+
+    assert re.search(r"--corpus\s+\"\$CORPUS\"", run_block), (
+        "the `Run eval harness` step must forward the selected corpus to the harness"
+    )
+
+
 def test_run_eval_harness_step_uses_robust_array_split() -> None:
     """The ``MODES`` input must be split via ``read -ra`` (SC2206-safe).
 

@@ -1,0 +1,107 @@
+{
+  "benchmark_corpus": [
+    {
+      "number": 598,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/598",
+      "title": "feat(tools): add bounded list_tree tool for repository discovery (#566)",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires structural discovery, reading the discovered tool_executors path, and a repository-discovery review mention.",
+        "checks": [
+          {
+            "id": "discover_tool_executors_path",
+            "type": "tool_call",
+            "tool": ["list_tree", "find_files"]
+          },
+          {
+            "id": "read_tool_executors_path",
+            "type": "tool_call",
+            "tool": "read_file",
+            "args_contains": { "path": ["tool_executors"] }
+          },
+          {
+            "id": "mentions_repository_discovery_context",
+            "type": "review_mentions",
+            "any_of": ["repository discovery", "tool discovery", "list_tree"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 600,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/600",
+      "title": "feat(context): add related code scanner",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading the related test path and mentioning the test or regression in the review.",
+        "checks": [
+          {
+            "id": "read_related_test_path",
+            "type": "tool_call",
+            "tool": "read_file",
+            "args_contains": { "path": ["test_related_context"] }
+          },
+          {
+            "id": "mentions_related_test",
+            "type": "review_mentions",
+            "any_of": ["test", "tests", "regression", "coverage"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 601,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/601",
+      "title": "feat(context): wire related code into reviews",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading the downstream caller path and mentioning the affected caller, contract, or downstream impact in the review.",
+        "checks": [
+          {
+            "id": "read_downstream_caller_path",
+            "type": "tool_call",
+            "tool": "read_file",
+            "args_contains": { "path": ["corpus.sh"] }
+          },
+          {
+            "id": "mentions_caller_contract_downstream",
+            "type": "review_mentions",
+            "any_of": ["caller", "contract", "downstream"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 599,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/599",
+      "title": "feat(context): add repository map context",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. This negative control requires a clean or approving review while allowing no more than three tool calls.",
+        "checks": [
+          {
+            "id": "mentions_clean_or_approve",
+            "type": "review_mentions",
+            "any_of": ["clean", "approve", "no issues", "looks good"]
+          },
+          {
+            "id": "limits_unnecessary_tool_calls",
+            "type": "max_tool_calls",
+            "max": 3
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-09-15T00:00:00Z",
+    "updated_at": "2026-09-15T00:00:00Z",
+    "description": "Repository-context capability fixtures. Evidence in expected_evidence is grader-only and is not a reviewer recipe; reviewers receive no exact path or tool sequence. Scenarios cover tree discovery, related tests, downstream callers, and a low-tool negative control.",
+    "issue_refs": [577],
+    "pr_refs": [598, 600, 601, 599]
+  }
+}

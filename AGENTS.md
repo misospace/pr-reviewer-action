@@ -211,9 +211,9 @@ none rather than guessing.
 
 ## Eval harness runbook
 
-The evaluation harness (`scripts/eval_harness.py`) and its graded corpus
-(`evals/corpus-agentic.json`) are wired into CI by the `eval-harness`
-workflow (`.github/workflows/eval-harness.yaml`). Use this runbook for manual
+The evaluation harness (`scripts/eval_harness.py`) and its graded corpora
+(`evals/corpus-agentic.json` and `evals/corpus-repo-context.json`) are wired
+into CI by the `eval-harness` workflow (`.github/workflows/eval-harness.yaml`). Use this runbook for manual
 runs or when triaging a failing scheduled regression sweep.
 
 ### Prerequisites
@@ -248,8 +248,9 @@ line, repeated `--modes x --modes y` works too). The default is
 The `eval-harness` workflow has two triggers:
 
 - **`workflow_dispatch`** — runs on demand from the Actions tab. Inputs:
-  `corpus` (default `evals/corpus-agentic.json`), `modes` (default
-  `tools_off native_loop`), `runs-per-mode` (default `10`), `max-prs`
+  `corpus` (default `evals/corpus-agentic.json`; choose
+  `evals/corpus-repo-context.json` for the repository-context fixtures), `modes`
+  (default `tools_off native_loop`), `runs-per-mode` (default `10`), `max-prs`
   (blank = corpus default).
 - **`schedule`** — weekly Monday 06:00 UTC sweep against `main`. The
   scheduled run additionally posts a Markdown summary to
