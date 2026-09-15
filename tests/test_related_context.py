@@ -16,10 +16,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from pr_reviewer import related_context  # noqa: E402
 from pr_reviewer.related_context import (  # noqa: E402
     ARTIFACT_VERSION,
+    MAX_JSON_BYTES,
+    MAX_MANIFESTS_PER_FILE,
     MAX_REFERENCES,
     MAX_REFERENCES_PER_SYMBOL,
     MAX_SYMBOLS,
     build_related_context,
+    render_related_context_json,
     render_related_context_markdown,
 )
 
@@ -109,9 +112,9 @@ def test_only_high_confidence_symbols_are_searched(tmp_path, monkeypatch):
     root = make_repo(tmp_path, {"module.py": "target()\nother()\n"})
     calls: list[str] = []
 
-    def fake_grep(symbol, workspace, *, timeout, max_hits):
+    def fake_grep(symbol, workspace, *, excluded_paths, timeout, max_hits):
         calls.append(symbol)
-        return [], None
+        return [], False, None
 
     monkeypatch.setattr(related_context, "git_grep_references", fake_grep)
     result = build_related_context(
@@ -239,7 +242,79 @@ def test_secret_redaction_and_hostile_markdown_are_safe(tmp_path):
 
 
 def test_caps_expose_default_bounds():
-    assert (MAX_SYMBOLS, MAX_REFERENCES_PER_SYMBOL, MAX_REFERENCES) == (40, 20, 200)
+    assert (MAX_SYMBOLS, MAX_REFERENCES_PER_SYMBOL, MAX_REFERENCES, MAX_MANIFESTS_PER_FILE) == (
+        40, 20, 200, 20
+    )
+
+
+def test_changed_hits_do_not_consume_reference_cap(tmp_path):
+    files = {"changed.py": "target()\n"}
+    for index in range(22):
+        files[f"changed_{index:02d}.py"] = "target()\n"
+    files["external_00.py"] = "target()\n"
+    files["external_01.py"] = "target()\n"
+    root = make_repo(tmp_path, files)
+    result = build_related_context(
+        anchors(source_file("changed.py", "target")),
+        root,
+        [
+            {"filename": path, "status": "modified"}
+            for path in ["changed.py", *[f"changed_{index:02d}.py" for index in range(22)]]
+        ],
+        max_references_per_symbol=1,
+        max_references=1,
+    )
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [ref["path"] for ref in refs] == ["external_00.py"]
+    assert result["truncation"]["omitted_references"] == 1
+
+
+def test_manifest_cap_is_explicit_and_deterministic(tmp_path):
+    files = {"module.py": "target()\n"}
+    for index in range(MAX_MANIFESTS_PER_FILE + 1):
+        files[f"Dockerfile.{index:02d}"] = "FROM scratch\n"
+    root = make_repo(tmp_path, files)
+    result = build_related_context(anchors(source_file("module.py", "target")), root)
+    manifests = result["files"][0]["manifests"]
+    assert len(manifests) == MAX_MANIFESTS_PER_FILE
+    assert manifests == [f"Dockerfile.{index:02d}" for index in range(MAX_MANIFESTS_PER_FILE)]
+    assert result["truncation"]["omitted_manifests"] == 1
+    assert "manifest_cap" in result["truncation"]["reasons"]
+
+
+def test_json_cap_preserves_valid_json_and_hard_limit():
+    related = {
+        "version": 1,
+        "files": [{
+            "path": "module.py",
+            "symbols": [{"name": "target", "references": [
+                {"path": f"ref_{index}.py", "line": index, "snippet": "x" * 1000}
+                for index in range(300)
+            ]}],
+            "tests": [],
+            "manifests": [],
+        }],
+        "truncated": False,
+        "errors": [],
+        "truncation": {"truncated": False, "reasons": []},
+    }
+    rendered = render_related_context_json(related)
+    assert len(rendered.encode("utf-8")) <= MAX_JSON_BYTES
+    parsed = json.loads(rendered)
+    assert parsed["truncated"] is True
+    assert "json_cap" in parsed["truncation"]["reasons"]
+
+
+def test_load_json_errors_do_not_render_oserror_details(tmp_path, monkeypatch):
+    sensitive = "/sensitive/path/with-secret-token.json"
+
+    def fail_read_text(*args, **kwargs):
+        raise OSError(f"permission denied: {sensitive}")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+    _, error = related_context._load_json(sensitive)
+    assert error == "could not read JSON"
+    assert sensitive not in error
 
 
 def test_cli_writes_versioned_json_and_markdown(tmp_path):

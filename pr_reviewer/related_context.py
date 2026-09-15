@@ -9,6 +9,7 @@ executing repository code or making network/model calls.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -24,8 +25,10 @@ MAX_SYMBOLS = 40
 MAX_REFERENCES_PER_SYMBOL = 20
 MAX_REFERENCES = 200
 MAX_TESTS_PER_FILE = 20
+MAX_MANIFESTS_PER_FILE = 20
 MAX_SNIPPET_CHARS = 300
 DEFAULT_GIT_TIMEOUT_SEC = 10
+MAX_JSON_BYTES = 100_000
 MAX_MARKDOWN_BYTES = 100_000
 MAX_ERROR_CHARS = 300
 
@@ -190,13 +193,15 @@ def git_grep_references(
     symbol: str,
     workspace: str | os.PathLike[str],
     *,
+    excluded_paths: set[str],
     timeout: float = DEFAULT_GIT_TIMEOUT_SEC,
-    max_hits: int = MAX_REFERENCES_PER_SYMBOL + 1,
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Search one symbol without allowing Git to buffer an unbounded result."""
+    max_hits: int = MAX_REFERENCES_PER_SYMBOL,
+) -> tuple[list[dict[str, Any]], bool, str | None]:
+    """Stream eligible symbol matches without buffering an unbounded result."""
     limit = max(0, int(max_hits))
     if limit == 0:
-        return [], None
+        return [], False, None
+    excluded = excluded_paths or set()
     try:
         proc = subprocess.Popen(
             ["git", "grep", "-n", "-F", "--", symbol, "--", "."],
@@ -205,33 +210,43 @@ def git_grep_references(
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        return [], "git executable not found"
-    except OSError as exc:
-        return [], _error("git grep failed to start", exc)
+        return [], False, "git executable not found"
+    except OSError:
+        return [], False, "git grep failed to start"
 
     assert proc.stdout is not None
     rows: list[dict[str, Any]] = []
+    extra_hit = False
     deadline = time.monotonic() + timeout
+    returncode = None
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
-            while len(rows) < limit:
+            while not extra_hit and len(rows) <= limit:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     proc.kill()
                     proc.wait()
-                    return [], _error("git grep", f"command timed out after {timeout:g}s")
+                    return [], False, _error("git grep", f"command timed out after {timeout:g}s")
                 if not selector.select(remaining):
                     proc.kill()
                     proc.wait()
-                    return [], _error("git grep", f"command timed out after {timeout:g}s")
+                    return [], False, _error("git grep", f"command timed out after {timeout:g}s")
                 raw_line = proc.stdout.readline()
                 if not raw_line:
                     break
-                line = raw_line.decode("utf-8", "replace")
-                rows.extend(_parse_grep_output(line))
-        capped = len(rows) >= limit
-        if capped and proc.poll() is None:
+                parsed = _parse_grep_output(raw_line.decode("utf-8", "replace"))
+                for row in parsed:
+                    if row["path"] in excluded:
+                        continue
+                    if len(rows) < limit:
+                        rows.append(row)
+                    else:
+                        extra_hit = True
+                        break
+                if extra_hit:
+                    break
+        if extra_hit and proc.poll() is None:
             proc.kill()
         returncode = proc.wait()
     finally:
@@ -239,15 +254,13 @@ def git_grep_references(
             proc.kill()
             proc.wait()
 
-    if returncode == 0 or rows:
-        return rows[:limit], None
+    if returncode == 0 or rows or extra_hit:
+        return rows, extra_hit, None
     if returncode == 1:
-        return [], None
-    if returncode < 0:
-        # Hitting the row cap deliberately kills Git before it can accumulate
-        # arbitrary output; the caller records this as truncation.
-        return rows[:limit], None
-    return [], _error(f"git grep exited {returncode}")
+        return [], False, None
+    if returncode is not None and returncode < 0:
+        return rows, extra_hit, None
+    return [], False, _error(f"git grep exited {returncode}")
 
 
 def _is_test_path(path: str) -> bool:
@@ -313,7 +326,7 @@ def _is_manifest(path: str) -> bool:
     return bool(_MANIFEST_BASE_RE.match(base))
 
 
-def _discover_manifests(changed_path: str, tracked: set[str]) -> list[str]:
+def _discover_manifests(changed_path: str, tracked: set[str]) -> tuple[list[str], int]:
     parent = changed_path.rsplit("/", 1)[0] if "/" in changed_path else ""
     directories: list[str] = []
     while True:
@@ -332,7 +345,8 @@ def _discover_manifests(changed_path: str, tracked: set[str]) -> list[str]:
             if "/" not in remainder:
                 local.append(path)
         manifests.extend(sorted(local))
-    return manifests
+    omitted = max(0, len(manifests) - MAX_MANIFESTS_PER_FILE)
+    return manifests[:MAX_MANIFESTS_PER_FILE], omitted
 
 
 def _anchor_symbols(
@@ -384,6 +398,8 @@ def _empty_result() -> dict[str, Any]:
             "omitted_symbols": 0,
             "omitted_references": 0,
             "omitted_tests": 0,
+            "omitted_manifests": 0,
+            "omitted_output_bytes": 0,
         },
     }
 
@@ -453,7 +469,6 @@ def build_related_context(
         if source not in deleted_paths and source not in by_file:
             by_file[source] = {"path": source, "symbols": [], "tests": [], "manifests": []}
             file_order.append(source)
-
     references_total = 0
     errors_seen = set(result["errors"])
     refs_by_file: dict[str, list[dict[str, Any]]] = {path: [] for path in file_order}
@@ -462,47 +477,30 @@ def build_related_context(
             continue
         symbol_output = {"name": name, "references": []}
         remaining = max_references - references_total
-        if remaining <= 0:
-            result["truncated"] = True
-            result["truncation"]["truncated"] = True
-            if "reference_cap" not in result["truncation"]["reasons"]:
-                result["truncation"]["reasons"].append("reference_cap")
-            result["truncation"]["omitted_references"] += 1
         hits: list[dict[str, Any]] = []
+        additional_hit = False
         grep_error: str | None = None
         if remaining > 0 and max_references_per_symbol > 0 and not tracked_error:
-            hits, grep_error = git_grep_references(
+            hits, additional_hit, grep_error = git_grep_references(
                 name,
                 workspace,
+                excluded_paths=changed_paths,
                 timeout=timeout,
-                max_hits=max_references_per_symbol + 1,
+                max_hits=min(max_references_per_symbol, max(remaining, 1)),
             )
         if grep_error and grep_error not in errors_seen:
             result["errors"].append(grep_error)
             errors_seen.add(grep_error)
-        all_filtered = [hit for hit in hits if hit["path"] not in changed_paths]
-        filtered = all_filtered[:max_references_per_symbol]
-        if len(hits) >= max_references_per_symbol + 1:
-            # The streaming grep deliberately stops one row past the requested
-            # cap, making truncation explicit without retaining unbounded output.
+        filtered = hits[: min(max_references_per_symbol, max(remaining, 0))]
+        omitted = int(additional_hit)
+        if len(hits) > len(filtered):
+            omitted += len(hits) - len(filtered)
+        if omitted:
             result["truncated"] = True
             result["truncation"]["truncated"] = True
             if "reference_cap" not in result["truncation"]["reasons"]:
                 result["truncation"]["reasons"].append("reference_cap")
-            result["truncation"]["omitted_references"] += 1
-        if remaining < len(filtered):
-            filtered = filtered[:remaining]
-            result["truncated"] = True
-            result["truncation"]["truncated"] = True
-            if "reference_cap" not in result["truncation"]["reasons"]:
-                result["truncation"]["reasons"].append("reference_cap")
-            result["truncation"]["omitted_references"] += 1
-        elif len(all_filtered) > len(filtered):
-            result["truncated"] = True
-            result["truncation"]["truncated"] = True
-            if "reference_cap" not in result["truncation"]["reasons"]:
-                result["truncation"]["reasons"].append("reference_cap")
-            result["truncation"]["omitted_references"] += len(all_filtered) - len(filtered)
+            result["truncation"]["omitted_references"] += omitted
 
         symbol_output["references"] = filtered
         references_total += len(filtered)
@@ -519,7 +517,14 @@ def build_related_context(
             result["truncation"]["omitted_tests"] += len(tests) - max_tests_per_file
             tests = tests[:max_tests_per_file]
         by_file[path]["tests"] = tests
-        by_file[path]["manifests"] = _discover_manifests(path, tracked_set)
+        manifests, omitted_manifests = _discover_manifests(path, tracked_set)
+        by_file[path]["manifests"] = manifests
+        if omitted_manifests:
+            result["truncated"] = True
+            result["truncation"]["truncated"] = True
+            if "manifest_cap" not in result["truncation"]["reasons"]:
+                result["truncation"]["reasons"].append("manifest_cap")
+            result["truncation"]["omitted_manifests"] += omitted_manifests
 
     result["files"] = [by_file[path] for path in file_order]
     if result["errors"]:
@@ -531,8 +536,122 @@ def build_related_context(
     return result
 
 
+def _json_dump(value: dict[str, Any], indent: int) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=min(max(0, int(indent)), 8), sort_keys=False) + "\n"
+
+
+def _mark_json_cap(related: dict[str, Any]) -> None:
+    related["truncated"] = True
+    truncation = related.get("truncation")
+    if not isinstance(truncation, dict):
+        truncation = {}
+        related["truncation"] = truncation
+    truncation["truncated"] = True
+    reasons = truncation.get("reasons")
+    if not isinstance(reasons, list):
+        reasons = []
+        truncation["reasons"] = reasons
+    if "json_cap" not in reasons:
+        reasons.append("json_cap")
+    truncation.setdefault("omitted_output_bytes", 0)
+
+
+def _shrink_json_value(value: Any, limit: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[: max(0, limit - 3)] + "..."
+    if isinstance(value, list):
+        return [_shrink_json_value(item, limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _shrink_json_value(item, limit) for key, item in value.items()}
+    return value
+
+
+def _drop_list_tails(value: Any) -> bool:
+    changed = False
+    if isinstance(value, list):
+        if len(value) > 1:
+            del value[(len(value) + 1) // 2 :]
+            changed = True
+        for item in value:
+            changed = _drop_list_tails(item) or changed
+    elif isinstance(value, dict):
+        for item in value.values():
+            changed = _drop_list_tails(item) or changed
+    return changed
+
+
+def _minimal_json_artifact(related: dict[str, Any]) -> dict[str, Any]:
+    original_truncation = related.get("truncation")
+    truncation = {
+        "truncated": True,
+        "reasons": ["json_cap"],
+        "omitted_output_bytes": 0,
+    }
+    if isinstance(original_truncation, dict):
+        reasons = original_truncation.get("reasons")
+        if isinstance(reasons, list):
+            truncation["reasons"] = [str(reason)[:100] for reason in reasons[:20]]
+            if "json_cap" not in truncation["reasons"]:
+                truncation["reasons"].append("json_cap")
+        for key in ("omitted_symbols", "omitted_references", "omitted_tests", "omitted_manifests"):
+            value = original_truncation.get(key)
+            if isinstance(value, int) and value >= 0:
+                truncation[key] = value
+    version = related.get("version", ARTIFACT_VERSION)
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, (int, float, str))
+        or isinstance(version, str) and len(version) > 100
+    ):
+        version = ARTIFACT_VERSION
+    minimal = {
+        "version": version,
+        "files": [],
+        "truncated": True,
+        "errors": [],
+        "truncation": truncation,
+    }
+    _mark_json_cap(minimal)
+    return minimal
+
+
 def render_related_context_json(related: dict[str, Any], indent: int = 2) -> str:
-    return json.dumps(related, ensure_ascii=False, indent=indent, sort_keys=False) + "\n"
+    """Render valid JSON within the hard artifact byte limit by dropping data structurally."""
+    cap = MAX_JSON_BYTES
+    rendered = _json_dump(related, indent)
+    if len(rendered.encode("utf-8")) <= cap:
+        return rendered
+
+    bounded = copy.deepcopy(related)
+    _mark_json_cap(bounded)
+    stages = [_drop_list_tails]
+    for stage in stages:
+        while True:
+            rendered = _json_dump(bounded, indent)
+            if len(rendered.encode("utf-8")) <= cap:
+                bounded["truncation"]["omitted_output_bytes"] = max(
+                    0, len(_json_dump(related, indent).encode("utf-8")) - len(rendered.encode("utf-8"))
+                )
+                return _json_dump(bounded, indent)
+            if not stage(bounded):
+                break
+
+    for string_limit in (1000, 300, 100, 30):
+        bounded = _shrink_json_value(bounded, string_limit)
+        _mark_json_cap(bounded)
+        rendered = _json_dump(bounded, indent)
+        if len(rendered.encode("utf-8")) <= cap:
+            bounded["truncation"]["omitted_output_bytes"] = max(
+                0, len(_json_dump(related, indent).encode("utf-8")) - len(rendered.encode("utf-8"))
+            )
+            return _json_dump(bounded, indent)
+
+    bounded = _minimal_json_artifact(related)
+    rendered = _json_dump(bounded, 0)
+    bounded["truncation"]["omitted_output_bytes"] = max(
+        0, len(_json_dump(related, indent).encode("utf-8")) - len(rendered.encode("utf-8"))
+    )
+    return _json_dump(bounded, 0)
 
 
 def _render_lines(related: dict[str, Any]) -> list[str]:
@@ -638,10 +757,10 @@ def _resolve_output(path: str, root: str) -> Path | None:
 def _load_json(path: str) -> tuple[Any, str | None]:
     try:
         return json.loads(Path(path).read_text(encoding="utf-8", errors="replace")), None
-    except OSError as exc:
-        return None, _error("could not read JSON", exc)
-    except ValueError as exc:
-        return None, _error("invalid JSON", exc)
+    except OSError:
+        return None, "could not read JSON"
+    except ValueError:
+        return None, "invalid JSON"
 
 
 def main(argv: list[str] | None = None) -> int:
