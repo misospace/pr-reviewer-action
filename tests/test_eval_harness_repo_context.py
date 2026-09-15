@@ -14,6 +14,54 @@ from eval_harness import BenchmarkCorpus, ReviewRun, evaluate_capability
 
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "evals" / "corpus-repo-context.json"
 RECOGNIZED_TYPES = {"tool_call", "review_mentions", "max_tool_calls"}
+POSITIVE_CONTEXT_FIXTURES = (598, 600, 601)
+EXPECTED_READ_TARGETS = {
+    598: "tests/test_tool_surface.py",
+    600: "tests/test_change_anchors.py",
+    601: "scripts/run_review.sh",
+}
+HISTORICAL_CHANGED_FILES = {
+    598: frozenset(
+        {
+            "AGENTS.md",
+            "README.md",
+            "SECURITY.md",
+            "pr_reviewer/conversation.py",
+            "pr_reviewer/tool_executors.py",
+            "scripts/run_tool_harness.py",
+            "tests/test_conversation.py",
+            "tests/test_run_native_loop_wiring.py",
+            "tests/test_tool_executors.py",
+        }
+    ),
+    600: frozenset(
+        {
+            "AGENTS.md",
+            "pr_reviewer/related_context.py",
+            "scripts/build_related_context.py",
+            "tests/test_related_context.py",
+        }
+    ),
+    601: frozenset(
+        {
+            "AGENTS.md",
+            "README.md",
+            "action.yml",
+            "pr_reviewer/conversation.py",
+            "pr_reviewer/precheck.py",
+            "scripts/artifact_paths.sh",
+            "scripts/default_system_prompt.txt",
+            "scripts/prompt_fragments/related_code.txt",
+            "scripts/run_tool_harness.py",
+            "scripts/sections/config.sh",
+            "scripts/sections/corpus.sh",
+            "tests/test_precheck.py",
+            "tests/test_related_code_wiring.sh",
+            "tests/test_system_prompt_fragments.sh",
+            "tests/test_tool_planning_context.py",
+        }
+    ),
+}
 
 
 def corpus() -> BenchmarkCorpus:
@@ -41,6 +89,28 @@ def call(tool: str, path: str, status: str = "ok") -> dict:
 
 def check(run_number: int, run_value: ReviewRun) -> dict:
     return evaluate_capability(run_value, scenario(run_number)["expected_evidence"])
+
+
+def read_target(number: int) -> str:
+    checks = scenario(number)["expected_evidence"]["checks"]
+    read_checks = [
+        check
+        for check in checks
+        if check["type"] == "tool_call" and check["tool"] == "read_file"
+    ]
+    assert len(read_checks) == 1
+    path_needles = read_checks[0]["args_contains"]["path"]
+    assert isinstance(path_needles, str)
+    return path_needles
+
+
+def test_positive_fixture_targets_are_exact_and_outside_historical_changes() -> None:
+    assert set(EXPECTED_READ_TARGETS) == set(POSITIVE_CONTEXT_FIXTURES)
+    for number in POSITIVE_CONTEXT_FIXTURES:
+        target = read_target(number)
+        assert target == EXPECTED_READ_TARGETS[number]
+        assert "/" in target
+        assert target not in HISTORICAL_CHANGED_FILES[number]
 
 
 def test_repo_context_corpus_schema_and_load() -> None:
@@ -71,74 +141,76 @@ def test_repo_context_corpus_schema_and_load() -> None:
                 assert item.get("max") is not None
 
 
-def test_discovery_and_auth_read_scenario_passes() -> None:
+def test_tool_surface_discovery_and_read_scenario_passes() -> None:
     result = check(
         598,
         run(
             598,
             "Reviewed the repository discovery behavior and list_tree tool.",
             [
-                call("list_tree", "pr_reviewer"),
-                call("read_file", "pr_reviewer/tool_executors.py"),
+                call("list_tree", "tests/"),
+                call("read_file", "tests/test_tool_surface.py"),
             ],
         ),
     )
     assert result["passed"] is True
 
 
-def test_discovery_and_auth_read_scenario_fails_without_chain() -> None:
+def test_tool_surface_discovery_and_read_scenario_fails_without_chain() -> None:
     result = check(
         598,
-        run(598, "The change looks good.", [call("read_file", "pr_reviewer/tool_executors.py")]),
+        run(598, "The change looks good.", [call("read_file", "tests/test_tool_surface.py")]),
     )
     assert result["passed"] is False
     assert {item["id"] for item in result["checks"] if not item["passed"]} == {
-        "discover_tool_executors_path",
+        "discover_tool_surface_path",
         "mentions_repository_discovery_context",
     }
 
 
-def test_find_files_is_an_accepted_discovery_path() -> None:
+def test_find_files_is_an_accepted_tool_surface_discovery_path() -> None:
     result = check(
         598,
         run(
             598,
             "The repository discovery tool preserves the list_tree behavior.",
             [
-                call("find_files", "pr_reviewer/tool_executors.py"),
-                call("read_file", "pr_reviewer/tool_executors.py"),
+                call("find_files", "test_tool_surface"),
+                call("read_file", "tests/test_tool_surface.py"),
             ],
         ),
     )
     assert result["passed"] is True
 
 
-def test_unrelated_discovery_or_path_does_not_satisfy_tool_executors_scenario() -> None:
+@pytest.mark.parametrize("discovery_path", ["src/billing", "testsuite"])
+def test_unrelated_discovery_with_lucky_read_does_not_satisfy_tool_surface_scenario(
+    discovery_path: str,
+) -> None:
     result = check(
         598,
         run(
             598,
-            "The patch is acceptable.",
+            "The repository discovery behavior is covered by this test.",
             [
-                call("list_tree", "src/billing"),
-                call("read_file", "src/billing/policy.py"),
+                call("list_tree", discovery_path),
+                call("read_file", "tests/test_tool_surface.py"),
             ],
         ),
     )
     assert result["passed"] is False
     assert {item["id"] for item in result["checks"] if not item["passed"]} == {
-        "read_tool_executors_path",
-        "mentions_repository_discovery_context",
+        "discover_tool_surface_path",
     }
 
 
-def test_related_test_scenario_passes_and_fails() -> None:
+def test_change_anchors_test_scenario_passes_and_fails() -> None:
     passing = check(
         600,
         run(
             600,
             "The related test covers the scanner regression.",
-            [call("read_file", "tests/test_related_context.py")],
+            [call("read_file", "tests/test_change_anchors.py")],
         ),
     )
     failing = check(
@@ -151,12 +223,12 @@ def test_related_test_scenario_passes_and_fails() -> None:
     )
     assert passing["passed"] is True
     assert {item["id"] for item in failing["checks"] if not item["passed"]} == {
-        "read_related_test_path",
+        "read_change_anchors_test_path",
         "mentions_related_test",
     }
 
 
-def test_unrelated_tool_and_path_do_not_satisfy_related_test() -> None:
+def test_unrelated_tool_and_path_do_not_satisfy_change_anchors_test() -> None:
     result = check(
         600,
         run(
@@ -166,16 +238,16 @@ def test_unrelated_tool_and_path_do_not_satisfy_related_test() -> None:
         ),
     )
     assert result["passed"] is False
-    assert {item["id"] for item in result["checks"] if not item["passed"]} == {"read_related_test_path"}
+    assert {item["id"] for item in result["checks"] if not item["passed"]} == {"read_change_anchors_test_path"}
 
 
-def test_downstream_caller_scenario_passes_and_fails() -> None:
+def test_run_review_caller_scenario_passes_and_fails() -> None:
     passing = check(
         601,
         run(
             601,
-            "The downstream caller path in corpus.sh preserves the contract.",
-            [call("read_file", "scripts/sections/corpus.sh")],
+            "The downstream caller path in run_review.sh preserves the contract.",
+            [call("read_file", "scripts/run_review.sh")],
         ),
     )
     failing = check(
@@ -188,12 +260,12 @@ def test_downstream_caller_scenario_passes_and_fails() -> None:
     )
     assert passing["passed"] is True
     assert {item["id"] for item in failing["checks"] if not item["passed"]} == {
-        "read_downstream_caller_path",
+        "read_run_review_caller_path",
         "mentions_caller_contract_downstream",
     }
 
 
-def test_unrelated_tool_and_path_do_not_satisfy_downstream_caller() -> None:
+def test_unrelated_tool_and_path_do_not_satisfy_run_review_caller() -> None:
     result = check(
         601,
         run(
@@ -204,7 +276,7 @@ def test_unrelated_tool_and_path_do_not_satisfy_downstream_caller() -> None:
     )
     assert result["passed"] is False
     assert {item["id"] for item in result["checks"] if not item["passed"]} == {
-        "read_downstream_caller_path",
+        "read_run_review_caller_path",
         "mentions_caller_contract_downstream",
     }
 

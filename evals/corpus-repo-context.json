@@ -7,18 +7,19 @@
       "title": "feat(tools): add bounded list_tree tool for repository discovery (#566)",
       "known_findings": [],
       "expected_evidence": {
-        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires structural discovery, reading the discovered tool_executors path, and a repository-discovery review mention.",
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires path-relevant structural discovery rooted at tests or naming test_tool_surface, reading tests/test_tool_surface.py, and a repository-discovery review mention.",
         "checks": [
           {
-            "id": "discover_tool_executors_path",
+            "id": "discover_tool_surface_path",
             "type": "tool_call",
-            "tool": ["list_tree", "find_files"]
+            "tool": ["list_tree", "find_files"],
+            "args_any_contains": ["tests/", "test_tool_surface"]
           },
           {
-            "id": "read_tool_executors_path",
+            "id": "read_tool_surface_test_path",
             "type": "tool_call",
             "tool": "read_file",
-            "args_contains": { "path": ["tool_executors"] }
+            "args_contains": { "path": "tests/test_tool_surface.py" }
           },
           {
             "id": "mentions_repository_discovery_context",
@@ -35,13 +36,13 @@
       "title": "feat(context): add related code scanner",
       "known_findings": [],
       "expected_evidence": {
-        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading the related test path and mentioning the test or regression in the review.",
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading tests/test_change_anchors.py, which covers the upstream anchor behavior consumed by related_context, and mentioning the test or regression in the review.",
         "checks": [
           {
-            "id": "read_related_test_path",
+            "id": "read_change_anchors_test_path",
             "type": "tool_call",
             "tool": "read_file",
-            "args_contains": { "path": ["test_related_context"] }
+            "args_contains": { "path": "tests/test_change_anchors.py" }
           },
           {
             "id": "mentions_related_test",
@@ -58,13 +59,13 @@
       "title": "feat(context): wire related code into reviews",
       "known_findings": [],
       "expected_evidence": {
-        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading the downstream caller path and mentioning the affected caller, contract, or downstream impact in the review.",
+        "description": "Grader-only evidence for repository-context evaluation; no reviewer recipe is provided. The grader requires reading scripts/run_review.sh, the unchanged orchestrator caller that sources corpus.sh, and mentioning the affected caller, contract, or downstream impact in the review.",
         "checks": [
           {
-            "id": "read_downstream_caller_path",
+            "id": "read_run_review_caller_path",
             "type": "tool_call",
             "tool": "read_file",
-            "args_contains": { "path": ["corpus.sh"] }
+            "args_contains": { "path": "scripts/run_review.sh" }
           },
           {
             "id": "mentions_caller_contract_downstream",
