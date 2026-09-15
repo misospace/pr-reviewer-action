@@ -269,6 +269,31 @@ def test_changed_hits_do_not_consume_reference_cap(tmp_path):
     assert result["truncation"]["omitted_references"] == 1
 
 
+def test_global_reference_cap_marks_later_symbols_unsearched(tmp_path):
+    root = make_repo(
+        tmp_path,
+        {
+            "module.py": "first()\nsecond()\n",
+            "a_reference.py": "first()\n",
+            "z_reference.py": "second()\n",
+        },
+    )
+    result = build_related_context(
+        anchors(source_file("module.py", "first", "second")),
+        root,
+        max_references_per_symbol=1,
+        max_references=1,
+    )
+    symbols = result["files"][0]["symbols"]
+    assert symbols == [
+        {"name": "first", "references": [{"path": "a_reference.py", "line": 1, "snippet": "first()"}]},
+        {"name": "second", "references": []},
+    ]
+    assert result["truncated"] is True
+    assert "reference_cap" in result["truncation"]["reasons"]
+    assert result["truncation"]["omitted_references"] == 1
+
+
 def test_manifest_cap_is_explicit_and_deterministic(tmp_path):
     files = {"module.py": "target()\n"}
     for index in range(MAX_MANIFESTS_PER_FILE + 1):

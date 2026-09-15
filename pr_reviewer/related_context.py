@@ -477,6 +477,14 @@ def build_related_context(
             continue
         symbol_output = {"name": name, "references": []}
         remaining = max_references - references_total
+        if remaining <= 0:
+            # Later anchors are not searched once the global budget is spent;
+            # make that omission visible instead of reporting a false negative.
+            result["truncated"] = True
+            result["truncation"]["truncated"] = True
+            if "reference_cap" not in result["truncation"]["reasons"]:
+                result["truncation"]["reasons"].append("reference_cap")
+            result["truncation"]["omitted_references"] += 1
         hits: list[dict[str, Any]] = []
         additional_hit = False
         grep_error: str | None = None
