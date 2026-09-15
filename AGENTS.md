@@ -56,7 +56,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`scripts/run_tool_harness.py`** — Tool harness entry point (`tool_mode=native_loop`): drives the native tool-calling loop (`run_native_loop`) over the read-only tools in `tool_executors.py`; on a model that issues no tool calls it degrades to a corpus-only review. (The `plan_execute_*` planner modes were removed in 2.0/#304.)
 - **`scripts/image_digest_analysis.py`** — Analyzes image digests from the diff for provenance context
 - **`scripts/build_repo_map.py`** — Thin CLI wrapper for the repository-map builder (#569): adds the project root to `sys.path` and forwards argv to `pr_reviewer.repo_map.main`. All core logic (git ls-files seeding, classification, bounded JSON/Markdown rendering, the `RepoMapError` fail-safe) lives in the importable `pr_reviewer/repo_map.py`; the wrapper is only the import shim so shell orchestration can call `python3 scripts/build_repo_map.py --workspace "$GITHUB_WORKSPACE" --json repo-map.json --markdown repo-map.md`
-- **`related_context.py`** — Deterministic bounded related-code scanner (#572): consumes version-1 `change-anchors.json`, the checked-out Git worktree, and optional `pr-files.json`; searches only high-confidence symbols with argv-only fixed-string `git grep`, discovers likely tests and nearest-first manifests, skips deleted/changed paths, redacts bounded snippets, and degrades Git failures/timeouts into explicit artifact errors. It emits version-1 `related-code.json` plus fence-safe compact Markdown. It is intentionally not wired into the corpus, prompt, action inputs, or native loop. CLI wrapper: `python3 scripts/build_related_context.py --workspace "$GITHUB_WORKSPACE" --anchors change-anchors.json --json related-code.json --markdown related-code.md`
+- **`related_context.py`** — Deterministic bounded related-code scanner (#572): consumes version-1 `change-anchors.json`, the checked-out Git worktree, and optional `pr-files.json`; searches only high-confidence symbols with argv-only fixed-string `git grep`, discovers likely tests and nearest-first manifests, skips deleted/changed paths, redacts bounded snippets, and degrades Git failures/timeouts into explicit artifact errors. It emits version-1 `related-code.json` plus fence-safe compact Markdown. `scripts/sections/corpus.sh` generates and bounds these artifacts before corpus construction when `related_code_context` is enabled. CLI wrapper: `python3 scripts/build_related_context.py --workspace "$GITHUB_WORKSPACE" --anchors change-anchors.json --json related-code.json --markdown related-code.md`
 
 ### Tests
 
@@ -93,20 +93,21 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 1. Changed Manifest Context (Helm/K8s manifests)
 2. PR Metadata (JSON from `gh pr view`)
 3. PR Classification (deterministic classifier output)
-4. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
-5. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
-6. PR Files (truncated JSON with patches)
-7. Version Hints from Diff
-8. PR Diff (truncated)
-9. Tool Harness Findings (planned + executed tool results)
-10. Evidence Providers (user-defined command output)
-11. Image Digest Provenance
-12. Linked Sources (fetched URLs, GitHub releases/compare metadata)
-13. Repository Impact Scan (git grep hits for extracted terms)
-14. Repository History (git log context for extracted terms)
-15. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
+4. Related Code Context (bounded deterministic references, tests, and manifests)
+5. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
+6. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
+7. PR Files (truncated JSON with patches)
+8. Version Hints from Diff
+9. PR Diff (truncated)
+10. Tool Harness Findings (planned + executed tool results)
+11. Evidence Providers (user-defined command output)
+12. Image Digest Provenance
+13. Linked Sources (fetched URLs, GitHub releases/compare metadata)
+14. Repository Impact Scan (git grep hits for extracted terms)
+15. Repository History (git log context for extracted terms)
+16. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
 
-Note: `MAX_CORPUS` truncation applies to sections 1–14; the standards section is always preserved in full.
+Note: `MAX_CORPUS` truncation applies to sections 1–15; the standards section is always preserved in full.
 
 The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 

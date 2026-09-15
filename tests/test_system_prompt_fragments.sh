@@ -34,12 +34,15 @@ source "$FUNCS"
 WORK="$(mktemp -d)"; trap 'rm -f "$FUNCS"; rm -rf "$WORK"' EXIT
 BASE="$(<"$SCRIPT_DIR/default_system_prompt.txt")"
 
-# Run the assembler for a given pr_kind, echo the resulting prompt.
+# Run the assembler for a given pr_kind, echo the resulting prompt. The second
+# arg sets RELATED_CODE_CONTEXT (default "true", matching config.sh's default)
+# so the related-code guidance gate is exercised per the call.
 assemble() {
   local kind="$1"
+  local rc_ctx="${2:-true}"
   ( cd "$WORK"
     printf '{"pr_kind":"%s"}' "$kind" > classification.json
-    SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+    SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 RELATED_CODE_CONTEXT="$rc_ctx"
     apply_system_prompt_fragments
     printf '%s' "$SYSTEM_PROMPT" )
 }
@@ -47,6 +50,7 @@ assemble() {
 echo "=== k8s_manifest (the Talos founding case) keeps host-platform guidance ==="
 OUT="$(assemble k8s_manifest)"
 check_contains "k8s_manifest includes HOST PLATFORM block" "$OUT" "HOST PLATFORM"
+check_contains "default includes related-code verification guidance" "$OUT" "Treat rows in Related Code Context as leads"
 check_not_contains "no unsubstituted placeholder remains" "$OUT" "{{"
 
 echo "=== dependency_upgrade keeps host-platform + release-notes guidance ==="
@@ -127,12 +131,37 @@ check_contains "classification-less run still applies the dial" "$OUT" "under 30
 check_not_contains "classification-less run leaks no verbosity placeholder" \
   "$OUT" "VERBOSITY_GUIDANCE"
 
+echo "=== related-code guidance is gated on RELATED_CODE_CONTEXT ==="
+# The guidance must only be substituted when the related-code context section
+# is actually gathered (RELATED_CODE_CONTEXT=true); otherwise it is dropped so
+# the model is never pointed at a corpus section that does not exist.
+OUT_ON="$(assemble k8s_manifest true)"
+check_contains "on: related-code guidance present" "$OUT_ON" "Treat rows in Related Code Context as leads"
+check_not_contains "on: no placeholder remains" "$OUT_ON" "{{"
+
+OUT_OFF="$(assemble k8s_manifest false)"
+check_not_contains "off: related-code guidance dropped" "$OUT_OFF" "Treat rows in Related Code Context as leads"
+check_not_contains "off: no placeholder remains" "$OUT_OFF" "{{"
+
+# Unset (no dial at all) is not "true", so it must drop the guidance too — the
+# same "removed otherwise" contract as an explicit false.
+OUT_UNSET="$( cd "$WORK"
+  printf '{"pr_kind":"k8s_manifest"}' > classification.json
+  unset RELATED_CODE_CONTEXT
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_not_contains "unset: related-code guidance dropped" "$OUT_UNSET" "Treat rows in Related Code Context as leads"
+check_not_contains "unset: no placeholder remains" "$OUT_UNSET" "{{"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
 RN="$(<"$SCRIPT_DIR/prompt_fragments/release_notes.txt") "
 CN="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
-RECON="${BASE/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
+RC="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
+RECON="${BASE/\{\{RELATED_CODE_GUIDANCE\}\}/$RC}"
+RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
 RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"

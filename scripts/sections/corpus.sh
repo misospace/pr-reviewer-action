@@ -9,6 +9,74 @@ section_timer_start "advisory-phases"
 harvest_advisory_phases
 section_timer_end
 
+build_related_code_context() {
+  local diff_path="${1:-pr.diff}"
+  local files_path="${2-pr-files.json}"
+  local empty_artifact
+  local artifacts="change-anchors.json related-code.json related-code.md related-code.truncated.md"
+  for empty_artifact in $artifacts; do
+    : > "$empty_artifact"
+  done
+
+  if [[ "$RELATED_CODE_CONTEXT" != "true" ]]; then
+    return 0
+  fi
+
+  local anchor_args=(--diff "$diff_path" --output change-anchors.json)
+  if [[ -n "$files_path" ]]; then
+    anchor_args+=(--files "$files_path")
+  fi
+  if ! python3 -m pr_reviewer.change_anchors "${anchor_args[@]}"; then
+    log "WARNING: related-code anchor generation failed; continuing without related-code context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+    return 0
+  fi
+
+  local related_args=(--anchors change-anchors.json --workspace "${GITHUB_WORKSPACE:-$(pwd)}" --json related-code.json --markdown related-code.md)
+  if [[ -n "$files_path" ]]; then
+    related_args+=(--files "$files_path")
+  fi
+  if ! python3 -m pr_reviewer.related_context "${related_args[@]}"; then
+    log "WARNING: related-code generation failed; continuing without related-code context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+    return 0
+  fi
+  if ! jq -e '.errors | length == 0' related-code.json >/dev/null 2>&1; then
+    log "WARNING: related-code scan reported errors; continuing without related-code context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+    return 0
+  fi
+
+  if ! RELATED_CODE_MAX_BYTES="$RELATED_CODE_MAX_BYTES" python3 - <<'PY'
+import os
+from pathlib import Path
+
+source = Path("related-code.md").read_bytes()
+limit = int(os.environ["RELATED_CODE_MAX_BYTES"])
+if len(source) <= limit:
+    Path("related-code.truncated.md").write_bytes(source)
+else:
+    marker = b"\n[related-code context truncated]\n"
+    clipped = source[:limit - len(marker)]
+    newline = clipped.rfind(b"\n")
+    if newline >= 0:
+        clipped = clipped[:newline]
+    Path("related-code.truncated.md").write_bytes(clipped + marker)
+PY
+  then
+    log "WARNING: related-code truncation failed; continuing without related-code context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+  fi
+}
+
 log "Building review corpus..."
 : > standards-context.md
 # standards-context.md is never empty — it carries an explicit "unavailable"
@@ -97,6 +165,12 @@ build_review_corpus() {
       echo "(Classification data unavailable for this review)"
     fi
     echo
+
+    if [ -s related-code.truncated.md ]; then
+      echo "# Related Code Context"
+      cat related-code.truncated.md
+      echo
+    fi
 
     if [[ "$corpus_type" == "incremental" ]]; then
       # Linear is opt-in. Preserve its issue/spec context across incremental
@@ -238,8 +312,12 @@ log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
 
 if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
   fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
+  log "Building related-code context from incremental diff..."
+  build_related_code_context incremental.diff ""
   build_review_corpus "incremental"
 else
+  log "Building related-code context from full diff..."
+  build_related_code_context pr.diff pr-files.json
   build_review_corpus "full"
 fi
 cp review-corpus.md review-corpus.truncated.md

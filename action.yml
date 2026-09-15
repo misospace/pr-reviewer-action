@@ -236,6 +236,14 @@ inputs:
     description: Comma-separated list of hosts allowed for linked source fetching
     required: false
     default: github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io
+  related_code_context:
+    description: Include deterministic related-code context discovered from changed-file anchors
+    required: false
+    default: "true"
+  related_code_max_bytes:
+    description: Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)
+    required: false
+    default: "16000"
   linear_api_key:
     description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
     required: false
@@ -763,6 +771,8 @@ runs:
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
         MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
+        RELATED_CODE_CONTEXT: ${{ inputs.related_code_context }}
+        RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
@@ -876,6 +886,8 @@ runs:
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
+        RELATED_CODE_CONTEXT: ${{ inputs.related_code_context }}
+        RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
         LINEAR_API_KEY: ${{ inputs.linear_api_key }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}

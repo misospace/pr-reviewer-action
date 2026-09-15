@@ -19,6 +19,7 @@ from pr_reviewer.precheck import (
     _detect_incremental_scope,
     build_broad_fingerprint,
     build_marker_fingerprint,
+    _collect_config_lines,
     compute_config_hash,
     compute_diff_fingerprint,
     evaluate_precheck,
@@ -88,6 +89,26 @@ class TestComputeConfigHash:
 
     def test_different_configs_different_hashes(self):
         assert compute_config_hash(["MODEL=gpt-4"]) != compute_config_hash(["MODEL=claude-3"])
+
+    def test_related_code_settings_change_collected_config(self, monkeypatch):
+        # _collect_config_lines takes no args and reads os.environ, so the
+        # related-code settings are driven through the monkeypatched env, like
+        # the other precheck tests. Each related-code setting must move the
+        # collected config (and therefore the config hash it feeds).
+        def _collect(context, max_bytes):
+            monkeypatch.delenv("RELATED_CODE_CONTEXT", raising=False)
+            monkeypatch.delenv("RELATED_CODE_MAX_BYTES", raising=False)
+            monkeypatch.setenv("RELATED_CODE_CONTEXT", context)
+            monkeypatch.setenv("RELATED_CODE_MAX_BYTES", max_bytes)
+            return _collect_config_lines()
+
+        enabled = _collect("true", "16000")
+        disabled = _collect("false", "16000")
+        resized = _collect("true", "32000")
+        # The context toggle, at a fixed byte budget, moves the hash ...
+        assert compute_config_hash(enabled) != compute_config_hash(disabled)
+        # ... as does the byte budget, at a fixed context state.
+        assert compute_config_hash(enabled) != compute_config_hash(resized)
 
     def test_null_bytes_are_significant(self):
         assert compute_config_hash(["A=x\x00y"]) != compute_config_hash(["A=xy"])

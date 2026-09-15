@@ -292,11 +292,42 @@ def build_planning_context(max_bytes, corpus_path=None):
     regions = {}
     if corpus_text:
         lines = corpus_text.split("\n")
-        starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+        corpus_titles = {
+            "Changed Manifest Context",
+            "PR Metadata",
+            "PR Classification",
+            "Related Code Context",
+            "Incremental Review Delta",
+            "Linked Issue Context",
+            "PR Files (truncated)",
+            "Version Hints from Diff",
+            "PR Diff (truncated)",
+            "Tool Harness Findings",
+            "Evidence Providers",
+            "CI Check Results",
+            "Image Digest Provenance",
+            "Linked Sources",
+            "Repository Impact Scan",
+            "Repository History",
+        }
+        starts = []
+        in_related_context = False
+        for index, line in enumerate(lines):
+            if not line.startswith("# "):
+                continue
+            title = line[2:].strip()
+            if title == "Related Code Context":
+                in_related_context = True
+            elif in_related_context and title.startswith("Related Code ("):
+                continue
+            else:
+                in_related_context = False
+            if title in corpus_titles:
+                starts.append(index)
         bounds = starts + [len(lines)]
         for i in range(len(starts)):
             title = lines[starts[i]][2:].strip()
-            if title in ("PR Classification", "PR Files (truncated)", "Version Hints from Diff"):
+            if title in ("PR Classification", "Related Code Context", "PR Files (truncated)", "Version Hints from Diff"):
                 regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
         if lines[0].startswith("# Repository Standards and Conventions"):
             end = corpus_text.find("\n# Changed Manifest Context")
@@ -306,6 +337,7 @@ def build_planning_context(max_bytes, corpus_path=None):
     # (corpus_region_key, excerpt_title, excerpt_source_path, excerpt_cap, fence)
     plan = [
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
+        ("Related Code Context", "Related Code Context", "related-code.truncated.md", 16000, None),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
         ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
         ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),

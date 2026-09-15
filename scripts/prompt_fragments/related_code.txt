@@ -1,0 +1,1 @@
+Treat rows in Related Code Context as leads, not proof. Verify relevant files with native read/search tools when available, and do not scan mechanically.

@@ -118,7 +118,9 @@ class TestBuildPlanningContext:
         assert "published support matrix" in text
 
 
-def _write_corpus(tmp_path, files_body='[{"filename":"a.py"}]', standards_tail=""):
+def _write_corpus(
+    tmp_path, files_body='[{"filename":"a.py"}]', standards_tail="", related_body=""
+):
     """A corpus shaped like build_review_corpus's output: standards prefix
     (self-titled, possibly with internal level-1 headers), then the body whose
     first line is '# Changed Manifest Context'."""
@@ -131,7 +133,9 @@ def _write_corpus(tmp_path, files_body='[{"filename":"a.py"}]', standards_tail="
         "# PR Metadata\n```json\n{\"number\":7}\n```\n\n"
         "# PR Classification\n"
         '{"pr_kind":"dependency-update","risk_flags":[],"must_check":[]}\n\n'
-        "# PR Files (truncated)\n```json\n" + files_body + "\n```\n\n"
+        + related_body
+        + "# PR Files (truncated)\n```json\n"
+        + files_body + "\n```\n\n"
         "# Version Hints from Diff\n```text\n+  tag: v1.2.3\n```\n\n"
         "# PR Diff (truncated)\n```diff\n+full diff body\n```\n"
     )
@@ -163,6 +167,34 @@ class TestCorpusSectionEmbedding:
         # Sections the planner does not embed are kept in full.
         assert "+full diff body" in deduped
         assert "(manifest body)" in deduped
+
+    def test_related_code_embedded_verbatim_and_deduped(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        related = (
+            "# Related Code Context\n"
+            "# Related Code (v1)\n"
+            "- `src/app.py` references `tests/test_app.py`\n\n"
+        )
+        corpus_path, corpus = _write_corpus(tmp_path, related_body=related)
+        (tmp_path / "related-code.truncated.md").write_text(
+            "# Related Code (v1)\n- fallback source\n"
+        )
+        text, _ = build_planning_context(50000, corpus_path)
+        assert related.rstrip() in text
+        assert text.count("# Related Code Context") == 1
+        deduped = dedupe_verdict_corpus(corpus, text)
+        assert "src/app.py" not in deduped
+        assert "fallback source" not in deduped
+
+    def test_related_code_falls_back_to_bounded_source_with_title(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "related-code.truncated.md").write_text(
+            "# Related Code (v1)\n- source fallback\n"
+        )
+        text, truncated = build_planning_context(50000)
+        assert truncated is False
+        assert text.startswith("# Related Code Context\n")
+        assert "source fallback" in text
 
     def test_standards_prefix_includes_internal_headers(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

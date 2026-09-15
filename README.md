@@ -305,6 +305,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
 | `image_digest_budget_sec` | Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. | No | `60` |
 | `allowed_source_hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
+| `related_code_context` | Include deterministic related-code references, test candidates, and nearest manifests derived from changed-file anchors | No | `true` |
+| `related_code_max_bytes` | Maximum bytes of related-code context included in the review corpus; values below `64` are clamped to `64` so the truncation marker remains readable | No | `16000` |
 
 </details>
 

@@ -478,7 +478,19 @@ def dedupe_verdict_corpus(corpus: str, planning_context: str) -> str:
     lines = corpus.split("\n")
     # Level-1 headers only: a line beginning "# " (hash + space). "## "/"### "
     # start with "#" then "#", so startswith("# ") excludes them.
-    starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+    starts = []
+    in_related_context = False
+    for index, line in enumerate(lines):
+        if not line.startswith("# "):
+            continue
+        title = line[2:].strip()
+        if title == "Related Code Context":
+            in_related_context = True
+        elif in_related_context and title.startswith("Related Code ("):
+            continue
+        else:
+            in_related_context = False
+        starts.append(index)
     if not starts:
         return corpus
     out: list[str] = []

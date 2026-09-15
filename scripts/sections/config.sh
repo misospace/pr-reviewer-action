@@ -61,6 +61,9 @@ EVIDENCE_PROVIDER_TIMEOUT_SEC="${EVIDENCE_PROVIDER_TIMEOUT_SEC:-30}"
 EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES="${EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES:-20000}"
 EVIDENCE_BLOCKER_ENFORCEMENT="${EVIDENCE_BLOCKER_ENFORCEMENT:-false}"
 EVIDENCE_ENABLE_FOR_FORKS="${EVIDENCE_ENABLE_FOR_FORKS:-false}"
+RELATED_CODE_CONTEXT="${RELATED_CODE_CONTEXT:-true}"
+RELATED_CODE_MAX_BYTES="${RELATED_CODE_MAX_BYTES:-16000}"
+RELATED_CODE_MIN_BYTES=64
 TOOL_MODE="${TOOL_MODE:-off}"
 TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-4}"
 TOOL_MAX_RESPONSE_BYTES="${TOOL_MAX_RESPONSE_BYTES:-12000}"
@@ -282,6 +285,22 @@ case "$(printf '%s' "$VALIDATE_REQUIRED_CHECKS" | tr '[:upper:]' '[:lower:]')" i
     ;;
 esac
 
+RELATED_CODE_CONTEXT="$(printf '%s' "$RELATED_CODE_CONTEXT" | tr '[:upper:]' '[:lower:]')"
+case "$RELATED_CODE_CONTEXT" in
+  true|false) ;;
+  *)
+    error "Invalid RELATED_CODE_CONTEXT '$RELATED_CODE_CONTEXT'; defaulting to true"
+    RELATED_CODE_CONTEXT=true
+    ;;
+esac
+if [[ ! "$RELATED_CODE_MAX_BYTES" =~ ^[0-9]+$ ]]; then
+  error "Invalid RELATED_CODE_MAX_BYTES '$RELATED_CODE_MAX_BYTES'; defaulting to 16000"
+  RELATED_CODE_MAX_BYTES=16000
+elif [[ "$RELATED_CODE_MAX_BYTES" -lt "$RELATED_CODE_MIN_BYTES" ]]; then
+  error "RELATED_CODE_MAX_BYTES '$RELATED_CODE_MAX_BYTES' is below the minimum of $RELATED_CODE_MIN_BYTES; clamping"
+  RELATED_CODE_MAX_BYTES="$RELATED_CODE_MIN_BYTES"
+fi
+
 case "$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" in
   warn|fail|metadata_only) REQUIRED_CHECK_VALIDATION_MODE="$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" ;;
   *)
@@ -408,6 +427,19 @@ apply_system_prompt_fragments() {
   # substituted outside the classification gate — a missing classification.json
   # must not leak "{{VERBOSITY_GUIDANCE}}" into the prompt.
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" ]]; then
+    # The related-code guidance is substituted only when the related-code
+    # context section is actually gathered for this run (RELATED_CODE_CONTEXT
+    # = true); otherwise the placeholder is dropped, so the model is never
+    # directed at a "Related Code Context" section the corpus does not contain.
+    # Lowercased here, like the verbosity dial below, so a caller reaching this
+    # function by another route (a test harness, a section reorder) assembles
+    # the right prompt regardless of the raw dial's case.
+    local rc="" rc_ctx
+    rc_ctx="$(printf '%s' "${RELATED_CODE_CONTEXT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$rc_ctx" == "true" ]]; then
+      rc="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELATED_CODE_GUIDANCE\}\}/$rc}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future
