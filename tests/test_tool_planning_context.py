@@ -20,6 +20,35 @@ from pr_reviewer.conversation import (  # noqa: E402
     VERDICT_DEDUP_NOTICE,
     dedupe_verdict_corpus,
 )
+from pr_reviewer.repo_map import (  # noqa: E402
+    FENCE,
+    build_repo_map,
+    render_repo_map_json,
+    render_repo_map_markdown,
+    reframe_for_corpus,
+    trust_framing_overhead,
+)
+
+
+# A small but non-trivial map shared by the fixture and the cap tests:
+# big enough that its four-backtick tree fence is exercised when a cap lands
+# inside it, and containing a recognizable "src/" path.
+def _fixture_map(files=None):
+    if files is None:
+        files = [f"pkg/f{i:02d}.py" for i in range(30)] + ["src/app.py", "AGENTS.md"]
+    return build_repo_map(files)
+
+
+def _write_repo_map(tmp_path, repo=None):
+    """Write a real repo-map.json plus a consistent repo-map.md for `repo`.
+
+    The harness treats the JSON artifact as the source of truth and
+    re-renders the Markdown from it, so the two must agree exactly."""
+    if repo is None:
+        repo = _fixture_map()
+    (tmp_path / "repo-map.json").write_text(render_repo_map_json(repo))
+    (tmp_path / "repo-map.md").write_text(render_repo_map_markdown(repo))
+    return repo
 
 
 def _write_pieces(tmp_path, diff_lines=20):
@@ -35,9 +64,7 @@ def _write_pieces(tmp_path, diff_lines=20):
     (tmp_path / "standards-context.capped.md").write_text(
         "# Repository Standards and Conventions\nAlways verify upstream release notes.\n"
     )
-    (tmp_path / "repo-map.md").write_text(
-        "# Repository Map (v1)\n\n" + "x" * 300 + "\n## Tree\n\nsrc/\n"
-    )
+    _write_repo_map(tmp_path)
 
     diff = "\n".join(f"+line {i}" for i in range(diff_lines))
     (tmp_path / "pr.diff.truncated").write_text(f"diff --git a/x b/x\n{diff}\n")
@@ -102,17 +129,66 @@ class TestBuildPlanningContext:
         map_start = text.index("# Repository Map")
         map_end = text.index("# Changed Files")
         map_section = text[map_start:map_end].rstrip()
+        # The final framed section fits the configured hard cap.
         assert len(map_section.encode("utf-8")) <= 180
-        assert "[truncated]" in map_section
+        # The renderer's own cut note, never a generic slice marker; a cut
+        # this shallow lands before the tree fence, so no fence is present.
+        assert "byte cap" in map_section
+        assert "[truncated]" not in map_section
+        assert FENCE not in map_section
         assert truncated is True
 
     def test_repo_map_tiny_byte_budget_never_overflows(self, tmp_path, monkeypatch):
+        """A cap below the 90-byte framed-minimum can't hold even the
+        minimal marker, so the map is omitted entirely — never emitted as a
+        partial / incomplete trust boundary."""
         monkeypatch.chdir(tmp_path)
         _write_pieces(tmp_path)
         monkeypatch.setenv("REPO_MAP_MAX_BYTES", "80")
         text, truncated = build_planning_context(50000)
         assert "# Repository Map" not in text
         assert truncated is True
+
+    def test_framing_overhead_forces_tree_cut_keeps_fence_closed(self, tmp_path, monkeypatch):
+        """#599 blocker repro (planner level): the final framed section is
+        ``trust_framing_overhead()`` bytes larger than the raw render. The
+        pre-fix flow capped the render at the final cap and then framed it,
+        overshooting the cap — and the only way to fit it back was a generic
+        byte slice that could land inside the four-backtick tree fence and
+        leave it open in the planner prompt. The fixed flow hands the
+        renderer a budget net of the overhead, so the framed section fits
+        the hard cap with the fence closed even when the overhead is what
+        pushes the cut into the tree."""
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        overhead = trust_framing_overhead()
+        full = render_repo_map_markdown(_fixture_map())
+        # A cap that lands the raw-render cut inside the tree fence.
+        fence_pos = full.index(FENCE + "text")
+        cap = fence_pos + len(FENCE) + 5 + 200 + overhead
+        monkeypatch.setenv("REPO_MAP_MAX_BYTES", str(cap))
+        text, truncated = build_planning_context(200000)
+        map_start = text.index("# Repository Map")
+        map_end = text.index("# Changed Files")
+        map_section = text[map_start:map_end].rstrip()
+
+        # The final framed section fits the hard cap the user configured.
+        assert len(map_section.encode("utf-8")) <= cap
+        # The cut landed inside the tree: the fence opens AND closes, and
+        # the renderer's own note names the cut — no generic slice marker.
+        assert FENCE + "text" in map_section
+        assert [ln for ln in map_section.splitlines() if ln == FENCE]
+        assert "Tree cut at the" in map_section
+        assert "[truncated]" not in map_section
+        assert truncated is True
+
+        # The pre-fix flow, for the record: capping the render at the final
+        # cap and framing afterwards overshoots the cap (with uniform tree
+        # lines the renderer's slack is smaller than the overhead).
+        naive = reframe_for_corpus(
+            render_repo_map_markdown(_fixture_map(), max_markdown_bytes=cap)
+        )
+        assert len(naive.encode("utf-8")) > cap
 
     def test_empty_when_nothing_available(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -148,11 +224,14 @@ class TestBuildPlanningContext:
         assert "published support matrix" in text
 
     def test_large_map_does_not_displace_files_or_standards(self, tmp_path, monkeypatch):
+        """A map large enough to dominate its own budget must still leave
+        room for the files and standards sections."""
         monkeypatch.chdir(tmp_path)
         _write_pieces(tmp_path)
-        (tmp_path / "repo-map.md").write_text(
-            "# Repository Map (v1)\n" + "map entry\n" * 1200,
-            encoding="utf-8",
+        # A genuinely large map (many entries) as a real JSON + MD pair.
+        _write_repo_map(
+            tmp_path,
+            _fixture_map([f"pkg/f{i:04d}.py" for i in range(500)]),
         )
         monkeypatch.setenv("REPO_MAP_MAX_BYTES", "12000")
         text, _ = build_planning_context(15000)
@@ -240,14 +319,16 @@ class TestCorpusSectionEmbedding:
         assert '{"f":"x"}' in deduped
 
     def test_corpus_map_falls_back_to_bounded_artifact(self, tmp_path, monkeypatch):
+        """When the corpus copy of the map region exceeds the configured cap,
+        the planner falls back to the bounded repository-map artifact —
+        re-rendered from its JSON at the framing-aware budget — rather than
+        embedding the oversized corpus text or a stale, unsliced MD copy."""
         monkeypatch.chdir(tmp_path)
         corpus_path, _ = _write_corpus(tmp_path)
+        _write_pieces(tmp_path)
+        # Inflate the corpus map region so it can't be embedded verbatim.
         (tmp_path / "review-corpus.truncated.md").write_text(
             corpus_path.read_text().replace("src/", "corpus-map-entry\n" * 500),
-            encoding="utf-8",
-        )
-        (tmp_path / "repo-map.md").write_text(
-            "# Repository Map (v1)\nartifact-map-entry\n" * 200,
             encoding="utf-8",
         )
         monkeypatch.setenv("REPO_MAP_MAX_BYTES", "180")
@@ -255,9 +336,12 @@ class TestCorpusSectionEmbedding:
         map_start = text.index("# Repository Map")
         map_end = text.index("# PR Files (truncated)")
         map_section = text[map_start:map_end].rstrip()
+        # Bounded by the configured cap; the renderer's own cut note, not a
+        # generic slice marker, and none of the inflated corpus text.
         assert len(map_section.encode("utf-8")) <= 180
         assert "corpus-map-entry" not in map_section
-        assert "artifact-map-entry" in map_section
+        assert "byte cap" in map_section
+        assert "[truncated]" not in map_section
         assert truncated is True
 
     def test_corpus_map_under_cap_embeds_verbatim_and_dedupes(self, tmp_path, monkeypatch):

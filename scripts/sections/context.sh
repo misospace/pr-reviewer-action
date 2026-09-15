@@ -54,13 +54,34 @@ jq -r '.body // ""' pr.json > pr-body.txt
 
 : > repo-map.json repo-map.md
 if [[ "$REPO_MAP_CONTEXT" == "true" ]]; then
-  if ! python3 "$SCRIPT_DIR/build_repo_map.py" \
-      --workspace "${GITHUB_WORKSPACE:-$PWD}" \
-      --json repo-map.json \
-      --markdown repo-map.md \
-      --max-markdown-bytes "$REPO_MAP_MAX_BYTES"; then
-    error "Repository map generation failed; continuing without repository map context"
-    : > repo-map.json repo-map.md
+  # The corpus re-frames the rendered map: the renderer's first line is
+  # replaced by a fixed trust-framing prefix, making the final section a
+  # fixed number of bytes LARGER than the raw render. Hand the renderer a
+  # body budget net of that overhead (computed from the shared constant,
+  # before rendering) so its hard cap holds on the final framed section —
+  # corpus.sh then only reframes and never slices, because a slice can
+  # land inside the four-backtick tree fence and leave it open (#599). A
+  # cap that cannot contain the framing plus the renderer's smallest safe
+  # output skips generation entirely.
+  REPO_MAP_BODY_BUDGET="$(REPO_MAP_MAX_BYTES="$REPO_MAP_MAX_BYTES" \
+      PYTHONPATH="${SCRIPT_DIR}/.." python3 -c '
+import os
+from pr_reviewer.repo_map import SCHEMA_VERSION, trust_framing_overhead
+print(int(os.environ["REPO_MAP_MAX_BYTES"]) - trust_framing_overhead(SCHEMA_VERSION))
+' 2>/dev/null || true)"
+  # A one-byte renderer marker has no map header, so re-framing it adds the
+  # full prefix rather than only the normal header-replacement overhead.
+  if [[ "$REPO_MAP_BODY_BUDGET" =~ ^[0-9]+$ && "$REPO_MAP_BODY_BUDGET" -ge 23 ]]; then
+    if ! python3 "$SCRIPT_DIR/build_repo_map.py" \
+        --workspace "${GITHUB_WORKSPACE:-$PWD}" \
+        --json repo-map.json \
+        --markdown repo-map.md \
+        --max-markdown-bytes "$REPO_MAP_BODY_BUDGET"; then
+      error "Repository map generation failed; continuing without repository map context"
+      : > repo-map.json repo-map.md
+    fi
+  else
+    log "Skipping repository map: REPO_MAP_MAX_BYTES=$REPO_MAP_MAX_BYTES cannot contain the trust framing plus the smallest safe body"
   fi
 fi
 section_timer_end
