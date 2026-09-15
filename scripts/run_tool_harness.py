@@ -51,6 +51,11 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     web_fetch,
     web_search,
 )
+from pr_reviewer.repo_map import (  # noqa: E402
+    reframe_for_corpus,
+    render_repo_map_markdown,
+    trust_framing_overhead,
+)
 
 # Conditional-fragment placeholders in default_system_prompt.txt, e.g.
 # {{VERSION_BUMP_GUIDANCE}} (substituted by apply_system_prompt_fragments).
@@ -296,14 +301,72 @@ def build_planning_context(max_bytes, corpus_path=None):
         bounds = starts + [len(lines)]
         for i in range(len(starts)):
             title = lines[starts[i]][2:].strip()
-            if title in ("PR Classification", "PR Files (truncated)", "Version Hints from Diff"):
+            if title in ("PR Classification", "Repository Map", "PR Files (truncated)", "Version Hints from Diff"):
                 regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
         if lines[0].startswith("# Repository Standards and Conventions"):
             end = corpus_text.find("\n# Changed Manifest Context")
             if end > 0:
                 regions["standards"] = corpus_text[:end].rstrip()
 
-    # (corpus_region_key, excerpt_title, excerpt_source_path, excerpt_cap, fence)
+    repo_map_max_bytes = env_int_bounded("REPO_MAP_MAX_BYTES", 12000, 1, 200000)
+
+
+    def _repo_map_excerpt(path, cap):
+        """Framed repository-map excerpt that never slices the rendered doc.
+
+        The artifact is already byte-capped and fence-safe by its renderer,
+        but the old behavior applied a second generic byte slice here,
+        which could land inside the four-backtick tree fence and leave it
+        open in the planner prompt (#599). Instead: re-render from the JSON
+        artifact at a budget net of the trust-framing overhead so the
+        *framed* section fits the cap — the renderer closes the fence
+        before any truncation note. Without a usable JSON artifact the
+        rendered file is used whole only when its framed form already
+        fits; otherwise the map is omitted, never emitted partially.
+        """
+        nonlocal any_clipped
+        body = _read_stripped(path)
+        if body is None:
+            return None
+        body_budget = cap - trust_framing_overhead()
+        if body_budget < 1:
+            # A user may choose a cap smaller than the fixed trust framing
+            # plus one body byte. Omit the map rather than emitting an
+            # incomplete trust boundary.
+            any_clipped = True
+            return None
+
+        rendered = None
+        json_path = Path(path).with_suffix(".json")
+        if json_path.exists():
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
+                rendered = render_repo_map_markdown(data, max_markdown_bytes=body_budget)
+            except Exception:
+                rendered = None
+
+        if rendered is not None and rendered == body + "\n":
+            # The artifact is a full render that already fits the budget.
+            return reframe_for_corpus(body)
+        if rendered is None:
+            # No JSON artifact: use the file whole only if its framed form
+            # already fits the cap.
+            final = reframe_for_corpus(body)
+            if len(final.encode("utf-8")) > cap:
+                any_clipped = True
+                return None
+            return final
+        # Re-rendered at the framing-aware budget (cut deeper than, or at
+        # a different budget than, the artifact): the renderer closed the
+        # fence before its truncation note, so the framed form is safe.
+        final = reframe_for_corpus(rendered)
+        if len(final.encode("utf-8")) > cap:
+            any_clipped = True
+            return None
+        any_clipped = True
+        return final
+
+
     plan = [
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
@@ -314,20 +377,36 @@ def build_planning_context(max_bytes, corpus_path=None):
     for region_key, title, excerpt_path, cap, fence in plan:
         avail = max_bytes - _used() - _PLANNING_RESERVE
         if avail < 400:
-            # Not enough room for a useful excerpt; later sections can't fit
-            # either (caps only shrink the same shared budget).
-            break
+            continue
         section = None
         region = regions.get(region_key)
-        if region is not None and len(region.encode("utf-8")) + 2 <= avail:
+        region_cap = min(cap, avail)
+        if region is not None and len(region.encode("utf-8")) + 2 <= region_cap:
             section = region
         if section is None:
             if region_key == "standards":
-                section = _standards_excerpt(title, excerpt_path, min(cap, avail))
+                section = _standards_excerpt(title, excerpt_path, region_cap)
             else:
-                section = _excerpt(title, excerpt_path, min(cap, avail), fence)
+                section = _excerpt(title, excerpt_path, region_cap, fence)
         if section is not None:
             sections.append(section)
+
+    map_section = None
+    map_avail = max_bytes - _used() - _PLANNING_RESERVE
+    if map_avail >= 400:
+        map_region = regions.get("Repository Map")
+        map_cap = min(repo_map_max_bytes, map_avail)
+        if map_region is not None and len(map_region.encode("utf-8")) + 2 <= map_cap:
+            map_section = map_region
+        if map_section is None:
+            map_section = _repo_map_excerpt("repo-map.md", map_cap)
+        if map_section is not None:
+            classification_index = next(
+                (index for index, section in enumerate(sections)
+                 if section.startswith("# PR Classification")),
+                -1,
+            )
+            sections.insert(classification_index + 1 if classification_index >= 0 else 0, map_section)
 
     if sections:
         # Whatever budget remains goes to the head of the diff. The diff head
