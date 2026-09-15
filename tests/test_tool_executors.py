@@ -209,6 +209,22 @@ def test_execute_tool_request_gh_api_missing_endpoint() -> None:
     assert "endpoint" in res.get("result", {}).get("error", "").lower()
 
 
+def test_execute_tool_request_repo_contents_dispatches():
+    fake_res = {"repo": "example/repo", "path": "src", "type": "directory", "entries": [], "truncated": False}
+    with patch.object(tool_executors, "repo_contents", return_value=fake_res) as rc:
+        res = _call("repo_contents", {"repo": "example/repo", "path": "src", "ref": "v1", "max_entries": 12})
+    assert rc.called
+    assert rc.call_args.args[:5] == ("example/repo", "src", "v1", ["*"], "example/repo")
+    assert rc.call_args.args[5] == 12
+    assert res == {"tool": "repo_contents", "status": "ok", "result": fake_res}
+
+
+def test_execute_tool_request_repo_contents_requires_repo():
+    res = _call("repo_contents", {})
+    assert res.get("status") == "error"
+    assert "repo" in res.get("result", {}).get("error", "").lower()
+
+
 def test_execute_tool_request_web_fetch_happy_path() -> None:
     """web_fetch tool should accept a URL and return content (mocked)."""
     fake_fetch = {"content": "<html>hi</html>"}

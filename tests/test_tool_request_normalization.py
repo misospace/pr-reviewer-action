@@ -92,6 +92,14 @@ def test_explicit_endpoint_not_overwritten_by_path():
     assert args.get("endpoint") == "repos/a/b/pulls/1"
 
 
+def test_repo_contents_top_level_arguments_are_hoisted():
+    tool, args = normalize_tool_request(
+        {"tool": "repo_contents", "repo": "acme/app", "path": "src", "ref": "v1", "max_entries": 9}
+    )
+    assert tool == "repo_contents"
+    assert args == {"repo": "acme/app", "path": "src", "ref": "v1", "max_entries": 9}
+
+
 if __name__ == "__main__":
     import pytest
 

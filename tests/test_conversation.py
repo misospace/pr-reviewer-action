@@ -31,6 +31,7 @@ class TestToolSchemas:
         # (normalize_tool_request repair + the named-only run_command).
         assert _tool_names() == {
             "gh_api",
+            "repo_contents",
             "read_file",
             "find_files",
             "list_tree",
@@ -55,6 +56,14 @@ class TestToolSchemas:
         enum = run_command["parameters"]["properties"]["command"]["enum"]
         # The allowlist in scripts/run_tool_harness.py (ALLOWED_COMMANDS).
         assert set(enum) == {"git_status_short", "git_diff_stat", "git_diff_name_only"}
+
+    def test_repo_contents_schema_documents_shared_allowlist_and_preference(self):
+        repo_contents = next(s for s in TOOL_SCHEMAS if s["name"] == "repo_contents")
+        description = repo_contents["description"].lower()
+        assert "same repo allowlist as gh_api" in description
+        assert "source files or directory listings" in description
+        assert "structured github api metadata" in description
+        assert repo_contents["parameters"]["required"] == ["repo"]
 
     def test_git_grep_schema_advertises_optional_args(self):
         # #568: the advertised git_grep schema must expose the new optional

@@ -9,11 +9,13 @@ line, and until then unsupported operations raise instead of failing silently.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -69,6 +71,21 @@ GH_DENY_SUBSTRINGS = (
     "/environments/",
     "/dispatches",
 )
+SENSITIVE_PATH_RE = re.compile(
+    r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$|\.netrc(\.|$)|\.npmrc(\.|$)|\.gitconfig(\.|$)|\.git-credentials(\.|$)|\.docker/config\.json(\.|$)|\.kube/(config|.*\.conf)(\.|$)|.*service-account.*\.json$|.*-key\.json$|\.htpasswd(\.|$))",
+    re.IGNORECASE,
+)
+
+
+def _repo_is_allowed(repo, allowed_repos, current_repo):
+    """Return whether a repository is in the operator's existing allowlist."""
+    return (
+        repo == current_repo
+        or "*" in (allowed_repos or set())
+        or repo in (allowed_repos or set())
+    )
+
+
 # Repo-scoped endpoint prefixes (path starts with ``/repos/owner/repo/...``).
 # These require the ``owner/repo`` to be in the allowlist.
 GH_API_ALLOWED_PREFIXES = (
@@ -217,12 +234,7 @@ def _validate_endpoint(endpoint, allowed_repos, current_repo):
     else:
         repo_key = f"{parts[0]}/{parts[1]}"
 
-    allowed = (
-        repo_key == current_repo
-        or "*" in (allowed_repos or set())
-        or repo_key in (allowed_repos or set())
-    )
-    if not allowed:
+    if not _repo_is_allowed(repo_key, allowed_repos, current_repo):
         return {"error": f"Repo not allowed: {repo_key}"}
 
     if parts[0] == "repos":
@@ -388,6 +400,127 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
         return {"error": f"Forgejo API timed out after {request_timeout}s"}
     except Exception as exc:
         return {"error": str(exc)}
+
+
+REPO_CONTENTS_DEFAULT_MAX_ENTRIES = 200
+REPO_CONTENTS_MAX_ENTRIES = 500
+REPO_CONTENTS_MAX_BYTES = 12_000
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_CONTENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._~!$'()*+,;=@%/-]+$")
+
+def _validate_repo_contents(repo, path, ref, allowed_repos, current_repo):
+    """Validate model-selected repository contents arguments."""
+    if not isinstance(repo, str):
+        return {"error": "Invalid repo: expected owner/name"}
+    if any(char in repo for char in "\x00\n\r#\\`"):
+        return {"error": "Invalid repo: expected owner/name"}
+    repo = repo.strip().strip("/")
+    if not _REPO_NAME_RE.fullmatch(repo):
+        return {"error": "Invalid repo: expected owner/name"}
+    if not _repo_is_allowed(repo, allowed_repos, current_repo):
+        return {"error": f"Repo not allowed: {repo}"}
+    for label, value in (("path", path), ("ref", ref)):
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or not _REPO_CONTENTS_PATH_RE.fullmatch(value):
+            return {"error": f"Invalid {label}"}
+        if any(part in ("", ".", "..") for part in value.strip("/").split("/")):
+            return {"error": f"Invalid {label}: dot-segment or empty segment"}
+        if label == "path" and SENSITIVE_PATH_RE.search(value):
+            return {"error": "Sensitive path blocked"}
+
+    normalized_path = (path or "").strip("/")
+    normalized_ref = ref.strip() if isinstance(ref, str) and ref else None
+    return {"repo": repo, "path": normalized_path, "ref": normalized_ref}
+
+
+def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
+    """Read GitHub repository contents after argument validation."""
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return {"error": "Missing GH_TOKEN"}
+    encoded_repo = "/".join(urllib.parse.quote(part, safe="") for part in repo.split("/"))
+    encoded_path = "/".join(urllib.parse.quote(part, safe="") for part in path.split("/")) if path else ""
+    url = f"https://api.github.com/repos/{encoded_repo}/contents/{encoded_path}".rstrip("/")
+    if ref is not None:
+        url += "?" + urllib.parse.urlencode({"ref": ref})
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return {"error": f"GitHub contents API error: {exc.code} {exc.reason}"}
+    except TimeoutError:
+        return {"error": f"GitHub contents API timed out after {request_timeout}s"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    if isinstance(data, list):
+        entries = sorted(
+            [
+                {
+                    "path": item.get("path", ""),
+                    "type": "directory" if item.get("type") == "dir" else item.get("type", ""),
+                }
+                for item in data
+                if isinstance(item, dict) and item.get("type") in ("file", "dir", "symlink", "submodule")
+            ],
+            key=lambda item: item["path"],
+        )
+        truncated = len(entries) > max_entries
+        return {
+            "repo": repo,
+            "path": path,
+            "type": "directory",
+            "entries": entries[:max_entries],
+            "truncated": truncated,
+        }
+    if not isinstance(data, dict):
+        return {"error": "GitHub contents API returned an unexpected response"}
+    if data.get("type") != "file":
+        return {"error": f"Unsupported repository contents type: {data.get('type', 'unknown')}"}
+    encoding = data.get("encoding")
+    raw_content = data.get("content", "")
+    if encoding != "base64" or not isinstance(raw_content, str):
+        return {"repo": repo, "path": path, "type": "file", "error": "Binary or unavailable file content"}
+    try:
+        decoded = base64.b64decode(raw_content, validate=False)
+    except Exception:
+        return {"repo": repo, "path": path, "type": "file", "error": "Invalid file content encoding"}
+    if b"\x00" in decoded:
+        return {"repo": repo, "path": path, "type": "file", "binary": True, "truncated": False}
+    try:
+        text = decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"repo": repo, "path": path, "type": "file", "binary": True, "truncated": False}
+    encoded = text.encode("utf-8")
+    truncated = len(encoded) > REPO_CONTENTS_MAX_BYTES
+    if truncated:
+        text = encoded[:REPO_CONTENTS_MAX_BYTES].decode("utf-8", errors="ignore")
+    return {"repo": repo, "path": path, "type": "file", "content": text, "truncated": truncated}
+
+
+def repo_contents(repo, path="", ref=None, allowed_repos=None, current_repo="", max_entries=REPO_CONTENTS_DEFAULT_MAX_ENTRIES, request_timeout=25):
+    """Read a normalized file or directory from an allowlisted repository."""
+    validated = _validate_repo_contents(repo, path, ref, allowed_repos, current_repo)
+    if validated.get("error"):
+        return validated
+    try:
+        max_entries = max(1, min(int(max_entries), REPO_CONTENTS_MAX_ENTRIES))
+    except (TypeError, ValueError):
+        max_entries = REPO_CONTENTS_DEFAULT_MAX_ENTRIES
+    if resolve_platform() == "forgejo":
+        return {"error": "repo_contents is not supported on PLATFORM=forgejo"}
+    return _repo_contents_github(
+        validated["repo"], validated["path"], validated["ref"], max_entries, request_timeout
+    )
 
 
 def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):

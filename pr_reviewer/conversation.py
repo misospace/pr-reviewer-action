@@ -144,6 +144,43 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "repo_contents",
+        "description": (
+            "Read-only contents from an explicitly allowlisted related GitHub "
+            "repository, using the same repo allowlist as gh_api. Prefer this "
+            "for source files or directory listings; use gh_api for structured "
+            "GitHub API metadata such as pull requests, issues, releases, or "
+            "compare results. Pass repo as owner/name; path defaults to the "
+            "repository root and ref defaults to the API's default branch. "
+            "Directory results contain sorted names only, capped at max_entries "
+            "(default 200, max 500). File text is capped at about 12 KB; binary "
+            "files return safe metadata without raw bytes. Unsupported on Forgejo."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in the same allowlist used by gh_api (owner/name).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional repository-relative file or directory path.",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Optional branch, tag, or commit ref.",
+                },
+                "max_entries": {
+                    "type": "integer",
+                    "description": "Optional directory entry cap (default 200, max 500).",
+                },
+            },
+            "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "read_file",
         "description": (
             "Read a file from the workspace. Path-traversal and sensitive "
