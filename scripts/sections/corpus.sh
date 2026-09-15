@@ -140,8 +140,38 @@ if [ ! -f tool-harness.json ]; then
 EOF
 fi
 
+build_bounded_repo_map() {
+  : > repo-map.capped.md
+  [ -s repo-map.md ] || return 0
+
+  # Re-frame only; never truncate. The renderer already cut the document to
+  # a body budget net of the framing overhead (see context.sh), so the
+  # re-framed form fits REPO_MAP_MAX_BYTES by construction. The old code
+  # applied a second, generic byte slice here that could land inside the
+  # four-backtick tree fence and leave it open (#599). The cap is now a
+  # verified invariant, not a truncation point: if it is ever violated
+  # (stale/hand-edited artifact, renderer version skew) we emit no map
+  # rather than partial data, and any failure is a graceful no-op — the map
+  # is advisory context, never a review-blocking dependency.
+  REPO_MAP_MAX_BYTES="$REPO_MAP_MAX_BYTES" PYTHONPATH="${SCRIPT_DIR}/.." \
+    python3 - <<'PY' || true
+import os
+from pathlib import Path
+
+from pr_reviewer.repo_map import reframe_for_corpus
+
+cap = int(os.environ["REPO_MAP_MAX_BYTES"])
+raw = Path("repo-map.md").read_text(encoding="utf-8")
+final = reframe_for_corpus(raw)
+if len(final.encode("utf-8")) <= cap:
+    Path("repo-map.capped.md").write_text(final, encoding="utf-8")
+PY
+}
+
 build_review_corpus() {
   local corpus_type="${1:-full}"  # 'full' or 'incremental'
+
+  build_bounded_repo_map
 
   # Build non-standards body first (this is the portion subject to truncation)
   {
@@ -169,6 +199,11 @@ build_review_corpus() {
     if [ -s related-code.truncated.md ]; then
       echo "# Related Code Context"
       cat related-code.truncated.md
+      echo
+    fi
+
+    if [ -s repo-map.capped.md ]; then
+      cat repo-map.capped.md
       echo
     fi
 

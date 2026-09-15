@@ -302,6 +302,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 |-------|-------------|----------|---------|
 | `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
 | `model_context_tokens` | The model's real context window in tokens (e.g. `8192`, `32768`). When set, corpus/diff/file byte budgets are derived from it (reserving `ai_max_tokens` for output) instead of `context_limit_mode`. Recommended for local models. Empty uses `context_limit_mode` | No | `""` |
+| `repo_map_context` | Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context | No | `true` |
+| `repo_map_max_bytes` | Maximum UTF-8 bytes for the final trust-framed repository-map section (review corpus + planning slot). The underlying Markdown artifact is rendered slightly smaller to leave room for the framing prefix, so the framed section always fits this cap | No | `12000` |
 | `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
 | `image_digest_budget_sec` | Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. | No | `60` |
 | `allowed_source_hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
