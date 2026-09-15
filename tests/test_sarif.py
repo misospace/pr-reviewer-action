@@ -320,3 +320,38 @@ def test_default_caps_are_bounded():
     assert MAX_FINDINGS == 200
     assert MAX_MESSAGE_CHARS == 1000
     assert MAX_TITLE_CHARS == 200
+
+
+def test_cli_returns_nonzero_on_runs_none(tmp_path):
+    input_path = tmp_path / "runs_none.sarif"
+    output_path = tmp_path / "out.json"
+    input_path.write_text(json.dumps({"version": "2.1.0", "runs": [None]}))
+    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    assert rc == 1
+    assert output_path.exists()
+    data = json.loads(output_path.read_text())
+    assert any("runs[0] is not an object" in e for e in data["errors"])
+
+
+def test_cli_returns_nonzero_on_results_not_array(tmp_path):
+    input_path = tmp_path / "results_bad.sarif"
+    output_path = tmp_path / "out.json"
+    payload = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x"}}, "results": "not-an-array"}]}
+    input_path.write_text(json.dumps(payload))
+    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    assert rc == 1
+    assert output_path.exists()
+    data = json.loads(output_path.read_text())
+    assert any("runs[0].results is not an array" in e for e in data["errors"])
+
+
+def test_cli_returns_nonzero_on_invalid_tool_driver_type(tmp_path):
+    input_path = tmp_path / "driver_bad.sarif"
+    output_path = tmp_path / "out.json"
+    payload = {"version": "2.1.0", "runs": [{"tool": {"driver": "string"}, "results": []}]}
+    input_path.write_text(json.dumps(payload))
+    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    assert rc == 1
+    assert output_path.exists()
+    data = json.loads(output_path.read_text())
+    assert any("runs[0].tool.driver is not an object" in e for e in data["errors"])

@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unable to write SARIF output: {exc}", file=sys.stderr)
         return 1
 
-    return 1 if _top_level_error(payload) is not None else 0
+    return 1 if normalized.get("errors") else 0
 
 
 if __name__ == "__main__":
