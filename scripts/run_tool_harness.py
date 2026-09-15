@@ -40,6 +40,7 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     execute_tool_request,
     find_files,
     gh_api,
+    repo_contents,
     git_blame,
     git_grep,
     git_log,
@@ -478,7 +479,7 @@ def normalize_tool_request(raw_req):
     if not isinstance(args, dict):
         args = {}
     # Promote known top-level string params when "args" wasn't nested.
-    for key in ("path", "endpoint", "url", "pattern", "command", "query"):
+    for key in ("repo", "path", "ref", "endpoint", "url", "pattern", "command", "query"):
         if key not in args and isinstance(raw_req.get(key), str):
             args[key] = raw_req[key]
     # max_results is an integer param (git_grep); promote a top-level int so a
@@ -489,6 +490,12 @@ def normalize_tool_request(raw_req):
         and isinstance(raw_req.get("max_results"), int)
     ):
         args["max_results"] = raw_req["max_results"]
+    if (
+        tool_name == "repo_contents"
+        and "max_entries" not in args
+        and isinstance(raw_req.get("max_entries"), int)
+    ):
+        args["max_entries"] = raw_req["max_entries"]
     # gh_api accepts "path" as an alias for "endpoint".
     if tool_name == "gh_api" and "endpoint" not in args and isinstance(args.get("path"), str):
         args["endpoint"] = args["path"]
@@ -765,7 +772,7 @@ def run_native_loop(
     conversation.add_user(
         f"Repository: {repo}\n"
         f"Review scope: {os.getenv('EFFECTIVE_SCOPE', 'full')}\n"
-        f"Allowed repos for gh_api: "
+        f"Allowed repos (gh_api + repo_contents): "
         f"{', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: "
         f"{', '.join(allowed_hosts) if allowed_hosts else '(none)'}\n"

@@ -27,16 +27,11 @@ from redact import mask_and_truncate, mask_secrets  # noqa: E402
 # The gh_api allowlist + denied path segments live on the platform seam (single
 # source of truth); _resolve_workspace_path reuses GH_DENY_SUBSTRINGS to block
 # the same sensitive segments in filesystem paths.
-from pr_reviewer.platform import GH_DENY_SUBSTRINGS, USER_AGENT  # noqa: E402
-
-
-SENSITIVE_PATH_RE = re.compile(
-    r"(^|/)(\.env(\.|$)|id_rsa(\.|$)|id_dsa(\.|$)|credentials(\.|$)|secret(s)?(\.|$)|.*\.pem$|.*\.key$"
-    r"|\.netrc(\.|$)|\.npmrc(\.|$)|\.gitconfig(\.|$)|\.git-credentials(\.|$)"
-    r"|\.docker/config\.json(\.|$)|\.kube/(config|.*\.conf)(\.|$)"
-    r"|.*service-account.*\.json$|.*-key\.json$"
-    r"|\.htpasswd(\.|$))",
-    re.IGNORECASE,
+from pr_reviewer.platform import (  # noqa: E402
+    GH_DENY_SUBSTRINGS,
+    SENSITIVE_PATH_RE,
+    USER_AGENT,
+    repo_contents as platform_repo_contents,
 )
 
 # The tool harness executes same-repo code, so command execution must not be
@@ -609,6 +604,13 @@ def git_blame(path, workspace_root, start=None, end=None, request_timeout=15):
     except (ValueError, Exception) as exc:  # int() on a bad range → clean error
         return {"error": str(exc)}
 
+def repo_contents(repo, path, ref, allowed_repos, current_repo, max_entries=200, request_timeout=25):
+    """Thin shim over the platform seam for normalized repository contents."""
+    return platform_repo_contents(
+        repo, path, ref, allowed_repos, current_repo, max_entries, request_timeout
+    )
+
+
 def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     """Make a host-platform API call with path/endpoint restrictions.
 
@@ -927,6 +929,39 @@ def execute_tool_request(
             matches = res.get("matches", [])
             text, truncated = mask_and_truncate("\n".join(matches), max_response_bytes)
             tool_result["result"] = {"matches": text.splitlines(), "truncated": truncated}
+
+        elif tool_name == "repo_contents":
+            repo = args.get("repo", "")
+            if not repo:
+                raise ValueError("Missing 'repo' argument")
+            raw_max_entries = args.get("max_entries")
+            max_entries = 200 if raw_max_entries is None else _opt_int(raw_max_entries)
+            res = repo_contents(
+                repo,
+                args.get("path", "") or "",
+                args.get("ref"),
+                allowed_gh_repos,
+                current_repo,
+                max_entries,
+                request_timeout,
+            )
+            if res.get("error"):
+                raise ValueError(res["error"])
+            if res.get("type") == "file" and "content" in res:
+                content, clipped = mask_and_truncate(res["content"], min(max_response_bytes, 12000))
+                res = {**res, "content": content, "truncated": res.get("truncated", False) or clipped}
+            elif res.get("type") == "directory" and max_response_bytes:
+                entries = []
+                used = 2
+                for entry in res.get("entries", []):
+                    row_bytes = len(json.dumps(entry, separators=(",", ":")).encode("utf-8"))
+                    added = row_bytes + (1 if entries else 0)
+                    if used + added > max_response_bytes:
+                        break
+                    entries.append(entry)
+                    used += added
+                res = {**res, "entries": entries, "truncated": res.get("truncated", False) or len(entries) < len(res.get("entries", []))}
+            tool_result["result"] = res
 
         elif tool_name == "gh_api":
             endpoint = args.get("endpoint", "")

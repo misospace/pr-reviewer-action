@@ -84,6 +84,45 @@ def _run(monkeypatch, tmp_path, responses):
     return handled, result
 
 
+def test_native_loop_advertises_and_dispatches_repo_contents(monkeypatch, tmp_path):
+    responses = [
+        _openai_call(
+            "c1",
+            "repo_contents",
+            '{"repo": "owner/repo", "path": "src/app.py", "ref": "main"}',
+        ),
+        _openai_text("found the source file"),
+        _openai_text('{"verdict": "approve", "review_markdown": "ok", "findings": []}'),
+    ]
+    dispatched = []
+
+    def fake_execute(name, args, *executor_args):
+        dispatched.append((name, args))
+        return {"tool": name, "status": "ok", "result": {"content": "source"}}
+
+    monkeypatch.setattr(rth, "execute_tool_request", fake_execute)
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai", responses
+    )
+    assert handled is True
+    assert result["mode"] == "native_loop"
+    assert dispatched == [
+        (
+            "repo_contents",
+            {"repo": "owner/repo", "path": "src/app.py", "ref": "main"},
+        )
+    ]
+    first_payload = payloads[0]
+    advertised = [tool["function"]["name"] for tool in first_payload["tools"]]
+    assert "repo_contents" in advertised
+    user_text = "\n".join(
+        message.get("content") or ""
+        for message in first_payload["messages"]
+        if message["role"] == "user"
+    )
+    assert "Allowed repos (gh_api + repo_contents)" in user_text
+
+
 def test_native_loop_two_hops_writes_outputs(monkeypatch, tmp_path):
     # Two offline hops: read the machineconfig (carries the platform version),
     # then read the manifest it points at. No network — the executor runs for
