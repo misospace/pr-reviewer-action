@@ -247,21 +247,40 @@ def test_render_count_cap_is_visible_and_keeps_most_recent():
         github_comment(i, f"u{i}", f"2026-09-1{i}T10:00:00Z", f"body {i}") for i in range(1, 4)
     ]
     out = render_pr_thread(comments, max_comments=2)
-    assert "most recent of 3" in out
+    assert "Showing 2 of 3 most recent" in out
     assert "body 1" not in out  # oldest dropped by the count cap
     assert "body 2" in out and "body 3" in out
 
 
 def test_render_byte_cap_drops_whole_comments_with_visible_note():
     comments = [
-        github_comment(i, f"u{i}", f"2026-09-1{i}T10:00:00Z", "y" * 600) for i in range(1, 4)
+        github_comment(i, f"u{i}", f"2026-09-1{i}T10:00:00Z", "y" * 600 + "\n```\n````")
+        for i in range(1, 4)
     ]
     out = render_pr_thread(comments, max_bytes=1500)
-    assert "older comment(s) omitted" in out
-    # Whole-comment granularity: every selected body that fits is intact.
+    assert len(out.encode("utf-8")) <= 1500
+    assert "older" in out and "omitted" in out
     fence_lines = [ln for ln in out.splitlines() if ln and set(ln) == {"`"}]
-    assert len(fence_lines) % 2 == 0  # no fence left open
-    assert "Comment by u3" in out  # newest always renders
+    assert fence_lines.count("`````") == 2
+    assert "Comment by u3" in out
+
+
+def test_render_count_and_byte_caps_report_actual_displayed_count():
+    comments = [
+        github_comment(i, f"u{i}", f"2026-09-{i:02d}T10:00:00Z", f"body {i} " + "x" * 300)
+        for i in range(1, 11)
+    ]
+    out = render_pr_thread(comments, max_comments=5, max_bytes=1400)
+    assert len(out.encode("utf-8")) <= 1400
+    assert out.count("## Comment by") == 2
+    assert "Showing 2 of 10 most recent conversation comment(s), oldest first." in out
+    assert "8 older comments omitted by configured context limits." in out
+    assert "PR_THREAD_MAX_BYTES budget" not in out
+
+
+def test_render_tiny_byte_cap_returns_empty():
+    comments = [github_comment(1, "a", "2026-09-10T10:00:00Z", "x" * 1000)]
+    assert render_pr_thread(comments, max_bytes=100) == ""
 
 
 def test_render_byte_cap_too_small_for_anything_returns_empty():
@@ -339,8 +358,8 @@ def test_cli_honors_byte_budget(tmp_path):
     src.write_text(json.dumps(comments), encoding="utf-8")
     assert main(["--comments", str(src), "--output", str(out), "--max-bytes", "1200"]) == 0
     rendered = out.read_text(encoding="utf-8")
-    assert len(rendered.encode("utf-8")) <= 1200 + 200  # cap plus omission note
-    assert "older comment(s) omitted" in rendered
+    assert len(rendered.encode("utf-8")) <= 1200
+    assert "older" in rendered and "omitted" in rendered
 
 
 def test_default_marker_covers_all_managed_variants():

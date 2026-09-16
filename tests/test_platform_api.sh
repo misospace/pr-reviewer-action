@@ -77,13 +77,31 @@ check "platform_issue_comments" \
   "$(run_seam github "" 'platform_issue_comments o/r 9')" \
   "gh api repos/o/r/issues/9/comments?per_page=100"
 GH_REVIEW_COMMENTS_LOG="$TMP/gh-review-comments.log"
-GH_REVIEW_COMMENTS_RESULT="$(run_seam github "" 'gh(){ printf "%s\\n" "$*" > "'"$GH_REVIEW_COMMENTS_LOG"'"; jq -cn '"'"'[{id:42,user:{login:"octocat"},created_at:"2026-01-02T00:00:00Z",updated_at:null,body:null}]'"'"'; }; platform_pr_review_comments owner/repo 42' | jq -c '.')"
-check "platform_pr_review_comments calls expected github api" \
-  "$(<"$GH_REVIEW_COMMENTS_LOG")" \
-  "api repos/owner/repo/issues/42/comments?per_page=100&sort=created&direction=desc"
-check "platform_pr_review_comments normalizes github comments" \
+GH_REVIEW_COMMENTS_RESPONSE="$TMP/gh-review-comments.json"
+jq -cn '[range(2;102) | {databaseId: ., body: ("body-" + tostring), createdAt: "2026-01-02T00:00:00Z", updatedAt: null, author: (if . == 50 then null else {login: ("user-" + tostring)} end)}] | {data: {repository: {pullRequest: {comments: {nodes: .}}}}}' > "$GH_REVIEW_COMMENTS_RESPONSE"
+GH_REVIEW_COMMENTS_RESULT="$(run_seam github "" 'gh(){ printf "%s\\n" "$*" > "'"$GH_REVIEW_COMMENTS_LOG"'"; cat "'"$GH_REVIEW_COMMENTS_RESPONSE"'"; }; platform_pr_review_comments owner/repo 42' | jq -c '{length: length, oldest_excluded: all(.[]; .id != 1), newest_included: any(.[]; .id == 101), first: .[0], null_author: (map(select(.id == 50))[0])}')"
+GH_REVIEW_COMMENTS_ARGS="$(<"$GH_REVIEW_COMMENTS_LOG")"
+check_contains "platform_pr_review_comments calls GitHub GraphQL" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "api graphql"
+check_contains "platform_pr_review_comments queries newest 100" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "comments(last: 100"
+check_contains "platform_pr_review_comments orders by creation time ascending" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "orderBy: {field: CREATED_AT, direction: ASC}"
+check_contains "platform_pr_review_comments captures owner variable" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "owner=owner"
+check_contains "platform_pr_review_comments captures repo variable" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "name=repo"
+check_contains "platform_pr_review_comments captures number variable" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "number=42"
+check "platform_pr_review_comments normalizes newest github comments" \
   "$GH_REVIEW_COMMENTS_RESULT" \
-  '[{"id":42,"user":"octocat","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":""}]'
+  '{"length":100,"oldest_excluded":true,"newest_included":true,"first":{"id":2,"user":"user-2","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":"body-2"},"null_author":{"id":50,"user":"","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":"body-50"}}'
 check "platform_compare" \
   "$(run_seam github "" 'platform_compare o/r aaa...bbb')" \
   "gh api repos/o/r/compare/aaa...bbb"
