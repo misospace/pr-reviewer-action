@@ -4,12 +4,14 @@
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 # Ensure the scripts directory and project root are on sys.path so we can
 # import shared helpers (redact) and pr_reviewer modules.
@@ -21,6 +23,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from pr_reviewer.env import env_int  # noqa: E402
+from pr_reviewer.sarif import (
+    MAX_FINDINGS as SARIF_DEFAULT_MAX_FINDINGS,
+    MAX_INPUT_BYTES as SARIF_MAX_INPUT_BYTES,
+    normalize_sarif,
+)  # noqa: E402
 from redact import mask_and_truncate, mask_secrets  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -30,7 +37,7 @@ def normalize_severity(value: object) -> str:
     if value is None:
         return "info"
     text = str(value).strip().lower()
-    if text in {"info", "warning", "blocker"}:
+    if text in {"info", "minor", "warning", "major", "blocker"}:
         return text
     return "info"
 
@@ -38,7 +45,7 @@ def normalize_severity(value: object) -> str:
 def severity_rank(value: str) -> int:
     if value == "blocker":
         return 3
-    if value == "warning":
+    if value in {"major", "warning"}:
         return 2
     return 1
 
@@ -265,6 +272,111 @@ def head_tail_cap(text: str, max_bytes: int) -> str:
     return head + "\n…[middle truncated]…\n" + tail
 
 
+def _split_sarif_paths(raw: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[,\n]", raw) if part.strip()]
+
+
+def _workspace_path(path_text: str, workspace_root: Path) -> Path | None:
+    if not path_text or "\x00" in path_text:
+        return None
+    candidate = Path(path_text)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    try:
+        resolved = (workspace_root / candidate).resolve()
+        if not resolved.is_relative_to(workspace_root.resolve()):
+            return None
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _sarif_provider(
+    index: int,
+    path_text: str,
+    workspace_root: Path,
+    max_findings: int,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": f"sarif-{index}",
+        "kind": "sarif",
+        "status": "error",
+        "command": "",
+        "duration_sec": 0.0,
+        "exit_code": None,
+        "provider_severity": "info",
+        "findings": [],
+        "stdout": "",
+        "stderr": "",
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "source": path_text,
+        "output_format": "sarif-2.1.0",
+    }
+    path = _workspace_path(path_text, workspace_root)
+    if path is None:
+        entry["provider_severity"] = "major"
+        entry["stderr"] = "SARIF path must be a workspace-relative path that stays inside the workspace"
+        return entry
+    if not path.is_file():
+        entry["provider_severity"] = "major"
+        entry["stderr"] = f"SARIF file not found: {path_text}"
+        return entry
+
+    try:
+        raw = path.read_bytes()
+        if len(raw) > SARIF_MAX_INPUT_BYTES:
+            raise ValueError(f"SARIF input exceeds {SARIF_MAX_INPUT_BYTES} byte limit")
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        entry["provider_severity"] = "major"
+        entry["stderr"] = f"Unable to parse SARIF file {path_text}: {exc}"
+        return entry
+
+    normalized = normalize_sarif(payload, max_findings=max_findings)
+    entry["findings"] = [
+        {
+            "severity": item["severity"],
+            "message": _sarif_finding_message(item),
+            "source": _sarif_finding_source(item, path_text),
+            "tool_name": item["tool_name"],
+            "tool_version": item["tool_version"],
+            "rule_id": item["rule_id"],
+            "title": item["title"],
+            "file": item["file"],
+            "line": item["line"],
+            "help_uri": item["help_uri"],
+        }
+        for item in normalized["findings"]
+    ]
+    if normalized["errors"]:
+        entry["stderr"] = "; ".join(normalized["errors"])
+    entry["status"] = "error" if normalized["errors"] else "ok"
+    entry["provider_severity"] = max(
+        (finding["severity"] for finding in entry["findings"]),
+        key=severity_rank,
+        default=entry["provider_severity"],
+    )
+    return entry
+
+
+def _sarif_finding_message(finding: dict[str, Any]) -> str:
+    location = ""
+    if finding.get("file"):
+        location = f" ({finding['file']}"
+        if finding.get("line") is not None:
+            location += f":{finding['line']}"
+        location += ")"
+    rule = f" [{finding['rule_id']}]" if finding.get("rule_id") else ""
+    title = f"{finding['title']}: " if finding.get("title") else ""
+    return f"{title}{finding['message']}{rule}{location}"
+
+
+def _sarif_finding_source(finding: dict[str, Any], path_text: str) -> str:
+    tool = finding.get("tool_name") or "SARIF"
+    return f"{path_text} ({tool})"
+
+
 def write_outputs(summary: dict, markdown: str) -> None:
     Path("evidence-providers.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
@@ -282,17 +394,21 @@ def write_outputs(summary: dict, markdown: str) -> None:
 
 def main() -> int:
     config_path_raw = os.getenv("EVIDENCE_PROVIDERS_FILE", "").strip()
+    sarif_paths = _split_sarif_paths(os.getenv("SARIF_FILES", ""))
     default_timeout = env_int("EVIDENCE_PROVIDER_TIMEOUT_SEC", 30)
     default_max_output = env_int("EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES", 20000)
+    sarif_max_findings = env_int("SARIF_MAX_FINDINGS", SARIF_DEFAULT_MAX_FINDINGS)
+    workspace_root = Path(os.getenv("GITHUB_WORKSPACE") or os.getcwd()).resolve()
 
     summary = {
-        "configured": False,
+        "configured": bool(config_path_raw or sarif_paths),
         "config_path": config_path_raw,
+        "sarif_files": sarif_paths,
         "has_blocker": False,
         "providers": [],
     }
 
-    if not config_path_raw:
+    if not config_path_raw and not sarif_paths:
         # Leave the markdown empty (not "not configured") — this is the normal,
         # expected state for consumers with no evidence providers set up, not
         # a diagnostic worth a corpus section. See #399/#409.
