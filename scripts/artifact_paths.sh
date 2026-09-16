@@ -29,6 +29,7 @@ assert_safe_artifact_paths() {
     linear-issues.json linear-issues.md
     repo-map.json repo-map.md repo-map.capped.md
     terms.txt terms.all.txt
+    pr-thread.raw.json pr-thread.json pr-thread.md
     change-anchors.json related-code.json related-code.md related-code.truncated.md
     review-corpus.body.md repo-impact.combined.txt
   )

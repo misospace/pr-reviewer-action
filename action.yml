@@ -361,6 +361,18 @@ inputs:
     description: Maximum UTF-8 bytes for the repository-map Markdown artifact and planning slot
     required: false
     default: "12000"
+  pr_thread_context:
+    description: Include a bounded snapshot of the PR's top-level conversation comments in the review corpus (this action's own managed comments are filtered out; inline review threads are out of scope for v1)
+    required: false
+    default: "true"
+  pr_thread_max_comments:
+    description: Maximum top-level PR comments to include in the PR Discussion Context section (values above 100 are clamped)
+    required: false
+    default: "10"
+  pr_thread_max_body_chars:
+    description: Maximum characters kept per PR comment body in the PR Discussion Context section
+    required: false
+    default: "1500"
   enrichment_budget_sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false
@@ -791,6 +803,9 @@ runs:
         RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
         REPO_MAP_CONTEXT: ${{ inputs.repo_map_context }}
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
+        PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
+        PR_THREAD_MAX_COMMENTS: ${{ inputs.pr_thread_max_comments }}
+        PR_THREAD_MAX_BODY_CHARS: ${{ inputs.pr_thread_max_body_chars }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
@@ -922,6 +937,9 @@ runs:
         MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
         REPO_MAP_CONTEXT: ${{ inputs.repo_map_context }}
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
+        PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
+        PR_THREAD_MAX_COMMENTS: ${{ inputs.pr_thread_max_comments }}
+        PR_THREAD_MAX_BODY_CHARS: ${{ inputs.pr_thread_max_body_chars }}
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}

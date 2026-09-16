@@ -83,6 +83,12 @@ TOOL_MIN_SUCCESSFUL_REQUESTS="${TOOL_MIN_SUCCESSFUL_REQUESTS:-0}"
 TOOL_ENABLE_FOR_FORKS="${TOOL_ENABLE_FOR_FORKS:-false}"
 REPO_MAP_CONTEXT="${REPO_MAP_CONTEXT:-true}"
 REPO_MAP_MAX_BYTES="${REPO_MAP_MAX_BYTES:-12000}"
+PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-true}"
+PR_THREAD_MAX_COMMENTS="${PR_THREAD_MAX_COMMENTS:-10}"
+PR_THREAD_MAX_BODY_CHARS="${PR_THREAD_MAX_BODY_CHARS:-1500}"
+PR_THREAD_MAX_JSON_BYTES="${PR_THREAD_MAX_JSON_BYTES:-100000}"
+PR_THREAD_MAX_MARKDOWN_BYTES="${PR_THREAD_MAX_MARKDOWN_BYTES:-8000}"
+PR_THREAD_MIN_COMMENTS=1
 AI_REQUEST_TIMEOUT_SEC="${AI_REQUEST_TIMEOUT_SEC:-300}"
 AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"
@@ -266,6 +272,39 @@ esac
 if [[ ! "$REPO_MAP_MAX_BYTES" =~ ^[0-9]+$ || "$REPO_MAP_MAX_BYTES" -lt 1 || "$REPO_MAP_MAX_BYTES" -gt 200000 ]]; then
   error "Invalid REPO_MAP_MAX_BYTES '$REPO_MAP_MAX_BYTES'; defaulting to 12000"
   REPO_MAP_MAX_BYTES=12000
+fi
+
+case "$(printf '%s' "$PR_THREAD_CONTEXT" | tr '[:upper:]' '[:lower:]')" in
+  true|false) PR_THREAD_CONTEXT="$(printf '%s' "$PR_THREAD_CONTEXT" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    error "Invalid PR_THREAD_CONTEXT '$PR_THREAD_CONTEXT'; defaulting to true"
+    PR_THREAD_CONTEXT=true
+    ;;
+esac
+if [[ ! "$PR_THREAD_MAX_COMMENTS" =~ ^[0-9]+$ || "$PR_THREAD_MAX_COMMENTS" -lt "$PR_THREAD_MIN_COMMENTS" ]]; then
+  error "Invalid PR_THREAD_MAX_COMMENTS '$PR_THREAD_MAX_COMMENTS'; defaulting to 10"
+  PR_THREAD_MAX_COMMENTS=10
+elif [[ "$PR_THREAD_MAX_COMMENTS" -gt 100 ]]; then
+  error "PR_THREAD_MAX_COMMENTS '$PR_THREAD_MAX_COMMENTS' exceeds the hard cap of 100; clamping"
+  PR_THREAD_MAX_COMMENTS=100
+fi
+if [[ ! "$PR_THREAD_MAX_BODY_CHARS" =~ ^[0-9]+$ || "$PR_THREAD_MAX_BODY_CHARS" -lt 1 ]]; then
+  error "Invalid PR_THREAD_MAX_BODY_CHARS '$PR_THREAD_MAX_BODY_CHARS'; defaulting to 1500"
+  PR_THREAD_MAX_BODY_CHARS=1500
+elif [[ "$PR_THREAD_MAX_BODY_CHARS" -gt 10000 ]]; then
+  error "PR_THREAD_MAX_BODY_CHARS '$PR_THREAD_MAX_BODY_CHARS' exceeds the hard cap of 10000; clamping"
+  PR_THREAD_MAX_BODY_CHARS=10000
+fi
+if [[ ! "$PR_THREAD_MAX_JSON_BYTES" =~ ^[0-9]+$ || "$PR_THREAD_MAX_JSON_BYTES" -lt 1 ]]; then
+  error "Invalid PR_THREAD_MAX_JSON_BYTES '$PR_THREAD_MAX_JSON_BYTES'; defaulting to 100000"
+  PR_THREAD_MAX_JSON_BYTES=100000
+elif [[ "$PR_THREAD_MAX_JSON_BYTES" -gt 1000000 ]]; then
+  error "PR_THREAD_MAX_JSON_BYTES '$PR_THREAD_MAX_JSON_BYTES' exceeds the hard cap of 1000000; clamping"
+  PR_THREAD_MAX_JSON_BYTES=1000000
+fi
+if [[ ! "$PR_THREAD_MAX_MARKDOWN_BYTES" =~ ^[0-9]+$ || "$PR_THREAD_MAX_MARKDOWN_BYTES" -lt 1 || "$PR_THREAD_MAX_MARKDOWN_BYTES" -gt 200000 ]]; then
+  error "Invalid PR_THREAD_MAX_MARKDOWN_BYTES '$PR_THREAD_MAX_MARKDOWN_BYTES'; defaulting to 8000"
+  PR_THREAD_MAX_MARKDOWN_BYTES=8000
 fi
 
 # AI_TEMPERATURE: empty means "omit the field"; otherwise must be numeric.
@@ -461,6 +500,16 @@ apply_system_prompt_fragments() {
       rc="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELATED_CODE_GUIDANCE\}\}/$rc}"
+    # The PR-discussion guidance is substituted only when the PR-thread
+    # context is actually gathered for this run (PR_THREAD_CONTEXT = true);
+    # otherwise the placeholder is dropped, so the model is never directed
+    # at a "PR Discussion Context" section the corpus does not contain.
+    local pt="" pt_ctx
+    pt_ctx="$(printf '%s' "${PR_THREAD_CONTEXT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$pt_ctx" == "true" ]]; then
+      pt="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{PR_THREAD_GUIDANCE\}\}/$pt}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future

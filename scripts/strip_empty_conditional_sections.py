@@ -53,6 +53,13 @@ SECTION_HEADINGS = {
     # "## Standards Notes" all match. Over-matching is harmless here: with no
     # standards file resolved there is nothing for any standards heading to say.
     "standards": "standards",
+    # #578: the "# PR Discussion Context" corpus section is gated on
+    # pr-thread.md in corpus.sh, so a confabulated "## PR Discussion ..."/
+    # "## PR Thread ..." heading is filler when the corpus carried no
+    # discussion. Both phrasings are seen in model output; both share the
+    # PR_THREAD_PRESENT signal.
+    "pr_discussion": "pr discussion",
+    "pr_thread": "pr thread",
 }
 
 # Matched as a WHOLE heading, not as a prefix, and that difference is the point.
@@ -222,6 +229,9 @@ def _present_from_env(env) -> dict:
         # One corpus signal, two headings the model may pick between.
         "tool_harness_findings": flag("TOOL_HARNESS_PRESENT"),
         "tool_harness_results": flag("TOOL_HARNESS_PRESENT"),
+        # #578: the PR-thread corpus gate; one signal, two model headings.
+        "pr_discussion": flag("PR_THREAD_PRESENT"),
+        "pr_thread": flag("PR_THREAD_PRESENT"),
     }
 
 

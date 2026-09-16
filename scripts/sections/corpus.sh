@@ -77,6 +77,60 @@ PY
   fi
 }
 
+build_pr_thread_context() {
+  local artifacts="pr-thread.raw.json pr-thread.json pr-thread.md"
+  local artifact
+  for artifact in $artifacts; do
+    : > "$artifact"
+  done
+
+  if [[ "$PR_THREAD_CONTEXT" != "true" ]]; then
+    return 0
+  fi
+
+  # The platform seam provides the comment page (github backend = the gh
+  # REST call, forgejo backend = pr_reviewer/forgejo_backend.py); on a
+  # transient failure the raw page is left empty and the Python side
+  # produces empty artifacts — a fetch failure degrades to "no PR
+  # discussion context", never to a placeholder.
+  if ! platform_issue_comments "$REPO" "$PR_NUMBER" > pr-thread.raw.json 2>/dev/null; then
+    log "WARNING: PR comment fetch failed; continuing without PR discussion context"
+    return 0
+  fi
+
+  if ! PR_THREAD_MAX_COMMENTS="$PR_THREAD_MAX_COMMENTS" \
+       PR_THREAD_MAX_BODY_CHARS="$PR_THREAD_MAX_BODY_CHARS" \
+       PR_THREAD_MAX_JSON_BYTES="$PR_THREAD_MAX_JSON_BYTES" \
+       PR_THREAD_MAX_MARKDOWN_BYTES="$PR_THREAD_MAX_MARKDOWN_BYTES" \
+       PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from pr_reviewer.pr_thread_context import build_artifacts
+
+raw = Path("pr-thread.raw.json").read_text(encoding="utf-8", errors="replace")
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    data = []
+json_text, markdown_text = build_artifacts(
+    data,
+    repo=os.environ.get("REPO", ""),
+    pr_number=os.environ.get("PR_NUMBER", ""),
+    max_comments=int(os.environ.get("PR_THREAD_MAX_COMMENTS", "10")),
+    max_body_chars=int(os.environ.get("PR_THREAD_MAX_BODY_CHARS", "1500")),
+    max_json_bytes=int(os.environ.get("PR_THREAD_MAX_JSON_BYTES", "100000")),
+    max_markdown_bytes=int(os.environ.get("PR_THREAD_MAX_MARKDOWN_BYTES", "8000")),
+)
+Path("pr-thread.json").write_text(json_text + "\n", encoding="utf-8")
+Path("pr-thread.md").write_text(markdown_text, encoding="utf-8")
+PY
+  then
+    log "WARNING: PR-thread context generation failed; continuing without it"
+  fi
+}
+
 log "Building review corpus..."
 : > standards-context.md
 # standards-context.md is never empty — it carries an explicit "unavailable"
@@ -259,6 +313,13 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
         cat linked-issues.md
         echo
       fi
+      # Bounded snapshot of the top-level PR conversation (gated like the
+      # linked-issues section: file empty → no header the model can react to).
+      if [ -s pr-thread.md ]; then
+        echo "# PR Discussion Context"
+        cat pr-thread.md
+        echo
+      fi
       echo "# PR Files (truncated)"
       echo '```json'
       cat pr-files.truncated.json
@@ -342,6 +403,7 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
   } > review-corpus.md
 }
 
+build_pr_thread_context
 section_timer_start "corpus-building"
 log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
 
