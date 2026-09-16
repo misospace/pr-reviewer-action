@@ -309,6 +309,8 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `allowed_source_hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
 | `related_code_context` | Include deterministic related-code references, test candidates, and nearest manifests derived from changed-file anchors | No | `true` |
 | `related_code_max_bytes` | Maximum bytes of related-code context included in the review corpus; values below `64` are clamped to `64` so the truncation marker remains readable | No | `16000` |
+| `pr_thread_context` | Include bounded recent PR conversation comments (thread context) in the review corpus. The action's own managed comments are filtered out, bodies are secret-redacted and fence-safe, and at most the 50 most recent comments are kept | No | `true` |
+| `pr_thread_max_bytes` | Maximum UTF-8 bytes of PR-thread context in the review corpus; whole comments are dropped to fit, so a fence is never left open | No | `8000` |
 
 </details>
 

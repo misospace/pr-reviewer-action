@@ -76,6 +76,14 @@ check "platform_issue_get" \
 check "platform_issue_comments" \
   "$(run_seam github "" 'platform_issue_comments o/r 9')" \
   "gh api repos/o/r/issues/9/comments?per_page=100"
+GH_REVIEW_COMMENTS_LOG="$TMP/gh-review-comments.log"
+GH_REVIEW_COMMENTS_RESULT="$(run_seam github "" 'gh(){ printf "%s\\n" "$*" > "'"$GH_REVIEW_COMMENTS_LOG"'"; jq -cn '"'"'[{id:42,user:{login:"octocat"},created_at:"2026-01-02T00:00:00Z",updated_at:null,body:null}]'"'"'; }; platform_pr_review_comments owner/repo 42' | jq -c '.')"
+check "platform_pr_review_comments calls expected github api" \
+  "$(<"$GH_REVIEW_COMMENTS_LOG")" \
+  "api repos/owner/repo/issues/42/comments?per_page=100&sort=created&direction=desc"
+check "platform_pr_review_comments normalizes github comments" \
+  "$GH_REVIEW_COMMENTS_RESULT" \
+  '[{"id":42,"user":"octocat","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":""}]'
 check "platform_compare" \
   "$(run_seam github "" 'platform_compare o/r aaa...bbb')" \
   "gh api repos/o/r/compare/aaa...bbb"
@@ -184,6 +192,14 @@ check "forgejo pr_get --jq projects a nested field" "$RESULT" "deadbeef"
 # Documented divergence: Forgejo's compare omits .url, so jq -r yields "null".
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "{\"total_commits\":3}"; }; platform_compare o/r aaa...bbb --jq .url' "https://forgejo.example.com")"
 check "forgejo compare --jq on an absent field yields null" "$RESULT" "null"
+FORGEJO_REVIEW_COMMENTS_LOG="$TMP/forgejo-review-comments.log"
+FORGEJO_REVIEW_COMMENTS_RESULT="$(run_seam forgejo "" '_forgejo_py(){ printf "%s\\n" "$*" > "'"$FORGEJO_REVIEW_COMMENTS_LOG"'"; jq -cn '"'"'[range(0;101) | {id: ., user: "u", created_at: ("2026-01-01T00:" + (("000" + (.|tostring))[-3:]) + ":00Z"), updated_at: "", body: "b"}]'"'"'; }; platform_pr_review_comments owner/repo 42' "https://forgejo.example.com" | jq -c '{length: length, first: .[0].id, last: .[-1].id}')"
+check "platform_pr_review_comments dispatches to forgejo backend" \
+  "$(<"$FORGEJO_REVIEW_COMMENTS_LOG")" \
+  "list-comments owner/repo 42"
+check "platform_pr_review_comments sorts and caps forgejo comments" \
+  "$FORGEJO_REVIEW_COMMENTS_RESULT" \
+  '{"length":100,"first":100,"last":1}'
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_pr_reviews o/r 7' "https://forgejo.example.com")"
 check "forgejo pr reviews uses backend cli" "$RESULT" "forgejo list-pr-reviews o/r 7"
 RESULT="$(run_seam forgejo "" '_forgejo_py(){ echo "forgejo $*"; }; platform_review_create_json o/r 7 req.json' "https://forgejo.example.com")"

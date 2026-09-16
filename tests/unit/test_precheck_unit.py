@@ -639,6 +639,14 @@ class TestCollectConfigLines:
         assert "REPO_MAP_CONTEXT=true" in lines
         assert "REPO_MAP_MAX_BYTES=12000" in lines
 
+    def test_collects_pr_thread_context_vars(self, monkeypatch):
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("PR_THREAD_CONTEXT", "true")
+        monkeypatch.setenv("PR_THREAD_MAX_BYTES", "8000")
+        lines = _collect_config_lines()
+        assert "PR_THREAD_CONTEXT=true" in lines
+        assert "PR_THREAD_MAX_BYTES=8000" in lines
+
     def test_ignores_runner_platform_vars(self, monkeypatch):
         """Runner-preset vars sharing a provider prefix are not config."""
         _clear_config_env(monkeypatch)

@@ -83,6 +83,8 @@ TOOL_MIN_SUCCESSFUL_REQUESTS="${TOOL_MIN_SUCCESSFUL_REQUESTS:-0}"
 TOOL_ENABLE_FOR_FORKS="${TOOL_ENABLE_FOR_FORKS:-false}"
 REPO_MAP_CONTEXT="${REPO_MAP_CONTEXT:-true}"
 REPO_MAP_MAX_BYTES="${REPO_MAP_MAX_BYTES:-12000}"
+PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-true}"
+PR_THREAD_MAX_BYTES="${PR_THREAD_MAX_BYTES:-8000}"
 AI_REQUEST_TIMEOUT_SEC="${AI_REQUEST_TIMEOUT_SEC:-300}"
 AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"
@@ -322,6 +324,18 @@ elif [[ "$RELATED_CODE_MAX_BYTES" -lt "$RELATED_CODE_MIN_BYTES" ]]; then
   RELATED_CODE_MAX_BYTES="$RELATED_CODE_MIN_BYTES"
 fi
 
+case "$(printf '%s' "$PR_THREAD_CONTEXT" | tr '[:upper:]' '[:lower:]')" in
+  true|false) PR_THREAD_CONTEXT="$(printf '%s' "$PR_THREAD_CONTEXT" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    error "Invalid PR_THREAD_CONTEXT '$PR_THREAD_CONTEXT'; defaulting to true"
+    PR_THREAD_CONTEXT=true
+    ;;
+esac
+if [[ ! "$PR_THREAD_MAX_BYTES" =~ ^[0-9]+$ || "$PR_THREAD_MAX_BYTES" -lt 1 || "$PR_THREAD_MAX_BYTES" -gt 200000 ]]; then
+  error "Invalid PR_THREAD_MAX_BYTES '$PR_THREAD_MAX_BYTES'; defaulting to 8000"
+  PR_THREAD_MAX_BYTES=8000
+fi
+
 case "$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" in
   warn|fail|metadata_only) REQUIRED_CHECK_VALIDATION_MODE="$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" ;;
   *)
@@ -461,6 +475,14 @@ apply_system_prompt_fragments() {
       rc="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELATED_CODE_GUIDANCE\}\}/$rc}"
+    # Same treatment for the PR-thread guidance: substituted only when the
+    # PR-thread context section is actually gathered (PR_THREAD_CONTEXT=true).
+    local pt="" pt_ctx
+    pt_ctx="$(printf '%s' "${PR_THREAD_CONTEXT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$pt_ctx" == "true" ]]; then
+      pt="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{PR_THREAD_GUIDANCE\}\}/$pt}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future

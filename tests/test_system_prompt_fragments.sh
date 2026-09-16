@@ -40,9 +40,10 @@ BASE="$(<"$SCRIPT_DIR/default_system_prompt.txt")"
 assemble() {
   local kind="$1"
   local rc_ctx="${2:-true}"
+  local pt_ctx="${3:-true}"
   ( cd "$WORK"
     printf '{"pr_kind":"%s"}' "$kind" > classification.json
-    SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 RELATED_CODE_CONTEXT="$rc_ctx"
+    SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 RELATED_CODE_CONTEXT="$rc_ctx" PR_THREAD_CONTEXT="$pt_ctx"
     apply_system_prompt_fragments
     printf '%s' "$SYSTEM_PROMPT" )
 }
@@ -154,16 +155,28 @@ OUT_UNSET="$( cd "$WORK"
 check_not_contains "unset: related-code guidance dropped" "$OUT_UNSET" "Treat rows in Related Code Context as leads"
 check_not_contains "unset: no placeholder remains" "$OUT_UNSET" "{{"
 
+echo "=== PR-thread guidance is gated on PR_THREAD_CONTEXT ==="
+PT_CONTENT="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt")"
+OUT_PT_ON="$(assemble k8s_manifest true true)"
+check_contains "on: PR-thread guidance present" "$OUT_PT_ON" "$PT_CONTENT"
+check_not_contains "on: no placeholder remains" "$OUT_PT_ON" "{{PR_THREAD_GUIDANCE}}"
+
+OUT_PT_OFF="$(assemble k8s_manifest true false)"
+check_not_contains "off: PR-thread guidance dropped" "$OUT_PT_OFF" "$PT_CONTENT"
+check_not_contains "off: no PR-thread placeholder remains" "$OUT_PT_OFF" "{{PR_THREAD_GUIDANCE}}"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
 RN="$(<"$SCRIPT_DIR/prompt_fragments/release_notes.txt") "
 CN="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
 RC="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
+PT="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
 RECON="${BASE/\{\{RELATED_CODE_GUIDANCE\}\}/$RC}"
 RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
 RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
+RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"
 check_contains "reconstructed prompt has digest block" "$RECON" "digest-only image"

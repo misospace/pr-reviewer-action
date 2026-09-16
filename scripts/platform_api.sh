@@ -188,6 +188,20 @@ platform_issue_comments() {
   fi
 }
 
+platform_pr_review_comments() {
+  # $1=repo $2=pr_number → up to the 100 most recent PR conversation
+  # (top-level issue) comments, newest first, normalized to
+  # {id,user,created_at,updated_at,body}. PR conversation comments are issue
+  # comments in both data models; the Forgejo backend already normalizes to
+  # this shape, so both branches emit identical JSON for pr_thread.py (#578).
+  if _platform_is_forgejo; then
+    _forgejo_py list-comments "$1" "$2" | jq 'sort_by(.created_at // "") | reverse | .[0:100]'
+  else
+    gh api "repos/$1/issues/$2/comments?per_page=100&sort=created&direction=desc" |
+      jq '[.[] | {id, user: (.user.login // ""), created_at: (.created_at // ""), updated_at: (.updated_at // ""), body: (.body // "")}]'
+  fi
+}
+
 platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
   # object (or the --jq projection) on stdout

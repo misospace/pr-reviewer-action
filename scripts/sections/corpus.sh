@@ -77,6 +77,39 @@ PY
   fi
 }
 
+build_pr_thread_context() {
+  # Bounded recent PR conversation comments (#578). Scope-independent: the
+  # thread is about the whole PR, so this is built once and embedded in both
+  # full and incremental corpora.
+  local empty_artifact
+  local artifacts="pr-thread.json pr-thread.md"
+  for empty_artifact in $artifacts; do
+    : > "$empty_artifact"
+  done
+
+  if [[ "$PR_THREAD_CONTEXT" != "true" ]]; then
+    return 0
+  fi
+
+  if ! platform_pr_review_comments "$REPO" "$PR_NUMBER" > pr-thread.json; then
+    log "WARNING: PR-thread comment fetch failed; continuing without PR thread context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+    return 0
+  fi
+
+  if ! python3 -m pr_reviewer.pr_thread \
+      --comments pr-thread.json \
+      --output pr-thread.md \
+      --max-bytes "$PR_THREAD_MAX_BYTES"; then
+    log "WARNING: PR-thread context generation failed; continuing without PR thread context"
+    for empty_artifact in $artifacts; do
+      : > "$empty_artifact"
+    done
+  fi
+}
+
 log "Building review corpus..."
 : > standards-context.md
 # standards-context.md is never empty — it carries an explicit "unavailable"
@@ -204,6 +237,14 @@ build_review_corpus() {
 
     if [ -s repo-map.capped.md ]; then
       cat repo-map.capped.md
+      echo
+    fi
+
+    # pr-thread.md carries its own trust-framed "# PR Thread Context" header
+    # (pr_thread.py) and is empty when no comment survives filtering, so the
+    # gate hides the section entirely rather than publishing a placeholder.
+    if [ -s pr-thread.md ]; then
+      cat pr-thread.md
       echo
     fi
 
@@ -344,6 +385,9 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 
 section_timer_start "corpus-building"
 log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
+
+log "Building PR-thread context..."
+build_pr_thread_context
 
 if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
   fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
