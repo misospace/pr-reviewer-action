@@ -517,19 +517,113 @@ def test_repo_contents_allowlist_and_hostile_arguments_are_rejected(monkeypatch)
     mock_urlopen.assert_not_called()
 
 
-def test_repo_contents_explicit_allowlist_and_wildcard_are_authorized(monkeypatch):
-    monkeypatch.setenv("PLATFORM", "github")
-    monkeypatch.setenv("GH_TOKEN", "test-token")
-    response = type("Response", (), {
-        "read": lambda self: b'{"type":"file","encoding":"base64","content":"aGk="}',
+def _json_response(payload):
+    return type("Response", (), {
+        "read": lambda self: json.dumps(payload).encode(),
         "__enter__": lambda self: self,
         "__exit__": lambda self, *args: False,
     })()
-    with patch("pr_reviewer.platform.urllib.request.urlopen", return_value=response) as mock_urlopen:
+
+
+def test_repo_contents_explicit_allowlist_and_wildcard_are_authorized(monkeypatch):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    responses = [
+        _json_response([{"name": "README.md", "type": "file"}]),
+        _json_response({"type": "file", "encoding": "base64", "content": "aGk="}),
+        _json_response([{"name": "README.md", "type": "file"}]),
+        _json_response({"type": "file", "encoding": "base64", "content": "aGk="}),
+    ]
+    with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
         listed = repo_contents("listed/repo", "README.md", None, {"listed/repo"}, _REPO)
         wildcard = repo_contents("wild/repo", "README.md", None, {"*"}, _REPO)
     assert listed["content"] == wildcard["content"] == "hi"
+    assert mock_urlopen.call_count == 4
+
+
+def test_repo_contents_regular_file_preflight_uses_same_ref(monkeypatch):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    responses = [
+        _json_response([{"name": "config.yaml", "type": "file"}]),
+        _json_response({"type": "file", "encoding": "base64", "content": "aGk="}),
+    ]
+    with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
+        result = repo_contents(_REPO, "docs/config.yaml", "release", set(), _REPO)
+    assert result["content"] == "hi"
+    assert [call.args[0].full_url for call in mock_urlopen.call_args_list] == [
+        "https://api.github.com/repos/owner/repo/contents/docs?ref=release",
+        "https://api.github.com/repos/owner/repo/contents/docs/config.yaml?ref=release",
+    ]
+
+
+@pytest.mark.parametrize("target", [".env", "docs/real-config"])
+def test_repo_contents_file_preflight_rejects_symlink_targets(monkeypatch, target):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    direct_secret = _json_response({
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode(b"TOP-SECRET").decode(),
+    })
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen",
+        side_effect=[
+            _json_response([{"name": "config-link", "type": "symlink", "target": target}]),
+            direct_secret,
+        ],
+    ) as mock_urlopen:
+        result = repo_contents(_REPO, "docs/config-link", "main", set(), _REPO)
+    assert result == {"error": "Repository contents file preflight failed"}
+    assert mock_urlopen.call_count == 1
+    assert "config-link" not in mock_urlopen.call_args.args[0].full_url
+    assert "TOP-SECRET" not in str(result)
+
+
+@pytest.mark.parametrize("entry_type", ["submodule", "unexpected"])
+def test_repo_contents_file_preflight_rejects_non_regular_entries(monkeypatch, entry_type):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen",
+        return_value=_json_response([{"name": "config-link", "type": entry_type}]),
+    ) as mock_urlopen:
+        result = repo_contents(_REPO, "docs/config-link", "main", set(), _REPO)
+    assert result == {"error": "Repository contents file preflight failed"}
+    mock_urlopen.assert_called_once()
+
+
+def test_repo_contents_nested_directory_listing_remains_supported(monkeypatch):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen",
+        side_effect=[
+            _json_response([{"name": "config", "type": "dir"}]),
+            _json_response([{"path": "docs/config/a.yml", "type": "file"}]),
+        ],
+    ) as mock_urlopen:
+        result = repo_contents(_REPO, "docs/config", "main", set(), _REPO)
+    assert result == {
+        "repo": _REPO,
+        "path": "docs/config",
+        "type": "directory",
+        "entries": [{"path": "docs/config/a.yml", "type": "file"}],
+        "truncated": False,
+    }
     assert mock_urlopen.call_count == 2
+
+
+def test_repo_contents_file_preflight_rejects_missing_entry(monkeypatch):
+    monkeypatch.setenv("PLATFORM", "github")
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen",
+        return_value=_json_response([{"name": "other.txt", "type": "file"}]),
+    ) as mock_urlopen:
+        result = repo_contents(_REPO, "docs/config-link", "main", set(), _REPO)
+    assert result == {"error": "Repository contents file preflight failed"}
+    mock_urlopen.assert_called_once()
 
 
 def test_repo_contents_github_404_returns_error(monkeypatch):
@@ -542,7 +636,10 @@ def test_repo_contents_github_404_returns_error(monkeypatch):
         {},
         None,
     )
-    with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=error):
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen",
+        side_effect=[_json_response([{"name": "missing", "type": "file"}]), error],
+    ):
         result = repo_contents(_REPO, "missing", None, set(), _REPO)
     assert result == {"error": "GitHub contents API error: 404 Not Found"}
 
@@ -552,7 +649,7 @@ def test_repo_contents_github_timeout_returns_error(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "test-token")
     with patch(
         "pr_reviewer.platform.urllib.request.urlopen",
-        side_effect=TimeoutError("request timed out"),
+        side_effect=[_json_response([{"name": "README.md", "type": "file"}]), TimeoutError("request timed out")],
     ):
         result = repo_contents(_REPO, "README.md", None, set(), _REPO)
     assert result == {"error": "GitHub contents API timed out after 25s"}
@@ -566,12 +663,11 @@ def test_repo_contents_file_is_text_capped_and_binary_is_metadata(monkeypatch):
         {"type": "file", "encoding": "base64", "content": base64.b64encode(b"x\x00y").decode()},
     ]
     responses = []
-    for payload in payloads:
-        responses.append(type("Response", (), {
-            "read": lambda self, payload=payload: json.dumps(payload).encode(),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *args: False,
-        })())
+    for name, payload in zip(("README.md", "image.dat"), payloads):
+        responses.extend([
+            _json_response([{"name": name, "type": "file"}]),
+            _json_response(payload),
+        ])
     with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses):
         text_result = repo_contents(_REPO, "README.md", "main", set(), _REPO)
         binary_result = repo_contents(_REPO, "image.dat", "main", set(), _REPO)

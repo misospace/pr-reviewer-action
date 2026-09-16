@@ -434,27 +434,60 @@ def _validate_repo_contents(repo, path, ref, allowed_repos, current_repo):
     return {"repo": repo, "path": normalized_path, "ref": normalized_ref}
 
 
-def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
-    """Read GitHub repository contents after argument validation."""
-    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
-    if not token:
-        return {"error": "Missing GH_TOKEN"}
+def _repo_contents_github_url(repo, path, ref):
     encoded_repo = "/".join(urllib.parse.quote(part, safe="") for part in repo.split("/"))
     encoded_path = "/".join(urllib.parse.quote(part, safe="") for part in path.split("/")) if path else ""
     url = f"https://api.github.com/repos/{encoded_repo}/contents/{encoded_path}".rstrip("/")
     if ref is not None:
         url += "?" + urllib.parse.urlencode({"ref": ref})
+    return url
+
+
+def _repo_contents_github_get(url, token, request_timeout):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
+    """Read GitHub repository contents after argument validation."""
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return {"error": "Missing GH_TOKEN"}
+
+    if path:
+        parent_path, separator, basename = path.rpartition("/")
+        if not separator:
+            parent_path = ""
+        try:
+            parent_data = _repo_contents_github_get(
+                _repo_contents_github_url(repo, parent_path, ref), token, request_timeout
+            )
+        except Exception:
+            return {"error": "Repository contents file preflight failed"}
+        if not isinstance(parent_data, list):
+            return {"error": "Repository contents file preflight failed"}
+        matches = [
+            item
+            for item in parent_data
+            if isinstance(item, dict) and item.get("name") == basename
+        ]
+        if len(matches) != 1 or matches[0].get("type") not in ("file", "dir"):
+            return {"error": "Repository contents file preflight failed"}
+        expected_type = matches[0]["type"]
+    else:
+        expected_type = "dir"
+
+    url = _repo_contents_github_url(repo, path, ref)
     try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github.v3+json",
-                "User-Agent": USER_AGENT,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        data = _repo_contents_github_get(url, token, request_timeout)
     except urllib.error.HTTPError as exc:
         return {"error": f"GitHub contents API error: {exc.code} {exc.reason}"}
     except TimeoutError:
@@ -463,6 +496,8 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
         return {"error": str(exc)}
 
     if isinstance(data, list):
+        if expected_type != "dir":
+            return {"error": "Repository contents file preflight failed"}
         entries = sorted(
             [
                 {
@@ -484,8 +519,8 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
         }
     if not isinstance(data, dict):
         return {"error": "GitHub contents API returned an unexpected response"}
-    if data.get("type") != "file":
-        return {"error": f"Unsupported repository contents type: {data.get('type', 'unknown')}"}
+    if expected_type != "file" or data.get("type") != "file":
+        return {"error": "Repository contents file preflight failed"}
     encoding = data.get("encoding")
     raw_content = data.get("content", "")
     if encoding != "base64" or not isinstance(raw_content, str):
