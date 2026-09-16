@@ -15,6 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import pytest
 
 from run_evidence_providers import (  # noqa: E402
+    SARIF_MAX_INPUT_BYTES,
     normalize_severity,
     parse_findings,
     severity_rank,
@@ -319,8 +320,6 @@ def test_env_int_zero_clamped_to_1():
         assert env_int("TEST_ENV_INT", 5) == 1
 
 
-
-
 def _sarif_fixture(messages, *, level="error"):
     return {
         "version": "2.1.0",
@@ -497,6 +496,38 @@ class TestSarifEvidence:
         assert second["status"] == "ok"
         assert "capped" in second["stderr"].lower()
         assert "omitted" in second["stderr"].lower()
+
+    def test_sarif_secrets_redacted_in_json_and_markdown(self, tmp_path: Path):
+        """Credential-shaped content in a SARIF finding must be redacted by
+        the shared mask_secrets() logic before it reaches evidence-providers.json
+        — not only the final Markdown (#605 review)."""
+        secret = "ghp_" + "a" * 36  # matches the GitHub-PAT redaction pattern
+        report = tmp_path / "leaky.sarif"
+        report.write_text(json.dumps(_sarif_fixture([f"leaked token {secret}"])))
+        result = _run_sarif(tmp_path, "leaky.sarif")
+        assert result.returncode == 0
+        json_text = (tmp_path / "evidence-providers.json").read_text(encoding="utf-8")
+        md_text = (tmp_path / "evidence-providers.md").read_text(encoding="utf-8")
+        assert secret not in json_text
+        assert secret not in md_text
+        assert "[REDACTED]" in json_text
+        assert "[REDACTED]" in md_text
+
+    def test_sarif_oversized_input_rejected_via_bounded_read(self, tmp_path: Path):
+        """Oversized SARIF must be rejected after reading at most
+        MAX_INPUT_BYTES + 1 bytes (#574 contract), never by slurping the
+        whole file — proven here with a sparse file far larger than memory
+        budgets would want to hold."""
+        big = tmp_path / "huge.sarif"
+        with big.open("wb") as fh:
+            fh.seek(SARIF_MAX_INPUT_BYTES + 1)
+            fh.write(b"0")
+        result = _run_sarif(tmp_path, "huge.sarif")
+        entry = _load_json_output(tmp_path)["providers"][0]
+        assert result.returncode == 0
+        assert entry["status"] == "error"
+        assert "exceeds" in entry["stderr"]
+        assert "byte limit" in entry["stderr"]
 
 
 # ── Integration tests: no providers configured ─────────────────────

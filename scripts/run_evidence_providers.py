@@ -310,7 +310,7 @@ def _sarif_provider(
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
-        "source": path_text,
+        "source": mask_secrets(path_text),
         "output_format": "sarif-2.1.0",
     }
     path = _workspace_path(path_text, workspace_root)
@@ -320,37 +320,41 @@ def _sarif_provider(
         return entry
     if not path.is_file():
         entry["provider_severity"] = "major"
-        entry["stderr"] = f"SARIF file not found or not a regular file: {path_text}"
+        entry["stderr"] = mask_secrets(f"SARIF file not found or not a regular file: {path_text}")
         return entry
 
+    # Bounded read (#574 contract): never load more than the byte limit into
+    # memory — read limit+1 bytes and reject when the extra byte shows up, so
+    # a multi-gigabyte file cannot be slurped before the size check.
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as handle:
+            raw = handle.read(SARIF_MAX_INPUT_BYTES + 1)
         if len(raw) > SARIF_MAX_INPUT_BYTES:
             raise ValueError(f"SARIF input exceeds {SARIF_MAX_INPUT_BYTES} byte limit")
         payload = json.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         entry["provider_severity"] = "major"
-        entry["stderr"] = f"Unable to parse SARIF file {path_text}: {exc}"
+        entry["stderr"] = mask_secrets(f"Unable to parse SARIF file {path_text}: {exc}")
         return entry
 
     normalized = normalize_sarif(payload, max_findings=max_findings)
     entry["findings"] = [
         {
             "severity": item["severity"],
-            "message": _sarif_finding_message(item),
-            "source": _sarif_finding_source(item, path_text),
-            "tool_name": item["tool_name"],
-            "tool_version": item["tool_version"],
-            "rule_id": item["rule_id"],
-            "title": item["title"],
-            "file": item["file"],
+            "message": mask_secrets(_sarif_finding_message(item)),
+            "source": mask_secrets(_sarif_finding_source(item, path_text)),
+            "tool_name": mask_secrets(item["tool_name"]),
+            "tool_version": mask_secrets(item["tool_version"]),
+            "rule_id": mask_secrets(item["rule_id"]),
+            "title": mask_secrets(item["title"]),
+            "file": mask_secrets(item["file"]),
             "line": item["line"],
-            "help_uri": item["help_uri"],
+            "help_uri": mask_secrets(item["help_uri"]),
         }
         for item in normalized["findings"]
     ]
     if normalized["errors"]:
-        entry["stderr"] = "; ".join(normalized["errors"])
+        entry["stderr"] = mask_secrets("; ".join(normalized["errors"]))
     if normalized.get("truncated"):
         # Covers both a per-file finding cap and an exhausted collective cap
         # (max_findings=0), so an empty-looking entry is distinguishable
@@ -499,6 +503,7 @@ def main() -> int:
         )
         summary["providers"].append(entry)
         remaining_sarif_findings -= len(entry["findings"])
+    summary["provider_count"] = len(summary["providers"])
 
     # Markdown embeds are head+tail capped, per stream and in aggregate, so
     # one chatty provider cannot crowd everything else out of the corpus.
