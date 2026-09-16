@@ -1,5 +1,35 @@
 # Changelog
 
+## [2.4.0](https://github.com/misospace/pr-reviewer-action/compare/v2.3.3...v2.4.0) (2026-09-16)
+
+
+### Features
+
+* **change-anchors:** extract deterministic change anchors from PR diffs ([#582](https://github.com/misospace/pr-reviewer-action/issues/582)) ([fc5f0d4](https://github.com/misospace/pr-reviewer-action/commit/fc5f0d483d1e7c6d21301e63278c22d2790ecb0a))
+* **context:** add bounded PR thread context ([#606](https://github.com/misospace/pr-reviewer-action/issues/606)) ([e8cfa01](https://github.com/misospace/pr-reviewer-action/commit/e8cfa0103831821b3e9802926000cbc54f3c30aa))
+* **context:** add related code scanner ([#600](https://github.com/misospace/pr-reviewer-action/issues/600)) ([4ce23b8](https://github.com/misospace/pr-reviewer-action/commit/4ce23b8ea71f5e6f9b2653c46f8998e429b0269f))
+* **context:** add repository map context ([#599](https://github.com/misospace/pr-reviewer-action/issues/599)) ([219c6fb](https://github.com/misospace/pr-reviewer-action/commit/219c6fb20770fddeeb5241d80ff1e71fc64bd9dd))
+* **context:** wire related code into reviews ([#601](https://github.com/misospace/pr-reviewer-action/issues/601)) ([f635ee5](https://github.com/misospace/pr-reviewer-action/commit/f635ee57996614bf79eb64b6cfbcbcede23d410f))
+* **evidence:** normalize SARIF findings ([#602](https://github.com/misospace/pr-reviewer-action/issues/602)) ([51e31af](https://github.com/misospace/pr-reviewer-action/commit/51e31af7ad1693008917f17939d55c6ad96b0927))
+* **evidence:** wire local SARIF files into the existing evidence pipeline ([#605](https://github.com/misospace/pr-reviewer-action/issues/605)) ([a0651d2](https://github.com/misospace/pr-reviewer-action/commit/a0651d27313ecbd3fa188f28afe0b5185ab0e8d4))
+* **git_grep:** add path scoping and explicit result limits ([#596](https://github.com/misospace/pr-reviewer-action/issues/596)) ([baa075b](https://github.com/misospace/pr-reviewer-action/commit/baa075b7a8b3b50d2fb437a12eec239fdedb44c3))
+* **publish:** add upstream_link_mode toggle for togithub.com links ([#562](https://github.com/misospace/pr-reviewer-action/issues/562)) ([5e6214a](https://github.com/misospace/pr-reviewer-action/commit/5e6214a5f1ff33d567c71a921bdd2237f903f781)), closes [#561](https://github.com/misospace/pr-reviewer-action/issues/561)
+* **repo-map:** add deterministic bounded repository-map builder ([5764321](https://github.com/misospace/pr-reviewer-action/commit/57643211335849d2384c3482da20a38eb86fea4b))
+* **tooling:** add bounded find_files tool for filename/path discovery ([#593](https://github.com/misospace/pr-reviewer-action/issues/593)) ([73692b1](https://github.com/misospace/pr-reviewer-action/commit/73692b17f65a237a4c0ff1e808f7d9947a9cdb33))
+* **tools:** add bounded list_tree tool for repository discovery ([#566](https://github.com/misospace/pr-reviewer-action/issues/566)) ([9ce0066](https://github.com/misospace/pr-reviewer-action/commit/9ce006684d46e32a7e3a367e3939a2f2abeebca9))
+* **tools:** add repo contents reader ([#604](https://github.com/misospace/pr-reviewer-action/issues/604)) ([5de3d65](https://github.com/misospace/pr-reviewer-action/commit/5de3d65647418b45ff231c8f4ac69c8a44c1a9cf))
+
+
+### Bug Fixes
+
+* **precheck:** fail closed when the [@ai-reviewer](https://github.com/ai-reviewer) dismiss permission check can't run ([#597](https://github.com/misospace/pr-reviewer-action/issues/597)) ([15007ab](https://github.com/misospace/pr-reviewer-action/commit/15007ab1304ee9741dfe50872f7a1b19180359a4))
+* **repo-map:** address PR review on three artifact-contract issues ([f7cae56](https://github.com/misospace/pr-reviewer-action/commit/f7cae56af692ef66b22b2c37d99f725ed0daec49)), closes [#569](https://github.com/misospace/pr-reviewer-action/issues/569)
+
+
+### Chores
+
+* **dogfood:** raise native-loop budget to 4 rounds / 8 requests / 600s ([#594](https://github.com/misospace/pr-reviewer-action/issues/594)) ([56546a1](https://github.com/misospace/pr-reviewer-action/commit/56546a124079064f04940ac4f65f8372fa6871ec)), closes [#565](https://github.com/misospace/pr-reviewer-action/issues/565)
+
 ## [2.3.3](https://github.com/misospace/pr-reviewer-action/compare/v2.3.2...v2.3.3) (2026-09-08)
 
 
