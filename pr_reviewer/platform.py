@@ -407,6 +407,7 @@ REPO_CONTENTS_MAX_ENTRIES = 500
 REPO_CONTENTS_MAX_BYTES = 12_000
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REPO_CONTENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._~!$'()*+,;=@%/-]+$")
+_REPO_CONTENTS_BLOB_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 def _validate_repo_contents(repo, path, ref, allowed_repos, current_repo):
     """Validate model-selected repository contents arguments."""
@@ -443,6 +444,11 @@ def _repo_contents_github_url(repo, path, ref):
     return url
 
 
+def _repo_contents_github_blob_url(repo, sha):
+    encoded_repo = "/".join(urllib.parse.quote(part, safe="") for part in repo.split("/"))
+    return f"https://api.github.com/repos/{encoded_repo}/git/blobs/{sha}"
+
+
 def _repo_contents_github_get(url, token, request_timeout):
     req = urllib.request.Request(
         url,
@@ -462,6 +468,8 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
     if not token:
         return {"error": "Missing GH_TOKEN"}
 
+    expected_type = "dir"
+    blob_sha = None
     if path:
         parent_path, separator, basename = path.rpartition("/")
         if not separator:
@@ -479,13 +487,22 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
             for item in parent_data
             if isinstance(item, dict) and item.get("name") == basename
         ]
-        if len(matches) != 1 or matches[0].get("type") not in ("file", "dir"):
+        if len(matches) != 1:
             return {"error": "Repository contents file preflight failed"}
-        expected_type = matches[0]["type"]
-    else:
-        expected_type = "dir"
+        entry = matches[0]
+        expected_type = entry.get("type")
+        if expected_type == "file":
+            blob_sha = entry.get("sha")
+            if not isinstance(blob_sha, str) or not _REPO_CONTENTS_BLOB_SHA_RE.fullmatch(blob_sha):
+                return {"error": "Repository contents file preflight failed"}
+        elif expected_type != "dir":
+            return {"error": "Repository contents file preflight failed"}
 
-    url = _repo_contents_github_url(repo, path, ref)
+    url = (
+        _repo_contents_github_blob_url(repo, blob_sha)
+        if expected_type == "file"
+        else _repo_contents_github_url(repo, path, ref)
+    )
     try:
         data = _repo_contents_github_get(url, token, request_timeout)
     except urllib.error.HTTPError as exc:
@@ -519,7 +536,7 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
         }
     if not isinstance(data, dict):
         return {"error": "GitHub contents API returned an unexpected response"}
-    if expected_type != "file" or data.get("type") != "file":
+    if expected_type != "file" or data.get("encoding") != "base64":
         return {"error": "Repository contents file preflight failed"}
     encoding = data.get("encoding")
     raw_content = data.get("content", "")
