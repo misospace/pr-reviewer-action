@@ -320,7 +320,7 @@ def _sarif_provider(
         return entry
     if not path.is_file():
         entry["provider_severity"] = "major"
-        entry["stderr"] = f"SARIF file not found: {path_text}"
+        entry["stderr"] = f"SARIF file not found or not a regular file: {path_text}"
         return entry
 
     try:
@@ -351,6 +351,15 @@ def _sarif_provider(
     ]
     if normalized["errors"]:
         entry["stderr"] = "; ".join(normalized["errors"])
+    if normalized.get("truncated"):
+        # Covers both a per-file finding cap and an exhausted collective cap
+        # (max_findings=0), so an empty-looking entry is distinguishable
+        # from a genuinely clean SARIF file.
+        note = (
+            f"SARIF findings capped: {len(entry['findings'])} included, "
+            f"{normalized['truncation']['omitted_findings']} omitted"
+        )
+        entry["stderr"] = f"{entry['stderr']}; {note}" if entry["stderr"] else note
     entry["status"] = "error" if normalized["errors"] else "ok"
     entry["provider_severity"] = max(
         (finding["severity"] for finding in entry["findings"]),
@@ -367,9 +376,13 @@ def _sarif_finding_message(finding: dict[str, Any]) -> str:
         if finding.get("line") is not None:
             location += f":{finding['line']}"
         location += ")"
-    rule = f" [{finding['rule_id']}]" if finding.get("rule_id") else ""
-    title = f"{finding['title']}: " if finding.get("title") else ""
-    return f"{title}{finding['message']}{rule}{location}"
+    rule_id = finding.get("rule_id") or ""
+    rule = f" [{rule_id}]" if rule_id else ""
+    # normalize_sarif falls back title to the ruleId when a rule carries no
+    # metadata; prefixing that alongside the "[ruleId]" suffix would duplicate it.
+    title = finding.get("title") or ""
+    title_prefix = f"{title}: " if title and title != rule_id else ""
+    return f"{title_prefix}{finding['message']}{rule}{location}"
 
 
 def _sarif_finding_source(finding: dict[str, Any], path_text: str) -> str:
@@ -397,7 +410,17 @@ def main() -> int:
     sarif_paths = _split_sarif_paths(os.getenv("SARIF_FILES", ""))
     default_timeout = env_int("EVIDENCE_PROVIDER_TIMEOUT_SEC", 30)
     default_max_output = env_int("EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES", 20000)
-    sarif_max_findings = env_int("SARIF_MAX_FINDINGS", SARIF_DEFAULT_MAX_FINDINGS)
+    raw_sarif_max_findings = os.getenv("SARIF_MAX_FINDINGS")
+    try:
+        sarif_max_findings = (
+            int(raw_sarif_max_findings)
+            if raw_sarif_max_findings is not None
+            else SARIF_DEFAULT_MAX_FINDINGS
+        )
+        if sarif_max_findings < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        sarif_max_findings = SARIF_DEFAULT_MAX_FINDINGS
     workspace_root = Path(os.getenv("GITHUB_WORKSPACE") or os.getcwd()).resolve()
 
     summary = {
@@ -415,37 +438,37 @@ def main() -> int:
         write_outputs(summary, "")
         return 0
 
-    config_path = Path(config_path_raw)
-    if not config_path.exists():
-        summary["error"] = f"Config file not found: {config_path_raw}"
-        write_outputs(
-            summary, f"Evidence providers config was not found: `{config_path_raw}`"
-        )
-        return 0
+    providers: list[object] = []
+    config_error = ""
+    if config_path_raw:
+        config_path = Path(config_path_raw)
+        if not config_path.exists():
+            config_error = f"Config file not found: {config_path_raw}"
+        else:
+            try:
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                config_error = f"Invalid JSON config: {exc}"
+            else:
+                if isinstance(payload, dict):
+                    providers = payload.get("providers", [])
+                elif isinstance(payload, list):
+                    providers = payload
+                if not isinstance(providers, list):
+                    providers = []
 
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        summary["error"] = f"Invalid JSON config: {exc}"
-        write_outputs(
-            summary, f"Evidence providers config could not be parsed: `{exc}`"
-        )
-        return 0
-
-    if isinstance(payload, dict):
-        providers = payload.get("providers", [])
-    elif isinstance(payload, list):
-        providers = payload
-    else:
-        providers = []
-
-    if not isinstance(providers, list):
-        providers = []
-
+    if config_error:
+        summary["error"] = config_error
     summary["configured"] = True
     summary["provider_count"] = len(providers)
 
     md_lines = ["Evidence providers executed before final review synthesis.", ""]
+    if config_error:
+        if config_error.startswith("Config file not found:"):
+            md_lines.append(f"Evidence providers config was not found: `{config_path_raw}`")
+        else:
+            md_lines.append(f"Evidence providers config could not be parsed: `{config_error.removeprefix('Invalid JSON config: ')}`")
+        md_lines.append("")
 
     # Providers are independent commands, so run them concurrently. Results
     # keep config order regardless of completion order. Set
@@ -469,6 +492,14 @@ def main() -> int:
             summary["has_blocker"] = True
         summary["providers"].append(entry)
 
+    remaining_sarif_findings = sarif_max_findings
+    for index, path_text in enumerate(sarif_paths, start=1):
+        entry = _sarif_provider(
+            index, path_text, workspace_root, remaining_sarif_findings
+        )
+        summary["providers"].append(entry)
+        remaining_sarif_findings -= len(entry["findings"])
+
     # Markdown embeds are head+tail capped, per stream and in aggregate, so
     # one chatty provider cannot crowd everything else out of the corpus.
     # evidence-providers.json keeps the full (per-provider capped) output.
@@ -491,7 +522,7 @@ def main() -> int:
         md_lines.append(block)
         md_lines.append("```")
 
-    if not summary["providers"]:
+    if not summary["providers"] and not config_error:
         md_lines.append("No providers were configured in the config file.")
     else:
         for provider in summary["providers"]:
@@ -499,7 +530,10 @@ def main() -> int:
             md_lines.append(
                 f"- status: {provider['status']}; severity: {provider['provider_severity']}; exit_code: {provider['exit_code']}; duration_sec: {provider['duration_sec']}"
             )
-            md_lines.append(f"- command: `{provider['command']}`")
+            if provider.get("kind") == "sarif":
+                md_lines.append(f"- SARIF source: `{provider['source']}`")
+            else:
+                md_lines.append(f"- command: `{provider['command']}`")
 
             findings = provider.get("findings", [])
             if findings:
@@ -523,7 +557,6 @@ def main() -> int:
     # Join md_lines into the markdown string, then redact it.
     markdown = "\n".join(md_lines)
     markdown = mask_secrets(markdown)
-
     write_outputs(summary, markdown)
     return 0
 

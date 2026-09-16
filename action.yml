@@ -373,6 +373,14 @@ inputs:
     description: Optional JSON file in the reviewed repository that defines evidence providers to run before review
     required: false
     default: ""
+  sarif_files:
+    description: Comma- or newline-delimited workspace-relative SARIF 2.1.0 files to include as evidence
+    required: false
+    default: ""
+  sarif_max_findings:
+    description: Global maximum number of findings combined across all supplied SARIF files
+    required: false
+    default: "200"
   evidence_provider_timeout_sec:
     description: Default timeout in seconds for each evidence provider command
     required: false
@@ -788,6 +796,8 @@ runs:
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
         LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
+        SARIF_FILES: ${{ inputs.sarif_files }}
+        SARIF_MAX_FINDINGS: ${{ inputs.sarif_max_findings }}
         EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
         EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
         EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
@@ -915,6 +925,8 @@ runs:
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
+        SARIF_FILES: ${{ inputs.sarif_files }}
+        SARIF_MAX_FINDINGS: ${{ inputs.sarif_max_findings }}
         EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
         EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
         EVIDENCE_PROVIDER_PARALLELISM: ${{ inputs.evidence_provider_parallelism }}

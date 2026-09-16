@@ -759,6 +759,19 @@ class TestComputeConfigHashNoArgs:
         h2 = compute_config_hash()
         assert h1 != h2
 
+    def test_sarif_settings_change_config_hash_and_collection(self, monkeypatch):
+        """Changing either SARIF setting must force a fresh review."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("SARIF_FILES", "reports/one.sarif")
+        monkeypatch.setenv("SARIF_MAX_FINDINGS", "200")
+        lines = _collect_config_lines()
+        assert "SARIF_FILES=reports/one.sarif" in lines
+        assert "SARIF_MAX_FINDINGS=200" in lines
+        h1 = compute_config_hash()
+        monkeypatch.setenv("SARIF_MAX_FINDINGS", "50")
+        h2 = compute_config_hash()
+        assert h1 != h2
+
     def test_different_env_produces_different_hash(self, monkeypatch):
         """Different env vars produce different hashes."""
         monkeypatch.setenv("AI_MODEL", "gpt-4")

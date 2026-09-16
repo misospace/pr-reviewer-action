@@ -340,6 +340,8 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `evidence_providers_file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
+| `sarif_files` | Comma- or newline-delimited workspace-relative SARIF 2.1.0 files to include as evidence | No | `""` |
+| `sarif_max_findings` | Global maximum number of findings combined across all supplied SARIF files | No | `200` |
 | `evidence_provider_timeout_sec` | Default timeout in seconds for each evidence provider command | No | `30` |
 | `evidence_provider_max_output_bytes` | Max stdout or stderr bytes captured per provider command | No | `20000` |
 | `evidence_provider_parallelism` | Max evidence provider commands run concurrently (set `1` to force serial execution) | No | `4` |
@@ -565,6 +567,8 @@ Every forced review re-establishes a full baseline by reviewing the complete PR 
     ai_base_url: http://llama-server.internal:8080/v1
     ai_model: qwen3-32b
     evidence_providers_file: .github/pr-review-providers.json
+    sarif_files: reports/codeql.sarif, reports/semgrep.sarif
+    sarif_max_findings: "200"
     evidence_provider_timeout_sec: "30"
     evidence_provider_max_output_bytes: "20000"
     evidence_blocker_enforcement: "true"
@@ -585,7 +589,7 @@ Example provider config (`.github/pr-review-providers.json`):
 }
 ```
 
-Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence_blocker_enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict.
+Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence_blocker_enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict. SARIF files are parsed as data in the requested order, never executed, and their combined findings are capped globally by `sarif_max_findings`; each path must be workspace-relative and remain inside the checked-out workspace. SARIF findings are evidence for the review but do not activate blocker enforcement automatically.
 
 #### Evidence provider execution model
 

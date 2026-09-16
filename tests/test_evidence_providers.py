@@ -319,6 +319,186 @@ def test_env_int_zero_clamped_to_1():
         assert env_int("TEST_ENV_INT", 5) == 1
 
 
+
+
+def _sarif_fixture(messages, *, level="error"):
+    return {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"name": "fixture-scanner"}},
+                "results": [
+                    {
+                        "ruleId": f"R{i}",
+                        "level": level,
+                        "message": {"text": message},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": f"src/{i}.py"},
+                                    "region": {"startLine": i + 1},
+                                }
+                            }
+                        ],
+                    }
+                    for i, message in enumerate(messages)
+                ],
+            }
+        ],
+    }
+
+
+def _run_sarif(tmp_path: Path, sarif_files, *, max_findings=None, config_path=None):
+    env = os.environ.copy()
+    env.pop("EVIDENCE_PROVIDERS_FILE", None)
+    env["GITHUB_WORKSPACE"] = str(tmp_path)
+    env["SARIF_FILES"] = sarif_files
+    if max_findings is not None:
+        env["SARIF_MAX_FINDINGS"] = str(max_findings)
+    if config_path is not None:
+        env["EVIDENCE_PROVIDERS_FILE"] = str(config_path)
+    return subprocess.run(
+        [sys.executable, str(EVIDENCE_SCRIPT)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+class TestSarifEvidence:
+    def test_disabled_including_sarif_env_unset(self, tmp_path: Path):
+        env = os.environ.copy()
+        env.pop("EVIDENCE_PROVIDERS_FILE", None)
+        env.pop("SARIF_FILES", None)
+        env["GITHUB_WORKSPACE"] = str(tmp_path)
+        result = subprocess.run(
+            [sys.executable, str(EVIDENCE_SCRIPT)],
+            cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30
+        )
+        assert result.returncode == 0
+        assert _load_json_output(tmp_path)["configured"] is False
+        assert (tmp_path / "evidence-providers.md").read_text() == ""
+
+    def test_valid_single_sarif(self, tmp_path: Path):
+        report = tmp_path / "reports" / "one.sarif"
+        report.parent.mkdir()
+        report.write_text(json.dumps(_sarif_fixture(["one finding"])))
+        result = _run_sarif(tmp_path, "reports/one.sarif")
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        assert [entry["id"] for entry in data["providers"]] == ["sarif-1"]
+        assert data["providers"][0]["findings"][0]["message"].startswith("one finding")
+        assert "SARIF source" in (tmp_path / "evidence-providers.md").read_text()
+
+    def test_comma_and_newline_multiple_sarif_after_commands(self, tmp_path: Path):
+        first = tmp_path / "first.sarif"
+        second = tmp_path / "second.sarif"
+        first.write_text(json.dumps(_sarif_fixture(["first"])))
+        second.write_text(json.dumps(_sarif_fixture(["second"])))
+        config = tmp_path / "providers.json"
+        config.write_text(json.dumps({"providers": [{"id": "command", "command": "echo command"}]}))
+        result = _run_sarif(tmp_path, "first.sarif,\nsecond.sarif", config_path=config)
+        assert result.returncode == 0
+        data = _load_json_output(tmp_path)
+        assert [entry["id"] for entry in data["providers"]] == ["command", "sarif-1", "sarif-2"]
+
+    @pytest.mark.parametrize("sarif_files, expected", [("missing.sarif", "not found"), ("bad.sarif", "parse")])
+    def test_malformed_or_missing_sarif_is_an_error(self, tmp_path: Path, sarif_files, expected):
+        path = tmp_path / sarif_files
+        if sarif_files == "bad.sarif":
+            path.write_text("not json")
+        result = _run_sarif(tmp_path, sarif_files)
+        assert result.returncode == 0
+        entry = _load_json_output(tmp_path)["providers"][0]
+        assert entry["status"] == "error"
+        assert expected in entry["stderr"].lower()
+
+    def test_sarif_config_error_is_preserved(self, tmp_path: Path):
+        report = tmp_path / "report.sarif"
+        report.write_text(json.dumps(_sarif_fixture(["kept"])))
+        config = tmp_path / "missing-providers.json"
+        result = _run_sarif(tmp_path, "report.sarif", config_path=config)
+        data = _load_json_output(tmp_path)
+        assert result.returncode == 0
+        assert "Config file not found" in data["error"]
+        assert [entry["id"] for entry in data["providers"]] == ["sarif-1"]
+        assert "not found" in (tmp_path / "evidence-providers.md").read_text()
+
+    @pytest.mark.parametrize("path_text", ["../outside.sarif", "/tmp/outside.sarif"])
+    def test_sarif_rejects_traversal_and_absolute_paths(self, tmp_path: Path, path_text):
+        result = _run_sarif(tmp_path, path_text)
+        entry = _load_json_output(tmp_path)["providers"][0]
+        assert result.returncode == 0
+        assert entry["status"] == "error"
+        assert "workspace-relative" in entry["stderr"]
+
+    def test_sarif_rejects_symlink_escape(self, tmp_path: Path):
+        outside = tmp_path.parent / "outside.sarif"
+        outside.write_text(json.dumps(_sarif_fixture(["outside"])))
+        link = tmp_path / "linked.sarif"
+        link.symlink_to(outside)
+        result = _run_sarif(tmp_path, "linked.sarif")
+        entry = _load_json_output(tmp_path)["providers"][0]
+        assert result.returncode == 0
+        assert entry["status"] == "error"
+        assert "workspace-relative" in entry["stderr"]
+
+    def test_sarif_global_cap_is_collective_and_later_entries_remain(self, tmp_path: Path):
+        for name in ("first.sarif", "second.sarif"):
+            (tmp_path / name).write_text(json.dumps(_sarif_fixture([f"{name}-a", f"{name}-b"])))
+        result = _run_sarif(tmp_path, "first.sarif,second.sarif", max_findings=3)
+        data = _load_json_output(tmp_path)
+        assert result.returncode == 0
+        assert [len(entry["findings"]) for entry in data["providers"]] == [2, 1]
+        assert data["providers"][1]["status"] == "ok"
+
+    def test_sarif_severity_never_sets_blocker(self, tmp_path: Path):
+        report = tmp_path / "blocker-looking.sarif"
+        report.write_text(json.dumps(_sarif_fixture(["major finding"], level="error")))
+        result = _run_sarif(tmp_path, "blocker-looking.sarif")
+        data = _load_json_output(tmp_path)
+        assert result.returncode == 0
+        assert data["has_blocker"] is False
+        assert data["providers"][0]["provider_severity"] == "major"
+
+    def test_sarif_finding_message_does_not_duplicate_rule_id_title(self, tmp_path: Path):
+        """Rule metadata with only an id (no shortDescription/name) makes
+        normalize_sarif fall back title to the ruleId; the rendered message
+        must not carry it twice ("R1: msg [R1]")."""
+        sarif = _sarif_fixture(["msg"])
+        sarif["runs"][0]["tool"]["driver"]["rules"] = [{"id": "R0"}]
+        (tmp_path / "r.sarif").write_text(json.dumps(sarif))
+        result = _run_sarif(tmp_path, "r.sarif")
+        assert result.returncode == 0
+        finding = _load_json_output(tmp_path)["providers"][0]["findings"][0]
+        assert finding["message"] == "msg [R0] (src/0.py:1)"
+
+    def test_sarif_directory_path_is_an_error(self, tmp_path: Path):
+        (tmp_path / "dir.sarif").mkdir()
+        result = _run_sarif(tmp_path, "dir.sarif")
+        entry = _load_json_output(tmp_path)["providers"][0]
+        assert result.returncode == 0
+        assert entry["status"] == "error"
+        assert "not a regular file" in entry["stderr"]
+
+    def test_sarif_cap_exhaustion_is_signaled(self, tmp_path: Path):
+        """Once the collective cap is exhausted, later entries must not look
+        like clean empty files — stderr carries the cap note."""
+        for name in ("first.sarif", "second.sarif"):
+            (tmp_path / name).write_text(json.dumps(_sarif_fixture([f"{name}-a"])))
+        result = _run_sarif(tmp_path, "first.sarif,second.sarif", max_findings=1)
+        data = _load_json_output(tmp_path)
+        assert result.returncode == 0
+        first, second = data["providers"]
+        assert len(first["findings"]) == 1
+        assert len(second["findings"]) == 0
+        assert second["status"] == "ok"
+        assert "capped" in second["stderr"].lower()
+        assert "omitted" in second["stderr"].lower()
+
+
 # ── Integration tests: no providers configured ─────────────────────
 
 class TestNoConfig:
@@ -524,6 +704,7 @@ class TestMarkdownOutput:
         model reacting to a "not configured" placeholder (#399/#409)."""
         env = os.environ.copy()
         env.pop("EVIDENCE_PROVIDERS_FILE", None)
+        env.pop("SARIF_FILES", None)
         result = subprocess.run(
             [sys.executable, str(EVIDENCE_SCRIPT)],
             cwd=str(tmp_path),
