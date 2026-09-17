@@ -19,16 +19,16 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from redact import mask_secrets  # noqa: E402
+from redact import mask_secrets
 
 # Transport + read-only executors were split into dedicated modules (#304).
 # Re-imported here so call sites and tests that reference these names via
 # run_tool_harness keep working unchanged.
-from pr_reviewer.transport import (  # noqa: E402
+from pr_reviewer.transport import (
     run_chat_request,
     safe_run,
 )
-from pr_reviewer.tool_executors import (  # noqa: E402
+from pr_reviewer.tool_executors import (
     ALLOWED_COMMANDS,
     FIND_FILES_DEFAULT_MAX,
     FIND_FILES_MAX_CAP,
@@ -52,7 +52,7 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     web_fetch,
     web_search,
 )
-from pr_reviewer.repo_map import (  # noqa: E402
+from pr_reviewer.repo_map import (
     reframe_for_corpus,
     render_repo_map_markdown,
     trust_framing_overhead,
@@ -707,24 +707,24 @@ def run_native_loop(
     repo_root = str(_SCRIPTS_DIR.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    from pr_reviewer.conversation import (  # noqa: PLC0415
+    from pr_reviewer.conversation import (
         TOOL_SCHEMAS,
         VERDICT_DEDUP_NOTICE,
         WEB_SEARCH_SCHEMA,
         Conversation,
         dedupe_verdict_corpus,
     )
-    from pr_reviewer.tool_loop import (  # noqa: PLC0415
+    from pr_reviewer.tool_loop import (
         adaptive_loop_budgets,
         drive_tool_loop,
         extract_tool_calls,
     )
-    from pr_reviewer.mcp_client import (  # noqa: PLC0415
+    from pr_reviewer.mcp_client import (
         McpToolset,
         parse_server_specs,
         split_namespaced,
     )
-    from pr_reviewer.evidence_memory import build_evidence_digest  # noqa: PLC0415
+    from pr_reviewer.evidence_memory import build_evidence_digest
 
     # web_search is advertised only when a search endpoint is configured.
     search_url = os.getenv("SEARCH_URL", "").strip()
@@ -748,7 +748,7 @@ def run_native_loop(
         )
         try:
             connect_error = toolset.connect()
-        except Exception as exc:  # noqa: BLE001 — never let MCP break the harness
+        except Exception as exc:
             connect_error = str(exc)
         if connect_error:
             print(f"  MCP server '{srv_name}' skipped: {connect_error}", file=sys.stderr)
@@ -892,7 +892,7 @@ def run_native_loop(
             "TOOL_LOOP_SUMMARIZE_MAX_TOKENS", 512, 128, 4096
         )
 
-        def summarize_fn(block):  # noqa: F811 — None vs callable by config
+        def summarize_fn(block):
             summarizer = Conversation(system=_SUMMARIZER_SYSTEM)
             summarizer.add_user(block)
             payload = summarizer.to_request_payload(
@@ -1030,7 +1030,7 @@ def run_native_loop(
                     json.dumps(verdict_response), encoding="utf-8"
                 )
                 result["native_loop_verdict_produced"] = True
-        except Exception as exc:  # noqa: BLE001 — never let it break evidence output
+        except Exception as exc:
             result["native_loop_verdict_error"] = str(exc)
 
     # Token/cost telemetry (loop turns + the verdict turn). cache_hit_ratio is

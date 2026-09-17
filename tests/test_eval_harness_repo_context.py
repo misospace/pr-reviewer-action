@@ -93,11 +93,7 @@ def check(run_number: int, run_value: ReviewRun) -> dict:
 
 def read_target(number: int) -> str:
     checks = scenario(number)["expected_evidence"]["checks"]
-    read_checks = [
-        check
-        for check in checks
-        if check["type"] == "tool_call" and check["tool"] == "read_file"
-    ]
+    read_checks = [check for check in checks if check["type"] == "tool_call" and check["tool"] == "read_file"]
     assert len(read_checks) == 1
     path_needles = read_checks[0]["args_contains"]["path"]
     assert isinstance(path_needles, str)
@@ -119,8 +115,7 @@ def test_repo_context_corpus_schema_and_load() -> None:
     assert len(loaded.prs) == 4
     assert all(pr["repo_full_name"] == "misospace/pr-reviewer-action" for pr in loaded.prs)
     assert [pr["url"] for pr in loaded.prs] == [
-        f"https://github.com/misospace/pr-reviewer-action/pull/{number}"
-        for number in [598, 600, 601, 599]
+        f"https://github.com/misospace/pr-reviewer-action/pull/{number}" for number in [598, 600, 601, 599]
     ]
 
     for pr in loaded.prs:
@@ -325,9 +320,7 @@ def test_old_agentic_canonical_behavior_is_unchanged() -> None:
     "count, maximum, expected_passed",
     [(0, 0, True), (1, 0, False), (1, 1, True), (2, 1, False)],
 )
-def test_max_tool_calls_zero_and_one_call_boundaries(
-    count: int, maximum: int, expected_passed: bool
-) -> None:
+def test_max_tool_calls_zero_and_one_call_boundaries(count: int, maximum: int, expected_passed: bool) -> None:
     expected = {"checks": [{"id": "limit", "type": "max_tool_calls", "max": maximum}]}
     result = evaluate_capability(run(599, "approve", [call("list_tree", "src")] * count), expected)
     assert result["passed"] is expected_passed
@@ -335,9 +328,7 @@ def test_max_tool_calls_zero_and_one_call_boundaries(
 
 def test_max_tool_calls_counts_failed_requests() -> None:
     expected = {"checks": [{"id": "limit", "type": "max_tool_calls", "max": 1}]}
-    result = evaluate_capability(
-        run(599, "approve", [call("list_tree", "src", status="error")]), expected
-    )
+    result = evaluate_capability(run(599, "approve", [call("list_tree", "src", status="error")]), expected)
     assert result["passed"] is True
 
 

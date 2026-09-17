@@ -29,15 +29,11 @@ GOOD_REVIEW = (
 
 
 def _write_fast_output(tmp_path, verdict="approve", review=GOOD_REVIEW):
-    (tmp_path / "ai-output.json").write_text(
-        json.dumps({"verdict": verdict, "review_markdown": review})
-    )
+    (tmp_path / "ai-output.json").write_text(json.dumps({"verdict": verdict, "review_markdown": review}))
 
 
 def _write_classification(tmp_path, must_check=None):
-    (tmp_path / "classification.json").write_text(
-        json.dumps({"pr_kind": "app_code", "must_check": must_check or []})
-    )
+    (tmp_path / "classification.json").write_text(json.dumps({"pr_kind": "app_code", "must_check": must_check or []}))
 
 
 class TestIsLowConfidence:
@@ -96,9 +92,7 @@ class TestShouldEscalate:
             "It rambles for a while to clear the low-confidence length bar "
             "and looks plausible without addressing what matters here.",
         )
-        _write_classification(
-            tmp_path, must_check=["verify file path sanitization"]
-        )
+        _write_classification(tmp_path, must_check=["verify file path sanitization"])
         escalate, reasons = should_escalate(on_incomplete=True)
         assert "incomplete_required_checks" in reasons
 
@@ -118,12 +112,14 @@ class TestShouldEscalate:
             must_check=["verify no breaking API changes in upstream release"],
         )
         (tmp_path / "classification.json").write_text(
-            json.dumps({
-                "pr_kind": "dependency_upgrade",
-                "risk_flags": [],
-                "route_signals": ["dependency_upgrade"],
-                "must_check": ["verify no breaking API changes in upstream release"],
-            })
+            json.dumps(
+                {
+                    "pr_kind": "dependency_upgrade",
+                    "risk_flags": [],
+                    "route_signals": ["dependency_upgrade"],
+                    "must_check": ["verify no breaking API changes in upstream release"],
+                }
+            )
         )
         escalate, reasons = should_escalate()
         assert escalate is False
@@ -140,9 +136,7 @@ class TestShouldEscalate:
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path)
         _write_classification(tmp_path)
-        (tmp_path / "evidence-providers.json").write_text(
-            json.dumps({"has_blocker": True, "providers": []})
-        )
+        (tmp_path / "evidence-providers.json").write_text(json.dumps({"has_blocker": True, "providers": []}))
         escalate, reasons = should_escalate()
         assert reasons == ["tool_or_evidence_blockers"]
 
@@ -172,9 +166,7 @@ class TestShouldEscalate:
         monkeypatch.chdir(tmp_path)
         _write_fast_output(tmp_path)
         _write_classification(tmp_path)
-        (tmp_path / "tool-harness.json").write_text(
-            json.dumps({"error": "harness crashed", "tool_results": []})
-        )
+        (tmp_path / "tool-harness.json").write_text(json.dumps({"error": "harness crashed", "tool_results": []}))
         escalate, reasons = should_escalate()
         assert escalate is False
         escalate, reasons = should_escalate(on_planning_failure=True)
@@ -185,10 +177,12 @@ class TestShouldEscalate:
         _write_fast_output(tmp_path)
         _write_classification(tmp_path)
         (tmp_path / "tool-harness.json").write_text(
-            json.dumps({
-                "executed_request_count": 2,
-                "tool_results": [{"status": "error"}, {"status": "error"}],
-            })
+            json.dumps(
+                {
+                    "executed_request_count": 2,
+                    "tool_results": [{"status": "error"}, {"status": "error"}],
+                }
+            )
         )
         escalate, reasons = should_escalate()
         assert reasons == ["tool_or_evidence_blockers"]
@@ -234,8 +228,7 @@ diff --git a/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml b/kubern
 
 # Short but real: a correct review of a one-line bump (#215).
 SHORT_BUMP_REVIEW = (
-    "Approve. Renovate patch bump of the konflate chart, 0.2.7 to 0.2.8; "
-    "no functional manifest changes."
+    "Approve. Renovate patch bump of the konflate chart, 0.2.7 to 0.2.8; no functional manifest changes."
 )
 
 

@@ -67,10 +67,11 @@ def _header_field(value: Any) -> str:
     text = _CONTROL_RE.sub("", text)
     return text.strip()[:_HEADER_FIELD_MAX_CHARS]
 
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from redact import mask_secrets  # noqa: E402
+from redact import mask_secrets
 
 
 def _parse_timestamp(value: str) -> tuple[int, str]:
@@ -132,19 +133,19 @@ def load_comments(path: str | Path) -> list[dict[str, Any]]:
     return _prepare(data)
 
 
-def filter_comments(
-    comments: list[dict[str, Any]], marker: str = DEFAULT_MANAGED_MARKER
-) -> list[dict[str, Any]]:
+def filter_comments(comments: list[dict[str, Any]], marker: str = DEFAULT_MANAGED_MARKER) -> list[dict[str, Any]]:
     """Drop the action's own comments and empty bodies, newest last.
 
     The marker is matched as a substring, like check_review_needed.sh's jq
     filter: the sticky-comment marker sits at the top of every managed body.
     """
     needle = (marker or DEFAULT_MANAGED_MARKER).strip()
-    if needle == DEFAULT_MANAGED_MARKER:
-        is_managed = _MANAGED_MARKER_RE.search
-    else:
-        is_managed = lambda body: needle in body
+
+    def is_managed(body: str) -> bool:
+        if needle == DEFAULT_MANAGED_MARKER:
+            return bool(_MANAGED_MARKER_RE.search(body))
+        return needle in body
+
     return [c for c in comments if not is_managed(c["body"]) and c["body"].strip()]
 
 
@@ -220,8 +221,7 @@ def render_pr_thread(
         count_note = ""
         if omitted_count:
             count_note = (
-                f"\nShowing {displayed_count} of {len(kept)} most recent conversation"
-                f" comment(s), oldest first.\n"
+                f"\nShowing {displayed_count} of {len(kept)} most recent conversation comment(s), oldest first.\n"
             )
         omission_note = _omission_note(omitted_count) if omitted_count else ""
         rendered = header + count_note + "".join(blocks_to_render) + omission_note
@@ -231,12 +231,8 @@ def render_pr_thread(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Build the bounded PR-thread context Markdown artifact."
-    )
-    parser.add_argument(
-        "--comments", required=True, help="Normalized comment JSON from the platform seam"
-    )
+    parser = argparse.ArgumentParser(description="Build the bounded PR-thread context Markdown artifact.")
+    parser.add_argument("--comments", required=True, help="Normalized comment JSON from the platform seam")
     parser.add_argument("--output", required=True, help="Markdown artifact path to write")
     parser.add_argument(
         "--marker",

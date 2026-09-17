@@ -9,7 +9,7 @@ import pytest
 # Ensure the repo root is on sys.path so ``pr_reviewer`` is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pr_reviewer.carry_forward import (  # noqa: E402
+from pr_reviewer.carry_forward import (
     apply_carry_forward,
     load_carried_findings,
     read_needs_full_review,
@@ -35,7 +35,13 @@ def _output(tmp_path, verdict="approve", findings=None, markdown="Looks good."):
     )
 
 
-BLOCKER = {"severity": "blocker", "category": "security", "file": "auth.go", "line": 10, "message": "token not validated"}
+BLOCKER = {
+    "severity": "blocker",
+    "category": "security",
+    "file": "auth.go",
+    "line": 10,
+    "message": "token not validated",
+}
 MINOR = {"severity": "minor", "category": "style", "file": None, "line": None, "message": "naming nit"}
 
 
@@ -251,6 +257,7 @@ class TestNeedsFullReviewPropagation:
         bad.write_text("[1, 2]", encoding="utf-8")
         assert read_needs_full_review(str(bad)) == empty
 
+
 class TestDismissalPath:
     """End-to-end path: comment + previous-findings + previous-dismissals → summary."""
 
@@ -274,15 +281,11 @@ class TestDismissalPath:
         # The production file lives in tmp_path, so workspace_root=tmp_path is required.
         # (A workspace_root of None drops the file — that is the bug this test pins down.)
         out = _output(tmp_path)
-        summary = apply_carry_forward(
-            carried, out, dismissals_path=dismiss_path, workspace_root=tmp_path
-        )
+        summary = apply_carry_forward(carried, out, dismissals_path=dismiss_path, workspace_root=tmp_path)
         assert summary["dismissed"] >= 1
         assert summary["open"] == 0  # P1 was dismissed, not carried open
         # And confirm the bug shape: a None workspace_root silently drops dismissals.
-        summary_no_root = apply_carry_forward(
-            carried, out, dismissals_path=dismiss_path, workspace_root=None
-        )
+        summary_no_root = apply_carry_forward(carried, out, dismissals_path=dismiss_path, workspace_root=None)
         assert summary_no_root["dismissed"] == 0
 
     def test_workspace_root_guard_refuses_outside_file(self, tmp_path):

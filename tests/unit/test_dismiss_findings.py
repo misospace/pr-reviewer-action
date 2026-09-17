@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from pr_reviewer import carry_forward  # noqa: E402
+from pr_reviewer import carry_forward
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +381,6 @@ def test_apply_carry_forward_mixed_resolution_dismiss_open(tmp_path):
     assert body.index("Resolved by this push") < body.index("Dismissed by a maintainer")
     assert body.index("Dismissed by a maintainer") < body.index("Still open (carried forward)")
     # Dismissed finding must NOT appear under "Still open".
-    assert "P2" not in body[body.index("Still open (carried forward)"):]
+    assert "P2" not in body[body.index("Still open (carried forward)") :]
     # Verdict stays approve (no blocker among open_items).
     assert written["verdict"] == "approve"

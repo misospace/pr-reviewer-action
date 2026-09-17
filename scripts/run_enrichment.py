@@ -41,8 +41,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pr_reviewer.budget import BudgetTracker  # noqa: E402,F401  (re-exported for tests)
-from pr_reviewer.enrichment import (  # noqa: E402
+from pr_reviewer.budget import BudgetTracker
+from pr_reviewer.enrichment import (
     extract_compare_shas,
     extract_ghcr_images,
     extract_urls,
@@ -50,10 +50,11 @@ from pr_reviewer.enrichment import (  # noqa: E402
     parse_allowed_hosts,
     select_target_version,
 )
+
 # fetch_url / gh_api_call are re-exported here so existing tests can reach
 # them as run_enrichment.<name>; render_linked_sources looks them up in the
 # pr_reviewer.linked_sources namespace.
-from pr_reviewer.http_client import fetch_url, gh_api_call  # noqa: E402,F401
+from pr_reviewer.http_client import fetch_url, gh_api_call
 
 
 def _parse_allowed_repos(raw: str | None) -> set[str] | None:
@@ -62,10 +63,13 @@ def _parse_allowed_repos(raw: str | None) -> set[str] | None:
         return None
     items = {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
     return items or None
-from pr_reviewer.linked_sources import render_linked_sources  # noqa: E402
+
+
+from pr_reviewer.linked_sources import render_linked_sources
 
 
 # --- File I/O helpers (injectable for tests) ---
+
 
 def read_file(name: str) -> str:
     p = Path(name)
@@ -79,6 +83,7 @@ def write_file(name: str, content: str) -> None:
 
 
 # --- Main ---
+
 
 def main() -> None:
     pr_body = read_file("pr-body.txt")

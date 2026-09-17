@@ -79,18 +79,12 @@ SENSITIVE_PATH_RE = re.compile(
 
 def _repo_is_allowed(repo, allowed_repos, current_repo):
     """Return whether a repository is in the operator's existing allowlist."""
-    return (
-        repo == current_repo
-        or "*" in (allowed_repos or set())
-        or repo in (allowed_repos or set())
-    )
+    return repo == current_repo or "*" in (allowed_repos or set()) or repo in (allowed_repos or set())
 
 
 # Repo-scoped endpoint prefixes (path starts with ``/repos/owner/repo/...``).
 # These require the ``owner/repo`` to be in the allowlist.
-GH_API_ALLOWED_PREFIXES = (
-    "/repos/",
-)
+GH_API_ALLOWED_PREFIXES = ("/repos/",)
 # Root-level endpoint prefixes (path starts with ``/<root>/...`` without an
 # owner/repo segment). These are NOT scoped to a repository: e.g.
 # ``/search/code?q=foo`` hits ``https://api.github.com/search/code?q=foo``
@@ -106,9 +100,7 @@ GH_API_ROOT_PREFIXES = (
 )
 
 
-def resolve_platform(
-    platform: str | None = None, forgejo_api_url: str | None = None
-) -> str:
+def resolve_platform(platform: str | None = None, forgejo_api_url: str | None = None) -> str:
     """Resolve PLATFORM (github|forgejo|auto) to a concrete backend name.
 
     Mirrors ``platform_resolve`` in scripts/platform_api.sh: ``auto`` maps to
@@ -128,11 +120,7 @@ def resolve_platform(
         platform = os.environ.get("PLATFORM", "github")
     platform = platform.strip().lower() or "github"
     if platform == "auto":
-        api = (
-            forgejo_api_url
-            if forgejo_api_url is not None
-            else os.environ.get("FORGEJO_API_URL", "")
-        )
+        api = forgejo_api_url if forgejo_api_url is not None else os.environ.get("FORGEJO_API_URL", "")
         if api.strip():
             return "forgejo"
         server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
@@ -171,6 +159,7 @@ def gh_argv(args: list) -> list:
 # that becomes a CVE. Adding a new endpoint to the tool surface requires
 # updating *both* ``GH_API_ALLOWED_PREFIXES`` here and the per-backend
 # URL translation below; the test suite enforces the parity.
+
 
 def _validate_endpoint(endpoint, allowed_repos, current_repo):
     """Run the cross-backend security checks against a tool-supplied endpoint.
@@ -311,7 +300,7 @@ def _forgejo_translate(full_path, repo_key):
     if not full_path.startswith(repos):
         return None
 
-    rest = full_path[len(repos):]  # begins with "/"
+    rest = full_path[len(repos) :]  # begins with "/"
     # PR metadata / diff / files / comments / reviews (the bulk of gh_api use).
     if rest == "/pulls" or rest.startswith("/pulls/"):
         # /pulls/N                  →  /api/v1/repos/o/r/pulls/N
@@ -320,7 +309,7 @@ def _forgejo_translate(full_path, repo_key):
         # /pulls/N/reviews          →  /api/v1/repos/o/r/pulls/N/reviews
         # /pulls/N/diff             →  /api/v1/repos/o/r/pulls/N.diff
         if rest.endswith("/diff"):
-            n = rest[len("/pulls/"):-len("/diff")]
+            n = rest[len("/pulls/") : -len("/diff")]
             return f"/api/v1/repos/{repo_key}/pulls/{n}.diff"
         return f"/api/v1/repos/{repo_key}{rest}"
 
@@ -332,7 +321,7 @@ def _forgejo_translate(full_path, repo_key):
 
     # Compare base...head (used by the incremental scope check).
     if rest == "/compare" or rest.startswith("/compare/"):
-        spec = rest[len("/compare/"):]
+        spec = rest[len("/compare/") :]
         return f"/api/v1/repos/{repo_key}/compare/{spec}"
 
     # Releases by tag (e.g. /releases/tags/v1.2.3 — already handled above
@@ -369,7 +358,7 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
     User-Agent requirement and the error-body-on-stdout discipline are fixed
     in one place.
     """
-    from pr_reviewer.forgejo_backend import _curl  # noqa: PLC0415
+    from pr_reviewer.forgejo_backend import _curl
 
     base = os.environ.get("FORGEJO_API_URL", "").rstrip("/")
     if not base:
@@ -379,11 +368,7 @@ def _gh_api_forgejo(full_path, repo_key, request_timeout):
     if not translated:
         return {"error": f"Endpoint not supported on PLATFORM=forgejo: {full_path}"}
 
-    token = (
-        os.environ.get("FORGEJO_TOKEN")
-        or os.environ.get("GITHUB_TOKEN")
-        or os.environ.get("GH_TOKEN", "")
-    )
+    token = os.environ.get("FORGEJO_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
     if not token:
         return {"error": "Missing FORGEJO_TOKEN"}
 
@@ -408,6 +393,7 @@ REPO_CONTENTS_MAX_BYTES = 12_000
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REPO_CONTENTS_PATH_RE = re.compile(r"^[A-Za-z0-9._~!$'()*+,;=@%/-]+$")
 _REPO_CONTENTS_BLOB_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
 
 def _validate_repo_contents(repo, path, ref, allowed_repos, current_repo):
     """Validate model-selected repository contents arguments."""
@@ -482,11 +468,7 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
             return {"error": "Repository contents file preflight failed"}
         if not isinstance(parent_data, list):
             return {"error": "Repository contents file preflight failed"}
-        matches = [
-            item
-            for item in parent_data
-            if isinstance(item, dict) and item.get("name") == basename
-        ]
+        matches = [item for item in parent_data if isinstance(item, dict) and item.get("name") == basename]
         if len(matches) != 1:
             return {"error": "Repository contents file preflight failed"}
         entry = matches[0]
@@ -559,7 +541,15 @@ def _repo_contents_github(repo, path, ref, max_entries, request_timeout):
     return {"repo": repo, "path": path, "type": "file", "content": text, "truncated": truncated}
 
 
-def repo_contents(repo, path="", ref=None, allowed_repos=None, current_repo="", max_entries=REPO_CONTENTS_DEFAULT_MAX_ENTRIES, request_timeout=25):
+def repo_contents(
+    repo,
+    path="",
+    ref=None,
+    allowed_repos=None,
+    current_repo="",
+    max_entries=REPO_CONTENTS_DEFAULT_MAX_ENTRIES,
+    request_timeout=25,
+):
     """Read a normalized file or directory from an allowlisted repository."""
     validated = _validate_repo_contents(repo, path, ref, allowed_repos, current_repo)
     if validated.get("error"):
@@ -570,9 +560,7 @@ def repo_contents(repo, path="", ref=None, allowed_repos=None, current_repo="", 
         max_entries = REPO_CONTENTS_DEFAULT_MAX_ENTRIES
     if resolve_platform() == "forgejo":
         return {"error": "repo_contents is not supported on PLATFORM=forgejo"}
-    return _repo_contents_github(
-        validated["repo"], validated["path"], validated["ref"], max_entries, request_timeout
-    )
+    return _repo_contents_github(validated["repo"], validated["path"], validated["ref"], max_entries, request_timeout)
 
 
 def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):

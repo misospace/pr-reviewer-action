@@ -18,6 +18,7 @@ from typing import Any
 # Content extraction
 # ---------------------------------------------------------------------------
 
+
 def _extract_content(response: dict[str, Any]) -> str | list[str] | None:
     """Pull the assistant's raw text content from *response*.
 
@@ -70,6 +71,7 @@ def _extract_content(response: dict[str, Any]) -> str | list[str] | None:
 # Text normalisation
 # ---------------------------------------------------------------------------
 
+
 def _strip_markdown_code_block(text: str) -> str:
     """Remove surrounding triple-backtick fences if present.
 
@@ -90,6 +92,7 @@ def _strip_markdown_code_block(text: str) -> str:
 # ---------------------------------------------------------------------------
 # JSON recovery
 # ---------------------------------------------------------------------------
+
 
 def _escape_raw_newlines_in_strings(text: str) -> str:
     """Escape literal ``\\n`` characters that appear inside JSON string values.
@@ -244,11 +247,18 @@ def _completion_tokens(response: dict[str, Any]) -> int | None:
             return v
     return None
 
+
 _APPROVE_VERDICTS = {"approve", "approved", "approval", "lgtm"}
 _REQUEST_CHANGES_VERDICTS = {
-    "request_changes", "request_change", "requestchanges",
-    "changes_requested", "change_requested", "needs_changes",
-    "needs_change", "reject", "rejected",
+    "request_changes",
+    "request_change",
+    "requestchanges",
+    "changes_requested",
+    "change_requested",
+    "needs_changes",
+    "needs_change",
+    "reject",
+    "rejected",
 }
 
 
@@ -274,14 +284,29 @@ def _normalize_verdict(value: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 _SEVERITY_ALIASES = {
-    "blocker": "blocker", "critical": "blocker",
-    "major": "major", "high": "major", "error": "major",
-    "minor": "minor", "medium": "minor", "low": "minor", "warning": "minor",
-    "info": "info", "note": "info", "nit": "info", "suggestion": "info",
+    "blocker": "blocker",
+    "critical": "blocker",
+    "major": "major",
+    "high": "major",
+    "error": "major",
+    "minor": "minor",
+    "medium": "minor",
+    "low": "minor",
+    "warning": "minor",
+    "info": "info",
+    "note": "info",
+    "nit": "info",
+    "suggestion": "info",
 }
 
 _FINDING_CATEGORIES = {
-    "bug", "security", "performance", "style", "docs", "question", "other",
+    "bug",
+    "security",
+    "performance",
+    "style",
+    "docs",
+    "question",
+    "other",
 }
 
 _MAX_FINDINGS = 50
@@ -420,6 +445,7 @@ def _surface_stream_error(response: dict[str, Any]) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     """Parse an LLM response and return a validated review dict.
 
@@ -473,16 +499,13 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     # caller escalate immediately instead of burning the parse-failure budget.
     if not text and _completion_tokens(response) == 0:
         print(
-            "Model returned an empty completion (0 completion tokens, "
-            f"finish_reason={finish!r}). Nothing to parse.",
+            f"Model returned an empty completion (0 completion tokens, finish_reason={finish!r}). Nothing to parse.",
             file=sys.stderr,
         )
         raise SystemExit(EMPTY_COMPLETION_EXIT)
 
     if not isinstance(parsed, dict):
-        raise SystemExit(
-            f"Expected JSON object but got {type(parsed).__name__}{trunc}"
-        )
+        raise SystemExit(f"Expected JSON object but got {type(parsed).__name__}{trunc}")
 
     # Validate required keys
     if "verdict" not in parsed:
@@ -493,9 +516,7 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     raw_verdict = parsed.get("verdict")
     verdict = _normalize_verdict(raw_verdict)
     if verdict is None:
-        raise SystemExit(
-            f"Expected verdict to be 'approve' or 'request_changes', got '{raw_verdict}'"
-        )
+        raise SystemExit(f"Expected verdict to be 'approve' or 'request_changes', got '{raw_verdict}'")
     # Write back the canonical value so downstream consumers (jq -r '.verdict')
     # always see 'approve' or 'request_changes'.
     parsed["verdict"] = verdict
@@ -519,8 +540,7 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
             "known artefact of grammar-constrained decoding under "
             "ai_response_format: json_schema (e.g., Fireworks). Retry "
             "with ai_response_format: json_object or increase "
-            "ai_max_tokens."
-            + trunc
+            "ai_max_tokens." + trunc
         )
 
     # Optional structured findings: normalised when present, empty when the
@@ -544,6 +564,7 @@ def parse_response_file(filepath: str) -> dict[str, Any]:
         The validated review dict.
     """
     from pathlib import Path
+
     raw_text = Path(filepath).read_text(encoding="utf-8", errors="replace")
     response = json.loads(raw_text)
     return parse_response(response)

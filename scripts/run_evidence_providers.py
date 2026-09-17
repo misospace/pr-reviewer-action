@@ -22,13 +22,13 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from pr_reviewer.env import env_int  # noqa: E402
+from pr_reviewer.env import env_int
 from pr_reviewer.sarif import (
     MAX_FINDINGS as SARIF_DEFAULT_MAX_FINDINGS,
     MAX_INPUT_BYTES as SARIF_MAX_INPUT_BYTES,
     normalize_sarif,
-)  # noqa: E402
-from redact import mask_and_truncate, mask_secrets  # noqa: E402
+)
+from redact import mask_and_truncate, mask_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +75,7 @@ def parse_findings(payload: object) -> tuple[str, list[dict[str, str]]]:
 
             source = item.get("source")
             if source is None and isinstance(item.get("sources"), list):
-                source = ", ".join(
-                    str(part) for part in item.get("sources", []) if part
-                )
+                source = ", ".join(str(part) for part in item.get("sources", []) if part)
 
             findings.append(
                 {
@@ -90,9 +88,7 @@ def parse_findings(payload: object) -> tuple[str, list[dict[str, str]]]:
     if not findings:
         fallback = payload.get("message") or payload.get("summary")
         if fallback is not None:
-            findings.append(
-                {"severity": provider_severity, "message": str(fallback), "source": ""}
-            )
+            findings.append({"severity": provider_severity, "message": str(fallback), "source": ""})
 
     highest = provider_severity
     for finding in findings:
@@ -123,9 +119,7 @@ def provider_env() -> dict:
     return env
 
 
-def run_provider(
-    index: int, provider: object, default_timeout: int, default_max_output: int
-) -> dict:
+def run_provider(index: int, provider: object, default_timeout: int, default_max_output: int) -> dict:
     """Execute a single evidence provider and return its result entry."""
     entry = {
         "id": f"provider-{index}",
@@ -211,12 +205,8 @@ def run_provider(
         # --- Secret redaction on stdout/stderr before capturing output ---
         stdout_text = completed.stdout.decode("utf-8", errors="replace") if completed.stdout else ""
         stderr_text = completed.stderr.decode("utf-8", errors="replace") if completed.stderr else ""
-        entry["stdout"], entry["stdout_truncated"] = mask_and_truncate(
-            stdout_text, max_output
-        )
-        entry["stderr"], entry["stderr_truncated"] = mask_and_truncate(
-            stderr_text, max_output
-        )
+        entry["stdout"], entry["stdout_truncated"] = mask_and_truncate(stdout_text, max_output)
+        entry["stderr"], entry["stderr_truncated"] = mask_and_truncate(stderr_text, max_output)
     except subprocess.TimeoutExpired as exc:
         entry["duration_sec"] = round(time.monotonic() - start, 3)
         entry["status"] = "timeout"
@@ -404,9 +394,7 @@ def write_outputs(summary: dict, markdown: str) -> None:
     # header entirely, instead of the model reacting to a header with nothing
     # under it (#399/#409). Real diagnostics (config errors, provider output)
     # still get a trailing newline as before.
-    Path("evidence-providers.md").write_text(
-        markdown.rstrip() + "\n" if markdown.strip() else "", encoding="utf-8"
-    )
+    Path("evidence-providers.md").write_text(markdown.rstrip() + "\n" if markdown.strip() else "", encoding="utf-8")
 
 
 def main() -> int:
@@ -417,9 +405,7 @@ def main() -> int:
     raw_sarif_max_findings = os.getenv("SARIF_MAX_FINDINGS")
     try:
         sarif_max_findings = (
-            int(raw_sarif_max_findings)
-            if raw_sarif_max_findings is not None
-            else SARIF_DEFAULT_MAX_FINDINGS
+            int(raw_sarif_max_findings) if raw_sarif_max_findings is not None else SARIF_DEFAULT_MAX_FINDINGS
         )
         if sarif_max_findings < 1:
             raise ValueError
@@ -451,7 +437,7 @@ def main() -> int:
         else:
             try:
                 payload = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 config_error = f"Invalid JSON config: {exc}"
             else:
                 if isinstance(payload, dict):
@@ -471,7 +457,9 @@ def main() -> int:
         if config_error.startswith("Config file not found:"):
             md_lines.append(f"Evidence providers config was not found: `{config_path_raw}`")
         else:
-            md_lines.append(f"Evidence providers config could not be parsed: `{config_error.removeprefix('Invalid JSON config: ')}`")
+            md_lines.append(
+                f"Evidence providers config could not be parsed: `{config_error.removeprefix('Invalid JSON config: ')}`"
+            )
         md_lines.append("")
 
     # Providers are independent commands, so run them concurrently. Results
@@ -498,9 +486,7 @@ def main() -> int:
 
     remaining_sarif_findings = sarif_max_findings
     for index, path_text in enumerate(sarif_paths, start=1):
-        entry = _sarif_provider(
-            index, path_text, workspace_root, remaining_sarif_findings
-        )
+        entry = _sarif_provider(index, path_text, workspace_root, remaining_sarif_findings)
         summary["providers"].append(entry)
         remaining_sarif_findings -= len(entry["findings"])
     summary["provider_count"] = len(summary["providers"])
@@ -516,8 +502,7 @@ def main() -> int:
         nonlocal md_budget
         if md_budget < 256:
             md_lines.append(
-                f"- {label}: (omitted — aggregate evidence output cap reached; "
-                "full output in evidence-providers.json)"
+                f"- {label}: (omitted — aggregate evidence output cap reached; full output in evidence-providers.json)"
             )
             return
         block = head_tail_cap(text, min(per_cap, md_budget))
@@ -545,9 +530,7 @@ def main() -> int:
                 md_lines.append("- findings:")
                 for finding in findings[:15]:
                     source = f" ({finding['source']})" if finding.get("source") else ""
-                    md_lines.append(
-                        f"  - [{finding['severity']}] {finding['message']}{source}"
-                    )
+                    md_lines.append(f"  - [{finding['severity']}] {finding['message']}{source}")
 
             stdout_text = provider.get("stdout", "").strip()
             if stdout_text and not findings:

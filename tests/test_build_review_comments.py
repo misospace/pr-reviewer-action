@@ -93,12 +93,14 @@ class TestBuildComments:
     def test_anchorable_finding_becomes_comment(self):
         comments, skipped = build_comments([_finding(line=12)], DIFF)
         assert skipped == 0
-        assert comments == [{
-            "path": "app/serve.py",
-            "line": 12,
-            "side": "RIGHT",
-            "body": comments[0]["body"],
-        }]
+        assert comments == [
+            {
+                "path": "app/serve.py",
+                "line": 12,
+                "side": "RIGHT",
+                "body": comments[0]["body"],
+            }
+        ]
         assert "bad" in comments[0]["body"]
         assert "Blocker" in comments[0]["body"]
         assert "(security)" in comments[0]["body"]
@@ -156,9 +158,7 @@ class TestFindingBody:
         assert "@someuser" not in body  # zero-width space inserted after @
 
     def test_secrets_masked(self):
-        body = finding_to_body(
-            _finding(message="leaked token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij")
-        )
+        body = finding_to_body(_finding(message="leaked token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"))
         assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" not in body
 
     def test_other_category_omitted(self):
@@ -236,9 +236,7 @@ class TestSuppression:
         fresh = _finding(line=13, message="brand new")
         from build_review_comments import finding_fingerprint
 
-        comments, skipped = build_comments(
-            [threaded, fresh], DIFF, suppressed={finding_fingerprint(threaded)}
-        )
+        comments, skipped = build_comments([threaded, fresh], DIFF, suppressed={finding_fingerprint(threaded)})
         assert len(comments) == 1
         assert "brand new" in comments[0]["body"]
         assert skipped == 1

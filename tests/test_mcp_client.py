@@ -19,6 +19,7 @@ from pr_reviewer.mcp_client import (
 
 def _stub(tools, *, fail_initialize=False, call_text="rendered diff"):
     """A scripted MCP transport (post_fn) — no network."""
+
     def post(url, payload, session_id, token, timeout):
         method = payload.get("method")
         if method == "initialize":
@@ -32,19 +33,22 @@ def _stub(tools, *, fail_initialize=False, call_text="rendered diff"):
         if method == "tools/call":
             name = payload["params"]["name"]
             return (
-                {"jsonrpc": "2.0", "id": 3,
-                 "result": {"content": [{"type": "text", "text": f"{call_text}:{name}"}]}},
-                session_id, None,
+                {"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": f"{call_text}:{name}"}]}},
+                session_id,
+                None,
             )
         return None, session_id, "unknown method"
+
     return post
 
 
 _KONFLATE_TOOLS = [
-    {"name": "list_pull_requests", "description": "list PRs",
-     "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "get_pr_diff", "description": "rendered diff",
-     "inputSchema": {"type": "object", "properties": {"number": {"type": "integer"}}}},
+    {"name": "list_pull_requests", "description": "list PRs", "inputSchema": {"type": "object", "properties": {}}},
+    {
+        "name": "get_pr_diff",
+        "description": "rendered diff",
+        "inputSchema": {"type": "object", "properties": {"number": {"type": "integer"}}},
+    },
     {"name": "delete_pr", "description": "DANGER", "inputSchema": {"type": "object"}},
     {"name": "update_config", "description": "DANGER", "inputSchema": {"type": "object"}},
 ]
@@ -62,8 +66,16 @@ def test_is_read_only_tool_default_deny_boundary():
     # Regression: write tools whose second _-segment matches a read verb
     # must stay denied when no prefix is configured. The earlier
     # any-segment scan admitted these.
-    for bad in ("set_status", "create_view", "update_diff", "refresh_status",
-                "delete_query", "run_search", "set_y", "exec_z"):
+    for bad in (
+        "set_status",
+        "create_view",
+        "update_diff",
+        "refresh_status",
+        "delete_query",
+        "run_search",
+        "set_y",
+        "exec_z",
+    ):
         assert not is_read_only_tool(bad), f"{bad!r} must be denied"
 
 
@@ -71,8 +83,7 @@ def test_is_read_only_tool_strips_known_prefix():
     prefixes = ("github-mcp",)
     for ok in ("github-mcp_list_issues", "github-mcp_get_pr", "github-mcp_search"):
         assert is_read_only_tool(ok, prefixes), f"{ok!r} should be admitted"
-    for bad in ("github-mcp_set_status", "github-mcp_create_view",
-                "github-mcp_update_config", "github-mcp_delete_pr"):
+    for bad in ("github-mcp_set_status", "github-mcp_create_view", "github-mcp_update_config", "github-mcp_delete_pr"):
         assert not is_read_only_tool(bad, prefixes), f"{bad!r} must be denied"
 
 
@@ -132,9 +143,7 @@ def test_namespacing_round_trip():
 def test_parse_server_specs():
     assert parse_server_specs("") == []
     assert parse_server_specs("konflate=https://k/mcp") == [("konflate", "https://k/mcp")]
-    assert parse_server_specs("a=http://a/x,\n b=https://b/y ") == [
-        ("a", "http://a/x"), ("b", "https://b/y")
-    ]
+    assert parse_server_specs("a=http://a/x,\n b=https://b/y ") == [("a", "http://a/x"), ("b", "https://b/y")]
     assert parse_server_specs("garbage,nourl=") == []  # no url → dropped
 
 

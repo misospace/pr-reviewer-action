@@ -20,55 +20,90 @@ from pathlib import Path
 # spamming complete reviews with warnings.
 CHECK_CONCEPTS: dict[str, list[str]] = {
     "verify no functional changes beyond lockfile hashes": [
-        "lockfile", "hash", "digest", "functional change",
+        "lockfile",
+        "hash",
+        "digest",
+        "functional change",
     ],
     "check for breaking API changes in updated dependencies": [
-        "breaking", "backward", "compatib", "api change",
+        "breaking",
+        "backward",
+        "compatib",
+        "api change",
     ],
     "run full test suite after upgrade": [
         "test",
     ],
     "validate manifest against target cluster version": [
-        "cluster", "api version", "apiversion", "manifest",
+        "cluster",
+        "api version",
+        "apiversion",
+        "manifest",
     ],
     "check for resource quota / limit changes": [
-        "quota", "limit", "resource",
+        "quota",
+        "limit",
+        "resource",
     ],
     "review auth flow for regression": [
         "auth",
     ],
     "verify session token handling is correct": [
-        "session", "token",
+        "session",
+        "token",
     ],
     "verify route access controls are in place": [
-        "access control", "authoriz", "route",
+        "access control",
+        "authoriz",
+        "route",
     ],
     "check for unintended public endpoints": [
-        "public", "unauthenticated", "endpoint",
+        "public",
+        "unauthenticated",
+        "endpoint",
     ],
     "verify file path sanitization": [
-        "sanitiz", "normaliz", "realpath", "resolved path", "path containment",
+        "sanitiz",
+        "normaliz",
+        "realpath",
+        "resolved path",
+        "path containment",
     ],
     "check for directory traversal vulnerabilities": [
-        "traversal", "../", "symlink", "escape",
+        "traversal",
+        "../",
+        "symlink",
+        "escape",
     ],
     "review for path traversal vulnerabilities": [
-        "traversal", "../", "symlink", "escape",
+        "traversal",
+        "../",
+        "symlink",
+        "escape",
     ],
     "test with edge-case paths (null bytes, symlinks)": [
-        "null byte", "symlink", "edge case", "edge-case",
+        "null byte",
+        "symlink",
+        "edge case",
+        "edge-case",
     ],
     "verify secrets are not logged or exposed in diffs": [
-        "secret", "leak", "exposed", "logged",
+        "secret",
+        "leak",
+        "exposed",
+        "logged",
     ],
     "check secret rotation impact": [
         "rotat",
     ],
     "review migration for data loss risk": [
-        "data loss", "destructive", "migration",
+        "data loss",
+        "destructive",
+        "migration",
     ],
     "test migration on a copy of production schema": [
-        "schema", "migration",
+        "schema",
+        "migration",
     ],
     "explicitly address the linked security issue": [
         "security",
@@ -77,17 +112,40 @@ CHECK_CONCEPTS: dict[str, list[str]] = {
         "audit",
     ],
     "treat as critical — verify all changes thoroughly": [
-        "critical", "p0", "thorough",
+        "critical",
+        "p0",
+        "thorough",
     ],
     "treat as high priority — verify correctness carefully": [
-        "high priority", "p1", "correct",
+        "high priority",
+        "p1",
+        "correct",
     ],
 }
 
 _FALLBACK_STOPWORDS = {
-    "verify", "check", "review", "test", "with", "that", "this", "the",
-    "for", "and", "are", "not", "all", "any", "from", "into", "after",
-    "before", "changes", "change", "ensure", "explicitly",
+    "verify",
+    "check",
+    "review",
+    "test",
+    "with",
+    "that",
+    "this",
+    "the",
+    "for",
+    "and",
+    "are",
+    "not",
+    "all",
+    "any",
+    "from",
+    "into",
+    "after",
+    "before",
+    "changes",
+    "change",
+    "ensure",
+    "explicitly",
 }
 
 
@@ -131,9 +189,7 @@ def apply_required_check_validation(
     """
     must_check: list[str] = []
     try:
-        classification = json.loads(
-            Path(classification_path).read_text(encoding="utf-8", errors="replace")
-        )
+        classification = json.loads(Path(classification_path).read_text(encoding="utf-8", errors="replace"))
         raw = classification.get("must_check")
         if isinstance(raw, list):
             must_check = [str(item) for item in raw if item]
@@ -173,15 +229,10 @@ def apply_required_check_validation(
         if status == "incomplete" and mode == "fail":
             data["verdict"] = "request_changes"
             data["review_markdown"] += (
-                "\n\n_required_check_validation_mode=fail: treating the missing "
-                "required checks as blocking._"
+                "\n\n_required_check_validation_mode=fail: treating the missing required checks as blocking._"
             )
 
     data["required_checks"] = status
-    Path(output_path).write_text(
-        json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    Path(result_path).write_text(
-        json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    Path(result_path).write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     return status

@@ -1,0 +1,51 @@
+# Ruff lint configuration for pr-reviewer-action.
+#
+# The repo is a shell-heavy GitHub Action with a Python package written before
+# ruff existed, so this baseline is intentionally narrow: it enforces rules
+# that catch real bugs (pyflakes F, pyupgrade UP, a curated set of E/B/RUF)
+# and drops pure-opinion/style rules to keep the gate stable across the mixed
+# shell/Python codebase.
+#
+# Import sorting (I) is off because several test files import modules *after*
+# a sys.path.insert() by design (hence the E402 ignore). Unused-import
+# reporting (F401) is off because scripts/ re-imports names from split-out
+# modules as a documented compatibility shim for existing callers.
+line-length = 120
+
+[format]
+exclude = [
+    # Source text here is pinned verbatim by a contract test and must not be
+    # reflowed by `ruff format`.
+    "scripts/run_tool_harness.py",
+]
+
+[lint]
+select = [
+    "E",    # pycodestyle errors/warnings
+    "F",    # pyflakes (real bugs: unused/undefined names)
+    "UP",   # pyupgrade (safe modernization)
+    "RUF",  # ruff-specific (a curated subset; see ignore)
+    "B",    # bugbear (curated subset)
+]
+ignore = [
+    "E402",   # module-level import not at top of file (sys.path test files)
+    "E501",   # line length: enforced by `ruff format`, not the linter
+    "E741",   # ambiguous Unicode-looking names (l = line) used throughout
+    "F401",   # unused import: scripts/ re-imports are compatibility shims
+    "BLE001", # fail-soft advisory catches (enrichment must never abort the run)
+    "UP022",  # Optional[X] -> X | None: unsafe without a future import
+    "UP031",  # %-formatting -> f-string: style
+    "B904",   # raise ... from: exception chaining style
+    "RUF001", "RUF002", "RUF003",  # ambiguous unicode in strings/comments
+    "RUF005", # camelcase imported as acronym (style)
+    "RUF012", # mutable class var default (style)
+    "RUF015", # next() over single-element slice (style)
+    "RUF059", # unsorted __dunder__ (style)
+    "B905",   # zip without explicit strict (style)
+]
+
+[lint.per-file-ignores]
+# Test files assert fail-soft behavior and reference fixture/helper names
+# defined in sibling modules; a couple keep unused locals for documentation
+# and use list() over a generator.
+"tests/**" = ["F821", "F841", "C408", "B033"]

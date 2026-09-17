@@ -40,7 +40,7 @@ class DeadlineBudget:
             self._deadline = None
 
     @classmethod
-    def from_env(cls, name: str, default: int = 60) -> "DeadlineBudget":
+    def from_env(cls, name: str, default: int = 60) -> DeadlineBudget:
         raw = os.getenv(name, str(default)).strip()
         try:
             budget = int(raw)

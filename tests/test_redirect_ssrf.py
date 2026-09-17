@@ -31,11 +31,11 @@ def _stub_public_resolution(monkeypatch, ip="93.184.216.34"):
     tests/test_resolved_ip_ssrf.py). Issue #510 closes the SSRF arc; the
     gate runs alongside the hostname allowlist.
     """
+
     def fake_resolve(host):
         return [ip]
-    monkeypatch.setattr(
-        "pr_reviewer.enrichment._resolve_host_ips", fake_resolve
-    )
+
+    monkeypatch.setattr("pr_reviewer.enrichment._resolve_host_ips", fake_resolve)
 
 
 class _RedirectHandler(http.server.BaseHTTPRequestHandler):
@@ -92,6 +92,7 @@ def _start_server(handler_cls, port):
 # ---------------------------------------------------------------------------
 # web_fetch tests (returns dict with "content" or "error")
 # ---------------------------------------------------------------------------
+
 
 class TestWebFetchRedirect:
     """web_fetch must re-validate redirect targets against the allowlist."""
@@ -153,6 +154,7 @@ class TestWebFetchRedirect:
 # ---------------------------------------------------------------------------
 # fetch_url tests (returns bytes on success or None on failure)
 # ---------------------------------------------------------------------------
+
 
 class TestFetchUrlRedirect:
     """fetch_url must re-validate redirect targets against the allowlist."""

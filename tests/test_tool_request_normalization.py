@@ -7,13 +7,11 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from run_tool_harness import normalize_tool_request  # noqa: E402
+from run_tool_harness import normalize_tool_request
 
 
 def test_well_formed_request_passes_through():
-    tool, args = normalize_tool_request(
-        {"tool": "read_file", "args": {"path": "values.yaml"}}
-    )
+    tool, args = normalize_tool_request({"tool": "read_file", "args": {"path": "values.yaml"}})
     assert tool == "read_file"
     assert args == {"path": "values.yaml"}
 
@@ -27,17 +25,13 @@ def test_top_level_params_promoted_into_args():
 
 def test_gh_api_path_aliases_to_endpoint():
     # The prompt now says "endpoint", but tolerate the old "path" key too.
-    tool, args = normalize_tool_request(
-        {"tool": "gh_api", "args": {"path": "repos/acme/app/releases/tags/v1.2.3"}}
-    )
+    tool, args = normalize_tool_request({"tool": "gh_api", "args": {"path": "repos/acme/app/releases/tags/v1.2.3"}})
     assert tool == "gh_api"
     assert args.get("endpoint") == "repos/acme/app/releases/tags/v1.2.3"
 
 
 def test_gh_api_top_level_path_promoted_and_aliased():
-    tool, args = normalize_tool_request(
-        {"tool": "gh_api", "endpoint": "repos/acme/app/pulls/5"}
-    )
+    tool, args = normalize_tool_request({"tool": "gh_api", "endpoint": "repos/acme/app/pulls/5"})
     assert tool == "gh_api"
     assert args.get("endpoint") == "repos/acme/app/pulls/5"
 
@@ -68,9 +62,7 @@ def test_git_grep_nested_optional_args_preserved():
 def test_git_grep_top_level_max_results_promoted():
     # A model that flattens params to the top level (like the string params)
     # still has its integer max_results forwarded.
-    tool, args = normalize_tool_request(
-        {"tool": "git_grep", "args": {"pattern": "x"}, "max_results": 25}
-    )
+    tool, args = normalize_tool_request({"tool": "git_grep", "args": {"pattern": "x"}, "max_results": 25})
     assert tool == "git_grep"
     assert args["max_results"] == 25
 
@@ -78,9 +70,7 @@ def test_git_grep_top_level_max_results_promoted():
 def test_git_grep_max_results_only_promoted_for_git_grep():
     # The top-level max_results promotion is scoped to git_grep so it can't
     # leak into other tools' args.
-    tool, args = normalize_tool_request(
-        {"tool": "read_file", "args": {"path": "a.yaml"}, "max_results": 25}
-    )
+    tool, args = normalize_tool_request({"tool": "read_file", "args": {"path": "a.yaml"}, "max_results": 25})
     assert tool == "read_file"
     assert "max_results" not in args
 

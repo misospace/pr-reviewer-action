@@ -50,7 +50,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import mask_secrets
 
 # Dismissal handling (#534): a maintainer with write/triage permission can
 # dismiss a finding via a machine-readable PR-comment directive such as
@@ -112,7 +112,7 @@ def parse_dismiss_directive(comment_body: str) -> list[dict]:
         line = _strip_blockquote(raw_line).strip()
         if not line.startswith(_DISMISS_PREFIX):
             continue
-        rest = line[len(_DISMISS_PREFIX):].lstrip()
+        rest = line[len(_DISMISS_PREFIX) :].lstrip()
         if not rest:
             continue
         # First try colon-separator; then em-dash; then hyphen. The hyphen
@@ -207,17 +207,12 @@ def write_dismissed_findings(
         else:
             link_target = target
         if not (link_target == resolved_root or resolved_root in link_target.parents):
-            raise ValueError(
-                f"target_path {target_path!r} resolves outside "
-                f"workspace_root {workspace_root!r}"
-            )
+            raise ValueError(f"target_path {target_path!r} resolves outside workspace_root {workspace_root!r}")
         if "\x00" in str(target_path):
             raise ValueError(f"target_path contains null byte: {target_path!r}")
         for part in Path(target_str).parts:
             if part == "..":
-                raise ValueError(
-                    f"target_path {target_path!r} contains '..' segment"
-                )
+                raise ValueError(f"target_path {target_path!r} contains '..' segment")
     else:
         target_str = os.fspath(target_path)
         if "\x00" in target_str:
@@ -292,8 +287,7 @@ def load_dismissed_findings(
         item_file = item.get("file")
         target_cat = target.get("category")
         target_file = target.get("file")
-        if (item_cat is None or item_file is None
-                or target_cat is None or target_file is None):
+        if item_cat is None or item_file is None or target_cat is None or target_file is None:
             continue
         if item_cat != target_cat or item_file != target_file:
             continue
@@ -425,9 +419,7 @@ def apply_carry_forward(
     if not carried:
         # No carried findings → nothing can be unverifiable; clear any stale
         # flag from an earlier run in the same workspace (#544).
-        _write_needs_full_review_flag(
-            Path(output_path).parent / "needs-full-review.json", False, 0, set()
-        )
+        _write_needs_full_review_flag(Path(output_path).parent / "needs-full-review.json", False, 0, set())
         return summary
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
@@ -436,9 +428,7 @@ def apply_carry_forward(
         findings = []
 
     resolutions = {
-        f["id"]: f.get("resolution")
-        for f in findings
-        if isinstance(f, dict) and isinstance(f.get("id"), str)
+        f["id"]: f.get("resolution") for f in findings if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
 
     # Track findings the model marked not_verifiable_from_delta separately.
@@ -451,9 +441,7 @@ def apply_carry_forward(
     unverifiable_ids: set[str] = set(
         f["id"]
         for f in findings
-        if isinstance(f, dict)
-        and isinstance(f.get("id"), str)
-        and f.get("resolution") == "not_verifiable_from_delta"
+        if isinstance(f, dict) and isinstance(f.get("id"), str) and f.get("resolution") == "not_verifiable_from_delta"
     )
 
     dismissed_ids = {d["id"] for d in dismissed}
@@ -518,16 +506,11 @@ def apply_carry_forward(
                 by_raw = meta.get("dismissed_by")
                 by = mask_secrets(str(by_raw)) if by_raw else "a maintainer"
                 suffix = f" — {reason}" if reason else ""
-                lines.append(
-                    f"- [{i['id']}] ({i['severity']}) {i['message']} "
-                    f"_(dismissed by {by}{suffix})_"
-                )
+                lines.append(f"- [{i['id']}] ({i['severity']}) {i['message']} _(dismissed by {by}{suffix})_")
         if open_items:
             lines.append("")
             lines.append("Still open (carried forward):")
-            lines.extend(
-                f"- [{i['id']}] ({i['severity']}) {i['message']}" for i in open_items
-            )
+            lines.extend(f"- [{i['id']}] ({i['severity']}) {i['message']}" for i in open_items)
         data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
 
     # Fail-closed verdict: surviving carried blockers block, regardless of
@@ -544,9 +527,7 @@ def apply_carry_forward(
         )
         summary["forced_request_changes"] = True
 
-    Path(output_path).write_text(
-        json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
 
     # Surface the escalation signal to the bash side (#544): the reviewer
     # step reads the file after enforcement, and the publish step persists
@@ -560,9 +541,7 @@ def apply_carry_forward(
     return summary
 
 
-def _write_needs_full_review_flag(
-    flag_path: Path, needs_full_review: bool, unverifiable: int, ids: set[str]
-) -> None:
+def _write_needs_full_review_flag(flag_path: Path, needs_full_review: bool, unverifiable: int, ids: set[str]) -> None:
     """Write (or clear) the escalation flag file the bash side reads (#544)."""
     if needs_full_review:
         flag_path.write_text(

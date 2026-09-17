@@ -12,7 +12,7 @@ from unittest import TestCase, main as unittest_main
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from pr_reviewer.response_parser import (  # noqa: E402
+from pr_reviewer.response_parser import (
     _escape_raw_newlines_in_strings,
     _extract_content,
     _strip_markdown_code_block,
@@ -26,13 +26,15 @@ from pr_reviewer.response_parser import (  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_openai(verdict: str = "approve", markdown: str = "# LGTM") -> dict:
     return {
         "choices": [
             {
-                "message": {"role": "assistant", "content": json.dumps(
-                    {"verdict": verdict, "review_markdown": markdown}
-                )},
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"verdict": verdict, "review_markdown": markdown}),
+                },
                 "finish_reason": "stop",
             }
         ],
@@ -42,9 +44,7 @@ def _make_openai(verdict: str = "approve", markdown: str = "# LGTM") -> dict:
 def _make_anthropic(verdict: str = "approve", markdown: str = "# LGTM") -> dict:
     return {
         "content": [
-            {"type": "text", "text": json.dumps(
-                {"verdict": verdict, "review_markdown": markdown}
-            )},
+            {"type": "text", "text": json.dumps({"verdict": verdict, "review_markdown": markdown})},
         ],
     }
 
@@ -52,6 +52,7 @@ def _make_anthropic(verdict: str = "approve", markdown: str = "# LGTM") -> dict:
 # ---------------------------------------------------------------------------
 # _extract_content
 # ---------------------------------------------------------------------------
+
 
 class TestExtractContent(TestCase):
     def test_openai_string(self):
@@ -63,31 +64,51 @@ class TestExtractContent(TestCase):
         self.assertEqual(_extract_content(resp), ["a", "b"])
 
     def test_openai_list_of_dicts_text(self):
-        resp = {"choices": [{"message": {"content": [
-            {"type": "text", "text": "hi"},
-            {"type": "tool_use", "name": "foo"},
-        ]}}]}
+        resp = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "hi"},
+                            {"type": "tool_use", "name": "foo"},
+                        ]
+                    }
+                }
+            ]
+        }
         self.assertEqual(_extract_content(resp), ["hi"])
 
     def test_openai_list_of_dicts_none_type(self):
         """Items with no 'type' key should be treated as text if they have 'text'."""
-        resp = {"choices": [{"message": {"content": [
-            {"text": "plain"},
-        ]}}]}
+        resp = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"text": "plain"},
+                        ]
+                    }
+                }
+            ]
+        }
         self.assertEqual(_extract_content(resp), ["plain"])
 
     def test_anthropic_text_blocks(self):
-        resp = {"content": [
-            {"type": "text", "text": "part1"},
-            {"type": "thinking", "text": "hidden"},
-            {"type": "text", "text": "part2"},
-        ]}
+        resp = {
+            "content": [
+                {"type": "text", "text": "part1"},
+                {"type": "thinking", "text": "hidden"},
+                {"type": "text", "text": "part2"},
+            ]
+        }
         self.assertEqual(_extract_content(resp), ["part1", "part2"])
 
     def test_anthropic_non_text_only(self):
-        resp = {"content": [
-            {"type": "thinking", "text": "hidden"},
-        ]}
+        resp = {
+            "content": [
+                {"type": "thinking", "text": "hidden"},
+            ]
+        }
         self.assertIsNone(_extract_content(resp))
 
     def test_plain_string(self):
@@ -105,6 +126,7 @@ class TestExtractContent(TestCase):
 # _strip_markdown_code_block
 # ---------------------------------------------------------------------------
 
+
 class TestStripMarkdownCodeBlock(TestCase):
     def test_no_fence(self):
         self.assertEqual(_strip_markdown_code_block("hello"), "hello")
@@ -114,7 +136,7 @@ class TestStripMarkdownCodeBlock(TestCase):
         self.assertEqual(_strip_markdown_code_block(text), "hello")
 
     def test_with_language_tag(self):
-        text = "```json\n{\"a\": 1}\n```"
+        text = '```json\n{"a": 1}\n```'
         self.assertEqual(_strip_markdown_code_block(text), '{"a": 1}')
 
     def test_nested_backticks_not_stripped(self):
@@ -125,6 +147,7 @@ class TestStripMarkdownCodeBlock(TestCase):
 # ---------------------------------------------------------------------------
 # _escape_raw_newlines_in_strings
 # ---------------------------------------------------------------------------
+
 
 class TestEscapeRawNewlinesInStrings(TestCase):
     def test_escapes_newline_inside_string(self):
@@ -168,15 +191,16 @@ class TestEscapeRawNewlinesInStrings(TestCase):
 # _try_decode_json
 # ---------------------------------------------------------------------------
 
+
 class TestTryDecodeJson(TestCase):
     def test_clean_json(self):
         self.assertEqual(_try_decode_json('{"a": 1}'), {"a": 1})
 
     def test_list_json(self):
-        self.assertEqual(_try_decode_json('[1, 2, 3]'), [1, 2, 3])
+        self.assertEqual(_try_decode_json("[1, 2, 3]"), [1, 2, 3])
 
     def test_prose_before_json(self):
-        result = _try_decode_json("Here is the answer: {\"key\": \"value\"}")
+        result = _try_decode_json('Here is the answer: {"key": "value"}')
         self.assertEqual(result, {"key": "value"})
 
     def test_reasoning_array_before_object(self):
@@ -234,10 +258,7 @@ class TestTryDecodeJson(TestCase):
         dogfood failure: after arrays were handled, the model's partial
         draft was returned, yielding 'missing required key review_markdown'.
         """
-        src = (
-            'Schema check: {"verdict": "approve"} '
-            'Final answer: {"verdict": "approve", "review_markdown": "# OK"}'
-        )
+        src = 'Schema check: {"verdict": "approve"} Final answer: {"verdict": "approve", "review_markdown": "# OK"}'
         result = _try_decode_json(src)
         self.assertIsInstance(result, dict)
         self.assertEqual(result["verdict"], "approve")
@@ -312,6 +333,7 @@ class TestTryDecodeJson(TestCase):
 # parse_response  (integration)
 # ---------------------------------------------------------------------------
 
+
 class TestParseResponse(TestCase):
     def test_openai_format(self):
         resp = _make_openai()
@@ -327,12 +349,16 @@ class TestParseResponse(TestCase):
     def test_openai_list_content(self):
         """OpenAI choices with content as a list of strings."""
         resp = {
-            "choices": [{
-                "message": {"content": [
-                    "Here's the review:",
-                    json.dumps({"verdict": "request_changes", "review_markdown": "Fix this"}),
-                ]},
-            }],
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            "Here's the review:",
+                            json.dumps({"verdict": "request_changes", "review_markdown": "Fix this"}),
+                        ]
+                    },
+                }
+            ],
         }
         result = parse_response(resp)
         self.assertEqual(result["verdict"], "request_changes")
@@ -351,14 +377,14 @@ class TestParseResponse(TestCase):
         # Build the content the way the failing model actually emitted it:
         # fenced JSON, with literal newlines inside the markdown string.
         content = (
-            '```json\n'
-            '{\n'
+            "```json\n"
+            "{\n"
             '  "verdict": "request_changes",\n'
             '  "review_markdown": "## Recommendation\n'
-            '\n'
+            "\n"
             'Request changes — fix the bug."\n'
-            '}\n'
-            '```'
+            "}\n"
+            "```"
         )
         resp = {"choices": [{"message": {"content": content}}]}
         result = parse_response(resp)
@@ -390,8 +416,7 @@ class TestParseResponse(TestCase):
         content = (
             "We need answer JSON review. Need decide approve vs "
             'request_changes. Candidates: ["approve", "request_changes"]. '
-            "Now the verdict: "
-            + json.dumps({"verdict": "approve", "review_markdown": "# Looks good"})
+            "Now the verdict: " + json.dumps({"verdict": "approve", "review_markdown": "# Looks good"})
         )
         resp = {"choices": [{"message": {"content": content}}]}
         result = parse_response(resp)
@@ -462,14 +487,16 @@ class TestParseResponse(TestCase):
         # ai_response_format: json_schema (e.g. Fireworks) can strip the
         # "\\n" escapes that markdown requires, yielding a wall of bolded
         # headings on a single line. Such a payload is not publishable.
-        inner = json.dumps({
-            "verdict": "request_changes",
-            "review_markdown": (
-                "## Summary This PR looks great overall ## Strengths "
-                "Clean code and good tests ## Concerns Possible "
-                "race condition in worker startup"
-            ),
-        })
+        inner = json.dumps(
+            {
+                "verdict": "request_changes",
+                "review_markdown": (
+                    "## Summary This PR looks great overall ## Strengths "
+                    "Clean code and good tests ## Concerns Possible "
+                    "race condition in worker startup"
+                ),
+            }
+        )
         resp = {"choices": [{"message": {"content": inner}}]}
         with self.assertRaises(SystemExit) as ctx:
             parse_response(resp)
@@ -480,10 +507,12 @@ class TestParseResponse(TestCase):
 
     def test_single_heading_no_newlines_still_accepted(self):
         # Only one heading marker -> not flattened; pass through as-is.
-        inner = json.dumps({
-            "verdict": "approve",
-            "review_markdown": "## Summary Looks good to me",
-        })
+        inner = json.dumps(
+            {
+                "verdict": "approve",
+                "review_markdown": "## Summary Looks good to me",
+            }
+        )
         resp = {"choices": [{"message": {"content": inner}}]}
         result = parse_response(resp)
         self.assertEqual(result["verdict"], "approve")
@@ -491,12 +520,12 @@ class TestParseResponse(TestCase):
 
     def test_multiple_headings_with_newlines_accepted(self):
         # Well-formed review with proper newlines -> no false positive.
-        inner = json.dumps({
-            "verdict": "approve",
-            "review_markdown": (
-                "## Summary\n\nLooks good.\n\n## Details\n\nNo issues found."
-            ),
-        })
+        inner = json.dumps(
+            {
+                "verdict": "approve",
+                "review_markdown": ("## Summary\n\nLooks good.\n\n## Details\n\nNo issues found."),
+            }
+        )
         resp = {"choices": [{"message": {"content": inner}}]}
         result = parse_response(resp)
         self.assertEqual(result["verdict"], "approve")
@@ -507,16 +536,23 @@ class TestParseResponse(TestCase):
 # parse_response_file
 # ---------------------------------------------------------------------------
 
+
 class TestParseResponseFile:
     def test_round_trip(self, tmp_path):
         """Write a response file, then read and parse it."""
         data = {
-            "choices": [{
-                "message": {"content": json.dumps({
-                    "verdict": "request_changes",
-                    "review_markdown": "Please fix the typo.",
-                })},
-            }],
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "verdict": "request_changes",
+                                "review_markdown": "Please fix the typo.",
+                            }
+                        )
+                    },
+                }
+            ],
         }
         path = tmp_path / "response.json"
         path.write_text(json.dumps(data))
@@ -528,6 +564,7 @@ class TestParseResponseFile:
 # ---------------------------------------------------------------------------
 # Verdict normalisation, truncation, and stream-error handling
 # ---------------------------------------------------------------------------
+
 
 def _exit_msg(resp: dict) -> str:
     """Call parse_response expecting SystemExit; return the message."""
@@ -542,12 +579,12 @@ class TestVerdictNormalization:
     @staticmethod
     def _resp(verdict: str, finish_reason: str = "stop") -> dict:
         return {
-            "choices": [{
-                "message": {"content": json.dumps(
-                    {"verdict": verdict, "review_markdown": "# ok"}
-                )},
-                "finish_reason": finish_reason,
-            }],
+            "choices": [
+                {
+                    "message": {"content": json.dumps({"verdict": verdict, "review_markdown": "# ok"})},
+                    "finish_reason": finish_reason,
+                }
+            ],
         }
 
     def test_capitalized_approve(self):
@@ -569,23 +606,19 @@ class TestVerdictNormalization:
 class TestTruncationAndStreamError:
     def test_truncation_hint_openai_length(self):
         # Unparseable (truncated) content with finish_reason=length.
-        resp = {"choices": [{"message": {"content": '{"verdict": "approve"'},
-                             "finish_reason": "length"}]}
+        resp = {"choices": [{"message": {"content": '{"verdict": "approve"'}, "finish_reason": "length"}]}
         assert "truncated" in _exit_msg(resp)
 
     def test_truncation_hint_anthropic_max_tokens(self):
-        resp = {"content": [{"type": "text", "text": '{"verdict":'}],
-                "stop_reason": "max_tokens"}
+        resp = {"content": [{"type": "text", "text": '{"verdict":'}], "stop_reason": "max_tokens"}
         assert "truncated" in _exit_msg(resp)
 
     def test_no_truncation_hint_when_finished_normally(self):
-        resp = {"choices": [{"message": {"content": "no json here"},
-                             "finish_reason": "stop"}]}
+        resp = {"choices": [{"message": {"content": "no json here"}, "finish_reason": "stop"}]}
         assert "truncated" not in _exit_msg(resp)
 
     def test_stream_error_surfaced(self):
-        resp = {"error": {"message": "context length exceeded"},
-                "choices": [{"message": {"content": ""}}]}
+        resp = {"error": {"message": "context length exceeded"}, "choices": [{"message": {"content": ""}}]}
         msg = _exit_msg(resp)
         assert "context length exceeded" in msg
 
@@ -614,25 +647,43 @@ class TestFindingsNormalization:
         assert self._parse_findings("not a list") == []
 
     def test_valid_finding_normalized(self):
-        out = self._parse_findings([
-            {"severity": "blocker", "category": "security", "file": "./a/b.py",
-             "line": "42", "message": "  path traversal  "}
-        ])
-        assert out == [{
-            "severity": "blocker", "category": "security", "file": "a/b.py",
-            "line": 42, "message": "path traversal",
-        }]
+        out = self._parse_findings(
+            [
+                {
+                    "severity": "blocker",
+                    "category": "security",
+                    "file": "./a/b.py",
+                    "line": "42",
+                    "message": "  path traversal  ",
+                }
+            ]
+        )
+        assert out == [
+            {
+                "severity": "blocker",
+                "category": "security",
+                "file": "a/b.py",
+                "line": 42,
+                "message": "path traversal",
+            }
+        ]
 
     def test_severity_aliases_mapped(self):
-        out = self._parse_findings([
-            {"severity": "Critical", "message": "a"},
-            {"severity": "HIGH", "message": "b"},
-            {"severity": "warning", "message": "c"},
-            {"severity": "nit", "message": "d"},
-            {"severity": "made-up", "message": "e"},
-        ])
+        out = self._parse_findings(
+            [
+                {"severity": "Critical", "message": "a"},
+                {"severity": "HIGH", "message": "b"},
+                {"severity": "warning", "message": "c"},
+                {"severity": "nit", "message": "d"},
+                {"severity": "made-up", "message": "e"},
+            ]
+        )
         assert [f["severity"] for f in out] == [
-            "blocker", "major", "minor", "info", "info",
+            "blocker",
+            "major",
+            "minor",
+            "info",
+            "info",
         ]
 
     def test_unknown_category_becomes_other(self):
@@ -640,31 +691,37 @@ class TestFindingsNormalization:
         assert out[0]["category"] == "other"
 
     def test_items_without_message_dropped(self):
-        out = self._parse_findings([
-            {"severity": "blocker"},
-            "just a string",
-            42,
-            {"message": "   "},
-            {"message": "kept"},
-        ])
+        out = self._parse_findings(
+            [
+                {"severity": "blocker"},
+                "just a string",
+                42,
+                {"message": "   "},
+                {"message": "kept"},
+            ]
+        )
         assert len(out) == 1
         assert out[0]["message"] == "kept"
 
     def test_message_fallbacks_summary_and_title(self):
-        out = self._parse_findings([
-            {"summary": "from summary"},
-            {"title": "from title"},
-        ])
+        out = self._parse_findings(
+            [
+                {"summary": "from summary"},
+                {"title": "from title"},
+            ]
+        )
         assert [f["message"] for f in out] == ["from summary", "from title"]
 
     def test_invalid_lines_become_null(self):
-        out = self._parse_findings([
-            {"message": "a", "line": 0},
-            {"message": "b", "line": -3},
-            {"message": "c", "line": "abc"},
-            {"message": "d", "line": True},
-            {"message": "e", "line": 7.0},
-        ])
+        out = self._parse_findings(
+            [
+                {"message": "a", "line": 0},
+                {"message": "b", "line": -3},
+                {"message": "c", "line": "abc"},
+                {"message": "d", "line": True},
+                {"message": "e", "line": 7.0},
+            ]
+        )
         assert [f["line"] for f in out] == [None, None, None, None, 7]
 
     def test_parent_traversal_path_not_silently_rewritten(self):
@@ -676,23 +733,29 @@ class TestFindingsNormalization:
         assert len(out) == 50
 
     def test_id_and_resolution_preserved(self):
-        out = self._parse_findings([
-            {"message": "carried", "id": "P1", "resolution": "resolved"},
-            {"message": "alias", "id": "P2", "resolution": "FIXED"},
-            {"message": "open", "id": "P3", "resolution": "still_open"},
-            {"message": "unknown", "id": "P4", "resolution": "not_verifiable"},
-        ])
+        out = self._parse_findings(
+            [
+                {"message": "carried", "id": "P1", "resolution": "resolved"},
+                {"message": "alias", "id": "P2", "resolution": "FIXED"},
+                {"message": "open", "id": "P3", "resolution": "still_open"},
+                {"message": "unknown", "id": "P4", "resolution": "not_verifiable"},
+            ]
+        )
         assert [(f["id"], f["resolution"]) for f in out] == [
-            ("P1", "resolved"), ("P2", "resolved"), ("P3", "still_open"),
+            ("P1", "resolved"),
+            ("P2", "resolved"),
+            ("P3", "still_open"),
             ("P4", "not_verifiable_from_delta"),
         ]
 
     def test_invalid_id_and_resolution_dropped(self):
-        out = self._parse_findings([
-            {"message": "a", "id": "../;rm -rf", "resolution": "maybe?"},
-            {"message": "b", "id": 7, "resolution": ["resolved"]},
-            {"message": "c"},
-        ])
+        out = self._parse_findings(
+            [
+                {"message": "a", "id": "../;rm -rf", "resolution": "maybe?"},
+                {"message": "b", "id": 7, "resolution": ["resolved"]},
+                {"message": "c"},
+            ]
+        )
         assert out[0]["id"] == "rm-rf"
         assert "resolution" not in out[0]
         assert "id" not in out[1] and "resolution" not in out[1]

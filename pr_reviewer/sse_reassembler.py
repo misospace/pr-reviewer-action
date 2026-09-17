@@ -164,12 +164,8 @@ def _reassemble_anthropic(
         if etype == "message_start":
             message_id = event.get("message", {}).get("id")
             model = event.get("message", {}).get("model")
-            input_tokens = (
-                event.get("message", {}).get("usage", {}).get("input_tokens", 0)
-            )
-            output_tokens = (
-                event.get("message", {}).get("usage", {}).get("output_tokens", 0)
-            )
+            input_tokens = event.get("message", {}).get("usage", {}).get("input_tokens", 0)
+            output_tokens = event.get("message", {}).get("usage", {}).get("output_tokens", 0)
         elif etype == "content_block_start":
             cb = event.get("content_block", {}) or {}
             cb_type = cb.get("type")
@@ -202,18 +198,14 @@ def _reassemble_anthropic(
                     # Some Anthropic-compatible proxies (LiteLLM) serialise the
                     # partial input as a JSON-encoded string of a dict;
                     # json.dumps is the safe round-trip back to a fragment.
-                    current_tool_args_parts.append(
-                        json.dumps(partial, ensure_ascii=False)
-                    )
+                    current_tool_args_parts.append(json.dumps(partial, ensure_ascii=False))
         elif etype == "content_block_stop":
             cb_index = event.get("index")
             # Flush when the stop matches the open tool block. When the proxy
             # never sent an index for the block, any stop closes it (the spec
             # interleaves blocks sequentially, so the first stop after the
             # deltas is the block's own).
-            if current_tool_id is not None and (
-                tool_block_index is None or cb_index == tool_block_index
-            ):
+            if current_tool_id is not None and (tool_block_index is None or cb_index == tool_block_index):
                 _flush_tool_call()
                 tool_block_index = None
         elif etype == "message_delta":
@@ -426,6 +418,4 @@ def reassemble_sse_to_file(response_path: str, api_format: str) -> None:
         Either ``"openai"`` or ``"anthropic"``.
     """
     result = reassemble_sse_file(response_path, api_format)
-    Path(response_path).write_text(
-        json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(response_path).write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")

@@ -20,7 +20,8 @@ def _import_harness():
     """Import run_tool_harness module ensuring scripts is on sys.path."""
     if str(_SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(_SCRIPTS_DIR))
-    import run_tool_harness  # noqa: F401
+    import run_tool_harness
+
     return run_tool_harness
 
 
@@ -95,9 +96,7 @@ class TestMaxRequestsBoundedCall(TestCase):
         source = harness_path.read_text(encoding="utf-8")
 
         # Should call env_int_bounded with TOOL_MAX_REQUESTS, default 4, min 1, max 20
-        self.assertIn(
-            'env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)', source
-        )
+        self.assertIn('env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)', source)
 
 
 if __name__ == "__main__":

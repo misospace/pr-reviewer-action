@@ -472,10 +472,14 @@ class TestApplyVerdictPolicy:
     def test_enforcement_still_overrides_gated_approve(self, tmp_path):
         out = self._write(tmp_path, "approve", [self._minor()])
         evidence = tmp_path / "evidence-providers.json"
-        evidence.write_text(json.dumps({
-            "has_blocker": True,
-            "providers": [{"id": "sec-scan", "provider_severity": "blocker"}],
-        }))
+        evidence.write_text(
+            json.dumps(
+                {
+                    "has_blocker": True,
+                    "providers": [{"id": "sec-scan", "provider_severity": "blocker"}],
+                }
+            )
+        )
         apply_verdict_policy("findings_severity_gated", str(out))
         apply_all_enforcement(
             evidence_blocker_enabled=True,

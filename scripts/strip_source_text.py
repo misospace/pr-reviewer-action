@@ -15,12 +15,7 @@ import sys
 
 def looks_like_html(text: str) -> bool:
     head = text[:512].lstrip().lower()
-    return (
-        head.startswith("<!doctype")
-        or head.startswith("<html")
-        or head.startswith("<")
-        or "<body" in head
-    )
+    return head.startswith("<!doctype") or head.startswith("<html") or head.startswith("<") or "<body" in head
 
 
 def strip_html(text: str) -> str:

@@ -12,9 +12,7 @@ import re
 from pathlib import Path
 
 
-def _force_request_changes(
-    output_path: str, section_md: str, reason: str
-) -> tuple[bool, str]:
+def _force_request_changes(output_path: str, section_md: str, reason: str) -> tuple[bool, str]:
     """Append an enforcement section to the review markdown and force the
     verdict to ``request_changes``. Shared by all enforcement rules so the
     output-mutation discipline lives in one place."""
@@ -53,11 +51,7 @@ def apply_evidence_blocker_enforcement(
     if not evidence.get("has_blocker"):
         return False, ""
 
-    blocker_ids = [
-        p["id"]
-        for p in evidence.get("providers", [])
-        if p.get("provider_severity") == "blocker"
-    ]
+    blocker_ids = [p["id"] for p in evidence.get("providers", []) if p.get("provider_severity") == "blocker"]
     ids_str = ", ".join(blocker_ids)
 
     return _force_request_changes(
@@ -99,11 +93,7 @@ def _count_successful_requests(tool_harness_path: str = "tool-harness.json") -> 
         harness = json.loads(Path(tool_harness_path).read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError):
         return 0
-    return sum(
-        1
-        for t in harness.get("tool_results", [])
-        if isinstance(t, dict) and t.get("status") == "ok"
-    )
+    return sum(1 for t in harness.get("tool_results", []) if isinstance(t, dict) and t.get("status") == "ok")
 
 
 def _harness_requested_tools(tool_harness_path: str = "tool-harness.json") -> bool:
@@ -218,8 +208,7 @@ def normalize_enforced_review_markdown(
                     "## Final Recommendation\n"
                     "Request changes. The following enforcement check(s) require this PR "
                     "to be treated as blocking even if the model's initial review text was approving:\n\n"
-                    f"{reasons_bullet}\n\n"
-                    + markdown.lstrip()
+                    f"{reasons_bullet}\n\n" + markdown.lstrip()
                 )
             else:
                 banner = (
@@ -259,9 +248,7 @@ def apply_verdict_policy(
 
     if policy == "findings_severity_gated" and isinstance(findings, list):
         blockers = [
-            finding
-            for finding in findings
-            if isinstance(finding, dict) and finding.get("severity") == "blocker"
+            finding for finding in findings if isinstance(finding, dict) and finding.get("severity") == "blocker"
         ]
         if blockers and data.get("verdict") != "request_changes":
             note = (
@@ -275,9 +262,7 @@ def apply_verdict_policy(
             source = "findings"
 
     data["verdict_source"] = source
-    Path(output_path).write_text(
-        json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
     return source
 
 
@@ -322,9 +307,7 @@ def apply_all_enforcement(
             applied += 1
             reasons.append(reason)
         elif tool_min_successful > 0:
-            ok, reason = apply_tool_min_successful_enforcement(
-                tool_min_successful, tool_harness_path, output_path
-            )
+            ok, reason = apply_tool_min_successful_enforcement(tool_min_successful, tool_harness_path, output_path)
             if ok:
                 applied += 1
                 reasons.append(reason)

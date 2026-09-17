@@ -36,7 +36,8 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from .conversation import Conversation
 
@@ -55,8 +56,7 @@ _DUPLICATE_NOTE = (
     "Reuse the earlier result instead of repeating the call."
 )
 _BUDGET_NOTE = (
-    "Tool-call budget exhausted: this call was not executed. "
-    "Finish the analysis with the evidence you already have."
+    "Tool-call budget exhausted: this call was not executed. Finish the analysis with the evidence you already have."
 )
 
 
@@ -82,7 +82,7 @@ def adaptive_loop_budgets(
     max_rounds: int,
     max_tool_calls: int,
     wall_clock_sec: float,
-) -> "LoopBudgets":
+) -> LoopBudgets:
     """Right-size the loop budget. A native round is one model turn, so the
     headroom is 2× the configured rounds (capped at 8); the configured tool-call
     budget is used as-is.
@@ -124,9 +124,7 @@ class LoopOutcome:
     error: str = ""
 
 
-def extract_tool_calls(
-    response: dict[str, Any], api_format: str
-) -> tuple[list[dict[str, Any]], str]:
+def extract_tool_calls(response: dict[str, Any], api_format: str) -> tuple[list[dict[str, Any]], str]:
     """Pull (tool_calls, text) out of a non-streaming chat response.
 
     Returned calls are in the flat ``{"id", "name", "arguments"}`` shape that
@@ -256,15 +254,10 @@ def drive_tool_loop(
                     summarized = conversation.summarize_oldest_tool_results(
                         summarize_fn, keep_newest=budgets.summarize_keep_newest
                     )
-                except Exception:  # noqa: BLE001 — summarization is best-effort
+                except Exception:
                     summarized = 0
-            if (
-                not summarized
-                or conversation.approx_tokens() > budgets.max_conversation_tokens
-            ):
-                conversation.truncate_oldest_tool_results(
-                    budgets.truncated_result_bytes
-                )
+            if not summarized or conversation.approx_tokens() > budgets.max_conversation_tokens:
+                conversation.truncate_oldest_tool_results(budgets.truncated_result_bytes)
 
         payload = conversation.to_request_payload(
             api_format,
@@ -277,7 +270,7 @@ def drive_tool_loop(
         )
         try:
             response = post_fn(payload)
-        except Exception as exc:  # noqa: BLE001 — transport errors end the loop
+        except Exception as exc:
             outcome.stop_reason = STOP_REQUEST_ERROR
             outcome.error = str(exc)
             break
@@ -287,9 +280,7 @@ def drive_tool_loop(
 
         if not calls:
             outcome.final_text = text
-            outcome.stop_reason = (
-                STOP_MODEL_DONE if outcome.tool_calls_issued else STOP_NO_TOOL_CALLS
-            )
+            outcome.stop_reason = STOP_MODEL_DONE if outcome.tool_calls_issued else STOP_NO_TOOL_CALLS
             break
 
         if text:
@@ -318,10 +309,7 @@ def drive_tool_loop(
                 if not isinstance(args, dict):
                     raise ValueError("arguments must be a JSON object")
             except (json.JSONDecodeError, ValueError) as exc:
-                plan.append(
-                    (call_id, "error",
-                     {"error": f"Invalid tool arguments (not a JSON object): {exc}"})
-                )
+                plan.append((call_id, "error", {"error": f"Invalid tool arguments (not a JSON object): {exc}"}))
                 continue
 
             key = _request_key(call["name"], args)
@@ -341,14 +329,11 @@ def drive_tool_loop(
         # Fan out the executions (read-only, independent within a round).
         results_by_idx: dict[int, dict[str, Any]] = {}
         if len(to_execute) == 1:
-            (only_idx, (name, args)), = to_execute.items()
+            ((only_idx, (name, args)),) = to_execute.items()
             results_by_idx[only_idx] = execute_fn(name, args)
         elif to_execute:
             with ThreadPoolExecutor(max_workers=min(len(to_execute), 8)) as pool:
-                futures = {
-                    pool.submit(execute_fn, name, args): i
-                    for i, (name, args) in to_execute.items()
-                }
+                futures = {pool.submit(execute_fn, name, args): i for i, (name, args) in to_execute.items()}
                 for fut in futures:
                     results_by_idx[futures[fut]] = fut.result()
 
@@ -359,9 +344,7 @@ def drive_tool_loop(
                 continue
             name, args = to_execute[data]
             result = results_by_idx[data]
-            outcome.executed.append(
-                ExecutedCall(tool=name, args=args, result=result)
-            )
+            outcome.executed.append(ExecutedCall(tool=name, args=args, result=result))
             conversation.add_tool_result(
                 call_id,
                 result.get("result", {}),

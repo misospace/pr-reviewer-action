@@ -75,17 +75,76 @@ _LANGUAGE_BY_EXT = {
 
 # Extensions we recognize as source but do not parse declarations for yet.
 _UNSUPPORTED_SOURCE_EXTS = {
-    "rb", "java", "kt", "cs", "php", "rs", "scala", "swift", "c", "cc",
-    "cpp", "h", "hpp", "sh", "bash", "zsh", "pl", "lua", "r", "ex", "exs",
-    "erl", "hs", "ml", "clj", "dart", "vue", "svelte",
+    "rb",
+    "java",
+    "kt",
+    "cs",
+    "php",
+    "rs",
+    "scala",
+    "swift",
+    "c",
+    "cc",
+    "cpp",
+    "h",
+    "hpp",
+    "sh",
+    "bash",
+    "zsh",
+    "pl",
+    "lua",
+    "r",
+    "ex",
+    "exs",
+    "erl",
+    "hs",
+    "ml",
+    "clj",
+    "dart",
+    "vue",
+    "svelte",
 }
 
 # Non-source files never contribute anchors (not even file anchors).
 _NON_SOURCE_EXTS = {
-    "md", "rst", "txt", "json", "yaml", "yml", "toml", "ini", "cfg", "conf",
-    "lock", "csv", "xml", "svg", "png", "jpg", "jpeg", "gif", "ico", "webp",
-    "pdf", "zip", "tar", "gz", "bin", "woff", "woff2", "ttf", "eot", "map",
-    "wasm", "p12", "pem", "crt", "key", "env", "gitignore", "dockerignore",
+    "md",
+    "rst",
+    "txt",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "lock",
+    "csv",
+    "xml",
+    "svg",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "ico",
+    "webp",
+    "pdf",
+    "zip",
+    "tar",
+    "gz",
+    "bin",
+    "woff",
+    "woff2",
+    "ttf",
+    "eot",
+    "map",
+    "wasm",
+    "p12",
+    "pem",
+    "crt",
+    "key",
+    "env",
+    "gitignore",
+    "dockerignore",
 }
 
 
@@ -108,42 +167,197 @@ def detect_language(path: str) -> str:
 # Noise filtering
 # ---------------------------------------------------------------------------
 
-_KEYWORDS = frozenset({
-    # Python
-    "False", "None", "True", "and", "as", "assert", "async", "await",
-    "break", "class", "continue", "def", "del", "elif", "else", "except",
-    "finally", "for", "from", "global", "if", "import", "in", "is",
-    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-    "while", "with", "yield",
-    # JavaScript / TypeScript
-    "arguments", "await", "boolean", "case", "catch", "const", "debugger",
-    "default", "delete", "do", "else", "enum", "export", "false", "finally",
-    "function", "if", "implements", "import", "instanceof", "interface",
-    "let", "new", "null", "number", "of", "package", "private", "protected",
-    "public", "static", "string", "super", "switch", "this", "throw",
-    "true", "typeof", "undefined", "var", "void", "while",
-    # Go
-    "bool", "byte", "cap", "chan", "close", "complex", "const", "copy",
-    "else", "fallthrough", "float32", "float64", "func", "go", "goto",
-    "imag", "int", "int8", "int16", "int32", "int64", "interface", "iota",
-    "len", "map", "make", "nil", "panic", "print", "println", "range",
-    "recover", "string", "struct", "type", "uint", "uint8", "uint16",
-    "uint32", "uint64", "uintptr",
-})
+_KEYWORDS = frozenset(
+    {
+        # Python
+        "False",
+        "None",
+        "True",
+        "and",
+        "as",
+        "assert",
+        "async",
+        "await",
+        "break",
+        "class",
+        "continue",
+        "def",
+        "del",
+        "elif",
+        "else",
+        "except",
+        "finally",
+        "for",
+        "from",
+        "global",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "nonlocal",
+        "not",
+        "or",
+        "pass",
+        "raise",
+        "return",
+        "try",
+        "while",
+        "with",
+        "yield",
+        # JavaScript / TypeScript
+        "arguments",
+        "boolean",
+        "case",
+        "catch",
+        "const",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "enum",
+        "export",
+        "false",
+        "function",
+        "implements",
+        "instanceof",
+        "interface",
+        "let",
+        "new",
+        "null",
+        "number",
+        "of",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "static",
+        "string",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "typeof",
+        "undefined",
+        "var",
+        "void",
+        # Go
+        "bool",
+        "byte",
+        "cap",
+        "chan",
+        "close",
+        "complex",
+        "copy",
+        "fallthrough",
+        "float32",
+        "float64",
+        "func",
+        "go",
+        "goto",
+        "imag",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "iota",
+        "len",
+        "map",
+        "make",
+        "nil",
+        "panic",
+        "print",
+        "println",
+        "range",
+        "recover",
+        "struct",
+        "type",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+    }
+)
 
 # Names that are never useful anchors even if not keywords.
-_LOW_VALUE_NAMES = frozenset({
-    "self", "cls", "this", "super", "undefined", "null", "None", "True",
-    "False", "nil", "default", "export", "import", "require", "module",
-    "exports", "console", "process", "global", "window", "document",
-    "object", "function", "class", "type", "var", "let", "const", "func",
-    "struct", "interface", "package", "main", "test", "tests", "init",
-    "setup", "teardown", "before", "after", "describe", "it", "expect",
-    "assert", "log", "info", "warn", "error", "debug", "trace", "verbose",
-    "string", "number", "boolean", "array", "list", "dict", "set", "tuple",
-    "bytes", "int", "float", "complex", "bool", "byte", "rune", "any",
-    "void", "never", "unknown",
-})
+_LOW_VALUE_NAMES = frozenset(
+    {
+        "self",
+        "cls",
+        "this",
+        "super",
+        "undefined",
+        "null",
+        "None",
+        "True",
+        "False",
+        "nil",
+        "default",
+        "export",
+        "import",
+        "require",
+        "module",
+        "exports",
+        "console",
+        "process",
+        "global",
+        "window",
+        "document",
+        "object",
+        "function",
+        "class",
+        "type",
+        "var",
+        "let",
+        "const",
+        "func",
+        "struct",
+        "interface",
+        "package",
+        "main",
+        "test",
+        "tests",
+        "init",
+        "setup",
+        "teardown",
+        "before",
+        "after",
+        "describe",
+        "it",
+        "expect",
+        "assert",
+        "log",
+        "info",
+        "warn",
+        "error",
+        "debug",
+        "trace",
+        "verbose",
+        "string",
+        "number",
+        "boolean",
+        "array",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "bytes",
+        "int",
+        "float",
+        "complex",
+        "bool",
+        "byte",
+        "rune",
+        "any",
+        "void",
+        "never",
+        "unknown",
+    }
+)
 
 _URL_RE = re.compile(r"^[a-z][a-z0-9+.-]*://\S+$", re.IGNORECASE)
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{8,}$")
@@ -181,16 +395,10 @@ def _valid_module(name: str) -> bool:
 # matches.
 _PY_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _PY_CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|\[|:|$)")
-_PY_IMPORT_RE = re.compile(
-    r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_.]*)*)"
-)
-_PY_FROM_RE = re.compile(
-    r"^\s*from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\s+([A-Za-z_][A-Za-z0-9_.\s,()]+)"
-)
+_PY_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_.]*)*)")
+_PY_FROM_RE = re.compile(r"^\s*from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\s+([A-Za-z_][A-Za-z0-9_.\s,()]+)")
 _PY_FROM_BLOCK_RE = re.compile(r"^\s*from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\s*\($")
-_PY_FROM_NAME_RE = re.compile(
-    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*,?\s*(#.*)?$"
-)
+_PY_FROM_NAME_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*,?\s*(#.*)?$")
 
 # JavaScript / TypeScript
 _JS_FUNC_RE = re.compile(
@@ -205,37 +413,23 @@ _JS_ARROW_RE = re.compile(
     r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
     r"\s*=\s*(async\s+)?\("
 )
-_JS_IMPORT_RE = re.compile(
-    r"^\s*import\s+(?:type\s+)?(?:[^'\";]*?\sfrom\s+)?['\"]([^'\"]+)['\"]"
-)
-_JS_REQUIRE_RE = re.compile(
-    r"(?<![A-Za-z0-9_$])require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"
-)
+_JS_IMPORT_RE = re.compile(r"^\s*import\s+(?:type\s+)?(?:[^'\";]*?\sfrom\s+)?['\"]([^'\"]+)['\"]")
+_JS_REQUIRE_RE = re.compile(r"(?<![A-Za-z0-9_$])require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
 
 # Go
-_GO_FUNC_RE = re.compile(
-    r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\("
-)
-_GO_TYPE_RE = re.compile(
-    r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface)\b"
-)
+_GO_FUNC_RE = re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_GO_TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface)\b")
 # Go import paths. Two forms:
 #  - Inside an `import (` block, every quoted path is an import, so single-word
 #    stdlib packages like "context" are accepted (the block makes it unambiguous).
 #  - A single-line import requires the `import` keyword, so a bare string
 #    literal in code (e.g. `s := "net/http"`) is never mistaken for an import.
-_GO_BLOCK_IMPORT_RE = re.compile(
-    r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?['\"]([A-Za-z0-9_./\-]+)['\"]"
-)
-_GO_SINGLE_IMPORT_RE = re.compile(
-    r"^\s*import\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)?['\"]([A-Za-z0-9_./\-]+)['\"]"
-)
+_GO_BLOCK_IMPORT_RE = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?['\"]([A-Za-z0-9_./\-]+)['\"]")
+_GO_SINGLE_IMPORT_RE = re.compile(r"^\s*import\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)?['\"]([A-Za-z0-9_./\-]+)['\"]")
 _GO_IMPORT_BLOCK_RE = re.compile(r"^\s*import\s*\(")
 
 
-def _extract_python(line: str, in_from_block: bool) -> tuple[
-    list[tuple[str, str, str]], list[str], bool
-]:
+def _extract_python(line: str, in_from_block: bool) -> tuple[list[tuple[str, str, str]], list[str], bool]:
     """Return (symbols, imports, still_in_from_block) for one added line."""
     symbols: list[tuple[str, str, str]] = []
     imports: list[str] = []
@@ -400,11 +594,7 @@ def _decode_c_quoted(inner: str) -> str:
                 # Octal byte escape: up to 3 digits, one byte.
                 digits = nxt
                 j = i + 2
-                while (
-                    j < len(inner)
-                    and len(digits) < 3
-                    and inner[j] in "01234567"
-                ):
+                while j < len(inner) and len(digits) < 3 and inner[j] in "01234567":
                     digits += inner[j]
                     j += 1
                 val = int(digits, 8)
@@ -417,9 +607,7 @@ def _decode_c_quoted(inner: str) -> str:
                 out.append(0x5C)
                 i += 1
                 continue
-            out.extend(
-                _PATH_ESCAPES.get(nxt, nxt).encode("utf-8", errors="surrogateescape")
-            )
+            out.extend(_PATH_ESCAPES.get(nxt, nxt).encode("utf-8", errors="surrogateescape"))
             i += 2
             continue
         out.extend(c.encode("utf-8", errors="surrogateescape"))
@@ -456,7 +644,7 @@ def _parse_path_token(text: str) -> tuple[str | None, str]:
                 i += 2
                 continue
             if c == '"':
-                return _decode_c_quoted(text[1:i]), text[i + 1:]
+                return _decode_c_quoted(text[1:i]), text[i + 1 :]
             i += 1
         # Unterminated quote — give up cleanly rather than guessing.
         return None, text
@@ -480,7 +668,7 @@ def _parse_diff_git_line(line: str) -> tuple[str, str] | None:
     prefix = "diff --git "
     if not line.startswith(prefix):
         return None
-    rest = line[len(prefix):]
+    rest = line[len(prefix) :]
 
     # First path: quoted or unquoted. When unquoted, the path carries the
     # ``a/`` prefix and the second `` b/`` separator is unambiguous; when
@@ -501,7 +689,7 @@ def _parse_diff_git_line(line: str) -> tuple[str, str] | None:
         if sep == -1:
             return None
         old_path = rest[:sep]
-        rest = rest[sep + 1:]
+        rest = rest[sep + 1 :]
 
     # Second path: quoted or unquoted. Unquoted paths carry the ``b/`` prefix
     # and span to the end of the line (the ``diff --git`` header has no other
@@ -531,7 +719,7 @@ def _parse_rename_line(line: str, target: str) -> str | None:
     prefix = f"rename {target} "
     if not line.startswith(prefix):
         return None
-    path, rest = _parse_path_token(line[len(prefix):])
+    path, rest = _parse_path_token(line[len(prefix) :])
     if path is None:
         return None
     # ``rename from X to Y`` has more content; ``rename to X`` is at end.
@@ -687,6 +875,7 @@ def parse_diff(diff_text: str) -> list[_FileState]:
 # Anchor extraction
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FileAnchors:
     path: str
@@ -713,12 +902,8 @@ def _merge_with_context(state: _FileState) -> list[tuple[int, str, bool]]:
     file's true order. The third tuple element marks a context line: the
     caller advances block state from it but emits no anchors.
     """
-    merged: list[tuple[int, str, bool]] = [
-        (line_no, content, False) for line_no, content in state.added_lines
-    ]
-    merged.extend(
-        (line_no, content, True) for line_no, content in state.context_lines
-    )
+    merged: list[tuple[int, str, bool]] = [(line_no, content, False) for line_no, content in state.added_lines]
+    merged.extend((line_no, content, True) for line_no, content in state.context_lines)
     merged.sort(key=lambda item: item[0])
     return merged
 
@@ -740,9 +925,7 @@ def _extract_file_anchors(state: _FileState) -> FileAnchors:
         if key in seen_symbols:
             return
         seen_symbols.add(key)
-        fa.symbols.append(
-            {"name": name, "kind": kind, "confidence": confidence, "line": line_no}
-        )
+        fa.symbols.append({"name": name, "kind": kind, "confidence": confidence, "line": line_no})
 
     def _add_import(mod: str) -> None:
         if mod not in seen_imports:
@@ -828,11 +1011,13 @@ def extract_change_anchors(
             if not path or path in seen_paths:
                 continue
             seen_paths.add(path)
-            merged.append(_FileState(
-                path=path,
-                old_path=entry.get("previous_filename") or "",
-                deleted=(entry.get("status") == "removed"),
-            ))
+            merged.append(
+                _FileState(
+                    path=path,
+                    old_path=entry.get("previous_filename") or "",
+                    deleted=(entry.get("status") == "removed"),
+                )
+            )
 
     for state in diff_files:
         if state.path in seen_paths:
@@ -867,10 +1052,7 @@ def extract_change_anchors(
         if key in seen_anchors:
             return
         seen_anchors.add(key)
-        anchors.append(
-            {"value": value, "kind": kind, "source": source,
-             "confidence": confidence}
-        )
+        anchors.append({"value": value, "kind": kind, "source": source, "confidence": confidence})
 
     for state in merged:
         fa = _extract_file_anchors(state)
@@ -912,6 +1094,7 @@ def extract_change_anchors(
 # File-list loading
 # ---------------------------------------------------------------------------
 
+
 def load_file_list(path: str | Path) -> list[dict[str, Any]]:
     """Load pr-files.json / pr-files.raw.json (array or {files: [...]})."""
     try:
@@ -928,6 +1111,7 @@ def load_file_list(path: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _resolve_artifact_path(path_str: str, workspace_root: str | Path) -> Path | None:
     """Validate ``path_str`` as an artifact write target inside ``workspace_root``.
@@ -965,19 +1149,17 @@ def _resolve_artifact_path(path_str: str, workspace_root: str | Path) -> Path | 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Extract deterministic change anchors from a PR diff."
+    parser = argparse.ArgumentParser(description="Extract deterministic change anchors from a PR diff.")
+    parser.add_argument("--diff", default="pr.diff", help="Path to pr.diff or pr.diff.truncated")
+    parser.add_argument("--files", default="", help="Path to pr-files.json / pr-files.raw.json (optional)")
+    parser.add_argument(
+        "--output",
+        default="change-anchors.json",
+        help="Output path for the change-anchors JSON (must be inside --workspace-root)",
     )
-    parser.add_argument("--diff", default="pr.diff",
-                        help="Path to pr.diff or pr.diff.truncated")
-    parser.add_argument("--files", default="",
-                        help="Path to pr-files.json / pr-files.raw.json (optional)")
-    parser.add_argument("--output", default="change-anchors.json",
-                        help="Output path for the change-anchors JSON "
-                             "(must be inside --workspace-root)")
-    parser.add_argument("--workspace-root", default="",
-                        help="Restrict --output to this directory "
-                             "(default: $GITHUB_WORKSPACE or cwd)")
+    parser.add_argument(
+        "--workspace-root", default="", help="Restrict --output to this directory (default: $GITHUB_WORKSPACE or cwd)"
+    )
     args = parser.parse_args(argv)
 
     # Default workspace root mirrors the rest of the project: the runner's
@@ -1001,8 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     out = _resolve_artifact_path(args.output, workspace_root)
     if out is None:
         print(
-            f"Refusing to write {args.output!r}: escapes workspace root "
-            f"{workspace_root!r} or is otherwise unsafe.",
+            f"Refusing to write {args.output!r}: escapes workspace root {workspace_root!r} or is otherwise unsafe.",
             file=sys.stderr,
         )
         return 1

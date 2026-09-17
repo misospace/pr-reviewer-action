@@ -4,10 +4,10 @@ import json
 import re
 from typing import Optional
 
-MARKER_PREFIX_PATTERN = re.compile(r'<!--\s*ai-pr-reviewer:\s*(?=\{)')
+MARKER_PREFIX_PATTERN = re.compile(r"<!--\s*ai-pr-reviewer:\s*(?=\{)")
 
 
-def parse_metadata(body: str) -> Optional[dict]:
+def parse_metadata(body: str) -> dict | None:
     """Extract the first ai-pr-reviewer metadata JSON from a comment/review body.
 
     Uses json.JSONDecoder.raw_decode from the opening brace so nested objects
@@ -31,15 +31,20 @@ def parse_metadata(body: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
-                 review_scope: str = "full", previous_head_sha: str = "",
-                 review_result: str = "clean",
-                 required_checks: str | None = None,
-                 review_route: str | None = None,
-                 escalation_reason: list[str] | None = None,
-                 evidence_digest: str | None = None,
-                 open_findings: list[dict] | None = None,
-                 cache_hit_ratio: float | None = None) -> str:
+def build_marker(
+    version: int = 1,
+    head_sha: str = "",
+    base_sha: str = "",
+    review_scope: str = "full",
+    previous_head_sha: str = "",
+    review_result: str = "clean",
+    required_checks: str | None = None,
+    review_route: str | None = None,
+    escalation_reason: list[str] | None = None,
+    evidence_digest: str | None = None,
+    open_findings: list[dict] | None = None,
+    cache_hit_ratio: float | None = None,
+) -> str:
     """Build a metadata marker string for insertion into managed comments."""
     data = {
         "version": version,

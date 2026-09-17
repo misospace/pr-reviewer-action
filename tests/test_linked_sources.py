@@ -2,6 +2,7 @@
 
 Target: >= 50% line coverage of pr_reviewer/linked_sources.py.
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -90,19 +91,17 @@ def test_render_linked_sources_with_empty_list() -> None:
 
 def test_render_linked_sources_returns_str_for_input() -> None:
     """A non-empty list of URLs should return a string (possibly empty)."""
-    out = linked_sources.render_linked_sources(
-        **_kwargs(urls=["https://github.com/foo/bar"])
-    )
+    out = linked_sources.render_linked_sources(**_kwargs(urls=["https://github.com/foo/bar"]))
     assert isinstance(out, str)
 
 
 def test_render_linked_sources_with_unreachable_url() -> None:
     """If fetch_url returns None and gh_api_call returns None, no exception."""
-    with patch.object(linked_sources, "fetch_url", return_value=None), \
-         patch.object(linked_sources, "gh_api_call", return_value=None):
-        out = linked_sources.render_linked_sources(
-            **_kwargs(urls=["https://github.com/foo/bar"])
-        )
+    with (
+        patch.object(linked_sources, "fetch_url", return_value=None),
+        patch.object(linked_sources, "gh_api_call", return_value=None),
+    ):
+        out = linked_sources.render_linked_sources(**_kwargs(urls=["https://github.com/foo/bar"]))
     assert isinstance(out, str)
 
 
@@ -129,15 +128,17 @@ def test_render_linked_sources_blocks_non_current_repo_by_default() -> None:
     """With no allowlist, a link to another repo must not trigger gh_api."""
     captured: list[str] = []
 
-    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+    def fake_gh_api(endpoint: str, token: str | None):
         captured.append(endpoint)
         return None
 
-    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+    def fake_fetch_url(*args, **kwargs):
         return None
 
-    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
-         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+    with (
+        patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api),
+        patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url),
+    ):
         out = linked_sources.render_linked_sources(
             urls=["https://github.com/other-org/other-repo/releases/tag/v1.0"],
             allowed_hosts={"github.com"},
@@ -164,15 +165,17 @@ def test_render_linked_sources_allows_current_repo() -> None:
     """current_repo itself remains eligible for enrichment."""
     captured: list[str] = []
 
-    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+    def fake_gh_api(endpoint: str, token: str | None):
         captured.append(endpoint)
         return None
 
-    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+    def fake_fetch_url(*args, **kwargs):
         return None
 
-    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
-         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+    with (
+        patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api),
+        patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url),
+    ):
         linked_sources.render_linked_sources(
             urls=["https://github.com/cur-org/cur-repo/releases/tag/v1.0"],
             allowed_hosts={"github.com"},
@@ -195,15 +198,17 @@ def test_render_linked_sources_allows_explicit_allowlist_repo() -> None:
     """A repo listed in allowed_repos is eligible even if not current_repo."""
     captured: list[str] = []
 
-    def fake_gh_api(endpoint: str, token: str | None):  # noqa: ARG001
+    def fake_gh_api(endpoint: str, token: str | None):
         captured.append(endpoint)
         return None
 
-    def fake_fetch_url(*args, **kwargs):  # noqa: ARG001
+    def fake_fetch_url(*args, **kwargs):
         return None
 
-    with patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api), \
-         patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url):
+    with (
+        patch.object(linked_sources, "gh_api_call", side_effect=fake_gh_api),
+        patch.object(linked_sources, "fetch_url", side_effect=fake_fetch_url),
+    ):
         linked_sources.render_linked_sources(
             urls=["https://github.com/allowed-org/allowed-repo/releases/tag/v1.0"],
             allowed_hosts={"github.com"},
@@ -250,7 +255,5 @@ def test_deadline_budget_disabled_when_max_seconds_le_zero() -> None:
 
 def test_deadline_budget_from_env_default() -> None:
     """DeadlineBudget.from_env reads a numeric env var with fallback default."""
-    db = budget.DeadlineBudget.from_env(
-        "TEST_DEADLINE_BUDGET_NOT_SET", default=120
-    )
+    db = budget.DeadlineBudget.from_env("TEST_DEADLINE_BUDGET_NOT_SET", default=120)
     assert db is not None

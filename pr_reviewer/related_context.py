@@ -18,7 +18,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 ARTIFACT_VERSION = 1
 MAX_SYMBOLS = 40
@@ -35,7 +36,7 @@ MAX_ERROR_CHARS = 300
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from redact import mask_secrets  # noqa: E402
+from redact import mask_secrets
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
@@ -103,7 +104,8 @@ def _normalise_file_list(file_list: Iterable[Any] | None) -> list[dict[str, Any]
 
 
 def _changed_paths(
-    anchor_files: list[dict[str, Any]], file_list: list[dict[str, Any]],
+    anchor_files: list[dict[str, Any]],
+    file_list: list[dict[str, Any]],
 ) -> tuple[set[str], set[str]]:
     changed: set[str] = set()
     deleted: set[str] = set()
@@ -130,7 +132,9 @@ def _error(kind: str, detail: Any = "") -> str:
 
 
 def _run_git(
-    argv: list[str], workspace: str, timeout: float,
+    argv: list[str],
+    workspace: str,
+    timeout: float,
 ) -> tuple[int | None, str, str]:
     try:
         proc = subprocess.run(
@@ -341,7 +345,7 @@ def _discover_manifests(changed_path: str, tracked: set[str]) -> tuple[list[str]
         for path in tracked:
             if not _is_manifest(path) or not path.startswith(prefix):
                 continue
-            remainder = path[len(prefix):]
+            remainder = path[len(prefix) :]
             if "/" not in remainder:
                 local.append(path)
         manifests.extend(sorted(local))
@@ -434,9 +438,7 @@ def build_related_context(
 
     raw_anchor_files = anchor_data.get("files", [])
     anchor_files = (
-        [entry for entry in raw_anchor_files if isinstance(entry, dict)]
-        if isinstance(raw_anchor_files, list)
-        else []
+        [entry for entry in raw_anchor_files if isinstance(entry, dict)] if isinstance(raw_anchor_files, list) else []
     )
     file_list_normalized = _normalise_file_list(file_list)
     changed_paths, deleted_paths = _changed_paths(anchor_files, file_list_normalized)
@@ -609,7 +611,7 @@ def _minimal_json_artifact(related: dict[str, Any]) -> dict[str, Any]:
     if (
         isinstance(version, bool)
         or not isinstance(version, (int, float, str))
-        or isinstance(version, str) and len(version) > 100
+        or (isinstance(version, str) and len(version) > 100)
     ):
         version = ARTIFACT_VERSION
     minimal = {
@@ -691,9 +693,7 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
                         line = reference.get("line", 0)
                         if not isinstance(line, int) or line < 0:
                             line = 0
-                        snippet = _code_span(
-                            _display(mask_secrets(str(reference.get("snippet", ""))))
-                        )
+                        snippet = _code_span(_display(mask_secrets(str(reference.get("snippet", "")))))
                         lines.append(f"  - {ref_path}:{line} — {snippet}")
         else:
             lines.append("- Symbols: none")
@@ -704,10 +704,7 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
             lines.append("- Tests: none")
         manifests = file_entry.get("manifests") or []
         if manifests:
-            lines.append(
-                "- Manifests (nearest first): "
-                + ", ".join(_code_span(_display(path)) for path in manifests)
-            )
+            lines.append("- Manifests (nearest first): " + ", ".join(_code_span(_display(path)) for path in manifests))
         else:
             lines.append("- Manifests: none")
         lines.append("")
@@ -724,7 +721,9 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
 
 
 def render_related_context_markdown(
-    related: dict[str, Any], *, max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
+    related: dict[str, Any],
+    *,
+    max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
 ) -> str:
     """Render a compact line-bounded Markdown artifact with safe code spans."""
     lines = _render_lines(related)

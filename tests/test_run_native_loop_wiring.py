@@ -17,8 +17,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import run_tool_harness as rth  # noqa: E402
-from pr_reviewer import transport  # noqa: E402
+import run_tool_harness as rth
+from pr_reviewer import transport
 
 
 def _openai_call(call_id, name, args):
@@ -101,9 +101,7 @@ def test_native_loop_advertises_and_dispatches_repo_contents(monkeypatch, tmp_pa
         return {"tool": name, "status": "ok", "result": {"content": "source"}}
 
     monkeypatch.setattr(rth, "execute_tool_request", fake_execute)
-    handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai", responses
-    )
+    handled, result, payloads = _run_capturing(monkeypatch, tmp_path, "openai", responses)
     assert handled is True
     assert result["mode"] == "native_loop"
     assert dispatched == [
@@ -116,9 +114,7 @@ def test_native_loop_advertises_and_dispatches_repo_contents(monkeypatch, tmp_pa
     advertised = [tool["function"]["name"] for tool in first_payload["tools"]]
     assert "repo_contents" in advertised
     user_text = "\n".join(
-        message.get("content") or ""
-        for message in first_payload["messages"]
-        if message["role"] == "user"
+        message.get("content") or "" for message in first_payload["messages"] if message["role"] == "user"
     )
     assert "Allowed repos (gh_api + repo_contents)" in user_text
 
@@ -127,12 +123,8 @@ def test_native_loop_two_hops_writes_outputs(monkeypatch, tmp_path):
     # Two offline hops: read the machineconfig (carries the platform version),
     # then read the manifest it points at. No network — the executor runs for
     # real, so the output must reflect the actual file contents.
-    (tmp_path / "machineconfig.yaml.j2").write_text(
-        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
-    )
-    (tmp_path / "kubernetesupgrade.yaml").write_text(
-        "kubeletVersion: v1.36.2\n", encoding="utf-8"
-    )
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8")
+    (tmp_path / "kubernetesupgrade.yaml").write_text("kubeletVersion: v1.36.2\n", encoding="utf-8")
     handled, result = _run(
         monkeypatch,
         tmp_path,
@@ -256,9 +248,7 @@ def test_native_loop_falls_back_to_non_streamed_turn(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_STREAM", "true")
     monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "machineconfig.yaml.j2").write_text(
-        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
-    )
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8")
 
     seen = []
     fallback_payloads = []
@@ -354,10 +344,21 @@ def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled):
         "tool_results": [],
     }
     handled = rth.run_native_loop(
-        "owner/repo", "http://model.local/v1", "openai", "mock-model", "key",
+        "owner/repo",
+        "http://model.local/v1",
+        "openai",
+        "mock-model",
+        "key",
         "# PR Corpus\nbumps kubelet image",
-        {"owner/repo"}, ["talos.dev"], str(tmp_path),
-        12000, 15, 4, 45, 400, result,
+        {"owner/repo"},
+        ["talos.dev"],
+        str(tmp_path),
+        12000,
+        15,
+        4,
+        45,
+        400,
+        result,
     )
     assert handled is False  # the stub degraded
     return captured["summarize_fn"]
@@ -393,9 +394,7 @@ def test_native_loop_degrade_records_native_usage(monkeypatch, tmp_path):
     handled, result = _run(
         monkeypatch,
         tmp_path,
-        [_openai_text_with_usage(
-            "Approve.", prompt=1000, completion=400, cached=600
-        )],
+        [_openai_text_with_usage("Approve.", prompt=1000, completion=400, cached=600)],
     )
     assert handled is False
     assert result["native_loop_degraded"] == "no-tool-calls"
@@ -410,6 +409,7 @@ def test_native_loop_request_error_records_usage_and_error(monkeypatch, tmp_path
     """A first-turn transport error degrades to the planner, but the native
     attempt's stop reason + (zeroed) usage are still recorded — no silent
     'mode present, usage absent' tool-harness.json."""
+
     def boom(base_url, api_format, payload, api_key, timeout_sec):
         raise RuntimeError("upstream 524")
 
@@ -424,10 +424,21 @@ def test_native_loop_request_error_records_usage_and_error(monkeypatch, tmp_path
         "tool_results": [],
     }
     handled = rth.run_native_loop(
-        "owner/repo", "http://model.local/v1", "openai", "mock-model", "key",
+        "owner/repo",
+        "http://model.local/v1",
+        "openai",
+        "mock-model",
+        "key",
         "# PR Corpus\nbumps kubelet image",
-        {"owner/repo"}, ["talos.dev"], str(tmp_path),
-        12000, 15, 4, 45, 400, result,
+        {"owner/repo"},
+        ["talos.dev"],
+        str(tmp_path),
+        12000,
+        15,
+        4,
+        45,
+        400,
+        result,
     )
     assert handled is False
     assert result["native_loop_degraded"] == "request-error"
@@ -458,10 +469,21 @@ def _run_capturing(monkeypatch, tmp_path, api_format, responses):
         "tool_results": [],
     }
     handled = rth.run_native_loop(
-        "owner/repo", "http://model.local/v1", api_format, "mock-model", "key",
+        "owner/repo",
+        "http://model.local/v1",
+        api_format,
+        "mock-model",
+        "key",
         "# PR Corpus\nbumps kubelet image in machineconfig.yaml.j2",
-        {"owner/repo"}, ["talos.dev"], str(tmp_path),
-        12000, 15, 4, 45, 400, result,
+        {"owner/repo"},
+        ["talos.dev"],
+        str(tmp_path),
+        12000,
+        15,
+        4,
+        45,
+        400,
+        result,
     )
     return handled, result, payloads
 
@@ -474,12 +496,12 @@ def test_native_loop_emits_in_conversation_verdict(monkeypatch, tmp_path):
     (tmp_path / "review-corpus.truncated.md").write_text(
         "# Full corpus\nthe complete unified diff lives here\n", encoding="utf-8"
     )
-    (tmp_path / "machineconfig.yaml.j2").write_text(
-        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
-    )
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8")
     verdict_json = '{"verdict": "approve", "review_markdown": "LGTM", "findings": []}'
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
             _openai_text("Evidence gathered: Talos v1.13.4."),  # ends the loop
@@ -498,9 +520,7 @@ def test_native_loop_emits_in_conversation_verdict(monkeypatch, tmp_path):
     verdict_payload = payloads[-1]
     assert "tools" not in verdict_payload
     assert verdict_payload.get("response_format", {}).get("type") == "json_object"
-    user_text = "\n".join(
-        m.get("content") or "" for m in verdict_payload["messages"] if m["role"] == "user"
-    )
+    user_text = "\n".join(m.get("content") or "" for m in verdict_payload["messages"] if m["role"] == "user")
     assert "the complete unified diff lives here" in user_text
 
 
@@ -511,11 +531,16 @@ def test_native_loop_skips_verdict_for_anthropic(monkeypatch, tmp_path):
     (tmp_path / "review-corpus.truncated.md").write_text("# Full corpus\n", encoding="utf-8")
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "anthropic",
+        monkeypatch,
+        tmp_path,
+        "anthropic",
         [
-            {"content": [{"type": "tool_use", "id": "c1", "name": "read_file",
-                          "input": {"path": "machineconfig.yaml.j2"}}],
-             "stop_reason": "tool_use"},
+            {
+                "content": [
+                    {"type": "tool_use", "id": "c1", "name": "read_file", "input": {"path": "machineconfig.yaml.j2"}}
+                ],
+                "stop_reason": "tool_use",
+            },
             {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"},
         ],
     )
@@ -537,7 +562,9 @@ def test_native_loop_system_is_stable_across_verdict_turn(monkeypatch, tmp_path)
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
     verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
             _openai_text("done"),  # ends the loop
@@ -562,7 +589,9 @@ def test_native_loop_honors_max_completion_tokens(monkeypatch, tmp_path):
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
     verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
     handled, _result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
             _openai_text("done"),  # ends the loop
@@ -583,14 +612,21 @@ def test_native_loop_accumulates_token_usage(monkeypatch, tmp_path):
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
 
     def with_usage(resp, p, c, cached):
-        resp["usage"] = {"prompt_tokens": p, "completion_tokens": c,
-                         "prompt_tokens_details": {"cached_tokens": cached}}
+        resp["usage"] = {"prompt_tokens": p, "completion_tokens": c, "prompt_tokens_details": {"cached_tokens": cached}}
         return resp
 
-    verdict = {"choices": [{"finish_reason": "stop",
-               "message": {"content": '{"verdict":"approve","review_markdown":"ok","findings":[]}'}}]}
+    verdict = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": '{"verdict":"approve","review_markdown":"ok","findings":[]}'},
+            }
+        ]
+    }
     handled, result, _ = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             with_usage(_openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'), 100, 20, 40),
             with_usage(_openai_text("done"), 150, 10, 120),
@@ -612,7 +648,9 @@ def test_native_loop_advertises_find_files_schema(monkeypatch, tmp_path):
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
     for api_format in ("openai", "anthropic"):
         handled, _result, payloads = _run_capturing(
-            monkeypatch, tmp_path, api_format,
+            monkeypatch,
+            tmp_path,
+            api_format,
             [_openai_text("done")],
         )
         # The first (loop) request advertises the built-in tool set.
@@ -644,7 +682,9 @@ def test_native_loop_dispatches_find_files_to_executor(monkeypatch, tmp_path):
     (tmp_path / "pyproject.toml").write_text("x", encoding="utf-8")
 
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "find_files", '{"pattern": "*.toml"}'),
             _openai_text("Found the manifest."),
@@ -659,9 +699,7 @@ def test_native_loop_dispatches_find_files_to_executor(monkeypatch, tmp_path):
     assert ff_calls and ff_calls[0]["status"] == "ok"
 
     # The executor ran for real: the result carries the actual matching path.
-    ff_result = next(
-        tr for tr in harness["tool_results"] if tr.get("tool") == "find_files"
-    )
+    ff_result = next(tr for tr in harness["tool_results"] if tr.get("tool") == "find_files")
     assert ff_result["result"]["files"] == ["pyproject.toml"]
     assert ff_result["result"]["total"] == 1
 
@@ -677,7 +715,9 @@ def test_native_loop_advertises_list_tree_schema(monkeypatch, tmp_path):
     (tmp_path / "machineconfig.yaml.j2").write_text("install: v1.13.4\n", encoding="utf-8")
     for api_format in ("openai", "anthropic"):
         handled, _result, payloads = _run_capturing(
-            monkeypatch, tmp_path, api_format,
+            monkeypatch,
+            tmp_path,
+            api_format,
             [_openai_text("done")],
         )
         # The first (loop) request advertises the built-in tool set.
@@ -709,7 +749,9 @@ def test_native_loop_dispatches_list_tree_to_executor(monkeypatch, tmp_path):
     (tmp_path / "pyproject.toml").write_text("x", encoding="utf-8")
 
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "list_tree", '{"path": ".", "depth": 1}'),
             _openai_text("Mapped the layout."),
@@ -724,9 +766,7 @@ def test_native_loop_dispatches_list_tree_to_executor(monkeypatch, tmp_path):
     assert lt_calls and lt_calls[0]["status"] == "ok"
 
     # The executor ran for real: depth=1 returns only the direct children.
-    lt_result = next(
-        tr for tr in harness["tool_results"] if tr.get("tool") == "list_tree"
-    )
+    lt_result = next(tr for tr in harness["tool_results"] if tr.get("tool") == "list_tree")
     assert lt_result["result"]["entries"] == [
         {"path": "pyproject.toml", "type": "file"},
         {"path": "scripts", "type": "dir"},
@@ -747,8 +787,13 @@ def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
     import pr_reviewer.mcp_client as mcp
 
     monkeypatch.setenv("TOOL_MCP_SERVERS", "konflate=http://x/mcp")
-    tools = [{"name": "get_pr_diff", "description": "rendered diff",
-              "inputSchema": {"type": "object", "properties": {"number": {"type": "integer"}}}}]
+    tools = [
+        {
+            "name": "get_pr_diff",
+            "description": "rendered diff",
+            "inputSchema": {"type": "object", "properties": {"number": {"type": "integer"}}},
+        }
+    ]
 
     def mcp_post(url, payload, session_id, token, timeout):
         method = payload.get("method")
@@ -757,13 +802,18 @@ def test_native_loop_advertises_and_routes_mcp_tool(monkeypatch, tmp_path):
         if method == "tools/list":
             return {"result": {"tools": tools}}, session_id, None
         if method == "tools/call":
-            return ({"result": {"content": [{"type": "text", "text": "version: v1.36.1 -> v1.36.2"}]}},
-                    session_id, None)
+            return (
+                {"result": {"content": [{"type": "text", "text": "version: v1.36.1 -> v1.36.2"}]}},
+                session_id,
+                None,
+            )
         return None, session_id, None
 
     monkeypatch.setattr(mcp, "_default_post", mcp_post)
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "mcp__konflate__get_pr_diff", '{"number": 7462}'),
             _openai_text("done"),
@@ -794,22 +844,13 @@ class TestResolveMcpToolName:
     }
 
     def test_exact_name_passes_through(self):
-        assert (
-            rth.resolve_mcp_tool_name("mcp__konflate__get_pr_diff", self.ROUTES)
-            == "mcp__konflate__get_pr_diff"
-        )
+        assert rth.resolve_mcp_tool_name("mcp__konflate__get_pr_diff", self.ROUTES) == "mcp__konflate__get_pr_diff"
 
     def test_single_underscore_alias_resolves(self):
-        assert (
-            rth.resolve_mcp_tool_name("mcp_konflate_get_pr_summary", self.ROUTES)
-            == "mcp__konflate__get_pr_summary"
-        )
+        assert rth.resolve_mcp_tool_name("mcp_konflate_get_pr_summary", self.ROUTES) == "mcp__konflate__get_pr_summary"
 
     def test_case_and_hyphen_variants_resolve(self):
-        assert (
-            rth.resolve_mcp_tool_name("MCP__Konflate__get-pr-diff", self.ROUTES)
-            == "mcp__konflate__get_pr_diff"
-        )
+        assert rth.resolve_mcp_tool_name("MCP__Konflate__get-pr-diff", self.ROUTES) == "mcp__konflate__get_pr_diff"
 
     def test_unknown_name_returns_none(self):
         assert rth.resolve_mcp_tool_name("mcp__konflate__render_diff", self.ROUTES) is None
@@ -847,23 +888,19 @@ _PLACEHOLDER_CORPUS = (
 
 
 def _verdict_user_text(payloads):
-    return "\n".join(
-        m.get("content") or "" for m in payloads[-1]["messages"] if m["role"] == "user"
-    )
+    return "\n".join(m.get("content") or "" for m in payloads[-1]["messages"] if m["role"] == "user")
 
 
 def test_verdict_corpus_reports_real_harness_findings(monkeypatch, tmp_path):
     """A successful loop must not hand the verdict turn the pending placeholder."""
     monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_object")
-    (tmp_path / "review-corpus.truncated.md").write_text(
-        _PLACEHOLDER_CORPUS, encoding="utf-8"
-    )
-    (tmp_path / "machineconfig.yaml.j2").write_text(
-        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
-    )
+    (tmp_path / "review-corpus.truncated.md").write_text(_PLACEHOLDER_CORPUS, encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8")
     verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
     handled, result, payloads = _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
             _openai_text("Evidence gathered: Talos v1.13.4."),
@@ -886,15 +923,13 @@ def test_verdict_path_still_writes_real_harness_outputs(monkeypatch, tmp_path):
     """Moving the summary ahead of the verdict turn must not lose the outputs:
     tool-harness.md/json still carry the real findings and counts afterwards."""
     monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_object")
-    (tmp_path / "review-corpus.truncated.md").write_text(
-        _PLACEHOLDER_CORPUS, encoding="utf-8"
-    )
-    (tmp_path / "machineconfig.yaml.j2").write_text(
-        "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
-    )
+    (tmp_path / "review-corpus.truncated.md").write_text(_PLACEHOLDER_CORPUS, encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8")
     verdict_json = '{"verdict": "approve", "review_markdown": "ok", "findings": []}'
     _run_capturing(
-        monkeypatch, tmp_path, "openai",
+        monkeypatch,
+        tmp_path,
+        "openai",
         [
             _openai_call("c1", "read_file", '{"path": "machineconfig.yaml.j2"}'),
             _openai_text("Evidence gathered: Talos v1.13.4."),
@@ -940,8 +975,7 @@ def test_verdict_harness_body_indexes_every_executed_call():
             self.result = {"status": status}
 
     class _Outcome:
-        executed = [_R("read_file", {"path": "a.yaml"}, "ok"),
-                    _R("web_fetch", {"url": "https://x.test/y"}, "error")]
+        executed = [_R("read_file", {"path": "a.yaml"}, "ok"), _R("web_fetch", {"url": "https://x.test/y"}, "error")]
         rounds = 2
         tool_calls_issued = 3
         stop_reason = "tool-call-budget-exhausted"
@@ -957,6 +991,7 @@ def test_verdict_harness_body_indexes_every_executed_call():
 # #568: model-emitted git_grep optional args (path/max_results) must survive
 # normalization and reach the executor, and the scoped result must come back.
 # ---------------------------------------------------------------------------
+
 
 def test_native_loop_forwards_git_grep_optional_args(monkeypatch, tmp_path):
     # A real throwaway repo in tmp_path so the scoped grep runs for real.

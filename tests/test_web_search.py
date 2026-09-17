@@ -17,7 +17,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import run_tool_harness as rth  # noqa: E402
+import run_tool_harness as rth
 
 
 @contextmanager
@@ -37,11 +37,13 @@ SEARCH = "https://search.example.com/search"
 
 
 def test_returns_capped_normalized_results():
-    payload = {"results": [
-        {"title": "A", "url": "https://a.example/x", "content": "snip a"},
-        {"title": "B", "url": "https://b.example/y", "content": "snip b"},
-        {"title": "C", "url": "https://c.example/z", "content": "snip c"},
-    ]}
+    payload = {
+        "results": [
+            {"title": "A", "url": "https://a.example/x", "content": "snip a"},
+            {"title": "B", "url": "https://b.example/y", "content": "snip b"},
+            {"title": "C", "url": "https://c.example/z", "content": "snip c"},
+        ]
+    }
     with _fake_urlopen(payload) as cap:
         res = rth.web_search("talos support matrix", SEARCH, max_results=2)
     assert "error" not in res
@@ -65,6 +67,7 @@ def test_empty_search_url_is_error():
 def test_transport_failure_is_error():
     def _boom(req, timeout=None):
         raise OSError("connection refused")
+
     with mock.patch.object(urllib.request, "urlopen", _boom):
         res = rth.web_search("q", SEARCH)
     assert "error" in res
@@ -74,8 +77,16 @@ def test_execute_tool_request_dispatches_web_search():
     payload = {"results": [{"title": "T", "url": "https://u.example", "content": "c"}]}
     with _fake_urlopen(payload):
         tr = rth.execute_tool_request(
-            "web_search", {"query": "k8s support matrix"},
-            ".", set(), "o/r", [], 12000, 20, SEARCH, 5,
+            "web_search",
+            {"query": "k8s support matrix"},
+            ".",
+            set(),
+            "o/r",
+            [],
+            12000,
+            20,
+            SEARCH,
+            5,
         )
     assert tr["status"] == "ok"
     assert "u.example" in tr["result"]["results"]
@@ -83,7 +94,16 @@ def test_execute_tool_request_dispatches_web_search():
 
 def test_execute_tool_request_web_search_missing_query():
     tr = rth.execute_tool_request(
-        "web_search", {}, ".", set(), "o/r", [], 12000, 20, SEARCH, 5,
+        "web_search",
+        {},
+        ".",
+        set(),
+        "o/r",
+        [],
+        12000,
+        20,
+        SEARCH,
+        5,
     )
     assert tr["status"] == "error"
 
@@ -91,6 +111,13 @@ def test_execute_tool_request_web_search_missing_query():
 def test_execute_tool_request_web_search_unconfigured_errors():
     # No search_url passed → executor surfaces the not-configured error.
     tr = rth.execute_tool_request(
-        "web_search", {"query": "q"}, ".", set(), "o/r", [], 12000, 20,
+        "web_search",
+        {"query": "q"},
+        ".",
+        set(),
+        "o/r",
+        [],
+        12000,
+        20,
     )
     assert tr["status"] == "error"

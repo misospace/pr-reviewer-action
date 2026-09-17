@@ -28,8 +28,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
-from sanitize_review_markdown import sanitize_markdown  # noqa: E402
+from redact import mask_secrets
+from sanitize_review_markdown import sanitize_markdown
 
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -66,11 +66,7 @@ def finding_fingerprint(finding: dict) -> str:
     category = finding.get("category") or "other"
     file_path = finding.get("file") or ""
     line = finding.get("line")
-    line_part = (
-        str(line)
-        if isinstance(line, int) and not isinstance(line, bool) and line > 0
-        else ""
-    )
+    line_part = str(line) if isinstance(line, int) and not isinstance(line, bool) and line > 0 else ""
     message = str(finding.get("message") or "").strip()[:_FINGERPRINT_MESSAGE_CHARS].strip()
     canon = "\x1f".join([str(severity), str(category), str(file_path), line_part, message])
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
@@ -259,9 +255,7 @@ def main(argv) -> int:
     suppressed = load_suppressed_fingerprints(os.getenv("SUPPRESS_FINDINGS_FILE"))
 
     comments, skipped = build_comments(findings, diff_text, max_comments, suppressed)
-    Path(output_path).write_text(
-        json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8")
     print(
         f"inline findings: {len(comments)} anchored comment(s), "
         f"{skipped} finding(s) skipped (not anchorable, resolved, or already threaded)",

@@ -79,6 +79,7 @@ class TestExtractLinkedIssueRefs:
 class TestLinkedIssuesToJson:
     def test_serialises_correctly(self):
         from pr_reviewer.github_context import LinkedIssueRef
+
         items = [
             LinkedIssueRef(ref="#1", repo="owner/repo", number=1),
             LinkedIssueRef(ref="other/repo#5", repo="other/repo", number=5),

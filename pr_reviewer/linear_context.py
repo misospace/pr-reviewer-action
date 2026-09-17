@@ -60,10 +60,7 @@ def parse_prefixes(value: str) -> list[str]:
         if not prefix:
             continue
         if not _PREFIX_RE.fullmatch(prefix):
-            raise ValueError(
-                f"invalid Linear issue prefix {prefix!r}; expected letters/digits "
-                "starting with a letter"
-            )
+            raise ValueError(f"invalid Linear issue prefix {prefix!r}; expected letters/digits starting with a letter")
         normalized = prefix.upper()
         if normalized not in prefixes:
             prefixes.append(normalized)
@@ -96,9 +93,7 @@ def extract_issue_identifiers(
 
 def _graphql_error_message(payload: dict[str, Any]) -> str:
     messages = [
-        str(item.get("message"))
-        for item in payload.get("errors", [])
-        if isinstance(item, dict) and item.get("message")
+        str(item.get("message")) for item in payload.get("errors", []) if isinstance(item, dict) and item.get("message")
     ]
     return "; ".join(messages) or "Linear GraphQL request failed"
 
@@ -111,9 +106,7 @@ def fetch_issue(
     timeout: int = 20,
 ) -> dict[str, Any]:
     """Fetch one Linear issue by human-readable identifier."""
-    request_body = json.dumps(
-        {"query": _ISSUE_QUERY, "variables": {"id": identifier}}
-    ).encode("utf-8")
+    request_body = json.dumps({"query": _ISSUE_QUERY, "variables": {"id": identifier}}).encode("utf-8")
     request = Request(
         api_url,
         data=request_body,
@@ -148,17 +141,11 @@ def fetch_issue(
 
     labels = (issue.get("labels") or {}).get("nodes") or []
     normalized_labels = [
-        {"name": str(label.get("name"))}
-        for label in labels
-        if isinstance(label, dict) and label.get("name")
+        {"name": str(label.get("name"))} for label in labels if isinstance(label, dict) and label.get("name")
     ]
     resolved_identifier = str(issue.get("identifier") or identifier).upper()
     raw_priority = issue.get("priority")
-    priority = (
-        raw_priority
-        if type(raw_priority) is int and raw_priority in _LINEAR_PRIORITY_LABELS
-        else None
-    )
+    priority = raw_priority if type(raw_priority) is int and raw_priority in _LINEAR_PRIORITY_LABELS else None
     return {
         "source": "linear",
         "ref": resolved_identifier,
@@ -173,9 +160,7 @@ def fetch_issue(
     }
 
 
-def render_markdown(
-    issues: list[dict[str, Any]], errors: list[tuple[str, str]]
-) -> str:
+def render_markdown(issues: list[dict[str, Any]], errors: list[tuple[str, str]]) -> str:
     """Render fetched Linear issues as untrusted fenced JSON corpus data."""
     parts: list[str] = []
     for issue in issues:
@@ -185,10 +170,7 @@ def render_markdown(
         serialized = json.dumps(issue, ensure_ascii=False, separators=(",", ":"))
         parts.append(f"## Linear issue {identifier}\n```json\n{serialized}\n```\n")
     for identifier, message in errors:
-        parts.append(
-            f"## Linear issue {identifier}\n"
-            f"(Could not fetch Linear issue {identifier}: {message})\n"
-        )
+        parts.append(f"## Linear issue {identifier}\n(Could not fetch Linear issue {identifier}: {message})\n")
     return "\n".join(parts)
 
 
@@ -205,9 +187,7 @@ def collect_from_pr(
     errors: list[tuple[str, str]] = []
     for identifier in extract_issue_identifiers(str(pr.get("title") or ""), prefixes):
         try:
-            issues.append(
-                fetch_issue(identifier, api_key, api_url=api_url, timeout=timeout)
-            )
+            issues.append(fetch_issue(identifier, api_key, api_url=api_url, timeout=timeout))
         except LinearContextError as exc:
             errors.append((identifier, str(exc)))
     return issues, errors
@@ -249,16 +229,11 @@ def main(argv: list[str] | None = None) -> int:
         api_url=LINEAR_API_URL,
         timeout=max(1, args.timeout),
     )
-    Path(args.output_json).write_text(
-        json.dumps(issues, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    Path(args.output_markdown).write_text(
-        render_markdown(issues, errors), encoding="utf-8"
-    )
+    Path(args.output_json).write_text(json.dumps(issues, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    Path(args.output_markdown).write_text(render_markdown(issues, errors), encoding="utf-8")
     if errors:
         print(
-            f"linear_context: fetched {len(issues)} issue(s), "
-            f"{len(errors)} fetch failure(s)",
+            f"linear_context: fetched {len(issues)} issue(s), {len(errors)} fetch failure(s)",
             file=sys.stderr,
         )
     return 0

@@ -109,9 +109,7 @@ def load_evidence_memory(path: str = "previous-evidence.json") -> dict | None:
     head_sha = data.get("head_sha")
     head_sha = re.sub(r"[^0-9a-fA-F]", "", str(head_sha or ""))[:64]
     # Re-cap + strip control/markup chars, but keep newlines (ledger layout).
-    digest = _ANGLE_RE.sub(
-        "", _CONTROL_CHARS_RE.sub("", digest)
-    ).strip()[:MAX_DIGEST_CHARS]
+    digest = _ANGLE_RE.sub("", _CONTROL_CHARS_RE.sub("", digest)).strip()[:MAX_DIGEST_CHARS]
     if not digest:
         return None
     return {"digest": digest, "head_sha": head_sha}

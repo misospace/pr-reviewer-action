@@ -19,16 +19,14 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import run_tool_harness as rth  # noqa: E402
-from pr_reviewer import tool_executors  # noqa: E402
+import run_tool_harness as rth
+from pr_reviewer import tool_executors
 
 _REPO = "owner/repo"
 
 
 def _exec(tool, args, workspace, max_response_bytes=12000):
-    return rth.execute_tool_request(
-        tool, args, str(workspace), {_REPO}, _REPO, ["github.com"], max_response_bytes, 15
-    )
+    return rth.execute_tool_request(tool, args, str(workspace), {_REPO}, _REPO, ["github.com"], max_response_bytes, 15)
 
 
 def _git(args, cwd):
@@ -241,9 +239,9 @@ def test_git_grep_no_path_no_max_results_preserves_behavior(git_repo):
     res = _exec("git_grep", {"pattern": "line"}, git_repo)
     assert res["status"] == "ok"
     # All 20 lines match "line", all from app.py, in deterministic line order.
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [("app.py", str(i), f"line {i}") for i in range(1, 21)]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
+        ("app.py", str(i), f"line {i}") for i in range(1, 21)
+    ]
 
 
 def test_git_grep_scoped_path_returns_only_subtree(git_repo):
@@ -256,9 +254,7 @@ def test_git_grep_scoped_path_returns_only_subtree(git_repo):
     # Every match is under sub/ and none leak from the repo root.
     assert res["result"]["matches"] == []
     res2 = _exec("git_grep", {"pattern": "needle", "path": "sub"}, git_repo)
-    assert [
-        _split_match(m) for m in res2["result"]["matches"]
-    ] == [("sub/deep.py", "1", "deep needle here")]
+    assert [_split_match(m) for m in res2["result"]["matches"]] == [("sub/deep.py", "1", "deep needle here")]
 
 
 def test_git_grep_max_results_below_default(git_repo):
@@ -266,9 +262,7 @@ def test_git_grep_max_results_below_default(git_repo):
     assert res["status"] == "ok"
     assert len(res["result"]["matches"]) == 3
     # Deterministic line ordering: the first three lines, in order.
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
         ("app.py", "1", "line 1"),
         ("app.py", "2", "line 2"),
         ("app.py", "3", "line 3"),
@@ -278,7 +272,8 @@ def test_git_grep_max_results_below_default(git_repo):
 def test_git_grep_max_results_clamped_to_200(git_repo):
     # An oversized request is clamped to the 200 upper bound, not honoured.
     mock_result = mock.Mock(
-        returncode=0, stderr="",
+        returncode=0,
+        stderr="",
         stdout="\n".join(f"f.py:{i}:x" for i in range(1, 202)),
     )
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
@@ -303,9 +298,7 @@ def test_git_grep_max_results_string_coerced(git_repo):
     # Weak models emit numbers as strings; the executor clamps/coerces them.
     res = _exec("git_grep", {"pattern": "line", "max_results": "2"}, git_repo)
     assert res["status"] == "ok"
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [("app.py", "1", "line 1"), ("app.py", "2", "line 2")]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [("app.py", "1", "line 1"), ("app.py", "2", "line 2")]
 
 
 def test_git_grep_default_argv_preserved(git_repo):
@@ -351,9 +344,7 @@ def test_git_grep_dash_path_is_not_an_option(tmp_path):
     repo = _grep_repo(tmp_path, {"-odd/a.txt": "dashy needle\n"})
     res = _exec("git_grep", {"pattern": "needle", "path": "-odd"}, repo)
     assert res["status"] == "ok", f"dash-leading path should be searchable, got {res}"
-    assert [_split_match(m) for m in res["result"]["matches"]] == [
-        ("-odd/a.txt", "1", "dashy needle")
-    ]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [("-odd/a.txt", "1", "dashy needle")]
 
 
 def test_git_grep_path_traversal_rejected(git_repo):
