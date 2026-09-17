@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.classifier — deterministic PR classification.""" 
+"""Tests for pr_reviewer.classifier — deterministic PR classification."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ def _make_file(filename: str, status: str = "modified") -> dict:
 # ---------------------------------------------------------------------------
 # pr_kind tests
 # ---------------------------------------------------------------------------
-
 
 class TestPRKindRenovateDigestOnly:
     def test_detects_digest_only(self):
@@ -80,13 +79,19 @@ class TestPRKindMultiLanguage:
 
     def test_auth_controller_java(self):
         # AuthController.java should be flagged (auth takes precedence over route).
-        assert _classify_pr_kind([_make_file("src/main/java/AuthController.java")], "") == "auth_changes"
+        assert _classify_pr_kind(
+            [_make_file("src/main/java/AuthController.java")], ""
+        ) == "auth_changes"
 
     def test_route_typescript(self):
-        assert _classify_pr_kind([_make_file("src/routes.ts")], "") == "public_route_changes"
+        assert _classify_pr_kind(
+            [_make_file("src/routes.ts")], ""
+        ) == "public_route_changes"
 
     def test_model_go(self):
-        assert _classify_pr_kind([_make_file("internal/models.go")], "") == "db_or_migration_changes"
+        assert _classify_pr_kind(
+            [_make_file("internal/models.go")], ""
+        ) == "db_or_migration_changes"
 
     def test_auth_risk_flag_typescript(self):
         flags, _ = _detect_risk_flags([_make_file("src/auth.ts")], "", [])
@@ -124,22 +129,19 @@ class TestPRKindDependencyUpgrade:
 
 
 class TestPRKindK8sManifest:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "helmrelease.yaml",
-            "deployment.yaml",
-            "statefulset.yml",
-            "kustomization.yaml",
-            "configmap.yaml",
-            "secret.yaml",
-            "service.yaml",
-            "ingress.yaml",
-            ".k8s.yaml",
-            "k8s/deployment.yaml",
-            "helm/templates/deployment.yaml",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "helmrelease.yaml",
+        "deployment.yaml",
+        "statefulset.yml",
+        "kustomization.yaml",
+        "configmap.yaml",
+        "secret.yaml",
+        "service.yaml",
+        "ingress.yaml",
+        ".k8s.yaml",
+        "k8s/deployment.yaml",
+        "helm/templates/deployment.yaml",
+    ])
     def test_k8s_manifest_variants(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -147,17 +149,14 @@ class TestPRKindK8sManifest:
 
 
 class TestPRKindAuthChanges:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "auth.py",
-            "login_handler.py",
-            "middleware_auth.py",
-            "permissions.yaml",
-            "rbac.yaml",
-            ".env.example",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "auth.py",
+        "login_handler.py",
+        "middleware_auth.py",
+        "permissions.yaml",
+        "rbac.yaml",
+        ".env.example",
+    ])
     def test_auth_file_patterns(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -165,16 +164,13 @@ class TestPRKindAuthChanges:
 
 
 class TestPRKindPublicRouteChanges:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "routes.py",
-            "urls.py",
-            "api/endpoints.py",
-            "api.go",
-            "controller.py",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "routes.py",
+        "urls.py",
+        "api/endpoints.py",
+        "api.go",
+        "controller.py",
+    ])
     def test_route_file_patterns(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -199,14 +195,11 @@ class TestPRKindPublicRouteChanges:
 
 
 class TestPRKindFileServingChanges:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "static_handler.py",
-            "public/assets.js",
-            "uploads/media.go",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "static_handler.py",
+        "public/assets.js",
+        "uploads/media.go",
+    ])
     def test_file_serving_patterns(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -214,15 +207,12 @@ class TestPRKindFileServingChanges:
 
 
 class TestPRKindPathHandlingChanges:
-    @pytest.mark.parametrize(
-        "pattern",
-        [
-            "pathlib",
-            "sanitize_path",
-            "..\\..\\etc/passwd",
-            "path_join",
-        ],
-    )
+    @pytest.mark.parametrize("pattern", [
+        "pathlib",
+        "sanitize_path",
+        "..\\..\\etc/passwd",
+        "path_join",
+    ])
     def test_path_handling_in_diff(self, pattern):
         files = [_make_file("utils.py")]
         kind = _classify_pr_kind(files, pattern)
@@ -230,14 +220,11 @@ class TestPRKindPathHandlingChanges:
 
 
 class TestPRKindSecretHandlingChanges:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "secrets.yaml",
-            "secret_handler.py",
-            "vault_config.json",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "secrets.yaml",
+        "secret_handler.py",
+        "vault_config.json",
+    ])
     def test_secret_file_patterns(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -245,17 +232,14 @@ class TestPRKindSecretHandlingChanges:
 
 
 class TestPRKindDBMigrationChanges:
-    @pytest.mark.parametrize(
-        "fname",
-        [
-            "migrations/001_add_users.py",
-            "schema.py",
-            "models.py",
-            "db.sql",
-            "alembic/versions/001.py",
-            "prisma/schema.prisma",
-        ],
-    )
+    @pytest.mark.parametrize("fname", [
+        "migrations/001_add_users.py",
+        "schema.py",
+        "models.py",
+        "db.sql",
+        "alembic/versions/001.py",
+        "prisma/schema.prisma",
+    ])
     def test_db_migration_patterns(self, fname):
         files = [_make_file(fname)]
         kind = _classify_pr_kind(files, "")
@@ -272,7 +256,6 @@ class TestPRKindDefault:
 # ---------------------------------------------------------------------------
 # Risk flags tests
 # ---------------------------------------------------------------------------
-
 
 class TestRiskFlags:
     def test_linked_security_issue(self):
@@ -314,7 +297,9 @@ class TestRiskFlags:
     def test_no_risk_flags(self):
         issues = [{"labels": [{"name": "bug"}]}]
         flags, _ = _detect_risk_flags([], "", issues)
-        assert not any(f.startswith("linked_") for f in flags), f"Expected no linked risk flags, got {flags}"
+        assert not any(
+            f.startswith("linked_") for f in flags
+        ), f"Expected no linked risk flags, got {flags}"
 
     def test_file_serving_flag(self):
         files = [_make_file("static/handler.py")]
@@ -325,7 +310,6 @@ class TestRiskFlags:
 # ---------------------------------------------------------------------------
 # Risk flag file attribution tests
 # ---------------------------------------------------------------------------
-
 
 class TestRiskFlagsWithFiles:
     """Tests for risk_flags_with_files — per-flag file attribution (issue #297)."""
@@ -398,7 +382,8 @@ class TestRiskFlagsWithFiles:
         flags, attribution = _detect_risk_flags(files, "", issues)
         assert "linked_audit_issue" in flags
         # No file-based flags fired, so attribution only contains file-based entries
-        file_based_flags = {"file_serving_changes", "path_handling_changes", "auth_changes", "secret_handling_changes"}
+        file_based_flags = {"file_serving_changes", "path_handling_changes",
+                            "auth_changes", "secret_handling_changes"}
         for flag in attribution:
             assert flag in file_based_flags
 
@@ -406,7 +391,6 @@ class TestRiskFlagsWithFiles:
 # ---------------------------------------------------------------------------
 # Must-check tests
 # ---------------------------------------------------------------------------
-
 
 class TestMustCheck:
     def test_renovate_must_check(self):
@@ -418,7 +402,8 @@ class TestMustCheck:
         assert any("breaking" in c or "test suite" in c for c in checks)
 
     def test_security_flag_adds_check(self):
-        checks = _build_must_check("app_code", ["linked_security_issue"])
+        checks = _build_must_check(
+            "app_code", ["linked_security_issue"])
         assert any("security issue" in c for c in checks)
 
     def test_risk_flag_adds_checks_beyond_pr_kind(self):
@@ -429,7 +414,8 @@ class TestMustCheck:
         assert any("session token" in c for c in checks)
 
     def test_multiple_risk_flags_union(self):
-        checks = _build_must_check("app_code", ["auth_changes", "path_handling_changes"])
+        checks = _build_must_check(
+            "app_code", ["auth_changes", "path_handling_changes"])
         assert any("auth flow" in c for c in checks)
         assert any("path traversal" in c for c in checks)
 
@@ -448,7 +434,6 @@ class TestMustCheck:
 # Full classify_pr integration tests
 # ---------------------------------------------------------------------------
 
-
 class TestClassifyPR:
     def test_basic_classification(self):
         files = [_make_file("app.py")]
@@ -466,13 +451,15 @@ class TestClassifyPR:
     def test_k8s_with_risk_flags(self):
         files = [_make_file("k8s/deployment.yaml")]
         issues = [{"labels": [{"name": "priority/p1"}]}]
-        result = classify_pr(files, diff_text="", linked_issues=issues)
+        result = classify_pr(
+            files, diff_text="", linked_issues=issues)
         assert result.pr_kind == "k8s_manifest"
         assert "linked_priority_p1" in result.risk_flags
 
     def test_must_check_populated(self):
         files = [_make_file("migrations/001.py")]
-        result = classify_pr(files, diff_text="", linked_issues=[])
+        result = classify_pr(
+            files, diff_text="", linked_issues=[])
         assert len(result.must_check) > 0
         assert any("migration" in c.lower() for c in result.must_check)
 
@@ -507,17 +494,20 @@ class TestClassifyPR:
 # classify_from_files CLI integration
 # ---------------------------------------------------------------------------
 
-
 class TestClassifyFromFile:
     def test_writes_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmppath = Path(tmp)
             pr_files = tmppath / "pr-files.json"
-            pr_files.write_text(json.dumps([{"filename": "app.py", "status": "modified"}]))
+            pr_files.write_text(json.dumps([
+                {"filename": "app.py", "status": "modified"}
+            ]))
             diff_file = tmppath / "pr.diff"
             diff_file.write_text("changed some code\n")
             issues_file = tmppath / "linked-issues.json"
-            issues_file.write_text(json.dumps([{"labels": [{"name": "priority/p1"}]}]))
+            issues_file.write_text(json.dumps([
+                {"labels": [{"name": "priority/p1"}]}
+            ]))
             output_file = tmppath / "classification.json"
 
             classify_from_files(
@@ -537,7 +527,9 @@ class TestClassifyFromFile:
         with tempfile.TemporaryDirectory() as tmp:
             tmppath = Path(tmp)
             pr_files = tmppath / "pr-files.json"
-            pr_files.write_text(json.dumps([{"filename": "package-lock.json", "status": "modified"}]))
+            pr_files.write_text(json.dumps([
+                {"filename": "package-lock.json", "status": "modified"}
+            ]))
             diff_file = tmppath / "pr.diff"
             diff_file.write_text('"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"')
             output_file = tmppath / "classification.json"
@@ -556,7 +548,6 @@ class TestClassifyFromFile:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
-
 
 class TestEdgeCases:
     def test_empty_pr_files(self):
@@ -586,8 +577,8 @@ class TestRouteSignals:
     def test_content_only_path_match_not_in_route_signals(self):
         # A diff that merely mentions os.path in an ordinary file must not route.
         result = classify_pr([_make_file("app.py")], diff_text="x = os.path.join(a, b)")
-        assert "path_handling_changes" in result.risk_flags  # still flagged for checks
-        assert result.route_signals == []  # but not for routing
+        assert "path_handling_changes" in result.risk_flags       # still flagged for checks
+        assert result.route_signals == []                          # but not for routing
 
     def test_real_auth_filename_in_route_signals(self):
         result = classify_pr([_make_file("auth.py")], diff_text="")

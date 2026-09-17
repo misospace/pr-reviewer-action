@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Thin CLI wrapper for the repository-map builder (#569).
 
 All core logic lives in the importable ``pr_reviewer/repo_map.py`` module
@@ -23,7 +23,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pr_reviewer.repo_map import main
+from pr_reviewer.repo_map import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for scripts/image_digest_analysis.py — token caching, time budget,
 parallel metadata fetching, and compare-repo resolution."""
 
@@ -73,7 +73,9 @@ class TestTimeBudget:
             raise AssertionError("network should not be touched after deadline")
 
         with mock.patch.object(ida, "http_json", fail_http_json):
-            result = ida.fetch_digest_metadata("ghcr.io/acme/app", DIGEST_A, deadline=time.monotonic() - 1)
+            result = ida.fetch_digest_metadata(
+                "ghcr.io/acme/app", DIGEST_A, deadline=time.monotonic() - 1
+            )
         assert "time budget exceeded" in (result["error"] or "")
 
     def test_expired_deadline_short_circuits_compare(self):
@@ -81,7 +83,9 @@ class TestTimeBudget:
             raise AssertionError("network should not be touched after deadline")
 
         with mock.patch.object(ida, "http_json", fail_http_json):
-            result = ida.fetch_github_compare("acme/app", "rev1", "rev2", deadline=time.monotonic() - 1)
+            result = ida.fetch_github_compare(
+                "acme/app", "rev1", "rev2", deadline=time.monotonic() - 1
+            )
         assert "time budget exceeded" in (result["error"] or "")
 
     def test_budget_env_zero_disables(self, monkeypatch):
@@ -242,10 +246,8 @@ class TestMainOutput:
                 "repo_source": None,
             }
 
-        with (
-            mock.patch.object(ida, "fetch_digest_metadata", fake_fetch),
-            mock.patch.object(ida, "fetch_github_compare", fake_compare),
-        ):
+        with mock.patch.object(ida, "fetch_digest_metadata", fake_fetch), \
+                mock.patch.object(ida, "fetch_github_compare", fake_compare):
             ida.main()
 
         out = (tmp_path / "image-digest-context.md").read_text()

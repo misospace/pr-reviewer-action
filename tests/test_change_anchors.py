@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.change_anchors — deterministic change-anchor extraction (#571).""" 
+"""Tests for pr_reviewer.change_anchors — deterministic change-anchor extraction (#571)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ from pr_reviewer.change_anchors import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _diff(*files: str) -> str:
     return "\n".join(files)
 
@@ -55,7 +54,6 @@ def _anchor_values(result: dict, kind: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Language detection
 # ---------------------------------------------------------------------------
-
 
 class TestDetectLanguage:
     def test_supported(self):
@@ -85,22 +83,18 @@ class TestDetectLanguage:
 # Python extraction
 # ---------------------------------------------------------------------------
 
-
 class TestPython:
     def test_function_class_import_additions(self):
-        diff = _py_file(
-            "pr_reviewer/tool_executors.py",
-            [
-                "import pathlib",
-                "from pr_reviewer.platform import run_platform",
-                "def git_grep(pattern):",
-                "    return pattern",
-                "async def fetch_thing():",
-                "    pass",
-                "class ToolExecutor:",
-                "    pass",
-            ],
-        )
+        diff = _py_file("pr_reviewer/tool_executors.py", [
+            "import pathlib",
+            "from pr_reviewer.platform import run_platform",
+            "def git_grep(pattern):",
+            "    return pattern",
+            "async def fetch_thing():",
+            "    pass",
+            "class ToolExecutor:",
+            "    pass",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["path"] == "pr_reviewer/tool_executors.py"
@@ -123,15 +117,12 @@ class TestPython:
         assert result["files"][0]["imports"] == ["os", "sys", "pathlib"]
 
     def test_from_import_with_parens_and_alias(self):
-        diff = _py_file(
-            "a.py",
-            [
-                "from pr_reviewer import (",
-                "    classifier as clf,",
-                "    metadata,",
-                ")",
-            ],
-        )
+        diff = _py_file("a.py", [
+            "from pr_reviewer import (",
+            "    classifier as clf,",
+            "    metadata,",
+            ")",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["imports"] == ["pr_reviewer"]
@@ -140,14 +131,11 @@ class TestPython:
         assert names == {"classifier", "metadata"}
 
     def test_keyword_and_one_char_names_rejected(self):
-        diff = _py_file(
-            "a.py",
-            [
-                "def class(x):",  # 'class' is a keyword, 'x' is one char
-                "def a():",
-                "def real_thing():",
-            ],
-        )
+        diff = _py_file("a.py", [
+            "def class(x):",   # 'class' is a keyword, 'x' is one char
+            "def a():",
+            "def real_thing():",
+        ])
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["real_thing"]
@@ -241,23 +229,19 @@ class TestPython:
 # JavaScript / TypeScript extraction
 # ---------------------------------------------------------------------------
 
-
 class TestJavaScript:
     def test_function_class_import_additions(self):
-        diff = _py_file(
-            "src/app/handler.ts",
-            [
-                "import { readFile } from 'fs/promises';",
-                "import path from 'path';",
-                "export function buildRequest(body) {",
-                "  return body;",
-                "}",
-                "export default class ReviewHandler {",
-                "  async handle(req) {}",
-                "}",
-                "const parseBody = (req) => req.body;",
-            ],
-        )
+        diff = _py_file("src/app/handler.ts", [
+            "import { readFile } from 'fs/promises';",
+            "import path from 'path';",
+            "export function buildRequest(body) {",
+            "  return body;",
+            "}",
+            "export default class ReviewHandler {",
+            "  async handle(req) {}",
+            "}",
+            "const parseBody = (req) => req.body;",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["language"] == "typescript"
@@ -271,13 +255,10 @@ class TestJavaScript:
         assert file["imports"] == ["fs/promises", "path"]
 
     def test_require_and_js_extension(self):
-        diff = _py_file(
-            "src/legacy.js",
-            [
-                "const fs = require('fs');",
-                "function oldHelper() {}",
-            ],
-        )
+        diff = _py_file("src/legacy.js", [
+            "const fs = require('fs');",
+            "function oldHelper() {}",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["language"] == "javascript"
@@ -286,25 +267,19 @@ class TestJavaScript:
 
     def test_arrow_not_confidently_distinguishable(self):
         # `const x = value` (no paren) is NOT an arrow function.
-        diff = _py_file(
-            "a.ts",
-            [
-                "const notArrow = 42;",
-                "const arrow = () => 1;",
-            ],
-        )
+        diff = _py_file("a.ts", [
+            "const notArrow = 42;",
+            "const arrow = () => 1;",
+        ])
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["arrow"]
 
     def test_keyword_names_rejected(self):
-        diff = _py_file(
-            "a.ts",
-            [
-                "function default() {}",
-                "function realOne() {}",
-            ],
-        )
+        diff = _py_file("a.ts", [
+            "function default() {}",
+            "function realOne() {}",
+        ])
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["realOne"]
@@ -314,31 +289,27 @@ class TestJavaScript:
 # Go extraction
 # ---------------------------------------------------------------------------
 
-
 class TestGo:
     def test_func_method_type_import_additions(self):
-        diff = _py_file(
-            "internal/server/server.go",
-            [
-                "import (",
-                '\t"context"',
-                '\t"net/http"',
-                '\t"github.com/example/pkg"',
-                ")",
-                "func NewServer(cfg Config) *Server {",
-                "\treturn &Server{cfg: cfg}",
-                "}",
-                "func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {",
-                "\t_ = w",
-                "}",
-                "type Server struct {",
-                "\tcfg Config",
-                "}",
-                "type Handler interface {",
-                "\tServe(ctx context.Context)",
-                "}",
-            ],
-        )
+        diff = _py_file("internal/server/server.go", [
+            "import (",
+            "\t\"context\"",
+            "\t\"net/http\"",
+            "\t\"github.com/example/pkg\"",
+            ")",
+            "func NewServer(cfg Config) *Server {",
+            "\treturn &Server{cfg: cfg}",
+            "}",
+            "func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {",
+            "\t_ = w",
+            "}",
+            "type Server struct {",
+            "\tcfg Config",
+            "}",
+            "type Handler interface {",
+            "\tServe(ctx context.Context)",
+            "}",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["language"] == "go"
@@ -349,9 +320,7 @@ class TestGo:
         assert names["Server"]["kind"] == "type"
         assert names["Handler"]["kind"] == "type"
         assert file["imports"] == [
-            "context",
-            "net/http",
-            "github.com/example/pkg",
+            "context", "net/http", "github.com/example/pkg",
         ]
 
     def test_import_block_opened_in_context(self):
@@ -377,39 +346,30 @@ class TestGo:
         assert [s["name"] for s in file["symbols"]] == []
 
     def test_single_line_import(self):
-        diff = _py_file(
-            "a.go",
-            [
-                'import "net/http"',
-                "func DoIt() {}",
-            ],
-        )
+        diff = _py_file("a.go", [
+            "import \"net/http\"",
+            "func DoIt() {}",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["imports"] == ["net/http"]
         assert [s["name"] for s in file["symbols"]] == ["DoIt"]
 
     def test_string_literal_in_code_not_an_import(self):
-        diff = _py_file(
-            "a.go",
-            [
-                "func f() {",
-                '\ts := "hello world"',
-                "\t_ = s",
-                "}",
-            ],
-        )
+        diff = _py_file("a.go", [
+            "func f() {",
+            "\ts := \"hello world\"",
+            "\t_ = s",
+            "}",
+        ])
         result = extract_change_anchors(diff)
         assert result["files"][0]["imports"] == []
 
     def test_keyword_names_rejected(self):
-        diff = _py_file(
-            "a.go",
-            [
-                "func main() {}",
-                "func realFunc() {}",
-            ],
-        )
+        diff = _py_file("a.go", [
+            "func main() {}",
+            "func realFunc() {}",
+        ])
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["realFunc"]
@@ -418,7 +378,6 @@ class TestGo:
 # ---------------------------------------------------------------------------
 # Diff structure handling
 # ---------------------------------------------------------------------------
-
 
 class TestDiffStructure:
     def test_multiple_files_and_hunks(self):
@@ -521,17 +480,15 @@ class TestDiffStructure:
         # paths containing spaces; the parser must still build a ``_FileState``
         # and enrich it with added lines, otherwise the changed symbols and
         # imports silently disappear (#571 review feedback).
-        diff = "\n".join(
-            [
-                "diff --git a/foo bar.py b/foo bar.py",
-                "--- a/foo bar.py",
-                "+++ b/foo bar.py",
-                "@@ -1,1 +1,3 @@",
-                " x = 1",
-                "+def hello():",
-                "+    pass",
-            ]
-        )
+        diff = "\n".join([
+            "diff --git a/foo bar.py b/foo bar.py",
+            "--- a/foo bar.py",
+            "+++ b/foo bar.py",
+            "@@ -1,1 +1,3 @@",
+            " x = 1",
+            "+def hello():",
+            "+    pass",
+        ])
         result = extract_change_anchors(diff)
         assert len(result["files"]) == 1
         file = result["files"][0]
@@ -568,7 +525,11 @@ class TestDiffStructure:
         weird = 'weird\\"quote.py'  # the literal ``\"`` Git emits
         actual = 'weird"quote.py'
         diff = (
-            f'diff --git "a/{weird}" "b/{weird}"\n--- "a/{weird}"\n+++ "b/{weird}"\n@@ -0,0 +1,1 @@\n+def quoted():\n'
+            f'diff --git "a/{weird}" "b/{weird}"\n'
+            f'--- "a/{weird}"\n'
+            f'+++ "b/{weird}"\n'
+            "@@ -0,0 +1,1 @@\n"
+            "+def quoted():\n"
         )
         result = extract_change_anchors(diff)
         assert len(result["files"]) == 1
@@ -616,19 +577,17 @@ class TestDiffStructure:
         # Rename headers may also contain spaces or quotes.
         old = "old name.py"
         new = "new name.py"
-        diff = "\n".join(
-            [
-                f"diff --git a/{old} b/{new}",
-                "similarity index 95%",
-                f"rename from {old}",
-                f"rename to {new}",
-                f"--- a/{old}",
-                f"+++ b/{new}",
-                "@@ -1,1 +1,1 @@",
-                "-def old_helper():",
-                "+def new_helper():",
-            ]
-        )
+        diff = "\n".join([
+            f"diff --git a/{old} b/{new}",
+            "similarity index 95%",
+            f"rename from {old}",
+            f"rename to {new}",
+            f"--- a/{old}",
+            f"+++ b/{new}",
+            "@@ -1,1 +1,1 @@",
+            "-def old_helper():",
+            "+def new_helper():",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["path"] == new
@@ -639,17 +598,15 @@ class TestDiffStructure:
         # a directory whose own name contains a space followed by a regular
         # filename. The whole path survives end-to-end through the file
         # state, language detection, and anchor emission.
-        diff = "\n".join(
-            [
-                "diff --git a/weird dir/foo.py b/weird dir/foo.py",
-                "--- a/weird dir/foo.py",
-                "+++ b/weird dir/foo.py",
-                "@@ -1,1 +1,3 @@",
-                " x = 1",
-                "+def hello():",
-                "+    pass",
-            ]
-        )
+        diff = "\n".join([
+            "diff --git a/weird dir/foo.py b/weird dir/foo.py",
+            "--- a/weird dir/foo.py",
+            "+++ b/weird dir/foo.py",
+            "@@ -1,1 +1,3 @@",
+            " x = 1",
+            "+def hello():",
+            "+    pass",
+        ])
         result = extract_change_anchors(diff)
         assert len(result["files"]) == 1
         file = result["files"][0]
@@ -668,19 +625,17 @@ class TestDiffStructure:
         old_escaped = 'old\\"quote.py'
         new_escaped = 'new\\"quote.py'
         new = 'new"quote.py'
-        diff = "\n".join(
-            [
-                f'diff --git "a/{old_escaped}" "b/{new_escaped}"',
-                "similarity index 95%",
-                f'rename from "{old_escaped}"',
-                f'rename to "{new_escaped}"',
-                f'--- "a/{old_escaped}"',
-                f'+++ "b/{new_escaped}"',
-                "@@ -1,1 +1,1 @@",
-                "-def old_helper():",
-                "+def new_helper():",
-            ]
-        )
+        diff = "\n".join([
+            f'diff --git "a/{old_escaped}" "b/{new_escaped}"',
+            "similarity index 95%",
+            f'rename from "{old_escaped}"',
+            f'rename to "{new_escaped}"',
+            f'--- "a/{old_escaped}"',
+            f'+++ "b/{new_escaped}"',
+            "@@ -1,1 +1,1 @@",
+            "-def old_helper():",
+            "+def new_helper():",
+        ])
         result = extract_change_anchors(diff)
         assert len(result["files"]) == 1
         file = result["files"][0]
@@ -691,7 +646,6 @@ class TestDiffStructure:
 # ---------------------------------------------------------------------------
 # File-list merging
 # ---------------------------------------------------------------------------
-
 
 class TestFileList:
     def test_list_order_and_diff_only_files(self):
@@ -715,7 +669,8 @@ class TestFileList:
 
     def test_previous_filename(self):
         files = [
-            {"filename": "new.py", "previous_filename": "old.py", "status": "renamed"},
+            {"filename": "new.py", "previous_filename": "old.py",
+             "status": "renamed"},
         ]
         result = extract_change_anchors("", files)
         assert result["files"][0]["path"] == "new.py"
@@ -723,14 +678,10 @@ class TestFileList:
     def test_load_file_list_shapes(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "pr-files.json"
-            p.write_text(
-                json.dumps(
-                    [
-                        {"filename": "a.py", "status": "modified"},
-                        {"filename": "b.go", "status": "added"},
-                    ]
-                )
-            )
+            p.write_text(json.dumps([
+                {"filename": "a.py", "status": "modified"},
+                {"filename": "b.go", "status": "added"},
+            ]))
             assert [e["filename"] for e in load_file_list(p)] == ["a.py", "b.go"]
 
             p2 = Path(tmp) / "wrapped.json"
@@ -747,17 +698,13 @@ class TestFileList:
 # Generic fallback
 # ---------------------------------------------------------------------------
 
-
 class TestGenericFallback:
     def test_unsupported_language_file_anchor(self):
-        diff = _py_file(
-            "lib/foo.rb",
-            [
-                "def bar",
-                "  puts 'hello'",
-                "end",
-            ],
-        )
+        diff = _py_file("lib/foo.rb", [
+            "def bar",
+            "  puts 'hello'",
+            "end",
+        ])
         result = extract_change_anchors(diff)
         file = result["files"][0]
         assert file["language"] == "unsupported"
@@ -782,7 +729,6 @@ class TestGenericFallback:
 # ---------------------------------------------------------------------------
 # Deduplication, ordering, caps
 # ---------------------------------------------------------------------------
-
 
 class TestDedupOrderingCaps:
     def test_duplicate_anchors_deduplicated(self):
@@ -889,7 +835,6 @@ class TestDedupOrderingCaps:
 # Malformed / hostile input
 # ---------------------------------------------------------------------------
 
-
 class TestMalformedHostile:
     def test_empty_diff(self):
         result = extract_change_anchors("")
@@ -906,7 +851,13 @@ class TestMalformedHostile:
         # A diff cut off mid-file: complete lines are still extracted, the
         # partial trailing line is dropped, and nothing crashes.
         diff = (
-            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,3 @@\n+def kept():\n     pass\n+def cut_off("
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            "+def kept():\n"
+            "     pass\n"
+            "+def cut_off("
         )
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
@@ -939,14 +890,11 @@ class TestMalformedHostile:
         marker = Path(tempfile.gettempdir()) / "ca_hostile_marker.txt"
         if marker.exists():
             marker.unlink()
-        diff = _py_file(
-            "a.py",
-            [
-                "import os",
-                f"os.system('touch {marker}')",
-                "def real():",
-            ],
-        )
+        diff = _py_file("a.py", [
+            f"import os",
+            f"os.system('touch {marker}')",
+            "def real():",
+        ])
         result = extract_change_anchors(diff)
         assert not marker.exists()
         names = [s["name"] for s in result["files"][0]["symbols"]]
@@ -963,7 +911,6 @@ class TestMalformedHostile:
 
     def test_diff_byte_cap(self):
         from pr_reviewer.change_anchors import MAX_DIFF_BYTES
-
         big = "diff --git a/a.py b/a.py\n" + ("+def f():\n" * (MAX_DIFF_BYTES // 10 + 10))
         assert len(big) > MAX_DIFF_BYTES
         result = extract_change_anchors(big)
@@ -981,23 +928,20 @@ class TestMalformedHostile:
         assert len(result["files"][0]["symbols"]) == MAX_SYMBOLS_PER_FILE
 
     def test_unicode_and_control_chars(self):
-        diff = _py_file(
-            "a.py",
-            [
-                "def \u00e9moji():",
-                "def bad\x00name():",
-                "def real():",
-            ],
-        )
+        diff = _py_file("a.py", [
+            "def \u00e9moji():",
+            "def bad\x00name():",
+            "def real():",
+        ])
         result = extract_change_anchors(diff)
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["real"]
 
     def test_no_network_or_model_imports(self):
         import pr_reviewer.change_anchors as mod
-
         src = Path(mod.__file__).read_text()
-        for banned in ("urllib", "requests", "http.client", "socket", "subprocess", "openai", "anthropic", "curl"):
+        for banned in ("urllib", "requests", "http.client", "socket",
+                       "subprocess", "openai", "anthropic", "curl"):
             assert banned not in src, f"banned import surface: {banned}"
 
 
@@ -1005,29 +949,19 @@ class TestMalformedHostile:
 # CLI
 # ---------------------------------------------------------------------------
 
-
 class TestCLI:
     def test_cli_produces_versioned_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             diff_path = Path(tmp) / "pr.diff"
-            diff_path.write_text(
-                _py_file(
-                    "pr_reviewer/tool_executors.py",
-                    [
-                        "import pathlib",
-                        "def git_grep(pattern):",
-                        "    return pattern",
-                    ],
-                )
-            )
+            diff_path.write_text(_py_file("pr_reviewer/tool_executors.py", [
+                "import pathlib",
+                "def git_grep(pattern):",
+                "    return pattern",
+            ]))
             files_path = Path(tmp) / "pr-files.json"
-            files_path.write_text(
-                json.dumps(
-                    [
-                        {"filename": "pr_reviewer/tool_executors.py", "status": "modified"},
-                    ]
-                )
-            )
+            files_path.write_text(json.dumps([
+                {"filename": "pr_reviewer/tool_executors.py", "status": "modified"},
+            ]))
             out_path = Path(tmp) / "change-anchors.json"
 
             env = dict(os.environ)
@@ -1035,24 +969,12 @@ class TestCLI:
             # Pass the temporary workspace explicitly: GitHub Actions sets
             # GITHUB_WORKSPACE, which otherwise overrides this subprocess cwd.
             proc = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pr_reviewer.change_anchors",
-                    "--diff",
-                    str(diff_path),
-                    "--files",
-                    str(files_path),
-                    "--output",
-                    str(out_path),
-                    "--workspace-root",
-                    tmp,
-                ],
-                capture_output=True,
-                text=True,
-                env=env,
-                cwd=tmp,
-                timeout=60,
+                [sys.executable, "-m", "pr_reviewer.change_anchors",
+                 "--diff", str(diff_path),
+                 "--files", str(files_path),
+                 "--output", str(out_path),
+                 "--workspace-root", tmp],
+                capture_output=True, text=True, env=env, cwd=tmp, timeout=60,
             )
             assert proc.returncode == 0, proc.stderr
 
@@ -1070,28 +992,18 @@ class TestCLI:
     def test_cli_missing_diff_degrades(self):
         with tempfile.TemporaryDirectory() as tmp:
             files_path = Path(tmp) / "pr-files.json"
-            files_path.write_text(
-                json.dumps(
-                    [
-                        {"filename": "a.py", "status": "modified"},
-                    ]
-                )
-            )
+            files_path.write_text(json.dumps([
+                {"filename": "a.py", "status": "modified"},
+            ]))
             out_path = Path(tmp) / "change-anchors.json"
             # Pass --workspace-root so the output path (which lives
             # inside the tmpdir) is accepted by the containment guard.
-            rc = main(
-                [
-                    "--diff",
-                    str(Path(tmp) / "nope.diff"),
-                    "--files",
-                    str(files_path),
-                    "--output",
-                    str(out_path),
-                    "--workspace-root",
-                    tmp,
-                ]
-            )
+            rc = main([
+                "--diff", str(Path(tmp) / "nope.diff"),
+                "--files", str(files_path),
+                "--output", str(out_path),
+                "--workspace-root", tmp,
+            ])
             assert rc == 0
             result = json.loads(out_path.read_text())
             assert result["files"][0]["path"] == "a.py"
@@ -1102,16 +1014,11 @@ class TestCLI:
             diff_path = Path(tmp) / "pr.diff"
             diff_path.write_text(_py_file("a.py", ["def real():"]))
             out_path = Path(tmp) / "change-anchors.json"
-            rc = main(
-                [
-                    "--diff",
-                    str(diff_path),
-                    "--output",
-                    str(out_path),
-                    "--workspace-root",
-                    tmp,
-                ]
-            )
+            rc = main([
+                "--diff", str(diff_path),
+                "--output", str(out_path),
+                "--workspace-root", tmp,
+            ])
             assert rc == 0
             result = json.loads(out_path.read_text())
             assert result["files"][0]["symbols"][0]["name"] == "real"
@@ -1128,16 +1035,11 @@ class TestCLI:
             try:
                 diff_path = Path(tmp) / "pr.diff"
                 diff_path.write_text(_py_file("a.py", ["def real():"]))
-                rc = main(
-                    [
-                        "--diff",
-                        str(diff_path),
-                        "--output",
-                        str(Path(sibling) / "change-anchors.json"),
-                        "--workspace-root",
-                        tmp,
-                    ]
-                )
+                rc = main([
+                    "--diff", str(diff_path),
+                    "--output", str(Path(sibling) / "change-anchors.json"),
+                    "--workspace-root", tmp,
+                ])
                 assert rc == 1, "escape via sibling directory was accepted"
                 assert not (Path(sibling) / "change-anchors.json").exists()
             finally:
@@ -1152,16 +1054,11 @@ class TestCLI:
             inner.mkdir()
             diff_path = Path(tmp) / "pr.diff"
             diff_path.write_text(_py_file("a.py", ["def real():"]))
-            rc = main(
-                [
-                    "--diff",
-                    str(diff_path),
-                    "--output",
-                    str(inner / ".." / "escape.json"),
-                    "--workspace-root",
-                    str(inner),
-                ]
-            )
+            rc = main([
+                "--diff", str(diff_path),
+                "--output", str(inner / ".." / "escape.json"),
+                "--workspace-root", str(inner),
+            ])
             assert rc == 1, "parent-traversal output was accepted"
             assert not (Path(tmp) / "escape.json").exists()
 
@@ -1171,16 +1068,11 @@ class TestCLI:
         with tempfile.TemporaryDirectory() as tmp:
             diff_path = Path(tmp) / "pr.diff"
             diff_path.write_text(_py_file("a.py", ["def real():"]))
-            rc = main(
-                [
-                    "--diff",
-                    str(diff_path),
-                    "--output",
-                    "change-anchors\x00.json",
-                    "--workspace-root",
-                    tmp,
-                ]
-            )
+            rc = main([
+                "--diff", str(diff_path),
+                "--output", "change-anchors\x00.json",
+                "--workspace-root", tmp,
+            ])
             assert rc == 1
 
     def test_cli_rejects_symlink_pointing_outside_workspace(self):
@@ -1203,16 +1095,11 @@ class TestCLI:
 
                 diff_path = Path(tmp) / "pr.diff"
                 diff_path.write_text(_py_file("a.py", ["def real():"]))
-                rc = main(
-                    [
-                        "--diff",
-                        str(diff_path),
-                        "--output",
-                        str(link),
-                        "--workspace-root",
-                        str(inner),
-                    ]
-                )
+                rc = main([
+                    "--diff", str(diff_path),
+                    "--output", str(link),
+                    "--workspace-root", str(inner),
+                ])
                 assert rc == 1, "symlink to outside target was accepted"
                 # The outside target must remain untouched (no write
                 # through the symlink).

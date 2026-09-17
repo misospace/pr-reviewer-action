@@ -1,14 +1,13 @@
-"""Unit tests for pr_reviewer.tool_loop. 
+"""Unit tests for pr_reviewer.tool_loop.
 
 Target: >= 50% line coverage of pr_reviewer/tool_loop.py.
 
 These tests complement tests/test_native_tool_loop.py with focused smoke tests
 for the module surface, dataclasses, and helper exports.
 """
-
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict
 
 import pytest
 
@@ -122,7 +121,9 @@ def test_loop_outcome_defaults() -> None:
 
 def test_adaptive_loop_budgets_scales_rounds() -> None:
     """adaptive_loop_budgets scales rounds with a cap of 8."""
-    b = tool_loop.adaptive_loop_budgets(max_rounds=2, max_tool_calls=5, wall_clock_sec=30.0)
+    b = tool_loop.adaptive_loop_budgets(
+        max_rounds=2, max_tool_calls=5, wall_clock_sec=30.0
+    )
     # rounds should be at least 1 and at most 8.
     assert 1 <= b.max_rounds <= 8
     assert b.max_tool_calls == 5
@@ -136,7 +137,7 @@ def test_adaptive_loop_budgets_scales_rounds() -> None:
 
 def test_extract_tool_calls_handles_openai_format() -> None:
     """OpenAI-style response: tool_calls on the assistant message."""
-    response: dict[str, Any] = {
+    response: Dict[str, Any] = {
         "choices": [
             {
                 "message": {
@@ -167,7 +168,9 @@ def test_extract_tool_calls_handles_openai_format() -> None:
 
 def test_extract_tool_calls_no_calls_returns_text() -> None:
     """When no tool_calls are present, text is returned in the second slot."""
-    response: dict[str, Any] = {"choices": [{"message": {"role": "assistant", "content": "hello"}}]}
+    response: Dict[str, Any] = {
+        "choices": [{"message": {"role": "assistant", "content": "hello"}}]
+    }
     calls, text = tool_loop.extract_tool_calls(response, "openai")
     assert calls == []
     assert text == "hello"
@@ -175,7 +178,7 @@ def test_extract_tool_calls_no_calls_returns_text() -> None:
 
 def test_extract_tool_calls_handles_anthropic_format() -> None:
     """Anthropic-style response: content blocks of type 'tool_use'."""
-    response: dict[str, Any] = {
+    response: Dict[str, Any] = {
         "content": [
             {"type": "text", "text": "thinking..."},
             {
@@ -195,7 +198,9 @@ def test_extract_tool_calls_handles_anthropic_format() -> None:
 
 def test_extract_tool_calls_handles_anthropic_no_tool_use() -> None:
     """Anthropic response without tool_use should yield no calls and the text."""
-    response: dict[str, Any] = {"content": [{"type": "text", "text": "plain text only"}]}
+    response: Dict[str, Any] = {
+        "content": [{"type": "text", "text": "plain text only"}]
+    }
     calls, text = tool_loop.extract_tool_calls(response, "anthropic")
     assert calls == []
     assert text == "plain text only"
@@ -203,7 +208,7 @@ def test_extract_tool_calls_handles_anthropic_no_tool_use() -> None:
 
 def test_extract_tool_calls_keeps_non_serializable_args_as_string() -> None:
     """Non-JSON arguments should be preserved as opaque strings."""
-    response: dict[str, Any] = {
+    response: Dict[str, Any] = {
         "choices": [
             {
                 "message": {

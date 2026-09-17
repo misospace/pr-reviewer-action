@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Reduce a fetched linked-source body to corpus-worthy text.
 
 HTML pages are stripped to visible text (script/style/head dropped, tags
@@ -15,7 +15,12 @@ import sys
 
 def looks_like_html(text: str) -> bool:
     head = text[:512].lstrip().lower()
-    return head.startswith("<!doctype") or head.startswith("<html") or head.startswith("<") or "<body" in head
+    return (
+        head.startswith("<!doctype")
+        or head.startswith("<html")
+        or head.startswith("<")
+        or "<body" in head
+    )
 
 
 def strip_html(text: str) -> str:

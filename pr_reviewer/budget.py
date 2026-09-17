@@ -1,4 +1,4 @@
-"""Wall-clock budget tracker for best-effort enrichment. 
+"""Wall-clock budget tracker for best-effort enrichment.
 
 Extracted from ``scripts/run_enrichment.py`` (#359). Enrichment performs
 bounded network work; once the budget elapses, remaining phases are skipped
@@ -40,7 +40,7 @@ class DeadlineBudget:
             self._deadline = None
 
     @classmethod
-    def from_env(cls, name: str, default: int = 60) -> DeadlineBudget:
+    def from_env(cls, name: str, default: int = 60) -> "DeadlineBudget":
         raw = os.getenv(name, str(default)).strip()
         try:
             budget = int(raw)

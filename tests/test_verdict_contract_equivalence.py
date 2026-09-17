@@ -1,4 +1,4 @@
-"""Verdict-turn contract equivalence tests (#362). 
+"""Verdict-turn contract equivalence tests (#362).
 
 The review verdict is built on two code paths that live in different
 languages and must stay in lockstep on the shared invariants:
@@ -28,7 +28,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from pr_reviewer.conversation import (
+from pr_reviewer.conversation import (  # noqa: E402
     Conversation,
     _OPENAI_VERDICT_JSON_SCHEMA,
 )
@@ -70,7 +70,9 @@ class TestSharedResponseFormat:
         # a dead constant).
         c = Conversation(system="reviewer")
         c.add_user("review me")
-        payload = c.to_request_payload("openai", "m", verdict_turn=True, response_format="json_schema")
+        payload = c.to_request_payload(
+            "openai", "m", verdict_turn=True, response_format="json_schema"
+        )
         assert payload["response_format"] == _bash_rf_literal("json_schema")
 
     def test_json_object_shape_matches(self):
@@ -78,7 +80,9 @@ class TestSharedResponseFormat:
         assert bash_obj == {"type": "json_object"}
         c = Conversation(system="reviewer")
         c.add_user("review me")
-        payload = c.to_request_payload("openai", "m", verdict_turn=True, response_format="json_object")
+        payload = c.to_request_payload(
+            "openai", "m", verdict_turn=True, response_format="json_object"
+        )
         assert payload["response_format"] == bash_obj
 
     def test_off_omits_response_format_on_both_paths(self):
@@ -87,7 +91,9 @@ class TestSharedResponseFormat:
         assert re.search(r'rf_json="null"', _MODEL_CALL_SH)
         c = Conversation(system="reviewer")
         c.add_user("review me")
-        payload = c.to_request_payload("openai", "m", verdict_turn=True, response_format=None)
+        payload = c.to_request_payload(
+            "openai", "m", verdict_turn=True, response_format=None
+        )
         assert "response_format" not in payload
 
 
@@ -115,7 +121,7 @@ class TestSharedTokenAndSamplingKnobs:
 
     def test_default_max_tokens_is_8192_on_both_paths(self):
         # Path A default.
-        assert "AI_MAX_TOKENS:-8192" in _MODEL_CALL_SH
+        assert 'AI_MAX_TOKENS:-8192' in _MODEL_CALL_SH
         # Path B default (env_int_bounded fallback in run_tool_harness.py).
         assert re.search(r'env_int_bounded\(\s*"AI_MAX_TOKENS",\s*8192', _HARNESS_PY)
 
@@ -128,7 +134,9 @@ class TestSharedTokenAndSamplingKnobs:
         ):
             c = Conversation(system="s")
             c.add_user("go")
-            payload = c.to_request_payload("openai", "m", verdict_turn=True, tokens_param=tp)
+            payload = c.to_request_payload(
+                "openai", "m", verdict_turn=True, tokens_param=tp
+            )
             assert expected in payload
             other = "max_tokens" if expected == "max_completion_tokens" else "max_completion_tokens"
             assert other not in payload
@@ -136,11 +144,15 @@ class TestSharedTokenAndSamplingKnobs:
     def test_temperature_omitted_when_none(self):
         # Bash omits temperature when AI_TEMPERATURE is empty; Python omits it
         # when temperature is None.
-        assert "if $temp == null then {} else {temperature:$temp} end" in _MODEL_CALL_SH
+        assert 'if $temp == null then {} else {temperature:$temp} end' in _MODEL_CALL_SH
         c = Conversation(system="s")
         c.add_user("go")
-        assert "temperature" not in c.to_request_payload("openai", "m", verdict_turn=True, temperature=None)
-        assert c.to_request_payload("openai", "m", verdict_turn=True, temperature=0.1)["temperature"] == 0.1
+        assert "temperature" not in c.to_request_payload(
+            "openai", "m", verdict_turn=True, temperature=None
+        )
+        assert c.to_request_payload(
+            "openai", "m", verdict_turn=True, temperature=0.1
+        )["temperature"] == 0.1
 
     def test_stream_options_include_usage_when_streaming(self):
         # Bash sets stream_options.include_usage on streamed openai requests;
@@ -160,7 +172,9 @@ class TestSharedSystemAndCorpus:
     def test_openai_verdict_has_system_and_user(self):
         c = Conversation(system="reviewer prompt")
         c.add_user("review me")
-        payload = c.to_request_payload("openai", "m", verdict_turn=True, response_format="json_object")
+        payload = c.to_request_payload(
+            "openai", "m", verdict_turn=True, response_format="json_object"
+        )
         roles = [msg["role"] for msg in payload["messages"]]
         assert roles[0] == "system"
         assert payload["messages"][0]["content"].startswith("reviewer prompt")
@@ -171,7 +185,9 @@ class TestSharedSystemAndCorpus:
         # response_format on either path.
         c = Conversation(system="reviewer prompt")
         c.add_user("review me")
-        payload = c.to_request_payload("anthropic", "m", verdict_turn=True, response_format="json_schema")
+        payload = c.to_request_payload(
+            "anthropic", "m", verdict_turn=True, response_format="json_schema"
+        )
         assert payload["system"]  # present
         assert "response_format" not in payload
         assert "tools" not in payload

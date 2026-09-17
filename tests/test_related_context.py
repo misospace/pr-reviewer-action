@@ -1,4 +1,4 @@
-"""Tests for the deterministic related-code scanner (#572).""" 
+"""Tests for the deterministic related-code scanner (#572)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pr_reviewer import related_context
-from pr_reviewer.related_context import (
+from pr_reviewer import related_context  # noqa: E402
+from pr_reviewer.related_context import (  # noqa: E402
     ARTIFACT_VERSION,
     MAX_JSON_BYTES,
     MAX_MANIFESTS_PER_FILE,
@@ -223,16 +223,12 @@ def test_secret_redaction_and_hostile_markdown_are_safe(tmp_path):
     snippet = "token=supersecret123 ` ```` boundary\nnext"
     related = {
         "version": 1,
-        "files": [
-            {
-                "path": "weird`path\n.py",
-                "symbols": [
-                    {"name": "target", "references": [{"path": "hostile`path.py", "line": 2, "snippet": snippet}]}
-                ],
-                "tests": ["tests/test_`hostile.py"],
-                "manifests": ["pyproject.toml"],
-            }
-        ],
+        "files": [{
+            "path": "weird`path\n.py",
+            "symbols": [{"name": "target", "references": [{"path": "hostile`path.py", "line": 2, "snippet": snippet}]}],
+            "tests": ["tests/test_`hostile.py"],
+            "manifests": ["pyproject.toml"],
+        }],
         "truncated": False,
         "errors": [],
     }
@@ -246,7 +242,9 @@ def test_secret_redaction_and_hostile_markdown_are_safe(tmp_path):
 
 
 def test_caps_expose_default_bounds():
-    assert (MAX_SYMBOLS, MAX_REFERENCES_PER_SYMBOL, MAX_REFERENCES, MAX_MANIFESTS_PER_FILE) == (40, 20, 200, 20)
+    assert (MAX_SYMBOLS, MAX_REFERENCES_PER_SYMBOL, MAX_REFERENCES, MAX_MANIFESTS_PER_FILE) == (
+        40, 20, 200, 20
+    )
 
 
 def test_changed_hits_do_not_consume_reference_cap(tmp_path):
@@ -312,21 +310,15 @@ def test_manifest_cap_is_explicit_and_deterministic(tmp_path):
 def test_json_cap_preserves_valid_json_and_hard_limit():
     related = {
         "version": 1,
-        "files": [
-            {
-                "path": "module.py",
-                "symbols": [
-                    {
-                        "name": "target",
-                        "references": [
-                            {"path": f"ref_{index}.py", "line": index, "snippet": "x" * 1000} for index in range(300)
-                        ],
-                    }
-                ],
-                "tests": [],
-                "manifests": [],
-            }
-        ],
+        "files": [{
+            "path": "module.py",
+            "symbols": [{"name": "target", "references": [
+                {"path": f"ref_{index}.py", "line": index, "snippet": "x" * 1000}
+                for index in range(300)
+            ]}],
+            "tests": [],
+            "manifests": [],
+        }],
         "truncated": False,
         "errors": [],
         "truncation": {"truncated": False, "reasons": []},

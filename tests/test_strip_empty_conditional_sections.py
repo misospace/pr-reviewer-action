@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for scripts/strip_empty_conditional_sections.py.
 
 Regression tests for issue #415: when the corpus contains no linked-issue
@@ -17,7 +17,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from strip_empty_conditional_sections import (
+from strip_empty_conditional_sections import (  # noqa: E402
     strip_empty_conditional_sections,
 )
 
@@ -66,7 +66,11 @@ class TestNoOp:
 
     def test_no_target_sections_unchanged(self):
         """Sections that are not conditional are never touched."""
-        text = "## Summary\n\nLGTM.\n\n## Change-by-Change Findings\n\nNothing blocking.\n\n## Sources\n\npr.diff\n"
+        text = (
+            "## Summary\n\nLGTM.\n\n"
+            "## Change-by-Change Findings\n\nNothing blocking.\n\n"
+            "## Sources\n\npr.diff\n"
+        )
         assert strip_empty_conditional_sections(text, ABSENT_ALL) == text
 
     def test_unreported_standards_signal_keeps_the_section(self):
@@ -188,15 +192,25 @@ class TestStripsAbsentSections:
 
 class TestSelectiveStripping:
     def test_present_linked_absent_evidence(self):
-        text = "## Linked Issue Fit\n\nCovers the acceptance criteria.\n\n## Evidence Provider Findings\n\nNone.\n"
-        result = strip_empty_conditional_sections(text, {"linked_issue": True, "evidence_provider": False})
+        text = (
+            "## Linked Issue Fit\n\nCovers the acceptance criteria.\n\n"
+            "## Evidence Provider Findings\n\nNone.\n"
+        )
+        result = strip_empty_conditional_sections(
+            text, {"linked_issue": True, "evidence_provider": False}
+        )
         assert "## Linked Issue Fit" in result
         assert "Covers the acceptance criteria." in result
         assert "Evidence Provider Findings" not in result
 
     def test_absent_linked_present_evidence(self):
-        text = "## Linked Issue Fit\n\nNo linked issue.\n\n## Evidence Provider Findings\n\nlint: clean.\n"
-        result = strip_empty_conditional_sections(text, {"linked_issue": False, "evidence_provider": True})
+        text = (
+            "## Linked Issue Fit\n\nNo linked issue.\n\n"
+            "## Evidence Provider Findings\n\nlint: clean.\n"
+        )
+        result = strip_empty_conditional_sections(
+            text, {"linked_issue": False, "evidence_provider": True}
+        )
         assert "Linked Issue Fit" not in result
         assert "## Evidence Provider Findings" in result
         assert "lint: clean." in result
@@ -224,7 +238,10 @@ class TestSelectiveStripping:
 class TestMarkdownRobustness:
     def test_does_not_match_hash_inside_code_fence(self):
         """A '# Linked Issue' line inside a code block is not a real heading."""
-        text = "## Summary\n\n```\n## Linked Issue Fit\nnot a heading\n```\n\n## Sources\n\nok.\n"
+        text = (
+            "## Summary\n\n```\n## Linked Issue Fit\nnot a heading\n```\n\n"
+            "## Sources\n\nok.\n"
+        )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # The line inside the fence is preserved.
         assert "## Linked Issue Fit" in result
@@ -232,7 +249,11 @@ class TestMarkdownRobustness:
 
     def test_preserves_surrounding_blank_line_layout(self):
         """Stripping doesn't leave huge blank gaps or eat unrelated content."""
-        text = "## Summary\n\nA.\n\n## Linked Issue Fit\n\nNope.\n\n## Sources\n\nB.\n"
+        text = (
+            "## Summary\n\nA.\n\n"
+            "## Linked Issue Fit\n\nNope.\n\n"
+            "## Sources\n\nB.\n"
+        )
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # No runs of 3+ newlines remain.
         assert "\n\n\n" not in result
@@ -280,13 +301,11 @@ class TestEdgeCaseInputs:
         """An empty input file is handled without error (in-place CLI path)."""
         import subprocess
         import sys
-
         f = tmp_path / "empty.md"
         f.write_text("")
         r = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin"},
         )
         assert r.returncode == 0
@@ -308,8 +327,7 @@ class TestEdgeCaseInputs:
         kept.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(kept)],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "true"},
         )
         assert r.returncode == 0
@@ -319,8 +337,7 @@ class TestEdgeCaseInputs:
         stripped.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(stripped)],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "false"},
         )
         assert r.returncode == 0
@@ -363,7 +380,9 @@ class TestToolHarness:
         assert "## Summary" in result
         assert "## Sources" in result
 
-    @pytest.mark.parametrize("heading", ["## Tool Harness Findings", "## Tool Harness Results"])
+    @pytest.mark.parametrize(
+        "heading", ["## Tool Harness Findings", "## Tool Harness Results"]
+    )
     def test_present_harness_section_is_kept(self, heading):
         text = f"## Summary\n\nLGTM.\n\n{heading}\n\ngh_api (ok): 3 calls.\n"
         assert strip_empty_conditional_sections(text, PRESENT_ALL) == text
@@ -447,7 +466,9 @@ class TestToolHarness:
         real = "## Tool Harness Findings (incremental review)\n\nfiller.\n"
         assert strip_empty_conditional_sections(real, ABSENT_ALL).strip() == ""
 
-    @pytest.mark.parametrize("heading", ["## Tool Harness Findings", "## Tool Harness Results"])
+    @pytest.mark.parametrize(
+        "heading", ["## Tool Harness Findings", "## Tool Harness Results"]
+    )
     def test_tool_harness_present_env_is_honored_via_cli(self, tmp_path, heading):
         """TOOL_HARNESS_PRESENT is read on the in-place CLI path.
 
@@ -466,8 +487,7 @@ class TestToolHarness:
         kept.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(kept)],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin", "TOOL_HARNESS_PRESENT": "true"},
         )
         assert r.returncode == 0
@@ -477,8 +497,7 @@ class TestToolHarness:
         stripped.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(stripped)],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={"PATH": "/usr/bin:/bin", "TOOL_HARNESS_PRESENT": "false"},
         )
         assert r.returncode == 0

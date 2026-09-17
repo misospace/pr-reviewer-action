@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.evidence_memory — cross-run evidence memory (#265).""" 
+"""Tests for pr_reviewer.evidence_memory — cross-run evidence memory (#265)."""
 
 import json
 import sys
@@ -23,16 +23,10 @@ class TestBuildEvidenceDigest:
 
     def test_falls_back_to_ledger_without_final_text(self):
         entries = [
-            {
-                "tool": "read_file",
-                "args": {"path": "talos/machineconfig.yaml.j2"},
-                "content": "install: factory.talos.dev/installer:v1.13.4",
-            },
-            {
-                "tool": "web_fetch",
-                "args": {"url": "https://docs.siderolabs.com/matrix"},
-                "content": "Kubernetes 1.32 to 1.36 supported on Talos 1.13",
-            },
+            {"tool": "read_file", "args": {"path": "talos/machineconfig.yaml.j2"},
+             "content": "install: factory.talos.dev/installer:v1.13.4"},
+            {"tool": "web_fetch", "args": {"url": "https://docs.siderolabs.com/matrix"},
+             "content": "Kubernetes 1.32 to 1.36 supported on Talos 1.13"},
         ]
         digest = build_evidence_digest(entries, "")
         assert "read_file path=talos/machineconfig.yaml.j2" in digest
@@ -45,7 +39,8 @@ class TestBuildEvidenceDigest:
 
     def test_ledger_entry_cap(self):
         entries = [
-            {"tool": "read_file", "args": {"path": f"f{i}"}, "content": f"c{i}"} for i in range(MAX_LEDGER_ENTRIES + 5)
+            {"tool": "read_file", "args": {"path": f"f{i}"}, "content": f"c{i}"}
+            for i in range(MAX_LEDGER_ENTRIES + 5)
         ]
         digest = build_evidence_digest(entries, "")
         # Exactly MAX_LEDGER_ENTRIES ledger lines are emitted (the rest dropped).
@@ -61,12 +56,7 @@ class TestBuildEvidenceDigest:
         assert len(digest) == MAX_DIGEST_CHARS
 
     def test_skips_malformed_entries(self):
-        entries = [
-            "notadict",
-            {"args": {}},
-            {"tool": ""},
-            {"tool": "git_grep", "args": {"pattern": "tok"}, "content": "hit"},
-        ]
+        entries = ["notadict", {"args": {}}, {"tool": ""}, {"tool": "git_grep", "args": {"pattern": "tok"}, "content": "hit"}]
         digest = build_evidence_digest(entries, "")
         assert digest == "- git_grep pattern=tok → hit"
 
@@ -133,7 +123,9 @@ class TestRenderEvidenceMemorySection:
         assert render_evidence_memory_section({"digest": ""}) == ""
 
     def test_includes_digest_sha_and_failsafe_framing(self):
-        out = render_evidence_memory_section({"digest": "- read_file → v1.13.4", "head_sha": "abcdef0123456789"})
+        out = render_evidence_memory_section(
+            {"digest": "- read_file → v1.13.4", "head_sha": "abcdef0123456789"}
+        )
         assert "Evidence Gathered by the Previous Review" in out
         assert "abcdef012345" in out  # head_sha[:12]
         assert "- read_file → v1.13.4" in out

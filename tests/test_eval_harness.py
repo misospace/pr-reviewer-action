@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for the A/B evaluation harness."""
 
 import json
@@ -29,19 +29,12 @@ from eval_harness import (
 TALOS_EVIDENCE = {
     "description": "chain to the support matrix and cite it",
     "checks": [
-        {
-            "id": "read_machineconfig",
-            "type": "tool_call",
-            "tool": "read_file",
-            "args_contains": {"path": ["machineconfig"]},
-        },
-        {
-            "id": "fetched_support_matrix",
-            "type": "tool_call",
-            "tool": "web_fetch",
-            "args_contains": {"url": ["talos.dev", "support-matrix"]},
-        },
-        {"id": "cited_matrix_in_review", "type": "review_mentions", "any_of": ["support matrix", "talos.dev"]},
+        {"id": "read_machineconfig", "type": "tool_call", "tool": "read_file",
+         "args_contains": {"path": ["machineconfig"]}},
+        {"id": "fetched_support_matrix", "type": "tool_call", "tool": "web_fetch",
+         "args_contains": {"url": ["talos.dev", "support-matrix"]}},
+        {"id": "cited_matrix_in_review", "type": "review_mentions",
+         "any_of": ["support matrix", "talos.dev"]},
     ],
 }
 
@@ -49,17 +42,11 @@ TALOS_EVIDENCE = {
 def _chained_run(mode="native_loop"):
     """A run that fully closes the Talos evidence chain."""
     return ReviewRun(
-        mode=mode,
-        pr_number=7462,
-        repo_full_name="joryirving/home-ops",
+        mode=mode, pr_number=7462, repo_full_name="joryirving/home-ops",
         review_markdown="Verified against the Talos support matrix: k8s v1.36 is supported.",
         tool_calls=[
             {"tool": "read_file", "args": {"path": "talos/main/machineconfig.yaml.j2"}, "status": "ok"},
-            {
-                "tool": "web_fetch",
-                "args": {"url": "https://www.talos.dev/v1.13/introduction/support-matrix/"},
-                "status": "ok",
-            },
+            {"tool": "web_fetch", "args": {"url": "https://www.talos.dev/v1.13/introduction/support-matrix/"}, "status": "ok"},
         ],
         tool_stop_reason="model-stopped",
     )
@@ -78,18 +65,14 @@ class TestEvaluateCapability:
     def test_pattern_rubber_stamp_fails(self):
         """No tools, no citation — the current Gemma failure mode."""
         run = ReviewRun(
-            mode="native_loop",
-            pr_number=7462,
-            repo_full_name="joryirving/home-ops",
+            mode="native_loop", pr_number=7462, repo_full_name="joryirving/home-ops",
             review_markdown="Patch bump v1.36.1 -> v1.36.2, low risk. Approve.",
             tool_calls=[],
         )
         cap = evaluate_capability(run, TALOS_EVIDENCE)
         assert cap["passed"] is False
         assert {c["id"] for c in cap["checks"] if not c["passed"]} == {
-            "read_machineconfig",
-            "fetched_support_matrix",
-            "cited_matrix_in_review",
+            "read_machineconfig", "fetched_support_matrix", "cited_matrix_in_review"
         }
 
     def test_fetched_but_not_cited_fails(self):
@@ -130,68 +113,45 @@ class TestConsultedMatrixCheck:
     EVIDENCE = {
         "description": "consult the support matrix via fetch or search, and cite",
         "checks": [
-            {
-                "id": "consulted_support_matrix",
-                "type": "tool_call",
-                "tool": ["web_fetch", "web_search"],
-                "args_any_contains": ["support-matrix", "support matrix"],
-            },
+            {"id": "consulted_support_matrix", "type": "tool_call",
+             "tool": ["web_fetch", "web_search"],
+             "args_any_contains": ["support-matrix", "support matrix"]},
             {"id": "cited", "type": "review_mentions", "any_of": ["support matrix"]},
         ],
     }
 
     def _run(self, calls, md="Per the support matrix, k8s v1.36 is supported."):
         return ReviewRun(
-            mode="native_loop",
-            pr_number=7462,
-            repo_full_name="joryirving/home-ops",
-            review_markdown=md,
-            tool_calls=calls,
-            tool_stop_reason="model-stopped",
+            mode="native_loop", pr_number=7462, repo_full_name="joryirving/home-ops",
+            review_markdown=md, tool_calls=calls, tool_stop_reason="model-stopped",
         )
 
     def test_web_search_query_satisfies_check(self):
-        run = self._run(
-            [
-                {"tool": "web_search", "args": {"query": "talos v1.13 kubernetes support matrix"}, "status": "ok"},
-            ]
-        )
+        run = self._run([
+            {"tool": "web_search", "args": {"query": "talos v1.13 kubernetes support matrix"}, "status": "ok"},
+        ])
         cap = evaluate_capability(run, self.EVIDENCE)
         assert cap["passed"] is True
 
     def test_web_fetch_url_satisfies_check(self):
-        run = self._run(
-            [
-                {
-                    "tool": "web_fetch",
-                    "args": {"url": "https://docs.siderolabs.com/talos/v1.13/getting-started/support-matrix"},
-                    "status": "ok",
-                },
-            ]
-        )
+        run = self._run([
+            {"tool": "web_fetch", "args": {"url": "https://docs.siderolabs.com/talos/v1.13/getting-started/support-matrix"}, "status": "ok"},
+        ])
         assert evaluate_capability(run, self.EVIDENCE)["passed"] is True
 
     def test_unrelated_calls_do_not_satisfy(self):
-        run = self._run(
-            [
-                {"tool": "web_search", "args": {"query": "kubernetes 1.36 release notes"}, "status": "ok"},
-                {
-                    "tool": "web_fetch",
-                    "args": {"url": "https://github.com/kubernetes/kubernetes/releases"},
-                    "status": "ok",
-                },
-            ]
-        )
+        run = self._run([
+            {"tool": "web_search", "args": {"query": "kubernetes 1.36 release notes"}, "status": "ok"},
+            {"tool": "web_fetch", "args": {"url": "https://github.com/kubernetes/kubernetes/releases"}, "status": "ok"},
+        ])
         cap = evaluate_capability(run, self.EVIDENCE)
         assert any(c["id"] == "consulted_support_matrix" and not c["passed"] for c in cap["checks"])
 
     def test_wrong_tool_not_credited(self):
         # read_file mentioning the phrase shouldn't count — tool must be in the list.
-        run = self._run(
-            [
-                {"tool": "read_file", "args": {"path": "docs/support-matrix.md"}, "status": "ok"},
-            ]
-        )
+        run = self._run([
+            {"tool": "read_file", "args": {"path": "docs/support-matrix.md"}, "status": "ok"},
+        ])
         cap = evaluate_capability(run, self.EVIDENCE)
         assert any(c["id"] == "consulted_support_matrix" and not c["passed"] for c in cap["checks"])
 
@@ -200,11 +160,9 @@ class TestCapabilityRateAggregation:
     def test_pass_rate_over_repeated_runs(self):
         """10 native_loop runs, 7 close the chain -> rate 0.7."""
         pr = {
-            "number": 7462,
-            "repo_full_name": "joryirving/home-ops",
+            "number": 7462, "repo_full_name": "joryirving/home-ops",
             "url": "https://github.com/joryirving/home-ops/pull/7462",
-            "known_findings": [],
-            "expected_evidence": TALOS_EVIDENCE,
+            "known_findings": [], "expected_evidence": TALOS_EVIDENCE,
         }
         corpus = BenchmarkCorpus(prs=[pr])
         runs = [_chained_run() for _ in range(7)]
@@ -224,8 +182,7 @@ class TestCapabilityRateAggregation:
 
     def test_findings_only_pr_has_no_capability_rate(self):
         pr = {
-            "number": 110,
-            "repo_full_name": "misospace/pr-reviewer-action",
+            "number": 110, "repo_full_name": "misospace/pr-reviewer-action",
             "url": "https://github.com/misospace/pr-reviewer-action/pull/110",
             "known_findings": [],
         }
@@ -240,7 +197,6 @@ class TestCapabilityRateAggregation:
 # ---------------------------------------------------------------------------
 # KnownFinding tests
 # ---------------------------------------------------------------------------
-
 
 class TestKnownFinding:
     def test_to_dict(self):
@@ -289,7 +245,6 @@ class TestKnownFinding:
 # Corpus loading tests
 # ---------------------------------------------------------------------------
 
-
 class TestBenchmarkCorpus:
     def test_from_file(self):
         corpus_data = {
@@ -299,7 +254,9 @@ class TestBenchmarkCorpus:
                     "repo_full_name": "test/repo",
                     "url": "https://github.com/test/repo/pull/1",
                     "title": "Test PR",
-                    "known_findings": [{"category": "security", "severity": "high", "description": "Bug"}],
+                    "known_findings": [
+                        {"category": "security", "severity": "high", "description": "Bug"}
+                    ],
                 }
             ]
         }
@@ -336,7 +293,6 @@ class TestBenchmarkCorpus:
 # Findings extraction tests
 # ---------------------------------------------------------------------------
 
-
 class TestExtractFindingsFromReview:
     def test_empty_markdown(self):
         run = ReviewRun(mode="tools_off", pr_number=1, repo_full_name="test/repo")
@@ -350,9 +306,7 @@ class TestExtractFindingsFromReview:
 
 No other issues detected."""
         run = ReviewRun(
-            mode="tools_off",
-            pr_number=1,
-            repo_full_name="test/repo",
+            mode="tools_off", pr_number=1, repo_full_name="test/repo",
             review_markdown=markdown,
         )
         findings = extract_findings_from_review(run)
@@ -367,9 +321,7 @@ No other issues detected."""
 
 All looks good. No issues detected."""
         run = ReviewRun(
-            mode="tools_off",
-            pr_number=1,
-            repo_full_name="test/repo",
+            mode="tools_off", pr_number=1, repo_full_name="test/repo",
             review_markdown=markdown,
         )
         assert extract_findings_from_review(run) == []
@@ -378,7 +330,6 @@ All looks good. No issues detected."""
 # ---------------------------------------------------------------------------
 # Quality comparison tests
 # ---------------------------------------------------------------------------
-
 
 class TestComputePrecisionRecall:
     def test_perfect_match(self):
@@ -421,15 +372,11 @@ class TestComputePrecisionRecall:
         ]
         found = [
             {"category": "security", "severity": "high", "description": "Found hardcoded key"},  # matches
-            {
-                "category": "correctness",
-                "severity": "medium",
-                "description": "Dead code detected",
-            },  # no match (no word overlap with "Unreachable code")
+            {"category": "correctness", "severity": "medium", "description": "Dead code detected"},  # no match (no word overlap with "Unreachable code")
         ]
         result = compute_precision_recall(found, known)
         assert result["precision"] == 0.5  # 1 of 2 found matches a known finding
-        assert abs(result["recall"] - (1 / 3)) < 0.001  # 1 of 3 known found
+        assert abs(result["recall"] - (1/3)) < 0.001   # 1 of 3 known found
 
     def test_no_match(self):
         known = [KnownFinding("security", "high", "Hardcoded key")]
@@ -452,50 +399,31 @@ class TestComputePrecisionRecall:
 # Report generation tests
 # ---------------------------------------------------------------------------
 
-
 class TestGenerateReport:
     def test_basic_report(self):
-        corpus = BenchmarkCorpus(
-            prs=[
-                {
-                    "number": 1,
-                    "repo_full_name": "test/repo",
-                    "url": "https://github.com/test/repo/pull/1",
-                    "known_findings": [
-                        {"category": "security", "severity": "high", "description": "Hardcoded key"},
-                    ],
-                }
-            ]
-        )
+        corpus = BenchmarkCorpus(prs=[{
+            "number": 1,
+            "repo_full_name": "test/repo",
+            "url": "https://github.com/test/repo/pull/1",
+            "known_findings": [
+                {"category": "security", "severity": "high", "description": "Hardcoded key"},
+            ],
+        }])
 
-        results = [
-            BenchmarkResult(
-                pr_number=1,
-                repo_full_name="test/repo",
-                runs=[
-                    ReviewRun(
-                        mode="tools_off",
-                        pr_number=1,
-                        repo_full_name="test/repo",
-                        verdict="request_changes",
-                        tokens_input=1000,
-                        tokens_output=500,
-                        wall_clock_sec=5.0,
-                        review_markdown="- [security/high] Hardcoded API key found in config",
-                    ),
-                    ReviewRun(
-                        mode="native_loop",
-                        pr_number=1,
-                        repo_full_name="test/repo",
-                        verdict="request_changes",
-                        tokens_input=2000,
-                        tokens_output=800,
-                        wall_clock_sec=10.0,
-                        review_markdown="- [security/high] Hardcoded API key found in config\n- [correctness/medium] Unreachable code",
-                    ),
-                ],
-            )
-        ]
+        results = [BenchmarkResult(
+            pr_number=1,
+            repo_full_name="test/repo",
+            runs=[
+                ReviewRun(mode="tools_off", pr_number=1, repo_full_name="test/repo",
+                          verdict="request_changes", tokens_input=1000, tokens_output=500,
+                          wall_clock_sec=5.0,
+                          review_markdown="- [security/high] Hardcoded API key found in config"),
+                ReviewRun(mode="native_loop", pr_number=1, repo_full_name="test/repo",
+                          verdict="request_changes", tokens_input=2000, tokens_output=800,
+                          wall_clock_sec=10.0,
+                          review_markdown="- [security/high] Hardcoded API key found in config\n- [correctness/medium] Unreachable code"),
+            ],
+        )]
 
         report = generate_report(results, corpus)
 
@@ -507,35 +435,21 @@ class TestGenerateReport:
         assert report["mode_summary"]["native_loop"]["runs"] == 1
 
     def test_multiple_prs(self):
-        corpus = BenchmarkCorpus(
-            prs=[
-                {
-                    "number": i,
-                    "repo_full_name": "test/repo",
-                    "url": f"https://github.com/test/repo/pull/{i}",
-                    "known_findings": [{"category": "security", "severity": "high", "description": f"Bug {i}"}],
-                }
-                for i in range(1, 4)
-            ]
-        )
+        corpus = BenchmarkCorpus(prs=[{
+            "number": i,
+            "repo_full_name": "test/repo",
+            "url": f"https://github.com/test/repo/pull/{i}",
+            "known_findings": [{"category": "security", "severity": "high", "description": f"Bug {i}"}],
+        } for i in range(1, 4)])
 
-        results = [
-            BenchmarkResult(
-                pr_number=i,
-                repo_full_name="test/repo",
-                runs=[
-                    ReviewRun(
-                        mode="tools_off",
-                        pr_number=i,
-                        repo_full_name="test/repo",
-                        tokens_input=1000,
-                        tokens_output=500,
-                        wall_clock_sec=5.0,
-                    ),
-                ],
-            )
-            for i in range(1, 4)
-        ]
+        results = [BenchmarkResult(
+            pr_number=i,
+            repo_full_name="test/repo",
+            runs=[
+                ReviewRun(mode="tools_off", pr_number=i, repo_full_name="test/repo",
+                          tokens_input=1000, tokens_output=500, wall_clock_sec=5.0),
+            ],
+        ) for i in range(1, 4)]
 
         report = generate_report(results, corpus)
         assert report["metadata"]["total_prs"] == 3
@@ -546,7 +460,6 @@ class TestGenerateReport:
 # ---------------------------------------------------------------------------
 # Sample corpus validation
 # ---------------------------------------------------------------------------
-
 
 class TestSampleCorpus:
     def test_sample_corpus_loads(self):
@@ -571,13 +484,9 @@ class TestSampleCorpus:
         # The scenario must be gradable: the chained run passes, rubber stamp fails.
         chained = _chained_run()
         assert evaluate_capability(chained, ee)["passed"] is True
-        stamp = ReviewRun(
-            mode="native_loop",
-            pr_number=pr["number"],
-            repo_full_name=pr["repo_full_name"],
-            review_markdown="patch bump, approve",
-            tool_calls=[],
-        )
+        stamp = ReviewRun(mode="native_loop", pr_number=pr["number"],
+                          repo_full_name=pr["repo_full_name"],
+                          review_markdown="patch bump, approve", tool_calls=[])
         assert evaluate_capability(stamp, ee)["passed"] is False
 
     def test_agentic_corpus_has_four_scenarios(self):
@@ -596,34 +505,28 @@ class TestSampleCorpus:
 TRIVIAL_DIGEST_EVIDENCE = {
     "description": "digest-only bump must be recognised as low-risk",
     "checks": [
-        {
-            "id": "verdict_is_approve_or_trivial",
-            "type": "review_mentions",
-            "any_of": ["digest", "low risk", "low-risk", "trivial", "no breaking", "no version change", "approve"],
-        },
+        {"id": "verdict_is_approve_or_trivial", "type": "review_mentions",
+         "any_of": ["digest", "low risk", "low-risk", "trivial", "no breaking",
+                    "no version change", "approve"]},
     ],
 }
 
 SECRET_LEAK_EVIDENCE = {
     "description": "hardcoded AWS key must trigger secret_handling_changes flag",
     "checks": [
-        {
-            "id": "flags_hardcoded_secret",
-            "type": "review_mentions",
-            "any_of": ["secret", "credential", "hardcoded", "hard-coded", "AKIA", "access key", "rotate", "leak"],
-        },
+        {"id": "flags_hardcoded_secret", "type": "review_mentions",
+         "any_of": ["secret", "credential", "hardcoded", "hard-coded", "AKIA",
+                    "access key", "rotate", "leak"]},
     ],
 }
 
 TOOL_REQUIRED_EVIDENCE = {
     "description": "config-loader refactor requires read_file and a mention of the module",
     "checks": [
-        {"id": "read_config_loader", "type": "tool_call", "tool": "read_file", "args_contains": {"path": ["config"]}},
-        {
-            "id": "cited_loader_in_review",
-            "type": "review_mentions",
-            "any_of": ["config", "loader", "module", "interface", "import", "extracted"],
-        },
+        {"id": "read_config_loader", "type": "tool_call", "tool": "read_file",
+         "args_contains": {"path": ["config"]}},
+        {"id": "cited_loader_in_review", "type": "review_mentions",
+         "any_of": ["config", "loader", "module", "interface", "import", "extracted"]},
     ],
 }
 
@@ -633,8 +536,7 @@ class TestTrivialDigestScenario:
 
     def _run(self, review_md, tool_calls=None):
         return ReviewRun(
-            mode="native_loop",
-            pr_number=8001,
+            mode="native_loop", pr_number=8001,
             repo_full_name="joryirving/home-ops",
             review_markdown=review_md,
             tool_calls=tool_calls or [],
@@ -665,8 +567,7 @@ class TestSecretLeakScenario:
 
     def _run(self, review_md):
         return ReviewRun(
-            mode="native_loop",
-            pr_number=8002,
+            mode="native_loop", pr_number=8002,
             repo_full_name="misospace/pr-reviewer-action",
             review_markdown=review_md,
             tool_calls=[],
@@ -716,8 +617,7 @@ class TestToolRequiredScenario:
 
     def _run(self, review_md, tool_calls=None):
         return ReviewRun(
-            mode="native_loop",
-            pr_number=8003,
+            mode="native_loop", pr_number=8003,
             repo_full_name="misospace/pr-reviewer-action",
             review_markdown=review_md,
             tool_calls=tool_calls or [],
@@ -747,7 +647,8 @@ class TestToolRequiredScenario:
         run = self._run("Refactor looks clean. Approve.", tool_calls=[])
         cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
         assert cap["passed"] is False
-        assert any(c["id"] == "read_config_loader" and not c["passed"] for c in cap["checks"])
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
 
     def test_wrong_file_read_fails(self):
         """Reading an unrelated file does not satisfy the config-read check."""
@@ -756,7 +657,8 @@ class TestToolRequiredScenario:
             tool_calls=[{"tool": "read_file", "args": {"path": "README.md"}, "status": "ok"}],
         )
         cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
-        assert any(c["id"] == "read_config_loader" and not c["passed"] for c in cap["checks"])
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
 
     def test_errored_tool_call_not_credited(self):
         run = self._run(
@@ -764,7 +666,8 @@ class TestToolRequiredScenario:
             tool_calls=[{"tool": "read_file", "args": {"path": "src/config.py"}, "status": "error"}],
         )
         cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
-        assert any(c["id"] == "read_config_loader" and not c["passed"] for c in cap["checks"])
+        assert any(c["id"] == "read_config_loader" and not c["passed"]
+                   for c in cap["checks"])
 
     def test_read_without_mentioning_module_fails_citation_check(self):
         """Tool call made, but review says nothing about the module — partial fail."""
@@ -774,7 +677,8 @@ class TestToolRequiredScenario:
         )
         cap = evaluate_capability(run, TOOL_REQUIRED_EVIDENCE)
         assert cap["passed"] is False
-        assert any(c["id"] == "cited_loader_in_review" and not c["passed"] for c in cap["checks"])
+        assert any(c["id"] == "cited_loader_in_review" and not c["passed"]
+                   for c in cap["checks"])
 
 
 if __name__ == "__main__":

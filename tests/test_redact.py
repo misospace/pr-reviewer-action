@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for scripts/redact.py — shared secret-redaction helpers.
 
 Covers:
@@ -16,7 +16,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets, mask_and_truncate
+from redact import mask_secrets, mask_and_truncate  # noqa: E402
 
 import pytest
 
@@ -56,7 +56,10 @@ class TestMaskSecretsGHP:
 
     def test_ghp_embedded_in_prose(self):
         """Token embedded inside a sentence."""
-        text = "The PR was reviewed using ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij which should not appear in logs."
+        text = (
+            "The PR was reviewed using ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij "
+            "which should not appear in logs."
+        )
         result = mask_secrets(text)
         assert "[REDACTED]" in result
         assert "ghp_" not in result
@@ -70,7 +73,10 @@ class TestMaskSecretsGHP:
 
     def test_ghp_multiple_in_text(self):
         """Multiple ghp tokens in one string."""
-        text = "first=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij second=ghp_123456789012345678901234567890ab"
+        text = (
+            "first=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij "
+            "second=ghp_123456789012345678901234567890ab"
+        )
         result = mask_secrets(text)
         assert result.count("[REDACTED]") == 2
         assert "ghp_" not in result
@@ -119,7 +125,7 @@ class TestMaskSecretsBearer:
     """Bearer token redaction."""
 
     def test_bearer_token(self):
-        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        text = 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
         result = mask_secrets(text)
         assert "[REDACTED]" in result
 
@@ -434,7 +440,9 @@ class TestMaskSecretsAdversarial:
         assert "[REDACTED]" in result
 
     def test_multiple_secrets(self):
-        text = "api_key=sk-abc123def456ghij7890 and token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        text = (
+            "api_key=sk-abc123def456ghij7890 and token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        )
         result = mask_secrets(text)
         assert result.count("[REDACTED]") == 2
 

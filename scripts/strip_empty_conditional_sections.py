@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Strip confabulated conditional output sections from review markdown.
 
 Issue #415: even with a clean corpus (no "# Linked Issue Context" / "# Evidence
@@ -88,7 +88,6 @@ def _normalise_title(heading_text: str) -> str:
             t = _TITLE_TRIM_RE.sub("", t[: -len(qualifier)])
             break
     return " ".join(t.split())
-
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 # CommonMark fenced code block opening: up to 3 leading spaces, then 3+ backticks
@@ -249,10 +248,15 @@ def main() -> None:
     changed = stripped != content
 
     if args.dry_run:
-        removed = [k for k in list(SECTION_HEADINGS) + list(SECTION_TITLES) if _section_absent(k, present)]
+        removed = [
+            k
+            for k in list(SECTION_HEADINGS) + list(SECTION_TITLES)
+            if _section_absent(k, present)
+        ]
         sys.stdout.write(stripped)
         sys.stderr.write(
-            f"\n[strip_empty_conditional_sections] present={present} absent_keys={removed} changed={changed}\n"
+            f"\n[strip_empty_conditional_sections] present={present} "
+            f"absent_keys={removed} changed={changed}\n"
         )
         return
 

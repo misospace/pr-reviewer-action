@@ -1,4 +1,4 @@
-"""Tests for scripts/sanitize_review_markdown.py.""" 
+"""Tests for scripts/sanitize_review_markdown.py."""
 
 import pytest
 from scripts.sanitize_review_markdown import sanitize_markdown
@@ -117,7 +117,10 @@ class TestSanitizeCurrentRepoRef:
 
     def test_current_repo_mixed_with_upstream(self):
         """Current-repo refs should be sanitized the same way as upstream refs."""
-        text = "Upstream bug itzg/mc-router#552 was resolved. Tracked in misospace/pr-reviewer-action#42."
+        text = (
+            "Upstream bug itzg/mc-router#552 was resolved. "
+            "Tracked in misospace/pr-reviewer-action#42."
+        )
         result = sanitize_markdown(text)
         assert "itzg/mc-router PR 552" in result
         assert "misospace/pr-reviewer-action PR 42" in result
@@ -257,8 +260,8 @@ class TestSanitizeMention:
 
     def test_user_mention_neutralized(self):
         result = sanitize_markdown("Thanks @octocat for the fix")
-        assert "@​octocat" in result  # zero-width space inserted
-        assert "@octocat" not in result  # raw (linkable) form gone
+        assert "@​octocat" in result      # zero-width space inserted
+        assert "@octocat" not in result          # raw (linkable) form gone
 
     def test_team_mention_neutralized(self):
         result = sanitize_markdown("cc @acme/platform-team")

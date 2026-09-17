@@ -1,13 +1,12 @@
-"""Unit tests for pr_reviewer.transport. 
+"""Unit tests for pr_reviewer.transport.
 
 Target: >= 50% line coverage of pr_reviewer/transport.py.
 """
-
 from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,7 +46,6 @@ def test_safe_run_captures_stdout_and_exit_code(monkeypatch: pytest.MonkeyPatch)
 
 def test_safe_run_returns_timeout_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """A TimeoutExpired should produce a structured timeout=True result."""
-
     def fake_run(*a: Any, **kw: Any):
         raise subprocess.TimeoutExpired(cmd=["sleep", "1"], timeout=0.01)
 
@@ -85,7 +83,7 @@ def test_run_chat_request_openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_run_chat_request_anthropic_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """For Anthropic the endpoint should be /messages."""
-    captured: dict[str, Any] = {}
+    captured: Dict[str, Any] = {}
 
     def fake_run(cmd, *args: Any, **kwargs: Any):
         captured["cmd"] = list(cmd)

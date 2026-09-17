@@ -1,4 +1,4 @@
-"""GitHub context collection helpers. 
+"""GitHub context collection helpers.
 
 Extracts linked issue references from a PR body, normalises them to
 owner/repo#number form, and provides PR metadata structures.

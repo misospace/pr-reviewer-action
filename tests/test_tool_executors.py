@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.tool_executors. 
+"""Unit tests for pr_reviewer.tool_executors.
 
 Target: >= 50% line coverage of pr_reviewer/tool_executors.py.
 
@@ -6,11 +6,10 @@ All tests are hermetic: every external dependency (read_file, git_log,
 git_blame, git_grep, gh_api, web_fetch, web_search, run_command) is
 patched so no live subprocess or network call is made.
 """
-
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Dict
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +17,7 @@ import pytest
 from pr_reviewer import tool_executors
 
 
-def _call(name: str, args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+def _call(name: str, args: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
     """Call execute_tool_request with sensible default kwargs."""
     defaults = dict(
         workspace_root="/tmp",
@@ -58,7 +57,7 @@ def test_execute_tool_request_empty_arguments_dict() -> None:
 
 def test_execute_tool_request_read_file_happy_path() -> None:
     """read_file tool with valid path should return content via mocked reader."""
-    fake_res: dict[str, Any] = {"content": "the file body", "range": None}
+    fake_res: Dict[str, Any] = {"content": "the file body", "range": None}
 
     with patch.object(tool_executors, "read_file", return_value=fake_res) as rd:
         res = _call("read_file", {"path": "README.md"})
@@ -79,7 +78,7 @@ def test_execute_tool_request_read_file_missing_path() -> None:
 
 def test_execute_tool_request_read_file_returns_error_from_reader() -> None:
     """If the reader returns an error key, the executor should surface it."""
-    fake_res: dict[str, Any] = {"error": "File not found", "content": ""}
+    fake_res: Dict[str, Any] = {"error": "File not found", "content": ""}
     with patch.object(tool_executors, "read_file", return_value=fake_res):
         res = _call("read_file", {"path": "missing.md"})
     assert res.get("status") == "error"
@@ -181,19 +180,19 @@ def test_execute_tool_request_git_grep_default_max_results_preserved() -> None:
 
 def test_clamp_grep_max_results() -> None:
     clamp = tool_executors.clamp_grep_max_results
-    assert clamp(None) == 60  # absent → default
-    assert clamp(40) == 40  # in range → unchanged
-    assert clamp("25") == 25  # string → coerced
-    assert clamp(0) == 1  # below floor → clamped up
+    assert clamp(None) == 60          # absent → default
+    assert clamp(40) == 40            # in range → unchanged
+    assert clamp("25") == 25          # string → coerced
+    assert clamp(0) == 1              # below floor → clamped up
     assert clamp(-3) == 1
-    assert clamp(200) == 200  # at ceiling
-    assert clamp(1000) == 200  # over ceiling → clamped down
+    assert clamp(200) == 200          # at ceiling
+    assert clamp(1000) == 200         # over ceiling → clamped down
     assert clamp("not-an-int") == 60  # malformed → default (degrade, don't fail)
 
 
 def test_execute_tool_request_gh_api_returns_dict_for_known_tool() -> None:
     """gh_api tool: mock gh_api to avoid any live subprocess call."""
-    fake_res: dict[str, Any] = {"data": {"login": "octocat"}, "error": None}
+    fake_res: Dict[str, Any] = {"data": {"login": "octocat"}, "error": None}
     with patch.object(tool_executors, "gh_api", return_value=fake_res) as gh:
         res = _call("gh_api", {"endpoint": "repos/example/repo"})
     assert gh.called

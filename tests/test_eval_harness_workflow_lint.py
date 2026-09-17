@@ -1,4 +1,4 @@
-"""Regression tests for the eval-harness CI workflow. 
+"""Regression tests for the eval-harness CI workflow.
 
 These guard against the CI ``validate`` failure recorded in the job log
 referenced by issue #472, where ``rhysd/actionlint`` reported::
@@ -52,7 +52,9 @@ def _extract_run_block(step_name: str, workflow_text: str) -> str:
                 candidate = lines[index]
                 if candidate.strip() and _leading_spaces(candidate) <= run_indent:
                     break
-                block_lines.append(candidate[run_indent + 2 :] if len(candidate) > run_indent + 1 else "")
+                block_lines.append(
+                    candidate[run_indent + 2 :] if len(candidate) > run_indent + 1 else ""
+                )
                 index += 1
             return "\n".join(block_lines)
         index += 1
@@ -65,7 +67,9 @@ def _replace_github_expressions(script: str) -> str:
 
 
 def test_eval_harness_workflow_exists() -> None:
-    assert WORKFLOW.is_file(), f"{WORKFLOW} must exist so the eval harness is wired into CI (issue #472)"
+    assert WORKFLOW.is_file(), (
+        f"{WORKFLOW} must exist so the eval harness is wired into CI (issue #472)"
+    )
 
 
 def test_run_eval_harness_step_forwards_selected_corpus() -> None:
@@ -119,5 +123,6 @@ def test_run_eval_harness_step_passes_shellcheck() -> None:
         )
 
     assert result.returncode == 0, (
-        f"`Run eval harness` step failed shellcheck (would break CI validate):\n{result.stdout}\n{result.stderr}"
+        f"`Run eval harness` step failed shellcheck (would break CI validate):\n"
+        f"{result.stdout}\n{result.stderr}"
     )

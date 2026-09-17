@@ -1,4 +1,4 @@
-import json 
+import json
 import os
 import re
 import threading
@@ -15,8 +15,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from pr_reviewer.budget import DeadlineBudget
-from pr_reviewer.platform import USER_AGENT
+from pr_reviewer.budget import DeadlineBudget  # noqa: E402
+from pr_reviewer.platform import USER_AGENT  # noqa: E402
 
 
 def time_budget_deadline():
@@ -51,20 +51,26 @@ def http_json(url, headers=None):
 def registry_targets(repo: str):
     if repo.startswith("docker.io/"):
         repo_path = repo[len("docker.io/") :]
-        token_url = "https://auth.docker.io/token?service=registry.docker.io&scope=" + parse.quote(
-            f"repository:{repo_path}:pull", safe=":"
+        token_url = (
+            "https://auth.docker.io/token?service=registry.docker.io&scope="
+            + parse.quote(f"repository:{repo_path}:pull", safe=":")
         )
         base_url = "https://registry-1.docker.io"
         return repo_path, token_url, base_url
     if repo.startswith("ghcr.io/"):
         repo_path = repo[len("ghcr.io/") :]
-        token_url = "https://ghcr.io/token?scope=" + parse.quote(f"repository:{repo_path}:pull", safe=":")
+        token_url = "https://ghcr.io/token?scope=" + parse.quote(
+            f"repository:{repo_path}:pull", safe=":"
+        )
         base_url = "https://ghcr.io"
         return repo_path, token_url, base_url
-    if repo.count("/") == 1 and not repo.startswith(("quay.io/", "gcr.io/", "registry.k8s.io/")):
+    if repo.count("/") == 1 and not repo.startswith(
+        ("quay.io/", "gcr.io/", "registry.k8s.io/")
+    ):
         repo_path = repo
-        token_url = "https://auth.docker.io/token?service=registry.docker.io&scope=" + parse.quote(
-            f"repository:{repo_path}:pull", safe=":"
+        token_url = (
+            "https://auth.docker.io/token?service=registry.docker.io&scope="
+            + parse.quote(f"repository:{repo_path}:pull", safe=":")
         )
         base_url = "https://registry-1.docker.io"
         return repo_path, token_url, base_url
@@ -144,7 +150,9 @@ def fetch_digest_metadata(repo: str, digest: str, deadline=None):
                 headers={"Authorization": f"Bearer {token}"},
             )
             labels = (
-                (config.get("config") or {}).get("Labels") or (config.get("container_config") or {}).get("Labels") or {}
+                (config.get("config") or {}).get("Labels")
+                or (config.get("container_config") or {}).get("Labels")
+                or {}
             )
             result["created"] = config.get("created")
             result["revision"] = labels.get("org.opencontainers.image.revision")
@@ -156,11 +164,13 @@ def fetch_digest_metadata(repo: str, digest: str, deadline=None):
     return result
 
 
-def github_repo_from_source(source: str | None):
+def github_repo_from_source(source: Optional[str]):
     if not source:
         return None
     src = source.strip()
-    match = re.search(r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s?#]+)", src, re.IGNORECASE)
+    match = re.search(
+        r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s?#]+)", src, re.IGNORECASE
+    )
     if match:
         owner = match.group("owner")
         repo = match.group("repo")
@@ -186,9 +196,9 @@ def guess_repo_from_image(image_repo: str):
 
 
 def fetch_github_compare(
-    repo: str | None,
-    old_rev: str | None,
-    new_rev: str | None,
+    repo: Optional[str],
+    old_rev: Optional[str],
+    new_rev: Optional[str],
     deadline=None,
 ):
     result = {
@@ -230,7 +240,9 @@ def fetch_github_compare(
         result["commits"] = [
             {
                 "sha": (commit.get("sha") or "")[:12],
-                "message": ((commit.get("commit") or {}).get("message") or "").splitlines()[0],
+                "message": (
+                    (commit.get("commit") or {}).get("message") or ""
+                ).splitlines()[0],
             }
             for commit in (data.get("commits") or [])[:15]
         ]
@@ -289,7 +301,11 @@ def fetch_all_metadata(changes, deadline=None, max_workers=8):
         repo, digest = pairs[0]
         return {pairs[0]: fetch_digest_metadata(repo, digest, deadline)}
     with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
-        metas = list(executor.map(lambda pair: fetch_digest_metadata(pair[0], pair[1], deadline), pairs))
+        metas = list(
+            executor.map(
+                lambda pair: fetch_digest_metadata(pair[0], pair[1], deadline), pairs
+            )
+        )
     return dict(zip(pairs, metas))
 
 
@@ -334,7 +350,9 @@ def parse_diff(diff_text: str):
                 buckets.setdefault(key, {"old": [], "new": []})
             continue
 
-        match_digest_only = re.match(r'^([+-])\s*digest:\s*[\'"]?(sha256:[0-9a-f]{64})', raw)
+        match_digest_only = re.match(
+            r'^([+-])\s*digest:\s*[\'"]?(sha256:[0-9a-f]{64})', raw
+        )
         if match_digest_only and current_repo:
             sign = match_digest_only.group(1)
             digest = match_digest_only.group(2)
@@ -344,7 +362,9 @@ def parse_diff(diff_text: str):
             buckets[key]["old" if sign == "-" else "new"].append(digest)
             continue
 
-        match_image = re.match(r'^([+-])\s*image:\s*[\'"]?([^\'"\s,]+@sha256:[0-9a-f]{64})', raw)
+        match_image = re.match(
+            r'^([+-])\s*image:\s*[\'"]?([^\'"\s,]+@sha256:[0-9a-f]{64})', raw
+        )
         if match_image:
             sign = match_image.group(1)
             image_ref = match_image.group(2)
@@ -404,10 +424,14 @@ def main():
         for change in changes:
             old_meta = metas[(change["repository"], change["old_digest"])]
             new_meta = metas[(change["repository"], change["new_digest"])]
-            compare_repo, compare_repo_source, mismatch = resolve_compare_repo(old_meta, new_meta, change["repository"])
+            compare_repo, compare_repo_source, mismatch = resolve_compare_repo(
+                old_meta, new_meta, change["repository"]
+            )
             key = (compare_repo, old_meta.get("revision"), new_meta.get("revision"))
             compare_keys.add(key)
-            prepared.append((change, old_meta, new_meta, compare_repo, compare_repo_source, mismatch, key))
+            prepared.append(
+                (change, old_meta, new_meta, compare_repo, compare_repo_source, mismatch, key)
+            )
 
         compare_keys = sorted(compare_keys, key=lambda k: tuple(str(p) for p in k))
         with ThreadPoolExecutor(max_workers=min(8, len(compare_keys))) as executor:
@@ -448,14 +472,22 @@ def main():
             new_rev = new_meta.get("revision")
             if old_rev and new_rev:
                 if old_rev != new_rev:
-                    lines.append("- Revision changed: **yes** (new code revision present)")
+                    lines.append(
+                        "- Revision changed: **yes** (new code revision present)"
+                    )
                 else:
-                    lines.append("- Revision changed: **no** (likely rebuild or republish of same source revision)")
+                    lines.append(
+                        "- Revision changed: **no** (likely rebuild or republish of same source revision)"
+                    )
             else:
-                lines.append("- Revision changed: **unknown** (missing OCI revision labels)")
+                lines.append(
+                    "- Revision changed: **unknown** (missing OCI revision labels)"
+                )
 
             if mismatch:
-                lines.append(f"- Root repo mismatch between old/new labels: `{mismatch[0]}` vs `{mismatch[1]}`")
+                lines.append(
+                    f"- Root repo mismatch between old/new labels: `{mismatch[0]}` vs `{mismatch[1]}`"
+                )
 
             # Compare results are shared between changes with the same key, so
             # copy before stamping the per-change repo source.
@@ -472,13 +504,17 @@ def main():
                     f"- Compare summary: status={short(compare.get('status'))}, total_commits={short(compare.get('total_commits'))}, ahead_by={short(compare.get('ahead_by'))}, behind_by={short(compare.get('behind_by'))}"
                 )
             elif compare.get("error"):
-                lines.append(f"- Compare lookup: **unavailable** ({short(compare.get('error'))})")
+                lines.append(
+                    f"- Compare lookup: **unavailable** ({short(compare.get('error'))})"
+                )
 
             commits = compare.get("commits") or []
             if commits:
                 lines.append("- Commits between old/new revision:")
                 for commit in commits:
-                    lines.append(f"  - `{short(commit.get('sha'))}` {short(commit.get('message'))}")
+                    lines.append(
+                        f"  - `{short(commit.get('sha'))}` {short(commit.get('message'))}"
+                    )
 
             files = compare.get("files") or []
             if files:

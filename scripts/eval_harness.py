@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """A/B evaluation harness for comparing PR review modes.
 
 Compares review approaches on a shared PR corpus:
@@ -33,13 +33,11 @@ from typing import Any
 # Data models
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class KnownFinding:
     """A single known-good finding for a PR."""
-
-    category: str  # e.g. "security", "correctness", "style"
-    severity: str  # "critical", "high", "medium", "low", "info"
+    category: str          # e.g. "security", "correctness", "style"
+    severity: str          # "critical", "high", "medium", "low", "info"
     description: str
     file_path: str | None = None
     line_range: tuple[int, int] | None = None
@@ -71,14 +69,13 @@ class KnownFinding:
 @dataclass
 class ReviewRun:
     """Results from a single review mode on a single PR."""
-
-    mode: str  # "tools_off", "native_loop"
+    mode: str              # "tools_off", "native_loop"
     pr_number: int
     repo_full_name: str
     tokens_input: int = 0
     tokens_output: int = 0
     wall_clock_sec: float = 0.0
-    verdict: str | None = None  # "approve" or "request_changes"
+    verdict: str | None = None          # "approve" or "request_changes"
     findings: list[dict[str, Any]] = field(default_factory=list)
     review_markdown: str = ""
     error: str | None = None
@@ -110,7 +107,6 @@ class ReviewRun:
 @dataclass
 class BenchmarkResult:
     """Aggregated results for one PR across all modes."""
-
     pr_number: int
     repo_full_name: str
     runs: list[ReviewRun] = field(default_factory=list)
@@ -126,7 +122,6 @@ class BenchmarkResult:
 @dataclass
 class BenchmarkCorpus:
     """The full benchmark corpus with known-good findings."""
-
     prs: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -138,7 +133,6 @@ class BenchmarkCorpus:
 # ---------------------------------------------------------------------------
 # Corpus helpers
 # ---------------------------------------------------------------------------
-
 
 def load_known_findings(pr_entry: dict[str, Any]) -> list[KnownFinding]:
     """Extract known-good findings from a corpus PR entry."""
@@ -169,20 +163,17 @@ def extract_findings_from_review(review_run: ReviewRun) -> list[dict[str, Any]]:
         sev = match.group(2).lower()
         desc = match.group(3).strip()
         if cat and sev:
-            findings.append(
-                {
-                    "category": cat,
-                    "severity": sev,
-                    "description": desc,
-                }
-            )
+            findings.append({
+                "category": cat,
+                "severity": sev,
+                "description": desc,
+            })
     return findings
 
 
 # ---------------------------------------------------------------------------
 # Quality comparison
 # ---------------------------------------------------------------------------
-
 
 def compute_precision_recall(
     found_findings: list[dict[str, Any]],
@@ -196,21 +187,13 @@ def compute_precision_recall(
     # Always include total_found/total_known so callers don't need special casing.
     if not known_findings:
         return {
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1": 0.0,
-            "matched_found": 0,
-            "total_found": len(found_findings),
-            "total_known": 0,
+            "precision": 0.0, "recall": 0.0, "f1": 0.0,
+            "matched_found": 0, "total_found": len(found_findings), "total_known": 0,
         }
     if not found_findings:
         return {
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1": 0.0,
-            "matched_found": 0,
-            "total_found": 0,
-            "total_known": len(known_findings),
+            "precision": 0.0, "recall": 0.0, "f1": 0.0,
+            "matched_found": 0, "total_found": 0, "total_known": len(known_findings),
         }
 
     # Build a set of (category, severity) tuples from known findings
@@ -241,7 +224,8 @@ def compute_precision_recall(
 
     precision = matched_found / len(found_findings) if found_findings else 0.0
     recall = matched_known / len(known_findings) if known_findings else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)
+          if (precision + recall) > 0 else 0.0)
 
     return {
         "precision": round(precision, 4),
@@ -280,7 +264,9 @@ def _arg_value(call: dict[str, Any], key: str) -> str:
     return val if isinstance(val, str) else ""
 
 
-def evaluate_capability(run: ReviewRun, expected_evidence: dict[str, Any] | None) -> dict[str, Any] | None:
+def evaluate_capability(
+    run: ReviewRun, expected_evidence: dict[str, Any] | None
+) -> dict[str, Any] | None:
     """Grade a run against a scenario's expected_evidence.
 
     Returns None when the scenario declares no capability checks (so callers
@@ -309,12 +295,17 @@ def evaluate_capability(run: ReviewRun, expected_evidence: dict[str, Any] | None
             # ``tool`` may be a single name or a list of acceptable names — the
             # latter lets one check credit either path to the same evidence
             # (e.g. web_search OR web_fetch reaching a support matrix).
-            want_tools = want_tool if isinstance(want_tool, list) else [want_tool] if want_tool else []
+            want_tools = (
+                want_tool if isinstance(want_tool, list)
+                else [want_tool] if want_tool else []
+            )
             args_contains = check.get("args_contains", {})
             # ``args_any_contains``: pass when ANY of the call's string arg
             # values contains ANY listed substring — tool-agnostic, so it
             # matches a matrix URL in web_fetch or a matrix query in web_search.
-            any_needles = [str(n).lower() for n in check.get("args_any_contains", [])]
+            any_needles = [
+                str(n).lower() for n in check.get("args_any_contains", [])
+            ]
             for call in run.tool_calls:
                 if want_tools and call.get("tool") not in want_tools:
                     continue
@@ -330,7 +321,9 @@ def evaluate_capability(run: ReviewRun, expected_evidence: dict[str, Any] | None
                         break
                 if ok and any_needles:
                     arg_vals = (call.get("args") or {}).values()
-                    haystack = " ".join(v.lower() for v in arg_vals if isinstance(v, str))
+                    haystack = " ".join(
+                        v.lower() for v in arg_vals if isinstance(v, str)
+                    )
                     ok = any(n in haystack for n in any_needles)
                 if ok:
                     passed = True
@@ -386,7 +379,6 @@ def populate_tool_trace(run: ReviewRun, repo_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Review execution (stub — to be wired with actual review scripts)
 # ---------------------------------------------------------------------------
-
 
 def run_review_for_pr(
     pr_entry: dict[str, Any],
@@ -501,7 +493,6 @@ def run_review_for_pr(
 # Report generation
 # ---------------------------------------------------------------------------
 
-
 def generate_report(
     results: list[BenchmarkResult],
     corpus: BenchmarkCorpus,
@@ -581,7 +572,8 @@ def generate_report(
 
         if pr_capability:
             entry["capability_pass_rate"] = {
-                mode: round(t["passes"] / t["runs"], 4) if t["runs"] else 0.0 for mode, t in pr_capability.items()
+                mode: round(t["passes"] / t["runs"], 4) if t["runs"] else 0.0
+                for mode, t in pr_capability.items()
             }
 
         # Quality comparison for each mode
@@ -592,14 +584,23 @@ def generate_report(
                 mm = mode_metrics[mode]
                 # Weighted average for precision/recall
                 if quality["total_found"] > 0 and quality["total_known"] > 0:
-                    mm["precision"] = (mm["precision"] * (mm["runs"] - 1) + quality["precision"]) / mm["runs"]
-                    mm["recall"] = (mm["recall"] * (mm["runs"] - 1) + quality["recall"]) / mm["runs"]
-                    mm["f1"] = (mm["f1"] * (mm["runs"] - 1) + quality["f1"]) / mm["runs"]
+                    mm["precision"] = (
+                        (mm["precision"] * (mm["runs"] - 1) + quality["precision"])
+                        / mm["runs"]
+                    )
+                    mm["recall"] = (
+                        (mm["recall"] * (mm["runs"] - 1) + quality["recall"])
+                        / mm["runs"]
+                    )
+                    mm["f1"] = (
+                        (mm["f1"] * (mm["runs"] - 1) + quality["f1"])
+                        / mm["runs"]
+                    )
 
         report_results.append(entry)
 
     # Compute averages for each mode
-    for _m, mm in mode_metrics.items():
+    for m, mm in mode_metrics.items():
         if mm["successful_runs"] > 0:
             n = mm["successful_runs"]
             mm["avg_tokens_input"] = round(mm["total_tokens_input"] / n, 1)
@@ -613,7 +614,9 @@ def generate_report(
         # that closed the expected evidence chain. None when no scenario in the
         # corpus declared expected_evidence for this mode.
         mm["capability_pass_rate"] = (
-            round(mm["capability_passes"] / mm["capability_runs"], 4) if mm["capability_runs"] > 0 else None
+            round(mm["capability_passes"] / mm["capability_runs"], 4)
+            if mm["capability_runs"] > 0
+            else None
         )
 
     report = {
@@ -634,7 +637,6 @@ def generate_report(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -721,7 +723,7 @@ def main() -> int:
         return 1
 
     # Limit PRs if requested
-    prs = corpus.prs[: args.max_prs] if args.max_prs else corpus.prs
+    prs = corpus.prs[:args.max_prs] if args.max_prs else corpus.prs
 
     model_config = {
         "model": args.model,

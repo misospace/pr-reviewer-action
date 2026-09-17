@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Strip internal AI PR reviewer metadata markers from review markdown.
 
 This prevents model-generated content from containing fake metadata markers
@@ -22,8 +22,8 @@ from pathlib import Path
 
 # Reserved internal metadata patterns — must stay in sync with action.yml.
 RESERVED_PATTERNS = [
-    re.compile(r"<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->", re.IGNORECASE),
-    re.compile(r"<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->", re.IGNORECASE),
+    re.compile(r'<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->', re.IGNORECASE),
+    re.compile(r'<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->', re.IGNORECASE),
 ]
 
 
@@ -38,7 +38,9 @@ def strip_reserved_markers(text: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Strip internal AI PR reviewer metadata markers from review markdown.")
+    parser = argparse.ArgumentParser(
+        description="Strip internal AI PR reviewer metadata markers from review markdown."
+    )
     parser.add_argument("file", nargs="?", help="File to process (default: stdin)")
     parser.add_argument(
         "--dry-run",
@@ -55,7 +57,10 @@ def main() -> None:
     stripped = strip_reserved_markers(content)
 
     # Count replacements for reporting
-    total = sum(len(p.findall(content)) for p in RESERVED_PATTERNS)
+    total = sum(
+        len(p.findall(content))
+        for p in RESERVED_PATTERNS
+    )
 
     if args.dry_run:
         print(f"{total} marker(s) stripped (dry run).")

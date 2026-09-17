@@ -1,4 +1,4 @@
-"""Direct unit tests for pr_reviewer.precheck pure functions. 
+"""Direct unit tests for pr_reviewer.precheck pure functions.
 
 Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
 resolve_review_scope (including validation-flag fallbacks), and
@@ -271,7 +271,6 @@ class TestBroadAndMarkerFingerprint:
         fp = build_marker_fingerprint("abc", "def")
         assert fp == "abc|cfg:def"
 
-
 class TestFingerprintsMatch:
     def test_match(self):
         assert fingerprints_match("abc", ["def", "abc"])
@@ -318,7 +317,6 @@ class TestShouldReviewIntegration:
 
 # ── #536 Case 1: a CI-state finding must survive the diff-unchanged guard ────
 
-
 def test_looks_like_ci_state_finding_matches_a_ci_blocker():
     from pr_reviewer.precheck import looks_like_ci_state_finding
 
@@ -353,7 +351,9 @@ def test_evaluate_precheck_skips_when_diff_unchanged():
     from pr_reviewer.precheck import evaluate_precheck, ReviewDecision
 
     first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck("diff --git a/x b/x\n+one\n", [first.broad_fingerprint], config_hash="c")
+    again = evaluate_precheck(
+        "diff --git a/x b/x\n+one\n", [first.broad_fingerprint], config_hash="c"
+    )
     assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
 
 
@@ -377,25 +377,27 @@ def test_evaluate_precheck_reviews_anyway_when_a_ci_state_finding_is_open():
 
 # ── #536 Case 2: an unassessable carried finding forces a full review ────────
 
-
 def test_resolve_review_scope_forces_full_when_previous_needed_it():
     """An incremental review would reach the same not_verifiable verdict for the
     same reason, and fail-closed would keep the PR blocked. (#536 Case 2)"""
     from pr_reviewer.precheck import resolve_review_scope
 
-    r = resolve_review_scope("auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=True)
+    r = resolve_review_scope(
+        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=True
+    )
     assert r.effective_review_scope == "full"
 
 
 def test_resolve_review_scope_still_increments_without_the_flag():
     from pr_reviewer.precheck import resolve_review_scope
 
-    r = resolve_review_scope("auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False)
+    r = resolve_review_scope(
+        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False
+    )
     assert r.effective_review_scope == "incremental"
 
 
 # ── #544: the flag must also defeat the diff-unchanged skip guard ──────────
-
 
 def test_diff_unchanged_guard_deferred_when_previous_needed_full_review():
     """The only way to clear a not_verifiable_from_delta finding is the full
@@ -476,7 +478,9 @@ class TestDismissalWiring:
         monkeypatch.setattr(precheck, "_github_token", lambda: "t")
         # Any import of github inside the function is fine; we only need to
         # know the guard let us past it.
-        monkeypatch.setitem(__import__("sys").modules, "github", type("m", (), {"Github": _explode}))
+        monkeypatch.setitem(
+            __import__("sys").modules, "github", type("m", (), {"Github": _explode})
+        )
         assert precheck._load_pr_comments("7") == []
         assert reached.get("fetch"), "guard returned before attempting the fetch"
 
@@ -503,7 +507,9 @@ class TestDismissalWiring:
         outside = tmp_path.parent / "escaped-dismissals.json"
         if outside.exists():
             outside.unlink()
-        comments = [{"id": 1, "author": "owner", "body": "@ai-reviewer dismiss P1: nope"}]
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss P1: nope"}
+        ]
         written = _write_previous_dismissals(
             comments,
             {"owner"},
@@ -719,7 +725,9 @@ class TestResolveMaintainersFailsClosed:
         # through, widening the #581 hole past the candidate set.
         import pr_reviewer.precheck as precheck
 
-        comments = [{"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: bogus"}]
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: bogus"}
+        ]
         written = precheck._write_previous_dismissals(
             comments,
             set(),
@@ -735,7 +743,9 @@ class TestResolveMaintainersFailsClosed:
         # guard above does not over-broaden.
         import pr_reviewer.precheck as precheck
 
-        comments = [{"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: legit"}]
+        comments = [
+            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: legit"}
+        ]
         written = precheck._write_previous_dismissals(
             comments,
             {"owner"},

@@ -1,4 +1,4 @@
-"""Tests for action.yml / README input consistency.""" 
+"""Tests for action.yml / README input consistency."""
 
 from __future__ import annotations
 
@@ -223,7 +223,7 @@ def _extract_gate_step(content: str):
     m = re.search(r"^    - name: Fail on request_changes\n", content, re.MULTILINE)
     assert m, "action.yml must contain a 'Fail on request_changes' step."
     start = m.start()
-    nxt = re.search(r"^    - name: ", content[m.end() :], re.MULTILINE)
+    nxt = re.search(r"^    - name: ", content[m.end():], re.MULTILINE)
     end = m.end() + nxt.start() if nxt else len(content)
     return content[start:end]
 
@@ -278,16 +278,20 @@ def test_fail_on_request_changes_input():
 
     # The gate step exists, is conditional on the input, and exits non-zero.
     gate_step = _extract_gate_step(content)
-    assert "if: ${{ inputs.fail_on_request_changes == 'true' }}" in gate_step, (
-        "the gate step must be conditional on inputs.fail_on_request_changes."
+    assert (
+        "if: ${{ inputs.fail_on_request_changes == 'true' }}" in gate_step
+    ), "the gate step must be conditional on inputs.fail_on_request_changes."
+    assert "exit 1" in gate_step, (
+        "the gate step must exit non-zero when the verdict is request_changes."
     )
-    assert "exit 1" in gate_step, "the gate step must exit non-zero when the verdict is request_changes."
 
     # The gate must consume the action-level verdict output context — the
     # same expression the top-level `verdict` output uses, so the
     # carry-forward / diff-unchanged paths that flow through
     # steps.precheck.outputs.verdict are gated too.
-    assert "steps.review.outputs.verdict || steps.precheck.outputs.verdict" in gate_step, (
+    assert (
+        "steps.review.outputs.verdict || steps.precheck.outputs.verdict" in gate_step
+    ), (
         "the gate must read the final verdict from the step output context "
         "(steps.review.outputs.verdict || steps.precheck.outputs.verdict), "
         "the same expression the top-level `verdict` output uses."
@@ -304,7 +308,9 @@ def test_fail_on_request_changes_input():
     assert _run_gate_body(run_body, "request_changes") == 1, (
         "the gate must exit non-zero when the final verdict is request_changes."
     )
-    assert _run_gate_body(run_body, "approve") == 0, "the gate must pass when the final verdict is approve."
+    assert _run_gate_body(run_body, "approve") == 0, (
+        "the gate must pass when the final verdict is approve."
+    )
     assert _run_gate_body(run_body, "") == 0, (
         "the gate must pass when there is no verdict (e.g. on_model_failure=notice)."
     )

@@ -1,8 +1,7 @@
-"""Unit tests for pr_reviewer.http_client. 
+"""Unit tests for pr_reviewer.http_client.
 
 Target: >= 50% line coverage of pr_reviewer/http_client.py.
 """
-
 from __future__ import annotations
 
 import urllib.error
@@ -22,7 +21,6 @@ def test_module_exposes_expected_symbols() -> None:
 
 def test_fetch_url_returns_none_for_blocked_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """fetch_url returns None for a host not in the allowed set."""
-
     # Patch _build_opener to prove it is never invoked when host is blocked.
     def _fake_opener(*args: Any, **kwargs: Any):
         raise AssertionError("_build_opener should not be called for blocked hosts")
@@ -39,8 +37,7 @@ def test_fetch_url_returns_none_for_blocked_host(monkeypatch: pytest.MonkeyPatch
 def test_fetch_url_returns_none_for_non_http_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     """fetch_url returns None for non-http schemes like file://."""
     monkeypatch.setattr(
-        http_client,
-        "_build_opener",
+        http_client, "_build_opener",
         lambda *a, **k: pytest.fail("_build_opener should not be called for file://"),
     )
     out = http_client.fetch_url("file:///etc/passwd", allowed_hosts={"github.com"})
@@ -61,7 +58,9 @@ def test_fetch_url_returns_bytes_on_success(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(http_client, "_build_opener", lambda *a, **k: fake_opener)
 
-    out = http_client.fetch_url("https://github.com/foo/bar", allowed_hosts={"github.com"})
+    out = http_client.fetch_url(
+        "https://github.com/foo/bar", allowed_hosts={"github.com"}
+    )
     assert out is not None, "successful mock must not return None"
     assert isinstance(out, bytes)
     assert out == body
@@ -70,10 +69,14 @@ def test_fetch_url_returns_bytes_on_success(monkeypatch: pytest.MonkeyPatch) -> 
 def test_fetch_url_returns_none_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """HTTPError from urllib should be swallowed and return None."""
     fake_opener = MagicMock()
-    fake_opener.open.side_effect = urllib.error.HTTPError("https://github.com/missing", 404, "Not Found", {}, None)
+    fake_opener.open.side_effect = urllib.error.HTTPError(
+        "https://github.com/missing", 404, "Not Found", {}, None
+    )
     monkeypatch.setattr(http_client, "_build_opener", lambda *a, **k: fake_opener)
 
-    out = http_client.fetch_url("https://github.com/missing", allowed_hosts={"github.com"})
+    out = http_client.fetch_url(
+        "https://github.com/missing", allowed_hosts={"github.com"}
+    )
     assert out is None
 
 
@@ -83,7 +86,9 @@ def test_fetch_url_returns_none_on_url_error(monkeypatch: pytest.MonkeyPatch) ->
     fake_opener.open.side_effect = urllib.error.URLError("dns failure")
     monkeypatch.setattr(http_client, "_build_opener", lambda *a, **k: fake_opener)
 
-    out = http_client.fetch_url("https://github.com/whatever", allowed_hosts={"github.com"})
+    out = http_client.fetch_url(
+        "https://github.com/whatever", allowed_hosts={"github.com"}
+    )
     assert out is None
 
 
@@ -101,7 +106,9 @@ def test_fetch_url_github_com_with_mocked_opener(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(http_client, "_build_opener", lambda *a, **k: fake_opener)
 
-    out = http_client.fetch_url("https://github.com/_render_node/foo", allowed_hosts={"github.com"})
+    out = http_client.fetch_url(
+        "https://github.com/_render_node/foo", allowed_hosts={"github.com"}
+    )
     # Tighten: a successful mock against github.com should yield bytes.
     assert out is not None, "successful mock must not return None"
     assert isinstance(out, bytes)
@@ -111,8 +118,7 @@ def test_fetch_url_github_com_with_mocked_opener(monkeypatch: pytest.MonkeyPatch
 def test_fetch_url_blocks_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
     """Localhost is blocked when not in the allowed_hosts set."""
     monkeypatch.setattr(
-        http_client,
-        "_build_opener",
+        http_client, "_build_opener",
         lambda *a, **k: pytest.fail("_build_opener should not run for localhost"),
     )
     out = http_client.fetch_url("http://localhost/admin", allowed_hosts={"github.com"})

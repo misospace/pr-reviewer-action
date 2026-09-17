@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.tool_loop — the native tool-calling loop driver (#203).""" 
+"""Tests for pr_reviewer.tool_loop — the native tool-calling loop driver (#203)."""
 
 import json
 import sys
@@ -66,7 +66,11 @@ def openai_tool_call_response(calls, content=None):
 
 
 def openai_text_response(text):
-    return {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]}
+    return {
+        "choices": [
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": text}}
+        ]
+    }
 
 
 def scripted_post(responses):
@@ -105,7 +109,9 @@ def fresh_conversation():
 
 
 def test_extract_openai_nested_shape():
-    resp = openai_tool_call_response([("call_1", "read_file", '{"path": "a.txt"}')], content="thinking...")
+    resp = openai_tool_call_response(
+        [("call_1", "read_file", '{"path": "a.txt"}')], content="thinking..."
+    )
     calls, text = extract_tool_calls(resp, "openai")
     assert calls == [{"id": "call_1", "name": "read_file", "arguments": '{"path": "a.txt"}'}]
     assert text == "thinking..."
@@ -155,7 +161,9 @@ def test_two_hop_chain_then_stop():
         ]
     )
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert [t for t, _ in log] == ["read_file", "web_fetch"]
     assert outcome.stop_reason == STOP_MODEL_DONE
     assert outcome.rounds == 3
@@ -181,7 +189,9 @@ def test_parallel_calls_in_one_round():
         ]
     )
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert len(log) == 2
     assert outcome.tool_calls_issued == 2
     assert conv.open_tool_call_ids() == set()
@@ -204,9 +214,13 @@ def test_error_tool_result_is_marked_and_loop_continues():
             }
         }
     )
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert outcome.stop_reason == STOP_MODEL_DONE
-    error_results = [e for e in conv.events if e["kind"] == "tool_result" and e["is_error"]]
+    error_results = [
+        e for e in conv.events if e["kind"] == "tool_result" and e["is_error"]
+    ]
     assert len(error_results) == 1
 
 
@@ -242,14 +256,21 @@ def test_tool_call_budget_exhaustion():
     assert outcome.tool_calls_issued == 3
     # The refused call still got a (synthetic error) result.
     assert conv.open_tool_call_ids() == set()
-    budget_notes = [e for e in conv.events if e["kind"] == "tool_result" and "budget" in e["content"].lower()]
+    budget_notes = [
+        e
+        for e in conv.events
+        if e["kind"] == "tool_result" and "budget" in e["content"].lower()
+    ]
     assert len(budget_notes) == 1
 
 
 def test_max_rounds_cap():
     conv = fresh_conversation()
     # Model would keep calling forever with fresh args each round.
-    responses = [openai_tool_call_response([(f"c{i}", "read_file", json.dumps({"path": f"f{i}"}))]) for i in range(10)]
+    responses = [
+        openai_tool_call_response([(f"c{i}", "read_file", json.dumps({"path": f"f{i}"}))])
+        for i in range(10)
+    ]
     post = scripted_post(responses)
     execute, log = recording_execute()
     outcome = drive_tool_loop(
@@ -274,7 +295,9 @@ def test_wall_clock_budget():
 
     def post(payload):
         clock["now"] += 100.0  # each round-trip takes 100 fake seconds
-        return openai_tool_call_response([(f"c{clock['now']}", "read_file", json.dumps({"path": str(clock["now"])}))])
+        return openai_tool_call_response(
+            [(f"c{clock['now']}", "read_file", json.dumps({"path": str(clock["now"])}))]
+        )
 
     execute, log = recording_execute()
     outcome = drive_tool_loop(
@@ -314,7 +337,9 @@ def test_wall_clock_triggers_mid_flight():
     def post(payload):
         round_counter["n"] += 1
         n = round_counter["n"]
-        return openai_tool_call_response([(f"c{n}", "read_file", json.dumps({"path": f"file{n}.txt"}))])
+        return openai_tool_call_response(
+            [(f"c{n}", "read_file", json.dumps({"path": f"file{n}.txt"}))]
+        )
 
     def slow_execute(tool_name, args):
         _time.sleep(1.5)  # outlasts the 1 s wall-clock budget
@@ -332,7 +357,9 @@ def test_wall_clock_triggers_mid_flight():
 
     # The wall-clock guard fires on the second pass through the while-condition,
     # after the slow executor has consumed more than 1 s.
-    assert outcome.stop_reason == STOP_WALL_CLOCK, f"expected STOP_WALL_CLOCK, got {outcome.stop_reason!r}"
+    assert outcome.stop_reason == STOP_WALL_CLOCK, (
+        f"expected STOP_WALL_CLOCK, got {outcome.stop_reason!r}"
+    )
     # Rounds was not the limiting factor.
     assert outcome.rounds < 10, "should have stopped long before max_rounds"
     # At least one tool call executed (round 1 completed before the check fired).
@@ -349,10 +376,8 @@ def test_wall_clock_triggers_mid_flight():
 def _big_execute(nbytes):
     """execute_fn returning a large result body to push the conversation over
     the context budget."""
-
     def execute(name, args):
         return {"tool": name, "status": "ok", "result": {"content": "Z" * nbytes}}
-
     return execute
 
 
@@ -360,7 +385,10 @@ def test_summarize_fn_folds_oldest_results_when_over_budget():
     conv = fresh_conversation()
     post = scripted_post(
         [
-            openai_tool_call_response([("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]),
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
             openai_text_response("done"),
         ]
     )
@@ -397,7 +425,10 @@ def test_empty_digest_falls_back_to_truncation():
     conv = fresh_conversation()
     post = scripted_post(
         [
-            openai_tool_call_response([("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]),
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
             openai_text_response("done"),
         ]
     )
@@ -427,7 +458,10 @@ def test_no_summarize_fn_truncates_as_before():
     conv = fresh_conversation()
     post = scripted_post(
         [
-            openai_tool_call_response([("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]),
+            openai_tool_call_response(
+                [("c1", "read_file", '{"path": "a"}'),
+                 ("c2", "read_file", '{"path": "b"}')]
+            ),
             openai_text_response("done"),
         ]
     )
@@ -461,7 +495,9 @@ def test_no_tool_calls_degrades():
     conv = fresh_conversation()
     post = scripted_post([openai_text_response("looks fine, approve")])
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert outcome.degraded is True
     assert outcome.stop_reason == STOP_NO_TOOL_CALLS
     assert log == []
@@ -474,7 +510,9 @@ def test_request_error_on_first_round_degrades():
         raise RuntimeError("connection refused")
 
     execute, _log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert outcome.stop_reason == STOP_REQUEST_ERROR
     assert outcome.degraded is True
     assert "connection refused" in outcome.error
@@ -490,7 +528,9 @@ def test_request_error_mid_loop_keeps_evidence():
         raise RuntimeError("timeout")
 
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert outcome.stop_reason == STOP_REQUEST_ERROR
     assert outcome.degraded is False  # one call ran; evidence is usable
     assert len(outcome.executed) == 1
@@ -507,7 +547,9 @@ def test_malformed_arguments_get_repairable_error():
         ]
     )
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert outcome.stop_reason == STOP_MODEL_DONE
     assert len(log) == 1  # only the repaired call executed
     assert outcome.tool_calls_issued == 2
@@ -558,7 +600,9 @@ def test_anthropic_loop_round_trip():
         ]
     )
     execute, log = recording_execute()
-    outcome = drive_tool_loop(conv, post, execute, api_format="anthropic", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="anthropic", model="m", budgets=LoopBudgets()
+    )
     assert log == [("git_grep", {"pattern": "installer"})]
     assert outcome.stop_reason == STOP_MODEL_DONE
     assert outcome.final_text == "done"
@@ -579,7 +623,9 @@ def test_payloads_carry_tools_and_history():
         return responses.pop(0)
 
     execute, _log = recording_execute()
-    drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
     assert len(seen_payloads) == 2
     assert all("tools" in p for p in seen_payloads)
     assert seen_payloads[0]["stream"] is False
@@ -610,7 +656,9 @@ def test_hostile_tool_result_is_fenced_before_next_round():
             }
         }
     )
-    outcome = drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    outcome = drive_tool_loop(
+        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
+    )
 
     assert outcome.stop_reason == STOP_MODEL_DONE
     tool_message = next(m for m in seen_payloads[1]["messages"] if m["role"] == "tool")
@@ -645,11 +693,7 @@ def test_round_calls_execute_concurrently_and_in_order():
         return {"tool": tool, "status": "ok", "result": {"path": args["path"]}}
 
     outcome = drive_tool_loop(
-        conv,
-        post,
-        execute,
-        api_format="openai",
-        model="m",
+        conv, post, execute, api_format="openai", model="m",
         budgets=LoopBudgets(max_tool_calls=3),
     )
     assert len(outcome.executed) == 3

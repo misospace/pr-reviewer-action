@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for pr_reviewer.completeness — required-check validation (#158)."""
 
 from __future__ import annotations
@@ -47,7 +47,10 @@ class TestValidateReview:
         assert set(result["missing"]) == set(FILE_SERVING_CHECKS)
 
     def test_complete_auth_review(self):
-        review = "Auth flow unchanged for existing users; session cookies keep the same token lifetime and rotation."
+        review = (
+            "Auth flow unchanged for existing users; session cookies keep the "
+            "same token lifetime and rotation."
+        )
         result = validate_review(AUTH_CHECKS, review)
         assert result["validated"] is True
 
@@ -88,7 +91,9 @@ class TestApplyRequiredCheckValidation:
         (tmp_path / "classification.json").write_text(
             json.dumps({"pr_kind": "file_serving_changes", "must_check": must_check})
         )
-        (tmp_path / "ai-output.json").write_text(json.dumps({"verdict": verdict, "review_markdown": review}))
+        (tmp_path / "ai-output.json").write_text(
+            json.dumps({"verdict": verdict, "review_markdown": review})
+        )
 
     def _output(self, tmp_path):
         return json.loads((tmp_path / "ai-output.json").read_text())
@@ -122,9 +127,7 @@ class TestApplyRequiredCheckValidation:
 
     def test_complete_review_status_complete(self, tmp_path, monkeypatch):
         self._setup(
-            tmp_path,
-            monkeypatch,
-            FILE_SERVING_CHECKS,
+            tmp_path, monkeypatch, FILE_SERVING_CHECKS,
             "Sanitization via realpath; traversal through ../ rejected.",
         )
         assert apply_required_check_validation("auto", "warn") == "complete"
@@ -145,7 +148,9 @@ class TestApplyRequiredCheckValidation:
 
     def test_missing_classification_is_none(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        (tmp_path / "ai-output.json").write_text(json.dumps({"verdict": "approve", "review_markdown": "ok"}))
+        (tmp_path / "ai-output.json").write_text(
+            json.dumps({"verdict": "approve", "review_markdown": "ok"})
+        )
         assert apply_required_check_validation("auto", "warn") == "none"
 
     def test_completeness_json_written(self, tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for scripts/strip_metadata_markers.py.
 
 Regression tests for issue #33: model-generated review markdown must not
@@ -12,7 +12,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from strip_metadata_markers import strip_reserved_markers
+from strip_metadata_markers import strip_reserved_markers  # noqa: E402
 
 import pytest
 

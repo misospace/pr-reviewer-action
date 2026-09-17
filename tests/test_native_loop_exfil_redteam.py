@@ -1,4 +1,4 @@
-"""Exfiltration red-team suite for the native tool-calling loop (#206, 6/7 of #197). 
+"""Exfiltration red-team suite for the native tool-calling loop (#206, 6/7 of #197).
 
 Threat model
 ------------
@@ -42,7 +42,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import run_tool_harness as rth
+import run_tool_harness as rth  # noqa: E402
 
 _REPO = "owner/repo"
 _HOSTS = ["github.com", "docs.siderolabs.com"]

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Linked-source markdown rendering for PR enrichment.
 
 Renders ``linked-sources.md`` from extracted URLs: fetches allowlisted
@@ -40,7 +40,7 @@ from pr_reviewer.http_client import fetch_url, gh_api_call
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from strip_source_text import reduce_source
+from strip_source_text import reduce_source  # noqa: E402
 
 SKIP_FETCH_HOSTS = {"gitlab.com", "bitbucket.org"}
 
@@ -184,7 +184,7 @@ def render_linked_sources(
         # query that repo's releases.
         key = f"{owner}/{repo}".lower()
         if not _repo_allowed(owner, repo, current_repo, allowed_repos):
-            blocked_repos.setdefault(key, []).append("releases")
+            blocked_repos.setdefault(key, []).append(f"releases")
             return None
         authorized_repos.add(key)
         data = cached_gh_api(f"repos/{owner}/{repo}/releases?per_page=30")
@@ -281,7 +281,7 @@ def render_linked_sources(
             elif host in SKIP_FETCH_HOSTS:
                 lines.append(f"(Raw HTML fetch skipped for known non-Forgejo host: {host})")
                 is_skip = True
-            elif fetched.get(i):
+            elif i in fetched and fetched[i]:
                 text = strip_source_to_text(fetched[i])
                 if text:
                     lines.append("```text")
@@ -306,7 +306,9 @@ def render_linked_sources(
             lines.append("")
             lines.append(f"### GitHub Release Metadata: {cls['owner']}/{cls['repo']}@{cls['tag']}")
             if budget.ok():
-                data = cached_gh_api(f"repos/{cls['owner']}/{cls['repo']}/releases/tags/{cls['tag']}")
+                data = cached_gh_api(
+                    f"repos/{cls['owner']}/{cls['repo']}/releases/tags/{cls['tag']}"
+                )
                 if isinstance(data, dict):
                     filtered = _pick(data, ("tag_name", "name", "published_at", "html_url", "body"))
                     lines.append("```json")
@@ -332,7 +334,9 @@ def render_linked_sources(
             lines.append("")
             lines.append(f"### GitHub Compare Metadata: {cls['owner']}/{cls['repo']}@{cls['compare_spec']}")
             if budget.ok():
-                data = cached_gh_api(f"repos/{cls['owner']}/{cls['repo']}/compare/{cls['compare_spec']}")
+                data = cached_gh_api(
+                    f"repos/{cls['owner']}/{cls['repo']}/compare/{cls['compare_spec']}"
+                )
                 if isinstance(data, dict):
                     filtered = {
                         "html_url": data.get("html_url"),
@@ -349,7 +353,8 @@ def render_linked_sources(
 
                     files = data.get("files", [])[:30]
                     file_list = [
-                        _pick(f, ("filename", "status", "additions", "deletions", "changes", "patch")) for f in files
+                        _pick(f, ("filename", "status", "additions", "deletions", "changes", "patch"))
+                        for f in files
                     ]
                     lines.append("### GitHub Compare Files")
                     lines.append("```json")
@@ -357,9 +362,7 @@ def render_linked_sources(
                     lines.append("")
                     lines.append("```")
                 else:
-                    lines.append(
-                        f"(Could not fetch compare metadata for {cls['owner']}/{cls['repo']}@{cls['compare_spec']})"
-                    )
+                    lines.append(f"(Could not fetch compare metadata for {cls['owner']}/{cls['repo']}@{cls['compare_spec']})")
 
         # Forgejo release/compare (non-github.com hosts) — reuse forgejo_backend
         if cls and host != "github.com" and host_allowed(normalized, allowed_hosts):
@@ -378,19 +381,14 @@ def render_linked_sources(
 
             if cls["type"] == "forgejo_compare":
                 lines.append("")
-                lines.append(
-                    f"### Forge Compare Metadata: {cls['host']} {cls['owner']}/{cls['repo']}@{cls['compare_spec']}"
-                )
+                lines.append(f"### Forge Compare Metadata: {cls['host']} {cls['owner']}/{cls['repo']}@{cls['compare_spec']}")
                 if budget.ok():
                     data = fetch_forge_compare(cls["host"], f"{cls['owner']}/{cls['repo']}", cls["compare_spec"])
                     if isinstance(data, dict):
                         filtered = {
                             "total_commits": data.get("total_commits"),
                             "commits": _commit_summaries((data.get("commits") or [])[:20]),
-                            "files": [
-                                {k: f.get(k) for k in ("filename", "status", "additions", "deletions")}
-                                for f in (data.get("files") or [])[:30]
-                            ],
+                            "files": [{k: f.get(k) for k in ("filename", "status", "additions", "deletions")} for f in (data.get("files") or [])[:30]],
                         }
                         lines.append("```json")
                         lines.append(json.dumps(filtered, indent=2)[:7000])
@@ -423,7 +421,10 @@ def render_linked_sources(
         # One trailing line for every collapsed source, hosts deduped + sorted.
         n = len(skipped_hosts)
         uniq = ", ".join(sorted(set(skipped_hosts)))
-        lines.append(f"({n} source{'s' if n != 1 else ''} skipped — non-allowlisted or non-fetchable hosts: {uniq})")
+        lines.append(
+            f"({n} source{'s' if n != 1 else ''} skipped — "
+            f"non-allowlisted or non-fetchable hosts: {uniq})"
+        )
         lines.append("")
 
     # Phase 3: GitHub releases enrichment for candidate repos
@@ -448,8 +449,7 @@ def render_linked_sources(
                 if target_version:
                     v_lower = target_version.lower()
                     matched = [
-                        r
-                        for r in data
+                        r for r in data
                         if (r.get("tag_name") or "").lower() == v_lower
                         or (r.get("tag_name") or "").lower() == f"v{v_lower}"
                         or v_lower in (r.get("tag_name") or "").lower()
@@ -458,9 +458,7 @@ def render_linked_sources(
                     if matched:
                         lines.append(f"#### Releases matching target version {target_version}")
                         lines.append("```json")
-                        matched_filtered = [
-                            _pick(r, ("tag_name", "name", "published_at", "html_url", "body")) for r in matched
-                        ]
+                        matched_filtered = [_pick(r, ("tag_name", "name", "published_at", "html_url", "body")) for r in matched]
                         lines.append(json.dumps(matched_filtered, indent=2)[:8000])
                         lines.append("")
                         lines.append("```")
@@ -514,9 +512,7 @@ def render_linked_sources(
 
             if not found_release:
                 if target_version:
-                    lines.append(
-                        f"(No release found for {owner}/{repo} at version {target_version} via ghcr.io path inference)"
-                    )
+                    lines.append(f"(No release found for {owner}/{repo} at version {target_version} via ghcr.io path inference)")
                 else:
                     lines.append(f"(TARGET_VERSION not set; skipping release lookup for {owner}/{repo})")
 
@@ -539,10 +535,7 @@ def render_linked_sources(
                     lines.append("```")
 
                     files = data.get("files", [])[:30]
-                    file_list = [
-                        {k: f.get(k) for k in ("filename", "status", "additions", "deletions", "changes")}
-                        for f in files
-                    ]
+                    file_list = [{k: f.get(k) for k in ("filename", "status", "additions", "deletions", "changes")} for f in files]
                     lines.append("#### Changed Files")
                     lines.append("```json")
                     lines.append(json.dumps(file_list, indent=2)[:5000])

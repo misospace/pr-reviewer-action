@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh. 
+"""Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh.
 
 Covers fingerprinting, config hashing, incremental scope detection,
 previous fingerprint extraction, and the main decision logic.
@@ -72,9 +72,7 @@ class TestComputeDiffFingerprint:
         assert fp_a != fp_b
 
     def test_unicode_content(self):
-        diff = (
-            "diff --git a/unicode.txt b/unicode.txt\n--- a/unicode.txt\n+++ b/unicode.txt\n@@ -1 +1 @@\n-你好\n+世界\n"
-        )
+        diff = "diff --git a/unicode.txt b/unicode.txt\n--- a/unicode.txt\n+++ b/unicode.txt\n@@ -1 +1 @@\n-你好\n+世界\n"
         fp = compute_diff_fingerprint(diff)
         assert len(fp) == 64
 
@@ -272,7 +270,12 @@ class TestDetectIncrementalScope:
         assert _detect_incremental_scope("   \n  ") is None
 
     def test_small_diff_is_incremental(self):
-        diff = "diff --git a/small.txt b/small.txt\n--- a/small.txt\n+++ b/small.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        diff = (
+            "diff --git a/small.txt b/small.txt\n"
+            "--- a/small.txt\n"
+            "+++ b/small.txt\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        )
         result = _detect_incremental_scope(diff)
         assert result is not None
         assert len(result["files"]) == 1
@@ -384,19 +387,25 @@ class TestShouldReview:
     def test_broad_fp_already_reviewed(self):
         diff = self._make_diff()
         config = ["MODEL=gpt-4"]
-        broad_fp = build_broad_fingerprint(compute_diff_fingerprint(diff), compute_config_hash(config))
+        broad_fp = build_broad_fingerprint(
+            compute_diff_fingerprint(diff), compute_config_hash(config)
+        )
         result = should_review(diff, config, [broad_fp])
         assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
 
     def test_incremental_skips_when_enabled(self):
         diff = self._make_diff()
-        result = should_review(diff, [], [], enable_incremental_detection=True)
+        result = should_review(
+            diff, [], [], enable_incremental_detection=True
+        )
         # Small single-file change should be incremental
         assert result.decision == ReviewDecision.SKIP_INCREMENTAL
 
     def test_incremental_disabled_needs_review(self):
         diff = self._make_diff()
-        result = should_review(diff, [], [], enable_incremental_detection=False)
+        result = should_review(
+            diff, [], [], enable_incremental_detection=False
+        )
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_result_contains_fingerprints(self):
@@ -488,7 +497,12 @@ class TestEndToEnd:
 
     def test_full_workflow_already_reviewed(self):
         """Simulate re-running precheck on an already-reviewed PR."""
-        diff = "diff --git a/src/main.py b/src/main.py\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-old\n+new\n"
+        diff = (
+            "diff --git a/src/main.py b/src/main.py\n"
+            "--- a/src/main.py\n"
+            "+++ b/src/main.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        )
         config = ["MODEL=gpt-4"]
 
         # First run — needs review (or incremental)
@@ -501,7 +515,12 @@ class TestEndToEnd:
 
     def test_config_change_triggers_new_review(self):
         """Changing config should produce a different broad fingerprint."""
-        diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n"
+        diff = (
+            "diff --git a/f.txt b/f.txt\n"
+            "--- a/f.txt\n"
+            "+++ b/f.txt\n"
+            "@@ -1 +1 @@\n-a\n+b\n"
+        )
         config_a = ["MODEL=gpt-4"]
         config_b = ["MODEL=claude-3"]
 
@@ -811,7 +830,9 @@ class TestBuildMarkerFingerprint:
 
 class TestResolveReviewScope:
     def test_force_review_returns_full(self):
-        scope = resolve_review_scope("auto", "prev_head", "prev_base", force_review=True)
+        scope = resolve_review_scope(
+            "auto", "prev_head", "prev_base", force_review=True
+        )
         assert scope.effective_review_scope == "full"
         assert scope.previous_head_sha == ""
         assert scope.baseline_clean is False
@@ -830,18 +851,14 @@ class TestResolveReviewScope:
 
     def test_ancestor_false_falls_back_to_full(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             previous_head_is_ancestor=False,
         )
         assert scope.effective_review_scope == "full"
 
     def test_compare_range_false_falls_back_to_full(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             compare_range_ok=False,
         )
         assert scope.effective_review_scope == "full"
@@ -853,36 +870,28 @@ class TestResolveReviewScope:
 
     def test_incremental_baseline_clean_when_result_clean(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             previous_review_result="clean",
         )
         assert scope.baseline_clean is True
 
     def test_incremental_baseline_clean_when_result_empty(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             previous_review_result="",
         )
         assert scope.baseline_clean is True
 
     def test_incremental_baseline_dirty_when_result_request_changes(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             previous_review_result="request_changes",
         )
         assert scope.baseline_clean is False
 
     def test_none_validation_does_not_gate(self):
         scope = resolve_review_scope(
-            "auto",
-            "prev_head",
-            "prev_base",
+            "auto", "prev_head", "prev_base",
             previous_head_is_ancestor=None,
             compare_range_ok=None,
         )
@@ -893,7 +902,9 @@ class TestResolveReviewScope:
         assert scope.effective_review_scope == "incremental"
 
     def test_force_overrides_incremental_metadata(self):
-        scope = resolve_review_scope("incremental", "prev_head", "prev_base", force_review=True)
+        scope = resolve_review_scope(
+            "incremental", "prev_head", "prev_base", force_review=True
+        )
         assert scope.effective_review_scope == "full"
 
 
@@ -904,7 +915,11 @@ class TestResolveReviewScope:
 
 class TestEvaluatePrecheck:
     def _diff(self, content="test"):
-        return f"diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-{content}\n+new\n"
+        return (
+            f"diff --git a/f.txt b/f.txt\n"
+            f"--- a/f.txt\n+++ b/f.txt\n"
+            f"@@ -1 +1 @@\n-{content}\n+new\n"
+        )
 
     def test_new_review_needed(self, monkeypatch):
         monkeypatch.setenv("AI_MODEL", "gpt-4")
@@ -944,7 +959,9 @@ class TestEvaluatePrecheck:
         cfg = "cfg_hash"
         diff_fp = compute_diff_fingerprint(diff)
         marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(diff, [marker], config_hash=cfg, force_review=True)
+        result = evaluate_precheck(
+            diff, [marker], config_hash=cfg, force_review=True
+        )
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_skip_disabled_bypasses_skip(self, monkeypatch):
@@ -953,7 +970,9 @@ class TestEvaluatePrecheck:
         cfg = "cfg_hash"
         diff_fp = compute_diff_fingerprint(diff)
         marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(diff, [marker], config_hash=cfg, skip_if_diff_unchanged=False)
+        result = evaluate_precheck(
+            diff, [marker], config_hash=cfg, skip_if_diff_unchanged=False
+        )
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_config_hash_computed_when_none(self, monkeypatch):
@@ -1029,7 +1048,9 @@ class TestBuildPrecheckPayload:
         assert reason == ""
 
     def test_decision_to_outputs_skip_already_reviewed(self):
-        should, reason = _decision_to_outputs(ReviewDecision.SKIP_ALREADY_REVIEWED)
+        should, reason = _decision_to_outputs(
+            ReviewDecision.SKIP_ALREADY_REVIEWED
+        )
         assert should is False
         assert reason == "diff-unchanged"
 

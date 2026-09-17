@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests that transport.run_chat_request keeps the API key out of curl argv,
 passing it via a 0600 --config file that is removed afterwards."""
 
@@ -54,7 +54,9 @@ def _call(api_format="openai", api_key="sk-secret-789"):
     # The API-key-out-of-argv handling lives in run_chat_request (the production
     # transport primitive); patch safe_run to capture the curl invocation.
     with mock.patch.object(transport, "safe_run", cap.fake_safe_run):
-        result = transport.run_chat_request("http://localhost:11434/v1", api_format, payload, api_key, 5)
+        result = transport.run_chat_request(
+            "http://localhost:11434/v1", api_format, payload, api_key, 5
+        )
     return cap, result
 
 

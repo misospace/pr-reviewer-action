@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """HTTP + GitHub API transport helpers for PR enrichment.
 
 Best-effort network primitives extracted from ``scripts/run_enrichment.py``
@@ -67,14 +67,20 @@ class _AllowListRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Count the redirect hop before deciding whether to follow.
         if self._redirect_count >= self._max_redirects:
-            raise urllib.error.HTTPError(newurl, code, "Too many redirects", {}, None)
+            raise urllib.error.HTTPError(
+                newurl, code, "Too many redirects", {}, None
+            )
 
         parsed = urllib.parse.urlparse(newurl)
         host = parsed.hostname or ""
         if not _host_allowed(host, self._allowed_hosts):
-            raise urllib.error.URLError(f"Redirect to disallowed host: {host}")
+            raise urllib.error.URLError(
+                f"Redirect to disallowed host: {host}"
+            )
         if not _host_resolves_safely(host):
-            raise urllib.error.URLError(f"Redirect host {host!r} resolves to a non-public IP")
+            raise urllib.error.URLError(
+                f"Redirect host {host!r} resolves to a non-public IP"
+            )
 
         self._redirect_count += 1
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -89,7 +95,9 @@ def _build_opener(allowed_hosts: set[str], timeout: int = 30):
     return urllib.request.build_opener(*handlers)
 
 
-def fetch_url(url: str, timeout: int = 25, allowed_hosts: set[str] | None = None) -> bytes | dict | None:
+def fetch_url(
+    url: str, timeout: int = 25, allowed_hosts: Optional[set[str]] = None
+) -> bytes | dict | None:
     """Best-effort URL fetch. Returns None on any failure.
 
     Validates the host against an allowlist (defaulting to common trusted hosts).
@@ -138,7 +146,9 @@ def gh_api_call(endpoint: str, token: str | None = None) -> dict | list | None:
         if token:
             env["GH_TOKEN"] = token
             env["GITHUB_TOKEN"] = token
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, env=env
+        )
         if result.returncode != 0:
             return None
         return json.loads(result.stdout)

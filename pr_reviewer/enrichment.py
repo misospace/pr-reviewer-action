@@ -1,4 +1,4 @@
-"""Pure extraction functions for PR enrichment context. 
+"""Pure extraction functions for PR enrichment context.
 
 Moves brittle grep/sed pipelines from shell into testable Python.
 Consumed by scripts/run_enrichment.py CLI and optionally sourced by shell sections.
@@ -37,14 +37,13 @@ def extract_urls(body: str, diff: str, limit: int | None = 25) -> list[str]:
 def normalize_url(url: str) -> str:
     """Normalize redirect.github.com to github.com."""
     if url.startswith("https://redirect.github.com/"):
-        return "https://github.com/" + url[len("https://redirect.github.com/") :]
+        return "https://github.com/" + url[len("https://redirect.github.com/"):]
     if url.startswith("http://redirect.github.com/"):
-        return "http://github.com/" + url[len("http://redirect.github.com/") :]
+        return "http://github.com/" + url[len("http://redirect.github.com/"):]
     return url
 
 
 # --- Host allowlist ---
-
 
 def parse_allowed_hosts(raw: str) -> set[str]:
     """Parse comma-separated ALLOWED_SOURCE_HOSTS into a lowercase set."""
@@ -58,14 +57,19 @@ def _url_host(url: str) -> str:
     return (parsed.hostname or "").lower()
 
 
-def _is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _is_public_ip(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
     """Return True only for IP addresses safe to fetch from.
 
     Rejects loopback, link-local (incl. cloud IMDS 169.254.169.254),
     private (RFC-1918 / ULA), multicast, reserved, and unspecified ranges.
     """
     return not (
-        ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
     )
 
 
@@ -229,10 +233,18 @@ def extract_compare_shas(version_hints: list[str]) -> tuple[str, str] | None:
 
 # --- URL classification ---
 
-_GH_RELEASE_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)")
-_GH_COMPARE_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+)")
-_FORGE_RELEASE_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/releases/tag/([^/?#]+)")
-_FORGE_COMPARE_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)")
+_GH_RELEASE_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)"
+)
+_GH_COMPARE_RE = re.compile(
+    r"^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+)"
+)
+_FORGE_RELEASE_RE = re.compile(
+    r"^https?://([^/]+)/([^/]+)/([^/]+)/releases/tag/([^/?#]+)"
+)
+_FORGE_COMPARE_RE = re.compile(
+    r"^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)"
+)
 
 
 def classify_url(url: str) -> dict | None:

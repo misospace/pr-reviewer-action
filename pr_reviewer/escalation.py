@@ -1,4 +1,4 @@
-"""Escalation decision for fast→smart review routing (#160). 
+"""Escalation decision for fast→smart review routing (#160).
 
 After the fast model produced a review, decide deterministically whether the
 smart model should re-review. Every trigger is boring and testable on
@@ -28,7 +28,9 @@ STUB_REVIEW_MIN_CHARS = 80
 # Header of the section the default prompt asks for "when evidence is
 # incomplete" — its presence with real content is the model saying it is
 # unsure.
-_UNKNOWNS_HEADER_RE = re.compile(r"(?im)^#{1,6}\s*unknowns?\b[^\n]*$")
+_UNKNOWNS_HEADER_RE = re.compile(
+    r"(?im)^#{1,6}\s*unknowns?\b[^\n]*$"
+)
 
 _EMPTY_SECTION_RE = re.compile(r"(?i)^\(?(none|n/?a|nothing)\)?[.!]?$")
 
@@ -84,7 +86,7 @@ def _has_populated_unknowns(text: str) -> bool:
     match = _UNKNOWNS_HEADER_RE.search(text)
     if not match:
         return False
-    rest = text[match.end() :].strip()
+    rest = text[match.end():].strip()
     section = re.split(r"(?m)^#{1,6}\s", rest, maxsplit=1)[0].strip()
     if not section or _EMPTY_SECTION_RE.match(section) or len(section) <= 40:
         return False
@@ -164,7 +166,9 @@ def should_escalate(
 
     if on_incomplete:
         classification = _load(classification_path)
-        must_check = [str(item) for item in (classification.get("must_check") or []) if item]
+        must_check = [
+            str(item) for item in (classification.get("must_check") or []) if item
+        ]
         if must_check and not validate_review(must_check, review)["validated"]:
             reasons.append("incomplete_required_checks")
 

@@ -1,4 +1,4 @@
-import re 
+import re
 import subprocess
 from pathlib import Path
 
@@ -127,7 +127,9 @@ def test_github_plain_url_matches_bash():
 def test_github_query_url_matches_bash():
     matched, captures, _ = _bash_match(GITHUB_COMPARE_PATTERN, URLS_WITH_QUERY[0])
     assert matched, "GitHub compare URL with query string must match in bash"
-    assert captures.get("R3") == "v1...v2", f"spec capture should exclude query, got: {captures.get('R3')}"
+    assert captures.get("R3") == "v1...v2", (
+        f"spec capture should exclude query, got: {captures.get('R3')}"
+    )
 
 
 def test_github_fragment_url_matches_bash():
@@ -184,13 +186,21 @@ def test_patterns_not_anchored_to_end():
 def test_enrichment_sh_no_longer_has_brittle_grep_pipelines():
     """Verify enrichment.sh is now a thin wrapper, not grep pipelines."""
     content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
-    assert "run_enrichment.py" in content, "enrichment.sh should delegate to run_enrichment.py"
+    assert "run_enrichment.py" in content, (
+        "enrichment.sh should delegate to run_enrichment.py"
+    )
     # Should not contain the old brittle TARGET_VERSION grep pipeline
-    assert 'TARGET_VERSION="$(jq -r' not in content, "enrichment.sh should not contain TARGET_VERSION grep pipeline"
+    assert 'TARGET_VERSION="$(jq -r' not in content, (
+        "enrichment.sh should not contain TARGET_VERSION grep pipeline"
+    )
 
 
 def test_context_sh_no_longer_has_brittle_compare_sha_grep():
     """Verify context.sh no longer has the brittle compare-sha grep pipelines."""
     content = (ROOT / "scripts/sections/context.sh").read_text(encoding="utf-8")
-    assert "_old_sha=$(grep" not in content, "context.sh should not contain brittle _old_sha grep pipeline"
-    assert "_new_sha=$(grep" not in content, "context.sh should not contain brittle _new_sha grep pipeline"
+    assert "_old_sha=$(grep" not in content, (
+        "context.sh should not contain brittle _old_sha grep pipeline"
+    )
+    assert "_new_sha=$(grep" not in content, (
+        "context.sh should not contain brittle _new_sha grep pipeline"
+    )

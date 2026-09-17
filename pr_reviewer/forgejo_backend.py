@@ -1,4 +1,4 @@
-"""Forgejo REST backend for
+"""Forgejo REST backend for core PR I/O operations.
 
 Provides a unified interface for PR metadata, diff retrieval, comment management,
 issue fetching, and PR file listing — working with both GitHub (via ``gh`` CLI)
@@ -43,7 +43,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets
+from redact import mask_secrets  # noqa: E402
 
 # Top-level import is safe: platform.py imports forgejo_backend only lazily
 # (inside _gh_api_forgejo), so there is no import cycle in this direction.
@@ -55,10 +55,19 @@ from pr_reviewer.platform import USER_AGENT, resolve_platform
 # ---------------------------------------------------------------------------
 
 FORGEJO_API_URL = os.environ.get("FORGEJO_API_URL", "").rstrip("/")
-FORGEJO_TOKEN = os.environ.get("FORGEJO_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+FORGEJO_TOKEN = (
+    os.environ.get("FORGEJO_TOKEN")
+    or os.environ.get("GITHUB_TOKEN")
+    or os.environ.get("GH_TOKEN")
+    or ""
+)
 FORGEJO_AUTH_METHOD = os.environ.get("FORGEJO_AUTH_METHOD", "token").strip().lower()
-FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE = os.environ.get("FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", "").strip()
-COMMENT_MARKER = os.environ.get("COMMENT_MARKER", "<!-- ai-pr-reviewer -->")
+FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE = os.environ.get(
+    "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", ""
+).strip()
+COMMENT_MARKER = os.environ.get(
+    "COMMENT_MARKER", "<!-- ai-pr-reviewer -->"
+)
 GH_TOKEN = os.environ.get("GH_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
 
 # JWT cache state — module-level so it persists across _curl calls within a
@@ -116,7 +125,6 @@ def _is_authorized_integration_mode() -> bool:
 # Authorized Integration JWT fetch + cache
 # ---------------------------------------------------------------------------
 
-
 def _fetch_authorized_integration_jwt() -> str:
     """Exchange the Forgejo Authorized Integration audience for a short-lived JWT.
 
@@ -137,11 +145,15 @@ def _fetch_authorized_integration_jwt() -> str:
     if not request_url:
         missing.append("ACTIONS_ID_TOKEN_REQUEST_URL")
     if not request_token:
-        missing.append("ACTIONS_ID_TOKEN_REQUEST_TOKEN (set enable-openid-connect: true in the workflow)")
+        missing.append(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN (set enable-openid-connect: true in the workflow)"
+        )
     if not audience:
         missing.append("FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE")
     if missing:
-        raise RuntimeError("Forgejo authorized_integration auth requires: " + ", ".join(missing))
+        raise RuntimeError(
+            "Forgejo authorized_integration auth requires: " + ", ".join(missing)
+        )
 
     # Per the Forgejo docs, the request URL already carries query params, so
     # the audience is appended with '&' (never a second '?').
@@ -159,15 +171,21 @@ def _fetch_authorized_integration_jwt() -> str:
         body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
         status_code = exc.code
         _report_http_error("JWT token exchange", status_code, body)
-        raise RuntimeError(f"Forgejo JWT token exchange failed (HTTP {status_code})") from None
+        raise RuntimeError(
+            f"Forgejo JWT token exchange failed (HTTP {status_code})"
+        ) from None
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Forgejo JWT token exchange network error: {exc.reason}") from None
+        raise RuntimeError(
+            f"Forgejo JWT token exchange network error: {exc.reason}"
+        ) from None
 
     data = _json_decode(body)
     jwt = data.get("value") if isinstance(data, dict) else None
     if not isinstance(jwt, str) or not jwt:
         _report_http_error("JWT token exchange", status_code, body)
-        raise RuntimeError("Forgejo JWT token exchange returned no .value field")
+        raise RuntimeError(
+            "Forgejo JWT token exchange returned no .value field"
+        )
 
     with _JWT_LOCK:
         _JWT_CACHE = jwt
@@ -185,7 +203,10 @@ def _get_jwt() -> str:
     """
     global _JWT_CACHE, _JWT_CACHE_TIME
     with _JWT_LOCK:
-        if _JWT_CACHE is not None and (time.time() - _JWT_CACHE_TIME) < _JWT_TTL_SECONDS:
+        if (
+            _JWT_CACHE is not None
+            and (time.time() - _JWT_CACHE_TIME) < _JWT_TTL_SECONDS
+        ):
             return _JWT_CACHE
         return _fetch_authorized_integration_jwt()
 
@@ -225,7 +246,6 @@ def _resolve_auth_header(token: str | None) -> str | None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _curl(
     method: str,
     url: str,
@@ -256,7 +276,7 @@ def _curl(
         auth_config_fd, auth_config_path = tempfile.mkstemp(prefix="forgejo_auth_", suffix=".conf")
         try:
             os.fchmod(auth_config_fd, 0o600)
-            os.write(auth_config_fd, f'header = "Authorization: {auth_header}"\n'.encode())
+            os.write(auth_config_fd, f'header = "Authorization: {auth_header}"\n'.encode("utf-8"))
             os.close(auth_config_fd)
             auth_config_fd = -1  # mark as closed so finally doesn't double-close
             cmd.extend(["--config", auth_config_path])
@@ -265,19 +285,13 @@ def _curl(
                 os.close(auth_config_fd)
             raise
 
-    cmd.extend(
-        [
-            "-H",
-            f"Accept: {accept}",
-            "-H",
-            f"User-Agent: {USER_AGENT}",
-            "-o",
-            "-",
-            "-w",
-            "\n%{http_code}",
-            url,
-        ]
-    )
+    cmd.extend([
+        "-H", f"Accept: {accept}",
+        "-H", f"User-Agent: {USER_AGENT}",
+        "-o", "-",
+        "-w", "\n%{http_code}",
+        url,
+    ])
     if data is not None and method.upper() in ("POST", "PATCH", "PUT"):
         if isinstance(data, bytes):
             body_bytes = data
@@ -403,7 +417,6 @@ def _json_decode(text: str) -> Any:
 # Repository access preflight
 # ---------------------------------------------------------------------------
 
-
 def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     """Return the active token's effective repository permission.
 
@@ -457,7 +470,9 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
     # fetch above proves that), so use its repository payload directly rather
     # than requiring the unrelated /user endpoint merely to learn a login.
     if _is_authorized_integration_mode():
-        status_code, body_text = _curl("GET", f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}")
+        status_code, body_text = _curl(
+            "GET", f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}"
+        )
         permission = permission_from_repo_payload(_json_decode(body_text))
         if status_code == 200 and permission is not None:
             return permission
@@ -548,7 +563,6 @@ def get_authenticated_repo_permission(repo_full_name: str) -> str | None:
 # PR Metadata
 # ---------------------------------------------------------------------------
 
-
 def get_pr_metadata(repo_full_name: str, pr_number: int) -> dict[str, Any] | None:
     """Return PR metadata as a dict.
 
@@ -574,8 +588,7 @@ def get_pr_metadata(repo_full_name: str, pr_number: int) -> dict[str, Any] | Non
     # equivalent — its fields are camelCase (author/headRefOid/mergedAt) and
     # it has no user/head/base keys at all.
     status_code, body = _gh(
-        "api",
-        f"repos/{owner}/{repo}/pulls/{pr_number}",
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body.strip():
@@ -620,10 +633,7 @@ def _forgejo_pr_to_github(data: dict, owner: str, repo: str, pr_number: int = 0)
         "merged_at": data.get("merged_at", None),
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
-        "url": data.get(
-            "html_url",
-            f"https://{FORGEJO_API_URL.replace('http://', '').replace('https://', '')}/{owner}/{repo}/pulls/{data.get('number', pr_number)}",
-        ),
+        "url": data.get("html_url", f"https://{FORGEJO_API_URL.replace('http://', '').replace('https://', '')}/{owner}/{repo}/pulls/{data.get('number', pr_number)}"),
         "draft": bool(data.get("draft", False)),
         "labels": [{"name": l.get("name", "")} for l in data.get("labels", [])],
     }
@@ -632,7 +642,6 @@ def _forgejo_pr_to_github(data: dict, owner: str, repo: str, pr_number: int = 0)
 # ---------------------------------------------------------------------------
 # PR Diff
 # ---------------------------------------------------------------------------
-
 
 def get_pr_diff(repo_full_name: str, pr_number: int) -> str:
     """Return the raw unified diff for a PR.
@@ -651,11 +660,7 @@ def get_pr_diff(repo_full_name: str, pr_number: int) -> str:
 
     # GitHub via gh CLI
     status_code, body = _gh(
-        "pr",
-        "diff",
-        str(pr_number),
-        "--repo",
-        repo_full_name,
+        "pr", "diff", str(pr_number), "--repo", repo_full_name,
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0:
@@ -666,7 +671,6 @@ def get_pr_diff(repo_full_name: str, pr_number: int) -> str:
 # ---------------------------------------------------------------------------
 # Issue Comments (list / create / edit)
 # ---------------------------------------------------------------------------
-
 
 def list_comments(repo_full_name: str, issue_number: int) -> list[dict[str, Any]]:
     """List all comments on a PR or issue.
@@ -698,11 +702,9 @@ def list_comments(repo_full_name: str, issue_number: int) -> list[dict[str, Any]
 
     # GitHub via gh CLI
     status_code, body = _gh(
-        "api",
-        f"repos/{owner}/{repo}/issues/{issue_number}/comments",
+        "api", f"repos/{owner}/{repo}/issues/{issue_number}/comments",
         "--paginate",
-        "--jq",
-        ".[] | {id: .id, body: .body, created_at: .created_at, updated_at: .updated_at, user: .user.login}",
+        "--jq", ".[] | {id: .id, body: .body, created_at: .created_at, updated_at: .updated_at, user: .user.login}",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body.strip():
@@ -728,7 +730,9 @@ def _forgejo_comment_to_standard(comment: dict, owner: str, repo: str) -> dict[s
     }
 
 
-def _latest_marker_comment(comments: list[dict[str, Any]], marker: str) -> dict[str, Any] | None:
+def _latest_marker_comment(
+    comments: list[dict[str, Any]], marker: str
+) -> dict[str, Any] | None:
     """Return the most recently updated comment containing *marker*, or None.
 
     Shared by both backends so "sticky comment" selection means the same
@@ -777,9 +781,7 @@ def create_comment(
     # string that a gh wording change can silently degrade to an unparsable
     # blob. The REST endpoint returns real JSON we can decode structurally.
     status_code, body_text = _gh_api_json(
-        "POST",
-        f"repos/{owner}/{repo}/issues/{issue_number}/comments",
-        {"body": body},
+        "POST", f"repos/{owner}/{repo}/issues/{issue_number}/comments", {"body": body},
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -840,9 +842,7 @@ def edit_last_comment(
     # --edit-last`` which both scrapes stdout text and edits a different
     # comment (the last one authored by the current gh user).
     status_code, body_text = _gh_api_json(
-        "PATCH",
-        f"repos/{owner}/{repo}/issues/comments/{target['id']}",
-        {"body": new_body},
+        "PATCH", f"repos/{owner}/{repo}/issues/comments/{target['id']}", {"body": new_body},
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -861,7 +861,6 @@ def edit_last_comment(
 # Issue Fetch (for linked issues)
 # ---------------------------------------------------------------------------
 
-
 def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None:
     """Fetch an issue's body and metadata.
 
@@ -879,8 +878,7 @@ def fetch_issue(repo_full_name: str, issue_number: int) -> dict[str, Any] | None
     else:
         # GitHub via gh CLI
         status_code, body_text = _gh(
-            "api",
-            f"repos/{owner}/{repo}/issues/{issue_number}",
+            "api", f"repos/{owner}/{repo}/issues/{issue_number}",
             timeout_sec=GH_API_TIMEOUT_SEC,
         )
         if status_code != 0:
@@ -921,8 +919,7 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
         return data
 
     status_code, body_text = _gh(
-        "api",
-        f"repos/{owner}/{repo}/compare/{spec}",
+        "api", f"repos/{owner}/{repo}/compare/{spec}",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -936,7 +933,6 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # The upstream repo may live on a different forge than the PR, so host is an
 # explicit argument (vs platform_*, which use the configured FORGEJO_API_URL).
-
 
 def _enrich_token_for_host(host: str) -> str | None:
     """Token for *host*: the configured instance only, else empty (unauth).
@@ -989,7 +985,6 @@ def fetch_forge_compare(host: str, repo_full_name: str, spec: str) -> dict[str, 
 # PR Files (for classifier)
 # ---------------------------------------------------------------------------
 
-
 def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
     """Return the list of changed files in a PR.
 
@@ -1023,11 +1018,9 @@ def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
 
     # GitHub via gh CLI
     status_code, body_text = _gh(
-        "api",
-        f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
         "--paginate",
-        "--jq",
-        ".[] | {filename: .filename, status: .status, additions: .additions, deletions: .deletions, changes: .changes}",
+        "--jq", ".[] | {filename: .filename, status: .status, additions: .additions, deletions: .deletions, changes: .changes}",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -1039,6 +1032,7 @@ def list_pr_files(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
         if parsed:
             results.append(parsed)
     return results
+
 
 
 # ---------------------------------------------------------------------------
@@ -1104,9 +1098,7 @@ def list_pr_reviews(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]
         return [_forgejo_review_to_github(review) for review in data]
 
     status_code, body_text = _gh(
-        "api",
-        f"repos/{owner}/{repo}/pulls/{pr_number}/reviews",
-        "--paginate",
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--paginate",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -1208,12 +1200,7 @@ def create_pr_review_from_payload(
         tmp_path = tmp.name
     try:
         status_code, body_text = _gh(
-            "api",
-            f"repos/{owner}/{repo}/pulls/{pr_number}/reviews",
-            "--method",
-            "POST",
-            "--input",
-            tmp_path,
+            "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--method", "POST", "--input", tmp_path,
             timeout_sec=GH_API_TIMEOUT_SEC,
         )
     finally:
@@ -1278,14 +1265,8 @@ def dismiss_pr_review(repo_full_name: str, pr_number: int, review_id: int, messa
         return review_id
 
     status_code, body_text = _gh(
-        "api",
-        f"repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
-        "--method",
-        "PUT",
-        "-f",
-        f"message={message}",
-        "--jq",
-        ".id",
+        "api", f"repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
+        "--method", "PUT", "-f", f"message={message}", "--jq", ".id",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0:
@@ -1295,11 +1276,9 @@ def dismiss_pr_review(repo_full_name: str, pr_number: int, review_id: int, messa
     except ValueError:
         return review_id
 
-
 # ---------------------------------------------------------------------------
 # Convenience: check if PR is a fork PR
 # ---------------------------------------------------------------------------
-
 
 def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
     """Return True if the PR originates from a fork.
@@ -1323,10 +1302,10 @@ def is_fork_pr(repo_full_name: str, pr_number: int) -> bool:
     return head_full != base_full
 
 
+
 # ---------------------------------------------------------------------------
 # Commit Statuses (CI wait — issue #225)
 # ---------------------------------------------------------------------------
-
 
 def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
     """Return the combined commit status for a SHA.
@@ -1365,8 +1344,7 @@ def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
 
     # GitHub via gh CLI — already returns the right shape.
     status_code, body_text = _gh(
-        "api",
-        f"repos/{owner}/{repo}/commits/{sha}/status",
+        "api", f"repos/{owner}/{repo}/commits/{sha}/status",
         timeout_sec=GH_API_TIMEOUT_SEC,
     )
     if status_code != 0 or not body_text.strip():
@@ -1377,7 +1355,6 @@ def get_commit_status(repo_full_name: str, sha: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # CLI entry-point for standalone testing
 # ---------------------------------------------------------------------------
-
 
 def main() -> None:
     """Minimal CLI for manual testing."""

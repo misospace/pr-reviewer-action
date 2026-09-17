@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Manage inline finding threads across incremental reviews (#208, #209).
 
 A previous run posted line-anchored inline comments carrying a content
@@ -47,9 +47,9 @@ for _p in (str(_SCRIPTS_DIR), str(_ACTION_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from build_review_comments import FINDING_MARKER_PREFIX, finding_fingerprint
-from pr_reviewer.carry_forward import load_carried_findings
-from pr_reviewer.platform import PlatformUnsupported, gh_argv, resolve_platform
+from build_review_comments import FINDING_MARKER_PREFIX, finding_fingerprint  # noqa: E402
+from pr_reviewer.carry_forward import load_carried_findings  # noqa: E402
+from pr_reviewer.platform import PlatformUnsupported, gh_argv, resolve_platform  # noqa: E402
 
 
 def _resolve_platform() -> str:
@@ -76,7 +76,10 @@ _THREADS_QUERY = (
     " } } } } }"
 )
 
-_RESOLVE_MUTATION = "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }"
+_RESOLVE_MUTATION = (
+    "mutation($id: ID!) {"
+    " resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }"
+)
 
 _MAX_THREADS_PAGE = 100
 
@@ -132,9 +135,15 @@ def resolved_fingerprints(carried: list, findings) -> set:
     if not isinstance(findings, list):
         return set()
     resolutions = {
-        f["id"]: f.get("resolution") for f in findings if isinstance(f, dict) and isinstance(f.get("id"), str)
+        f["id"]: f.get("resolution")
+        for f in findings
+        if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
-    return {finding_fingerprint(item) for item in carried if resolutions.get(item.get("id")) == "resolved"}
+    return {
+        finding_fingerprint(item)
+        for item in carried
+        if resolutions.get(item.get("id")) == "resolved"
+    }
 
 
 def extract_marker_fingerprint(body):
@@ -144,7 +153,7 @@ def extract_marker_fingerprint(body):
     start = body.find(FINDING_MARKER_PREFIX)
     if start == -1:
         return None
-    rest = body[start + len(FINDING_MARKER_PREFIX) :]
+    rest = body[start + len(FINDING_MARKER_PREFIX):]
     end = rest.find("-->")
     if end == -1:
         return None
@@ -227,7 +236,9 @@ def main(argv) -> int:
 
     resolved_fps = resolved_fingerprints(carried, findings)
     resolutions = {
-        f["id"]: f.get("resolution") for f in findings if isinstance(f, dict) and isinstance(f.get("id"), str)
+        f["id"]: f.get("resolution")
+        for f in findings
+        if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
     open_by_fp = {}
     for item in carried:
@@ -243,7 +254,8 @@ def main(argv) -> int:
     # for dedup, but we cannot query or mutate threads.
     if not _is_github_platform():
         print(
-            f"resolve_finding_threads: skipping thread management (platform={_resolve_platform()}; no GraphQL API)",
+            f"resolve_finding_threads: skipping thread management "
+            f"(platform={_resolve_platform()}; no GraphQL API)",
             file=sys.stderr,
         )
         # Still write empty surviving list so build_review_comments.py
@@ -257,14 +269,10 @@ def main(argv) -> int:
 
     data = _gh_graphql(
         [
-            "-f",
-            f"query={_THREADS_QUERY}",
-            "-f",
-            f"owner={owner}",
-            "-f",
-            f"name={name}",
-            "-F",
-            f"number={pr_number}",
+            "-f", f"query={_THREADS_QUERY}",
+            "-f", f"owner={owner}",
+            "-f", f"name={name}",
+            "-F", f"number={pr_number}",
         ]
     )
     if data is None:
@@ -278,7 +286,8 @@ def main(argv) -> int:
         thread_nodes = []
     if len(thread_nodes) >= _MAX_THREADS_PAGE:
         print(
-            f"  NOTE: PR has {_MAX_THREADS_PAGE}+ review threads; only the first {_MAX_THREADS_PAGE} were checked",
+            f"  NOTE: PR has {_MAX_THREADS_PAGE}+ review threads; only the first "
+            f"{_MAX_THREADS_PAGE} were checked",
             file=sys.stderr,
         )
 
@@ -293,7 +302,8 @@ def main(argv) -> int:
             resolved += 1
         else:
             print(
-                f"  WARN: could not resolve review thread {info['thread_id']} (may require additional permissions)",
+                f"  WARN: could not resolve review thread {info['thread_id']} "
+                "(may require additional permissions)",
                 file=sys.stderr,
             )
 
@@ -314,7 +324,8 @@ def main(argv) -> int:
             continue
         if replies >= max_replies:
             print(
-                f"  NOTE: follow-up reply cap ({max_replies}) reached; remaining open threads left without a reply",
+                f"  NOTE: follow-up reply cap ({max_replies}) reached; remaining "
+                "open threads left without a reply",
                 file=sys.stderr,
             )
             break
@@ -322,21 +333,18 @@ def main(argv) -> int:
             continue
         result = _run_gh(
             [
-                "api",
-                f"repos/{repo}/pulls/{pr_number}/comments",
-                "--method",
-                "POST",
-                "-F",
-                f"in_reply_to={info['first_comment_id']}",
-                "-f",
-                f"body={followup_body(item, head_sha)}",
+                "api", f"repos/{repo}/pulls/{pr_number}/comments",
+                "--method", "POST",
+                "-F", f"in_reply_to={info['first_comment_id']}",
+                "-f", f"body={followup_body(item, head_sha)}",
             ]
         )
         if result is not None:
             replies += 1
         else:
             print(
-                f"  WARN: could not reply on review thread {info['thread_id']} (may require additional permissions)",
+                f"  WARN: could not reply on review thread {info['thread_id']} "
+                "(may require additional permissions)",
                 file=sys.stderr,
             )
 
@@ -345,13 +353,16 @@ def main(argv) -> int:
     if open_threads_out:
         surviving = sorted(fp for fp in matched if fp not in resolved_fps)
         try:
-            Path(open_threads_out).write_text(json.dumps(surviving) + "\n", encoding="utf-8")
+            Path(open_threads_out).write_text(
+                json.dumps(surviving) + "\n", encoding="utf-8"
+            )
         except OSError:
             print(f"  WARN: could not write {open_threads_out}", file=sys.stderr)
 
     print(
         f"resolve_finding_threads: resolved {resolved}/{len(to_resolve)} fixed thread(s), "
-        f"replied on {replies} still-open thread(s)" + (f", {skipped_dup} already up to date" if skipped_dup else "")
+        f"replied on {replies} still-open thread(s)"
+        + (f", {skipped_dup} already up to date" if skipped_dup else "")
     )
     return 0
 

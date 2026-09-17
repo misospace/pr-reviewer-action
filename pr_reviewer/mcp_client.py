@@ -1,4 +1,4 @@
-"""Read-only MCP tool client for the native tool-calling loop (#245). 
+"""Read-only MCP tool client for the native tool-calling loop (#245).
 
 Lets the loop call read-only tools from an *allowlisted* set of MCP servers, so
 a reviewer can pull host-specific pre-rendered evidence the built-in tools can't
@@ -25,8 +25,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 import urllib.request
-from typing import Any
-from collections.abc import Callable
+from typing import Any, Callable
 
 from pr_reviewer.platform import USER_AGENT
 
@@ -37,24 +36,8 @@ _PROTOCOL_VERSION = "2024-11-05"
 # Default-deny: an unrecognised verb (create/update/delete/set/run/exec/…) is
 # never advertised or called, even if the server lists it.
 READ_ONLY_VERBS = frozenset(
-    {
-        "list",
-        "get",
-        "read",
-        "search",
-        "fetch",
-        "describe",
-        "show",
-        "find",
-        "lookup",
-        "query",
-        "head",
-        "stat",
-        "summary",
-        "diff",
-        "status",
-        "view",
-    }
+    {"list", "get", "read", "search", "fetch", "describe", "show", "find",
+     "lookup", "query", "head", "stat", "summary", "diff", "status", "view"}
 )
 
 
@@ -70,7 +53,7 @@ def is_read_only_tool(name: str, prefixes: tuple[str, ...] = ()) -> bool:
     for prefix in prefixes:
         prefix_n = prefix.strip().lower().replace("-", "_").rstrip("_")
         if prefix_n and normalized.startswith(prefix_n + "_"):
-            normalized = normalized[len(prefix_n) + 1 :]
+            normalized = normalized[len(prefix_n) + 1:]
             break
     head = normalized.split("_", 1)[0]
     return head in READ_ONLY_VERBS
@@ -84,7 +67,7 @@ def split_namespaced(name: str) -> tuple[str, str] | None:
     """``mcp__server__tool`` → ``(server, tool)``; None if not MCP-namespaced."""
     if not name.startswith(MCP_PREFIX):
         return None
-    rest = name[len(MCP_PREFIX) :]
+    rest = name[len(MCP_PREFIX):]
     server, sep, tool = rest.partition("__")
     if not sep or not server or not tool:
         return None
@@ -107,12 +90,14 @@ def _default_post(url, payload, session_id, token, timeout):
         headers["Mcp-Session-Id"] = session_id
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             new_session = resp.headers.get("Mcp-Session-Id") or session_id
             body = resp.read().decode("utf-8", errors="replace")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surfaced to the caller as an error
         return None, session_id, str(exc)
     return _parse_jsonrpc(body), new_session, None
 
@@ -127,7 +112,7 @@ def _parse_jsonrpc(body: str):
         for line in reversed(text.splitlines()):
             line = line.strip()
             if line.startswith("data:"):
-                text = line[len("data:") :].strip()
+                text = line[len("data:"):].strip()
                 break
     try:
         return json.loads(text)
@@ -138,22 +123,15 @@ def _parse_jsonrpc(body: str):
 class McpToolset:
     """An initialized connection to one allowlisted MCP server."""
 
-    def __init__(
-        self,
-        server: str,
-        url: str,
-        token: str = "",
-        *,
-        timeout: int = 20,
-        post_fn: Callable | None = None,
-        name_prefixes: tuple[str, ...] = (),
-    ):
+    def __init__(self, server: str, url: str, token: str = "", *, timeout: int = 20,
+                 post_fn: Callable | None = None, name_prefixes: tuple[str, ...] = ()):
         self.server = server
         self.url = url
         self.token = token
         self.timeout = timeout
         self._name_prefixes = tuple(
-            p.strip().lower().replace("-", "_").rstrip("_") for p in name_prefixes if p and p.strip()
+            p.strip().lower().replace("-", "_").rstrip("_")
+            for p in name_prefixes if p and p.strip()
         )
         # Runtime lookup of the default so tests can monkeypatch _default_post.
         self._post = post_fn or _default_post
@@ -167,7 +145,9 @@ class McpToolset:
             payload["id"] = msg_id
         if params is not None:
             payload["params"] = params
-        result, self._session_id, error = self._post(self.url, payload, self._session_id, self.token, self.timeout)
+        result, self._session_id, error = self._post(
+            self.url, payload, self._session_id, self.token, self.timeout
+        )
         return result, error
 
     def connect(self) -> str | None:
@@ -177,11 +157,8 @@ class McpToolset:
         """
         init, error = self._rpc(
             "initialize",
-            {
-                "protocolVersion": _PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "ai-pr-reviewer", "version": "1.0"},
-            },
+            {"protocolVersion": _PROTOCOL_VERSION, "capabilities": {},
+             "clientInfo": {"name": "ai-pr-reviewer", "version": "1.0"}},
             msg_id=1,
         )
         if error or not isinstance(init, dict) or "result" not in init:
@@ -206,15 +183,14 @@ class McpToolset:
             if not isinstance(schema, dict):
                 schema = {"type": "object", "properties": {}, "additionalProperties": True}
             self._tool_names.add(name)
-            self.schemas.append(
-                {
-                    "name": namespaced_name(self.server, name),
-                    "description": (
-                        f"[MCP:{self.server}] {tool.get('description') or name} (read-only external evidence)"
-                    ),
-                    "parameters": schema,
-                }
-            )
+            self.schemas.append({
+                "name": namespaced_name(self.server, name),
+                "description": (
+                    f"[MCP:{self.server}] {tool.get('description') or name} "
+                    "(read-only external evidence)"
+                ),
+                "parameters": schema,
+            })
         return None
 
     def call(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -225,7 +201,9 @@ class McpToolset:
         """
         if tool not in self._tool_names or not is_read_only_tool(tool, self._name_prefixes):
             return {"error": f"MCP tool not allowed: {tool}"}
-        result, error = self._rpc("tools/call", {"name": tool, "arguments": args or {}}, msg_id=3)
+        result, error = self._rpc(
+            "tools/call", {"name": tool, "arguments": args or {}}, msg_id=3
+        )
         if error:
             return {"error": f"MCP call failed: {error}"}
         if not isinstance(result, dict) or "result" not in result:
@@ -261,7 +239,7 @@ def is_safe_server_url(url: str) -> bool:
     # later at the socket layer). Percent-encoded sequences (%00, %2f, …) are
     # valid URL encoding and are left intact — they ride in the HTTP path to the
     # remote server, not a local file read, so they are not an LFI vector here.
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in url):
         return False
     try:
         parsed = urllib.parse.urlparse(url)

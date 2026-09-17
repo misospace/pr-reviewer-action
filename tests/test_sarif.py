@@ -1,4 +1,4 @@
-"""Tests for the standalone SARIF 2.1.0 normalizer.""" 
+"""Tests for the standalone SARIF 2.1.0 normalizer."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from pr_reviewer.sarif import (
+from pr_reviewer.sarif import (  # noqa: E402
     MAX_ERRORS,
     MAX_FINDINGS,
     MAX_INPUT_BYTES,
@@ -80,7 +80,9 @@ def test_multiple_runs_tools_preserve_declared_order():
 def test_severity_mapping_and_unknown_levels():
     results = [_result(level=level, message=level) for level in ["error", "warning", "note", "none", "", "bogus"]]
     findings = normalize_sarif(_sarif(runs=[_run(results)]))["findings"]
-    assert [item["severity"] for item in findings] == ["major", "minor", "info", "info", "info"]
+    assert [item["severity"] for item in findings] == [
+        "major", "minor", "info", "info", "info"
+    ]
 
 
 def test_missing_level_defaults_to_warning_and_null_is_unknown():
@@ -99,7 +101,9 @@ def test_rule_index_resolves_declared_rule_metadata_without_rule_id():
     result.pop("ruleId")
     result["ruleIndex"] = 0
     finding = normalize_sarif(_sarif(runs=[_run([result], rules=rules)]))["findings"][0]
-    assert (finding["rule_id"], finding["title"], finding["help_uri"]) == ("indexed", "Indexed title", "https://rule")
+    assert (finding["rule_id"], finding["title"], finding["help_uri"]) == (
+        "indexed", "Indexed title", "https://rule"
+    )
 
 
 def test_rule_metadata_and_tool_information_uri_fallback():
@@ -114,7 +118,9 @@ def test_rule_metadata_and_tool_information_uri_fallback():
         _result(rule_id="identified", message="c"),
         _result(rule_id="missing", message="d"),
     ]
-    findings = normalize_sarif(_sarif(runs=[_run(results, rules=rules, information_uri="https://tool")]))["findings"]
+    findings = normalize_sarif(
+        _sarif(runs=[_run(results, rules=rules, information_uri="https://tool")])
+    )["findings"]
     assert [(item["rule_id"], item["title"], item["help_uri"]) for item in findings] == [
         ("short", "Short title", "https://rule"),
         ("named", "Named rule", "https://tool"),
@@ -183,7 +189,9 @@ def test_caps_record_reasons_and_omitted_counts():
 
 def test_error_cap_retains_first_errors_and_marks_truncation():
     locations = [None] * (MAX_ERRORS + 50)
-    result = normalize_sarif(_sarif(runs=[_run([_result("message", locations=locations)])]))
+    result = normalize_sarif(
+        _sarif(runs=[_run([_result("message", locations=locations)])])
+    )
     assert len(result["errors"]) == MAX_ERRORS + 1
     assert result["errors"][0].endswith("locations[0] is not an object")
     assert result["errors"][-1] == "errors_truncated"
@@ -199,7 +207,9 @@ def test_caps_require_non_negative_integers(value):
 
 
 def test_keyword_caps_can_drop_all_findings():
-    result = normalize_sarif(_sarif(runs=[_run([_result("message")])]), max_findings=0, max_message_chars=0)
+    result = normalize_sarif(
+        _sarif(runs=[_run([_result("message")])]), max_findings=0, max_message_chars=0
+    )
     assert result["findings"] == []
     assert result["truncation"]["omitted_findings"] == 1
     assert result["truncation"]["omitted_message_chars"] == len("message")
@@ -240,17 +250,7 @@ def test_cli_accepts_utf8_bom_and_writes_inside_workspace(tmp_path):
     env = dict(os.environ)
     env["PYTHONPATH"] = str(_REPO_ROOT)
     process = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pr_reviewer.sarif",
-            "--input",
-            str(input_path),
-            "--output",
-            str(output_path),
-            "--workspace-root",
-            str(tmp_path),
-        ],
+        [sys.executable, "-m", "pr_reviewer.sarif", "--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)],
         cwd=tmp_path,
         env=env,
         capture_output=True,

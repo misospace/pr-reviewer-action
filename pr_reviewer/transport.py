@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """HTTP/subprocess transport for the tool harness (#304 split).
 
 Owns the low-level model-call transport (curl-based chat requests + the simple
@@ -19,7 +19,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets
+from redact import mask_secrets  # noqa: E402
 
 
 def safe_run(args, timeout_sec):
@@ -39,7 +39,6 @@ def safe_run(args, timeout_sec):
             "stdout": (exc.stdout or "") if isinstance(exc.stdout, str) else "",
             "stderr": (exc.stderr or "") if isinstance(exc.stderr, str) else "",
         }
-
 
 def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
     """POST a wire-ready chat payload via curl and return the parsed JSON.
@@ -112,14 +111,15 @@ def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
         if len(stderr) > 500:
             stderr = stderr[:500] + "...[truncated]"
         raise RuntimeError(
-            f"planner model request failed with exit code {completed.returncode}" + (f": {stderr}" if stderr else "")
+            f"planner model request failed with exit code {completed.returncode}"
+            + (f": {stderr}" if stderr else "")
         )
 
     if streaming:
         # SSE deltas → the non-streaming response shape the loop parses. The
         # reassembler also surfaces a JSON error body returned mid-"stream"
         # (some servers reply 200 + an error object instead of events).
-        from pr_reviewer.sse_reassembler import reassemble_sse
+        from pr_reviewer.sse_reassembler import reassemble_sse  # noqa: PLC0415
 
         return reassemble_sse(completed.stdout, api_format)
     return json.loads(completed.stdout)

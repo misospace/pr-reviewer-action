@@ -1,4 +1,4 @@
-"""Deterministic PR classification and risk-flag detection. 
+"""Deterministic PR classification and risk-flag detection.
 
 Analyzes a PR's file changes, diff content, linked issues, and metadata to
 produce structured classification output that is injected into the review
@@ -26,8 +26,7 @@ import re
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
-from collections.abc import Callable
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -77,22 +76,17 @@ RENOVATE_DIGEST_FILE_PATTERNS = [
 
 # Dependency-related files (lockfiles, manifests)
 DEPENDENCY_PATTERNS = [
-    re.compile(
-        r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|"
-        r"Pipfile\.lock|requirements\.txt|Gemfile\.lock|Cargo\.lock|"
-        r"go\.mod|go\.sum|composer\.lock|mix\.lock|build\.gradle|"
-        r"pom\.xml|setup\.py|setup\.cfg|pyproject\.toml|pubspec\.yaml|"
-        r"\.npmrc|\.yarnrc)"
-    ),
+    re.compile(r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|"
+               r"Pipfile\.lock|requirements\.txt|Gemfile\.lock|Cargo\.lock|"
+               r"go\.mod|go\.sum|composer\.lock|mix\.lock|build\.gradle|"
+               r"pom\.xml|setup\.py|setup\.cfg|pyproject\.toml|pubspec\.yaml|"
+               r"\.npmrc|\.yarnrc)"),
 ]
 
 # Kubernetes manifest patterns
 K8S_PATTERNS = [
-    re.compile(
-        r"(helmrelease|deployment|statefulset|daemonset|kustomization)"
-        r"\.ya?ml$",
-        re.IGNORECASE,
-    ),
+    re.compile(r"(helmrelease|deployment|statefulset|daemonset|kustomization)"
+               r"\.ya?ml$", re.IGNORECASE),
     re.compile(r"configmap\.ya?ml$"),
     re.compile(r"secret\.ya?ml$"),
     re.compile(r"service\.ya?ml$"),
@@ -108,17 +102,15 @@ _SRC_EXT = r"(py|js|jsx|ts|tsx|go|rb|java|kt|cs|php|rs|scala|swift)"
 
 # Auth-related changes
 AUTH_PATTERNS = [
-    re.compile(
-        r"(auth|login|oauth|oidc|saml|jwt|token|mfa|2fa|session)"
-        r"[_.-]?\w*\." + _SRC_EXT + r"$",
-        re.IGNORECASE,
-    ),
+    re.compile(r"(auth|login|oauth|oidc|saml|jwt|token|mfa|2fa|session)"
+               r"[_.-]?\w*\." + _SRC_EXT + r"$", re.IGNORECASE),
     re.compile(r"middleware[_.-]?auth", re.IGNORECASE),
     re.compile(r"permissions?\.ya?ml$"),
     re.compile(r"rbac\.ya?ml$"),
     re.compile(r"role[-_].*binding", re.IGNORECASE),
     re.compile(r"\.env(\.example)?$", re.IGNORECASE),
-    re.compile(r"(auth|authn|authz)[-_]?(controller|service|guard|middleware|handler)", re.IGNORECASE),
+    re.compile(r"(auth|authn|authz)[-_]?(controller|service|guard|middleware|handler)",
+               re.IGNORECASE),
 ]
 
 # Public route changes
@@ -126,12 +118,14 @@ PUBLIC_ROUTE_PATTERNS = [
     # NB: `routes` (plural) only — a bare `route.<ext>` is the mandated name of
     # every Next.js App Router API handler (src/app/api/**/route.ts), so it
     # carries no routing-layer signal and must not match. See #531.
-    re.compile(r"(routes|urls?|api|endpoints?|controller)\." + _SRC_EXT + r"$", re.IGNORECASE),
+    re.compile(r"(routes|urls?|api|endpoints?|controller)\." + _SRC_EXT + r"$",
+               re.IGNORECASE),
     re.compile(r"router[_.-]?py$"),
     re.compile(r"urlpatterns"),
     re.compile(r"app\.route\("),
     re.compile(r"@\w+\.route\("),
-    re.compile(r"(registerEndpoint|@(Get|Post|Put|Delete|Patch|RequestMapping))", re.IGNORECASE),
+    re.compile(r"(registerEndpoint|@(Get|Post|Put|Delete|Patch|RequestMapping))",
+               re.IGNORECASE),
 ]
 
 # File serving changes — match directory names or file patterns
@@ -157,11 +151,8 @@ PATH_HANDLING_PATTERNS = [
 
 # Secret handling changes
 SECRET_HANDLING_PATTERNS = [
-    re.compile(
-        r"(secret|credential|password|api.?key|private.?key|token)"
-        r"[_.-]?\w*\.(py|js|ts|go|rb|yaml|yml|json)$",
-        re.IGNORECASE,
-    ),
+    re.compile(r"(secret|credential|password|api.?key|private.?key|token)"
+               r"[_.-]?\w*\.(py|js|ts|go|rb|yaml|yml|json)$", re.IGNORECASE),
     re.compile(r"secrets?\.ya?ml$"),
     re.compile(r"vault|hashicorp|aws.?secrets", re.IGNORECASE),
     re.compile(r"base64\.(decode|encode)", re.IGNORECASE),
@@ -182,7 +173,6 @@ DB_MIGRATION_PATTERNS = [
 # ---------------------------------------------------------------------------
 # Classification result
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class PRClassification:
@@ -211,7 +201,7 @@ def _has_version_bump(diff_text: str) -> bool:
     """
     if re.search(r'"version"\s*:\s*"[^"]+"', diff_text):
         return True
-    if re.search(r"(?m)^[+-]\s*(?:app)?[Vv]ersion:\s*\S+", diff_text):
+    if re.search(r'(?m)^[+-]\s*(?:app)?[Vv]ersion:\s*\S+', diff_text):
         return True
     return False
 
@@ -224,7 +214,10 @@ def _all_files_are_lockfiles(filenames: list[str]) -> bool:
     """
     if not filenames:
         return False
-    return all(any(pat.search(f) for pat in RENOVATE_DIGEST_FILE_PATTERNS) for f in filenames)
+    return all(
+        any(pat.search(f) for pat in RENOVATE_DIGEST_FILE_PATTERNS)
+        for f in filenames
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +236,10 @@ def _all_files_are_lockfiles(filenames: list[str]) -> bool:
 
 # Pattern-based predicate factories -----------------------------------------
 
-
 def _filename_matches(patterns: list[re.Pattern]) -> Callable[[list[str], str], bool]:
     """Predicate: any changed filename matches any pattern in the set."""
-
     def _pred(filenames: list[str], diff_text: str) -> bool:
         return any(any(pat.search(f) for pat in patterns) for f in filenames)
-
     return _pred
 
 
@@ -260,17 +250,14 @@ def _filename_or_diff_matches(patterns: list[re.Pattern]) -> Callable[[list[str]
     steps yielded the same kind, so folding them into one OR is behavior-
     preserving while keeping the diff fallback in a single rule.
     """
-
     def _pred(filenames: list[str], diff_text: str) -> bool:
         if any(any(pat.search(f) for pat in patterns) for f in filenames):
             return True
         return any(pat.search(diff_text) for pat in patterns)
-
     return _pred
 
 
 # Compound predicates (don't reduce to a single pattern scan) ----------------
-
 
 def _is_renovate_digest_only(filenames: list[str], diff_text: str) -> bool:
     """Most specific rule: EVERY changed file is a lockfile and the diff has no
@@ -284,7 +271,9 @@ def _is_dependency_upgrade(filenames: list[str], diff_text: str) -> bool:
     """A dependency/manifest file changed, but NOT a k8s manifest (which happens
     to reference versions and must classify as k8s_manifest instead).
     """
-    has_dep_file = any(any(pat.search(f) for pat in DEPENDENCY_PATTERNS) for f in filenames)
+    has_dep_file = any(
+        any(pat.search(f) for pat in DEPENDENCY_PATTERNS) for f in filenames
+    )
     if not has_dep_file:
         return False
     has_k8s = any(any(pat.search(f) for pat in K8S_PATTERNS) for f in filenames)
@@ -294,7 +283,6 @@ def _is_dependency_upgrade(filenames: list[str], diff_text: str) -> bool:
 @dataclass(frozen=True)
 class KindRule:
     """One pr_kind classification rule: a name plus a match predicate."""
-
     kind: str
     matches: Callable[[list[str], str], bool]
 
@@ -403,7 +391,10 @@ def _detect_risk_flags(
     # File-based risk flags (derived from classification patterns).
     for pat_set, flag in FILE_RISK_RULES:
         # Collect the specific files that triggered this flag
-        triggering_files = [f for f in filenames if any(pat.search(f) for pat in pat_set)]
+        triggering_files = [
+            f for f in filenames
+            if any(pat.search(f) for pat in pat_set)
+        ]
         matches_in_diff = any(pat.search(diff_text) for pat in pat_set)
         if triggering_files or matches_in_diff:
             if flag not in flags:
@@ -558,7 +549,9 @@ def classify_pr(
     # Build changed files summary (just filenames, truncated)
     file_names = [f.get("filename", "") for f in pr_files]
     changed_files_summary = file_names[:max_summary_files]
-    route_signals = _route_signals(pr_kind, file_names, risk_flags, risk_flags_with_files)
+    route_signals = _route_signals(
+        pr_kind, file_names, risk_flags, risk_flags_with_files
+    )
 
     # Collect linked issue labels
     linked_issue_labels: list[str] = []
@@ -598,7 +591,8 @@ def classify_from_files(
 
     linked_issues: list[dict] = []
     if issues_path and Path(issues_path).exists():
-        linked_issues = json.loads(Path(issues_path).read_text(encoding="utf-8"))
+        linked_issues = json.loads(
+            Path(issues_path).read_text(encoding="utf-8"))
 
     result = classify_pr(pr_files, diff_text, linked_issues)
 
@@ -612,16 +606,20 @@ def classify_from_files(
 # CLI entry point (for run_review.sh)
 # ---------------------------------------------------------------------------
 
-
 def main() -> None:
     """CLI: python3 scripts/classify_pr.py --pr-files F --diff D ..."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Deterministic PR classification and risk-flag detection")
-    parser.add_argument("--pr-files", required=True, help="Path to pr-files.json")
-    parser.add_argument("--diff", default="", help="Path to pr.diff.truncated (optional)")
-    parser.add_argument("--linked-issues", default="", help="Path to linked-issues.json (optional)")
-    parser.add_argument("--output", default="classification.json", help="Output path for classification JSON")
+    parser = argparse.ArgumentParser(
+        description="Deterministic PR classification and risk-flag detection")
+    parser.add_argument("--pr-files", required=True,
+                        help="Path to pr-files.json")
+    parser.add_argument("--diff", default="",
+                        help="Path to pr.diff.truncated (optional)")
+    parser.add_argument("--linked-issues", default="",
+                        help="Path to linked-issues.json (optional)")
+    parser.add_argument("--output", default="classification.json",
+                        help="Output path for classification JSON")
 
     args = parser.parse_args()
     classify_from_files(

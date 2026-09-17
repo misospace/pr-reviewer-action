@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """Tests for the gh_api tool and the underlying _validate_endpoint helper.
 
 The validator is the security boundary for both backends (GitHub and
@@ -18,7 +18,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from pr_reviewer.platform import (
+from pr_reviewer.platform import (  # noqa: E402
     _validate_endpoint,
 )
 
@@ -38,9 +38,15 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"Current repo with repos/ prefix should be allowed: {result}"
-        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", f"Unexpected full_path: {result}"
-        assert result["repo_key"] == "misospace/pr-reviewer-action", f"Unexpected repo_key: {result}"
+        assert "error" not in result, (
+            f"Current repo with repos/ prefix should be allowed: {result}"
+        )
+        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", (
+            f"Unexpected full_path: {result}"
+        )
+        assert result["repo_key"] == "misospace/pr-reviewer-action", (
+            f"Unexpected repo_key: {result}"
+        )
 
     def test_direct_path_current_repo(self):
         """Direct owner/repo path matching current repo should be allowed."""
@@ -50,9 +56,15 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"Current repo with direct path should be allowed: {result}"
-        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", f"Unexpected full_path: {result}"
-        assert result["repo_key"] == "misospace/pr-reviewer-action", f"Unexpected repo_key: {result}"
+        assert "error" not in result, (
+            f"Current repo with direct path should be allowed: {result}"
+        )
+        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", (
+            f"Unexpected full_path: {result}"
+        )
+        assert result["repo_key"] == "misospace/pr-reviewer-action", (
+            f"Unexpected repo_key: {result}"
+        )
 
     def test_repos_prefix_explicit_allowed_repo(self):
         """Endpoint with 'repos/' prefix for an explicitly allowed repo should pass allowlist."""
@@ -62,9 +74,15 @@ class TestGhApiRepoParsing:
             allowed_repos={"other-org/other-repo"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"Explicitly allowed repo with repos/ prefix should be allowed: {result}"
-        assert result["full_path"] == "/repos/other-org/other-repo/issues", f"Unexpected full_path: {result}"
-        assert result["repo_key"] == "other-org/other-repo", f"Unexpected repo_key: {result}"
+        assert "error" not in result, (
+            f"Explicitly allowed repo with repos/ prefix should be allowed: {result}"
+        )
+        assert result["full_path"] == "/repos/other-org/other-repo/issues", (
+            f"Unexpected full_path: {result}"
+        )
+        assert result["repo_key"] == "other-org/other-repo", (
+            f"Unexpected repo_key: {result}"
+        )
 
     def test_direct_path_explicit_allowed_repo(self):
         """Direct path for an explicitly allowed repo should pass allowlist."""
@@ -74,9 +92,15 @@ class TestGhApiRepoParsing:
             allowed_repos={"other-org/other-repo"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"Explicitly allowed repo with direct path should be allowed: {result}"
-        assert result["full_path"] == "/repos/other-org/other-repo/issues", f"Unexpected full_path: {result}"
-        assert result["repo_key"] == "other-org/other-repo", f"Unexpected repo_key: {result}"
+        assert "error" not in result, (
+            f"Explicitly allowed repo with direct path should be allowed: {result}"
+        )
+        assert result["full_path"] == "/repos/other-org/other-repo/issues", (
+            f"Unexpected full_path: {result}"
+        )
+        assert result["repo_key"] == "other-org/other-repo", (
+            f"Unexpected repo_key: {result}"
+        )
 
     def test_wildcard_allows_any_repo(self):
         """Wildcard '*' in allowed_repos should permit any repo."""
@@ -86,9 +110,15 @@ class TestGhApiRepoParsing:
             allowed_repos={"*"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"Wildcard should allow any repo: {result}"
-        assert result["full_path"] == "/repos/any-org/any-repo/pulls", f"Unexpected full_path: {result}"
-        assert result["repo_key"] == "any-org/any-repo", f"Unexpected repo_key: {result}"
+        assert "error" not in result, (
+            f"Wildcard should allow any repo: {result}"
+        )
+        assert result["full_path"] == "/repos/any-org/any-repo/pulls", (
+            f"Unexpected full_path: {result}"
+        )
+        assert result["repo_key"] == "any-org/any-repo", (
+            f"Unexpected repo_key: {result}"
+        )
 
     def test_denied_repo_rejected(self):
         """Repos not in current_repo, not in allowed_repos, and no wildcard should be rejected."""
@@ -98,7 +128,9 @@ class TestGhApiRepoParsing:
             allowed_repos={"other-org/other-repo"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "Repo not allowed" in (result.get("error") or ""), f"Disallowed repo should be rejected: {result}"
+        assert "Repo not allowed" in (result.get("error") or ""), (
+            f"Disallowed repo should be rejected: {result}"
+        )
 
     def test_denied_secrets_path_blocked(self):
         """Paths containing '/actions/secrets' should be denied regardless of repo."""
@@ -108,7 +140,9 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "Path segment denied" in (result.get("error") or ""), f"Secrets path should be denied: {result}"
+        assert "Path segment denied" in (result.get("error") or ""), (
+            f"Secrets path should be denied: {result}"
+        )
 
     def test_denied_environments_path_blocked(self):
         """Paths containing '/environments/' should be denied regardless of repo."""
@@ -118,7 +152,9 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "Path segment denied" in (result.get("error") or ""), f"Environments path should be denied: {result}"
+        assert "Path segment denied" in (result.get("error") or ""), (
+            f"Environments path should be denied: {result}"
+        )
 
     def test_denied_dispatches_path_blocked(self):
         """Paths containing '/dispatches' should be denied regardless of repo."""
@@ -128,7 +164,9 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "Path segment denied" in (result.get("error") or ""), f"Dispatches path should be denied: {result}"
+        assert "Path segment denied" in (result.get("error") or ""), (
+            f"Dispatches path should be denied: {result}"
+        )
 
     def test_short_endpoint_returns_error(self):
         """Repo-scoped endpoints with fewer than 2 path segments should return an error."""
@@ -138,7 +176,9 @@ class TestGhApiRepoParsing:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "Invalid endpoint format" in (result.get("error") or ""), f"Short endpoint should return error: {result}"
+        assert "Invalid endpoint format" in (result.get("error") or ""), (
+            f"Short endpoint should return error: {result}"
+        )
 
 
 class TestGhApiPathValidation:
@@ -164,7 +204,9 @@ class TestGhApiPathValidation:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert result.get("error") is not None, f"Endpoint with null byte should be rejected: {result}"
+        assert result.get("error") is not None, (
+            f"Endpoint with null byte should be rejected: {result}"
+        )
 
     def test_parent_directory_traversal_rejected(self):
         """Endpoints containing '..' segment should be rejected."""
@@ -174,7 +216,9 @@ class TestGhApiPathValidation:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "dot" in (result.get("error") or "").lower(), f"Dot-segment '..' should be rejected: {result}"
+        assert "dot" in (result.get("error") or "").lower(), (
+            f"Dot-segment '..' should be rejected: {result}"
+        )
 
     def test_current_directory_segment_rejected(self):
         """Endpoints containing '.' segment should be rejected."""
@@ -184,7 +228,9 @@ class TestGhApiPathValidation:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "dot-segment" in (result.get("error") or "").lower(), f"Dot-segment '.' should be rejected: {result}"
+        assert "dot-segment" in (result.get("error") or "").lower(), (
+            f"Dot-segment '.' should be rejected: {result}"
+        )
 
     def test_dot_in_path_component_allowed(self):
         """Dots inside non-traversal components (release tags, repos) are allowed.
@@ -211,7 +257,9 @@ class TestGhApiPathValidation:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "dot-segment" in (result.get("error") or "").lower(), f"Empty segment should be rejected: {result}"
+        assert "dot-segment" in (result.get("error") or "").lower(), (
+            f"Empty segment should be rejected: {result}"
+        )
 
     def test_unallowed_prefix_rejected(self):
         """Repo-scoped endpoints not starting with an allowed prefix should be rejected."""
@@ -221,7 +269,9 @@ class TestGhApiPathValidation:
             allowed_repos={"misospace/pr-reviewer-action"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "not allowed" in (result.get("error") or "").lower(), f"Unallowed prefix should be rejected: {result}"
+        assert "not allowed" in (result.get("error") or "").lower(), (
+            f"Unallowed prefix should be rejected: {result}"
+        )
 
     def test_repos_prefix_passes(self):
         """Endpoints starting with /repos/ should pass prefix check."""
@@ -231,8 +281,12 @@ class TestGhApiPathValidation:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/repos/ prefix should be allowed: {result}"
-        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", f"Unexpected full_path: {result}"
+        assert "error" not in result, (
+            f"/repos/ prefix should be allowed: {result}"
+        )
+        assert result["full_path"] == "/repos/misospace/pr-reviewer-action/pulls/1", (
+            f"Unexpected full_path: {result}"
+        )
 
 
 class TestGhApiRootEndpoints:
@@ -256,9 +310,15 @@ class TestGhApiRootEndpoints:
             allowed_repos={"*"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/search/ should validate under wildcard: {result}"
-        assert result["full_path"] == "/search/code?q=foo", f"Wildcard must not prepend /repos/: {result}"
-        assert result["repo_key"] == "", f"Root endpoint repo_key must be empty: {result}"
+        assert "error" not in result, (
+            f"/search/ should validate under wildcard: {result}"
+        )
+        assert result["full_path"] == "/search/code?q=foo", (
+            f"Wildcard must not prepend /repos/: {result}"
+        )
+        assert result["repo_key"] == "", (
+            f"Root endpoint repo_key must be empty: {result}"
+        )
 
     def test_search_under_empty_allowlist(self):
         """An empty allowlist (current repo only) must still let /search/ through.
@@ -274,9 +334,15 @@ class TestGhApiRootEndpoints:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/search/ should validate without explicit repo allowlist: {result}"
-        assert result["full_path"] == "/search/code?q=foo", f"Empty allowlist must not affect root endpoint: {result}"
-        assert result["repo_key"] == "", f"Root endpoint repo_key must be empty: {result}"
+        assert "error" not in result, (
+            f"/search/ should validate without explicit repo allowlist: {result}"
+        )
+        assert result["full_path"] == "/search/code?q=foo", (
+            f"Empty allowlist must not affect root endpoint: {result}"
+        )
+        assert result["repo_key"] == "", (
+            f"Root endpoint repo_key must be empty: {result}"
+        )
 
     def test_search_with_leading_slash(self):
         """A leading slash on the endpoint is normalised and must work the same."""
@@ -286,8 +352,12 @@ class TestGhApiRootEndpoints:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/search/ with leading slash should validate: {result}"
-        assert result["full_path"] == "/search/code?q=foo", f"Leading slash must not mangle /search/: {result}"
+        assert "error" not in result, (
+            f"/search/ with leading slash should validate: {result}"
+        )
+        assert result["full_path"] == "/search/code?q=foo", (
+            f"Leading slash must not mangle /search/: {result}"
+        )
 
     def test_search_with_subpath(self):
         """``search/code?q=foo`` and ``search/issues?q=bar`` share the root
@@ -316,11 +386,15 @@ class TestGhApiRootEndpoints:
             allowed_repos={"*"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/git/ under wildcard should pass: {result}"
+        assert "error" not in result, (
+            f"/git/ under wildcard should pass: {result}"
+        )
         assert result["full_path"] == "/git/refs/heads/main", (
             f"Wildcard must not prepend /repos/ to /git/ (issue #469): {result}"
         )
-        assert result["repo_key"] == "", f"Root endpoint repo_key must be empty (issue #469): {result}"
+        assert result["repo_key"] == "", (
+            f"Root endpoint repo_key must be empty (issue #469): {result}"
+        )
 
     def test_git_refs_without_wildcard_also_passes(self):
         """Root-level endpoints must be allowed even when ``allowed_repos``
@@ -334,8 +408,12 @@ class TestGhApiRootEndpoints:
             allowed_repos={"misospace/pr-reviewer-action"},
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/git/ with explicit repo in allowlist should pass: {result}"
-        assert result["full_path"] == "/git/refs/heads/main", f"/git/ full_path must not be mangled: {result}"
+        assert "error" not in result, (
+            f"/git/ with explicit repo in allowlist should pass: {result}"
+        )
+        assert result["full_path"] == "/git/refs/heads/main", (
+            f"/git/ full_path must not be mangled: {result}"
+        )
 
     def test_issues_root_endpoint_passes(self):
         """``/issues`` (root, listing all org-wide issues) must reach the API
@@ -347,9 +425,15 @@ class TestGhApiRootEndpoints:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/issues root endpoint should pass: {result}"
-        assert result["full_path"] == "/issues", f"/issues full_path must not be mangled: {result}"
-        assert result["repo_key"] == "", f"Root endpoint repo_key must be empty: {result}"
+        assert "error" not in result, (
+            f"/issues root endpoint should pass: {result}"
+        )
+        assert result["full_path"] == "/issues", (
+            f"/issues full_path must not be mangled: {result}"
+        )
+        assert result["repo_key"] == "", (
+            f"Root endpoint repo_key must be empty: {result}"
+        )
 
     def test_releases_root_endpoint_passes(self):
         """``/releases`` (root, listing all org-wide releases) must reach the
@@ -361,9 +445,15 @@ class TestGhApiRootEndpoints:
             allowed_repos=set(),
             current_repo="misospace/pr-reviewer-action",
         )
-        assert "error" not in result, f"/releases root endpoint should pass: {result}"
-        assert result["full_path"] == "/releases", f"/releases full_path must not be mangled: {result}"
-        assert result["repo_key"] == "", f"Root endpoint repo_key must be empty: {result}"
+        assert "error" not in result, (
+            f"/releases root endpoint should pass: {result}"
+        )
+        assert result["full_path"] == "/releases", (
+            f"/releases full_path must not be mangled: {result}"
+        )
+        assert result["repo_key"] == "", (
+            f"Root endpoint repo_key must be empty: {result}"
+        )
 
     def test_root_endpoint_with_dot_segment_still_rejected(self):
         """Root endpoints inherit the dot-segment / unsafe-character guards.
@@ -384,5 +474,4 @@ class TestGhApiRootEndpoints:
 
 if __name__ == "__main__":
     import pytest
-
     pytest.main([__file__, "-v"])
