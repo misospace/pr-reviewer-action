@@ -28,12 +28,36 @@ chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH"
 
 # Run a snippet in a clean subshell with controlled env; echoes stdout.
+# Args: platform server snippet [forgejo_api_url] [tangled_env_csv]
+# tangled_env_csv is "KEY=VAL,KEY=VAL" — each pair is exported verbatim.
+# When TANGLED_RUNTIME_SIGNALS are unset explicitly so they cannot leak
+# from the host shell, the helper exports every name in the shared list
+# as empty first, so test cases can opt-in by adding a pair to the CSV.
 run_seam() {
-  local platform="$1" server="$2" snippet="$3" forgejo_api_url="${4:-}"
+  local platform="$1" server="$2" snippet="$3" forgejo_api_url="${4:-}" tangled_csv="${5:-}"
   (
     export PLATFORM="$platform"
     if [[ -n "$server" ]]; then export GITHUB_SERVER_URL="$server"; else unset GITHUB_SERVER_URL; fi
     if [[ -n "$forgejo_api_url" ]]; then export FORGEJO_API_URL="$forgejo_api_url"; else unset FORGEJO_API_URL; fi
+    # Start with all known TANGLED_* signals explicitly empty so a host
+    # shell that happens to have one set cannot contaminate auto detection.
+    local sig
+    for sig in TANGLED_PIPELINE_ID TANGLED_PIPELINE_KIND TANGLED_REPO_DID \
+               TANGLED_REPO_NAME TANGLED_REPO_KNOT TANGLED_REPO_URL \
+               TANGLED_REPO_DEFAULT_BRANCH TANGLED_PR_SOURCE_BRANCH \
+               TANGLED_PR_TARGET_BRANCH TANGLED_PR_SOURCE_SHA \
+               TANGLED_BOBBIN_URL TANGLED_APPVIEW_URL TANGLED_KNOT_URL; do
+      unset "$sig"
+    done
+    if [[ -n "$tangled_csv" ]]; then
+      local pair key val
+      IFS=',' read -r -a pairs <<< "$tangled_csv"
+      for pair in "${pairs[@]}"; do
+        key="${pair%%=*}"
+        val="${pair#*=}"
+        export "$key"="$val"
+      done
+    fi
     unset _PLATFORM_API_SOURCED
     # shellcheck disable=SC1090
     source "$SEAM"
@@ -45,13 +69,49 @@ echo "=== platform_resolve ==="
 check "default resolves to github" "$(run_seam "" "" 'platform_resolve')" "github"
 check "explicit github" "$(run_seam github "" 'platform_resolve')" "github"
 check "explicit forgejo" "$(run_seam forgejo "" 'platform_resolve')" "forgejo"
+check "explicit tangled" "$(run_seam tangled "" 'platform_resolve')" "tangled"
+check "tangled case-insensitive" "$(run_seam Tangled "" 'platform_resolve')" "tangled"
 check "auto + github.com server → github" "$(run_seam auto "https://github.com" 'platform_resolve')" "github"
 check "auto + no server → github" "$(run_seam auto "" 'platform_resolve')" "github"
 check "auto + custom host → forgejo" "$(run_seam auto "https://forgejo.example.com" 'platform_resolve')" "forgejo"
 check "auto + FORGEJO_API_URL → forgejo" "$(run_seam auto "https://github.com" 'platform_resolve' "https://forgejo.example.com")" "forgejo"
+# Tangled auto-detection (#583): any stable TANGLED_* runtime signal
+# promotes auto → tangled BEFORE the non-github.com host fallback fires,
+# so a self-hosted Tangled knot on a custom host never lands on forgejo.
+check "auto + TANGLED_PIPELINE_ID + custom host → tangled" \
+  "$(run_seam auto "https://knot.tangled.org" 'platform_resolve' "" \
+    "TANGLED_PIPELINE_ID=at://did:plc:abc/sh.tangled.repo.pull/rkey")" \
+  "tangled"
+check "auto + TANGLED_REPO_DID only → tangled" \
+  "$(run_seam auto "https://github.com" 'platform_resolve' "" \
+    "TANGLED_REPO_DID=did:plc:abc")" \
+  "tangled"
+check "auto + TANGLED_PR_SOURCE_BRANCH only → tangled" \
+  "$(run_seam auto "https://github.com" 'platform_resolve' "" \
+    "TANGLED_PR_SOURCE_BRANCH=feature-x")" \
+  "tangled"
+check "auto + tangled beats FORGEJO_API_URL" \
+  "$(run_seam auto "https://github.com" 'platform_resolve' "https://forgejo.example.com" \
+    "TANGLED_REPO_DID=did:plc:abc,TANGLED_REPO_NAME=core")" \
+  "tangled"
+# Regression guard: without any TANGLED_* signal, the existing non-github
+# host → forgejo rule must keep firing (so removing a Tangled signal
+# always falls through, never gets stuck on Tangled).
+check "auto + custom host + no tangled signal → forgejo" \
+  "$(run_seam auto "https://knot.tangled.org" 'platform_resolve')" \
+  "forgejo"
+# PR_NUMBER alone is NOT a Tangled signal — the auto path must not be
+# fooled into Tangled by a numeric pull identifier (#564/#583 warning).
+check "auto + PR_NUMBER alone → forgejo (not tangled)" \
+  "$(run_seam auto "https://knot.tangled.org" 'platform_resolve' "" \
+    "PR_NUMBER=42")" \
+  "forgejo"
 check "case-insensitive" "$(run_seam GITHUB "" 'platform_resolve')" "github"
 RESULT="$(run_seam gitlab "" 'platform_resolve')"
 check "invalid platform errors" "$(echo "$RESULT" | grep -c "unsupported PLATFORM")" "1"
+RESULT_INVALID="$(run_seam gitlab "" 'platform_resolve')"
+check "invalid platform errors mention expected values" \
+  "$(echo "$RESULT_INVALID" | grep -c "expected github|forgejo|tangled|auto")" "1"
 
 echo ""
 echo "=== github backend: exact gh argv ==="

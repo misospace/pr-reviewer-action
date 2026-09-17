@@ -572,13 +572,18 @@ inputs:
   platform:
     description: >-
       Target hosting platform for API capability gating and backend selection.
-      'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL:
-      non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo';
-      otherwise 'github'. Set 'forgejo' or 'github' explicitly to override
-      auto-detection. On Forgejo, features requiring GitHub GraphQL (thread
-      resolution, review minimization) degrade gracefully with a log line;
-      the REST backend handles core PR operations. Linked-source enrichment
-      always targets github.com regardless of this setting.
+      'auto' (default) detects from the runtime: any TANGLED_* env var
+      (Spindle pipelines export them) resolves to 'tangled'; otherwise a
+      non-github.com GITHUB_SERVER_URL or a set FORGEJO_API_URL resolves
+      to 'forgejo'; otherwise 'github'. Set 'tangled', 'forgejo', or
+      'github' explicitly to override auto-detection. On non-GitHub hosts,
+      features requiring GitHub GraphQL (thread resolution, review
+      minimization) degrade gracefully with a log line; the REST backend
+      handles core PR operations. Tangled support is currently identity-
+      and context-only (#583): the review pipeline refuses to start
+      against Tangled until the Bobbin / ATProto backends land (#584,
+      #587). Linked-source enrichment always targets github.com
+      regardless of this setting.
     required: false
     default: "auto"
   forgejo_api_url:

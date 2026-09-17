@@ -5,6 +5,10 @@ Mirror of ``scripts/platform_api.sh`` for the Python consumers
 ``gh_api`` tool migrates here in #226). The github backend is argv-identical
 to the pre-seam code; forgejo support arrives per-consumer across the 1.4.x
 line, and until then unsupported operations raise instead of failing silently.
+Tangled support begins in #583: the platform identity is resolved from
+Spindle runtime signals (``TANGLED_*`` env vars) but no Tangled network or
+API calls land here yet — those arrive in #584/#587 once the Bobbin client
+and ATProto session modules exist.
 """
 
 from __future__ import annotations
@@ -106,56 +110,112 @@ GH_API_ROOT_PREFIXES = (
 )
 
 
+# Stable Tangled/Spindle runtime signals (#583). The platform seam treats any
+# of these as a positive Tangled identification: the runtime exports the full
+# set under a pull_request / push pipeline, but a single ``TANGLED_*`` env var
+# is enough to confirm we're not on a forgejo host whose Actions runtime
+# populates a non-github.com ``GITHUB_SERVER_URL``. The check is on the env
+# var NAME and a non-empty value, so a Spindle runner that omits one of the
+# optional signals still resolves correctly while a host that has a Tangled
+# env var set to empty (e.g. unset-as-empty in a misconfigured workflow) does
+# not accidentally land on the Tangled branch.
+_TANGLED_RUNTIME_SIGNALS = (
+    "TANGLED_PIPELINE_ID",
+    "TANGLED_PIPELINE_KIND",
+    "TANGLED_REPO_DID",
+    "TANGLED_REPO_NAME",
+    "TANGLED_REPO_KNOT",
+    "TANGLED_PR_SOURCE_BRANCH",
+    "TANGLED_PR_TARGET_BRANCH",
+    "TANGLED_PR_SOURCE_SHA",
+)
+
+
+def _tangled_runtime_signal_present(env=None) -> bool:
+    """Return True iff at least one stable Tangled/Spindle env var is set
+    to a non-empty value.
+
+    Centralises the detection rule so the Python and shell resolvers share
+    one definition of "looks like Tangled". Takes an optional env mapping for
+    testing; defaults to ``os.environ`` so callers don't have to forward
+    anything in production.
+    """
+    src = os.environ if env is None else env
+    return any(name in src and src[name] for name in _TANGLED_RUNTIME_SIGNALS)
+
+
 def resolve_platform(
-    platform: str | None = None, forgejo_api_url: str | None = None
+    platform: str | None = None,
+    forgejo_api_url: str | None = None,
+    env: dict | None = None,
 ) -> str:
-    """Resolve PLATFORM (github|forgejo|auto) to a concrete backend name.
+    """Resolve PLATFORM (github|forgejo|tangled|auto) to a concrete backend name.
 
     Mirrors ``platform_resolve`` in scripts/platform_api.sh: ``auto`` maps to
     forgejo when FORGEJO_API_URL is set or GITHUB_SERVER_URL names a
     non-github.com host (Forgejo Actions runners populate it with the
     instance URL), github otherwise.
 
+    Tangled is recognised by stable Spindle runtime signals (#583): any
+    exported ``TANGLED_*`` env var (see ``_TANGLED_RUNTIME_SIGNALS``) flips
+    ``auto`` to ``tangled`` BEFORE the non-github.com host heuristic, so a
+    self-hosted Tangled knot whose URL happens not to be ``github.com`` is
+    never misclassified as Forgejo. The order matters: Tangled detection
+    runs first so a Spindle runner on a custom host cannot fall through to
+    the Forgejo branch.
+
     ``platform`` and ``forgejo_api_url`` are optional overrides for the two
     env vars this function otherwise reads. They exist so a caller that
     already holds those values can delegate here instead of re-deriving the
     rule — notably ``forgejo_backend._is_forgejo_mode``, which must consult
     its monkeypatchable module-level ``FORGEJO_API_URL`` rather than a fresh
-    env read. With no arguments the behaviour is unchanged: an unset PLATFORM
-    still defaults to ``github`` (the documented contract).
+    env read. The ``env`` override exposes the Tangled-detection inputs the
+    same way for testability without monkeypatching ``os.environ``; with no
+    arguments the behaviour is unchanged: an unset PLATFORM still defaults
+    to ``github`` (the documented contract), and GitHub / Forgejo resolution
+    rules are byte-for-byte identical to the pre-#583 implementation.
     """
+    src = os.environ if env is None else env
     if platform is None:
-        platform = os.environ.get("PLATFORM", "github")
+        platform = src.get("PLATFORM", "github")
     platform = platform.strip().lower() or "github"
     if platform == "auto":
+        if _tangled_runtime_signal_present(env=src):
+            return "tangled"
         api = (
             forgejo_api_url
             if forgejo_api_url is not None
-            else os.environ.get("FORGEJO_API_URL", "")
+            else src.get("FORGEJO_API_URL", "")
         )
         if api.strip():
             return "forgejo"
-        server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
+        server = src.get("GITHUB_SERVER_URL", "").rstrip("/")
         if server and server != "https://github.com":
             return "forgejo"
         return "github"
-    if platform in ("github", "forgejo"):
+    if platform in ("github", "forgejo", "tangled"):
         return platform
-    raise ValueError(f"unsupported PLATFORM {platform!r} (expected github|forgejo|auto)")
+    raise ValueError(
+        f"unsupported PLATFORM {platform!r} "
+        "(expected github|forgejo|tangled|auto)"
+    )
 
 
 def gh_argv(args: list) -> list:
     """Return the argv for a host-platform CLI call.
 
     github: ``["gh", *args]`` — byte-identical to the pre-seam invocations.
-    forgejo: raises PlatformUnsupported; the consumers that reach this
-    (finding-thread resolution, the tool harness) get Forgejo backends in
-    #224/#226.
+    forgejo / tangled: raises PlatformUnsupported. ``gh`` is a GitHub-only
+    binary and Tangled has no equivalent (#583 — the Tangled backends in
+    #584/#587 will replace ``gh`` calls entirely, not add a Tangled
+    adapter inside ``gh_argv``).
     """
-    if resolve_platform() == "forgejo":
+    resolved = resolve_platform()
+    if resolved != "github":
         raise PlatformUnsupported(
-            "gh CLI operations are not available on PLATFORM=forgejo; "
-            "this consumer's Forgejo backend lands later in the 1.4.x line"
+            f"gh CLI operations are not available on PLATFORM={resolved}; "
+            "this consumer's non-GitHub backend lands later (Forgejo: #224/"
+            "#226, Tangled: #584/#587)"
         )
     return ["gh", *args]
 

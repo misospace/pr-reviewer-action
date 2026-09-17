@@ -104,7 +104,13 @@ What it supports:
 
 ## 🖥️ Platform support
 
-The action works on **GitHub** and **Forgejo** (1.4.x). Set `platform: auto` (default) to detect automatically from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`, or set explicitly to `forgejo` / `github`.
+The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** identity
+is recognised on Spindle pipelines (#583) but the review pipeline does not
+yet run end-to-end against Tangled — the Bobbin / ATProto backends are
+landing in #584 and #587. Set `platform: auto` (default) to detect
+automatically (any `TANGLED_*` env var → `tangled`; otherwise a
+non-github.com `GITHUB_SERVER_URL` or a set `FORGEJO_API_URL` → `forgejo`;
+otherwise `github`), or set explicitly to `tangled` / `forgejo` / `github`.
 
 | Feature | GitHub | Forgejo |
 |---|---|---|
@@ -404,7 +410,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
-| `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
+| `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from the runtime: any `TANGLED_*` env var (Spindle pipelines export them) resolves to `tangled`; otherwise a non-github.com `GITHUB_SERVER_URL` or a set `FORGEJO_API_URL` resolves to `forgejo`; otherwise `github`. Set `tangled`, `forgejo`, or `github` explicitly to override auto-detection. On non-GitHub hosts, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Tangled support is identity-only today (#583) — the review pipeline refuses to start against Tangled until the Bobbin / ATProto backends land (#584, #587). Linked-source enrichment always targets github.com. | No | `auto` |
 | `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
 | `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
 | `forgejo_auth_method` | Forgejo authentication method. `token` (default) uses a static personal access token via `forgejo_token`. `authorized_integration` uses Forgejo's [authorized integrations](https://forgejo.org/docs/latest/user/api/authorized-integrations/) flow: the action exchanges `forgejo_authorized_integration_audience` for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with `Authorization: Bearer {jwt}`. Requires `forgejo_authorized_integration_audience` and that the workflow sets `enable-openid-connect: true`. | No | `token` |

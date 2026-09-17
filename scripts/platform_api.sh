@@ -13,9 +13,17 @@
 #   forgejo – operations via pr_reviewer/forgejo_backend.py (curl /api/v1).
 #             Requires FORGEJO_API_URL. Implemented per-operation across the
 #             1.4.x line; unimplemented operations fail loudly, never silently.
-#   auto    – resolved here: forgejo when FORGEJO_API_URL is set or when
-#             GITHUB_SERVER_URL names a non-github.com host (Forgejo Actions
-#             runners populate it with the instance URL), github otherwise.
+#   tangled – operations via pr_reviewer/tangled_context.py + (later) the
+#             Bobbin / ATProto backends (#583/#584/#587). The runtime
+#             identity (TANGLED_*) is read here, but no XRPC calls are
+#             issued by the platform seam itself.
+#   auto    – resolved here: tangled when any TANGLED_* runtime signal is
+#             set (Spindle pipelines export them), then forgejo when
+#             FORGEJO_API_URL is set or when GITHUB_SERVER_URL names a
+#             non-github.com host (Forgejo Actions runners populate it with
+#             the instance URL), github otherwise. Tangled detection runs
+#             before the Forgejo fallback so a self-hosted Tangled knot on
+#             a custom host cannot be misclassified as Forgejo.
 #
 # Two function classes:
 #   platform_*       – the repo under review; switches on PLATFORM.
@@ -50,14 +58,60 @@ _PLATFORM_API_SOURCED=1
 
 _PLATFORM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Stable Tangled/Spindle runtime signals (#583). The platform seam treats
+# the presence of any of these env vars as a positive Tangled
+# identification — the runtime exports the full set under a pull_request /
+# push pipeline, but a single ``TANGLED_*`` env var is enough to confirm
+# we're not on a forgejo host whose Actions runtime populates a
+# non-github.com ``GITHUB_SERVER_URL``. The check is on the env var NAME
+# (not its value): an empty string still counts because we use
+# ``[[ -n "${VAR:-}" ]]``, which is false for unset OR empty — and we want
+# unset to fail Tangled detection but empty to be a defensive pass-through
+# in case a Spindle runner exports an unset shell variable as empty by
+# accident. To keep behaviour deterministic we only count the env var as
+# present when its value is non-empty.
+_TANGLED_RUNTIME_SIGNALS=(
+  TANGLED_PIPELINE_ID
+  TANGLED_PIPELINE_KIND
+  TANGLED_REPO_DID
+  TANGLED_REPO_NAME
+  TANGLED_REPO_KNOT
+  TANGLED_PR_SOURCE_BRANCH
+  TANGLED_PR_TARGET_BRANCH
+  TANGLED_PR_SOURCE_SHA
+)
+
+_platform_tangled_runtime_signal_present() {
+  # Single source of truth for "looks like Tangled" — keeps the Python and
+  # shell resolvers from drifting. Loops the shared signal list; any
+  # non-empty value flips the result to true. Used both by the auto path
+  # below and by callers that need to know whether Tangled runtime is
+  # available without forcing explicit PLATFORM=tangled.
+  local name
+  for name in "${_TANGLED_RUNTIME_SIGNALS[@]}"; do
+    if [[ -n "${!name:-}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 platform_resolve() {
-  # Normalize PLATFORM, resolving `auto` from explicit Forgejo config or host.
+  # Normalize PLATFORM, resolving `auto` from explicit Tangled / Forgejo
+  # signals or host. Order matters: Tangled detection runs FIRST so a
+  # self-hosted Tangled knot on a non-github.com host cannot fall through
+  # to the Forgejo branch (#583). The Forgejo fallback then only fires on
+  # a true Forgejo Actions runner (GITHUB_SERVER_URL is set to the
+  # instance) or when FORGEJO_API_URL is explicitly configured.
   local p="${PLATFORM:-github}"
   p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
   if [[ "$p" == "auto" ]]; then
+    if _platform_tangled_runtime_signal_present; then
+      printf '%s' "tangled"
+      return 0
+    fi
     if [[ -n "${FORGEJO_API_URL:-}" ]]; then
-      p="forgejo"
-      printf '%s' "$p"
+      printf '%s' "forgejo"
       return 0
     fi
     local server="${GITHUB_SERVER_URL:-}"
@@ -68,9 +122,9 @@ platform_resolve() {
     fi
   fi
   case "$p" in
-    github|forgejo) printf '%s' "$p" ;;
+    github|forgejo|tangled) printf '%s' "$p" ;;
     *)
-      echo "platform_api: unsupported PLATFORM '$p' (expected github|forgejo|auto)" >&2
+      echo "platform_api: unsupported PLATFORM '$p' (expected github|forgejo|tangled|auto)" >&2
       return 1
       ;;
   esac
