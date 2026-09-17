@@ -1,4 +1,4 @@
-"""Red-team + translation tests for the Forgejo backend of the gh_api tool.
+"""Red-team + translation tests for the Forgejo backend of the gh_api tool. 
 
 Issue #226 ports the gh_api tool to the platform seam so on a Forgejo host it
 issues ``/api/v1`` requests instead of going to ``https://api.github.com``.

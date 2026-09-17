@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Thin CLI wrapper for the related-code context builder (#572)."""
 
 from __future__ import annotations

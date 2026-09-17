@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.http_client.
+"""Unit tests for pr_reviewer.http_client. 
 
 Target: >= 50% line coverage of pr_reviewer/http_client.py.
 """

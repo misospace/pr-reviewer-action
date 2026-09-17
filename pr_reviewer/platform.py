@@ -1,4 +1,4 @@
-"""Python side of the platform seam (issue #221).
+"""Python side of the platform seam (issue #221). 
 
 Mirror of ``scripts/platform_api.sh`` for the Python consumers
 (``scripts/resolve_finding_threads.py`` now; ``scripts/run_tool_harness.py``'s

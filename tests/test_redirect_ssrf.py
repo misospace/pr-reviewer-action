@@ -1,4 +1,4 @@
-"""Tests for redirect-SSRF mitigation in web_fetch and fetch_url (Issue #494).
+"""Tests for redirect-SSRF mitigation in web_fetch and fetch_url (Issue #494). 
 
 Verifies that both ``web_fetch`` (tool_executors) and ``fetch_url``
 (http_client) re-validate the host allowlist on every redirect hop, so a

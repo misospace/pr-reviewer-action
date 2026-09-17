@@ -1,4 +1,4 @@
-"""Regression tests for the eval-harness CI workflow.
+"""Regression tests for the eval-harness CI workflow. 
 
 These guard against the CI ``validate`` failure recorded in the job log
 referenced by issue #472, where ``rhysd/actionlint`` reported::

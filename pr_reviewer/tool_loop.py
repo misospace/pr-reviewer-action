@@ -1,4 +1,4 @@
-"""Native tool-calling loop driver (#203, umbrella #197 §1 item 3/7).
+"""Native tool-calling loop driver (#203, umbrella #197 §1 item 3/7). 
 
 Drives an agentic exchange against a tool-capable model: send the corpus +
 tool schemas, execute the tool calls the model returns, append the results,

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for scripts/image_digest_analysis.py — token caching, time budget,
 parallel metadata fetching, and compare-repo resolution."""
 

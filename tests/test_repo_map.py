@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.repo_map — deterministic bounded repository map (#569).
+"""Tests for pr_reviewer.repo_map — deterministic bounded repository map (#569). 
 
 Uses real temporary Git repos (init/add/commit in tmp dirs) so the
 ``git ls-files -z`` path is exercised end to end, plus direct calls into the

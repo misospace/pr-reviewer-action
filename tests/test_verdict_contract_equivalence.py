@@ -1,4 +1,4 @@
-"""Verdict-turn contract equivalence tests (#362).
+"""Verdict-turn contract equivalence tests (#362). 
 
 The review verdict is built on two code paths that live in different
 languages and must stay in lockstep on the shared invariants:

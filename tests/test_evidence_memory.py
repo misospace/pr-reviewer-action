@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.evidence_memory — cross-run evidence memory (#265)."""
+"""Tests for pr_reviewer.evidence_memory — cross-run evidence memory (#265).""" 
 
 import json
 import sys

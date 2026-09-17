@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for scripts/strip_empty_conditional_sections.py.
 
 Regression tests for issue #415: when the corpus contains no linked-issue

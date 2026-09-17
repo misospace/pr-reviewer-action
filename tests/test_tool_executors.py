@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.tool_executors.
+"""Unit tests for pr_reviewer.tool_executors. 
 
 Target: >= 50% line coverage of pr_reviewer/tool_executors.py.
 

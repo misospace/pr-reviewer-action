@@ -1,4 +1,4 @@
-"""Forgejo REST backend for core PR I/O operations.
+"""Forgejo REST backend for
 
 Provides a unified interface for PR metadata, diff retrieval, comment management,
 issue fetching, and PR file listing — working with both GitHub (via ``gh`` CLI)

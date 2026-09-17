@@ -1,4 +1,4 @@
-"""Deterministic PR classification and risk-flag detection.
+"""Deterministic PR classification and risk-flag detection. 
 
 Analyzes a PR's file changes, diff content, linked issues, and metadata to
 produce structured classification output that is injected into the review

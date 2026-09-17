@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Reduce a fetched linked-source body to corpus-worthy text.
 
 HTML pages are stripped to visible text (script/style/head dropped, tags

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Regression guard for #252 item 4: the action's urllib-based HTTP helpers
 must set a non-default User-Agent.
 

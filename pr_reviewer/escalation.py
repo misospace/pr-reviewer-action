@@ -1,4 +1,4 @@
-"""Escalation decision for fast→smart review routing (#160).
+"""Escalation decision for fast→smart review routing (#160). 
 
 After the fast model produced a review, decide deterministically whether the
 smart model should re-review. Every trigger is boring and testable on

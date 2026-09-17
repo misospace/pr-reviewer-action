@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.transport.
+"""Unit tests for pr_reviewer.transport. 
 
 Target: >= 50% line coverage of pr_reviewer/transport.py.
 """

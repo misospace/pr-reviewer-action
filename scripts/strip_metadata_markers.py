@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Strip internal AI PR reviewer metadata markers from review markdown.
 
 This prevents model-generated content from containing fake metadata markers

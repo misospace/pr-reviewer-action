@@ -1,4 +1,4 @@
-"""Pre-check logic extracted from scripts/check_review_needed.sh.
+"""Pre-check logic extracted from scripts/check_review_needed.sh. 
 
 Core functions for diff fingerprinting, incremental scope detection,
 config hash computation, and review metadata transport.

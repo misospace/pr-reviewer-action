@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Thin CLI wrapper for the repository-map builder (#569).
 
 All core logic lives in the importable ``pr_reviewer/repo_map.py`` module

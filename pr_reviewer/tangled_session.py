@@ -147,7 +147,9 @@ def _validate_host(host: str) -> None:
     hostname = (parts.hostname or "").lower()
     if not hostname:
         raise TangledConfigError("ATPROTO_HOST must include a hostname")
-    if not re.fullmatch(
+    # Bare IPv6 literals (e.g. [::1]) are only accepted when they are
+    # loopback; everything else must match the ordinary hostname shape.
+    if hostname not in LOOPBACK_HOSTS and not re.fullmatch(
         r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*",
         hostname,
     ):

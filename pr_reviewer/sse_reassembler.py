@@ -1,4 +1,4 @@
-"""Reassemble Server-Sent Events (SSE) streaming responses into consolidated JSON.
+"""Reassemble Server-Sent Events (SSE) streaming responses into consolidated JSON. 
 
 Ported from the ``reassemble_sse_response`` function in ``scripts/run_review.sh``.
 Handles OpenAI chat completions streaming and Anthropic messages streaming formats,

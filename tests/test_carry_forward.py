@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.carry_forward (#193)."""
+"""Tests for pr_reviewer.carry_forward (#193).""" 
 
 import json
 import sys

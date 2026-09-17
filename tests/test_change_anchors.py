@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.change_anchors — deterministic change-anchor extraction (#571)."""
+"""Tests for pr_reviewer.change_anchors — deterministic change-anchor extraction (#571).""" 
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""SSRF: resolved-IP gate for allowlisted hosts (issue #510).
+"""SSRF: resolved-IP gate for allowlisted hosts (issue #510). 
 
 Covers the remaining gap in the SSRF hardening arc: the hostname allowlist
 is no longer trusted on its own; the hostname must resolve only to

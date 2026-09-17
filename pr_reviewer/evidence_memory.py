@@ -1,4 +1,4 @@
-"""Cross-run evidence memory: carry gathered evidence across incremental reviews.
+"""Cross-run evidence memory: carry gathered evidence across incremental reviews. 
 
 A native_loop review gathers evidence with read-only tools (read a config,
 fetch a support matrix, grep for callers). Today that work is thrown away at

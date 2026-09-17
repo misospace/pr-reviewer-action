@@ -542,6 +542,108 @@ def test_get_session_establishes_once_and_caches(monkeypatch):
         tangled_session.reset_session()
 
 
+def test_redirect_regression_bearer_never_reach_redirect_target():
+    # Regression demanded by the #587 review: prove that Authorization is
+    # never sent to a redirected origin. This drives the module's real
+    # ``urlopen`` seam (the opener it builds) against a real local origin
+    # whose server 302-redirects to a second local origin, and asserts the
+    # redirect target never receives the request's bearer token.
+    #
+    # If urllib's default redirect handler were installed, it would re-issue
+    # the request with all headers preserved and this assertion would fail.
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received: dict = {"target": []}
+    target_up = threading.Event()
+    origin_up = threading.Event()
+
+    class _TargetHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            received["target"].append((self.path, self.headers.get("Authorization"), body))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    class _OriginHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == tangled_session.CREATE_SESSION_PATH:
+                # createSession succeeds; record writes get the 302.
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(SESSION_RESPONSE).encode("utf-8"))
+            else:
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target_port}/stolen")
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    origin_server = ThreadingHTTPServer(("127.0.0.1", 0), _OriginHandler)
+    target_server = ThreadingHTTPServer(("127.0.0.1", 0), _TargetHandler)
+    origin_port = origin_server.server_address[1]
+    target_port = target_server.server_address[1]
+
+    def _serve(server, up, stop):
+        up.set()
+        server.serve_forever(poll_interval=0.01)
+
+    threads = []
+    for server, up in ((origin_server, origin_up), (target_server, target_up)):
+        stop = threading.Event()
+        threads.append((threading.Thread(target=_serve, args=(server, up, stop)), stop))
+    for thread, _stop in threads:
+        thread.start()
+
+    try:
+        assert origin_up.wait(2) and target_up.wait(2)
+        session = tangled_session.TangledSession(
+            tangled_session.SessionConfig(
+                host=f"http://127.0.0.1:{origin_port}",
+                handle=HANDLE,
+                app_password=APP_PASSWORD,
+                timeout=5,
+            )
+        )
+        session.establish()
+        with pytest.raises(tangled_session.TangledSessionError, match="HTTP 302"):
+            session.create_record("ok", {"x": 1})
+
+        # The redirect target must never receive the bearer. It should not
+        # receive the request at all (the redirect is refused before any
+        # re-issue), and it never carries Authorization.
+        for path, authorization, _body in received["target"]:
+            assert path == "/stolen"
+            assert authorization is None
+            assert "Bearer" not in (authorization or "")
+    finally:
+        for _thread, stop in threads:
+            stop.set()
+        for server in (origin_server, target_server):
+            server.shutdown()
+            server.server_close()
+        for thread, _stop in threads:
+            thread.join(2)
+
+
+def test_loopback_ipv6_is_accepted():
+    # The docstring promises [::1] is accepted as a loopback host; it must
+    # pass the same validation as localhost/127.0.0.1.
+    tangled_session._validate_host("http://[::1]:3000")
+
+
+def test_non_loopback_ipv6_is_rejected():
+    for host in ("http://[2001:db8::1]:3000", "http://[fe80::1]:3000"):
+        with pytest.raises(tangled_session.TangledConfigError):
+            tangled_session._validate_host(host)
+
+
 def test_get_session_requires_configuration(monkeypatch):
     monkeypatch.delenv("ATPROTO_HANDLE", raising=False)
     monkeypatch.delenv("ATPROTO_APP_PASSWORD", raising=False)

@@ -1,4 +1,4 @@
-"""Tests for action.yml / README input consistency."""
+"""Tests for action.yml / README input consistency.""" 
 
 from __future__ import annotations
 

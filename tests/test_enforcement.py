@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.enforcement."""
+"""Tests for pr_reviewer.enforcement.""" 
 
 from __future__ import annotations
 

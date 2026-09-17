@@ -1,4 +1,4 @@
-"""Read-only MCP tool client for the native tool-calling loop (#245).
+"""Read-only MCP tool client for the native tool-calling loop (#245). 
 
 Lets the loop call read-only tools from an *allowlisted* set of MCP servers, so
 a reviewer can pull host-specific pre-rendered evidence the built-in tools can't

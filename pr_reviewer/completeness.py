@@ -1,4 +1,4 @@
-"""Deterministic review-completeness validation against must_check items.
+"""Deterministic review-completeness validation against must_check items. 
 
 The classifier (pr_reviewer/classifier.py) emits a must_check list for risky
 PRs and the prompt instructs the model to address each item. This module

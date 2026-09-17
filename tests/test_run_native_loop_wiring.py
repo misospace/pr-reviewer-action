@@ -1,4 +1,4 @@
-"""Integration test for run_tool_harness.run_native_loop (#203).
+"""Integration test for run_tool_harness.run_native_loop (#203). 
 
 Exercises the corpus → Conversation → driver → output-file path with a
 scripted transport (run_chat_request monkeypatched), and the degradation

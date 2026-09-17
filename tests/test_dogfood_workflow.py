@@ -1,4 +1,4 @@
-"""Regression tests for the dogfood self-review workflow (issue #565).
+"""Regression tests for the dogfood self-review workflow (issue #565). 
 
 The dogfood workflow (``.github/workflows/ai-pr-review.yaml``) reviews every
 PR with the repository's own in-flight action code (``uses: $/``). Its

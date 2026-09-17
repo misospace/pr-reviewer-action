@@ -1,4 +1,4 @@
-"""An empty completion must be distinguishable from a malformed one.
+"""An empty completion must be distinguishable from a malformed one. 
 
 A model that returns HTTP 200 with no content and zero completion tokens has
 generated nothing -- retrying it with the same input produces the same nothing.

@@ -1,4 +1,4 @@
-"""Tests for issue #103: respect tool_max_requests in tool harness planner and executor.
+"""Tests for issue #103: respect tool_max_requests in tool harness planner and executor. 
 
 Acceptance criteria:
   - TOOL_MAX_REQUESTS=1 limits planner prompt and executor to 1 call.

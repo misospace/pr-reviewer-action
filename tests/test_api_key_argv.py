@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests that transport.run_chat_request keeps the API key out of curl argv,
 passing it via a 0600 --config file that is removed afterwards."""
 

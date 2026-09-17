@@ -1,4 +1,4 @@
-"""Extract and validate JSON from an LLM model response.
+"""Extract and validate JSON from an LLM model response. 
 
 Ported from the ``parse_and_validate`` function in ``scripts/run_review.sh``.
 Handles multiple response formats (OpenAI choices, Anthropic content blocks,

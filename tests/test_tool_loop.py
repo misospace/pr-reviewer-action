@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.tool_loop.
+"""Unit tests for pr_reviewer.tool_loop. 
 
 Target: >= 50% line coverage of pr_reviewer/tool_loop.py.
 

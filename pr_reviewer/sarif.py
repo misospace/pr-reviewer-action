@@ -1,4 +1,4 @@
-"""Normalize local SARIF 2.1.0 results into stable evidence findings.
+"""Normalize local SARIF 2.1.0 results into stable evidence findings. 
 
 The importable :func:`normalize_sarif` function accepts an already-decoded JSON
 value and returns a version-1 artifact with a stable finding schema. Findings

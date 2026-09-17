@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """CLI for PR enrichment: extraction + linked-source rendering.
 
 Replaces brittle grep/sed pipelines in context.sh and enrichment.sh with

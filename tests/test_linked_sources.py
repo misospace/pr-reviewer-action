@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.linked_sources.
+"""Unit tests for pr_reviewer.linked_sources. 
 
 Target: >= 50% line coverage of pr_reviewer/linked_sources.py.
 """

@@ -1,4 +1,4 @@
-"""Bounded PR-thread (conversation comment) context builder (#578).
+"""Bounded PR-thread (conversation comment) context builder (#578). 
 
 Deterministic companion to the platform seam's ``platform_pr_review_comments``
 wrapper (scripts/platform_api.sh), which fetches up to the 100 most recent

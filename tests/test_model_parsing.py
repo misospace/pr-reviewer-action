@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Fixture tests for model output parsing and SSE reassembly.
 
 Covers the acceptance criteria from issue #32:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """A/B evaluation harness for comparing PR review modes.
 
 Compares review approaches on a shared PR corpus:

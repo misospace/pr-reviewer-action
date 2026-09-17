@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for the gh_api tool and the underlying _validate_endpoint helper.
 
 The validator is the security boundary for both backends (GitHub and

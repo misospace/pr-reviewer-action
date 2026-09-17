@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.conversation (#202)."""
+"""Tests for pr_reviewer.conversation (#202).""" 
 
 from __future__ import annotations
 

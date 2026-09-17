@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.sse_reassembler."""
+"""Tests for pr_reviewer.sse_reassembler.""" 
 
 from __future__ import annotations
 

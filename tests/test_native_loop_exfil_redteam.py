@@ -1,4 +1,4 @@
-"""Exfiltration red-team suite for the native tool-calling loop (#206, 6/7 of #197).
+"""Exfiltration red-team suite for the native tool-calling loop (#206, 6/7 of #197). 
 
 Threat model
 ------------

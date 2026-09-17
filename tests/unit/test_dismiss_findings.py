@@ -1,4 +1,4 @@
-"""Tests for the maintainer dismissal directive (#534).
+"""Tests for the maintainer dismissal directive (#534). 
 
 The precheck is expected to have already gated on the API permission check
 ("the permission check, not the text, is what makes this safe"), so the

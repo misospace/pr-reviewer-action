@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.mcp_client (#245) — no network (stubbed transport)."""
+"""Unit tests for pr_reviewer.mcp_client (#245) — no network (stubbed transport).""" 
 
 from __future__ import annotations
 

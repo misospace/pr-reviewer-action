@@ -1,4 +1,4 @@
-"""Tests for the web_search tool (SearXNG-backed) in run_tool_harness.py.
+"""Tests for the web_search tool (SearXNG-backed) in run_tool_harness.py. 
 
 web_search lets the native loop discover a page's URL (e.g. a moved docs
 site) and then web_fetch it. It hits a single operator-configured endpoint;

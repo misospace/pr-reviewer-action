@@ -1,4 +1,4 @@
-"""Deterministic change-anchor extraction from PR diffs (#571).
+"""Deterministic change-anchor extraction from PR diffs (#571). 
 
 Turns a unified diff (``pr.diff`` / ``pr.diff.truncated``) plus the changed-file
 list (``pr-files.json`` / ``pr-files.raw.json``) into a small, versioned,

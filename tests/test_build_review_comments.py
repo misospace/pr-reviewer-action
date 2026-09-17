@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for scripts/build_review_comments.py — diff anchoring, filtering,
 caps, body sanitization — plus action.yml wiring for inline_findings."""
 

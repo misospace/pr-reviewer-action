@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Deterministic bounded repository map (issue #569).
 
 Builds a compact structural summary of a checked-out repository from **Git

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """HTTP/subprocess transport for the tool harness (#304 split).
 
 Owns the low-level model-call transport (curl-based chat requests + the simple

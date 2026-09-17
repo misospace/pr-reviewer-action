@@ -1,4 +1,4 @@
-"""Deterministic Linear issue context for PR reviews.
+"""Deterministic Linear issue context for PR reviews. 
 
 The adapter discovers configured Linear issue identifiers in the PR title,
 fetches them through Linear's GraphQL API, and renders the same linked-issue

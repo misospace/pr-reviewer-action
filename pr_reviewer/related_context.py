@@ -1,4 +1,4 @@
-"""Deterministic bounded related-code context from change anchors (#572).
+"""Deterministic bounded related-code context from change anchors (#572). 
 
 The builder consumes the version-1 change-anchor artifact and a checked-out Git
 worktree. It searches only high-confidence symbol anchors, discovers likely test

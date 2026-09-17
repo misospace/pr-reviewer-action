@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for pr_reviewer.escalation — fast→smart escalation triggers (#160)."""
 
 from __future__ import annotations

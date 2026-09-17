@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Linked-source markdown rendering for PR enrichment.
 
 Renders ``linked-sources.md`` from extracted URLs: fetches allowlisted

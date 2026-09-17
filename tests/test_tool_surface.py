@@ -1,4 +1,4 @@
-"""Tool-surface expansion (#197 §3): read_file line ranges, git_log, git_blame.
+"""Tool-surface expansion (#197 §3): read_file line ranges, git_log, git_blame. 
 
 Drives the executor (execute_tool_request — the native loop's execute_fn target)
 so the tests exercise the real arg-handling, security guards, and output shaping.

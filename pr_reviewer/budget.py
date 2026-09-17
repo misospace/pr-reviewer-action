@@ -1,4 +1,4 @@
-"""Wall-clock budget tracker for best-effort enrichment.
+"""Wall-clock budget tracker for best-effort enrichment. 
 
 Extracted from ``scripts/run_enrichment.py`` (#359). Enrichment performs
 bounded network work; once the budget elapses, remaining phases are skipped

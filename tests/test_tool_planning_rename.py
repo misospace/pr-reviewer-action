@@ -1,4 +1,4 @@
-"""CI gate for the #540 tool_planning_* → tool_* input rename.
+"""CI gate for the #540 tool_planning_* → tool_* input rename. 
 
 The plan_execute planner the ``tool_planning_*`` inputs were named for was
 removed in #304; the native tool loop (#203) is the only tool mode. The

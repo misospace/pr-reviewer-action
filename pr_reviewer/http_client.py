@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """HTTP + GitHub API transport helpers for PR enrichment.
 
 Best-effort network primitives extracted from ``scripts/run_enrichment.py``

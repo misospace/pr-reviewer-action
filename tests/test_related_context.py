@@ -1,4 +1,4 @@
-"""Tests for the deterministic related-code scanner (#572)."""
+"""Tests for the deterministic related-code scanner (#572).""" 
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Pure extraction functions for PR enrichment context.
+"""Pure extraction functions for PR enrichment context. 
 
 Moves brittle grep/sed pipelines from shell into testable Python.
 Consumed by scripts/run_enrichment.py CLI and optionally sourced by shell sections.

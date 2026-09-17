@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Execute evidence-provider commands and write structured results."""
 
 import json

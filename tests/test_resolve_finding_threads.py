@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for scripts/resolve_finding_threads.py — fingerprint matching,
 fail-closed resolution selection, still-open follow-up replies, suppression
 output, and gh interaction against a mocked gh that mimics the real CLI's

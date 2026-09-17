@@ -1,4 +1,4 @@
-"""Tests for scripts/sanitize_review_markdown.py."""
+"""Tests for scripts/sanitize_review_markdown.py.""" 
 
 import pytest
 from scripts.sanitize_review_markdown import sanitize_markdown

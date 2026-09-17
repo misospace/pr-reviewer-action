@@ -1,4 +1,4 @@
-"""Enforcement logic for review verdicts.
+"""Enforcement logic for review verdicts. 
 
 Applies evidence blocker and tool harness enforcement rules, overriding
 the model's verdict to ``request_changes`` when configured conditions are met.

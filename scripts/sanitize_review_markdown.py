@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Sanitize review markdown to prevent GitHub auto-linking of upstream references.
 
 This script neutralizes raw upstream PR/issue/commit references in AI-generated

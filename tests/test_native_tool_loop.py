@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.tool_loop — the native tool-calling loop driver (#203)."""
+"""Tests for pr_reviewer.tool_loop — the native tool-calling loop driver (#203).""" 
 
 import json
 import sys

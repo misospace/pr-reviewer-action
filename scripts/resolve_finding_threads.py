@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Manage inline finding threads across incremental reviews (#208, #209).
 
 A previous run posted line-anchored inline comments carrying a content

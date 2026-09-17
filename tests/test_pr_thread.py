@@ -1,4 +1,4 @@
-"""Tests for the bounded PR-thread context builder (#578)."""
+"""Tests for the bounded PR-thread context builder (#578).""" 
 
 from __future__ import annotations
 

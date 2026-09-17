@@ -1,4 +1,4 @@
-"""Multi-turn conversation/request builder for native tool calling (#202).
+"""Multi-turn conversation/request builder for native tool calling (#202). 
 
 A pure-Python stateful builder for the OpenAI and Anthropic message shapes
 that the native tool-calling loop (umbrella #197 §1, item 2/7) needs. It is

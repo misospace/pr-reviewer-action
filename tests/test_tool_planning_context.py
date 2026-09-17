@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for run_tool_harness.build_planning_context — the dedicated planning
 context replacing the head-truncated corpus."""
 

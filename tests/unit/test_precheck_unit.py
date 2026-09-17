@@ -1,4 +1,4 @@
-"""Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh.
+"""Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh. 
 
 Covers fingerprinting, config hashing, incremental scope detection,
 previous fingerprint extraction, and the main decision logic.

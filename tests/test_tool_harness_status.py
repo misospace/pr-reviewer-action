@@ -1,4 +1,4 @@
-"""Tests for issue #53 and issue #102: tool harness status accounting and error handling.
+"""Tests for issue #53 and issue #102: tool harness status accounting and error handling. 
 
 Issue #53: run_review.sh checked `.tool_results[].result.status` but
 run_tool_harness.py writes status at `.tool_results[].status`.

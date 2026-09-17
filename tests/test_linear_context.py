@@ -1,4 +1,4 @@
-"""Tests for deterministic Linear issue discovery and fetching."""
+"""Tests for deterministic Linear issue discovery and fetching.""" 
 
 from __future__ import annotations
 

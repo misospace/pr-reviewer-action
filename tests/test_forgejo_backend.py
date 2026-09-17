@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for the Forgejo REST backend.
 
 Uses unittest.mock.patch to intercept _curl calls, avoiding the need for a

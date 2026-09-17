@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Carry-forward of open findings across incremental reviews (#193).
 
 A full review that requests changes records its findings in the metadata

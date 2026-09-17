@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Strip confabulated conditional output sections from review markdown.
 
 Issue #415: even with a clean corpus (no "# Linked Issue Context" / "# Evidence

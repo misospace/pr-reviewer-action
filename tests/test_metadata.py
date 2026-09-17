@@ -1,4 +1,4 @@
-"""Tests for pr_reviewer.metadata module."""
+"""Tests for pr_reviewer.metadata module.""" 
 
 import json
 import sys

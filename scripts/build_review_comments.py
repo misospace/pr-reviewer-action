@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Turn structured findings into native PR review comments[] entries.
 
 Reads a findings JSON array and the PR's unified diff, keeps only findings

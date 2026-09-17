@@ -1,4 +1,4 @@
-"""Tests for the standalone SARIF 2.1.0 normalizer."""
+"""Tests for the standalone SARIF 2.1.0 normalizer.""" 
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Tests for scripts/strip_metadata_markers.py.
 
 Regression tests for issue #33: model-generated review markdown must not

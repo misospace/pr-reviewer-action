@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """Read-only tool executors for the tool harness (#304 split).
 
 The model-plannable tools (read_file, git_*, gh_api, web_fetch, web_search,

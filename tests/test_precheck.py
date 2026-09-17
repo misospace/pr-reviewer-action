@@ -1,4 +1,4 @@
-"""Direct unit tests for pr_reviewer.precheck pure functions.
+"""Direct unit tests for pr_reviewer.precheck pure functions. 
 
 Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
 resolve_review_scope (including validation-flag fallbacks), and
