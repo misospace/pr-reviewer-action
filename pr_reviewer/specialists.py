@@ -633,7 +633,11 @@ def _resolve_artifact_path(path_str: str, workspace_root: Path) -> Path | None:
         return None
     try:
         root = Path(workspace_root).resolve()
-        target = Path(path_str).resolve()
+        # Relative paths are workspace-root-relative, not cwd-relative.
+        target = Path(path_str)
+        if not target.is_absolute():
+            target = root / target
+        target = target.resolve()
     except (OSError, ValueError):
         return None
     if not target.is_relative_to(root):

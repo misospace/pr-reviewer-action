@@ -28,6 +28,7 @@ from pr_reviewer.specialists import (
     MAX_LEADS,
     MAX_SPECIALIST_SEVERITY,
     SPECIALIST_ROLES,
+    SPECIALIST_ROLES_ORDER,
     SPECIALIST_SEVERITIES,
     extract_specialist_json,
     load_specialist_prompt,
@@ -45,6 +46,13 @@ from pr_reviewer.specialists import (
 
 def test_three_fixed_roles_exist_with_explicit_names():
     assert SPECIALIST_ROLES == frozenset({"correctness", "security", "tests"})
+
+
+def test_specialist_roles_order_is_pinned():
+    # #607 requires stable deterministic role ordering. Asserting the exact
+    # tuple is what catches an accidental reorder; sorted(SPECIALIST_ROLES)
+    # checks set membership, not order.
+    assert SPECIALIST_ROLES_ORDER == ("correctness", "security", "tests")
 
 
 def test_all_three_fixed_roles_normalize_to_the_shared_contract():
@@ -788,6 +796,36 @@ def test_cli_normalizes_valid_input_inside_workspace(tmp_path):
     data = json.loads(output_path.read_text())
     assert data["role"] == "security"
     assert data["leads"][0]["message"] == "ok"
+
+
+def test_cli_relative_output_is_workspace_root_relative(tmp_path, monkeypatch):
+    # The happy path runs with cwd == workspace-root, which would mask this.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    input_path = tmp_path / "in.json"
+    input_path.write_text(
+        json.dumps({"role": "security", "leads": []}), encoding="utf-8"
+    )
+    rc = main(
+        [
+            "--role",
+            "security",
+            "--input",
+            str(input_path),
+            "--output",
+            "nested/out.json",
+            "--workspace-root",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    expected = tmp_path / "nested" / "out.json"
+    assert expected.exists()
+    assert not (elsewhere / "nested" / "out.json").exists()
+    data = json.loads(expected.read_text())
+    assert data["role"] == "security"
+    assert data["leads"] == []
 
 
 def test_cli_rejects_malformed_json_and_still_writes_the_result(tmp_path):
