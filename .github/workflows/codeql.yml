@@ -1,0 +1,64 @@
+# CodeQL analysis for this repository.
+#
+# CodeQL adds semantic security analysis on top of the existing CI gates
+# (gitleaks, shellcheck, yamllint, actionlint, and pytest) in ci.yaml. The
+# static linters cannot see the finding classes this workflow targets — the
+# threat model in SECURITY.md:
+#
+#   - py/command-line-injection at the subprocess call sites in
+#     pr_reviewer/tool_executors.py
+#   - path traversal via pr_reviewer/tool_executors.py
+#     `_resolve_workspace_path`
+#   - SSRF in pr_reviewer/http_client.py
+#   - token/secret handling in pr_reviewer/transport.py,
+#     pr_reviewer/tangled_session.py, and pr_reviewer/forgejo_backend.py
+#
+# The whole checkout is analysed; pr_reviewer/ and scripts/ (which contains
+# Python helpers alongside its shell scripts) dominate it.
+#
+# Bash is intentionally NOT in the matrix: CodeQL ships no bash extractor
+# (verified by a failed run of the predecessor PR #622 — the init step
+# hard-fails with "Did not recognize the following languages: bash"), so
+# shell scripts stay covered by the shellcheck gate in ci.yaml.
+name: CodeQL
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python is the only supported/analysed surface today. To extend the
+        # scan, add a language CodeQL actually ships an extractor for here
+        # (bash is not one — see the note at the top of this file).
+        language: [python]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          # Pin the query suite explicitly: the implicit v4 suite is
+          # `default`, not `security-and-quality`, and #621's acceptance
+          # requires the full security-and-quality pack.
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
