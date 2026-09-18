@@ -87,24 +87,42 @@ fi
 # When DEEP_REVIEW=true, launch the three fixed specialist roles
 # (correctness / security / tests — pr_reviewer/specialists.py) as a
 # BACKGROUND JOB over the same truncated review corpus, reusing the primary
-# model settings. Launching BEFORE the final reviewer runs means the leads
-# and the review are produced in parallel: the phase is reaped (wait on
-# SPECIALISTS_PID) just before the step summary is written, so a slow
-# specialist never delays the review, and a slow review never delays the
-# (advisory) specialists. Fail-soft: a specialist that times out or fails is
-# recorded as an error in specialists.json and the review proceeds — never
-# aborts (the wait is guarded with || status=$? against set -e). Advisory
-# only: the leads never touch the verdict, enforcement, or the published
-# review body in this iteration. When DEEP_REVIEW is false the gate is not
-# entered and the normal path is preserved.
+# model settings. The three roles run concurrently WITH EACH OTHER (the
+# runner fans them out on internal threads); the phase as a whole is launched
+# here and fully reaped (wait on SPECIALISTS_PID) BEFORE the final reviewer
+# path below enters, so a follow-up (#609) can feed specialists.json into the
+# final synthesis. Fail-soft: a specialist that times out or fails is
+# recorded as an error in specialists.json and the final reviewer still runs
+# — never blocked, never aborted (the wait is guarded with || status=$?
+# against set -e). Advisory only: the leads never touch the verdict,
+# enforcement, or the published review body in this iteration. When
+# DEEP_REVIEW is false the gate is not entered and the normal path is
+# preserved untouched (no timer entries, no artifacts).
 DEEP_REVIEW_ACTIVE="false"
 SPECIALISTS_PID=""
 if [[ "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
   DEEP_REVIEW_ACTIVE="true"
+  section_timer_start "specialists"
   python3 "$SCRIPT_DIR/run_specialists.py" --corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &
   SPECIALISTS_PID=$!
   log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the review corpus (pid $SPECIALISTS_PID)"
 fi
+
+# Reap the specialist phase fully BEFORE the final reviewer path (the #371
+# harvest idiom): a nonzero phase status only logs an error — advisory passes
+# never block the final review.
+harvest_specialist_phase() {
+  [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]] || return 0
+  [[ -n "${SPECIALISTS_PID:-}" ]] || return 0
+  local status=0
+  wait "$SPECIALISTS_PID" || status=$?
+  cat specialists.phase.log 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    error "specialist phase exited ${status}; continuing (advisory passes never block the final review)"
+  fi
+  section_timer_end
+}
+harvest_specialist_phase
 
 PRIMARY_OK=0
 # native_loop in-conversation verdict (#205): when the tool loop produced its
@@ -490,16 +508,4 @@ write_step_summary() {
   } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 }
 
-# Reap the deep-review specialist phase (launched above): wait on the pid,
-# guarded against set -e, then surface the phase log. A nonzero status only
-# logs a warning — the review has already resolved, and a specialist failure
-# is advisory, not fatal.
-if [[ "$DEEP_REVIEW_ACTIVE" == "true" && -n "$SPECIALISTS_PID" ]]; then
-  status=0
-  wait "$SPECIALISTS_PID" || status=$?
-  cat specialists.phase.log 2>/dev/null || true
-  if [ "$status" -ne 0 ]; then
-    log "deep_review: specialist run recorded failures; continuing (advisory only)"
-  fi
-fi
 write_step_summary

@@ -8,7 +8,6 @@ role-artifact shape, and the symlink/workspace guards.
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -95,7 +94,8 @@ def patch_transport(monkeypatch, tmp_path: Path, behavior=None, *, sleep=0.0):
     (role, attempt, payload) calls in arrival order.
     """
     if behavior is None:
-        behavior = lambda role, attempt: openai_response("")
+        def behavior(role, attempt):  # noqa: ARG001
+            return openai_response("")
     prompts = {
         role: run_specialists.load_specialist_prompt(role) for role in ROLES
     }
@@ -545,3 +545,45 @@ def test_disabled_no_calls_no_artifacts(tmp_path, monkeypatch, deep_review):
 
     assert calls == []
     assert list(ws.iterdir()) == []
+
+
+# ── 14. Worker crash guard writes the full artifact set ───────────
+
+
+def test_worker_crash_writes_full_artifact_set(tmp_path, monkeypatch):
+    """A crash escaping _run_role is caught by the worker's last-resort
+    Exception guard and recorded with the FULL fail-soft artifact set:
+    the role artifact plus the response record on disk and the aggregate
+    entry — not just an in-memory entry."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    env_setup(tmp_path, monkeypatch)
+
+    def boom(role, **kwargs):
+        raise RuntimeError("worker exploded")
+
+    # Patching _run_role itself is the honest seam: the guard lives in the
+    # thread worker wrapper that calls it.
+    monkeypatch.setattr(run_specialists, "_run_role", boom)
+
+    assert run_main(tmp_path, ws, corpus) == 0  # aggregate still written
+
+    agg = aggregate(ws)
+    assert agg["any_errors"] is True
+    by_name = {r["role"]: r for r in agg["roles"]}
+    for role in ROLES:
+        entry = by_name[role]
+        assert entry["status"] == "error"
+        assert entry["error_kind"] == "transport"
+        assert entry["lead_count"] == 0
+        # Full artifact set on disk, both carrying the crash error.
+        assert (ws / f"specialist-{role}.json").exists()
+        assert (ws / f"specialist-{role}.response.json").exists()
+        artifact = role_artifact(ws, role)
+        assert set(artifact) == {"version", "role", "leads", "truncated", "truncation", "errors"}
+        assert any("worker exploded" in e for e in artifact["errors"])
+        response = json.loads(
+            (ws / f"specialist-{role}.response.json").read_text(encoding="utf-8")
+        )
+        assert set(response) == {"error"}
+        assert "worker exploded" in response["error"]

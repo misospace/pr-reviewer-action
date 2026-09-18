@@ -312,7 +312,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `pr_thread_context` | Include bounded recent PR conversation comments (thread context) in the review corpus. The action's own managed comments are filtered out, bodies are secret-redacted and fence-safe, and at most the 50 most recent comments are kept | No | `true` |
 | `pr_thread_max_bytes` | Maximum UTF-8 bytes of PR-thread context in the review corpus; whole comments are dropped to fit, so a fence is never left open | No | `8000` |
 | `deep_review` | Opt-in specialist leads: the three fixed specialist roles (correctness / security / tests) run concurrently over the same review corpus, reusing the primary model settings. Each specialist's structured leads are parsed and normalized (severity capped below a blocker, bounded) and written to `specialist-<role>.json` + `specialists.json`. Advisory only in this iteration: the leads never touch the verdict, enforcement, or the published review body. Disabled by default | No | `false` |
-| `deep_review_timeout_sec` | Maximum wall-clock seconds for the whole deep-review specialist phase (all three roles run concurrently). Roles still running past the deadline are recorded as errors on their `specialist-<role>.json` / `specialists.json`; the review is never delayed or failed. Default 600 | No | `600` |
+| `deep_review_timeout_sec` | Maximum wall-clock seconds for the whole deep-review specialist phase (all three roles run concurrently). Stragglers past the deadline are recorded as errors on their `specialist-<role>.json` / `specialists.json`; the review is never blocked or failed. Default 600 | No | `600` |
 
 </details>
 

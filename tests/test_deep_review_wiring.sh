@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Wiring assertions for #608 (deep review): when deep_review is enabled, the
-# specialist phase must be launched as a background job BEFORE the final
-# reviewer runs, reaped with a set -e guard before the step summary is
-# written, and both the toggle and the phase deadline must land in the config
+# specialist phase must be launched as a background job and fully reaped
+# (wait guarded against set -e, fail-soft) BEFORE the final reviewer path
+# enters, and both the toggle and the phase deadline must land in the config
 # fingerprint. Static grep checks (same idiom as test_advisory_parallel.sh) —
 # the sections rely on orchestrator globals and are not executable standalone.
 
@@ -58,12 +58,19 @@ check "launch precedes the native-verdict path" \
   "$([ -n "$launch_line" ] && [ -n "$native_verdict_line" ] && [ "$launch_line" -lt "$native_verdict_line" ] && echo yes || echo no)" "yes"
 check "launch precedes the primary model call" \
   "$([ -n "$launch_line" ] && [ -n "$primary_call_line" ] && [ "$launch_line" -lt "$primary_call_line" ] && echo yes || echo no)" "yes"
+reap_line="$(grep -n 'wait "$SPECIALISTS_PID"' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
+check "reap precedes the native-verdict path" \
+  "$([ -n "$reap_line" ] && [ -n "$native_verdict_line" ] && [ "$reap_line" -lt "$native_verdict_line" ] && echo yes || echo no)" "yes"
+check "reap precedes the primary model call" \
+  "$([ -n "$reap_line" ] && [ -n "$primary_call_line" ] && [ "$reap_line" -lt "$primary_call_line" ] && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== review.sh: specialist phase reaped, fail-soft ==="
 check_contains "reap guards the wait against set -e" "$REVIEW" 'wait "$SPECIALISTS_PID" || status=$?'
+check "exactly one reap of the specialist phase (old trailing block gone)" \
+  "$(grep -c 'wait "$SPECIALISTS_PID"' "$REVIEW_SH" || true)" "1"
 check_contains "fail-soft text on specialist failure" \
-  "$REVIEW" 'deep_review: specialist run recorded failures; continuing (advisory only)'
+  "$REVIEW" 'specialist phase exited ${status}; continuing (advisory passes never block the final review)'
 check_not_contains "old post-escalation placement is gone" \
   "$REVIEW" 'python3 "$SCRIPT_DIR/run_specialists.py" \'
 

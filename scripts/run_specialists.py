@@ -4,9 +4,10 @@
 The execution layer for the advisory specialist passes defined by the #607
 contract module (:mod:`pr_reviewer.specialists`). Invoked from
 ``scripts/sections/review.sh`` behind the ``DEEP_REVIEW=true`` gate — launched
-as a background job *before* the final review call and reaped fail-soft later
-in the step, so the phase overlaps the review's wall clock instead of adding
-to it.
+as a background job before the final reviewer path and reaped fail-soft
+*before* that path enters, so later tickets can feed the leads into the
+final synthesis; the three roles are concurrent with each other (internal
+daemon threads), not with the reviewer.
 
 One model call per role (correctness / security / tests — the closed set in
 ``SPECIALIST_ROLES_ORDER``) runs **concurrently** on daemon threads, reusing
@@ -297,6 +298,32 @@ def _role_entry(
     }
 
 
+def _write_role_failure_artifacts(
+    workspace_root: Path,
+    role: str,
+    artifact: dict[str, Any],
+    message: str,
+    *,
+    cancel: Optional[threading.Event] = None,
+) -> None:
+    """Write the fail-soft artifact pair for a role that never answered:
+    the empty contract artifact carrying ``message`` in ``errors`` plus the
+    raw response record. Shared by the worker crash guard and the deadline
+    timeout reaper so both write the identical pair."""
+    _guarded_write(
+        workspace_root,
+        f"specialist-{role}.json",
+        _json_text(artifact),
+        abort=cancel,
+    )
+    _guarded_write(
+        workspace_root,
+        f"specialist-{role}.response.json",
+        _json_text({"error": message}),
+        abort=cancel,
+    )
+
+
 class _RoleFailure(Exception):
     """Internal control flow: a role failed at ``kind`` with a masked
     message. Caught inside the worker; never escapes the thread."""
@@ -553,17 +580,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         def worker(role: str) -> None:
             # _run_role is designed never to raise, but a latent bug must
             # still not leave the collector without an entry: catch anything
-            # that escapes and publish a fail-soft record instead.
+            # that escapes and publish a fail-soft record with the full
+            # artifact set. Exception (not BaseException) so a
+            # KeyboardInterrupt / SystemExit still propagates.
             try:
                 results[role] = _run_role_inner(role)
-            except BaseException as exc:  # noqa: BLE001 - last-resort guard
+            except Exception as exc:  # noqa: BLE001 - last-resort guard
+                message = (
+                    f"transport: specialist worker crashed: "
+                    f"{mask_secrets(str(exc))[:500]}"
+                )
                 artifact = _empty_artifact(role)
-                artifact["errors"].append(
-                    f"transport: specialist worker crashed: {mask_secrets(str(exc))[:500]}"
+                artifact["errors"].append(message)
+                _write_role_failure_artifacts(
+                    workspace_root, role, artifact, message,
+                    cancel=cancels[role],
                 )
                 results[role] = _role_entry(
                     role, artifact, status="error", error_kind="transport",
-                    elapsed_sec=0.0,
+                    elapsed_sec=time.monotonic() - phase_started,
                 )
 
         def _run_role_inner(role: str) -> dict[str, Any]:
@@ -602,15 +637,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             threads[role].join(timeout=max(0.0, remaining))
             if threads[role].is_alive():
                 cancels[role].set()
-                artifact = _empty_artifact(role)
-                artifact["errors"].append(
+                timeout_message = (
                     f"timeout: specialist phase exceeded {phase_timeout_sec}s"
                 )
-                _guarded_write(workspace_root, f"specialist-{role}.json", _json_text(artifact))
-                _guarded_write(
-                    workspace_root,
-                    f"specialist-{role}.response.json",
-                    _json_text({"error": f"timeout: specialist phase exceeded {phase_timeout_sec}s"}),
+                artifact = _empty_artifact(role)
+                artifact["errors"].append(timeout_message)
+                _write_role_failure_artifacts(
+                    workspace_root, role, artifact, timeout_message
                 )
                 results[role] = _role_entry(
                     role,
