@@ -87,22 +87,22 @@ for artifact in change-anchors.json related-code.json related-code.md related-co
 done
 
 reset_artifacts
-ANCHOR_MODE=fail run_context incremental.diff ""
+ANCHOR_MODE=fail run_context pr.diff pr-files.json
 for artifact in change-anchors.json related-code.json related-code.md related-code.truncated.md; do
   check "anchor failure clears $artifact" "$(wc -c < "$WORK/$artifact" | tr -d ' ')" "0"
 done
 
 reset_artifacts
-RELATED_MODE=fail run_context incremental.diff ""
+RELATED_MODE=fail run_context pr.diff pr-files.json
 for artifact in change-anchors.json related-code.json related-code.md related-code.truncated.md; do
   check "related scan failure clears $artifact" "$(wc -c < "$WORK/$artifact" | tr -d ' ')" "0"
 done
 
 reset_artifacts
-RELATED_BODY="$(printf '# Related Code (v1)\n%s' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')" run_context incremental.diff ""
-check_contains "incremental anchor uses current diff" "$(<"$WORK/calls.log")" "--diff incremental.diff"
-check_not_contains "incremental anchor omits file manifest" "$(<"$WORK/calls.log")" "--files"
-check_contains "incremental output keeps truncation marker" "$(<"$WORK/related-code.truncated.md")" "[related-code context truncated]"
+RELATED_BODY="$(printf '# Related Code (v1)\n%s' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')" run_context pr.diff pr-files.json
+check_contains "current anchor uses pr.diff" "$(<"$WORK/calls.log")" "--diff pr.diff"
+check_contains "current anchor receives file manifest" "$(<"$WORK/calls.log")" "--files pr-files.json"
+check_contains "current output keeps truncation marker" "$(<"$WORK/related-code.truncated.md")" "[related-code context truncated]"
 TRUNCATED_BYTES="$(wc -c < "$WORK/related-code.truncated.md" | tr -d ' ')"
 if [ "$TRUNCATED_BYTES" -le 64 ]; then
   echo "  PASS: truncated related-code output respects minimum cap ($TRUNCATED_BYTES bytes)"
@@ -112,10 +112,23 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# Regression for #616: the corpus-side call site must always pass the current
+# PR diff + files manifest (no incremental.diff branching). The corpus.sh
+# grep below fails if a refactor reintroduces an incremental-only call path.
 reset_artifacts
-RELATED_BODY="# Related Code (v1)" run_context pr.diff pr-files.json
-check_contains "full anchor uses full diff" "$(<"$WORK/calls.log")" "--diff pr.diff"
-check_contains "full anchor receives file manifest" "$(<"$WORK/calls.log")" "--files pr-files.json"
+CORPUS_SOURCE="$SCRIPT_DIR/sections/corpus.sh"
+check_contains "corpus.sh anchors on the current PR diff" \
+  "$(grep -E 'build_related_code_context pr.diff pr-files.json' "$CORPUS_SOURCE" || true)" \
+  "build_related_code_context pr.diff pr-files.json"
+check_not_contains "corpus.sh never anchors on incremental.diff" \
+  "$(grep -E 'incremental.diff' "$CORPUS_SOURCE" || true)" \
+  "incremental.diff"
+check_not_contains "corpus.sh never fetches incremental patch" \
+  "$(grep -E 'fetch_incremental_patch' "$CORPUS_SOURCE" || true)" \
+  "fetch_incremental_patch"
+check_not_contains "corpus.sh never branches on corpus_type" \
+  "$(grep -E 'corpus_type' "$CORPUS_SOURCE" || true)" \
+  "corpus_type"
 
 printf '\n=== Results: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

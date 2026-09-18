@@ -553,8 +553,8 @@ def replace_harness_findings_section(corpus, body):
 
     Sections are delimited by level-1 ATX headers — the same rule
     build_review_corpus emits and dedupe_verdict_corpus splits on. The header
-    line itself is preserved (it carries the "(incremental review)" suffix on
-    delta reviews). Returns the corpus unchanged when the section is absent.
+    line itself is preserved verbatim. Returns the corpus unchanged when the
+    section is absent.
     """
     lines = corpus.split("\n")
     starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
@@ -1086,10 +1086,10 @@ def _summarize_loop_outcome(result, outcome, build_evidence_digest):
         )
 
     # Cross-run evidence memory: a compact digest of what this review gathered,
-    # carried forward so the next incremental review of this PR reuses it
-    # instead of re-running the same reads/fetches. Prefer the model's own
-    # closing summary; else a deterministic ledger of the successful calls. The
-    # tool output it draws from was already secret-masked + size-capped by the
+    # carried forward so the next review of this PR reuses it instead of
+    # re-running the same reads/fetches. Prefer the model's own closing
+    # summary; else a deterministic ledger of the successful calls. The tool
+    # output it draws from was already secret-masked + size-capped by the
     # executor. run_review.sh surfaces this into the metadata marker.
     digest_entries = [
         {

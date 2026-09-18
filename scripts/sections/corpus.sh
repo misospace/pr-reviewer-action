@@ -79,8 +79,8 @@ PY
 
 build_pr_thread_context() {
   # Bounded recent PR conversation comments (#578). Scope-independent: the
-  # thread is about the whole PR, so this is built once and embedded in both
-  # full and incremental corpora.
+  # thread is about the whole PR, so this is built once and embedded in the
+  # review corpus.
   local empty_artifact
   local artifacts="pr-thread.json pr-thread.md"
   for empty_artifact in $artifacts; do
@@ -201,9 +201,13 @@ if len(final.encode("utf-8")) <= cap:
 PY
 }
 
+# After #615/#616 there is exactly one review-corpus construction path:
+# every reviewed PR builds the same current-PR corpus from pr.diff + the
+# changed-files manifest. Related-code anchors, PR files/version hints, the
+# full PR diff, carried-forward findings, and prior evidence all reach the
+# model through this single body. The previous→current compare-diff fetch
+# and its incremental-only headings/framing have been retired.
 build_review_corpus() {
-  local corpus_type="${1:-full}"  # 'full' or 'incremental'
-
   build_bounded_repo_map
 
   # Build non-standards body first (this is the portion subject to truncation)
@@ -248,84 +252,59 @@ build_review_corpus() {
       echo
     fi
 
-    if [[ "$corpus_type" == "incremental" ]]; then
-      # Linear is opt-in. Preserve its issue/spec context across incremental
-      # reviews without changing the existing default treatment of linked
-      # GitHub or Forgejo issues when the adapter is disabled.
-      if [ -s linear-issues.md ]; then
-        echo "# Linked Issue Context"
-        cat linear-issues.md
-        echo
-      fi
-      local head_sha
-      head_sha="$(jq -r '.headRefOid' pr.json 2>/dev/null || echo 'unknown')"
-      echo "# Incremental Review Delta"
-      echo "_Reviewing changes from $PREVIOUS_HEAD_SHA to $head_sha. This is not a full re-review of the entire PR._"
-      echo
-      if [ -f incremental.diff ]; then
-        echo '```diff'
-        truncate_clean incremental.diff incremental.diff.truncated "$MAX_DIFF" '…[delta truncated]'
-        cat incremental.diff.truncated
-        echo '```'
-      else
-        echo "(No incremental diff available)"
-      fi
-      echo
-      # Carried-forward open findings (#193): the previous review's unresolved
-      # findings, which the model must answer one-by-one. High in the corpus
-      # on purpose — it is the most important context an incremental review has.
-      if [ -s previous-findings.json ] && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
-        PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
+    # Carried-forward open findings (#193): the previous review's unresolved
+    # findings, which the model must answer one-by-one. Present on every
+    # follow-up review so a carried blocker cannot silently drop on the
+    # next push; the full PR diff above gives the model the context to
+    # judge whether the change resolves each one.
+    if [ -s previous-findings.json ] && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
+      PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
 from pr_reviewer.carry_forward import load_carried_findings, render_carried_findings_section
 print(render_carried_findings_section(load_carried_findings()), end='')
 " 2>/dev/null || echo "(Previous review findings could not be loaded)"
-      fi
-      # Cross-run evidence memory (#265): reuse the evidence the previous review
-      # already gathered so this delta review doesn't re-run the same reads/
-      # fetches. Rendered with fail-safe "re-verify the delta" framing. Below
-      # carried findings on purpose — findings are the more important context.
-      if [ "$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ] \
-         && [ -s previous-evidence.json ]; then
-        PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
+    fi
+
+    # Cross-run evidence memory (#265): reuse the evidence the previous review
+    # already gathered so this review doesn't re-run the same reads/fetches.
+    # Rendered with fail-safe "re-verify" framing. Below carried findings on
+    # purpose — findings are the more important context.
+    if [ "$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ] \
+       && [ -s previous-evidence.json ]; then
+      PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
 from pr_reviewer.evidence_memory import load_evidence_memory, render_evidence_memory_section
 print(render_evidence_memory_section(load_evidence_memory()), end='')
 " 2>/dev/null || true
-      fi
-    else
-      # context.sh leaves linked-issues.md empty when there's no linked issue
-      # (#399/#400) so the model sees no section boundary to react to. Gate
-      # the header the same way, matching the CI Check Results pattern below.
-      if [ -s linked-issues.md ]; then
-        echo "# Linked Issue Context"
-        cat linked-issues.md
-        echo
-      fi
-      echo "# PR Files (truncated)"
-      echo '```json'
-      cat pr-files.truncated.json
-      echo '```'
-      echo
-      echo "# Version Hints from Diff"
-      echo '```text'
-      cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
-      echo '```'
-      echo
-      echo "# PR Diff (truncated)"
-      echo '```diff'
-      cat pr.diff.truncated
-      echo '```'
+    fi
+
+    # context.sh leaves linked-issues.md empty when there's no linked issue
+    # (#399/#400) so the model sees no section boundary to react to. Gate
+    # the header the same way, matching the CI Check Results pattern below.
+    if [ -s linked-issues.md ]; then
+      echo "# Linked Issue Context"
+      cat linked-issues.md
       echo
     fi
+    echo "# PR Files (truncated)"
+    echo '```json'
+    cat pr-files.truncated.json
+    echo '```'
+    echo
+    echo "# Version Hints from Diff"
+    echo '```text'
+    cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
+    echo '```'
+    echo
+    echo "# PR Diff (truncated)"
+    echo '```diff'
+    cat pr.diff.truncated
+    echo '```'
+    echo
 
     # High-value evidence comes BEFORE linked sources / repo scans so that when
     # the corpus overflows the budget, the noisy low-value sections at the tail
     # are dropped first instead of this evidence.
     if [ -s tool-harness.md ]; then
-      if [[ "$corpus_type" == "incremental" ]]; then
-        echo "# Tool Harness Findings (incremental review)"
-      else
-        echo "# Tool Harness Findings"
-      fi
+      echo "# Tool Harness Findings"
       cat tool-harness.md
       echo
     fi
@@ -384,21 +363,19 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 }
 
 section_timer_start "corpus-building"
-log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
+log "Building review corpus..."
 
 log "Building PR-thread context..."
 build_pr_thread_context
 
-if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-  fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
-  log "Building related-code context from incremental diff..."
-  build_related_code_context incremental.diff ""
-  build_review_corpus "incremental"
-else
-  log "Building related-code context from full diff..."
-  build_related_code_context pr.diff pr-files.json
-  build_review_corpus "full"
-fi
+# Every reviewed PR builds the same current-PR corpus (#616): related-code
+# anchors come from the full pr.diff + the changed-files manifest, and the
+# corpus body always includes PR files, version hints, and the full PR diff.
+# The previous→current compare-diff fetch and the incremental/full branching
+# were retired — see the parent issue for the rationale.
+log "Building related-code context from full diff..."
+build_related_code_context pr.diff pr-files.json
+build_review_corpus
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
@@ -420,12 +397,9 @@ EOF
 EOF
     fi
   fi
-  # Rebuild with the same scope used before the harness ran; build_review_corpus
-  # defaults to "full", which would silently discard an incremental delta review.
-  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-    build_review_corpus "incremental"
-  else
-    build_review_corpus "full"
-  fi
+  # Rebuild the corpus now that the harness has written its findings; same
+  # single path used above so the rebuilt corpus never switches scope or
+  # drops sections (#616).
+  build_review_corpus
   cp review-corpus.md review-corpus.truncated.md
 fi

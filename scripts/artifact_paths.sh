@@ -8,7 +8,7 @@ assert_safe_artifact_paths() {
   local -a artifact_paths=(
     pr.diff pr-object.json pr.json pr-body.txt changed-files.json precheck-result.json
     previous-review-meta.json previous-findings.json previous-evidence.json
-    incremental.diff linked-issues.md urls.all.txt urls.txt
+    linked-issues.md urls.all.txt urls.txt
     version-hints.txt version-hints.truncated.txt ghcr-images.txt compare-shas.txt
     linked-sources.md manifest-context.md image-digest-context.md
     repo-impact.md repo-impact.truncated.md repo-history.md repo-history.truncated.md

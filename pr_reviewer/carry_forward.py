@@ -365,10 +365,10 @@ def render_carried_findings_section(carried: list[dict]) -> str:
         "# Open Findings From the Previous Review",
         "",
         "The previous review of this PR left the findings below open. This",
-        "delta review MUST answer each one: include a finding in the findings",
+        "review MUST answer each one: include a finding in the findings",
         'array with the same "id" and a "resolution" of "resolved" (this',
-        'delta demonstrably fixes it), "still_open", or',
-        '"not_verifiable_from_delta". Only claim "resolved" when the delta',
+        'review demonstrably fixes it), "still_open", or',
+        '"not_verifiable_from_delta". Only claim "resolved" when the current',
         "diff shows the fix; unverifiable findings stay open.",
         "",
     ]

@@ -149,18 +149,28 @@ def test_workspace_module_cannot_shadow_action_adapter(tmp_path):
     assert json.loads(output_json.read_text()) == []
 
 
-def test_incremental_corpus_changes_only_when_linear_is_enabled():
+def test_corpus_uses_single_full_pr_path():
+    """#616: every reviewed PR builds the same current-PR corpus. The
+    corpus must use linked-issues.md (which context.sh merges Linear into)
+    rather than rendering linear-issues.md separately, and the corpus must
+    not carry an incremental-only branch keyed on $corpus_type."""
     corpus_source = (_REPO_ROOT / "scripts/sections/corpus.sh").read_text()
-    incremental_setup = corpus_source.split(
-        'if [[ "$corpus_type" == "incremental" ]]; then', 1
-    )[1].split("      local head_sha", 1)[0]
-    assert "cat linear-issues.md" in incremental_setup
-    assert "cat linked-issues.md" not in incremental_setup
-
-    full_setup = corpus_source.split(
-        '    else\n      # context.sh leaves linked-issues.md empty', 1
-    )[1].split('      echo "# PR Files (truncated)"', 1)[0]
-    assert "cat linked-issues.md" in full_setup
+    # No "$corpus_type == incremental" branching remains: a single path
+    # renders the corpus from the current PR diff every time.
+    assert "$corpus_type" not in corpus_source
+    assert "incremental.diff" not in corpus_source
+    assert "fetch_incremental_patch" not in corpus_source
+    # linked-issues.md is the unified source — Linear content is merged
+    # into it by context.sh, so the corpus never reads linear-issues.md
+    # directly and never branches on $corpus_type.
+    assert "cat linear-issues.md" not in corpus_source
+    assert "cat linked-issues.md" in corpus_source
+    # PR files / version hints / PR diff all reach the corpus through
+    # the same single path (no incremental-only headings).
+    assert "# PR Files (truncated)" in corpus_source
+    assert "# Version Hints from Diff" in corpus_source
+    assert "# PR Diff (truncated)" in corpus_source
+    assert "# Incremental Review Delta" not in corpus_source
 
 
 def test_cli_with_no_matching_title_writes_empty_artifacts(tmp_path, monkeypatch):

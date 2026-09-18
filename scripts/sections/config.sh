@@ -178,40 +178,6 @@ open(dst, "w", encoding="utf-8").write(text + "\n" + os.environ.get("MARKER", ""
 PY
 }
 
-fetch_incremental_patch() {
-  local previous_head="$1"
-  local current_head="$2"
-  local output_file="$3"
-
-  echo "Fetching incremental diff: $previous_head...$current_head" >&2
-
-  # Get the compare API URL and fetch the raw diff
-  local compare_url
-  compare_url="$(platform_compare "$REPO" "${previous_head}...${current_head}" --jq '.url' 2>/dev/null || echo "")"
-
-  # Only fetch when we actually got a URL: Forgejo's compare object omits `url`
-  # (jq -r yields the string "null"), and a gh error body could leave junk —
-  # either way, skip the diff fetch rather than curl a non-URL.
-  if [[ "$compare_url" == http://* || "$compare_url" == https://* ]]; then
-    # The token goes through a 0600 curl --config file rather than argv (same
-    # treatment as model API keys in model_call.sh) so it never appears in
-    # /proc/<pid>/cmdline on shared runners.
-    local auth_config
-    auth_config="$(mktemp)"
-    chmod 600 "$auth_config"
-    printf 'header = "%s"\n' "$(curl_config_escape "Authorization: token $GH_TOKEN")" > "$auth_config"
-    curl -q -fsSL --config "$auth_config" \
-      -H "Accept: application/vnd.github.v3.diff" \
-      "$compare_url" > "$output_file" 2>/dev/null || true
-    rm -f "$auth_config"
-  fi
-
-  if [[ ! -s "$output_file" ]]; then
-    echo "Compare API returned empty or failed; falling back to full PR diff" >&2
-    platform_pr_diff "$REPO" "$PR_NUMBER" > "$output_file"
-  fi
-}
-
 if [[ -z "$REPO" || -z "$PR_NUMBER" || -z "$AI_BASE_URL" || -z "$AI_MODEL" ]]; then
   error "Missing required environment variables: REPO, PR_NUMBER, AI_BASE_URL, or AI_MODEL"
   exit 1
