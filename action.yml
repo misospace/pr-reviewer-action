@@ -369,6 +369,28 @@ inputs:
     description: Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)
     required: false
     default: "8000"
+
+  # Deep review: opt-in specialist leads. When enabled, the three fixed specialist
+  # roles (correctness / security / tests — pr_reviewer/specialists.py) run
+  # concurrently over the same review corpus, reusing the primary model settings.
+  # Each specialist's structured leads are parsed and normalized (severity capped
+  # below a blocker, bounded) and written to specialist-<role>.json +
+  # specialists.json. Advisory only in this iteration: the leads never touch the
+  # verdict, enforcement, or the published review body.
+  deep_review:
+    description: 'Run opt-in specialist leads (correctness/security/tests) over the review corpus. Advisory only'
+    required: false
+    default: 'false'
+
+  # Deep review phase deadline: maximum wall-clock seconds for the whole
+  # specialist phase (all three roles). Roles still running past the deadline
+  # are recorded as errors on their specialist-<role>.json / specialists.json;
+  # the review is never delayed or failed.
+  deep_review_timeout_sec:
+    description: 'Maximum wall-clock seconds for the whole deep-review specialist phase; stragglers past the deadline are recorded as role errors (advisory only). Default 600.'
+    required: false
+    default: '600'
+
   enrichment_budget_sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false
@@ -801,6 +823,8 @@ runs:
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
         PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
+        DEEP_REVIEW: ${{ inputs.deep_review }}
+        DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
@@ -934,6 +958,8 @@ runs:
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
         PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
+        DEEP_REVIEW: ${{ inputs.deep_review }}
+        DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}

@@ -85,6 +85,8 @@ REPO_MAP_CONTEXT="${REPO_MAP_CONTEXT:-true}"
 REPO_MAP_MAX_BYTES="${REPO_MAP_MAX_BYTES:-12000}"
 PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-true}"
 PR_THREAD_MAX_BYTES="${PR_THREAD_MAX_BYTES:-8000}"
+DEEP_REVIEW="${DEEP_REVIEW:-false}"
+DEEP_REVIEW_TIMEOUT_SEC="${DEEP_REVIEW_TIMEOUT_SEC:-600}"
 AI_REQUEST_TIMEOUT_SEC="${AI_REQUEST_TIMEOUT_SEC:-300}"
 AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"
@@ -334,6 +336,26 @@ esac
 if [[ ! "$PR_THREAD_MAX_BYTES" =~ ^[0-9]+$ || "$PR_THREAD_MAX_BYTES" -lt 1 || "$PR_THREAD_MAX_BYTES" -gt 200000 ]]; then
   error "Invalid PR_THREAD_MAX_BYTES '$PR_THREAD_MAX_BYTES'; defaulting to 8000"
   PR_THREAD_MAX_BYTES=8000
+fi
+
+# Deep review toggle: normalize true/false and force lowercase so the review
+# gate ([[ "$DEEP_REVIEW" == "true" ]]) is case-insensitive. Any other value
+# degrades to off (advisory passes must never be enabled by a typo'd value).
+case "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" in
+  true|false) DEEP_REVIEW="$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" ;;
+  *)
+    error "Invalid DEEP_REVIEW '$DEEP_REVIEW'; defaulting to false"
+    DEEP_REVIEW=false
+    ;;
+esac
+
+# Deep review phase deadline: the whole specialist phase (all roles) must
+# finish within this many seconds; stragglers past it are recorded as role
+# errors. Non-numeric values degrade to the 600s default (an advisory phase
+# must never be misconfigured into a hard failure).
+if [[ ! "$DEEP_REVIEW_TIMEOUT_SEC" =~ ^[0-9]+$ || "$DEEP_REVIEW_TIMEOUT_SEC" -lt 1 ]]; then
+  error "Invalid DEEP_REVIEW_TIMEOUT_SEC '$DEEP_REVIEW_TIMEOUT_SEC'; defaulting to 600"
+  DEEP_REVIEW_TIMEOUT_SEC=600
 fi
 
 case "$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" in

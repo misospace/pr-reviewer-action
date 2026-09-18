@@ -647,6 +647,14 @@ class TestCollectConfigLines:
         assert "PR_THREAD_CONTEXT=true" in lines
         assert "PR_THREAD_MAX_BYTES=8000" in lines
 
+    def test_collects_deep_review_var(self, monkeypatch):
+        """Toggling deep review changes what runs over the corpus, so it must
+        land in the config fingerprint (#608)."""
+        _clear_config_env(monkeypatch)
+        monkeypatch.setenv("DEEP_REVIEW", "true")
+        lines = _collect_config_lines()
+        assert "DEEP_REVIEW=true" in lines
+
     def test_ignores_runner_platform_vars(self, monkeypatch):
         """Runner-preset vars sharing a provider prefix are not config."""
         _clear_config_env(monkeypatch)
