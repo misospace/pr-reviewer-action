@@ -11,8 +11,8 @@ set -euo pipefail
 #
 # Requires env (exported by the Publish step): GITHUB_ACTION_PATH, PUBLISH_MODE,
 # HEAD_SHA, REPO, PR_NUMBER, VERDICT, REVIEW_MARKDOWN, ANALYSIS_ENGINE,
-# EFFECTIVE_SCOPE, BASE_SHA, PREVIOUS_HEAD_SHA, COMMENT_MARKER, and the
-# per-mode keys (ALLOW_APPROVE, APPROVE_FORKS, IS_FORK_PR, BASELINE_CLEAN,
+# BASE_SHA, COMMENT_MARKER, and the per-mode keys (ALLOW_APPROVE, APPROVE_FORKS,
+# IS_FORK_PR,
 # INLINE_FINDINGS, INLINE_FINDINGS_MAX, FINDINGS, CLEANUP_PREVIOUS_NATIVE_REVIEWS).
 
 # shellcheck source=scripts/publish_helpers.sh
@@ -49,15 +49,12 @@ case "$PUBLISH_MODE" in
     fi
 
     # Build metadata marker
-    METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "$PREVIOUS_HEAD_SHA")"
+    METADATA_MARKER="$(build_metadata_marker "$BASE_SHA")"
 
     if [ "$VERDICT" = "request_changes" ]; then
       VERDICT_PREFIX="⚠️ **Automated recommendation: REQUEST CHANGES**"
     else
       VERDICT_PREFIX="✅ **Automated recommendation: APPROVE**"
-    fi
-    if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-      VERDICT_PREFIX="$VERDICT_PREFIX (incremental)"
     fi
 
     {
@@ -92,9 +89,6 @@ case "$PUBLISH_MODE" in
     # Build metadata marker
     METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "")"
     REVIEW_HEADER="# AI Automated Review"
-    if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-      REVIEW_HEADER="# AI Automated Review (incremental)"
-    fi
 
     # Build the review body with managed marker
     BODY_FILE="review-comment-body.md"
@@ -174,31 +168,22 @@ case "$PUBLISH_MODE" in
       REVIEW_RESULT="issues"
     fi
 
-    # Build metadata marker with verdict safety for incremental
-    METADATA_MARKER="$(build_metadata_marker "$BASE_SHA" "$PREVIOUS_HEAD_SHA")"
+    # Build metadata marker
+    METADATA_MARKER="$(build_metadata_marker "$BASE_SHA")"
     REVIEW_HEADER="# AI Automated Review"
-    if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-      REVIEW_HEADER="# AI Automated Review (incremental)"
-    fi
 
-    # Evaluate approval guardrails with baseline check for incremental
+    # Evaluate approval guardrails
     ALLOW_APPROVE_BOOL="$(printf '%s' "$ALLOW_APPROVE" | tr '[:upper:]' '[:lower:]')"
     APPROVE_FORKS_BOOL="$(printf '%s' "$APPROVE_FORKS" | tr '[:upper:]' '[:lower:]')"
 
     CAN_APPROVE=false
 
     if [ "$VERDICT" = "approve" ] && [ "$ALLOW_APPROVE_BOOL" = "true" ]; then
-      # For incremental reviews, require a trusted clean full baseline
-      if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
-        echo "Blocking approval: incremental review without trusted clean full baseline" >&2
-        CAN_APPROVE=false
-      else
-        # Check fork gate
-        if [ "$IS_FORK_PR" != "true" ]; then
-          CAN_APPROVE=true
-        elif [ "$APPROVE_FORKS_BOOL" = "true" ]; then
-          CAN_APPROVE=true
-        fi
+      # Check fork gate
+      if [ "$IS_FORK_PR" != "true" ]; then
+        CAN_APPROVE=true
+      elif [ "$APPROVE_FORKS_BOOL" = "true" ]; then
+        CAN_APPROVE=true
       fi
     fi
 
@@ -208,11 +193,7 @@ case "$PUBLISH_MODE" in
       emit_review_markers
       echo "$REVIEW_HEADER"
       echo
-      if [ "$EFFECTIVE_SCOPE" = "incremental" ]; then
-        echo "_Incremental review: reviewed the changes since the last managed review; unresolved findings from that review are carried forward._"
-      else
-        echo "_Full PR review._"
-      fi
+      echo "_Full PR review._"
       echo
       printf '_Analysis engine: %s_\n' "$ANALYSIS_ENGINE"
       echo
@@ -282,17 +263,10 @@ case "$PUBLISH_MODE" in
         # not find, especially for forks where approval is intentionally
         # off. Explain the actual reason and submit a COMMENT review.
         echo "Withholding native approval for #$PR_NUMBER (allow_approve=${ALLOW_APPROVE_BOOL}, approve_forks=${APPROVE_FORKS_BOOL}, is_fork=${IS_FORK_PR})"
-        if [ "$EFFECTIVE_SCOPE" = "incremental" ] && [ "$BASELINE_CLEAN" != "true" ]; then
-          {
-            echo ""
-            echo "> **Approval withheld**: the previous review of this PR found blocking issues. This clean incremental review is advisory until a full review against a clean baseline confirms the PR as a whole."
-          } >> "$BODY_FILE"
-        else
-          {
-            echo ""
-            echo "> **Approval blocked by policy**: this clean review is advisory. Native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs)."
-          } >> "$BODY_FILE"
-        fi
+        {
+          echo ""
+          echo "> **Approval blocked by policy**: this clean review is advisory. Native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs)."
+        } >> "$BODY_FILE"
 
         submit_native_review COMMENT "$BODY_FILE"
       fi

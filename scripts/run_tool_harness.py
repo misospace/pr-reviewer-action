@@ -771,7 +771,6 @@ def run_native_loop(
     conversation = Conversation(system=loop_system, tool_schemas=tool_schemas)
     conversation.add_user(
         f"Repository: {repo}\n"
-        f"Review scope: {os.getenv('EFFECTIVE_SCOPE', 'full')}\n"
         f"Allowed repos (gh_api + repo_contents): "
         f"{', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: "

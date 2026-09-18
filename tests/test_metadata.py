@@ -1,16 +1,25 @@
-"""Tests for pr_reviewer.metadata module."""
+"""Tests for pr_reviewer.metadata module.
+
+v3 (#615) removed ``review_scope`` / ``previous_head_sha`` from the marker
+schema: every review that runs is implicitly a full review of the current
+PR, so the marker no longer needs to record what was already implicit.
+These tests pin both halves of that — build_marker no longer writes the
+removed fields, and parse_metadata treats them as legacy/ignored on
+read (carried forward to keep older managed comments parseable).
+"""
 
 import json
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pr_reviewer.metadata import parse_metadata, build_marker
 
 
 def test_parse_metadata_found():
-    body = """<!-- ai-pr-reviewer:{"version":1,"head_sha":"abc123","base_sha":"def456","review_scope":"full","review_result":"clean"} -->
+    body = """
+<!-- ai-pr-reviewer:{"version":1,"head_sha":"abc123","base_sha":"def456","review_result":"clean"} -->
 # AI Automated Review
 
 Some review content."""
@@ -19,12 +28,16 @@ Some review content."""
     assert result["version"] == 1
     assert result["head_sha"] == "abc123"
     assert result["base_sha"] == "def456"
-    assert result["review_scope"] == "full"
     assert result["review_result"] == "clean"
 
 
-def test_parse_metadata_with_previous_head():
-    body = """<!-- ai-pr-reviewer:{"version":1,"head_sha":"xyz789","base_sha":"def456","review_scope":"incremental","previous_head_sha":"abc123","review_result":"issues"} -->
+def test_parse_metadata_tolerates_legacy_scope_fields():
+    # Older managed comments still carry review_scope / previous_head_sha;
+    # the parser must accept them so diff-FP extraction and the dismissed /
+    # carry-forward consumers keep working on legacy markers. The marker
+    # schema no longer *writes* them (see test_build_marker_* below).
+    body = """
+<!-- ai-pr-reviewer:{"version":1,"head_sha":"xyz789","base_sha":"def456","review_scope":"incremental","previous_head_sha":"abc123","review_result":"issues"} -->
 Review body."""
     result = parse_metadata(body)
     assert result is not None
@@ -52,27 +65,20 @@ def test_build_marker_default():
     assert data["version"] == 1
     assert data["head_sha"] == "abc123"
     assert data["base_sha"] == "def456"
-    assert data["review_scope"] == "full"
-    assert "previous_head_sha" not in data
-
-
-def test_build_marker_with_previous():
-    marker = build_marker(
-        head_sha="xyz789", base_sha="def456",
-        review_scope="incremental", previous_head_sha="abc123",
-        review_result="issues"
+    assert "review_scope" not in data, (
+        "v3 does not write review_scope into the marker (#615)"
     )
-    data = parse_metadata(marker)
-    assert data is not None
-    assert data["previous_head_sha"] == "abc123"
-    assert data["review_scope"] == "incremental"
+    assert "previous_head_sha" not in data, (
+        "v3 does not write previous_head_sha into the marker (#615)"
+    )
 
 
-def test_build_marker_roundtrip():
+def test_build_marker_roundtrip_v3():
     original = {
-        "version": 1, "head_sha": "aaa", "base_sha": "bbb",
-        "review_scope": "incremental", "previous_head_sha": "ccc",
-        "review_result": "clean"
+        "version": 1,
+        "head_sha": "aaa",
+        "base_sha": "bbb",
+        "review_result": "clean",
     }
     marker = build_marker(**original)
     parsed = parse_metadata(marker)
@@ -106,10 +112,9 @@ def test_parse_metadata_non_object_rejected():
 
 if __name__ == "__main__":
     test_parse_metadata_found()
-    test_parse_metadata_with_previous_head()
+    test_parse_metadata_tolerates_legacy_scope_fields()
     test_parse_metadata_no_marker()
     test_parse_metadata_invalid_json()
     test_build_marker_default()
-    test_build_marker_with_previous()
-    test_build_marker_roundtrip()
+    test_build_marker_roundtrip_v3()
     print("All metadata tests passed!")

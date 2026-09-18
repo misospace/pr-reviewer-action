@@ -32,7 +32,6 @@ def parse_metadata(body: str) -> Optional[dict]:
 
 
 def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
-                 review_scope: str = "full", previous_head_sha: str = "",
                  review_result: str = "clean",
                  required_checks: str | None = None,
                  review_route: str | None = None,
@@ -40,16 +39,20 @@ def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
                  evidence_digest: str | None = None,
                  open_findings: list[dict] | None = None,
                  cache_hit_ratio: float | None = None) -> str:
-    """Build a metadata marker string for insertion into managed comments."""
+    """Build a metadata marker string for insertion into managed comments.
+
+    v3 removed ``review_scope`` and ``previous_head_sha`` from the marker
+    schema (#615): every non-skipped review is implicitly a full review
+    of the current PR, so no scope plumbing reaches the marker either.
+    The keyword arguments are kept with default values for backward
+    compatibility, but they are no longer written into the marker JSON.
+    """
     data = {
         "version": version,
         "head_sha": head_sha,
         "base_sha": base_sha,
-        "review_scope": review_scope,
         "review_result": review_result,
     }
-    if previous_head_sha:
-        data["previous_head_sha"] = previous_head_sha
     if required_checks is not None and required_checks not in ("", "none"):
         data["required_checks"] = required_checks
     if review_route is not None and review_route != "legacy":

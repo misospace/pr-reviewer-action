@@ -667,14 +667,6 @@ inputs:
     description: If true, proceed with review after timeout instead of failing. If false, abort the action on timeout. Default true.
     required: false
     default: "true"
-  review_scope:
-    description: >-
-      Controls whether the action reviews the full PR or only changes since the
-      last managed review. auto performs a full review first, then incremental
-      reviews on later PR synchronize events when safe. Accepted values: auto,
-      full, incremental.
-    required: false
-    default: "auto"
 
 outputs:
 
@@ -717,21 +709,9 @@ outputs:
   ci_status_final:
     description: Final CI state (success/failure) when ci_status_check completed
     value: ${{ steps.ci_status.outputs.ci_status_final }}
-  effective_review_scope:
-    description: Effective review scope used (full or incremental)
-    value: ${{ steps.precheck.outputs.effective_review_scope }}
-  previous_head_sha:
-    description: Previous head SHA when effective scope is incremental
-    value: ${{ steps.precheck.outputs.previous_head_sha }}
-  baseline_clean:
-    description: Whether the full-review baseline was clean (for verdict safety)
-    value: ${{ steps.precheck.outputs.baseline_clean }}
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
-  needs_full_review:
-    description: Whether this incremental review could not assess a carried finding from its delta (true → the next run resolves full scope)
-    value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
     value: ${{ steps.review.outputs.tool_calls }}
@@ -765,7 +745,6 @@ runs:
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
-        REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
         FORCE_REVIEW: ${{ inputs.force_review }}
         REREVIEW_LABEL: ${{ inputs.rereview_label }}
@@ -912,7 +891,6 @@ runs:
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
         ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
         ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
-        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
@@ -974,9 +952,6 @@ runs:
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
-        REVIEW_SCOPE: ${{ inputs.review_scope }}
-        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
-        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
@@ -1009,7 +984,6 @@ runs:
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
         EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        NEEDS_FULL_REVIEW: ${{ steps.review.outputs.needs_full_review }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
@@ -1021,11 +995,8 @@ runs:
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
-        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
         BASE_SHA: ${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}
-        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: bash "${{ github.action_path }}/scripts/publish.sh"
 

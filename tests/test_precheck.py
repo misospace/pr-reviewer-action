@@ -1,8 +1,13 @@
 """Direct unit tests for pr_reviewer.precheck pure functions.
 
 Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
-resolve_review_scope (including validation-flag fallbacks), and
-_detect_incremental_scope.
+and _detect_incremental_scope.
+
+Issue #615 acceptance: v3 removed the public/runtime concept of selecting
+``full`` vs ``incremental`` review scope. Every non-skipped review is now
+implicitly a full review of the current PR, so there is no resolve function,
+no ``previous_head_sha`` / ``baseline_clean`` / ``effective_review_scope``
+plumbing, and no incremental-specific result state.
 """
 
 import sys
@@ -15,7 +20,6 @@ from pr_reviewer.precheck import (
     MAX_INCREMENTAL_LINES,
     MIN_INCREMENTAL_RATIO,
     ReviewDecision,
-    ScopeResolution,
     _detect_incremental_scope,
     build_broad_fingerprint,
     build_marker_fingerprint,
@@ -24,7 +28,6 @@ from pr_reviewer.precheck import (
     compute_diff_fingerprint,
     evaluate_precheck,
     fingerprints_match,
-    resolve_review_scope,
     should_review,
 )
 
@@ -62,7 +65,9 @@ class TestComputeDiffFingerprint:
     def test_null_bytes_are_significant(self):
         diff_with = "a\x00b\n"
         diff_without = "ab\n"
-        assert compute_diff_fingerprint(diff_with) != compute_diff_fingerprint(diff_without)
+        assert compute_diff_fingerprint(diff_with) != compute_diff_fingerprint(
+            diff_without
+        )
 
 
 class TestComputeConfigHash:
@@ -76,7 +81,9 @@ class TestComputeConfigHash:
         assert len(h) == 64
 
     def test_order_independent(self):
-        assert compute_config_hash(["B=2", "A=1"]) == compute_config_hash(["A=1", "B=2"])
+        assert compute_config_hash(["B=2", "A=1"]) == compute_config_hash(
+            ["A=1", "B=2"]
+        )
 
     def test_comments_filtered(self):
         assert compute_config_hash(["# comment", "A=1"]) == compute_config_hash(["A=1"])
@@ -88,7 +95,9 @@ class TestComputeConfigHash:
         assert compute_config_hash(["  A=1  "]) == compute_config_hash(["A=1"])
 
     def test_different_configs_different_hashes(self):
-        assert compute_config_hash(["MODEL=gpt-4"]) != compute_config_hash(["MODEL=claude-3"])
+        assert compute_config_hash(["MODEL=gpt-4"]) != compute_config_hash(
+            ["MODEL=claude-3"]
+        )
 
     def test_related_code_settings_change_collected_config(self, monkeypatch):
         # _collect_config_lines takes no args and reads os.environ, so the
@@ -135,7 +144,9 @@ class TestDetectIncrementalScope:
         assert _detect_incremental_scope("   \n\t\n  ") is None
 
     def test_small_diff_is_incremental(self):
-        result = _detect_incremental_scope(self._make_diff(files=1, added_lines_per_file=1))
+        result = _detect_incremental_scope(
+            self._make_diff(files=1, added_lines_per_file=1)
+        )
         assert result is not None
         assert result["files"] == ["f0.txt"]
         assert result["total_files"] == 1
@@ -166,98 +177,6 @@ class TestDetectIncrementalScope:
         assert result is None or result["line_count"] <= MAX_INCREMENTAL_LINES
 
 
-class TestResolveReviewScope:
-    """Tests for resolve_review_scope including validation-flag fallbacks."""
-
-    def _resolve(
-        self,
-        review_scope="auto",
-        previous_head_sha="abc123",
-        previous_base_sha="def456",
-        previous_review_result="",
-        *,
-        force_review=False,
-        previous_head_is_ancestor=None,
-        compare_range_ok=None,
-    ):
-        return resolve_review_scope(
-            review_scope=review_scope,
-            previous_head_sha=previous_head_sha,
-            previous_base_sha=previous_base_sha,
-            previous_review_result=previous_review_result,
-            force_review=force_review,
-            previous_head_is_ancestor=previous_head_is_ancestor,
-            compare_range_ok=compare_range_ok,
-        )
-
-    def test_force_review_returns_full(self):
-        scope = self._resolve(force_review=True)
-        assert scope.effective_review_scope == "full"
-        assert scope.previous_head_sha == ""
-        assert scope.baseline_clean is False
-
-    def test_full_scope_request(self):
-        scope = self._resolve(review_scope="full")
-        assert scope.effective_review_scope == "full"
-
-    def test_missing_previous_head_returns_full(self):
-        scope = self._resolve(previous_head_sha="")
-        assert scope.effective_review_scope == "full"
-
-    def test_missing_previous_base_returns_full(self):
-        scope = self._resolve(previous_base_sha="")
-        assert scope.effective_review_scope == "full"
-
-    def test_invalid_scope_degrades_to_auto_and_falls_through(self):
-        # With valid metadata and validation flags None, an invalid scope
-        # degrades to auto and resolves to incremental.
-        scope = self._resolve(review_scope="banana")
-        assert scope.effective_review_scope == "incremental"
-
-    def test_incremental_scope_request(self):
-        scope = self._resolve(review_scope="incremental")
-        assert scope.effective_review_scope == "incremental"
-        assert scope.previous_head_sha == "abc123"
-
-    def test_auto_scope_resolves_to_incremental(self):
-        scope = self._resolve(review_scope="auto")
-        assert scope.effective_review_scope == "incremental"
-
-    def test_previous_head_is_ancestor_false_returns_full(self):
-        scope = self._resolve(previous_head_is_ancestor=False)
-        assert scope.effective_review_scope == "full"
-
-    def test_compare_range_ok_false_returns_full(self):
-        scope = self._resolve(compare_range_ok=False)
-        assert scope.effective_review_scope == "full"
-
-    def test_previous_head_is_ancestor_none_does_not_gate(self):
-        # None means caller did not assert; other conditions satisfied.
-        scope = self._resolve(previous_head_is_ancestor=None, compare_range_ok=True)
-        assert scope.effective_review_scope == "incremental"
-
-    def test_compare_range_ok_none_does_not_gate(self):
-        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=None)
-        assert scope.effective_review_scope == "incremental"
-
-    def test_both_validation_flags_true_incremental(self):
-        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=True)
-        assert scope.effective_review_scope == "incremental"
-        assert scope.baseline_clean is True
-
-    def test_baseline_clean_with_clean_result(self):
-        scope = self._resolve(previous_review_result="clean")
-        assert scope.baseline_clean is True
-
-    def test_baseline_clean_with_empty_result(self):
-        scope = self._resolve(previous_review_result="")
-        assert scope.baseline_clean is True
-
-    def test_baseline_dirty_with_issues_result(self):
-        scope = self._resolve(previous_review_result="issues")
-        assert scope.baseline_clean is False
-
-
 class TestBroadAndMarkerFingerprint:
     """Tests for helper fingerprint builders."""
 
@@ -270,6 +189,7 @@ class TestBroadAndMarkerFingerprint:
     def test_build_marker_fingerprint(self):
         fp = build_marker_fingerprint("abc", "def")
         assert fp == "abc|cfg:def"
+
 
 class TestFingerprintsMatch:
     def test_match(self):
@@ -317,19 +237,26 @@ class TestShouldReviewIntegration:
 
 # ── #536 Case 1: a CI-state finding must survive the diff-unchanged guard ────
 
+
 def test_looks_like_ci_state_finding_matches_a_ci_blocker():
     from pr_reviewer.precheck import looks_like_ci_state_finding
 
     assert looks_like_ci_state_finding(
-        {"message": "CI is in a terminal failure state for this commit: 'npm audit' failed"}
+        {
+            "message": "CI is in a terminal failure state for this commit: 'npm audit' failed"
+        }
     )
-    assert looks_like_ci_state_finding({"message": "The Build check is failing on this commit"})
+    assert looks_like_ci_state_finding(
+        {"message": "The Build check is failing on this commit"}
+    )
 
 
 def test_looks_like_ci_state_finding_ignores_ordinary_findings():
     from pr_reviewer.precheck import looks_like_ci_state_finding
 
-    assert not looks_like_ci_state_finding({"message": "This function returns the wrong type"})
+    assert not looks_like_ci_state_finding(
+        {"message": "This function returns the wrong type"}
+    )
     assert not looks_like_ci_state_finding({"message": ""})
     assert not looks_like_ci_state_finding({"message": None})
     assert not looks_like_ci_state_finding("not a dict")
@@ -375,60 +302,36 @@ def test_evaluate_precheck_reviews_anyway_when_a_ci_state_finding_is_open():
     assert again.broad_fingerprint == first.broad_fingerprint
 
 
-# ── #536 Case 2: an unassessable carried finding forces a full review ────────
+# ── #615: v3 removed the runtime scope resolver. Acceptance tests: ─────────
+#   * there is no resolve function to call
+#   * evaluate_precheck has no previous_needs_full_review kwarg
+#   * everything leaving precheck is implicitly a full review of the current PR
 
-def test_resolve_review_scope_forces_full_when_previous_needed_it():
-    """An incremental review would reach the same not_verifiable verdict for the
-    same reason, and fail-closed would keep the PR blocked. (#536 Case 2)"""
-    from pr_reviewer.precheck import resolve_review_scope
 
-    r = resolve_review_scope(
-        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=True
+def test_no_resolve_review_scope_function():
+    """The v3 precheck no longer exposes a scope resolver at all (#615)."""
+    import pr_reviewer.precheck as precheck
+
+    assert not hasattr(precheck, "resolve_review_scope"), (
+        "resolve_review_scope() was removed in v3 — there is no "
+        "full vs incremental selection on the precheck path"
     )
-    assert r.effective_review_scope == "full"
-
-
-def test_resolve_review_scope_still_increments_without_the_flag():
-    from pr_reviewer.precheck import resolve_review_scope
-
-    r = resolve_review_scope(
-        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False
+    assert not hasattr(precheck, "ScopeResolution"), (
+        "ScopeResolution dataclass was removed with resolve_review_scope"
     )
-    assert r.effective_review_scope == "incremental"
 
 
-# ── #544: the flag must also defeat the diff-unchanged skip guard ──────────
+def test_evaluate_precheck_rejects_previous_needs_full_review_kwarg():
+    """The kwarg that drove incremental→full fallback was removed in v3."""
+    import inspect
 
-def test_diff_unchanged_guard_deferred_when_previous_needed_full_review():
-    """The only way to clear a not_verifiable_from_delta finding is the full
-    review the flag requests; skipping would strand the PR on the same
-    incremental diff forever. (#544)"""
-    from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
+    import pr_reviewer.precheck as precheck
 
-    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck(
-        "diff --git a/x b/x\n+one\n",
-        [first.broad_fingerprint],
-        config_hash="c",
-        previous_needs_full_review=True,
+    sig = inspect.signature(precheck.evaluate_precheck)
+    assert "previous_needs_full_review" not in sig.parameters, (
+        "evaluate_precheck() must no longer accept previous_needs_full_review "
+        "in v3 — every non-skipped review is implicitly a full review"
     )
-    assert again.decision == ReviewDecision.REVIEW_NEEDED
-    assert "full review" in again.reason
-    # the fingerprint itself is unchanged; only the decision differs
-    assert again.broad_fingerprint == first.broad_fingerprint
-
-
-def test_diff_unchanged_guard_still_skips_without_the_flag():
-    from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
-
-    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck(
-        "diff --git a/x b/x\n+one\n",
-        [first.broad_fingerprint],
-        config_hash="c",
-        previous_needs_full_review=False,
-    )
-    assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
 
 
 # --- #543: the dismissal writer must actually be reachable in production ---

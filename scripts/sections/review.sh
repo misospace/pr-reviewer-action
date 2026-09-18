@@ -61,20 +61,22 @@ if [[ "$(printf '%s' "$AI_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; t
   STREAM_BOOL="true"
 fi
 
-# Carry-forward (#193) is active when this is an incremental review and the
-# precheck extracted open findings from the previous review's marker.
+# Carry-forward (#193) is active when the precheck extracted open findings
+# from the previous review's marker. v3 always reviews the full PR, so
+# carried findings are still useful context (the model can re-confirm
+# resolutions against the full diff), but the routing decision is no
+# longer gated on EFFECTIVE_SCOPE.
 CARRY_FORWARD_ACTIVE="false"
-if [[ "$EFFECTIVE_SCOPE" == "incremental" ]] && [ -s previous-findings.json ] \
+if [ -s previous-findings.json ] \
   && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
   CARRY_FORWARD_ACTIVE="true"
 fi
 
-# Incremental review against a baseline the previous review flagged as having
-# issues. Used for the dirty-baseline escalation trigger.
+# Every review is now a full review of the current PR (#615), so there is
+# no incremental/dirty-baseline escalation path to trigger. The variable
+# stays defined so escalation.py's existing wiring keeps a stable
+# interface — the dirty_baseline flag is now always false.
 DIRTY_BASELINE="false"
-if [[ "$EFFECTIVE_SCOPE" == "incremental" && "$BASELINE_CLEAN" != "true" ]]; then
-  DIRTY_BASELINE="true"
-fi
 
 USER_MESSAGE="$(build_user_message classification.json)"
 if [[ "$CARRY_FORWARD_ACTIVE" == "true" ]]; then
@@ -284,11 +286,11 @@ apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED
 # ── Incremental-insufficient escalation (#544) ───────────────────────
 # apply_carry_forward writes needs-full-review.json when a carried finding
 # was marked not_verifiable_from_delta: the resolving change is outside the
-# incremental diff, so re-running an incremental review cannot clear it.
-# This run stays incremental (the corpus was delta-only), but the flag is
-# persisted into the metadata marker by the publish step, so the NEXT run's
-# precheck resolves full scope (PREVIOUS_NEEDS_FULL_REVIEW) — the same
-# escape hatch the ai-review label provides manually.
+# delta the model could see, so re-running cannot clear it. v3 always
+# reviews the full current PR (#615), so this flag no longer drives a
+# routing decision on the NEXT run. We keep the file read + log so the
+# diagnostic still surfaces in the step summary (and any in-body section
+# below remains accurate for the corpus the model actually saw).
 NEEDS_FULL_REVIEW="false"
 UNVERIFIABLE_COUNT="0"
 if [[ -s needs-full-review.json ]]; then
@@ -296,25 +298,8 @@ if [[ -s needs-full-review.json ]]; then
   UNVERIFIABLE_COUNT="$(jq -r '.unverifiable // 0' needs-full-review.json 2>/dev/null || echo 0)"
 fi
 if [[ "$NEEDS_FULL_REVIEW" == "true" ]]; then
-  log "Incremental review insufficient: $UNVERIFIABLE_COUNT carried finding(s) could not be evaluated from this delta; the next run will be a full review"
-  # In-body section so the published review explains why it is incremental
-  # only and what clears the block. The text is static (no model/PR input),
-  # so it cannot carry prompt injection.
-  UNVERIFIABLE_COUNT="$UNVERIFIABLE_COUNT" python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-n = int(os.environ.get("UNVERIFIABLE_COUNT") or 0)
-data = json.loads(Path("ai-output.json").read_text(encoding="utf-8", errors="replace"))
-data["review_markdown"] = str(data.get("review_markdown") or "") + (
-    "\n\n## Incremental Review Insufficient\n\n"
-    f"{n} carried finding(s) could not be evaluated from this delta; this "
-    "review is incremental only — push to rebase or apply the re-review "
-    "label for a full review."
-)
-Path("ai-output.json").write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-PY
-  echo "::warning title=AI review: incremental insufficient::$UNVERIFIABLE_COUNT carried finding(s) could not be evaluated from this delta; the next run will be a full review."
+  log "Carried finding(s) could not be assessed from the full diff: $UNVERIFIABLE_COUNT"
+  echo "::warning title=AI review: carried finding not assessable::$UNVERIFIABLE_COUNT carried finding(s) could not be evaluated against this PR's diff."
 fi
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
@@ -369,12 +354,6 @@ jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
 echo "$ANALYSIS_ENGINE" > analysis_engine.txt
 
-echo "effective_review_scope=$EFFECTIVE_SCOPE" >> "$OUTPUT_FILE"
-if [[ -n "$PREVIOUS_HEAD_SHA" ]]; then
-  echo "previous_head_sha=$PREVIOUS_HEAD_SHA" >> "$OUTPUT_FILE"
-fi
-# Incremental-insufficient escalation (#544): the publish step persists this
-# into the metadata marker so the next run's precheck resolves full scope.
 echo "needs_full_review=$NEEDS_FULL_REVIEW" >> "$OUTPUT_FILE"
 
 # Cache hit ratio: per-review prompt-cache effectiveness signal from the
@@ -442,9 +421,9 @@ write_step_summary() {
     echo "| Required checks | ${required_checks_status} |"
     echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
-    echo "| Scope | ${EFFECTIVE_SCOPE} |"
+    echo "| Scope | full |"
     if [[ "${NEEDS_FULL_REVIEW:-false}" == "true" ]]; then
-      echo "| Incremental insufficient | ${UNVERIFIABLE_COUNT:-0} carried finding(s) not evaluable from delta — next run full |"
+      echo "| Carried finding not assessable | ${UNVERIFIABLE_COUNT:-0} carried finding(s) not evaluable against the full diff |"
     fi
     echo "| Budget | ${budget_desc} |"
     echo "| Diff bytes | ${diff_bytes} (truncated: ${diff_trunc}) |"

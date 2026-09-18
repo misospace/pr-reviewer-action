@@ -399,11 +399,10 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 </details>
 
 <details>
-<summary><b>Review scope & CI gating</b> — incremental reviews, diff skip, waiting for CI</summary>
+<summary><b>Diff skip & CI gating</b> — diff skip, waiting for CI</summary>
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
 | `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
 | `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
@@ -438,9 +437,6 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `diff_fingerprint` | Stable fingerprint of the current PR patch |
 | `ci_status_skipped` | `true` if CI status check was skipped, `false` if it completed |
 | `ci_status_final` | Final CI state (`success`/`failure`) when `ci_status_check` completed |
-| `effective_review_scope` | Effective scope used: `full` or `incremental` |
-| `previous_head_sha` | Previous head SHA when scope is `incremental` |
-| `baseline_clean` | Whether the full-review baseline was clean (for verdict safety) |
 
 ## 📖 Usage recipes
 
@@ -959,36 +955,19 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
 - `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
 
-Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
+Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and the carried-forward findings section keep that bounded.
 
-## 💾 Token-saving with incremental reviews
+## 💾 Token-saving with the diff-unchanged skip
 
-When `review_scope: auto` (the default), the action performs a full PR review on the first run. On subsequent pushes to the same PR, it attempts an **incremental review** that only analyzes the delta since the last managed review. This can significantly reduce token usage for large PRs with multiple commits.
+The action skips the model entirely when the current PR patch matches the
+last managed review's fingerprint (`skip_if_diff_unchanged: true`, the
+default). On a re-trigger that touches no PR content — a label change,
+a no-op push, or a draft flip — the action exits early without spending
+tokens; the managed comment stays put.
 
-Key behaviors:
-
-- **First run**: Full PR review (same as before).
-- **Later pushes**: Incremental review of only new changes.
-- **Fallback**: Automatically falls back to full review when incremental comparison is unsafe (force-push, rebase, base branch change, missing metadata, etc.).
-- **Verdict safety**: With `publish_mode: review_verdict`, approvals based on incremental reviews require a trusted clean full-review baseline. If the baseline is dirty, a forced re-review (the `ai-review` label) escalates to full scope to re-establish it — see [Forcing a re-review](#-forcing-a-re-review).
-- **Carried-forward findings (cumulative verdict)**: when a review requests changes, its findings are persisted in the managed metadata marker (`open_findings`). The next incremental review receives them as a high-priority corpus section and must answer each with a `resolution`: `resolved`, `still_open`, or `not_verifiable_from_delta`. Findings the model does not convincingly resolve survive into the new review's `findings` output, and a surviving blocker forces `request_changes` (`verdict_source: carry_forward`) — fixing one of three blockers cannot rubber-stamp the other two. The published review lists what this push resolved and what is still open, so the latest review always reflects total PR state (useful since superseded reviews are dismissed and hidden).
-- **Incremental insufficient → full review next push**: when a carried finding is answered `not_verifiable_from_delta`, the resolving change is outside the incremental diff, so re-running an incremental review cannot clear it. The review step flags this in the published body ("N carried finding(s) could not be evaluated from this delta; this review is incremental only — push to rebase or apply the re-review label for a full review") and a step-summary warning, and persists `needs_full_review` in the metadata marker. The next run's precheck then resolves **full scope** automatically — the same escape hatch the `ai-review` label provides manually, without the label.
-- **Cross-run evidence memory (`tool_mode: native_loop`)**: a native_loop review gathers evidence with read-only tools (reading configs, fetching support matrices). A compact digest of that evidence is persisted in the same metadata marker (`evidence_digest`, tagged with the head SHA it was gathered at). The next incremental review receives it as a corpus section and reuses it — re-verifying only what the delta touched — instead of re-running the same reads and fetches. On by default (`tool_evidence_memory`); the framing is fail-safe (prior evidence is context, not ground truth, and may be stale).
-- **Header**: incremental reviews are titled `# AI Automated Review (incremental)`.
-
-You can force specific behavior:
-
-```yaml
-# Always do full reviews (original behavior)
-- uses: misospace/pr-reviewer-action@vX.Y.Z
-  with:
-    review_scope: full
-
-# Always attempt incremental (falls back safely)
-- uses: misospace/pr-reviewer-action@vX.Y.Z
-  with:
-    review_scope: incremental
-```
+To opt out and force a fresh review on every run, set
+`skip_if_diff_unchanged: false` or apply the configured
+`rereview_label` (`ai-review` by default).
 
 ## 🔧 Local model troubleshooting
 

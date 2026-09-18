@@ -1,7 +1,7 @@
 """Pre-check logic extracted from scripts/check_review_needed.sh.
 
-Core functions for diff fingerprinting, incremental scope detection,
-config hash computation, and review metadata transport.
+Core functions for diff fingerprinting, config hash computation, and
+review metadata transport.
 
 These replace the shell implementations with testable Python code.
 
@@ -10,11 +10,10 @@ CLI contract (``python3 -m pr_reviewer.precheck``)
 
 The module entry point (``main``) reads its inputs from the environment
 and writes a single JSON object to stdout with the keys ``should_review``,
-``skip_reason``, ``effective_review_scope``, ``previous_head_sha``,
-``baseline_clean``, ``diff_fingerprint``, ``broad_fingerprint`` and
-``config_hash``. It is the decision half of the action precheck; the shell
-wrapper performs platform I/O (diff/PR/comment fetches) and forwards the
-result to ``$GITHUB_OUTPUT``.
+``skip_reason``, ``diff_fingerprint``, ``broad_fingerprint`` and
+``config_hash``. It is the decision half of the action precheck; the
+shell wrapper performs platform I/O (diff/PR/comment fetches) and
+forwards the result to ``$GITHUB_OUTPUT``.
 
 Environment inputs:
 
@@ -26,19 +25,6 @@ Environment inputs:
   honoured).
 - ``FORCE_REVIEW``: ``true`` bypasses the diff-unchanged guard.
 - ``SKIP_IF_DIFF_UNCHANGED``: ``true`` (default) enables the guard.
-- ``REVIEW_SCOPE``: user scope request (``full`` / ``incremental`` /
-  ``auto``); ``auto`` is the default.
-- ``PREVIOUS_HEAD_SHA`` / ``PREVIOUS_BASE_SHA`` / ``PREVIOUS_REVIEW_RESULT``:
-  metadata from the last managed review.
-- ``PREVIOUS_HEAD_IS_ANCESTOR`` / ``COMPARE_RANGE_OK``: caller-supplied
-  validation verdicts for the previous→current range (ancestorship and
-  compare/base continuity). Unset means "not asserted" (the check does
-  not gate the baseline); ``false`` forces a full-scope fallback.
-- ``PREVIOUS_NEEDS_FULL_REVIEW``: ``true`` when the last review's
-  carry-forward step flagged a carried finding it could not assess from
-  its delta (``needs_full_review`` in the metadata marker, #544). Forces
-  a full-scope fallback so the next run can actually clear the finding
-  instead of looping on the same incremental diff.
 
 ``diff_fingerprint`` is the diff's own fingerprint (``empty-diff``
 placeholder for an empty diff); ``broad_fingerprint`` is the marker form
@@ -108,19 +94,6 @@ class PrecheckResult:
     reason: str = ""
 
 
-@dataclass
-class ScopeResolution:
-    """Outcome of metadata-based review scope resolution.
-
-    A full scope always clears the carried incremental baseline: no
-    previous head is forwarded and the baseline is untrusted.
-    """
-
-    effective_review_scope: str = "full"
-    previous_head_sha: str = ""
-    baseline_clean: bool = False
-
-
 # ---------------------------------------------------------------------------
 # Fingerprinting
 # ---------------------------------------------------------------------------
@@ -158,7 +131,6 @@ _EXACT_CONFIG_KEYS = frozenset((
     "CONTEXT_LIMIT_MODE",
     "MODEL_CONTEXT_TOKENS",
     "REVIEW_ROUTING_MODE",
-    "REVIEW_SCOPE",
     "ESCALATE_ON_RISK_FLAGS",
     "SYSTEM_PROMPT",
     "STANDARDS_FILE_CANDIDATES",
@@ -662,116 +634,6 @@ def should_review(
 # ---------------------------------------------------------------------------
 
 
-def resolve_review_scope(
-    review_scope: str,
-    previous_head_sha: str,
-    previous_base_sha: str,
-    previous_review_result: str = "",
-    *,
-    force_review: bool = False,
-    previous_head_is_ancestor: Optional[bool] = None,
-    compare_range_ok: Optional[bool] = None,
-    previous_needs_full_review: bool = False,
-) -> ScopeResolution:
-    """Resolve the effective review scope from explicit metadata inputs.
-
-    Python-side port of the scope logic that used to live in
-    ``check_review_needed.sh``: no git or API calls are made here. The
-    range validations the shell used to run itself (``git merge-base
-    --is-ancestor`` and the compare API) are passed in as verdicts:
-
-    - ``previous_head_is_ancestor``: whether the previous head is an
-      ancestor of the current head (force-push/rebase detection).
-    - ``compare_range_ok``: whether the previous→current range is still
-      comparable, which subsumes base-branch continuity (a changed base
-      makes the stored incremental range invalid).
-
-    ``None`` means the caller did not assert the check (it does not gate
-    the baseline, mirroring the old shell skipping a check it could not
-    run); ``True`` is a passing verdict; ``False`` forces a full-scope
-    fallback.
-
-    Rules, in order:
-
-    1. ``force_review`` or a ``full`` scope request → full scope.
-    2. An unrecognized ``review_scope`` degrades to ``auto`` (with a
-       warning) and continues through the safety gates.
-    3. Missing previous head or base metadata → full scope (no baseline
-       to increment from).
-    4. A failing validation verdict → full scope.
-    4a. The previous review could not assess a carried finding from its
-        delta (``previous_needs_full_review``) → full scope. An incremental
-        review would reach the same verdict for the same reason, and the
-        fail-closed carry-forward rule would keep the PR blocked (#536).
-    5. Otherwise → incremental scope carrying ``previous_head_sha``;
-       ``baseline_clean`` is true only when the previous review result
-       was ``clean`` or absent.
-
-    Parameters
-    ----------
-    review_scope : str
-        User scope request (``full`` / ``incremental`` / ``auto``).
-    previous_head_sha : str
-        Head SHA recorded in the last managed review marker.
-    previous_base_sha : str
-        Base SHA recorded in the last managed review marker.
-    previous_review_result : str
-        Review result recorded in the last managed review marker.
-    force_review : bool
-        Explicit re-review (label-driven or input); always full scope.
-    previous_head_is_ancestor : bool | None
-        Caller verdict for previous-head ancestorship (see above).
-    compare_range_ok : bool | None
-        Caller verdict for range comparability (see above).
-
-    Returns
-    -------
-    ScopeResolution
-    """
-    full = ScopeResolution()
-
-    if force_review:
-        logger.info("Forced re-review: using full scope")
-        return full
-
-    scope = (review_scope or "").strip().lower()
-    if scope == "full":
-        return full
-    if scope not in ("", "auto", "incremental"):
-        logger.warning(
-            "Invalid REVIEW_SCOPE %r; defaulting to auto", review_scope
-        )
-
-    if not previous_head_sha or not previous_base_sha:
-        return full
-    if previous_head_is_ancestor is False:
-        logger.info(
-            "Review scope fallback: previous head %s is not an ancestor of "
-            "the current head (possible force-push/rebase)",
-            previous_head_sha,
-        )
-        return full
-    if compare_range_ok is False:
-        logger.info(
-            "Review scope fallback: previous→current range is not comparable"
-        )
-        return full
-    if previous_needs_full_review:
-        logger.info(
-            "Review scope fallback: the previous review carried a finding it "
-            "could not assess from its delta"
-        )
-        return full
-
-    return ScopeResolution(
-        effective_review_scope="incremental",
-        previous_head_sha=previous_head_sha,
-        baseline_clean=(previous_review_result or "").strip().lower()
-        in ("", "clean"),
-    )
-
-
-
 # Findings about CI state describe the *run*, not the diff. The diff-unchanged
 # guard compares a fingerprint of the diff, so a red-to-green CI transition
 # leaves the fingerprint identical and the review short-circuits — the PR then
@@ -813,7 +675,6 @@ def evaluate_precheck(
     force_review: bool = False,
     skip_if_diff_unchanged: bool = True,
     ci_state_findings_open: bool = False,
-    previous_needs_full_review: bool = False,
 ) -> PrecheckResult:
     """Run the action's should-review decision over a diff.
 
@@ -821,8 +682,9 @@ def evaluate_precheck(
     :func:`should_review`: the only skip is a marker fingerprint match
     (diff unchanged since the last managed review), and an empty diff is
     not a skip — it fingerprinted as ``empty-diff`` so that the marker
-    round-trip can skip *subsequent* runs. Scope selection is out of
-    scope here (see :func:`resolve_review_scope`).
+    round-trip can skip *subsequent* runs. v3 removed scope selection:
+    every non-skipped review is implicitly a full review of the current PR
+    (#615).
 
     Parameters
     ----------
@@ -842,12 +704,6 @@ def evaluate_precheck(
         The previous review left a finding about CI state open. Such a finding
         can clear without the diff changing, so the diff-unchanged guard must
         not short-circuit it (#536).
-    previous_needs_full_review : bool
-        The previous review flagged a carried finding it could not assess
-        from its delta (#544). The diff-unchanged guard must not
-        short-circuit it either: the only way to clear the finding is the
-        full review this flag requests, and skipping would strand the PR
-        on the same incremental diff forever.
 
     Returns
     -------
@@ -866,7 +722,6 @@ def evaluate_precheck(
     if (
         not force_review
         and not ci_state_findings_open
-        and not previous_needs_full_review
         and skip_if_diff_unchanged
         and fingerprints_match(broad, previous_fingerprints)
     ):
@@ -881,14 +736,6 @@ def evaluate_precheck(
     reason = "New or forced changes detected"
     if ci_state_findings_open and fingerprints_match(broad, previous_fingerprints):
         reason = "Diff unchanged, but a CI-state finding is still open"
-    elif (
-        previous_needs_full_review
-        and fingerprints_match(broad, previous_fingerprints)
-    ):
-        reason = (
-            "Diff unchanged, but a carried finding needs a full review "
-            "to be assessed (#544)"
-        )
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=marker_fp,
@@ -912,23 +759,20 @@ def _decision_to_outputs(decision: ReviewDecision) -> tuple[bool, str]:
 
 
 def build_precheck_payload(
-    result: PrecheckResult, scope: ScopeResolution
+    result: PrecheckResult, scope: object = None
 ) -> dict:
     """Assemble the JSON payload the CLI writes to stdout.
 
-    When the decision does not run a review the scope fields are reset to
-    the full-scope defaults, so the payload is internally consistent
-    (the shell wrapper re-applies the same reset defensively).
+    v3 removed ``effective_review_scope`` / ``previous_head_sha`` /
+    ``baseline_clean`` from the precheck contract: every non-skipped
+    review is implicitly a full review of the current PR. The ``scope``
+    argument is kept solely so older call sites (and tests) that still
+    pass a scope object do not break — its value is ignored here.
     """
     should_review, skip_reason = _decision_to_outputs(result.decision)
-    if not should_review:
-        scope = ScopeResolution()
     return {
         "should_review": should_review,
         "skip_reason": skip_reason,
-        "effective_review_scope": scope.effective_review_scope,
-        "previous_head_sha": scope.previous_head_sha,
-        "baseline_clean": scope.baseline_clean,
         "diff_fingerprint": result.diff_fingerprint,
         "broad_fingerprint": result.broad_fingerprint,
         "config_hash": result.config_hash,
@@ -970,27 +814,6 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() == "true"
-
-
-def _env_validation_flag(name: str) -> Optional[bool]:
-    """Read a caller-supplied range-validation verdict.
-
-    Unset/empty means the caller did not assert the check (returns
-    ``None``; the check does not gate the baseline). ``true``/``false``
-    (case-insensitive, plus ``1``/``0``) are the verdicts. An unparseable
-    value fails closed to ``False``: a broken verdict must not certify a
-    baseline it cannot vouch for.
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return None
-    value = raw.strip().lower()
-    if value in ("true", "1"):
-        return True
-    if value in ("false", "0"):
-        return False
-    logger.warning("Unparseable %s=%r; treating validation as failed", name, raw)
-    return False
 
 
 def _read_diff_content() -> str:
@@ -1055,10 +878,11 @@ def main() -> None:
     Reads the action precheck inputs from the environment (see the module
     docstring for the contract) and writes a single JSON object to stdout
     with the keys ``should_review``, ``skip_reason``,
-    ``effective_review_scope``, ``previous_head_sha``, ``baseline_clean``,
     ``diff_fingerprint``, ``broad_fingerprint`` and ``config_hash``.
     Designed to be called from a thin shell wrapper; library callers use
-    :func:`evaluate_precheck` / :func:`resolve_review_scope` directly.
+    :func:`evaluate_precheck` directly. v3 removed the scope resolver
+    (#615): every non-skipped review is implicitly a full review of the
+    current PR, so no scope plumbing reaches this code path.
     """
     diff_content = _read_diff_content()
     previous_fingerprints = _read_previous_fingerprints()
@@ -1071,24 +895,9 @@ def main() -> None:
         force_review=force_review,
         skip_if_diff_unchanged=skip_if_diff_unchanged,
         ci_state_findings_open=has_ci_state_findings(_read_previous_findings()),
-        previous_needs_full_review=_env_flag(
-            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
-        ),
-    )
-    scope = resolve_review_scope(
-        os.environ.get("REVIEW_SCOPE", "auto"),
-        os.environ.get("PREVIOUS_HEAD_SHA", ""),
-        os.environ.get("PREVIOUS_BASE_SHA", ""),
-        os.environ.get("PREVIOUS_REVIEW_RESULT", ""),
-        force_review=force_review,
-        previous_head_is_ancestor=_env_validation_flag("PREVIOUS_HEAD_IS_ANCESTOR"),
-        compare_range_ok=_env_validation_flag("COMPARE_RANGE_OK"),
-        previous_needs_full_review=_env_flag(
-            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
-        ),
     )
 
-    print(json.dumps(build_precheck_payload(result, scope), indent=2))
+    print(json.dumps(build_precheck_payload(result), indent=2))
 
     pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get(
         "GITHUB_PR_NUMBER", ""

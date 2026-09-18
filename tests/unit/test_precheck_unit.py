@@ -2,6 +2,14 @@
 
 Covers fingerprinting, config hashing, incremental scope detection,
 previous fingerprint extraction, and the main decision logic.
+
+v3 (#615) removed the public/runtime concept of selecting ``full`` vs
+``incremental`` review scope: every non-skipped review is implicitly a
+full review of the current PR, so the previous ``ScopeResolution`` /
+``resolve_review_scope`` test classes are gone. Their coverage is
+replaced by the ``TestEvaluatePrecheck`` and ``TestBuildPrecheckPayload``
+classes below, which lock in the new contract (no scope plumbing in
+the payload, no ``previous_*`` carry into the decision).
 """
 
 import json
@@ -21,7 +29,6 @@ from pr_reviewer.precheck import (
     MIN_INCREMENTAL_RATIO,
     PrecheckResult,
     ReviewDecision,
-    ScopeResolution,
     _collect_config_lines,
     _decision_to_outputs,
     _detect_incremental_scope,
@@ -36,7 +43,6 @@ from pr_reviewer.precheck import (
     evaluate_precheck,
     extract_config_lines,
     fingerprints_match,
-    resolve_review_scope,
     should_review,
 )
 
@@ -67,8 +73,12 @@ class TestComputeDiffFingerprint:
         assert compute_diff_fingerprint(diff) == compute_diff_fingerprint(diff)
 
     def test_different_diff_different_fingerprint(self):
-        fp_a = compute_diff_fingerprint("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n")
-        fp_b = compute_diff_fingerprint("diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n")
+        fp_a = compute_diff_fingerprint(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n"
+        )
+        fp_b = compute_diff_fingerprint(
+            "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n"
+        )
         assert fp_a != fp_b
 
     def test_unicode_content(self):
@@ -189,7 +199,10 @@ class TestExtractPreviousFingerprints:
         )
         result = _extract_previous_fingerprints(body)
         assert len(result) == 1
-        assert result[0] == "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+        assert (
+            result[0]
+            == "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+        )
 
     def test_partial_hex_not_matched(self):
         body = "diff-fp:xyz not hex"
@@ -395,17 +408,13 @@ class TestShouldReview:
 
     def test_incremental_skips_when_enabled(self):
         diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=True
-        )
+        result = should_review(diff, [], [], enable_incremental_detection=True)
         # Small single-file change should be incremental
         assert result.decision == ReviewDecision.SKIP_INCREMENTAL
 
     def test_incremental_disabled_needs_review(self):
         diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=False
-        )
+        result = should_review(diff, [], [], enable_incremental_detection=False)
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_result_contains_fingerprints(self):
@@ -603,7 +612,11 @@ def _clear_config_env(monkeypatch):
     """Remove every env var _collect_config_lines can match, so tests are
     hermetic on runners that preset provider/platform variables."""
     for key in list(os.environ):
-        if key.startswith("AI_") or key in _EXACT_CONFIG_KEYS or key == "REVIEW_VERBOSITY":
+        if (
+            key.startswith("AI_")
+            or key in _EXACT_CONFIG_KEYS
+            or key == "REVIEW_VERBOSITY"
+        ):
             monkeypatch.delenv(key, raising=False)
 
 
@@ -824,88 +837,31 @@ class TestBuildMarkerFingerprint:
 
 
 # ---------------------------------------------------------------------------
-# resolve_review_scope
+# #615: v3 removed the runtime scope resolver. Lock in the absence.
 # ---------------------------------------------------------------------------
 
 
-class TestResolveReviewScope:
-    def test_force_review_returns_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base", force_review=True
+class TestScopeResolverRemoved:
+    """v3 (issue #615) removed every runtime concept of selecting ``full``
+    vs ``incremental`` review scope. There is no resolver function and
+    no incremental-specific result state — precheck simply decides
+    whether to skip, and any review that runs is implicitly a full
+    review of the current PR."""
+
+    def test_resolve_review_scope_is_not_an_attribute(self):
+        import pr_reviewer.precheck as precheck
+
+        assert not hasattr(precheck, "resolve_review_scope"), (
+            "resolve_review_scope() was removed in v3; every review is "
+            "implicitly a full review of the current PR"
         )
-        assert scope.effective_review_scope == "full"
-        assert scope.previous_head_sha == ""
-        assert scope.baseline_clean is False
 
-    def test_explicit_full_scope(self):
-        scope = resolve_review_scope("full", "prev_head", "prev_base")
-        assert scope.effective_review_scope == "full"
+    def test_scope_resolution_dataclass_is_not_an_attribute(self):
+        import pr_reviewer.precheck as precheck
 
-    def test_missing_previous_head_returns_full(self):
-        scope = resolve_review_scope("auto", "", "prev_base")
-        assert scope.effective_review_scope == "full"
-
-    def test_missing_previous_base_returns_full(self):
-        scope = resolve_review_scope("auto", "prev_head", "")
-        assert scope.effective_review_scope == "full"
-
-    def test_ancestor_false_falls_back_to_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_head_is_ancestor=False,
+        assert not hasattr(precheck, "ScopeResolution"), (
+            "ScopeResolution was removed alongside resolve_review_scope"
         )
-        assert scope.effective_review_scope == "full"
-
-    def test_compare_range_false_falls_back_to_full(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            compare_range_ok=False,
-        )
-        assert scope.effective_review_scope == "full"
-
-    def test_incremental_with_valid_metadata(self):
-        scope = resolve_review_scope("auto", "prev_head", "prev_base")
-        assert scope.effective_review_scope == "incremental"
-        assert scope.previous_head_sha == "prev_head"
-
-    def test_incremental_baseline_clean_when_result_clean(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="clean",
-        )
-        assert scope.baseline_clean is True
-
-    def test_incremental_baseline_clean_when_result_empty(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="",
-        )
-        assert scope.baseline_clean is True
-
-    def test_incremental_baseline_dirty_when_result_request_changes(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_review_result="request_changes",
-        )
-        assert scope.baseline_clean is False
-
-    def test_none_validation_does_not_gate(self):
-        scope = resolve_review_scope(
-            "auto", "prev_head", "prev_base",
-            previous_head_is_ancestor=None,
-            compare_range_ok=None,
-        )
-        assert scope.effective_review_scope == "incremental"
-
-    def test_invalid_scope_degrades_to_auto(self):
-        scope = resolve_review_scope("bogus", "prev_head", "prev_base")
-        assert scope.effective_review_scope == "incremental"
-
-    def test_force_overrides_incremental_metadata(self):
-        scope = resolve_review_scope(
-            "incremental", "prev_head", "prev_base", force_review=True
-        )
-        assert scope.effective_review_scope == "full"
 
 
 # ---------------------------------------------------------------------------
@@ -959,9 +915,7 @@ class TestEvaluatePrecheck:
         cfg = "cfg_hash"
         diff_fp = compute_diff_fingerprint(diff)
         marker = build_marker_fingerprint(diff_fp, cfg)
-        result = evaluate_precheck(
-            diff, [marker], config_hash=cfg, force_review=True
-        )
+        result = evaluate_precheck(diff, [marker], config_hash=cfg, force_review=True)
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_skip_disabled_bypasses_skip(self, monkeypatch):
@@ -987,6 +941,15 @@ class TestEvaluatePrecheck:
 
 
 class TestBuildPrecheckPayload:
+    """v3 (#615): the precheck payload no longer carries scope state.
+
+    The action's precheck contract is now ``should_review``,
+    ``skip_reason``, plus the diff / config fingerprints; there is no
+    ``effective_review_scope`` / ``previous_head_sha`` / ``baseline_clean``
+    plumbing in the payload, because every review that runs is implicitly
+    a full review of the current PR (#615).
+    """
+
     def test_review_needed_payload(self):
         result = PrecheckResult(
             decision=ReviewDecision.REVIEW_NEEDED,
@@ -995,22 +958,14 @@ class TestBuildPrecheckPayload:
             broad_fingerprint="fp|cfg:cfg",
             reason="New changes",
         )
-        scope = ScopeResolution(
-            effective_review_scope="incremental",
-            previous_head_sha="prev",
-            baseline_clean=True,
-        )
-        payload = build_precheck_payload(result, scope)
+        payload = build_precheck_payload(result)
         assert payload["should_review"] is True
         assert payload["skip_reason"] == ""
-        assert payload["effective_review_scope"] == "incremental"
-        assert payload["previous_head_sha"] == "prev"
-        assert payload["baseline_clean"] is True
         assert payload["diff_fingerprint"] == "fp"
         assert payload["broad_fingerprint"] == "fp|cfg:cfg"
         assert payload["config_hash"] == "cfg"
 
-    def test_skip_resets_scope_to_full(self):
+    def test_skip_unchanged_payload(self):
         result = PrecheckResult(
             decision=ReviewDecision.SKIP_ALREADY_REVIEWED,
             diff_fingerprint="fp",
@@ -1018,17 +973,9 @@ class TestBuildPrecheckPayload:
             broad_fingerprint="fp|cfg:cfg",
             reason="Unchanged",
         )
-        scope = ScopeResolution(
-            effective_review_scope="incremental",
-            previous_head_sha="prev",
-            baseline_clean=True,
-        )
-        payload = build_precheck_payload(result, scope)
+        payload = build_precheck_payload(result)
         assert payload["should_review"] is False
         assert payload["skip_reason"] == "diff-unchanged"
-        assert payload["effective_review_scope"] == "full"
-        assert payload["previous_head_sha"] == ""
-        assert payload["baseline_clean"] is False
 
     def test_skip_no_changes_reason(self):
         result = PrecheckResult(
@@ -1038,9 +985,26 @@ class TestBuildPrecheckPayload:
             broad_fingerprint="",
             reason="No diff",
         )
-        payload = build_precheck_payload(result, ScopeResolution())
+        payload = build_precheck_payload(result)
         assert payload["should_review"] is False
         assert payload["skip_reason"] == "no-changes"
+
+    def test_scope_keys_are_omitted_from_payload(self):
+        result = PrecheckResult(
+            decision=ReviewDecision.REVIEW_NEEDED,
+            diff_fingerprint="fp",
+            config_hash="cfg",
+            broad_fingerprint="fp|cfg:cfg",
+        )
+        payload = build_precheck_payload(result)
+        for removed in (
+            "effective_review_scope",
+            "previous_head_sha",
+            "baseline_clean",
+        ):
+            assert removed not in payload, (
+                f"v3 must not carry {removed!r} in the precheck payload (#615)"
+            )
 
     def test_decision_to_outputs_review_needed(self):
         should, reason = _decision_to_outputs(ReviewDecision.REVIEW_NEEDED)
@@ -1048,9 +1012,7 @@ class TestBuildPrecheckPayload:
         assert reason == ""
 
     def test_decision_to_outputs_skip_already_reviewed(self):
-        should, reason = _decision_to_outputs(
-            ReviewDecision.SKIP_ALREADY_REVIEWED
-        )
+        should, reason = _decision_to_outputs(ReviewDecision.SKIP_ALREADY_REVIEWED)
         assert should is False
         assert reason == "diff-unchanged"
 
@@ -1071,15 +1033,36 @@ class TestBuildPrecheckPayload:
             config_hash="cfg",
             broad_fingerprint="fp|cfg:cfg",
         )
-        payload = build_precheck_payload(result, ScopeResolution())
+        payload = build_precheck_payload(result)
         expected_keys = {
             "should_review",
             "skip_reason",
-            "effective_review_scope",
-            "previous_head_sha",
-            "baseline_clean",
             "diff_fingerprint",
             "broad_fingerprint",
             "config_hash",
         }
         assert set(payload.keys()) == expected_keys
+
+    def test_payload_accepts_legacy_scope_arg_for_backcompat(self):
+        # Older callers (and test code) may still pass a ScopeResolution-like
+        # arg; the v3 precheck ignores it rather than erroring.
+        result = PrecheckResult(
+            decision=ReviewDecision.REVIEW_NEEDED,
+            diff_fingerprint="fp",
+            config_hash="cfg",
+            broad_fingerprint="fp|cfg:cfg",
+        )
+        legacy = type(
+            "LegacyScope",
+            (),
+            {
+                "effective_review_scope": "incremental",
+                "previous_head_sha": "prev",
+                "baseline_clean": True,
+            },
+        )()
+        payload = build_precheck_payload(result, legacy)
+        # The v3 payload is exactly the new shape — no scope keys leak in.
+        assert "effective_review_scope" not in payload
+        assert "previous_head_sha" not in payload
+        assert "baseline_clean" not in payload

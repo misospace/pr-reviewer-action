@@ -135,20 +135,22 @@ check_not_contains "angle brackets stripped from digest by precheck" "$HOSTILE_D
 check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.13.4"
 
 echo ""
-echo "=== Incremental-insufficient escalation (#544): marker persists → precheck extracts → review reads ==="
-# Publish: the review step's needs_full_review output is persisted in the marker.
-MARKER_NFR="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=true build_metadata_marker "b" "p")"
-check_contains "marker carries needs_full_review" "$MARKER_NFR" '"needs_full_review":true'
+echo "=== v3 (#615): marker no longer carries incremental-scope plumbing ==="
+# v3 removed review_scope / previous_head_sha / needs_full_review from the
+# marker schema: every review is implicitly a full review of the current
+# PR, so none of these need to be persisted. Carry-forward itself still
+# writes the needs-full-review.json side-file for #544 diagnostics, and
+# the bash reviewer step still reads it via read_needs_full_review — but
+# no scope plumbing crosses the marker boundary in either direction.
+MARKER_SCOPE_ON="$(HEAD_SHA=h REVIEW_RESULT=clean build_metadata_marker "b" "" )"
+check_not_contains "marker omits review_scope" "$MARKER_SCOPE_ON" "review_scope"
+check_not_contains "marker omits previous_head_sha" "$MARKER_SCOPE_ON" "previous_head_sha"
+check_not_contains "marker omits needs_full_review" "$MARKER_SCOPE_ON" "needs_full_review"
 
-MARKER_NFR_OFF="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=false build_metadata_marker "b" "p")"
-check_not_contains "flag omitted when false" "$MARKER_NFR_OFF" "needs_full_review"
-
-# Precheck: extraction surfaces LAST_NEEDS_FULL_REVIEW for the scope resolver.
-BODY_NFR="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_NFR")"
-extract_review_metadata "$BODY_NFR"
-check "precheck extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
-
-# Review side: the helper the bash reviewer step imports reads the flag file.
+# The carry-forward file side-channel is independent of the marker schema,
+# so the helper the bash reviewer step imports still works as documented
+# (#544). v3 just routes it to a step summary / in-body diagnostic instead
+# of forcing the next run's scope.
 NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "
 from pr_reviewer.carry_forward import read_needs_full_review
 import json

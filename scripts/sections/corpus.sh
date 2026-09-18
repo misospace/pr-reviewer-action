@@ -384,21 +384,19 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 }
 
 section_timer_start "corpus-building"
-log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
+log "Building review corpus..."
 
 log "Building PR-thread context..."
 build_pr_thread_context
 
-if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-  fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
-  log "Building related-code context from incremental diff..."
-  build_related_code_context incremental.diff ""
-  build_review_corpus "incremental"
-else
-  log "Building related-code context from full diff..."
-  build_related_code_context pr.diff pr-files.json
-  build_review_corpus "full"
-fi
+# v3 always reviews the full current PR; the precheck no longer routes to
+# the incremental corpus builder (#615). build_review_corpus still
+# accepts an "incremental" argument so the alternate corpus section logic
+# in this file remains intact (non-goal: keep the alternate corpus builder
+# in place for downstream consumers / tests that still reference it).
+log "Building related-code context from full diff..."
+build_related_code_context pr.diff pr-files.json
+build_review_corpus "full"
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
@@ -420,12 +418,8 @@ EOF
 EOF
     fi
   fi
-  # Rebuild with the same scope used before the harness ran; build_review_corpus
-  # defaults to "full", which would silently discard an incremental delta review.
-  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-    build_review_corpus "incremental"
-  else
-    build_review_corpus "full"
-  fi
+  # v3 always reviews the full current PR (#615). build_review_corpus
+  # defaults to "full", so the rebuild below is unconditional.
+  build_review_corpus "full"
   cp review-corpus.md review-corpus.truncated.md
 fi
