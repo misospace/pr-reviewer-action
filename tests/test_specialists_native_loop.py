@@ -136,5 +136,69 @@ class TestSpecialistReviewLeadsPlanning:
         assert "corpus-lead off-by-one in loop bound" in text
 
 
+class TestSpecialistLeadsFirstTurnReservation:
+    """The leads are reserved BEFORE lower-priority discovery context so the
+    native loop's FIRST tool-planning turn always sees them (#609). They were
+    previously the last plan entry, so a greedy Related Code Context could
+    consume the whole budget and starve them at the repo's dogfooded
+    tool_corpus_max_bytes (15000)."""
+
+    def _corpus_with_leads(self, tmp_path):
+        corpus = (
+            "# Repository Standards and Conventions\n"
+            "Derived from AGENTS.md for this repository.\n"
+            "\n"
+            "# Changed Manifest Context\n"
+            "(manifest body)\n\n"
+            "# PR Classification\n"
+            '{"pr_kind": "app_code", "risk_flags": [], "must_check": []}\n\n'
+            "# Version Hints from Diff\n"
+            "```text\n+  tag: v9.9.9\n```\n\n" + _specialist_section() + "\n"
+        )
+        path = tmp_path / "review-corpus.truncated.md"
+        path.write_text(corpus)
+        return path
+
+    def test_leads_survive_tight_budget_with_greedy_related_code(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # A deliberately large Related Code Context competitor written to its
+        # excerpt file: pre-fix it consumed the budget and dropped the leads.
+        related = "\n".join(f"related filler reference line {i}" for i in range(900))
+        assert len(related.encode("utf-8")) > 12000
+        (tmp_path / "related-code.truncated.md").write_text(related)
+        corpus_path = self._corpus_with_leads(tmp_path)
+
+        text, _ = build_planning_context(15000, corpus_path)
+
+        # The guarantee: the advisory leads are present in the FIRST-turn
+        # planning context even at the dogfooded 15000-byte budget with a
+        # 12 KB+ related-code competitor.
+        assert f"# {SPECIALIST_LEADS_TITLE}" in text
+        assert (
+            "corpus-lead possible unsanitized query" in text
+            or "corpus-lead off-by-one in loop bound" in text
+        )
+        # Within budget (mask_and_truncate guarantees this; assert it holds).
+        assert len(text.encode("utf-8")) <= 15000
+        # The competitor was real — related-code contributed to the context.
+        assert "# Related Code Context" in text
+        # The leads occupy the head of the joined text (before the lower-
+        # priority discovery section), which is what makes them survive the
+        # tail clip of mask_and_truncate.
+        assert text.index(f"# {SPECIALIST_LEADS_TITLE}") < text.index(
+            "# Related Code Context"
+        )
+
+    def test_leads_survive_even_without_related_code(self, tmp_path, monkeypatch):
+        # Control: shrink the competitor; the leads remain present (the fix is
+        # not merely trading one starvation for another).
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "related-code.truncated.md").write_text("tiny related note\n")
+        corpus_path = self._corpus_with_leads(tmp_path)
+        text, _ = build_planning_context(15000, corpus_path)
+        assert f"# {SPECIALIST_LEADS_TITLE}" in text
+        assert len(text.encode("utf-8")) <= 15000
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

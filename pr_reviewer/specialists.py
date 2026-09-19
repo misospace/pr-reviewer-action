@@ -671,6 +671,19 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
         return None
     file_path = lead.get("file")
     category = lead.get("category")
+    # ``file`` and ``category`` are ALSO specialist-model-controlled text that
+    # reaches the final corpus (``file`` renders inside _lead_line's path span,
+    # ``category`` as its trailing suffix), so they get the SAME shared secret
+    # redaction that ``message`` already gets — otherwise a credential-like
+    # substring hidden in a path or a category survives verbatim into the
+    # prompt. This adds redaction only; the control-character/path/backtick
+    # handling stays where it is (_escape_control_chars here for the message,
+    # the delimiter-length logic in _lead_line), so the existing hygiene is
+    # preserved, not duplicated.
+    if isinstance(file_path, str) and file_path:
+        file_path = mask_secrets(file_path)
+    if isinstance(category, str):
+        category = mask_secrets(category)
     return {
         "severity": lead.get("severity") or "info",
         "category": category if isinstance(category, str) else "",
@@ -712,7 +725,10 @@ def render_specialist_leads_section(
       the previous role's last, and so on, appending a deterministic
       ``… N lead(s) omitted (byte cap)`` footer when anything was dropped.
       If even the zero-lead framing plus footer cannot fit, returns ``""``
-      (the caller treats that as "section dropped").
+      (the caller treats that as "section dropped"). Symmetrically, if the cap
+      removes **every** usable lead — leaving only the header, framing, role
+      headings, and the omission footer inside ``max_bytes`` — returns ``""``
+      too, so the section is never advertised while containing no lead.
     - Deterministic: identical input produces byte-identical output on
       every call (fixed role order, no timestamps, no dict-order
       dependence).
@@ -787,6 +803,15 @@ def render_specialist_leads_section(
         role_lead_lines[target].pop()
         omitted += 1
         doc = build(role_lead_lines, omitted)
+    # The loop can also exit with every lead dropped because the
+    # framing + headings + omission footer shell alone fit within max_bytes.
+    # Emitting that shell would advertise "N lead(s) omitted" while containing
+    # no lead at all — a hollow section that misleads the reviewer and wastes
+    # corpus bytes. If no complete lead survived truncation, treat it as
+    # dropped ("") just like the pre-truncation zero-lead case, so a section
+    # is only ever present when it actually carries a lead.
+    if not any(role_lead_lines):
+        return ""
     return doc
 
 

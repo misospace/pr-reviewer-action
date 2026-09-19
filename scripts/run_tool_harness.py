@@ -401,13 +401,40 @@ def build_planning_context(max_bytes, corpus_path=None):
         return final
 
 
+    # ── Specialist Review Leads: reserved FIRST for first-turn visibility ──
+    # The advisory leads must already be in the context when the native loop
+    # takes its FIRST tool-planning turn (the #609 placement guarantee). As the
+    # LAST plan entry they were starv-able: the greedy discovery sections — above
+    # all Related Code Context (per-section cap 16000) — could consume the whole
+    # max_bytes - _PLANNING_RESERVE budget first, leaving avail < 400 so the
+    # leads were skipped entirely. At the repo's dogfooded tool_corpus_max_bytes
+    # (15000) a large related-code section did exactly that. Commit the leads
+    # BEFORE the plan loop so their bytes occupy _used() — and therefore the head
+    # of the joined text, which is the part that survives mask_and_truncate's
+    # tail clip — while every lower-priority section below still shares what
+    # remains via the existing _used() accounting. Same region-preferred-over-
+    # file logic and embed/excerpt mechanics as the loop; bounded to the same
+    # 6000 slice and only attempted when there is room beyond the diff reserve.
+    sp_room = max_bytes - _PLANNING_RESERVE
+    if sp_room >= 400:
+        sp_cap = min(6000, sp_room)
+        sp_section = None
+        sp_region = regions.get("Specialist Review Leads")
+        if sp_region is not None and len(sp_region.encode("utf-8")) + 2 <= sp_cap:
+            sp_section = sp_region
+        if sp_section is None:
+            sp_section = _excerpt(
+                "Specialist Review Leads", "specialists.md", sp_cap, None
+            )
+        if sp_section is not None:
+            sections.append(sp_section)
+
     plan = [
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
         ("Related Code Context", "Related Code Context", "related-code.truncated.md", 16000, None),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
         ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
         ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
-        ("Specialist Review Leads", "Specialist Review Leads", "specialists.md", 6000, None),
     ]
 
     for region_key, title, excerpt_path, cap, fence in plan:

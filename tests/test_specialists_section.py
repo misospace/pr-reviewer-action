@@ -266,6 +266,10 @@ def test_omission_footer_count_is_consistent_at_several_caps():
     size = _byte_len(_uncapped(results))
     for cap in (size - 1, size - 12, size - 30, size - 60, size - 90, size - 120):
         out = render_specialist_leads_section(results, max_bytes=cap)
+        # A cap that cannot fit even the framing (or that truncation reduced to
+        # a lead-less shell) drops the WHOLE section ("") — nothing to check.
+        if not out:
+            continue
         bullets = [ln for ln in out.splitlines() if ln.startswith("- [")]
         m = re.search(r"… (\d+) lead\(s\) omitted \(byte cap\)", out)
         if m:
@@ -340,6 +344,101 @@ def test_secret_looking_message_is_redacted():
     assert secret not in out
     # The shared redaction placeholder is present instead.
     assert "[REDACTED]" in out
+
+
+def test_secret_looking_file_is_redacted():
+    # file is specialist-model-controlled text rendered into the corpus inside
+    # _lead_line's path span; a credential-like segment there must not survive
+    # verbatim (#609 review follow-up).
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz"
+    results = {
+        "correctness": _ok(
+            "correctness",
+            [{"message": "c1", "file": f"src/{secret}.py", "line": 5}],
+        ),
+        "security": _ok("security", [{"message": "s1"}]),
+        "tests": _ok("tests", [{"message": "t1"}]),
+    }
+    out = _uncapped(results)
+    assert secret not in out
+    assert "[REDACTED]" in out
+
+
+def test_secret_looking_category_is_redacted():
+    # category is likewise model-controlled text rendered as the bullet's
+    # trailing "(category)" suffix; redact it the same way.
+    secret = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+    results = {
+        "correctness": _ok(
+            "correctness", [{"message": "c1", "category": f"leak-{secret}"}]
+        ),
+        "security": _ok("security", [{"message": "s1"}]),
+        "tests": _ok("tests", [{"message": "t1"}]),
+    }
+    out = _uncapped(results)
+    assert secret not in out
+    assert "[REDACTED]" in out
+
+
+def test_secrets_in_message_file_and_category_all_redacted():
+    msg_secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz"
+    file_secret = "AKIA" + "ABCDEFGHIJKLMN1234"
+    cat_secret = "ghp_" + "QwErTyUiOpAsDfGhJkLzXcVbNmKjHgFeDc"
+    results = {
+        "correctness": _ok(
+            "correctness",
+            [
+                {
+                    "message": f"note {msg_secret}",
+                    "file": f"lib/{file_secret}/handler.py",
+                    "category": f"security-{cat_secret}",
+                    "line": 7,
+                }
+            ],
+        ),
+        "security": _ok("security", [{"message": "s1"}]),
+        "tests": _ok("tests", [{"message": "t1"}]),
+    }
+    out = _uncapped(results)
+    for secret in (msg_secret, file_secret, cat_secret):
+        assert secret not in out, secret
+    assert "[REDACTED]" in out
+
+
+# ---------------------------------------------------------------------------
+# Byte-cap truncation must never emit a lead-less "shell" section
+# ---------------------------------------------------------------------------
+
+
+def test_truncation_to_shell_only_returns_empty():
+    # Three leads with deliberately long messages so the header + framing +
+    # role headings + omission-footer shell is much smaller than the shell
+    # plus even ONE lead. A cap sized into that gap can fit the shell but no
+    # complete lead: such a document advertises "N lead(s) omitted" while
+    # containing no lead, so it must be dropped entirely ("").
+    results = {
+        "correctness": _ok("correctness", [{"message": "x" * 300}]),
+        "security": _ok("security", [{"message": "y" * 300}]),
+        "tests": _ok("tests", [{"message": "z" * 300}]),
+    }
+    shell_floor = _byte_len(SPECIALIST_LEADS_FRAMING)
+    # A cap well above the framing but far below shell + one 300-char lead.
+    cap = shell_floor + 100
+    assert render_specialist_leads_section(results, max_bytes=cap) == ""
+
+
+def test_no_hollow_section_at_any_cap():
+    # The strongest pin: across EVERY cap from 0 to the full uncapped length,
+    # the section is emitted ONLY when it actually carries at least one lead
+    # bullet. There is never a cap whose non-empty output is a header/framing/
+    # headings/footer shell with zero leads.
+    results = _tiny_results()
+    size = _byte_len(_uncapped(results))
+    for cap in range(0, size + 1):
+        out = render_specialist_leads_section(results, max_bytes=cap)
+        assert out == "" or any(
+            ln.startswith("- [") for ln in out.splitlines()
+        ), (cap, out)
 
 
 # ---------------------------------------------------------------------------
