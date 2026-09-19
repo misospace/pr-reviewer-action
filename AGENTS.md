@@ -277,3 +277,37 @@ failed vs. the previous baseline. A pass rate below `0.95` or any
 non-empty `regressions` list should block the release; inspect the
 artifact, reproduce locally with the command above, then fix the prompt or
 routing regression in the action before re-running.
+
+## Historical dogfood regression corpus (#627)
+
+The corpus lives at `evals/corpus-historical-dogfood.json` and is graded
+by `pr_reviewer/semantic_eval.py` — a side-effect-free, offline
+semantic scorer (no model calls, no network). Each fixture reconstructs a
+real dogfood miss so prompt / harness / model / specialist / escalation
+changes can be evaluated against known failure classes without depending
+on mutable live PR state. The v1 schema records:
+
+- `class` (`control_flow_sequencing`, `output_completeness`,
+  `negative_control`) — the capability the fixture asserts;
+- `provenance` — `{pr, issue, pr_url, issue_url}` for human audit;
+- `review_mode` (`standard` / `deep` / `any`);
+- `route` (`primary` / `escalation` / `primary+escalation` / `any`) —
+  exercises the configured primary + escalation routing pair without
+  baking specific model names into production behavior;
+- `stage_attribution` (`specialist` / `primary` / `escalation` / `any`)
+  — which stage is expected to catch the issue;
+- `expected_capabilities` and `expected_evidence_anchors` —
+  capability-class match plus a textual anchor (`mention` / `finding` /
+  `tool`);
+- `forbidden_capabilities` — the negative-control guard; any signal
+  classified on a forbidden class fails the fixture (so recall
+  improvements cannot come from fabricated findings).
+
+Stage attribution rides on `ReviewRun.stage` (defaults to `"primary"` so
+pre-#627 records still grade). The deterministic CI path lives at
+`scripts/run_semantic_eval_ci.py` — `python scripts/run_semantic_eval_ci.py
+--corpus evals/corpus-historical-dogfood.json` validates the corpus
+schema and exercises the canned grader scenarios without ever reaching
+out to a model. Live-model benchmark runs continue to use the existing
+`eval-harness` workflow conventions; the semantic corpus is the
+sibling fixture the harness can grade against the same report.
