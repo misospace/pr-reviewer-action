@@ -505,6 +505,17 @@ apply_system_prompt_fragments() {
       pt="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{PR_THREAD_GUIDANCE\}\}/$pt}"
+    # The requirement-ledger guidance is substituted only when a non-empty
+    # requirement ledger was built for this run (requirement-ledger-present.txt
+    # is written by the ledger build in context.sh, before this function runs);
+    # otherwise the placeholder is dropped, so the model is never told to fill a
+    # requirement_coverage checklist for a "Requirement Ledger" section the corpus
+    # does not contain.
+    local rl=""
+    if [[ -s requirement-ledger-present.txt ]]; then
+      rl="$(<"$SCRIPT_DIR/prompt_fragments/requirement_ledger.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$rl}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future

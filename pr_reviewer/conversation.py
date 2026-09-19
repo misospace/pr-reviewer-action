@@ -468,7 +468,8 @@ APPROX_BYTES_PER_TOKEN = 4
 # array (Anthropic 400s without a leading user message).
 VERDICT_USER_INSTRUCTION = (
     "Produce the final review verdict now as a single JSON object. "
-    "Do not issue any tool calls."
+    "Do not issue any tool calls. "
+    "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail)."
 )
 
 # Placeholder emitted for a corpus section dropped by dedupe_verdict_corpus.
@@ -1251,8 +1252,39 @@ _OPENAI_VERDICT_JSON_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                     },
                 },
+                "requirement_coverage": {
+                    "type": ["array", "null"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "requirement_id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["satisfied", "violated", "unknown"],
+                            },
+                            "evidence": {
+                                "type": ["array", "null"],
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["file", "test", "tool", "ci", "diff"],
+                                        },
+                                        "ref": {"type": ["string", "null"]},
+                                        "detail": {"type": ["string", "null"]},
+                                    },
+                                    "required": ["kind", "ref", "detail"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["requirement_id", "status", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
             },
-            "required": ["verdict", "review_markdown", "findings"],
+            "required": ["verdict", "review_markdown", "findings", "requirement_coverage"],
             "additionalProperties": False,
         },
     },

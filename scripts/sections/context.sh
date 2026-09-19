@@ -164,6 +164,42 @@ if [[ -n "$LINEAR_API_KEY" && -n "$LINEAR_ISSUE_PREFIXES" ]]; then
 fi
 section_timer_end
 
+# ── Requirement Ledger (#624) ─────────────────────────────────────────
+# Build the requirement ledger now that linked-issues.md is finalized, and
+# BEFORE classification.sh runs apply_system_prompt_fragments: the ledger's
+# requirement-ledger-present.txt signal gates the system-prompt fragment, so the
+# ledger must exist before the fragment is substituted. Fail-soft: a ledger
+# failure (or a missing module) never aborts the review — the run continues with
+# an empty ledger and no ledger section.
+{
+  if [[ -n "${STANDARDS_FILE:-}" && -f "${STANDARDS_FILE}" ]]; then
+    python3 -m pr_reviewer.requirement_ledger build \
+      --pr-json pr.json \
+      --linked-issues-md linked-issues.md \
+      --standards "$STANDARDS_FILE" \
+      --standards-ref "$(basename "$STANDARDS_FILE")" \
+      --output requirement-ledger.json \
+      --markdown requirement-ledger.md 2>/dev/null
+  else
+    python3 -m pr_reviewer.requirement_ledger build \
+      --pr-json pr.json \
+      --linked-issues-md linked-issues.md \
+      --output requirement-ledger.json \
+      --markdown requirement-ledger.md 2>/dev/null
+  fi
+} || true
+# Presence signal: a non-empty ledger writes its sha (or '1' if the sha is
+# absent); an empty ledger leaves the signal empty so the system-prompt fragment
+# stays dropped and the corpus section stays out. A stale ledger from a prior
+# run is cleared in the empty case.
+if [[ -s requirement-ledger.md ]]; then
+  ledger_sha="$(jq -r '.sha // empty' requirement-ledger.json 2>/dev/null || true)"
+  printf '%s\n' "${ledger_sha:-1}" > requirement-ledger-present.txt
+else
+  : > requirement-ledger-present.txt
+  : > requirement-ledger.json
+fi
+
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
 # by scripts/run_enrichment.py which runs in the enrichment section below.
 # This avoids brittle grep pipelines under set -euo pipefail (#7892).

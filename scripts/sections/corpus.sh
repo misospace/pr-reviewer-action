@@ -300,6 +300,16 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
         cat linked-issues.md
         echo
       fi
+      # ── Explicit Requirement Ledger (#624) ──────────────────────
+      # A non-empty ledger becomes a reviewable checklist the model must assess
+      # in requirement_coverage. Emitted as a normal corpus section (NOT
+      # standards-exempt): it lives in the body block, so MAX_CORPUS truncation
+      # applies to it like any other section.
+      if [ -s requirement-ledger.md ]; then
+        echo "# Explicit Requirement Ledger"
+        cat requirement-ledger.md
+        echo
+      fi
       echo "# PR Files (truncated)"
       echo '```json'
       cat pr-files.truncated.json

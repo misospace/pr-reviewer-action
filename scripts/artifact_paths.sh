@@ -37,6 +37,8 @@ assert_safe_artifact_paths() {
     terms.txt terms.all.txt
     change-anchors.json related-code.json related-code.md related-code.truncated.md
     review-corpus.body.md repo-impact.combined.txt
+    requirement-ledger.json requirement-ledger.md requirement-coverage.json
+    requirement-ledger-present.txt
   )
 
   for path in "${artifact_paths[@]}"; do

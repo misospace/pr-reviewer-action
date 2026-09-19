@@ -1,0 +1,9 @@
+{
+  "description": "Derived from issue #608's contract and the pre-fix #623 implementation. Invariant under test: specialists run concurrently -> ALL specialists terminate/reap -> final reviewer starts. A reviewer that only verified 'launched before the final reviewer' but not the reap-before-final boundary must NOT receive coverage credit.",
+  "issue_contract_text": "## Requirements\n\n- Specialists MUST run concurrently.\n- All specialist workers MUST terminate and be reaped before the final review call starts.\n",
+  "pr_body_text": "Runs three specialists as background jobs launched before the final reviewer path.\n",
+  "coverage_claims": {
+    "launch_order_only": [{"status": "satisfied", "evidence": [{"kind": "file", "ref": "scripts/sections/review.sh", "detail": "background job is launched before the final reviewer call"}]}],
+    "reap_verified": [{"status": "satisfied", "evidence": [{"kind": "file", "ref": "scripts/sections/review.sh", "detail": "job is waited on and reaped before the review call"}, {"kind": "tool", "ref": "tests/test_advisory_parallel.sh", "detail": "run output shows all specialist pids gone before final request is sent"}]}]
+  }
+}

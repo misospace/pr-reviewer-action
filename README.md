@@ -169,6 +169,10 @@ After the model returns, the action deterministically checks whether `review_mar
 
 The result is exposed as the `required_checks` output (`complete` / `incomplete` / `none`), written to the run's step summary, and recorded in the managed metadata marker for future runs. Low-risk PRs (empty `must_check`) produce no validation noise.
 
+### 📒 Requirement ledger & coverage
+
+When the linked issues, the PR description, or the repository standards file state explicit requirements — acceptance-criteria bullets, `MUST`/`SHALL` sentences, or ordering invariants — the action extracts them into a bounded, deterministic **requirement ledger** (`pr_reviewer/requirement_ledger.py`) with content-derived ids and per-source provenance, and presents it to the final reviewer as an **Explicit Requirement Ledger** corpus section. The reviewer must then report, for every listed requirement, a `requirement_coverage` entry of `satisfied` / `violated` / `unknown` backed by concrete evidence (`file`, `test`, `tool`, `ci`, or `diff`). Claims are validated deterministically against the ledger (`pr_reviewer/requirement_coverage.py`) into an internal `requirement-coverage.json` artifact: a claim without concrete evidence — or an invariant "satisfied" on a source-code glance alone, without observable test/tool/CI evidence — is downgraded to `unknown`, and `unknown` is never promoted. This is a completeness signal for review-quality tracking, not a verdict: it never changes the outcome by itself, and PRs whose inputs carry no explicit normative text see the existing behavior unchanged.
+
 ### 🧼 Upstream link sanitizer
 
 Before publishing, the action runs `scripts/sanitize_review_markdown.py` on the review markdown to neutralize upstream GitHub references (PR URLs, issue URLs, commit URLs, compare URLs, cross-repo `owner/repo#123` references, and bare `#123` references). This prevents GitHub from auto-linking them into the reviewed repository, which would create notification noise and misleading linkbacks to unrelated projects. Sanitization is documented as P0 hygiene in [issue #132](https://github.com/misospace/pr-reviewer-action/issues/132).
