@@ -65,7 +65,16 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+# scripts/ hosts redact.py (the shared secret-redaction helper
+# scripts/run_specialists.py uses); resolve relative to this file so the
+# import works regardless of the caller's cwd.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from redact import mask_secrets  # noqa: E402
 
 ARTIFACT_VERSION = 1
 
@@ -620,6 +629,164 @@ def render_specialist_markdown(result: dict[str, Any], *, max_bytes: int = 0) ->
         # A single oversized lead line still exceeds the budget; shrink it
         # char-safely so the cap holds exactly.
         doc = _fit_to_bytes(doc, max_bytes)
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# Aggregate "Specialist Review Leads" corpus section (#609)
+# ---------------------------------------------------------------------------
+
+
+#: Exact title of the aggregate corpus section. Other modules and tests
+#: reference this constant so the heading can never drift.
+SPECIALIST_LEADS_TITLE = "Specialist Review Leads"
+
+#: Advisory framing paragraph: the leads are unverified signals, never
+#: findings — the final reviewer verifies them against PR evidence.
+SPECIALIST_LEADS_FRAMING = (
+    "These are unverified advisory leads from independent specialist passes. "
+    "They are not findings or proof. Verify each relevant claim against the "
+    "PR/repository evidence before using it in the final review."
+)
+
+
+def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
+    """Defensively redact and control-escape one lead for section rendering.
+
+    Lead messages already pass through the ``normalize_specialist_output``
+    sanitization; this re-applies the shared :func:`mask_secrets`
+    secret-redaction (the same helper ``scripts/run_specialists.py`` runs on
+    every role outcome) plus control-character escaping, so an un-normalized
+    artifact cannot leak a raw secret or a raw control byte into the final
+    corpus. Returns ``None`` when the lead is unusable (not a dict, or no
+    usable message).
+    """
+    if not isinstance(lead, dict):
+        return None
+    message = lead.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+    message = _escape_control_chars(mask_secrets(message))
+    if not message.strip():
+        return None
+    file_path = lead.get("file")
+    category = lead.get("category")
+    return {
+        "severity": lead.get("severity") or "info",
+        "category": category if isinstance(category, str) else "",
+        "file": file_path if isinstance(file_path, str) and file_path else None,
+        "line": lead.get("line"),
+        "message": message,
+    }
+
+
+def render_specialist_leads_section(
+    role_results: Mapping[str, Any], *, max_bytes: int
+) -> str:
+    """Render the aggregate "Specialist Review Leads" corpus section (#609).
+
+    ``role_results`` maps each role name to its normalized version-1
+    specialist artifact, or ``None`` for a role whose advisory pass was
+    missing or unparseable. Only the three fixed roles render, in the fixed
+    order of :data:`SPECIALIST_ROLES_ORDER` (``correctness``, ``security``,
+    ``tests``); any other mapping keys are ignored.
+
+    Behaviour contract:
+
+    - The section starts with the heading line ``# <title>`` (the title is
+      :data:`SPECIALIST_LEADS_TITLE`), a blank line, and the
+      :data:`SPECIALIST_LEADS_FRAMING` advisory paragraph, followed by one
+      ``## <Role>`` heading per fixed role (capitalized role name), in fixed
+      order.
+    - A role with usable leads lists them (whole lead lines,
+      control-character-escaped and secret-redacted) via the same fence-safe
+      assembly the per-role renderer uses. A role with none renders a single
+      concise, deterministic note line (counts only — never a raw error
+      string) instead of bullets.
+    - If no role has any usable lead, returns ``""`` — no section at all,
+      not even the role-failure notes.
+    - A **hard UTF-8 byte cap** applies to the whole returned document:
+      ``len(rendered.encode("utf-8")) <= max_bytes``. Truncation drops
+      **whole leads only** (never a partial line), always the LAST lead of
+      the LAST role that still has leads (reverse fixed-role order), then
+      the previous role's last, and so on, appending a deterministic
+      ``… N lead(s) omitted (byte cap)`` footer when anything was dropped.
+      If even the zero-lead framing plus footer cannot fit, returns ``""``
+      (the caller treats that as "section dropped").
+    - Deterministic: identical input produces byte-identical output on
+      every call (fixed role order, no timestamps, no dict-order
+      dependence).
+    """
+    role_lead_lines: list[list[str]] = []
+    role_notes: list[str] = []
+    for role in SPECIALIST_ROLES_ORDER:
+        artifact = role_results.get(role) if role_results is not None else None
+        lines: list[str] = []
+        if isinstance(artifact, dict):
+            raw_leads = artifact.get("leads")
+            if isinstance(raw_leads, list):
+                for lead in raw_leads:
+                    sanitized = _sanitize_lead_for_section(lead)
+                    if sanitized is not None:
+                        lines.append(_lead_line(sanitized))
+        errors = artifact.get("errors") if isinstance(artifact, dict) else None
+        n_errors = len(errors) if isinstance(errors, list) else 0
+        if lines:
+            note = ""
+        elif n_errors:
+            note = (
+                f"- advisory pass reported no leads "
+                f"({n_errors} pass-level error(s))"
+            )
+        else:
+            note = "- no advisory leads"
+        role_lead_lines.append(lines)
+        role_notes.append(note)
+
+    if sum(len(lines) for lines in role_lead_lines) == 0:
+        # Zero usable leads across all roles: no section at all — not even
+        # the role-failure notes.
+        return ""
+
+    def build(lines_per_role: list[list[str]], omitted: int) -> str:
+        role_sections = [
+            _assemble_specialist_markdown(
+                f"## {role.capitalize()}", lines, note if not lines else None
+            )
+            for role, lines, note in zip(
+                SPECIALIST_ROLES_ORDER, lines_per_role, role_notes
+            )
+        ]
+        doc = "\n".join(
+            [
+                f"# {SPECIALIST_LEADS_TITLE}",
+                "",
+                SPECIALIST_LEADS_FRAMING,
+                "",
+                *role_sections,
+            ]
+        )
+        if omitted:
+            doc += f"\n… {omitted} lead(s) omitted (byte cap)\n"
+        return doc
+
+    omitted = 0
+    doc = build(role_lead_lines, 0)
+    while len(doc.encode("utf-8")) > max_bytes:
+        # Whole-lead granularity: drop the LAST lead of the LAST role that
+        # still has leads (reverse fixed-role order), then rebuild.
+        target = None
+        for i in range(len(SPECIALIST_ROLES_ORDER) - 1, -1, -1):
+            if role_lead_lines[i]:
+                target = i
+                break
+        if target is None:
+            # Even the zero-lead framing plus footer cannot fit within the
+            # cap: the caller treats this as "section dropped".
+            return ""
+        role_lead_lines[target].pop()
+        omitted += 1
+        doc = build(role_lead_lines, omitted)
     return doc
 
 

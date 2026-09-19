@@ -34,6 +34,7 @@ assert_safe_artifact_paths() {
     specialist-correctness.json specialist-security.json specialist-tests.json
     specialists.json
     specialists.phase.log
+    specialists.md specialist-leads-present.txt
     terms.txt terms.all.txt
     change-anchors.json related-code.json related-code.md related-code.truncated.md
     review-corpus.body.md repo-impact.combined.txt

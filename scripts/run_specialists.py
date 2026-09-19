@@ -22,7 +22,12 @@ Artifacts (all resolved under the workspace root, symlink-refused):
 ``specialist-<role>.request.json`` / ``specialist-<role>.response.json`` /
 ``specialist-<role>.json`` (the pure version-1 contract artifact) and the
 deterministic aggregate ``specialists.json`` (fixed role order, per-role
-status / error_kind / elapsed / lead counts).
+status / error_kind / elapsed / lead counts). The #609 corpus feed adds
+``specialists.md`` (the bounded "Specialist Review Leads" section rendered
+from the per-role version-1 artifacts, capped by
+``SPECIALISTS_SECTION_MAX_BYTES``) and ``specialist-leads-present.txt``
+(byte count of the section when it is non-empty, else empty — the
+lockstep signal the system-prompt fragment gate reads).
 
 Bounds: each attempt is capped by ``min(AI_REQUEST_TIMEOUT_SEC, remaining
 aggregate deadline)``; the whole phase is capped by ``DEEP_REVIEW_TIMEOUT_SEC``
@@ -68,6 +73,7 @@ from pr_reviewer.specialists import (  # noqa: E402
     _resolve_artifact_path,
     load_specialist_prompt,
     parse_specialist_response,
+    render_specialist_leads_section,
 )
 from pr_reviewer.transport import run_chat_request  # noqa: E402
 from redact import mask_secrets  # noqa: E402
@@ -515,6 +521,28 @@ def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str]]:
     return raw.decode("utf-8", errors="replace"), None
 
 
+def _read_role_artifacts(
+    workspace_root: Path,
+) -> dict[str, Optional[dict[str, Any]]]:
+    """Reload the per-role normalized version-1 artifacts just written as
+    ``specialist-<role>.json``. This is the canonical, already-normalized lead
+    data for the #609 corpus section, so the section renders exactly the
+    contract artifact (not a second, drift-prone in-memory copy). A missing,
+    unreadable, or non-object file degrades that role to ``None``; the render
+    then simply omits it. Never raises."""
+    role_results: dict[str, Optional[dict[str, Any]]] = {}
+    for role in SPECIALIST_ROLES_ORDER:
+        path = workspace_root / f"specialist-{role}.json"
+        try:
+            raw = path.read_bytes()
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        except (OSError, ValueError):
+            role_results[role] = None
+            continue
+        role_results[role] = parsed if isinstance(parsed, dict) else None
+    return role_results
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run the deep-review specialist passes (#608)."
@@ -685,6 +713,49 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"deep review complete: {aggregate['total_leads']} lead(s) across "
         f"{len(entries)} roles in {aggregate['aggregate_elapsed_sec']}s"
     )
+
+    # --- #609: bounded "Specialist Review Leads" corpus section + presence
+    # ---   signal, rendered from the per-role version-1 artifacts and capped
+    # ---   by SPECIALISTS_SECTION_MAX_BYTES. Fail-soft: any render/write
+    # ---   problem here is a stderr note and a continue — never an aggregate
+    # ---   change, never an exit-code change (the section is advisory corpus
+    # ---   feed, not a verdict input). Both artifacts are written on the
+    # ---   enabled path (empty content where there is no section), so a
+    # ---   reused workspace can never present a prior run's section/signal
+    # ---   as this run's.
+    try:
+        max_bytes = _env_int("SPECIALISTS_SECTION_MAX_BYTES", 12000)
+        role_results = _read_role_artifacts(workspace_root)
+        section = render_specialist_leads_section(
+            role_results, max_bytes=max_bytes
+        )
+        # Fit sanity: a section that cannot fit the corpus budget is dropped
+        # rather than allowed to crowd the rest of the corpus into
+        # truncation.
+        max_corpus = 0
+        raw_max_corpus = os.environ.get("MAX_CORPUS", "").strip()
+        if raw_max_corpus:
+            try:
+                value = int(raw_max_corpus)
+            except ValueError:
+                value = 0
+            if value > 0:
+                max_corpus = value
+        if max_corpus > 0 and len(section.encode("utf-8")) >= max_corpus:
+            section = ""
+        section_bytes = len(section.encode("utf-8"))
+        _guarded_write(workspace_root, "specialists.md", section)
+        _guarded_write(
+            workspace_root,
+            "specialist-leads-present.txt",
+            f"{section_bytes}\n" if section else "",
+        )
+    except Exception:
+        print(
+            "note: specialist-leads section render/write failed; "
+            "continuing without the #609 corpus feed",
+            file=sys.stderr,
+        )
     return 0
 
 

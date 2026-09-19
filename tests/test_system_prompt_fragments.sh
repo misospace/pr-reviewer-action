@@ -173,6 +173,8 @@ CN="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
 RC="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
 PT="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
 RL="$(<"$SCRIPT_DIR/prompt_fragments/requirement_ledger.txt") "
+SL="$(<"$SCRIPT_DIR/prompt_fragments/specialist_leads.txt")"
+[[ -n "$SL" ]] || { echo "FAIL: specialist_leads.txt fragment is empty"; FAIL=$((FAIL+1)); }
 RECON="${BASE/\{\{RELATED_CODE_GUIDANCE\}\}/$RC}"
 RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
@@ -180,12 +182,86 @@ RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
 RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 RECON="${RECON/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$RL}"
+RECON="${RECON/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/$SL}"
 check_contains "reconstructed prompt has requirement-ledger block" "$RECON" "requirement_coverage"
+check_contains "reconstructed prompt has specialist-leads block" "$RECON" "Specialist Review Leads"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"
 check_contains "reconstructed prompt has digest block" "$RECON" "digest-only image"
 check_contains "reconstructed prompt has release-notes block" "$RECON" "upstream release notes"
 check_contains "reconstructed prompt has brevity block" "$RECON" "under 300 words"
 check_not_contains "fully reconstructed prompt has no placeholder" "$RECON" "{{"
+
+echo "=== specialist-leads guidance is two-pass (#609): neutralized at assembly, appended from the signal ==="
+# The presence signal is only written by run_specialists.py during the
+# corpus-phase specialist pass, long after apply_system_prompt_fragments has
+# run — so the placeholder must be neutralized to empty at assembly (never
+# leak, never prefill) and the guidance appended only by
+# apply_specialist_leads_fragment, once, iff the signal is non-empty, and
+# never onto a custom (non-default) prompt.
+FUNCS2="$(mktemp)"; trap 'rm -f "$FUNCS" "$FUNCS2"; rm -rf "$WORK"' EXIT
+python3 - "$SCRIPT_DIR/sections/config.sh" "$FUNCS2" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^apply_specialist_leads_fragment\(\) \{\n(.*?)\n\}", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract apply_specialist_leads_fragment")
+open(sys.argv[2], "w").write("apply_specialist_leads_fragment() {\n%s\n}\n" % m.group(1))
+PY
+# shellcheck source=/dev/null
+source "$FUNCS2"
+
+# Disabled path: assembly strips the placeholder and the later call without a
+# signal adds nothing — the disabled prompt must carry no specialist guidance.
+OUT_NOSIG="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  rm -f specialist-leads-present.txt
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  apply_specialist_leads_fragment
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_not_contains "no signal: no placeholder leaks" "$OUT_NOSIG" "{{"
+check_not_contains "no signal: no specialist guidance added" "$OUT_NOSIG" "Specialist Review Leads"
+check_not_contains "no signal: base schema untouched" "$OUT_NOSIG" "NOT-A-SENTINEL"
+
+# Enabled path: non-empty signal appends the guidance with verify/deduplicate/
+# advisory framing wording the issue requires.
+OUT_SIG="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  printf '123\n' > specialist-leads-present.txt
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  apply_specialist_leads_fragment
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "signal: specialist guidance appended" "$OUT_SIG" "$SL"
+check_contains "signal: guidance says verify" "$OUT_SIG" "Verify each relevant lead"
+check_contains "signal: guidance says merge/deduplicate" "$OUT_SIG" "merge overlapping leads"
+check_contains "signal: guidance says advisory-not-proof" "$OUT_SIG" "not findings, not proof"
+check_not_contains "signal: no placeholder leaks" "$OUT_SIG" "{{"
+
+# Idempotency: a second call with the same signal must not double-append.
+OUT_TWICE="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  printf '123\n' > specialist-leads-present.txt
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  apply_specialist_leads_fragment
+  apply_specialist_leads_fragment
+  printf '%s' "$SYSTEM_PROMPT" )"
+if [ "$OUT_TWICE" = "$OUT_SIG" ]; then
+  echo "PASS: apply_specialist_leads_fragment is idempotent"; PASS=$((PASS+1))
+else
+  echo "FAIL: apply_specialist_leads_fragment double-appends"; FAIL=$((FAIL+1))
+fi
+
+# Custom (replace-mode) prompts never receive the fragment.
+OUT_CUSTOM="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  printf '123\n' > specialist-leads-present.txt
+  SYSTEM_PROMPT="MY CUSTOM PROMPT" SYSTEM_PROMPT_IS_DEFAULT=0
+  apply_specialist_leads_fragment
+  printf '%s' "$SYSTEM_PROMPT" )"
+check "custom prompt untouched by the fragment" "$OUT_CUSTOM" "MY CUSTOM PROMPT"
+rm -f specialist-leads-present.txt
 
 # Extract resolve_system_prompt to test replace vs append mode end-to-end.
 RFUNCS="$(mktemp)"

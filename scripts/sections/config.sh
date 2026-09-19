@@ -87,6 +87,10 @@ PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-true}"
 PR_THREAD_MAX_BYTES="${PR_THREAD_MAX_BYTES:-8000}"
 DEEP_REVIEW="${DEEP_REVIEW:-false}"
 DEEP_REVIEW_TIMEOUT_SEC="${DEEP_REVIEW_TIMEOUT_SEC:-600}"
+# #609: hard UTF-8 byte cap on the rendered "Specialist Review Leads" corpus
+# section (specialists.md). run_specialists.py reads the same name; the shell
+# side validates it so a typo cannot silently disable the cap.
+SPECIALISTS_SECTION_MAX_BYTES="${SPECIALISTS_SECTION_MAX_BYTES:-12000}"
 AI_REQUEST_TIMEOUT_SEC="${AI_REQUEST_TIMEOUT_SEC:-300}"
 AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"
@@ -358,6 +362,15 @@ if [[ ! "$DEEP_REVIEW_TIMEOUT_SEC" =~ ^[0-9]+$ || "$DEEP_REVIEW_TIMEOUT_SEC" -lt
   DEEP_REVIEW_TIMEOUT_SEC=600
 fi
 
+# #609 section byte cap: numeric, >= 1, <= 200000. A non-numeric or
+# out-of-range value degrades to the 12000 default (a typo must not disable
+# the cap that keeps one specialist from flooding the corpus).
+if [[ ! "$SPECIALISTS_SECTION_MAX_BYTES" =~ ^[0-9]+$ || "$SPECIALISTS_SECTION_MAX_BYTES" -lt 1 || "$SPECIALISTS_SECTION_MAX_BYTES" -gt 200000 ]]; then
+  error "Invalid SPECIALISTS_SECTION_MAX_BYTES '$SPECIALISTS_SECTION_MAX_BYTES'; defaulting to 12000"
+  SPECIALISTS_SECTION_MAX_BYTES=12000
+fi
+export SPECIALISTS_SECTION_MAX_BYTES
+
 case "$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" in
   warn|fail|metadata_only) REQUIRED_CHECK_VALIDATION_MODE="$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" ;;
   *)
@@ -516,6 +529,14 @@ apply_system_prompt_fragments() {
       rl="$(<"$SCRIPT_DIR/prompt_fragments/requirement_ledger.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$rl}"
+    # The specialist-leads guidance is NOT substituted here: unlike the ledger
+    # (built in context.sh, before this function), its presence signal
+    # (specialist-leads-present.txt) does not exist until the deep-review
+    # phase has been reaped in corpus.sh — long after prompt assembly. So the
+    # placeholder is neutralized to empty here (it must never leak to the
+    # model on any path), and apply_specialist_leads_fragment below appends
+    # the guidance once — and only once — the signal actually exists.
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future
@@ -554,6 +575,36 @@ apply_system_prompt_fragments() {
   if [[ -n "${SYSTEM_PROMPT_ADDENDUM:-}" ]]; then
     SYSTEM_PROMPT="${SYSTEM_PROMPT}"$'\n\n'"${SYSTEM_PROMPT_ADDENDUM}"
   fi
+  export SYSTEM_PROMPT
+}
+
+# #609: substitute the "Specialist Review Leads" guidance block. The block is
+# gated on the SAME lockstep signal the #608 corpus section uses —
+# specialist-leads-present.txt is non-empty only when run_specialists.py
+# actually wrote a non-empty section — so the guidance can never be enabled
+# for a run whose corpus lacks the section. Gated on SYSTEM_PROMPT_IS_DEFAULT
+# because, like {{REQUIREMENT_LEDGER_GUIDANCE}}, the placeholder only exists
+# in the bundled default; a replace/append override never carries it.
+#
+# Unlike the {{REQUIREMENT_LEDGER_GUIDANCE}} block (which is folded into
+# apply_system_prompt_fragments and runs at prompt assembly), this one is
+# intentionally called LATER — from the corpus step after the specialist
+# phase has been reaped — because the presence signal is only known then. It
+# is NOT called from apply_system_prompt_fragments.
+apply_specialist_leads_fragment() {
+  [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" ]] || return 0
+  [[ -s specialist-leads-present.txt ]] || return 0
+  local sl
+  sl="$(<"$SCRIPT_DIR/prompt_fragments/specialist_leads.txt")"
+  [[ -n "$sl" ]] || return 0
+  # The placeholder was already neutralized to empty by
+  # apply_system_prompt_fragments (it runs before the signal can exist), so
+  # the guidance is appended as its own paragraph instead. The containment
+  # guard keeps this idempotent: a second call on the same assembled prompt
+  # must never double-append.
+  [[ "$SYSTEM_PROMPT" == *"$sl"* ]] && return 0
+  SYSTEM_PROMPT="${SYSTEM_PROMPT}
+${sl}"
   export SYSTEM_PROMPT
 }
 

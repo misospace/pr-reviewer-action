@@ -316,6 +316,7 @@ def build_planning_context(max_bytes, corpus_path=None):
             "Linked Sources",
             "Repository Impact Scan",
             "Repository History",
+            "Specialist Review Leads",
         }
         starts = []
         in_related_context = False
@@ -334,7 +335,7 @@ def build_planning_context(max_bytes, corpus_path=None):
         bounds = starts + [len(lines)]
         for i in range(len(starts)):
             title = lines[starts[i]][2:].strip()
-            if title in ("PR Classification", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff"):
+            if title in ("PR Classification", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"):
                 regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
         if lines[0].startswith("# Repository Standards and Conventions"):
             end = corpus_text.find("\n# Changed Manifest Context")
@@ -406,6 +407,7 @@ def build_planning_context(max_bytes, corpus_path=None):
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
         ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
         ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
+        ("Specialist Review Leads", "Specialist Review Leads", "specialists.md", 6000, None),
     ]
 
     for region_key, title, excerpt_path, cap, fence in plan:
