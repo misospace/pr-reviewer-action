@@ -168,10 +168,34 @@ section_timer_end
 # Build the requirement ledger now that linked-issues.md is finalized, and
 # BEFORE classification.sh runs apply_system_prompt_fragments: the ledger's
 # requirement-ledger-present.txt signal gates the system-prompt fragment, so the
-# ledger must exist before the fragment is substituted. Fail-soft: a ledger
-# failure (or a missing module) never aborts the review — the run continues with
-# an empty ledger and no ledger section.
-{
+# ledger must exist before the fragment is substituted.
+#
+# Stale-artifact reset: every ledger artifact is truncated BEFORE the build is
+# attempted (the same reset dance the corpus applies to standards-present.txt
+# and tool-harness.{md,json} in corpus.sh). A reused workspace whose previous
+# run had a ledger must not present STALE requirements, a stale presence
+# signal, or a stale section file when this run's build fails or extracts
+# nothing. Post-build logic never consults a file that can predate this run.
+#
+# The presence signal is conservative: it is written only when the ledger is
+# non-empty AND fits the corpus reservation (ledger bytes + the section
+# framing < MAX_CORPUS). The fragment substitution runs BEFORE corpus
+# assembly (classification.sh precedes corpus.sh in run_review.sh's source
+# order), and the fragments cannot be re-substituted once assembled — so the
+# signal must never promise a section the corpus cannot sanely reserve. The
+# corpus build applies the identical predicate when deciding whether to emit
+# the reserved ledger block, keeping guidance and corpus in lockstep.
+#
+# Fail-soft: a ledger failure (or a missing module) never aborts the review —
+# the run continues with empty artifacts, an empty signal, and no ledger
+# section.
+build_requirement_ledger() {
+  local ledger_md_bytes ledger_sha
+  : > requirement-ledger.json
+  : > requirement-ledger.md
+  : > requirement-ledger-present.txt
+  : > requirement-ledger.section.md
+
   if [[ -n "${STANDARDS_FILE:-}" && -f "${STANDARDS_FILE}" ]]; then
     python3 -m pr_reviewer.requirement_ledger build \
       --pr-json pr.json \
@@ -179,26 +203,42 @@ section_timer_end
       --standards "$STANDARDS_FILE" \
       --standards-ref "$(basename "$STANDARDS_FILE")" \
       --output requirement-ledger.json \
-      --markdown requirement-ledger.md 2>/dev/null
+      --markdown requirement-ledger.md 2>/dev/null || true
   else
     python3 -m pr_reviewer.requirement_ledger build \
       --pr-json pr.json \
       --linked-issues-md linked-issues.md \
       --output requirement-ledger.json \
-      --markdown requirement-ledger.md 2>/dev/null
+      --markdown requirement-ledger.md 2>/dev/null || true
   fi
-} || true
-# Presence signal: a non-empty ledger writes its sha (or '1' if the sha is
-# absent); an empty ledger leaves the signal empty so the system-prompt fragment
-# stays dropped and the corpus section stays out. A stale ledger from a prior
-# run is cleared in the empty case.
-if [[ -s requirement-ledger.md ]]; then
-  ledger_sha="$(jq -r '.sha // empty' requirement-ledger.json 2>/dev/null || true)"
-  printf '%s\n' "${ledger_sha:-1}" > requirement-ledger-present.txt
-else
-  : > requirement-ledger-present.txt
-  : > requirement-ledger.json
-fi
+
+  # Presence signal: a non-empty ledger writes its sha (or '1' if the sha is
+  # absent); an empty ledger leaves the signal empty so the system-prompt
+  # fragment stays dropped and the corpus section stays out. The framing
+  # overhead is derived from the header string itself (header text + its
+  # newline + the trailing blank line that corpus.sh appends), so this
+  # predicate and corpus.sh's section-emission predicate are exact
+  # complements — the measured section bytes are always ledger_md_bytes +
+  # ledger_overhead — leaving no window where the signal promises a section
+  # the corpus would drop.
+  local ledger_header='# Explicit Requirement Ledger'
+  local ledger_overhead=$(( ${#ledger_header} + 2 ))
+  if [[ -s requirement-ledger.md ]]; then
+    ledger_md_bytes="$(wc -c < requirement-ledger.md | tr -d ' ')"
+    if [ $(( ledger_md_bytes + ledger_overhead )) -lt "$MAX_CORPUS" ]; then
+      ledger_sha="$(jq -r '.sha // empty' requirement-ledger.json 2>/dev/null || true)"
+      printf '%s\n' "${ledger_sha:-1}" > requirement-ledger-present.txt
+    else
+      log "WARNING: requirement ledger (${ledger_md_bytes}B + ${ledger_overhead}B framing) does not fit a MAX_CORPUS=${MAX_CORPUS} reservation; dropping the ledger signal and corpus section for this run"
+      : > requirement-ledger-present.txt
+    fi
+  else
+    : > requirement-ledger-present.txt
+    : > requirement-ledger.json
+  fi
+}
+
+build_requirement_ledger
 
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
 # by scripts/run_enrichment.py which runs in the enrichment section below.

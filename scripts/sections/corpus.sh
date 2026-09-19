@@ -300,16 +300,6 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
         cat linked-issues.md
         echo
       fi
-      # ── Explicit Requirement Ledger (#624) ──────────────────────
-      # A non-empty ledger becomes a reviewable checklist the model must assess
-      # in requirement_coverage. Emitted as a normal corpus section (NOT
-      # standards-exempt): it lives in the body block, so MAX_CORPUS truncation
-      # applies to it like any other section.
-      if [ -s requirement-ledger.md ]; then
-        echo "# Explicit Requirement Ledger"
-        cat requirement-ledger.md
-        echo
-      fi
       echo "# PR Files (truncated)"
       echo '```json'
       cat pr-files.truncated.json
@@ -371,26 +361,73 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     echo
   } > review-corpus.body.md
 
-  # MAX_CORPUS is the total budget (standards + body). Cap the standards section
-  # first, then give the truncatable body whatever budget remains so a large
-  # standards file can't silently blow past the model's context window.
+  # MAX_CORPUS is the total budget (standards + body + reserved ledger). Cap
+  # the standards section first, carve out the reserved ledger section, then
+  # give the body the remaining budget so a large standards file or ledger can't
+  # silently blow past the model's context window.
   local std_cap=16000
   truncate_clean standards-context.md standards-context.capped.md "$std_cap" '…[standards truncated]'
-  local std_bytes body_budget
+  local std_bytes ledger_bytes body_budget
   std_bytes="$(wc -c < standards-context.capped.md | tr -d ' ')"
-  body_budget=$(( MAX_CORPUS - std_bytes ))
+
+  # ── Explicit Requirement Ledger (#624) — reserved, like standards ─────
+  # Rebuild the ledger section from scratch on EVERY assembly (full,
+  # incremental, and the native_loop rebuild all go through this function),
+  # exactly once, into requirement-ledger.section.md: the header line + the
+  # exact bytes of requirement-ledger.md + a trailing blank line. Its size is
+  # subtracted from the body budget below, so the body truncation can never
+  # eat it — the block is appended after the truncated body, never truncated
+  # itself, and scope-independent (full, incremental, and the native-loop
+  # rebuild all reserve it). The ledger content is already hard-capped at
+  # MAX_LEDGER_MARKDOWN_BYTES (8192) by the renderer. The same fits-sanity
+  # that gated the presence signal in context.sh applies here — the section's
+  # measured bytes equal the ledger bytes plus the framing (the header line
+  # and its newline, plus the trailing blank line), which context.sh derives
+  # from the same header string — so signal and section cannot diverge: a
+  # ledger that does not fit is dropped from both.
+  : > requirement-ledger.section.md
+  if [ -s requirement-ledger.md ]; then
+    {
+      echo "# Explicit Requirement Ledger"
+      cat requirement-ledger.md
+      echo
+    } > requirement-ledger.section.md
+  fi
+  ledger_bytes="$(wc -c < requirement-ledger.section.md | tr -d ' ')"
+  if [ "$ledger_bytes" -gt 0 ] && [ "$ledger_bytes" -ge "$MAX_CORPUS" ]; then
+    : > requirement-ledger.section.md
+    ledger_bytes=0
+  fi
+
+  body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes ))
   [ "$body_budget" -lt 4000 ] && body_budget=4000
   truncate_clean review-corpus.body.md review-corpus.body.truncated.md "$body_budget" \
     '```
-…[review corpus truncated to fit the model context budget]'
+ …[review corpus truncated to fit the model context budget]'
 
-  # Prepend the (capped) standards section, then append the truncated body
+  # Prepend the (capped) standards section — first and highest-authority,
+  # truncation-exempt (see tests/test_corpus_standards_survival.sh) — then the
+  # truncated body, then the reserved ledger block last.
   {
     echo "# Repository Standards and Conventions ($STANDARDS_FILE)"
     cat standards-context.capped.md
     echo
     cat review-corpus.body.truncated.md
+    cat requirement-ledger.section.md
   } > review-corpus.md
+
+  # Lockstep guard: the system-prompt fragment was already substituted from
+  # requirement-ledger-present.txt (apply_system_prompt_fragments in
+  # classification.sh, which runs before this assembly) — so a non-empty
+  # signal must correspond to a ledger section in the final corpus. Unreachable
+  # by construction (the section's bytes were carved out of the body budget
+  # above, and the shared fits-sanity keeps signal and section in step),
+  # asserted defensively.
+  if [ -s requirement-ledger-present.txt ] \
+     && ! grep -qF '# Explicit Requirement Ledger' review-corpus.md; then
+    log "WARNING: requirement-ledger-present.txt is set but the ledger section is missing from review-corpus.md; clearing the stale signal"
+    : > requirement-ledger-present.txt
+  fi
 }
 
 section_timer_start "corpus-building"

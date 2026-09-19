@@ -328,7 +328,9 @@ apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED
 # ai-output.json) into a standalone requirement-coverage.json, merged against
 # the requirement ledger built in context.sh. Fail-soft: a merge failure — or an
 # absent ledger / a module that is not present yet — never aborts the review; the
-# published verdict is already enforced above.
+# published verdict is already enforced above. Reset the artifact first so a
+# reused workspace cannot present a prior run's coverage as this run's.
+: > requirement-coverage.json
 if [ -s requirement-ledger.json ]; then
   python3 -m pr_reviewer.requirement_coverage \
     --coverage ai-output.json \

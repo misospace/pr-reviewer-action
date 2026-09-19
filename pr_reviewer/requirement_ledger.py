@@ -20,11 +20,15 @@ Design invariants:
   order within the source. Exact-duplicate text (casefolded) from any source
   merges into one entry whose position is set by the earliest occurrence;
   provenance entries are appended in source-priority, then document, order.
-- **Bounded.** The ledger holds at most :data:`MAX_REQUIREMENTS` entries,
-  each entry's normalized text is capped at :data:`MAX_REQUIREMENT_CHARS`
-  with a visible ``…`` marker, at most :data:`MAX_SOURCES` distinct
-  provenance sources are considered, and the rendered markdown has a hard
-  UTF-8 byte cap.
+ - **Bounded.** The ledger holds at most :data:`MAX_REQUIREMENTS` entries,
+   each entry's normalized text is capped at :data:`MAX_REQUIREMENT_CHARS`
+   with a visible ``…`` marker, at most :data:`MAX_SOURCES` source documents
+   are scanned — with capacity *reserved* for the standards and PR body
+   documents (at most two) before the variable linked-issue set is bounded,
+   so one noisy linked-issue source cannot crowd out the others, and any
+   dropped linked-issue documents are visible via
+   ``truncation.omitted_sources`` — and the rendered markdown has a hard
+   UTF-8 byte cap.
 - **Fence-safe rendering.** Rendered entry text is control-escaped, wrapped
   in a backtick code span whose delimiter is strictly longer than the
   longest backtick run in the text, and a leading ``#`` is escaped, so
@@ -68,7 +72,8 @@ The artifact has this shape::
              "provenance": [{"source": "standards", "ref": "AGENTS.md",
                              "line": 42}]}
         ],
-        "truncation": {"truncated": false, "omitted_requirements": 0}
+        "truncation": {"truncated": false, "omitted_requirements": 0,
+                        "omitted_sources": 0}
     }
 """
 
@@ -149,7 +154,11 @@ def _empty_artifact() -> dict[str, Any]:
         "version": ARTIFACT_VERSION,
         "sha": _compute_sha([]),
         "requirements": [],
-        "truncation": {"truncated": False, "omitted_requirements": 0},
+        "truncation": {
+            "truncated": False,
+            "omitted_requirements": 0,
+            "omitted_sources": 0,
+        },
     }
 
 
@@ -296,9 +305,26 @@ def extract_requirement_ledger(
     if pr_text is not None:
         documents.append(("pr_body", "pr", pr_text))
 
-    # Distinct provenance sources are capped in the same priority order, so
-    # one noisy source cannot crowd out the others.
-    documents = documents[:MAX_SOURCES]
+    # Reserve capacity for the fixed source classes (the standards doc and
+    # the PR doc — at most two) before bounding the variable linked-issue
+    # set, so one noisy linked-issue source cannot crowd out the others.
+    # Kept linked-issue docs are the leading ones in document order; the
+    # scan order (standards, linked_issues, pr_body) and the entry
+    # ordering/ids/dedup/caps are unchanged.
+    reserved_docs = [d for d in documents if d[0] != "linked_issues"]
+    linked_docs = [d for d in documents if d[0] == "linked_issues"]
+    li_capacity = max(0, MAX_SOURCES - len(reserved_docs))
+    kept_docs: list[tuple[str, str, str]] = []
+    kept_linked = 0
+    for doc in documents:
+        if doc[0] == "linked_issues":
+            if kept_linked < li_capacity:
+                kept_docs.append(doc)
+                kept_linked += 1
+        else:
+            kept_docs.append(doc)
+    documents = kept_docs
+    omitted_sources = len(linked_docs) - kept_linked
 
     entries: list[dict[str, Any]] = []
     index_by_key: dict[str, int] = {}
@@ -336,8 +362,11 @@ def extract_requirement_ledger(
         "sha": _compute_sha(entries),
         "requirements": entries,
         "truncation": {
-            "truncated": bool(omitted),
+            # Source-capacity drops are truncation too: the omitted linked-issue
+            # docs never become entries, and that omission must be visible.
+            "truncated": bool(omitted or omitted_sources),
             "omitted_requirements": omitted,
+            "omitted_sources": omitted_sources,
         },
     }
 
@@ -415,6 +444,7 @@ def load_ledger(path: str) -> dict[str, Any]:
     truncation = data.get("truncation")
     truncated = False
     omitted = 0
+    omitted_sources = 0
     if isinstance(truncation, dict):
         truncated = bool(truncation.get("truncated"))
         raw_omitted = truncation.get("omitted_requirements")
@@ -424,6 +454,13 @@ def load_ledger(path: str) -> dict[str, Any]:
             and raw_omitted > 0
         ):
             omitted = raw_omitted
+        raw_omitted_sources = truncation.get("omitted_sources")
+        if (
+            isinstance(raw_omitted_sources, int)
+            and not isinstance(raw_omitted_sources, bool)
+            and raw_omitted_sources > 0
+        ):
+            omitted_sources = raw_omitted_sources
 
     return {
         "version": ARTIFACT_VERSION,
@@ -431,7 +468,11 @@ def load_ledger(path: str) -> dict[str, Any]:
         # tampered file can never carry a mismatched signature.
         "sha": _compute_sha(requirements),
         "requirements": requirements,
-        "truncation": {"truncated": truncated, "omitted_requirements": omitted},
+        "truncation": {
+            "truncated": truncated,
+            "omitted_requirements": omitted,
+            "omitted_sources": omitted_sources,
+        },
     }
 
 

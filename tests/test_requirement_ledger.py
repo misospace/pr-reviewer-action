@@ -314,7 +314,11 @@ def test_ledger_is_capped_at_max_requirements_with_truncation_count():
     )
     ledger = extract_requirement_ledger(standards_text=standards)
     assert len(ledger["requirements"]) == MAX_REQUIREMENTS  # 48
-    assert ledger["truncation"] == {"truncated": True, "omitted_requirements": 1}
+    assert ledger["truncation"] == {
+        "truncated": True,
+        "omitted_requirements": 1,
+        "omitted_sources": 0,
+    }
 
 
 def test_overlong_entry_is_truncated_with_visible_marker_and_post_truncation_id():
@@ -525,7 +529,11 @@ def test_load_ledger_repairs_forced_ids_and_bad_kinds(tmp_path):
     assert reqs[1]["id"] == _id_of("the deploy must run the checks")
     # The sha is always recomputed from the surviving entries.
     assert loaded["sha"] == requirement_ledger._compute_sha(reqs)
-    assert loaded["truncation"] == {"truncated": True, "omitted_requirements": 2}
+    assert loaded["truncation"] == {
+        "truncated": True,
+        "omitted_requirements": 2,
+        "omitted_sources": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +602,120 @@ def test_sha_is_content_derived():
         standards_text="- The build must produce a different artifact\n"
     )
     assert a["sha"] != b["sha"]
+
+
+# ---------------------------------------------------------------------------
+# 11. Source capacity: reserved docs survive, linked issues are bounded
+# ---------------------------------------------------------------------------
+
+
+def _linked_doc(ref: str, text: str) -> str:
+    return f"## {ref}\n```json\n{json.dumps({'body': text})}\n```\n"
+
+
+def _linked_docs(count: int) -> str:
+    return "".join(
+        _linked_doc(f"owner/repo#{i}", f"- Requirement {i} must hold")
+        for i in range(1, count + 1)
+    )
+
+
+def _sources(req):
+    return {p["source"] for p in req["provenance"]}
+
+
+def test_source_capacity_reserves_standards_and_pr_body():
+    # MAX_SOURCES + 3 linked-issue docs: the reserved docs (standards, pr body)
+    # must survive, and the linked-issue set is bounded to the remaining
+    # capacity — the leading docs in document order, with the drop count visible.
+    ledger = extract_requirement_ledger(
+        pr_json={"title": "t", "body": "- The PR body must be represented\n"},
+        linked_issues_markdown=_linked_docs(MAX_SOURCES + 3),
+        standards_text="- The standards file must be represented\n",
+        standards_ref="AGENTS.md",
+    )
+    reqs = ledger["requirements"]
+    sources = set().union(*(_sources(r) for r in reqs))
+    assert {"standards", "pr_body"} <= sources
+    linked_refs = {
+        p["ref"] for r in reqs for p in r["provenance"] if p["source"] == "linked_issues"
+    }
+    kept = MAX_SOURCES - 2
+    assert len(linked_refs) == kept
+    # Document order: the leading docs survive, the trailing ones are dropped.
+    assert f"owner/repo#{kept}" in linked_refs
+    assert f"owner/repo#{kept + 1}" not in linked_refs
+    assert f"owner/repo#{MAX_SOURCES + 3}" not in linked_refs
+    assert ledger["truncation"]["omitted_sources"] == 5
+    assert ledger["truncation"]["truncated"] is True
+
+
+def test_source_capacity_exact_reserved_fit_is_not_truncated():
+    ledger = extract_requirement_ledger(
+        pr_json={"title": "t", "body": "- The PR body must be represented\n"},
+        linked_issues_markdown=_linked_docs(MAX_SOURCES - 2),
+        standards_text="- The standards file must be represented\n",
+        standards_ref="AGENTS.md",
+    )
+    assert ledger["truncation"]["omitted_sources"] == 0
+    assert ledger["truncation"]["truncated"] is False
+    sources = set().union(*(_sources(r) for r in ledger["requirements"]))
+    assert sources == {"standards", "pr_body", "linked_issues"}
+
+
+def test_source_capacity_unreserved_budget_goes_to_linked_issues():
+    # No reserved docs present: linked issues get the full MAX_SOURCES budget.
+    ledger = extract_requirement_ledger(
+        linked_issues_markdown=_linked_docs(MAX_SOURCES + 3)
+    )
+    linked_refs = {
+        p["ref"]
+        for r in ledger["requirements"]
+        for p in r["provenance"]
+        if p["source"] == "linked_issues"
+    }
+    assert len(linked_refs) == MAX_SOURCES
+    assert ledger["truncation"]["omitted_sources"] == 3
+    assert ledger["truncation"]["truncated"] is True
+
+
+def test_source_capacity_no_sources_is_clean():
+    ledger = extract_requirement_ledger()
+    assert ledger["truncation"] == {
+        "truncated": False,
+        "omitted_requirements": 0,
+        "omitted_sources": 0,
+    }
+
+
+def test_oversized_source_set_is_deterministic():
+    kwargs = dict(
+        pr_json={"title": "t", "body": "- The PR body must be represented\n"},
+        linked_issues_markdown=_linked_docs(MAX_SOURCES + 5),
+        standards_text="- The standards file must be represented\n",
+        standards_ref="AGENTS.md",
+    )
+    a = extract_requirement_ledger(**kwargs)
+    b = extract_requirement_ledger(**kwargs)
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def test_load_ledger_round_trips_omitted_sources(tmp_path):
+    ledger = extract_requirement_ledger(
+        linked_issues_markdown=_linked_docs(MAX_SOURCES + 2)
+    )
+    path = tmp_path / "requirement-ledger.json"
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+    loaded = load_ledger(str(path))
+    assert loaded["truncation"]["omitted_sources"] == 2
+
+
+def test_load_ledger_defaults_missing_omitted_sources(tmp_path):
+    ledger = extract_requirement_ledger(
+        standards_text="- The build must produce an artifact\n"
+    )
+    del ledger["truncation"]["omitted_sources"]
+    path = tmp_path / "requirement-ledger.json"
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+    loaded = load_ledger(str(path))
+    assert loaded["truncation"]["omitted_sources"] == 0
