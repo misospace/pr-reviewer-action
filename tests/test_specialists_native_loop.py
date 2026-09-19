@@ -278,6 +278,10 @@ class TestSpecialistLeadsStructureAwareReduction:
         for role, artifact in role_results.items():
             (tmp_path / f"specialist-{role}.json").write_text(json.dumps(artifact))
         (tmp_path / "specialists.md").write_text(full_section)
+        # Current-run presence signal (the enabled-run gate source).
+        (tmp_path / "specialist-leads-present.txt").write_text(
+            f"{len(full_section.encode('utf-8'))}\n"
+        )
         # A competitor so budget pressure is real (leads still reserved first).
         (tmp_path / "related-code.truncated.md").write_text(
             "\n".join(f"related filler line {i}" for i in range(700))
@@ -362,6 +366,76 @@ class TestSpecialistLeadsStructureAwareReduction:
         assert small in text  # embedded verbatim → dedup-compatible
         assert "omitted (byte cap)" not in text
         assert len(text.encode("utf-8")) <= 15000
+
+
+    def test_stale_reused_workspace_disabled_run_injects_nothing(self, tmp_path, monkeypatch):
+        """A reused workspace where a PREVIOUS run had deep_review on, re-run
+        with it OFF, must inject NO specialist context (#609 stale-artifact
+        safety). context.sh resets only specialists.md + the presence signal,
+        deliberately leaving the per-role specialist-<role>.json behind; the
+        planner must gate on current-run presence, never on role-JSON
+        existence."""
+        monkeypatch.chdir(tmp_path)
+
+        # Run A (enabled) left a full, valid set of artifacts behind.
+        stale_role = normalize_specialist_output(
+            {
+                "role": "security",
+                "leads": [
+                    {
+                        "severity": "major",
+                        "category": "security",
+                        "file": "src/stale_leak.py",
+                        "line": 7,
+                        "message": "STALE-run-A-lead-off-by-one-do-not-inject",
+                    }
+                ],
+            },
+            role="security",
+        )
+        stale_section = render_specialist_leads_section(
+            {"correctness": None, "security": stale_role, "tests": None},
+            max_bytes=8000,
+        )
+        assert "STALE-run-A-lead-off-by-one-do-not-inject" in stale_section
+        for role in ("correctness", "security", "tests"):
+            artifact = stale_role if role == "security" else {
+                "version": 1, "role": role, "leads": [], "truncated": False,
+                "truncation": {}, "errors": [],
+            }
+            (tmp_path / f"specialist-{role}.json").write_text(json.dumps(artifact))
+        (tmp_path / "specialists.md").write_text(stale_section)
+        (tmp_path / "specialist-leads-present.txt").write_text(
+            f"{len(stale_section.encode('utf-8'))}\n"
+        )
+
+        # Simulate Run B's current-run reset: specialists.md + signal emptied
+        # (context.sh behavior); the role JSON files are INTENTIONALLY left.
+        (tmp_path / "specialists.md").write_text("")
+        (tmp_path / "specialist-leads-present.txt").write_text("")
+
+        # A corpus with NO Specialist Review Leads section (disabled run).
+        corpus = (
+            "# Repository Standards and Conventions\n"
+            "Derived from AGENTS.md for this repository.\n\n"
+            "# Changed Manifest Context\n(manifest body)\n\n"
+            "# PR Classification\n"
+            '{"pr_kind": "app_code", "risk_flags": [], "must_check": []}\n\n'
+            "# Version Hints from Diff\n```text\n+  tag: v1.0.0\n```\n"
+        )
+        corpus_path = tmp_path / "review-corpus.truncated.md"
+        corpus_path.write_text(corpus)
+
+        text, _ = build_planning_context(15000, corpus_path)
+
+        # No specialist section and no stale lead text leaked into the
+        # first planning turn — even though valid role JSON remains on disk.
+        assert SPECIALIST_LEADS_TITLE not in text
+        assert "STALE-run-A-lead-off-by-one-do-not-inject" not in text
+        assert "src/stale_leak.py" not in text
+        # The normal planning context is still assembled (not collapsed).
+        assert "# PR Classification" in text
+        assert "# Repository Standards and Conventions" in text
 
 
 if __name__ == "__main__":

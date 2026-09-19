@@ -424,6 +424,8 @@ def build_planning_context(max_bytes, corpus_path=None):
     def _specialist_leads_excerpt(cap):
         """Whole-lead, fence-safe, sanitized Specialist Review Leads slice.
 
+        Called ONLY after the current-run stale-workspace gate below, so the
+        per-role artifacts read here are known to be THIS run's.
         render_specialist_leads_section is the single authority for this
         section's integrity: whole-lead drops only, balanced fences, secret and
         control-character sanitization, and "" when nothing usable fits. So a
@@ -432,10 +434,10 @@ def build_planning_context(max_bytes, corpus_path=None):
         sliced (a slice of the rendered Markdown could split a lead mid-line,
         break a role's code fence, drop the closing fence, or emit a generic
         ``[truncated]``). If no usable artifact is available (abnormal for a
-        run that reached here, since run_specialists.py writes the artifacts
-        and the section together), embed ``specialists.md`` whole ONLY if it
-        already fits ``cap``; never emit a partial. Returning ``None`` means
-        the section is omitted, never truncated into a malformed prompt.
+        gated run, since run_specialists.py writes the artifacts and the section
+        together), embed ``specialists.md`` whole ONLY if it already fits
+        ``cap``; never emit a partial. Returning ``None`` means the section is
+        omitted, never truncated into a malformed prompt.
         """
         nonlocal any_clipped
         role_results = {}
@@ -467,10 +469,27 @@ def build_planning_context(max_bytes, corpus_path=None):
         return None
 
     sp_room = max_bytes - _PLANNING_RESERVE
-    if sp_room >= 400:
+    sp_region = regions.get("Specialist Review Leads")
+    # Stale-workspace gate (#609): the per-role ``specialist-<role>.json``
+    # artifacts are deliberately NOT reset between runs (context.sh resets only
+    # specialists.md + the presence signal), so their mere existence proves
+    # NOTHING about THIS run — a reused workspace whose PREVIOUS run had
+    # deep_review on, re-run with it off, leaves the old role JSON behind with
+    # no current specialist phase. Only two facts are current-run: a non-empty
+    # presence signal (written this run by run_specialists.py) or a Specialist
+    # Review Leads region in the corpus that build_review_corpus freshly
+    # assembled this run (which emits the section only from a current, non-empty
+    # specialists.md). Gate the whole pre-pass — including the role-JSON
+    # structure-aware re-render below — on those, never on role-JSON existence.
+    # Both are false on a deep_review-disabled reused workspace, so no stale lead
+    # can reach the first planning turn; both are true on an enabled run (the
+    # signal and region are written in lockstep with the artifacts).
+    sp_current_run = (
+        _read_stripped("specialist-leads-present.txt") is not None or sp_region is not None
+    )
+    if sp_current_run and sp_room >= 400:
         sp_cap = min(6000, sp_room)
         sp_section = None
-        sp_region = regions.get("Specialist Review Leads")
         if sp_region is not None and len(sp_region.encode("utf-8")) + 2 <= sp_cap:
             sp_section = sp_region
         if sp_section is None:
