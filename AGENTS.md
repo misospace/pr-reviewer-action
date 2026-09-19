@@ -221,9 +221,16 @@ none rather than guessing.
 ## Eval harness runbook
 
 The evaluation harness (`scripts/eval_harness.py`) and its graded corpora
-(`evals/corpus-agentic.json` and `evals/corpus-repo-context.json`) are wired
+(`evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and
+`evals/corpus-historical.json`) are wired
 into CI by the `eval-harness` workflow (`.github/workflows/eval-harness.yaml`). Use this runbook for manual
-runs or when triaging a failing scheduled regression sweep.
+runs or when triaging a failing scheduled regression sweep. The
+historical corpus pins real dogfood misses as semantic regression
+fixtures (#627): `scripts/eval_historical.py` adds
+`sequencing` / `failure_contract` / `negative_control` check kinds on
+top of the legacy capability grammar so PR #623's cross-file/control-flow
+sequencing and exceptional-path output completeness are graded against
+synthetic traces in the deterministic CI path.
 
 ### Prerequisites
 
@@ -258,13 +265,55 @@ The `eval-harness` workflow has two triggers:
 
 - **`workflow_dispatch`** — runs on demand from the Actions tab. Inputs:
   `corpus` (default `evals/corpus-agentic.json`; choose
-  `evals/corpus-repo-context.json` for the repository-context fixtures), `modes`
+  `evals/corpus-repo-context.json` for the repository-context fixtures,
+  or `evals/corpus-historical.json` for the historical-dogfood-miss
+  corpus (#627)), `modes`
   (default `tools_off native_loop`), `runs-per-mode` (default `10`), `max-prs`
   (blank = corpus default).
 - **`schedule`** — weekly Monday 06:00 UTC sweep against `main`. The
   scheduled run additionally posts a Markdown summary to
   `GITHUB_STEP_SUMMARY` and as a comment on issue #472 so regressions are
   discoverable from the issue tracker.
+
+### Historical-dogfood-miss corpus (#627)
+
+`evals/corpus-historical.json` is graded by `scripts/eval_historical.py`,
+which extends the legacy capability grammar with three new check kinds:
+
+* **`sequencing`** — pins PR #623's cross-file/control-flow dogfood class.
+  The deep-review phase must record specialist completion events whose
+  monotonic order is strictly less than the primary final reviewer's
+  start event. A launch-only timeline (the pre-fix shape, reaped at the
+  step summary) is explicitly rejected by the
+  `completion_required_not_launch` ordering; partial completion by any
+  specialist fails `all_specialists_before_primary`.
+* **`failure_contract`** — pins PR #623's exceptional-path dogfood class.
+  For each material terminal path (`success`, `exception`, `timeout`,
+  `retry_exhaustion`, `validation`, `disabled`, `write_failure`) the
+  scenario declares the artifacts the runner promised to write. A
+  catastrophic exception fallback that omits the per-role response
+  record fails — even when the happy path is complete.
+* **`negative_control`** — pins a clean-PR scenario so recall-style
+  improvements on the #623 classes cannot be bought with fabricated
+  findings, excessive tool calls, or invented capability credits on
+  capability classes the fixture forbids.
+
+The scorer consumes in-memory `StageEvent` traces (no model calls,
+no network I/O), so the deterministic CI path stays offline. Operators
+running the live-model benchmark path pass `--primary-model` and
+`--escalation-model` at run time; the corpus never names a model and
+the production routing code never reads it, so any routing pair
+(including M2.7 → M3) can be evaluated without hard-coding names into
+production behavior. Each scenario result carries an `attribution`
+field naming the stage that caught the expected issue
+(`specialist_correctness` / `specialist_security` / `specialist_tests`
+/ `primary_final` / `escalation`), so the report answers "which review
+stage caught this?" without re-running.
+
+Provenance is recorded on each fixture entry
+(`tracking_issue`, `source_issue`, `source_pr`, `fixture_type`,
+`notes`), so a human triaging a regression can trace any capability
+back to the historical dogfood PR that originally surfaced the gap.
 
 The JSON report is uploaded as the `eval-report` artifact on every run
 (including failed runs) so regressions can be diffed week-over-week.

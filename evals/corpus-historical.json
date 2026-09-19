@@ -1,0 +1,104 @@
+{
+  "benchmark_corpus": [
+    {
+      "number": 623,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+      "title": "feat(review): add deep-review specialist advisory passes (#608)",
+      "provenance": {
+        "tracking_issue": 627,
+        "source_issue": 608,
+        "source_pr": 623,
+        "kind": "historical_dogfood_miss",
+        "fixture_type": "synthetic",
+        "notes": "Pre-fix state reconstructed from PR #623 review history (reap-before-final moved from the step summary to immediately after the launch); behavior pinned by synthetic StageEvent traces in tests/test_eval_historical.py so the deterministic CI path stays offline."
+      },
+      "scenarios": [
+        {
+          "scenario_id": "623_sequencing_reap_before_final",
+          "class": "cross-file/control-flow sequencing",
+          "description": "Specialists must all terminate/reap before the final reviewer path enters (#623 dogfood class). Pre-fix state launched specialists in the background and reaped only at the step summary, so the reviewer ran in parallel with the specialist phase and any capability check that credited the launch path alone received false credit. The capability is the *full* reap-before-final semantics: all three roles must show completion before the primary reviewer enters.",
+          "negative_control": false,
+          "expected_evidence": {
+            "checks": [
+              {
+                "id": "specialists_reaped_before_final",
+                "type": "sequencing",
+                "stages": ["specialist_correctness", "specialist_security", "specialist_tests", "primary_final"],
+                "ordering": "all_specialists_before_primary",
+                "description": "Each specialist role must record a completion timestamp <= the primary reviewer's start timestamp. A run where the primary started before any specialist completed fails."
+              },
+              {
+                "id": "no_credit_for_launch_alone",
+                "type": "sequencing",
+                "stages": ["specialist_correctness", "specialist_security", "specialist_tests", "primary_final"],
+                "ordering": "completion_required_not_launch",
+                "description": "Launching the specialist phase (with no completion entry) does not satisfy the reap-before-final capability. The pre-fix state would receive credit here, which is the regression this fixture pins."
+              }
+            ]
+          }
+        },
+        {
+          "scenario_id": "623_failure_contract_per_role_artifacts",
+          "class": "exceptional-path output completeness",
+          "description": "Promised normalized/per-role artifact state must exist on catastrophic failure as well as normal failure paths (#623 dogfood class). The catastrophic-exception fallback path must still write the per-role response record and the aggregate artifact; missing one on the exception path is the regression.",
+          "negative_control": false,
+          "expected_evidence": {
+            "checks": [
+              {
+                "id": "exception_path_writes_per_role_response",
+                "type": "failure_contract",
+                "path": "exception",
+                "required_artifacts": ["specialist-{role}.response.json", "specialists.json"],
+                "description": "On the catastrophic-exception terminal path the runner must still write the per-role response record and the aggregate. A successful happy-path write alone is insufficient."
+              },
+              {
+                "id": "happy_path_unchanged",
+                "type": "failure_contract",
+                "path": "success",
+                "required_artifacts": ["specialist-{role}.json", "specialist-{role}.response.json", "specialists.json"],
+                "description": "The happy path must still write the full per-role artifact set; this anchors the regression as exceptional-path parity rather than a regression on the happy path."
+              }
+            ]
+          }
+        },
+        {
+          "scenario_id": "623_negative_control_no_fabrication",
+          "class": "negative control (clean PR with intentional noise)",
+          "description": "A clean PR where the deep-review path produces no expected issue. Fabricated findings or excessive tool use from the specialist passes must be penalised; recall-style 'more findings = better' optimization must not credit the run. This is the negative control that prevents the improvement on the #623 sequencing and #623 failure-contract scenarios from coming from invented leads.",
+          "negative_control": true,
+          "expected_evidence": {
+            "checks": [
+              {
+                "id": "no_fabricated_capability_credits",
+                "type": "negative_control",
+                "forbidden_categories": ["sequencing", "failure_contract"],
+                "max_findings": 0,
+                "description": "No fabricated sequencing/failure-contract finding may be credited; the negative control scenario is not in the #623 dogfood class."
+              },
+              {
+                "id": "no_excessive_tool_use",
+                "type": "max_tool_calls",
+                "max": 5,
+                "description": "Specialist passes on a clean PR must stay within a conservative tool-call budget; deep mode must not invent findings by exploring the tree."
+              }
+            ]
+          }
+        }
+      ],
+      "known_findings": [],
+      "expected_evidence": null
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-09-19T00:00:00Z",
+    "updated_at": "2026-09-19T00:00:00Z",
+    "description": "Historical semantic regression corpus for issue #627. PR #623 contributes the two dogfood miss classes: cross-file/control-flow sequencing (specialists must all terminate/reap before the final reviewer enters) and exceptional-path output completeness (promised per-role/aggregate artifacts must exist on the catastrophic-exception path too). The third fixture is a clean-PR negative control so recall-style improvements on the #623 scenarios cannot be bought with fabricated findings or excessive tool calls. Each scenario is graded semantically against synthetic StageEvent traces in tests/test_eval_historical.py — the CI deterministic path does not call any model. Operators can evaluate M2.7 -> M3 as a routing pair via the existing --primary-model / --escalation-model flags without those names leaking into production behavior.",
+    "issue_refs": [627, 608],
+    "pr_refs": [623],
+    "depends_on_refs": [610, 580],
+    "supports_routing_pair": true,
+    "supports_review_depths": ["standard", "deep"],
+    "supports_attribution_stages": ["specialist_correctness", "specialist_security", "specialist_tests", "primary_final", "escalation"]
+  }
+}
