@@ -57,6 +57,10 @@ from pr_reviewer.repo_map import (  # noqa: E402
     render_repo_map_markdown,
     trust_framing_overhead,
 )
+from pr_reviewer.specialists import (  # noqa: E402
+    SPECIALIST_ROLES_ORDER,
+    render_specialist_leads_section,
+)
 
 # Conditional-fragment placeholders in default_system_prompt.txt, e.g.
 # {{VERSION_BUMP_GUIDANCE}} (substituted by apply_system_prompt_fragments).
@@ -412,9 +416,56 @@ def build_planning_context(max_bytes, corpus_path=None):
     # BEFORE the plan loop so their bytes occupy _used() — and therefore the head
     # of the joined text, which is the part that survives mask_and_truncate's
     # tail clip — while every lower-priority section below still shares what
-    # remains via the existing _used() accounting. Same region-preferred-over-
-    # file logic and embed/excerpt mechanics as the loop; bounded to the same
-    # 6000 slice and only attempted when there is room beyond the diff reserve.
+    # remains via the existing _used() accounting. Bounded to the same 6000 slice
+    # and only attempted when there is room beyond the diff reserve. When the
+    # section is larger than that slice it must NOT be generic byte-sliced (that
+    # would split a lead mid-line or cut inside a role's fence); see
+    # _specialist_leads_excerpt for the structure-aware reduction.
+    def _specialist_leads_excerpt(cap):
+        """Whole-lead, fence-safe, sanitized Specialist Review Leads slice.
+
+        render_specialist_leads_section is the single authority for this
+        section's integrity: whole-lead drops only, balanced fences, secret and
+        control-character sanitization, and "" when nothing usable fits. So a
+        section over the planning slice is re-rendered from the normalized
+        per-role artifacts (``specialist-<role>.json``) at ``cap`` — never byte-
+        sliced (a slice of the rendered Markdown could split a lead mid-line,
+        break a role's code fence, drop the closing fence, or emit a generic
+        ``[truncated]``). If no usable artifact is available (abnormal for a
+        run that reached here, since run_specialists.py writes the artifacts
+        and the section together), embed ``specialists.md`` whole ONLY if it
+        already fits ``cap``; never emit a partial. Returning ``None`` means
+        the section is omitted, never truncated into a malformed prompt.
+        """
+        nonlocal any_clipped
+        role_results = {}
+        have_artifact = False
+        for role in SPECIALIST_ROLES_ORDER:
+            artifact = None
+            body = _read_stripped(f"specialist-{role}.json")
+            if body is not None:
+                try:
+                    parsed = json.loads(body)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    artifact = parsed
+                    have_artifact = True
+            role_results[role] = artifact
+        if have_artifact:
+            # Re-rendered at a cap smaller than the artifact's own cap, so
+            # whole leads are dropped to fit (a real truncation → flag it).
+            rendered = render_specialist_leads_section(role_results, max_bytes=cap)
+            if rendered:
+                any_clipped = True
+            return rendered or None
+        body = _read_stripped("specialists.md")
+        if body is not None:
+            if len(body.encode("utf-8")) <= cap:
+                return body
+            any_clipped = True  # wanted it but it does not fit whole → omit
+        return None
+
     sp_room = max_bytes - _PLANNING_RESERVE
     if sp_room >= 400:
         sp_cap = min(6000, sp_room)
@@ -423,9 +474,7 @@ def build_planning_context(max_bytes, corpus_path=None):
         if sp_region is not None and len(sp_region.encode("utf-8")) + 2 <= sp_cap:
             sp_section = sp_region
         if sp_section is None:
-            sp_section = _excerpt(
-                "Specialist Review Leads", "specialists.md", sp_cap, None
-            )
+            sp_section = _specialist_leads_excerpt(sp_cap)
         if sp_section is not None:
             sections.append(sp_section)
 
