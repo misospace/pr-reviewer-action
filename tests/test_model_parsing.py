@@ -24,14 +24,15 @@ def parse_and_validate(response_dict):
     """Parse model response dict and return the extracted review dict."""
     content = None
     if isinstance(response_dict.get("choices"), list):
-        content = (
-            (response_dict.get("choices") or [{}])[0]
-            .get("message") or {}
-        ).get("content")
+        content = ((response_dict.get("choices") or [{}])[0].get("message") or {}).get("content")
     elif isinstance(response_dict.get("content"), list):
         parts = []
         for item in response_dict.get("content") or []:
-            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            ):
                 parts.append(item["text"])
         content = "".join(parts)
     elif isinstance(response_dict.get("content"), str):
@@ -133,16 +134,18 @@ def reassemble_anthropic_sse(sse_text):
         "id": message_id or "",
         "object": "chat.completion",
         "model": model or "",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content_text},
-            "finish_reason": stop_reason or "stop"
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content_text},
+                "finish_reason": stop_reason or "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens
-        }
+            "total_tokens": input_tokens + output_tokens,
+        },
     }
 
 
@@ -189,16 +192,18 @@ def reassemble_openai_sse(sse_text):
         "id": id_val,
         "object": "chat.completion",
         "model": model or "",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content_text},
-            "finish_reason": finish_reason or "stop"
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content_text},
+                "finish_reason": finish_reason or "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": usage_prompt_tokens,
             "completion_tokens": usage_completion_tokens,
-            "total_tokens": usage_prompt_tokens + usage_completion_tokens
-        }
+            "total_tokens": usage_prompt_tokens + usage_completion_tokens,
+        },
     }
 
 
@@ -216,15 +221,20 @@ def _sse_block(lines):
 # Tests: OpenAI non-stream response parsing
 # ---------------------------------------------------------------------------
 
+
 def test_openai_nonstream_standard():
     resp = {
         "id": "chatcmpl-test",
-        "choices": [{
-            "message": {
-                "content": json.dumps({"verdict":"approve","review_markdown":"Looks good.","packages":[]})
-            },
-            "finish_reason": "stop"
-        }]
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"verdict": "approve", "review_markdown": "Looks good.", "packages": []}
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -234,12 +244,16 @@ def test_openai_nonstream_standard():
 def test_openai_nonstream_array_wrapped():
     resp = {
         "id": "chatcmpl-test",
-        "choices": [{
-            "message": {
-                "content": json.dumps([{"verdict":"request_changes","review_markdown":"Needs work."}])
-            },
-            "finish_reason": "stop"
-        }]
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        [{"verdict": "request_changes", "review_markdown": "Needs work."}]
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "request_changes"
@@ -249,7 +263,7 @@ def test_openai_nonstream_array_wrapped():
 def test_openai_nonstream_string_content():
     resp = {
         "id": "msg-test",
-        "content": json.dumps({"verdict":"approve","review_markdown":"Direct string."})
+        "content": json.dumps({"verdict": "approve", "review_markdown": "Direct string."}),
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -259,6 +273,7 @@ def test_openai_nonstream_string_content():
 # Tests: Anthropic non-stream response parsing
 # ---------------------------------------------------------------------------
 
+
 def test_anthropic_nonstream_text_blocks():
     resp = {
         "id": "msg-test",
@@ -267,8 +282,11 @@ def test_anthropic_nonstream_text_blocks():
         "content": [
             {"type": "thinking", "thinking": "private reasoning"},
             {"type": "tool_use", "name": "read_file", "input": {}},
-            {"type": "text", "text": json.dumps({"verdict":"approve","review_markdown":"Anthropic clean."})}
-        ]
+            {
+                "type": "text",
+                "text": json.dumps({"verdict": "approve", "review_markdown": "Anthropic clean."}),
+            },
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -280,7 +298,7 @@ def test_anthropic_nonstream_only_thinking():
         "id": "msg-test",
         "type": "message",
         "role": "assistant",
-        "content": [{"type": "thinking", "thinking": "just thinking"}]
+        "content": [{"type": "thinking", "thinking": "just thinking"}],
     }
     with pytest.raises(SystemExit, match="Could not extract JSON"):
         parse_and_validate(resp)
@@ -294,8 +312,11 @@ def test_anthropic_nonstream_mixed_text_list():
         "content": [
             {"type": "thinking", "thinking": "ignored"},
             "Some prose ",
-            {"type": "text", "text": json.dumps({"verdict":"approve","review_markdown":"Mixed list."})}
-        ]
+            {
+                "type": "text",
+                "text": json.dumps({"verdict": "approve", "review_markdown": "Mixed list."}),
+            },
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -305,14 +326,38 @@ def test_anthropic_nonstream_mixed_text_list():
 # Tests: OpenAI SSE reassembly
 # ---------------------------------------------------------------------------
 
+
 def test_openai_sse_single_delta():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Single delta."})
-    sse = _sse_block([
-        _sse_line({"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"}}]}),
-        _sse_line({"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":review_json}}]}),
-        _sse_line({"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop"}]}),
-        "data: [DONE]",
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Single delta."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"content": review_json}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "finish_reason": "stop"}],
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
     assembled = reassemble_openai_sse(sse)
     parsed = parse_and_validate(assembled)
     assert parsed["verdict"] == "approve"
@@ -322,18 +367,48 @@ def test_openai_sse_single_delta():
 
 
 def test_openai_sse_multiple_deltas():
-    review = json.dumps({"verdict":"request_changes","review_markdown":"Multi chunk."})
+    review = json.dumps({"verdict": "request_changes", "review_markdown": "Multi chunk."})
     mid_point = len(review) // 2
     part1 = review[:mid_point]
     part2 = review[mid_point:]
 
-    sse = _sse_block([
-        _sse_line({"id":"chatcmpl-2","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"}}]}),
-        _sse_line({"id":"chatcmpl-2","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":part1}}]}),
-        _sse_line({"id":"chatcmpl-2","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":part2}}]}),
-        _sse_line({"id":"chatcmpl-2","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop"}]}),
-        "data: [DONE]",
-    ])
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"content": part1}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"content": part2}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "finish_reason": "stop"}],
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
     assembled = reassemble_openai_sse(sse)
     parsed = parse_and_validate(assembled)
     assert parsed["verdict"] == "request_changes"
@@ -341,12 +416,29 @@ def test_openai_sse_multiple_deltas():
 
 
 def test_openai_sse_with_usage():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"With usage."})
-    sse = _sse_block([
-        _sse_line({"id":"chatcmpl-3","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":review_json}}]}),
-        _sse_line({"id":"chatcmpl-3","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50}}),
-        "data: [DONE]",
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "With usage."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "id": "chatcmpl-3",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "delta": {"content": review_json}}],
+                }
+            ),
+            _sse_line(
+                {
+                    "id": "chatcmpl-3",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-4",
+                    "choices": [{"index": 0, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
     assembled = reassemble_openai_sse(sse)
     assert assembled["usage"]["prompt_tokens"] == 100
     assert assembled["usage"]["completion_tokens"] == 50
@@ -356,11 +448,13 @@ def test_openai_sse_with_usage():
 
 
 def test_openai_sse_with_blank_lines():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Blank lines."})
-    sse = _sse_block([
-        _sse_line({"id":"chatcmpl-4","choices":[{"delta":{"content":review_json}}]}),
-        "data: [DONE]",
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Blank lines."})
+    sse = _sse_block(
+        [
+            _sse_line({"id": "chatcmpl-4", "choices": [{"delta": {"content": review_json}}]}),
+            "data: [DONE]",
+        ]
+    )
     assembled = reassemble_openai_sse(sse)
     parsed = parse_and_validate(assembled)
     assert parsed["verdict"] == "approve"
@@ -370,21 +464,51 @@ def test_openai_sse_with_blank_lines():
 # Tests: Anthropic SSE reassembly
 # ---------------------------------------------------------------------------
 
+
 def test_anthropic_sse_text_delta():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Streamed clean."})
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Streamed clean."})
     mid = len(review_json) // 2
     part1 = review_json[:mid]
     part2 = review_json[mid:]
 
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg_smoke","model":"claude-3-5-sonnet","usage":{"input_tokens":10,"output_tokens":0}}}),
-        _sse_line({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":part1}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":part2}}),
-        _sse_line({"type":"content_block_stop","index":0}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-        _sse_line({"type":"message_stop"}),
-    ])
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_smoke",
+                        "model": "claude-3-5-sonnet",
+                        "usage": {"input_tokens": 10, "output_tokens": 0},
+                    },
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": part1},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": part2},
+                }
+            ),
+            _sse_line({"type": "content_block_stop", "index": 0}),
+            _sse_line({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            _sse_line({"type": "message_stop"}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     parsed = parse_and_validate(assembled)
     assert parsed["verdict"] == "approve"
@@ -394,18 +518,52 @@ def test_anthropic_sse_text_delta():
 
 
 def test_anthropic_sse_thinking_ignored():
-    review_json = json.dumps({"verdict":"request_changes","review_markdown":"After thinking."})
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg-think","model":"claude-3-5-sonnet"}}),
-        _sse_line({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private reasoning that must not leak"}}),
-        _sse_line({"type":"content_block_stop","index":0}),
-        _sse_line({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
-        _sse_line({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":review_json}}),
-        _sse_line({"type":"content_block_stop","index":1}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-        _sse_line({"type":"message_stop"}),
-    ])
+    review_json = json.dumps({"verdict": "request_changes", "review_markdown": "After thinking."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg-think", "model": "claude-3-5-sonnet"},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "private reasoning that must not leak",
+                    },
+                }
+            ),
+            _sse_line({"type": "content_block_stop", "index": 0}),
+            _sse_line(
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {"type": "text_delta", "text": review_json},
+                }
+            ),
+            _sse_line({"type": "content_block_stop", "index": 1}),
+            _sse_line({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            _sse_line({"type": "message_stop"}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     content = assembled["choices"][0]["message"]["content"]
     assert "private reasoning" not in content
@@ -415,18 +573,49 @@ def test_anthropic_sse_thinking_ignored():
 
 
 def test_anthropic_sse_tool_use_ignored():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Tool blocks ignored."})
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg-tool","model":"claude-3-5-sonnet"}}),
-        _sse_line({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":review_json}}),
-        _sse_line({"type":"content_block_stop","index":0}),
-        _sse_line({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"read_file"}}),
-        _sse_line({"type":"content_block_delta","index":1,"delta":{"type":"input_json","input":{"path":"/etc/passwd"}}}),
-        _sse_line({"type":"content_block_stop","index":1}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-        _sse_line({"type":"message_stop"}),
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Tool blocks ignored."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg-tool", "model": "claude-3-5-sonnet"},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": review_json},
+                }
+            ),
+            _sse_line({"type": "content_block_stop", "index": 0}),
+            _sse_line(
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {"type": "tool_use", "name": "read_file"},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {"type": "input_json", "input": {"path": "/etc/passwd"}},
+                }
+            ),
+            _sse_line({"type": "content_block_stop", "index": 1}),
+            _sse_line({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            _sse_line({"type": "message_stop"}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     content = assembled["choices"][0]["message"]["content"]
     assert "input_json" not in content
@@ -437,12 +626,25 @@ def test_anthropic_sse_tool_use_ignored():
 
 
 def test_anthropic_sse_empty_stream():
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg-empty","model":"claude-3-5-sonnet"}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"only thinking"}}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-        _sse_line({"type":"message_stop"}),
-    ])
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg-empty", "model": "claude-3-5-sonnet"},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "only thinking"},
+                }
+            ),
+            _sse_line({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            _sse_line({"type": "message_stop"}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     assert assembled["choices"][0]["message"]["content"] == ""
     with pytest.raises(SystemExit, match="Could not extract JSON"):
@@ -450,12 +652,25 @@ def test_anthropic_sse_empty_stream():
 
 
 def test_anthropic_sse_text_type_alias():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Type alias."})
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg-alias","model":"claude-3-5-sonnet"}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"text","text":review_json}}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Type alias."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {"id": "msg-alias", "model": "claude-3-5-sonnet"},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text", "text": review_json},
+                }
+            ),
+            _sse_line({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     parsed = parse_and_validate(assembled)
     assert parsed["verdict"] == "approve"
@@ -464,6 +679,7 @@ def test_anthropic_sse_text_type_alias():
 # ---------------------------------------------------------------------------
 # Tests: Invalid / malformed outputs
 # ---------------------------------------------------------------------------
+
 
 def test_malformed_bare_numeric_list():
     resp = {"id": "chatcmpl-test", "choices": [{"message": {"content": "[1,2,3]"}}]}
@@ -478,13 +694,19 @@ def test_malformed_empty_array():
 
 
 def test_malformed_non_json_prose():
-    resp = {"id": "chatcmpl-test", "choices": [{"message": {"content": "I can't help with that right now."}}]}
+    resp = {
+        "id": "chatcmpl-test",
+        "choices": [{"message": {"content": "I can't help with that right now."}}],
+    }
     with pytest.raises(SystemExit):
         parse_and_validate(resp)
 
 
 def test_malformed_invalid_json():
-    resp = {"id": "chatcmpl-test", "choices": [{"message": {"content": '{"verdict":"approve","review_markdown":broken}'}}]}
+    resp = {
+        "id": "chatcmpl-test",
+        "choices": [{"message": {"content": '{"verdict":"approve","review_markdown":broken}'}}],
+    }
     with pytest.raises(SystemExit):
         parse_and_validate(resp)
 
@@ -511,12 +733,19 @@ def test_malformed_missing_choices():
 # Tests: Edge cases and boundary conditions
 # ---------------------------------------------------------------------------
 
+
 def test_edge_markdown_fence_variants():
     for lang in ["json", "", "JSON"]:
         fence_start = f"```{lang}" if lang else "```"
         resp = {
             "id": "chatcmpl-test",
-            "choices": [{"message": {"content": f"{fence_start}\n{{\"verdict\":\"approve\",\"review_markdown\":\"Fence: {lang}\"}}\n```"}}]
+            "choices": [
+                {
+                    "message": {
+                        "content": f'{fence_start}\n{{"verdict":"approve","review_markdown":"Fence: {lang}"}}\n```'
+                    }
+                }
+            ],
         }
         parsed = parse_and_validate(resp)
         assert parsed["verdict"] == "approve"
@@ -525,7 +754,13 @@ def test_edge_markdown_fence_variants():
 def test_edge_leading_trailing_prose():
     resp = {
         "id": "chatcmpl-test",
-        "choices": [{"message": {"content": "Here is my review:\n\n{\"verdict\":\"approve\",\"review_markdown\":\"Clean PR.\"}\n\nLet me know if you need anything else."}}]
+        "choices": [
+            {
+                "message": {
+                    "content": 'Here is my review:\n\n{"verdict":"approve","review_markdown":"Clean PR."}\n\nLet me know if you need anything else.'
+                }
+            }
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -535,7 +770,13 @@ def test_edge_leading_trailing_prose():
 def test_edge_single_item_array():
     resp = {
         "id": "chatcmpl-test",
-        "choices": [{"message": {"content": "[{\"verdict\":\"request_changes\",\"review_markdown\":\"Needs fixes.\"}]"}}]
+        "choices": [
+            {
+                "message": {
+                    "content": '[{"verdict":"request_changes","review_markdown":"Needs fixes."}]'
+                }
+            }
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "request_changes"
@@ -545,7 +786,13 @@ def test_edge_single_item_array():
 def test_edge_single_item_array_wrapped_in_fence():
     resp = {
         "id": "chatcmpl-test",
-        "choices": [{"message": {"content": "```json\n[{\"verdict\":\"approve\",\"review_markdown\":\"Fenced array.\"}]\n```"}}]
+        "choices": [
+            {
+                "message": {
+                    "content": '```json\n[{"verdict":"approve","review_markdown":"Fenced array."}]\n```'
+                }
+            }
+        ],
     }
     parsed = parse_and_validate(resp)
     assert parsed["verdict"] == "approve"
@@ -555,18 +802,24 @@ def test_edge_invalid_verdict_values():
     for verdict in ["unknown", "ERROR", "", "approve_extra"]:
         resp = {
             "id": "chatcmpl-test",
-            "choices": [{"message": {"content": json.dumps({"verdict": verdict, "review_markdown": "test"})}}]
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"verdict": verdict, "review_markdown": "test"})
+                    }
+                }
+            ],
         }
         parsed = parse_and_validate(resp)
         assert parsed.get("verdict") == verdict
 
 
 def test_edge_sse_corrupted_chunk():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Corrupted skip."})
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Corrupted skip."})
     sse_lines = [
-        _sse_line({"id":"chatcmpl-5","choices":[{"delta":{"content":review_json}}]}),
+        _sse_line({"id": "chatcmpl-5", "choices": [{"delta": {"content": review_json}}]}),
         "data: THIS IS NOT JSON AT ALL!!!",
-        _sse_line({"id":"chatcmpl-5","choices":[{"delta":{"content":"more text"}}]}),
+        _sse_line({"id": "chatcmpl-5", "choices": [{"delta": {"content": "more text"}}]}),
         "data: [DONE]",
     ]
     sse = "\n\n".join(sse_lines)
@@ -576,13 +829,35 @@ def test_edge_sse_corrupted_chunk():
 
 
 def test_edge_anthropic_usage_accumulation():
-    review_json = json.dumps({"verdict":"approve","review_markdown":"Usage accumulation."})
-    sse = _sse_block([
-        _sse_line({"type":"message_start","message":{"id":"msg-usage","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":0}}}),
-        _sse_line({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":review_json}}),
-        _sse_line({"type":"message_delta","delta":{"stop_reason":"end_turn","usage":{"output_tokens":50}}}),
-        _sse_line({"type":"message_stop"}),
-    ])
+    review_json = json.dumps({"verdict": "approve", "review_markdown": "Usage accumulation."})
+    sse = _sse_block(
+        [
+            _sse_line(
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg-usage",
+                        "model": "claude-3-5-sonnet",
+                        "usage": {"input_tokens": 100, "output_tokens": 0},
+                    },
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": review_json},
+                }
+            ),
+            _sse_line(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "usage": {"output_tokens": 50}},
+                }
+            ),
+            _sse_line({"type": "message_stop"}),
+        ]
+    )
     assembled = reassemble_anthropic_sse(sse)
     assert assembled["usage"]["prompt_tokens"] == 100
     assert assembled["usage"]["completion_tokens"] == 50
@@ -593,53 +868,72 @@ def test_edge_anthropic_usage_accumulation():
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     print("=" * 60)
     print("Model Parsing & SSE Reassembly Tests")
     print("=" * 60)
 
     test_functions = [
-        ("OpenAI Non-Stream Response Parsing", [
-            test_openai_nonstream_standard,
-            test_openai_nonstream_array_wrapped,
-            test_openai_nonstream_string_content,
-        ]),
-        ("Anthropic Non-Stream Response Parsing", [
-            test_anthropic_nonstream_text_blocks,
-            test_anthropic_nonstream_only_thinking,
-            test_anthropic_nonstream_mixed_text_list,
-        ]),
-        ("OpenAI SSE Reassembly", [
-            test_openai_sse_single_delta,
-            test_openai_sse_multiple_deltas,
-            test_openai_sse_with_usage,
-            test_openai_sse_with_blank_lines,
-        ]),
-        ("Anthropic SSE Reassembly", [
-            test_anthropic_sse_text_delta,
-            test_anthropic_sse_thinking_ignored,
-            test_anthropic_sse_tool_use_ignored,
-            test_anthropic_sse_empty_stream,
-            test_anthropic_sse_text_type_alias,
-        ]),
-        ("Invalid / Malformed Outputs", [
-            test_malformed_bare_numeric_list,
-            test_malformed_empty_array,
-            test_malformed_non_json_prose,
-            test_malformed_invalid_json,
-            test_malformed_empty_content,
-            test_malformed_none_content,
-            test_malformed_missing_choices,
-        ]),
-        ("Edge Cases & Boundary Conditions", [
-            test_edge_markdown_fence_variants,
-            test_edge_leading_trailing_prose,
-            test_edge_single_item_array,
-            test_edge_single_item_array_wrapped_in_fence,
-            test_edge_invalid_verdict_values,
-            test_edge_sse_corrupted_chunk,
-            test_edge_anthropic_usage_accumulation,
-        ]),
+        (
+            "OpenAI Non-Stream Response Parsing",
+            [
+                test_openai_nonstream_standard,
+                test_openai_nonstream_array_wrapped,
+                test_openai_nonstream_string_content,
+            ],
+        ),
+        (
+            "Anthropic Non-Stream Response Parsing",
+            [
+                test_anthropic_nonstream_text_blocks,
+                test_anthropic_nonstream_only_thinking,
+                test_anthropic_nonstream_mixed_text_list,
+            ],
+        ),
+        (
+            "OpenAI SSE Reassembly",
+            [
+                test_openai_sse_single_delta,
+                test_openai_sse_multiple_deltas,
+                test_openai_sse_with_usage,
+                test_openai_sse_with_blank_lines,
+            ],
+        ),
+        (
+            "Anthropic SSE Reassembly",
+            [
+                test_anthropic_sse_text_delta,
+                test_anthropic_sse_thinking_ignored,
+                test_anthropic_sse_tool_use_ignored,
+                test_anthropic_sse_empty_stream,
+                test_anthropic_sse_text_type_alias,
+            ],
+        ),
+        (
+            "Invalid / Malformed Outputs",
+            [
+                test_malformed_bare_numeric_list,
+                test_malformed_empty_array,
+                test_malformed_non_json_prose,
+                test_malformed_invalid_json,
+                test_malformed_empty_content,
+                test_malformed_none_content,
+                test_malformed_missing_choices,
+            ],
+        ),
+        (
+            "Edge Cases & Boundary Conditions",
+            [
+                test_edge_markdown_fence_variants,
+                test_edge_leading_trailing_prose,
+                test_edge_single_item_array,
+                test_edge_single_item_array_wrapped_in_fence,
+                test_edge_invalid_verdict_values,
+                test_edge_sse_corrupted_chunk,
+                test_edge_anthropic_usage_accumulation,
+            ],
+        ),
     ]
 
     total_passed = 0

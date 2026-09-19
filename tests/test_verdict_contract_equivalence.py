@@ -91,9 +91,7 @@ class TestSharedResponseFormat:
         assert re.search(r'rf_json="null"', _MODEL_CALL_SH)
         c = Conversation(system="reviewer")
         c.add_user("review me")
-        payload = c.to_request_payload(
-            "openai", "m", verdict_turn=True, response_format=None
-        )
+        payload = c.to_request_payload("openai", "m", verdict_turn=True, response_format=None)
         assert "response_format" not in payload
 
 
@@ -121,7 +119,7 @@ class TestSharedTokenAndSamplingKnobs:
 
     def test_default_max_tokens_is_8192_on_both_paths(self):
         # Path A default.
-        assert 'AI_MAX_TOKENS:-8192' in _MODEL_CALL_SH
+        assert "AI_MAX_TOKENS:-8192" in _MODEL_CALL_SH
         # Path B default (env_int_bounded fallback in run_tool_harness.py).
         assert re.search(r'env_int_bounded\(\s*"AI_MAX_TOKENS",\s*8192', _HARNESS_PY)
 
@@ -134,9 +132,7 @@ class TestSharedTokenAndSamplingKnobs:
         ):
             c = Conversation(system="s")
             c.add_user("go")
-            payload = c.to_request_payload(
-                "openai", "m", verdict_turn=True, tokens_param=tp
-            )
+            payload = c.to_request_payload("openai", "m", verdict_turn=True, tokens_param=tp)
             assert expected in payload
             other = "max_tokens" if expected == "max_completion_tokens" else "max_completion_tokens"
             assert other not in payload
@@ -144,15 +140,16 @@ class TestSharedTokenAndSamplingKnobs:
     def test_temperature_omitted_when_none(self):
         # Bash omits temperature when AI_TEMPERATURE is empty; Python omits it
         # when temperature is None.
-        assert 'if $temp == null then {} else {temperature:$temp} end' in _MODEL_CALL_SH
+        assert "if $temp == null then {} else {temperature:$temp} end" in _MODEL_CALL_SH
         c = Conversation(system="s")
         c.add_user("go")
         assert "temperature" not in c.to_request_payload(
             "openai", "m", verdict_turn=True, temperature=None
         )
-        assert c.to_request_payload(
-            "openai", "m", verdict_turn=True, temperature=0.1
-        )["temperature"] == 0.1
+        assert (
+            c.to_request_payload("openai", "m", verdict_turn=True, temperature=0.1)["temperature"]
+            == 0.1
+        )
 
     def test_stream_options_include_usage_when_streaming(self):
         # Bash sets stream_options.include_usage on streamed openai requests;

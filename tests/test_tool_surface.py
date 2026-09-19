@@ -41,7 +41,9 @@ def git_repo(tmp_path):
     _git(["init", "-q"], tmp_path)
     _git(["config", "user.email", "t@example.com"], tmp_path)
     _git(["config", "user.name", "Tester"], tmp_path)
-    (tmp_path / "app.py").write_text("\n".join(f"line {i}" for i in range(1, 21)) + "\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "\n".join(f"line {i}" for i in range(1, 21)) + "\n", encoding="utf-8"
+    )
     _git(["add", "app.py"], tmp_path)
     _git(["commit", "-q", "-m", "add app.py"], tmp_path)
     return tmp_path
@@ -49,7 +51,9 @@ def git_repo(tmp_path):
 
 # ── read_file line ranges ────────────────────────────────────────────────────
 def test_read_file_offset_limit_returns_window(tmp_path):
-    (tmp_path / "big.txt").write_text("\n".join(f"row{i}" for i in range(1, 101)) + "\n", encoding="utf-8")
+    (tmp_path / "big.txt").write_text(
+        "\n".join(f"row{i}" for i in range(1, 101)) + "\n", encoding="utf-8"
+    )
     res = _exec("read_file", {"path": "big.txt", "offset": 10, "limit": 3}, tmp_path)
     assert res["status"] == "ok"
     assert res["result"]["content"] == "row10\nrow11\nrow12\n"
@@ -168,7 +172,9 @@ def test_read_file_blocks_kube_conf(tmp_path):
 
 
 def test_read_file_blocks_service_account_json(tmp_path):
-    (tmp_path / "my-project-service-account.json").write_text('{"type":"service_account"}\n', encoding="utf-8")
+    (tmp_path / "my-project-service-account.json").write_text(
+        '{"type":"service_account"}\n', encoding="utf-8"
+    )
     res = _exec("read_file", {"path": "my-project-service-account.json"}, tmp_path)
     assert res["status"] == "error"
 
@@ -241,9 +247,9 @@ def test_git_grep_no_path_no_max_results_preserves_behavior(git_repo):
     res = _exec("git_grep", {"pattern": "line"}, git_repo)
     assert res["status"] == "ok"
     # All 20 lines match "line", all from app.py, in deterministic line order.
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [("app.py", str(i), f"line {i}") for i in range(1, 21)]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
+        ("app.py", str(i), f"line {i}") for i in range(1, 21)
+    ]
 
 
 def test_git_grep_scoped_path_returns_only_subtree(git_repo):
@@ -256,9 +262,9 @@ def test_git_grep_scoped_path_returns_only_subtree(git_repo):
     # Every match is under sub/ and none leak from the repo root.
     assert res["result"]["matches"] == []
     res2 = _exec("git_grep", {"pattern": "needle", "path": "sub"}, git_repo)
-    assert [
-        _split_match(m) for m in res2["result"]["matches"]
-    ] == [("sub/deep.py", "1", "deep needle here")]
+    assert [_split_match(m) for m in res2["result"]["matches"]] == [
+        ("sub/deep.py", "1", "deep needle here")
+    ]
 
 
 def test_git_grep_max_results_below_default(git_repo):
@@ -266,9 +272,7 @@ def test_git_grep_max_results_below_default(git_repo):
     assert res["status"] == "ok"
     assert len(res["result"]["matches"]) == 3
     # Deterministic line ordering: the first three lines, in order.
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
         ("app.py", "1", "line 1"),
         ("app.py", "2", "line 2"),
         ("app.py", "3", "line 3"),
@@ -278,7 +282,8 @@ def test_git_grep_max_results_below_default(git_repo):
 def test_git_grep_max_results_clamped_to_200(git_repo):
     # An oversized request is clamped to the 200 upper bound, not honoured.
     mock_result = mock.Mock(
-        returncode=0, stderr="",
+        returncode=0,
+        stderr="",
         stdout="\n".join(f"f.py:{i}:x" for i in range(1, 202)),
     )
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
@@ -303,9 +308,10 @@ def test_git_grep_max_results_string_coerced(git_repo):
     # Weak models emit numbers as strings; the executor clamps/coerces them.
     res = _exec("git_grep", {"pattern": "line", "max_results": "2"}, git_repo)
     assert res["status"] == "ok"
-    assert [
-        _split_match(m) for m in res["result"]["matches"]
-    ] == [("app.py", "1", "line 1"), ("app.py", "2", "line 2")]
+    assert [_split_match(m) for m in res["result"]["matches"]] == [
+        ("app.py", "1", "line 1"),
+        ("app.py", "2", "line 2"),
+    ]
 
 
 def test_git_grep_default_argv_preserved(git_repo):

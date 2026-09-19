@@ -6,6 +6,7 @@ All tests are hermetic: every external dependency (read_file, git_log,
 git_blame, git_grep, gh_api, web_fetch, web_search, run_command) is
 patched so no live subprocess or network call is made.
 """
+
 from __future__ import annotations
 
 import json
@@ -180,13 +181,13 @@ def test_execute_tool_request_git_grep_default_max_results_preserved() -> None:
 
 def test_clamp_grep_max_results() -> None:
     clamp = tool_executors.clamp_grep_max_results
-    assert clamp(None) == 60          # absent → default
-    assert clamp(40) == 40            # in range → unchanged
-    assert clamp("25") == 25          # string → coerced
-    assert clamp(0) == 1              # below floor → clamped up
+    assert clamp(None) == 60  # absent → default
+    assert clamp(40) == 40  # in range → unchanged
+    assert clamp("25") == 25  # string → coerced
+    assert clamp(0) == 1  # below floor → clamped up
     assert clamp(-3) == 1
-    assert clamp(200) == 200          # at ceiling
-    assert clamp(1000) == 200         # over ceiling → clamped down
+    assert clamp(200) == 200  # at ceiling
+    assert clamp(1000) == 200  # over ceiling → clamped down
     assert clamp("not-an-int") == 60  # malformed → default (degrade, don't fail)
 
 
@@ -210,9 +211,17 @@ def test_execute_tool_request_gh_api_missing_endpoint() -> None:
 
 
 def test_execute_tool_request_repo_contents_dispatches():
-    fake_res = {"repo": "example/repo", "path": "src", "type": "directory", "entries": [], "truncated": False}
+    fake_res = {
+        "repo": "example/repo",
+        "path": "src",
+        "type": "directory",
+        "entries": [],
+        "truncated": False,
+    }
     with patch.object(tool_executors, "repo_contents", return_value=fake_res) as rc:
-        res = _call("repo_contents", {"repo": "example/repo", "path": "src", "ref": "v1", "max_entries": 12})
+        res = _call(
+            "repo_contents", {"repo": "example/repo", "path": "src", "ref": "v1", "max_entries": 12}
+        )
     assert rc.called
     assert rc.call_args.args[:5] == ("example/repo", "src", "v1", ["*"], "example/repo")
     assert rc.call_args.args[5] == 12

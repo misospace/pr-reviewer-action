@@ -67,7 +67,15 @@ def _exec(tool, args, tmp_path, *, allowed_repos=None, hosts=None, search_url=""
 # 1. Secret files cannot be read, even when explicitly requested.
 @pytest.mark.parametrize(
     "name",
-    [".env", ".env.production", "id_rsa", "credentials.json", "secrets.yaml", "tls.pem", "server.key"],
+    [
+        ".env",
+        ".env.production",
+        "id_rsa",
+        "credentials.json",
+        "secrets.yaml",
+        "tls.pem",
+        "server.key",
+    ],
 )
 def test_read_file_blocks_sensitive_paths(tmp_path, name):
     # The file genuinely exists in the workspace — the block is by name, not by absence.
@@ -200,7 +208,10 @@ def test_web_search_query_cannot_change_host(tmp_path, monkeypatch):
     # the URL-encoded q= parameter rather than re-pointing the request.
     assert captured["url"].startswith("https://search.jory.dev/search?")
     assert "evil.example" not in urllib.parse.urlparse(captured["url"]).netloc
-    assert "q=talos+matrix%26engines" in captured["url"] or "q=talos%20matrix%26engines" in captured["url"]
+    assert (
+        "q=talos+matrix%26engines" in captured["url"]
+        or "q=talos%20matrix%26engines" in captured["url"]
+    )
 
 
 # 6. gh_api is fenced to the repo allowlist, read-only prefixes, and denies the

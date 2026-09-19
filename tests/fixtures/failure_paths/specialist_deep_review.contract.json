@@ -1,0 +1,8 @@
+{
+  "paths": {
+    "success": ["response.json", "specialists.json"],
+    "exception": ["response.json"],
+    "write_failure": ["specialists.json"],
+    "disabled": []
+  }
+}

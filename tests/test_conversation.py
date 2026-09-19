@@ -99,27 +99,18 @@ class TestWebSearchGating:
         conv = Conversation(system="s")
         for fmt, key in (("openai", "function"), ("anthropic", None)):
             payload = conv.to_request_payload(fmt, "m", max_tokens=64)
-            names = [
-                (t["function"]["name"] if key else t["name"])
-                for t in payload["tools"]
-            ]
+            names = [(t["function"]["name"] if key else t["name"]) for t in payload["tools"]]
             assert "web_search" not in names
 
     def test_extended_conversation_advertises_web_search(self):
-        conv = Conversation(
-            system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA]
-        )
+        conv = Conversation(system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA])
         payload = conv.to_request_payload("openai", "m", max_tokens=64)
         names = [t["function"]["name"] for t in payload["tools"]]
         assert "web_search" in names
 
     def test_verdict_turn_drops_web_search_too(self):
-        conv = Conversation(
-            system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA]
-        )
-        payload = conv.to_request_payload(
-            "openai", "m", max_tokens=64, verdict_turn=True
-        )
+        conv = Conversation(system="s", tool_schemas=list(TOOL_SCHEMAS) + [WEB_SEARCH_SCHEMA])
+        payload = conv.to_request_payload("openai", "m", max_tokens=64, verdict_turn=True)
         assert "tools" not in payload
 
 
@@ -381,9 +372,7 @@ class TestConversationOverflow:
         assert shrunk == 2
         for call_id in ("old", "new"):
             event = next(
-                e
-                for e in c.events
-                if e["kind"] == "tool_result" and e["call_id"] == call_id
+                e for e in c.events if e["kind"] == "tool_result" and e["call_id"] == call_id
             )
             assert len(event["content"].encode("utf-8")) <= 1000
 
@@ -494,9 +483,7 @@ class TestOpenAIPayload:
         assert payload["messages"][2]["role"] == "assistant"
         assert payload["messages"][2]["content"] is None
         assert payload["messages"][2]["tool_calls"][0]["id"] == "call_1"
-        assert (
-            payload["messages"][2]["tool_calls"][0]["function"]["name"] == "read_file"
-        )
+        assert payload["messages"][2]["tool_calls"][0]["function"]["name"] == "read_file"
         # Tool result turn.
         assert payload["messages"][3]["role"] == "tool"
         assert payload["messages"][3]["tool_call_id"] == "call_1"
@@ -505,9 +492,7 @@ class TestOpenAIPayload:
         assert "UNTRUSTED DATA" in tool_content
         assert "print('hi')" in tool_content
         # Top-level tools attach in non-verdict mode.
-        read_file = next(
-            t for t in payload["tools"] if t["function"]["name"] == "read_file"
-        )
+        read_file = next(t for t in payload["tools"] if t["function"]["name"] == "read_file")
         assert read_file["type"] == "function"
 
     def test_stream_adds_stream_options(self):
@@ -520,9 +505,7 @@ class TestOpenAIPayload:
     def test_verdict_turn_drops_tools_and_attaches_response_format(self):
         c = Conversation(system="reviewer")
         c.add_user("review me")
-        c.add_assistant_tool_calls(
-            [{"id": "call_1", "name": "read_file", "arguments": "{}"}]
-        )
+        c.add_assistant_tool_calls([{"id": "call_1", "name": "read_file", "arguments": "{}"}])
         c.add_tool_result("call_1", "ok")
 
         payload = c.to_request_payload(
@@ -548,9 +531,7 @@ class TestOpenAIPayload:
     def test_verdict_turn_keep_full_history(self):
         c = Conversation()
         c.add_user("review me")
-        c.add_assistant_tool_calls(
-            [{"id": "call_1", "name": "read_file", "arguments": "{}"}]
-        )
+        c.add_assistant_tool_calls([{"id": "call_1", "name": "read_file", "arguments": "{}"}])
         c.add_tool_result("call_1", "ok")
 
         payload = c.to_request_payload(
@@ -654,9 +635,7 @@ class TestAnthropicPayload:
         c.add_assistant_text("thinking out loud")
         payload = c.to_request_payload("anthropic", "claude-3-5-sonnet")
         assistant_turn = payload["messages"][1]
-        assert assistant_turn["content"] == [
-            {"type": "text", "text": "thinking out loud"}
-        ]
+        assert assistant_turn["content"] == [{"type": "text", "text": "thinking out loud"}]
 
     def test_multiple_tool_results_batched_into_one_user_turn(self):
         c = Conversation()
@@ -680,9 +659,7 @@ class TestAnthropicPayload:
 
     def test_tool_error_sets_is_error_block(self):
         c = Conversation()
-        c.add_assistant_tool_calls(
-            [{"id": "a", "name": "read_file", "arguments": "{}"}]
-        )
+        c.add_assistant_tool_calls([{"id": "a", "name": "read_file", "arguments": "{}"}])
         c.add_tool_result("a", "boom", is_error=True)
         payload = c.to_request_payload("anthropic", "claude-3-5-sonnet")
         result_turn = next(m for m in payload["messages"] if m["role"] == "user")
@@ -703,9 +680,7 @@ class TestAnthropicPayload:
         # typed as object, but receiving an unparseable value as a string
         # marker is preferable to silently dropping the call).
         c = Conversation()
-        c.add_assistant_tool_calls(
-            [{"id": "a", "name": "git_grep", "arguments": '{"pattern":'}]
-        )
+        c.add_assistant_tool_calls([{"id": "a", "name": "git_grep", "arguments": '{"pattern":'}])
         payload = c.to_request_payload("anthropic", "claude-3-5-sonnet")
         assistant_turn = payload["messages"][0]
         assert assistant_turn["content"][0]["input"] == {"_raw": '{"pattern":'}
@@ -723,14 +698,10 @@ class TestAnthropicPayload:
     def test_anthropic_verdict_turn_drops_tools(self):
         c = Conversation()
         c.add_user("review me")
-        c.add_assistant_tool_calls(
-            [{"id": "a", "name": "read_file", "arguments": "{}"}]
-        )
+        c.add_assistant_tool_calls([{"id": "a", "name": "read_file", "arguments": "{}"}])
         c.add_tool_result("a", "ok")
 
-        payload = c.to_request_payload(
-            "anthropic", "claude-3-5-sonnet", verdict_turn=True
-        )
+        payload = c.to_request_payload("anthropic", "claude-3-5-sonnet", verdict_turn=True)
         assert "tools" not in payload
         # History collapses to a system note; one closing user instruction
         # remains (Anthropic requires a non-empty messages array).
@@ -782,9 +753,7 @@ class TestVerdictTurnContract:
         # The tools-drop is the verdict-turn contract itself, not a side
         # effect of response_format: ai_response_format=off must not leave
         # the tool catalogue attached to the closing call.
-        p = self._conv().to_request_payload(
-            "openai", "m", verdict_turn=True, response_format=None
-        )
+        p = self._conv().to_request_payload("openai", "m", verdict_turn=True, response_format=None)
         assert "tools" not in p
         assert "response_format" not in p
 
@@ -859,11 +828,7 @@ class TestDedupeVerdictCorpus:
     def test_identical_section_is_dropped_with_placeholder(self):
         section = "# Version Hints from Diff\n```text\nimg: app-1.2.3\n```"
         planning = "# PR Classification\n{}\n\n" + section
-        corpus = (
-            "# PR Diff (truncated)\n```diff\n+full diff here\n```\n\n"
-            + section
-            + "\n"
-        )
+        corpus = "# PR Diff (truncated)\n```diff\n+full diff here\n```\n\n" + section + "\n"
         out = dedupe_verdict_corpus(corpus, planning)
         # The duplicate section collapses to a placeholder...
         assert VERDICT_DEDUP_NOTICE in out
@@ -905,11 +870,7 @@ class TestDedupeVerdictCorpus:
 
     def test_section_order_preserved_for_kept_sections(self):
         s_dup = "# Version Hints from Diff\n```text\nv1\n```"
-        corpus = (
-            "# First\nfirst body\n\n"
-            + s_dup
-            + "\n\n# Last\nlast body\n"
-        )
+        corpus = "# First\nfirst body\n\n" + s_dup + "\n\n# Last\nlast body\n"
         out = dedupe_verdict_corpus(corpus, "planning ... " + s_dup + " ... more")
         # Kept sections keep their relative order; the middle one collapsed.
         assert out.index("# First") < out.index("## Version Hints from Diff")

@@ -129,8 +129,6 @@ class TestFakeMarkerInjection:
             "Approved."
         )
 
-        full_comment = f"{trusted_sha}\n{trusted_fp}\n## Review\n{model_markdown}"
-
         # After stripping the model markdown portion
         stripped_md = strip_reserved_markers(model_markdown)
         sanitized_comment = f"{trusted_sha}\n{trusted_fp}\n## Review\n{stripped_md}"

@@ -38,6 +38,7 @@ def _import_tool(name):
         run_command,
         web_fetch,
     )
+
     return locals()[name]
 
 
@@ -110,6 +111,7 @@ FIXTURE_TOOL_HARNESS = {
 # Test: Old (buggy) path counts 0 successes → would enforce request_changes
 # ---------------------------------------------------------------------------
 
+
 def test_old_path_counts_zero():
     """The old jq expression `.tool_results[].result.status` finds nothing."""
     data = FIXTURE_TOOL_HARNESS
@@ -117,20 +119,18 @@ def test_old_path_counts_zero():
     # This is the OLD buggy path: .result.status (which doesn't exist)
     successful = _count_ok_by_path(data, ["result", "status"])
     assert successful == 0, (
-        f"Old path should count 0 successes for tool results with .status field, "
-        f"got {successful}"
+        f"Old path should count 0 successes for tool results with .status field, got {successful}"
     )
 
     # The old path also fails the "any ok" check used in TOOL_FAILURE_REASON:
     any_ok_old = _any_ok_by_path(data, ["result", "status"])
-    assert any_ok_old is False, (
-        f"Old path should find no 'ok' results, got {any_ok_old}"
-    )
+    assert any_ok_old is False, f"Old path should find no 'ok' results, got {any_ok_old}"
 
 
 # ---------------------------------------------------------------------------
 # Test: New (fixed) path counts 1 success → passes fail-closed check
 # ---------------------------------------------------------------------------
+
 
 def test_new_path_counts_one():
     """The fixed jq expression `.tool_results[].status` finds the correct count."""
@@ -139,15 +139,12 @@ def test_new_path_counts_one():
     # This is the FIXED path: .status
     successful = _count_ok_by_path(data, ["status"])
     assert successful == 1, (
-        f"New path should count 1 success for tool results with .status='ok', "
-        f"got {successful}"
+        f"New path should count 1 success for tool results with .status='ok', got {successful}"
     )
 
     # The new path finds at least one 'ok' in the any check:
     any_ok_new = _any_ok_by_path(data, ["status"])
-    assert any_ok_new is True, (
-        f"New path should find at least one 'ok' result, got {any_ok_new}"
-    )
+    assert any_ok_new is True, f"New path should find at least one 'ok' result, got {any_ok_new}"
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +210,7 @@ def test_all_fail_fixture():
 # Test: Verify run_review.sh delegates enforcement to Python module
 # ---------------------------------------------------------------------------
 
+
 def test_run_review_uses_correct_path():
     """Confirm the review driver delegates enforcement to pr_reviewer.enforcement."""
     scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
@@ -261,9 +259,7 @@ def test_read_file_path_escape():
 def test_git_grep_error_path():
     """git_grep returns {'error': ...} when subprocess raises TimeoutExpired."""
     git_grep = _import_tool("git_grep")
-    with mock.patch(
-        "subprocess.run", side_effect=subprocess.TimeoutExpired("git", 15)
-    ):
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 15)):
         result = git_grep("some-pattern", "/tmp")
     assert result.get("error") == "git grep timed out after 15s", (
         f"Expected exact timeout error message, got: {result}"
@@ -332,13 +328,12 @@ def test_gh_api_error_repo_not_allowed():
         # rejected by the allowlist. The allowlist check runs before any
         # HTTP request in gh_api().
         with mock.patch("urllib.request.urlopen") as mock_urlopen:
-            result = gh_api(
-                "other-owner/other-repo/pulls/1", set(), "my-org/my-repo"
-            )
+            result = gh_api("other-owner/other-repo/pulls/1", set(), "my-org/my-repo")
         assert "error" in result, f"Expected error for disallowed repo, got: {result}"
         assert "Repo not allowed" in result["error"]
-        mock_urlopen.assert_not_called(), (
-            "urlopen should not be called when repo is not allowlisted"
+        (
+            mock_urlopen.assert_not_called(),
+            ("urlopen should not be called when repo is not allowlisted"),
         )
     finally:
         if old_token:
@@ -401,9 +396,7 @@ def test_git_grep_default_timeout():
 def test_git_grep_timeout_error_message():
     """git_grep timeout error message includes the configured timeout."""
     git_grep = _import_tool("git_grep")
-    with mock.patch(
-        "subprocess.run", side_effect=subprocess.TimeoutExpired("git", 10)
-    ):
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 10)):
         result = git_grep("pattern", "/tmp", request_timeout=10)
     assert result.get("error") == "git grep timed out after 10s"
 
@@ -426,9 +419,7 @@ def test_gh_api_uses_custom_timeout():
             gh_api("owner/repo/pulls/1", {"owner/repo"}, "owner/repo", request_timeout=42)
         mock_urlopen.assert_called_once()
         args, kwargs = mock_urlopen.call_args
-        assert kwargs.get("timeout") == 42, (
-            f"Expected timeout=42, got {kwargs}"
-        )
+        assert kwargs.get("timeout") == 42, f"Expected timeout=42, got {kwargs}"
     finally:
         if old_token:
             os.environ[old_token[0]] = old_token[1]
@@ -453,9 +444,7 @@ def test_web_fetch_uses_custom_timeout():
         web_fetch("https://github.com/test", ["github.com"], request_timeout=42)
     mock_opener.open.assert_called_once()
     args, kwargs = mock_opener.open.call_args
-    assert kwargs.get("timeout") == 42, (
-        f"Expected timeout=42, got {kwargs}"
-    )
+    assert kwargs.get("timeout") == 42, f"Expected timeout=42, got {kwargs}"
 
 
 def test_web_fetch_default_timeout():
@@ -475,9 +464,7 @@ def test_web_fetch_default_timeout():
         web_fetch("https://github.com/test", ["github.com"])
     mock_opener.open.assert_called_once()
     args, kwargs = mock_opener.open.call_args
-    assert kwargs.get("timeout") == 25, (
-        f"Expected timeout=25, got {kwargs}"
-    )
+    assert kwargs.get("timeout") == 25, f"Expected timeout=25, got {kwargs}"
 
 
 def test_run_command_uses_custom_timeout():
@@ -498,9 +485,7 @@ def test_run_command_uses_custom_timeout():
 def test_run_command_timeout_error_message():
     """run_command timeout error message includes the configured timeout."""
     run_command = _import_tool("run_command")
-    with mock.patch(
-        "subprocess.run", side_effect=subprocess.TimeoutExpired("git", 10)
-    ):
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 10)):
         result = run_command("git_status_short", "/tmp", request_timeout=10)
     assert result.get("error") == "Command timed out after 10s"
 
@@ -605,6 +590,7 @@ def test_enforcement_fixture_no_successes():
 # resolve_review_system_prompt — env-first assembled prompt, defensive fallback
 # ---------------------------------------------------------------------------
 
+
 def test_system_prompt_env_first_no_double_compose(tmp_path):
     """When bash exports an assembled SYSTEM_PROMPT, Python trusts it verbatim.
 
@@ -695,7 +681,9 @@ def test_system_prompt_preserves_raw_whitespace(tmp_path):
     env = {"SYSTEM_PROMPT": "   ", "SYSTEM_PROMPT_FILE": str(file_path)}
     with mock.patch.dict(os.environ, env, clear=False):
         result = resolve_review_system_prompt()
-    assert result == "FILE CONTENT", f"Expected file-only for blank-only SYSTEM_PROMPT, got: {result!r}"
+    assert result == "FILE CONTENT", (
+        f"Expected file-only for blank-only SYSTEM_PROMPT, got: {result!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -776,13 +764,15 @@ def test_web_search_strips_non_http_results():
     from pr_reviewer.tool_executors import web_search
 
     fake_response = mock.Mock()
-    fake_response.read.return_value = json.dumps({
-        "results": [
-            {"title": "Safe", "url": "https://example.com/safe", "content": "ok"},
-            {"title": "File LFI", "url": "file:///etc/passwd", "content": "bad"},
-            {"title": "FTP", "url": "ftp://evil.com/malware", "content": "bad"},
-        ]
-    }).encode()
+    fake_response.read.return_value = json.dumps(
+        {
+            "results": [
+                {"title": "Safe", "url": "https://example.com/safe", "content": "ok"},
+                {"title": "File LFI", "url": "file:///etc/passwd", "content": "bad"},
+                {"title": "FTP", "url": "ftp://evil.com/malware", "content": "bad"},
+            ]
+        }
+    ).encode()
     fake_response.__enter__ = mock.Mock(return_value=fake_response)
     fake_response.__exit__ = mock.Mock(return_value=False)
     with mock.patch("urllib.request.urlopen", return_value=fake_response):
@@ -826,9 +816,10 @@ def main():
         ("env_int_bounded clamps high", test_env_int_bounded_clamps_high),
         ("env_int_bounded invalid falls back", test_env_int_bounded_invalid_falls_back),
         ("enforcement fixture no successes", test_enforcement_fixture_no_successes),
-        ("integration all tools fail", test_integration_all_tools_fail),
-        ("integration mixed success/failure", test_integration_mixed_success_and_failure),
-        ("system_prompt env-first no double compose", test_system_prompt_env_first_no_double_compose),
+        (
+            "system_prompt env-first no double compose",
+            test_system_prompt_env_first_no_double_compose,
+        ),
         ("system_prompt preserves raw whitespace", test_system_prompt_preserves_raw_whitespace),
         ("web_fetch rejects file scheme", test_web_fetch_rejects_file_scheme),
         ("web_fetch rejects ftp scheme", test_web_fetch_rejects_ftp_scheme),

@@ -194,9 +194,7 @@ def _exec_forgejo(monkeypatch, endpoint, body='{"ok": true}', http_code=200):
 
 def test_forgejo_pr_metadata_routes_to_api_v1(monkeypatch):
     """``repos/o/r/pulls/N`` is rewritten to ``/api/v1/repos/o/r/pulls/N``."""
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/pulls/42"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/pulls/42")
     assert "error" not in result, result
     cmd = captured["cmd"]
     # The command is a curl invocation against the configured FORGEJO_API_URL.
@@ -209,9 +207,7 @@ def test_forgejo_pr_metadata_routes_to_api_v1(monkeypatch):
 
 def test_forgejo_pr_diff_routes_to_api_v1(monkeypatch):
     """``repos/o/r/pulls/N/diff`` is rewritten to ``/api/v1/repos/o/r/pulls/N.diff``."""
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/pulls/42/diff"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/pulls/42/diff")
     assert "error" not in result, result
     cmd = captured["cmd"]
     assert any("/pulls/42.diff" in tok for tok in cmd), cmd
@@ -220,9 +216,7 @@ def test_forgejo_pr_diff_routes_to_api_v1(monkeypatch):
 
 def test_forgejo_issue_routes_to_api_v1(monkeypatch):
     """``repos/o/r/issues/N`` is rewritten to ``/api/v1/repos/o/r/issues/N``."""
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/issues/9"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/issues/9")
     assert "error" not in result, result
     cmd = captured["cmd"]
     assert any("/api/v1/repos/" + _REPO + "/issues/9" in tok for tok in cmd), cmd
@@ -230,9 +224,7 @@ def test_forgejo_issue_routes_to_api_v1(monkeypatch):
 
 def test_forgejo_release_tag_routes_to_api_v1(monkeypatch):
     """``repos/o/r/releases/tags/v1.2.3`` keeps its shape on the ``/api/v1`` form."""
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/releases/tags/v1.2.3"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/releases/tags/v1.2.3")
     assert "error" not in result, result
     cmd = captured["cmd"]
     assert any("/api/v1/repos/" + _REPO + "/releases/tags/v1.2.3" in tok for tok in cmd), cmd
@@ -240,9 +232,7 @@ def test_forgejo_release_tag_routes_to_api_v1(monkeypatch):
 
 def test_forgejo_commit_status_passes_through(monkeypatch):
     """A commit-status endpoint keeps its ``/status`` shape verbatim."""
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/commits/abc123/status"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/commits/abc123/status")
     assert "error" not in result, result
     cmd = captured["cmd"]
     assert any("/api/v1/repos/" + _REPO + "/commits/abc123/status" in tok for tok in cmd), cmd
@@ -255,9 +245,7 @@ def test_forgejo_get_commit_is_not_rewritten_to_status(monkeypatch):
     call, so fetching a commit silently returned its CI status instead. The
     validated path is passed through verbatim now.
     """
-    result, captured = _exec_forgejo(
-        monkeypatch, f"repos/{_REPO}/commits/abc123"
-    )
+    result, captured = _exec_forgejo(monkeypatch, f"repos/{_REPO}/commits/abc123")
     assert "error" not in result, result
     cmd = captured["cmd"]
     assert any(tok.endswith("/api/v1/repos/" + _REPO + "/commits/abc123") for tok in cmd), cmd
@@ -284,9 +272,7 @@ def test_forgejo_root_search_routes_to_api_v1(monkeypatch):
     result, captured = _exec_forgejo(monkeypatch, "/search/code?q=foo")
     assert "error" not in result, result
     cmd = captured["cmd"]
-    assert any(
-        _FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd
-    ), cmd
+    assert any(_FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd), cmd
     assert not any("api.github.com" in tok for tok in cmd), cmd
     # And the URL must NOT have been mangled to /repos/search/...
     assert not any("/repos/search/" in tok for tok in cmd), cmd
@@ -302,9 +288,7 @@ def test_forgejo_root_search_without_leading_slash_routes_to_api_v1(monkeypatch)
     result, captured = _exec_forgejo(monkeypatch, "search/code?q=foo")
     assert "error" not in result, result
     cmd = captured["cmd"]
-    assert any(
-        _FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd
-    ), cmd
+    assert any(_FORGEJO_BASE + "/api/v1/search/code?q=foo" in tok for tok in cmd), cmd
     assert not any("/repos/search/" in tok for tok in cmd), cmd
 
 
@@ -317,9 +301,7 @@ def test_forgejo_root_git_endpoint_rejected(monkeypatch):
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
     with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
-        result = gh_api(
-            "/git/refs/heads/main", allowed_repos=set(), current_repo=_REPO
-        )
+        result = gh_api("/git/refs/heads/main", allowed_repos=set(), current_repo=_REPO)
     assert "not supported" in result.get("error", "").lower(), result
     mock_run.assert_not_called()
 
@@ -409,9 +391,7 @@ def test_forgejo_non_200_status_returns_error(monkeypatch):
             ["curl"], 0, stdout=b'{"message":"Not Found"}\n404', stderr=b""
         ),
     ):
-        result = gh_api(
-            f"repos/{_REPO}/pulls/9999", allowed_repos=set(), current_repo=_REPO
-        )
+        result = gh_api(f"repos/{_REPO}/pulls/9999", allowed_repos=set(), current_repo=_REPO)
     assert result.get("error"), result
     assert "404" in result["error"]
 
@@ -427,9 +407,7 @@ def test_forgejo_unsupported_endpoint_returns_error(monkeypatch):
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
     with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run:
-        result = gh_api(
-            f"repos/{_REPO}/milestones", allowed_repos=set(), current_repo=_REPO
-        )
+        result = gh_api(f"repos/{_REPO}/milestones", allowed_repos=set(), current_repo=_REPO)
     assert result.get("error"), result
     assert "not supported" in result["error"].lower(), result
     mock_run.assert_not_called()
@@ -456,18 +434,13 @@ def test_tool_harness_shim_dispatches_to_platform(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout=b'{"ok":true}\n200', stderr=b""
-        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=b'{"ok":true}\n200', stderr=b"")
 
     with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
-        result = rth_gh_api(
-            f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO
-        )
+        result = rth_gh_api(f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO)
     assert "error" not in result, result
     assert any(
-        _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/pulls/1" in tok
-        for tok in captured["cmd"]
+        _FORGEJO_BASE + "/api/v1/repos/" + _REPO + "/pulls/1" in tok for tok in captured["cmd"]
     )
 
 
@@ -480,14 +453,28 @@ def test_tool_harness_shim_dispatches_to_platform(monkeypatch):
 def test_repo_contents_current_repo_is_allowed_and_omits_ref(monkeypatch):
     monkeypatch.setenv("PLATFORM", "github")
     monkeypatch.setenv("GH_TOKEN", "test-token")
-    response = type("Response", (), {
-        "read": lambda self: json.dumps([{"path": "z.txt", "type": "file"}, {"path": "a", "type": "dir"}]).encode(),
-        "__enter__": lambda self: self,
-        "__exit__": lambda self, *args: False,
-    })()
-    with patch("pr_reviewer.platform.urllib.request.urlopen", return_value=response) as mock_urlopen:
+    response = type(
+        "Response",
+        (),
+        {
+            "read": lambda self: json.dumps(
+                [{"path": "z.txt", "type": "file"}, {"path": "a", "type": "dir"}]
+            ).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *args: False,
+        },
+    )()
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen", return_value=response
+    ) as mock_urlopen:
         result = repo_contents(_REPO, "", None, set(), _REPO, max_entries=1)
-    assert result == {"repo": _REPO, "path": "", "type": "directory", "entries": [{"path": "a", "type": "directory"}], "truncated": True}
+    assert result == {
+        "repo": _REPO,
+        "path": "",
+        "type": "directory",
+        "entries": [{"path": "a", "type": "directory"}],
+        "truncated": True,
+    }
     request = mock_urlopen.call_args.args[0]
     assert "?ref=" not in request.full_url
 
@@ -499,9 +486,7 @@ def test_repo_contents_rejects_adversarial_arguments(monkeypatch, field, value):
     args = {"repo": _REPO, "path": "src/file.py", "ref": "main"}
     args[field] = value
     with patch("pr_reviewer.platform.urllib.request.urlopen") as mock_urlopen:
-        result = repo_contents(
-            args["repo"], args["path"], args["ref"], {"*"}, _REPO
-        )
+        result = repo_contents(args["repo"], args["path"], args["ref"], {"*"}, _REPO)
     assert result.get("error"), result
     mock_urlopen.assert_not_called()
 
@@ -513,16 +498,22 @@ def test_repo_contents_allowlist_and_hostile_arguments_are_rejected(monkeypatch)
         assert "Invalid repo" in repo_contents("other/repo?x", "x", None, {"*"}, _REPO)["error"]
         assert "Invalid path" in repo_contents(_REPO, "../secret", None, set(), _REPO)["error"]
         assert "Invalid ref" in repo_contents(_REPO, "x", "main?x", set(), _REPO)["error"]
-        assert "not allowed" in repo_contents("listed/repo", "x", None, {"other/repo"}, _REPO)["error"]
+        assert (
+            "not allowed" in repo_contents("listed/repo", "x", None, {"other/repo"}, _REPO)["error"]
+        )
     mock_urlopen.assert_not_called()
 
 
 def _json_response(payload):
-    return type("Response", (), {
-        "read": lambda self: json.dumps(payload).encode(),
-        "__enter__": lambda self: self,
-        "__exit__": lambda self, *args: False,
-    })()
+    return type(
+        "Response",
+        (),
+        {
+            "read": lambda self: json.dumps(payload).encode(),
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *args: False,
+        },
+    )()
 
 
 def test_repo_contents_explicit_allowlist_and_wildcard_are_authorized(monkeypatch):
@@ -535,7 +526,9 @@ def test_repo_contents_explicit_allowlist_and_wildcard_are_authorized(monkeypatc
         _json_response([{"name": "README.md", "type": "file", "sha": sha}]),
         _json_response({"encoding": "base64", "content": "aGk="}),
     ]
-    with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen", side_effect=responses
+    ) as mock_urlopen:
         listed = repo_contents("listed/repo", "README.md", None, {"listed/repo"}, _REPO)
         wildcard = repo_contents("wild/repo", "README.md", None, {"*"}, _REPO)
     assert listed["content"] == wildcard["content"] == "hi"
@@ -550,7 +543,9 @@ def test_repo_contents_regular_file_preflight_uses_same_ref(monkeypatch):
         _json_response([{"name": "config.yaml", "type": "file", "sha": sha}]),
         _json_response({"encoding": "base64", "content": "aGk="}),
     ]
-    with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses) as mock_urlopen:
+    with patch(
+        "pr_reviewer.platform.urllib.request.urlopen", side_effect=responses
+    ) as mock_urlopen:
         result = repo_contents(_REPO, "docs/config.yaml", "release", set(), _REPO)
     assert result["content"] == "hi"
     assert [call.args[0].full_url for call in mock_urlopen.call_args_list] == [
@@ -646,7 +641,9 @@ def test_repo_contents_file_uses_preflight_blob_when_path_ref_moves(monkeypatch)
     responses = {
         parent_url: _json_response([{"name": "config-link", "type": "file", "sha": sha}]),
         blob_url: _json_response({"encoding": "base64", "content": benign_content}),
-        direct_url: _json_response({"type": "file", "encoding": "base64", "content": secret_content}),
+        direct_url: _json_response(
+            {"type": "file", "encoding": "base64", "content": secret_content}
+        ),
     }
 
     def urlopen(request, *args, **kwargs):
@@ -690,7 +687,10 @@ def test_repo_contents_github_timeout_returns_error(monkeypatch):
     sha = "d" * 40
     with patch(
         "pr_reviewer.platform.urllib.request.urlopen",
-        side_effect=[_json_response([{"name": "README.md", "type": "file", "sha": sha}]), TimeoutError("request timed out")],
+        side_effect=[
+            _json_response([{"name": "README.md", "type": "file", "sha": sha}]),
+            TimeoutError("request timed out"),
+        ],
     ):
         result = repo_contents(_REPO, "README.md", None, set(), _REPO)
     assert result == {"error": "GitHub contents API timed out after 25s"}
@@ -705,10 +705,12 @@ def test_repo_contents_file_is_text_capped_and_binary_is_metadata(monkeypatch):
     ]
     responses = []
     for name, payload, sha in zip(("README.md", "image.dat"), payloads, ("e" * 40, "f" * 40)):
-        responses.extend([
-            _json_response([{"name": name, "type": "file", "sha": sha}]),
-            _json_response({key: value for key, value in payload.items() if key != "type"}),
-        ])
+        responses.extend(
+            [
+                _json_response([{"name": name, "type": "file", "sha": sha}]),
+                _json_response({key: value for key, value in payload.items() if key != "type"}),
+            ]
+        )
     with patch("pr_reviewer.platform.urllib.request.urlopen", side_effect=responses):
         text_result = repo_contents(_REPO, "README.md", "main", set(), _REPO)
         binary_result = repo_contents(_REPO, "image.dat", "main", set(), _REPO)
@@ -720,9 +722,10 @@ def test_repo_contents_forgejo_is_explicitly_unsupported_without_github_fallback
     monkeypatch.setenv("PLATFORM", "forgejo")
     monkeypatch.setenv("FORGEJO_API_URL", _FORGEJO_BASE)
     monkeypatch.setenv("FORGEJO_TOKEN", "fj-test")
-    with patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run, patch(
-        "pr_reviewer.platform.urllib.request.urlopen"
-    ) as mock_urlopen:
+    with (
+        patch("pr_reviewer.forgejo_backend.subprocess.run") as mock_run,
+        patch("pr_reviewer.platform.urllib.request.urlopen") as mock_urlopen,
+    ):
         result = repo_contents("owner/repo", "README.md", None, {_REPO}, _REPO)
     assert "not supported" in result.get("error", "").lower()
     mock_run.assert_not_called()
@@ -739,14 +742,10 @@ def test_auto_platform_with_forgejo_server_url_uses_forgejo_backend(monkeypatch)
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout=b'{"ok":true}\n200', stderr=b""
-        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=b'{"ok":true}\n200', stderr=b"")
 
     with patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
-        result = gh_api(
-            f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO
-        )
+        result = gh_api(f"repos/{_REPO}/pulls/1", allowed_repos=set(), current_repo=_REPO)
     assert "error" not in result, result
     assert any(_FORGEJO_BASE in tok for tok in captured["cmd"]), captured["cmd"]
     assert not any("api.github.com" in tok for tok in captured["cmd"]), captured["cmd"]

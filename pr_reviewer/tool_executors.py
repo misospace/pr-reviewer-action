@@ -43,8 +43,10 @@ ALLOWED_COMMANDS = {
     "git_diff_name_only": ["git", "diff", "--name-only", "HEAD"],
 }
 
+
 def command_catalog_markdown():
     return ", ".join(sorted(ALLOWED_COMMANDS))
+
 
 def _opt_int(value):
     """Coerce an optional tool arg to int, tolerating model string/None forms."""
@@ -55,8 +57,10 @@ def _opt_int(value):
     except (TypeError, ValueError):
         return None
 
+
 def normalize_host(host):
     return (host or "").strip().lower()
+
 
 def allowlisted_host(host, allowlist):
     candidate = normalize_host(host)
@@ -69,6 +73,7 @@ def allowlisted_host(host, allowlist):
         if norm == "*" or candidate == norm:
             return True
     return False
+
 
 def _resolve_workspace_path(path, workspace_root):
     """Resolve a workspace-relative path with traversal/symlink/sensitive guards.
@@ -108,6 +113,7 @@ def _resolve_workspace_path(path, workspace_root):
 
     return resolved, None
 
+
 def read_file(path, workspace_root, offset=None, limit=None):
     """Read a file, optionally a 1-based line window, with path protection.
 
@@ -135,6 +141,7 @@ def read_file(path, workspace_root, offset=None, limit=None):
         "content": window[:12000],
         "range": {"offset": start + 1, "lines": len(lines[start:end]), "total_lines": len(lines)},
     }
+
 
 # find_files result cap: the default the model gets when it omits max_results,
 # and the hard ceiling a model-supplied value is clamped to (the issue asks for
@@ -225,6 +232,7 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
         "total": len(files),
         "truncated": total > cap,
     }
+
 
 def list_tree(path, workspace_root, depth=2, max_entries=200):
     """List repository entries (names only) bounded by depth and entry count.
@@ -433,7 +441,7 @@ def _parse_grep_z_records(stdout):
         # scanning for a later text record's NUL pair.
         if stdout.startswith("Binary file ", i):
             newline = stdout.find("\n", i)
-            binary_line = stdout[i:newline if newline != -1 else n]
+            binary_line = stdout[i : newline if newline != -1 else n]
             if _GREP_Z_MATCH_RE.match(binary_line):
                 records.append(("binary", binary_line))
                 i = n if newline == -1 else newline + 1
@@ -445,13 +453,15 @@ def _parse_grep_z_records(stdout):
             # Keep it as a binary-style record so the redaction pass fails
             # closed if it resembles a sensitive binary-match name.
             newline = stdout.find("\n", i)
-            records.append(("binary", stdout[i:newline if newline != -1 else n]))
+            records.append(("binary", stdout[i : newline if newline != -1 else n]))
             i = n if newline == -1 else newline + 1
             continue
         newline = stdout.find("\n", nul2 + 1)
         if newline == -1:
             newline = n
-        records.append(("text", stdout[i:nul1], stdout[nul1 + 1:nul2], stdout[nul2 + 1:newline]))
+        records.append(
+            ("text", stdout[i:nul1], stdout[nul1 + 1 : nul2], stdout[nul2 + 1 : newline])
+        )
         i = newline + 1
     return records
 
@@ -550,6 +560,7 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
     except Exception as exc:
         return {"error": str(exc)}
 
+
 def git_log(path, workspace_root, max_count=20, request_timeout=15):
     """Read-only recent commit history (oneline), optionally scoped to a path.
 
@@ -559,8 +570,12 @@ def git_log(path, workspace_root, max_count=20, request_timeout=15):
     consistency with the content-bearing tools.
     """
     args = [
-        "git", "log", f"-n{max_count}", "--no-color",
-        "--date=short", "--pretty=format:%h %ad %an %s",
+        "git",
+        "log",
+        f"-n{max_count}",
+        "--no-color",
+        "--date=short",
+        "--pretty=format:%h %ad %an %s",
     ]
     if path:
         resolved, err = _resolve_workspace_path(path, workspace_root)
@@ -578,6 +593,7 @@ def git_log(path, workspace_root, max_count=20, request_timeout=15):
         return {"error": f"git log timed out after {request_timeout}s"}
     except Exception as exc:
         return {"error": str(exc)}
+
 
 def git_blame(path, workspace_root, start=None, end=None, request_timeout=15):
     """Read-only line-level authorship for a tracked file (optional L range).
@@ -604,7 +620,10 @@ def git_blame(path, workspace_root, start=None, end=None, request_timeout=15):
     except (ValueError, Exception) as exc:  # int() on a bad range → clean error
         return {"error": str(exc)}
 
-def repo_contents(repo, path, ref, allowed_repos, current_repo, max_entries=200, request_timeout=25):
+
+def repo_contents(
+    repo, path, ref, allowed_repos, current_repo, max_entries=200, request_timeout=25
+):
     """Thin shim over the platform seam for normalized repository contents."""
     return platform_repo_contents(
         repo, path, ref, allowed_repos, current_repo, max_entries, request_timeout
@@ -624,7 +643,9 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     # platform seam is unavailable (e.g. in a script-only test that
     # doesn't add the package to sys.path).
     from pr_reviewer.platform import gh_api as _platform_gh_api
+
     return _platform_gh_api(endpoint, allowed_repos, current_repo, request_timeout)
+
 
 def web_fetch(url, allowed_hosts, request_timeout=25):
     """Fetch a URL using the same host-allowlist logic.
@@ -640,7 +661,9 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
     parsed = urllib.parse.urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
-        return {"error": f"URL scheme '{parsed.scheme}' is not allowed; only http and https are permitted"}
+        return {
+            "error": f"URL scheme '{parsed.scheme}' is not allowed; only http and https are permitted"
+        }
 
     host = parsed.hostname or ""
 
@@ -657,15 +680,11 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
 
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             if self._redirect_count >= self._max_redirects:
-                raise urllib.error.HTTPError(
-                    newurl, code, "Too many redirects", {}, None
-                )
+                raise urllib.error.HTTPError(newurl, code, "Too many redirects", {}, None)
             parsed = urllib.parse.urlparse(newurl)
             hop_host = parsed.hostname or ""
             if not allowlisted_host(normalize_host(hop_host), allowed_hosts):
-                raise urllib.error.URLError(
-                    f"Redirect to disallowed host: {hop_host}"
-                )
+                raise urllib.error.URLError(f"Redirect to disallowed host: {hop_host}")
             self._redirect_count += 1
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -686,6 +705,7 @@ def web_fetch(url, allowed_hosts, request_timeout=25):
             return {"content": text[:10000]}
     except Exception as exc:
         return {"error": str(exc)}
+
 
 def web_search(query, search_url, request_timeout=20, max_results=5):
     """Query a configured search engine (SearXNG JSON API) for a free-text query.
@@ -724,12 +744,15 @@ def web_search(query, search_url, request_timeout=20, max_results=5):
         parsed_url = urllib.parse.urlparse(url)
         if parsed_url.scheme and parsed_url.scheme not in ("http", "https"):
             url = ""
-        results.append({
-            "title": str(item.get("title", ""))[:300],
-            "url": url,
-            "snippet": str(item.get("content", ""))[:500],
-        })
+        results.append(
+            {
+                "title": str(item.get("title", ""))[:300],
+                "url": url,
+                "snippet": str(item.get("content", ""))[:500],
+            }
+        )
     return {"results": results}
+
 
 def run_command(command, workspace_root, request_timeout=30):
     """Execute a named read-only command definition.
@@ -741,12 +764,7 @@ def run_command(command, workspace_root, request_timeout=30):
     command_name = (command or "").strip()
     args = ALLOWED_COMMANDS.get(command_name)
     if args is None:
-        return {
-            "error": (
-                "Command not allowlisted. Use one of: "
-                + command_catalog_markdown()
-            )
-        }
+        return {"error": ("Command not allowlisted. Use one of: " + command_catalog_markdown())}
 
     try:
         result = subprocess.run(
@@ -775,6 +793,7 @@ def run_command(command, workspace_root, request_timeout=30):
             "stderr": mask_secrets(stderr),
             "command": command_name,
         }
+
 
 def execute_tool_request(
     tool_name,
@@ -818,9 +837,7 @@ def execute_tool_request(
                 raise ValueError("Missing 'pattern' argument")
             raw_max_results = args.get("max_results")
             max_results = (
-                FIND_FILES_DEFAULT_MAX
-                if raw_max_results is None
-                else _opt_int(raw_max_results)
+                FIND_FILES_DEFAULT_MAX if raw_max_results is None else _opt_int(raw_max_results)
             )
             res = find_files(
                 pattern,
@@ -840,7 +857,9 @@ def execute_tool_request(
         elif tool_name == "list_tree":
             path = args.get("path") or "."
             res = list_tree(
-                path, workspace_root, _opt_int(args.get("depth")),
+                path,
+                workspace_root,
+                _opt_int(args.get("depth")),
                 _opt_int(args.get("max_entries")),
             )
             if res.get("error"):
@@ -881,9 +900,7 @@ def execute_tool_request(
 
         elif tool_name == "git_log":
             max_count = max(1, min(_opt_int(args.get("max_count")) or 20, 100))
-            res = git_log(
-                args.get("path", "") or "", workspace_root, max_count, request_timeout
-            )
+            res = git_log(args.get("path", "") or "", workspace_root, max_count, request_timeout)
             if res.get("error"):
                 raise ValueError(res["error"])
             text, _ = mask_and_truncate("\n".join(res.get("log", [])), max_response_bytes)
@@ -894,8 +911,11 @@ def execute_tool_request(
             if not path:
                 raise ValueError("Missing 'path' argument")
             res = git_blame(
-                path, workspace_root,
-                _opt_int(args.get("start")), _opt_int(args.get("end")), request_timeout,
+                path,
+                workspace_root,
+                _opt_int(args.get("start")),
+                _opt_int(args.get("end")),
+                request_timeout,
             )
             if res.get("error"):
                 raise ValueError(res["error"])
@@ -949,7 +969,11 @@ def execute_tool_request(
                 raise ValueError(res["error"])
             if res.get("type") == "file" and "content" in res:
                 content, clipped = mask_and_truncate(res["content"], min(max_response_bytes, 12000))
-                res = {**res, "content": content, "truncated": res.get("truncated", False) or clipped}
+                res = {
+                    **res,
+                    "content": content,
+                    "truncated": res.get("truncated", False) or clipped,
+                }
             elif res.get("type") == "directory" and max_response_bytes:
                 entries = []
                 used = 2
@@ -960,7 +984,12 @@ def execute_tool_request(
                         break
                     entries.append(entry)
                     used += added
-                res = {**res, "entries": entries, "truncated": res.get("truncated", False) or len(entries) < len(res.get("entries", []))}
+                res = {
+                    **res,
+                    "entries": entries,
+                    "truncated": res.get("truncated", False)
+                    or len(entries) < len(res.get("entries", [])),
+                }
             tool_result["result"] = res
 
         elif tool_name == "gh_api":

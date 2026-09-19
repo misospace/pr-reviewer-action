@@ -258,13 +258,8 @@ def drive_tool_loop(
                     )
                 except Exception:  # noqa: BLE001 — summarization is best-effort
                     summarized = 0
-            if (
-                not summarized
-                or conversation.approx_tokens() > budgets.max_conversation_tokens
-            ):
-                conversation.truncate_oldest_tool_results(
-                    budgets.truncated_result_bytes
-                )
+            if not summarized or conversation.approx_tokens() > budgets.max_conversation_tokens:
+                conversation.truncate_oldest_tool_results(budgets.truncated_result_bytes)
 
         payload = conversation.to_request_payload(
             api_format,
@@ -319,8 +314,11 @@ def drive_tool_loop(
                     raise ValueError("arguments must be a JSON object")
             except (json.JSONDecodeError, ValueError) as exc:
                 plan.append(
-                    (call_id, "error",
-                     {"error": f"Invalid tool arguments (not a JSON object): {exc}"})
+                    (
+                        call_id,
+                        "error",
+                        {"error": f"Invalid tool arguments (not a JSON object): {exc}"},
+                    )
                 )
                 continue
 
@@ -341,13 +339,12 @@ def drive_tool_loop(
         # Fan out the executions (read-only, independent within a round).
         results_by_idx: dict[int, dict[str, Any]] = {}
         if len(to_execute) == 1:
-            (only_idx, (name, args)), = to_execute.items()
+            ((only_idx, (name, args)),) = to_execute.items()
             results_by_idx[only_idx] = execute_fn(name, args)
         elif to_execute:
             with ThreadPoolExecutor(max_workers=min(len(to_execute), 8)) as pool:
                 futures = {
-                    pool.submit(execute_fn, name, args): i
-                    for i, (name, args) in to_execute.items()
+                    pool.submit(execute_fn, name, args): i for i, (name, args) in to_execute.items()
                 }
                 for fut in futures:
                     results_by_idx[futures[fut]] = fut.result()
@@ -359,9 +356,7 @@ def drive_tool_loop(
                 continue
             name, args = to_execute[data]
             result = results_by_idx[data]
-            outcome.executed.append(
-                ExecutedCall(tool=name, args=args, result=result)
-            )
+            outcome.executed.append(ExecutedCall(tool=name, args=args, result=result))
             conversation.add_tool_result(
                 call_id,
                 result.get("result", {}),

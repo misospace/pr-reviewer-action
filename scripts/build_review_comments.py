@@ -67,9 +67,7 @@ def finding_fingerprint(finding: dict) -> str:
     file_path = finding.get("file") or ""
     line = finding.get("line")
     line_part = (
-        str(line)
-        if isinstance(line, int) and not isinstance(line, bool) and line > 0
-        else ""
+        str(line) if isinstance(line, int) and not isinstance(line, bool) and line > 0 else ""
     )
     message = str(finding.get("message") or "").strip()[:_FINGERPRINT_MESSAGE_CHARS].strip()
     canon = "\x1f".join([str(severity), str(category), str(file_path), line_part, message])
@@ -259,9 +257,7 @@ def main(argv) -> int:
     suppressed = load_suppressed_fingerprints(os.getenv("SUPPRESS_FINDINGS_FILE"))
 
     comments, skipped = build_comments(findings, diff_text, max_comments, suppressed)
-    Path(output_path).write_text(
-        json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8")
     print(
         f"inline findings: {len(comments)} anchored comment(s), "
         f"{skipped} finding(s) skipped (not anchorable, resolved, or already threaded)",

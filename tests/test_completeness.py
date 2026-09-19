@@ -127,7 +127,9 @@ class TestApplyRequiredCheckValidation:
 
     def test_complete_review_status_complete(self, tmp_path, monkeypatch):
         self._setup(
-            tmp_path, monkeypatch, FILE_SERVING_CHECKS,
+            tmp_path,
+            monkeypatch,
+            FILE_SERVING_CHECKS,
             "Sanitization via realpath; traversal through ../ rejected.",
         )
         assert apply_required_check_validation("auto", "warn") == "complete"

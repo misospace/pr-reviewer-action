@@ -41,7 +41,7 @@ class TestExtractUrls:
         assert "https://ghcr.io/my/img" in urls
 
     def test_strips_trailing_punctuation(self):
-        body = "Check https://example.com/releases,\" and https://other.org; end."
+        body = 'Check https://example.com/releases," and https://other.org; end.'
         urls = extract_urls(body, "")
         assert "https://example.com/releases" in urls
         assert "https://other.org" in urls
@@ -72,7 +72,10 @@ class TestExtractUrls:
 
 class TestNormalizeUrl:
     def test_redirect_github_to_github(self):
-        assert normalize_url("https://redirect.github.com/owner/repo") == "https://github.com/owner/repo"
+        assert (
+            normalize_url("https://redirect.github.com/owner/repo")
+            == "https://github.com/owner/repo"
+        )
 
     def test_http_redirect_github(self):
         assert normalize_url("http://redirect.github.com/a/b") == "http://github.com/a/b"
@@ -81,7 +84,10 @@ class TestNormalizeUrl:
         assert normalize_url("https://github.com/owner/repo") == "https://github.com/owner/repo"
 
     def test_other_host_unchanged(self):
-        assert normalize_url("https://forgejo.example.com/org/proj/releases/tag/v1") == "https://forgejo.example.com/org/proj/releases/tag/v1"
+        assert (
+            normalize_url("https://forgejo.example.com/org/proj/releases/tag/v1")
+            == "https://forgejo.example.com/org/proj/releases/tag/v1"
+        )
 
     def test_redirect_github_in_path_unchanged(self):
         url = "https://evil.example/redirect.github.com/owner/repo"
@@ -391,6 +397,7 @@ class TestRunEnrichmentMain:
 
         with patch("scripts.run_enrichment.render_linked_sources", return_value=""):
             from scripts import run_enrichment
+
             run_enrichment.main()
 
         # All output files should exist
@@ -414,6 +421,7 @@ class TestRunEnrichmentMain:
 
         with patch("scripts.run_enrichment.render_linked_sources", return_value=""):
             from scripts import run_enrichment
+
             run_enrichment.main()
 
         assert (tmp_path / "urls.all.txt").exists()
@@ -431,6 +439,7 @@ class TestRunEnrichmentMain:
         rendered_md = "## Source 1\nURL: https://example.com"
         with patch("scripts.run_enrichment.render_linked_sources", return_value=rendered_md):
             from scripts import run_enrichment
+
             run_enrichment.main()
 
         assert (tmp_path / "linked-sources.md").read_text() == rendered_md
@@ -444,6 +453,7 @@ class TestRunEnrichmentMain:
 
         with patch("scripts.run_enrichment.render_linked_sources", return_value=""):
             from scripts import run_enrichment
+
             run_enrichment.main()
 
         all_urls = (tmp_path / "urls.all.txt").read_text().strip().splitlines()
@@ -460,6 +470,7 @@ class TestRunEnrichmentMain:
 
         with patch("scripts.run_enrichment.render_linked_sources", return_value=""):
             from scripts import run_enrichment
+
             run_enrichment.main()
 
         full_hints = (tmp_path / "version-hints.txt").read_text().strip().splitlines()
@@ -470,6 +481,7 @@ class TestRunEnrichmentMain:
     def test_budget_default_is_60(self):
         """ENRICHMENT_BUDGET_SEC default should be 60."""
         from scripts.run_enrichment import BudgetTracker
+
         bt = BudgetTracker()
         assert bt.max_seconds == 60
 
@@ -533,8 +545,7 @@ class TestSkippedSourceCollapse:
         assert "(Skipped non-allowlisted URL" not in md
         # One summary line, count = number of skipped sources, hosts deduped+sorted.
         assert (
-            "(3 sources skipped — non-allowlisted or non-fetchable hosts: "
-            "bad.net, evil.com)"
+            "(3 sources skipped — non-allowlisted or non-fetchable hosts: bad.net, evil.com)"
         ) in md
 
     def test_mixed_skipped_and_fetched_ordering(self, monkeypatch):
@@ -549,10 +560,7 @@ class TestSkippedSourceCollapse:
         assert "URL: https://example.com/page" in md
         # The skipped source's "## Source 2" block is gone, folded into summary.
         assert "## Source 2" not in md
-        assert (
-            "(1 source skipped — non-allowlisted or non-fetchable hosts: evil.com)"
-            in md
-        )
+        assert "(1 source skipped — non-allowlisted or non-fetchable hosts: evil.com)" in md
 
     def test_no_skipped_sources_leaves_summary_absent(self, monkeypatch):
         md = self._render(
@@ -584,10 +592,13 @@ class TestSelectTargetVersionLastWins:
 
     def test_no_title_version_uses_last_hint(self):
         """Title has no version; hints have multiple — last hint semver wins."""
-        result = select_target_version("chore: update deps", [
-            "+image: old:0.1.0",
-            "+image: new:2.5.3",
-        ])
+        result = select_target_version(
+            "chore: update deps",
+            [
+                "+image: old:0.1.0",
+                "+image: new:2.5.3",
+            ],
+        )
         assert result == "2.5.3"
 
 
@@ -596,14 +607,17 @@ class TestBudgetTracker:
 
     def test_ok_true_before_expiry(self):
         from pr_reviewer.budget import BudgetTracker
+
         assert BudgetTracker(max_seconds=60).ok() is True
 
     def test_ok_false_after_expiry(self):
         from pr_reviewer.budget import BudgetTracker
+
         assert BudgetTracker(max_seconds=0).ok() is False
 
     def test_warning_logged_at_most_once(self, capsys):
         from pr_reviewer.budget import BudgetTracker
+
         bt = BudgetTracker(max_seconds=0)
         bt.ok()
         bt.ok()
@@ -740,8 +754,15 @@ class TestLinkedSourcesFanout:
         monkeypatch.setattr(linked_sources, "fetch_url", lambda url, timeout=25: None)
         budget = linked_sources.BudgetTracker(max_seconds=60)
         return linked_sources.render_linked_sources(
-            self.URLS, {"github.com"}, None, "", [], None, budget,
-            current_repo="o1/r1", allowed_repos={"o2/r2"},
+            self.URLS,
+            {"github.com"},
+            None,
+            "",
+            [],
+            None,
+            budget,
+            current_repo="o1/r1",
+            allowed_repos={"o2/r2"},
         )
 
     def test_output_identical_when_calls_complete_out_of_order(self, monkeypatch):
@@ -801,7 +822,13 @@ class TestLinkedSourcesFanout:
 
         budget = FakeBudget(allowed=2)
         md = linked_sources.render_linked_sources(
-            urls, set(), None, "", [], None, budget,
+            urls,
+            set(),
+            None,
+            "",
+            [],
+            None,
+            budget,
         )
 
         # Skip-only sections are collapsed into the trailing summary (#372), so

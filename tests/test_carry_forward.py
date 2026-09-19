@@ -35,8 +35,20 @@ def _output(tmp_path, verdict="approve", findings=None, markdown="Looks good."):
     )
 
 
-BLOCKER = {"severity": "blocker", "category": "security", "file": "auth.go", "line": 10, "message": "token not validated"}
-MINOR = {"severity": "minor", "category": "style", "file": None, "line": None, "message": "naming nit"}
+BLOCKER = {
+    "severity": "blocker",
+    "category": "security",
+    "file": "auth.go",
+    "line": 10,
+    "message": "token not validated",
+}
+MINOR = {
+    "severity": "minor",
+    "category": "style",
+    "file": None,
+    "line": None,
+    "message": "naming nit",
+}
 
 
 class TestLoadCarriedFindings:
@@ -48,11 +60,26 @@ class TestLoadCarriedFindings:
     def test_sanitizes_bad_fields(self, tmp_path):
         path = _carried(
             tmp_path,
-            [{"severity": "nuclear", "category": "weird", "file": 42, "line": "ten", "message": "  m  "}],
+            [
+                {
+                    "severity": "nuclear",
+                    "category": "weird",
+                    "file": 42,
+                    "line": "ten",
+                    "message": "  m  ",
+                }
+            ],
         )
         carried = load_carried_findings(path)
         assert carried == [
-            {"id": "P1", "severity": "info", "category": "other", "file": None, "line": None, "message": "m"}
+            {
+                "id": "P1",
+                "severity": "info",
+                "category": "other",
+                "file": None,
+                "line": None,
+                "message": "m",
+            }
         ]
 
     def test_drops_messageless_and_nondict(self, tmp_path):
@@ -250,6 +277,7 @@ class TestNeedsFullReviewPropagation:
         assert read_needs_full_review(str(bad)) == empty
         bad.write_text("[1, 2]", encoding="utf-8")
         assert read_needs_full_review(str(bad)) == empty
+
 
 class TestDismissalPath:
     """End-to-end path: comment + previous-findings + previous-dismissals → summary."""

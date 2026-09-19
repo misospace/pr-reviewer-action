@@ -75,9 +75,7 @@ def parse_findings(payload: object) -> tuple[str, list[dict[str, str]]]:
 
             source = item.get("source")
             if source is None and isinstance(item.get("sources"), list):
-                source = ", ".join(
-                    str(part) for part in item.get("sources", []) if part
-                )
+                source = ", ".join(str(part) for part in item.get("sources", []) if part)
 
             findings.append(
                 {
@@ -90,9 +88,7 @@ def parse_findings(payload: object) -> tuple[str, list[dict[str, str]]]:
     if not findings:
         fallback = payload.get("message") or payload.get("summary")
         if fallback is not None:
-            findings.append(
-                {"severity": provider_severity, "message": str(fallback), "source": ""}
-            )
+            findings.append({"severity": provider_severity, "message": str(fallback), "source": ""})
 
     highest = provider_severity
     for finding in findings:
@@ -211,12 +207,8 @@ def run_provider(
         # --- Secret redaction on stdout/stderr before capturing output ---
         stdout_text = completed.stdout.decode("utf-8", errors="replace") if completed.stdout else ""
         stderr_text = completed.stderr.decode("utf-8", errors="replace") if completed.stderr else ""
-        entry["stdout"], entry["stdout_truncated"] = mask_and_truncate(
-            stdout_text, max_output
-        )
-        entry["stderr"], entry["stderr_truncated"] = mask_and_truncate(
-            stderr_text, max_output
-        )
+        entry["stdout"], entry["stdout_truncated"] = mask_and_truncate(stdout_text, max_output)
+        entry["stderr"], entry["stderr_truncated"] = mask_and_truncate(stderr_text, max_output)
     except subprocess.TimeoutExpired as exc:
         entry["duration_sec"] = round(time.monotonic() - start, 3)
         entry["status"] = "timeout"
@@ -316,7 +308,9 @@ def _sarif_provider(
     path = _workspace_path(path_text, workspace_root)
     if path is None:
         entry["provider_severity"] = "major"
-        entry["stderr"] = "SARIF path must be a workspace-relative path that stays inside the workspace"
+        entry["stderr"] = (
+            "SARIF path must be a workspace-relative path that stays inside the workspace"
+        )
         return entry
     if not path.is_file():
         entry["provider_severity"] = "major"
@@ -471,7 +465,9 @@ def main() -> int:
         if config_error.startswith("Config file not found:"):
             md_lines.append(f"Evidence providers config was not found: `{config_path_raw}`")
         else:
-            md_lines.append(f"Evidence providers config could not be parsed: `{config_error.removeprefix('Invalid JSON config: ')}`")
+            md_lines.append(
+                f"Evidence providers config could not be parsed: `{config_error.removeprefix('Invalid JSON config: ')}`"
+            )
         md_lines.append("")
 
     # Providers are independent commands, so run them concurrently. Results
@@ -498,9 +494,7 @@ def main() -> int:
 
     remaining_sarif_findings = sarif_max_findings
     for index, path_text in enumerate(sarif_paths, start=1):
-        entry = _sarif_provider(
-            index, path_text, workspace_root, remaining_sarif_findings
-        )
+        entry = _sarif_provider(index, path_text, workspace_root, remaining_sarif_findings)
         summary["providers"].append(entry)
         remaining_sarif_findings -= len(entry["findings"])
     summary["provider_count"] = len(summary["providers"])
@@ -545,9 +539,7 @@ def main() -> int:
                 md_lines.append("- findings:")
                 for finding in findings[:15]:
                     source = f" ({finding['source']})" if finding.get("source") else ""
-                    md_lines.append(
-                        f"  - [{finding['severity']}] {finding['message']}{source}"
-                    )
+                    md_lines.append(f"  - [{finding['severity']}] {finding['message']}{source}")
 
             stdout_text = provider.get("stdout", "").strip()
             if stdout_text and not findings:

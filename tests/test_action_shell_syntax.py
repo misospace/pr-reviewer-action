@@ -30,7 +30,9 @@ def _extract_literal_run_blocks(action_yml: str) -> list[tuple[str, str]]:
                 candidate = lines[index]
                 if candidate.strip() and _leading_spaces(candidate) <= run_indent:
                     break
-                block_lines.append(candidate[run_indent + 2 :] if len(candidate) > run_indent + 1 else "")
+                block_lines.append(
+                    candidate[run_indent + 2 :] if len(candidate) > run_indent + 1 else ""
+                )
                 index += 1
             blocks.append((last_step_name, "\n".join(block_lines)))
             continue

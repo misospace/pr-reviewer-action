@@ -182,8 +182,7 @@ def _location(
             else:
                 _add_error(
                     result,
-                    f"{path}.locations[{index}].physicalLocation.artifactLocation "
-                    "is not an object",
+                    f"{path}.locations[{index}].physicalLocation.artifactLocation is not an object",
                 )
         region = physical.get("region")
         line: int | None = None
@@ -195,8 +194,7 @@ def _location(
             else:
                 _add_error(
                     result,
-                    f"{path}.locations[{index}].physicalLocation.region "
-                    "is not an object",
+                    f"{path}.locations[{index}].physicalLocation.region is not an object",
                 )
         if uri or line is not None:
             return uri, line
@@ -223,9 +221,7 @@ def normalize_sarif(
     """Normalize a decoded SARIF payload without I/O, commands, or network calls."""
     output = _empty_artifact()
     max_findings = _cap(max_findings, MAX_FINDINGS, "max_findings", output)
-    max_message_chars = _cap(
-        max_message_chars, MAX_MESSAGE_CHARS, "max_message_chars", output
-    )
+    max_message_chars = _cap(max_message_chars, MAX_MESSAGE_CHARS, "max_message_chars", output)
     max_title_chars = _cap(max_title_chars, MAX_TITLE_CHARS, "max_title_chars", output)
 
     top_level_error = _top_level_error(payload)
@@ -292,11 +288,7 @@ def normalize_sarif(
                 _add_error(output, f"{result_path} is not an object")
                 continue
             message_data = result_data.get("message")
-            message = (
-                message_data.get("text")
-                if isinstance(message_data, dict)
-                else None
-            )
+            message = message_data.get("text") if isinstance(message_data, dict) else None
             if not isinstance(message, str) or not message.strip():
                 _add_error(output, f"{result_path} is missing a usable message")
                 continue
@@ -327,9 +319,7 @@ def normalize_sarif(
                 "tool_version": tool_version,
                 "rule_id": rule_id,
                 "title": _bounded_text(title, max_title_chars, "title_chars", output),
-                "message": _bounded_text(
-                    message, max_message_chars, "message_chars", output
-                ),
+                "message": _bounded_text(message, max_message_chars, "message_chars", output),
                 "severity": severity,
                 "file": file_uri,
                 "line": line,

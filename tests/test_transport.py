@@ -2,6 +2,7 @@
 
 Target: >= 50% line coverage of pr_reviewer/transport.py.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,6 +47,7 @@ def test_safe_run_captures_stdout_and_exit_code(monkeypatch: pytest.MonkeyPatch)
 
 def test_safe_run_returns_timeout_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """A TimeoutExpired should produce a structured timeout=True result."""
+
     def fake_run(*a: Any, **kw: Any):
         raise subprocess.TimeoutExpired(cmd=["sleep", "1"], timeout=0.01)
 

@@ -11,9 +11,7 @@ from run_tool_harness import normalize_tool_request  # noqa: E402
 
 
 def test_well_formed_request_passes_through():
-    tool, args = normalize_tool_request(
-        {"tool": "read_file", "args": {"path": "values.yaml"}}
-    )
+    tool, args = normalize_tool_request({"tool": "read_file", "args": {"path": "values.yaml"}})
     assert tool == "read_file"
     assert args == {"path": "values.yaml"}
 
@@ -35,9 +33,7 @@ def test_gh_api_path_aliases_to_endpoint():
 
 
 def test_gh_api_top_level_path_promoted_and_aliased():
-    tool, args = normalize_tool_request(
-        {"tool": "gh_api", "endpoint": "repos/acme/app/pulls/5"}
-    )
+    tool, args = normalize_tool_request({"tool": "gh_api", "endpoint": "repos/acme/app/pulls/5"})
     assert tool == "gh_api"
     assert args.get("endpoint") == "repos/acme/app/pulls/5"
 

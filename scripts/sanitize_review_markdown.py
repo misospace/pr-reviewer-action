@@ -69,23 +69,17 @@ _RE_GH_COMPARE_URL = re.compile(
 )
 
 # Cross-repo references: owner/repo#123 (with word boundary to avoid false matches)
-_RE_CROSS_REPO_REF = re.compile(
-    r"(?<!\w)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)(?!\w)"
-)
+_RE_CROSS_REPO_REF = re.compile(r"(?<!\w)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)(?!\w)")
 
 # Bare issue/PR references: #123 (standalone, not inside URL or markdown link)
 # Must NOT match when preceded by https:// or inside a markdown link [text](url).
-_RE_BARE_REF = re.compile(
-    r"(?<!\w)#(\d+)(?!\w)"
-)
+_RE_BARE_REF = re.compile(r"(?<!\w)#(\d+)(?!\w)")
 
 # @-mentions: @user and @org/team. The model can echo these from PR content
 # (incl. prompt-injected text); posted verbatim they ping people and create
 # notification noise / a social-engineering vector. Word-boundary lookbehind
 # avoids matching email local parts (foo@bar) and existing code spans.
-_RE_MENTION = re.compile(
-    r"(?<![\w/`@])@([A-Za-z0-9][A-Za-z0-9-]{0,38}(?:/[A-Za-z0-9._-]+)?)"
-)
+_RE_MENTION = re.compile(r"(?<![\w/`@])@([A-Za-z0-9][A-Za-z0-9-]{0,38}(?:/[A-Za-z0-9._-]+)?)")
 
 
 def _togithub_url(match: re.Match) -> str:
@@ -215,12 +209,13 @@ def sanitize_markdown(text: str, link_mode: str = "inert") -> str:
     - Local repo references that are part of the review context
     """
     if link_mode not in LINK_MODES:
-        raise ValueError(f"unknown upstream link mode: {link_mode!r} (expected one of {', '.join(LINK_MODES)})")
+        raise ValueError(
+            f"unknown upstream link mode: {link_mode!r} (expected one of {', '.join(LINK_MODES)})"
+        )
     parts = _RE_CODE_SEGMENT.split(text)
     # re.split with one capture group alternates prose / code segments.
     return "".join(
-        part if index % 2 else _sanitize_prose(part, link_mode)
-        for index, part in enumerate(parts)
+        part if index % 2 else _sanitize_prose(part, link_mode) for index, part in enumerate(parts)
     )
 
 

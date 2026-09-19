@@ -78,11 +78,12 @@ def test_multiple_runs_tools_preserve_declared_order():
 
 
 def test_severity_mapping_and_unknown_levels():
-    results = [_result(level=level, message=level) for level in ["error", "warning", "note", "none", "", "bogus"]]
-    findings = normalize_sarif(_sarif(runs=[_run(results)]))["findings"]
-    assert [item["severity"] for item in findings] == [
-        "major", "minor", "info", "info", "info"
+    results = [
+        _result(level=level, message=level)
+        for level in ["error", "warning", "note", "none", "", "bogus"]
     ]
+    findings = normalize_sarif(_sarif(runs=[_run(results)]))["findings"]
+    assert [item["severity"] for item in findings] == ["major", "minor", "info", "info", "info"]
 
 
 def test_missing_level_defaults_to_warning_and_null_is_unknown():
@@ -102,7 +103,9 @@ def test_rule_index_resolves_declared_rule_metadata_without_rule_id():
     result["ruleIndex"] = 0
     finding = normalize_sarif(_sarif(runs=[_run([result], rules=rules)]))["findings"][0]
     assert (finding["rule_id"], finding["title"], finding["help_uri"]) == (
-        "indexed", "Indexed title", "https://rule"
+        "indexed",
+        "Indexed title",
+        "https://rule",
     )
 
 
@@ -135,8 +138,18 @@ def test_locations_keep_unlocated_findings_and_use_first_physical_location():
             "located",
             locations=[
                 {"logicalLocations": [{"name": "not physical"}]},
-                {"physicalLocation": {"artifactLocation": {"uri": "src/a.py"}, "region": {"startLine": 12}}},
-                {"physicalLocation": {"artifactLocation": {"uri": "src/later.py"}, "region": {"startLine": 99}}},
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": "src/a.py"},
+                        "region": {"startLine": 12},
+                    }
+                },
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": "src/later.py"},
+                        "region": {"startLine": 99},
+                    }
+                },
             ],
         ),
         _result("unlocated"),
@@ -189,9 +202,7 @@ def test_caps_record_reasons_and_omitted_counts():
 
 def test_error_cap_retains_first_errors_and_marks_truncation():
     locations = [None] * (MAX_ERRORS + 50)
-    result = normalize_sarif(
-        _sarif(runs=[_run([_result("message", locations=locations)])])
-    )
+    result = normalize_sarif(_sarif(runs=[_run([_result("message", locations=locations)])]))
     assert len(result["errors"]) == MAX_ERRORS + 1
     assert result["errors"][0].endswith("locations[0] is not an object")
     assert result["errors"][-1] == "errors_truncated"
@@ -246,11 +257,23 @@ def test_no_network_or_command_execution_surface():
 def test_cli_accepts_utf8_bom_and_writes_inside_workspace(tmp_path):
     input_path = tmp_path / "results.sarif"
     output_path = tmp_path / "sarif-evidence.json"
-    input_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(_sarif(runs=[_run([_result("ok")])])).encode())
+    input_path.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(_sarif(runs=[_run([_result("ok")])])).encode()
+    )
     env = dict(os.environ)
     env["PYTHONPATH"] = str(_REPO_ROOT)
     process = subprocess.run(
-        [sys.executable, "-m", "pr_reviewer.sarif", "--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)],
+        [
+            sys.executable,
+            "-m",
+            "pr_reviewer.sarif",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--workspace-root",
+            str(tmp_path),
+        ],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -265,7 +288,19 @@ def test_cli_rejects_malformed_json_and_does_not_write(tmp_path):
     input_path = tmp_path / "bad.sarif"
     output_path = tmp_path / "out.json"
     input_path.write_text("{not json")
-    assert main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--workspace-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert not output_path.exists()
 
 
@@ -282,7 +317,19 @@ def test_cli_rejects_malformed_top_level(tmp_path, payload):
     input_path = tmp_path / "invalid.sarif"
     output_path = tmp_path / "out.json"
     input_path.write_text(json.dumps(payload))
-    assert main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--workspace-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert output_path.exists()
 
 
@@ -290,7 +337,19 @@ def test_cli_rejects_wrong_version(tmp_path):
     input_path = tmp_path / "wrong.sarif"
     output_path = tmp_path / "out.json"
     input_path.write_text(json.dumps(_sarif(version="2.0.0")))
-    assert main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--workspace-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert output_path.exists()
 
 
@@ -298,20 +357,47 @@ def test_cli_rejects_output_outside_workspace_and_symlink(tmp_path):
     input_path = tmp_path / "results.sarif"
     input_path.write_text(json.dumps(_sarif()))
     outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
-    assert main(["--input", str(input_path), "--output", str(outside), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(outside),
+                "--workspace-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     try:
         link = tmp_path / "link.json"
         link.symlink_to(outside)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unsupported on this filesystem")
-    assert main(["--input", str(input_path), "--output", str(link), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(["--input", str(input_path), "--output", str(link), "--workspace-root", str(tmp_path)])
+        == 1
+    )
 
 
 def test_cli_rejects_oversized_input(tmp_path):
     input_path = tmp_path / "large.sarif"
     output_path = tmp_path / "out.json"
     input_path.write_bytes(b"x" * (MAX_INPUT_BYTES + 1))
-    assert main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)]) == 1
+    assert (
+        main(
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--workspace-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert not output_path.exists()
 
 
@@ -326,7 +412,16 @@ def test_cli_returns_nonzero_on_runs_none(tmp_path):
     input_path = tmp_path / "runs_none.sarif"
     output_path = tmp_path / "out.json"
     input_path.write_text(json.dumps({"version": "2.1.0", "runs": [None]}))
-    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    rc = main(
+        [
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--workspace-root",
+            str(tmp_path),
+        ]
+    )
     assert rc == 1
     assert output_path.exists()
     data = json.loads(output_path.read_text())
@@ -336,9 +431,21 @@ def test_cli_returns_nonzero_on_runs_none(tmp_path):
 def test_cli_returns_nonzero_on_results_not_array(tmp_path):
     input_path = tmp_path / "results_bad.sarif"
     output_path = tmp_path / "out.json"
-    payload = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x"}}, "results": "not-an-array"}]}
+    payload = {
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": {"name": "x"}}, "results": "not-an-array"}],
+    }
     input_path.write_text(json.dumps(payload))
-    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    rc = main(
+        [
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--workspace-root",
+            str(tmp_path),
+        ]
+    )
     assert rc == 1
     assert output_path.exists()
     data = json.loads(output_path.read_text())
@@ -350,7 +457,16 @@ def test_cli_returns_nonzero_on_invalid_tool_driver_type(tmp_path):
     output_path = tmp_path / "out.json"
     payload = {"version": "2.1.0", "runs": [{"tool": {"driver": "string"}, "results": []}]}
     input_path.write_text(json.dumps(payload))
-    rc = main(["--input", str(input_path), "--output", str(output_path), "--workspace-root", str(tmp_path)])
+    rc = main(
+        [
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--workspace-root",
+            str(tmp_path),
+        ]
+    )
     assert rc == 1
     assert output_path.exists()
     data = json.loads(output_path.read_text())

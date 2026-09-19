@@ -121,13 +121,13 @@ def test_dogfood_native_loop_budget() -> None:
         "the dogfood workflow must review with tool_mode=native_loop"
     )
     assert values.get("tool_max_rounds") == "4", (
-        f"dogfood tool_max_rounds must stay \"4\" (issue #565); found {values.get('tool_max_rounds')!r}"
+        f'dogfood tool_max_rounds must stay "4" (issue #565); found {values.get("tool_max_rounds")!r}'
     )
     assert values.get("tool_max_requests") == "8", (
-        f"dogfood tool_max_requests must stay \"8\" (issue #565); found {values.get('tool_max_requests')!r}"
+        f'dogfood tool_max_requests must stay "8" (issue #565); found {values.get("tool_max_requests")!r}'
     )
     assert values.get("tool_loop_wall_clock_sec") == "600", (
-        f"dogfood tool_loop_wall_clock_sec must stay \"600\" (issue #565); "
+        f'dogfood tool_loop_wall_clock_sec must stay "600" (issue #565); '
         f"found {values.get('tool_loop_wall_clock_sec')!r}"
     )
 
@@ -141,17 +141,17 @@ def test_dogfood_untouched_inputs_stay_put() -> None:
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
 
     assert values.get("tool_turn_timeout_sec") == "300", (
-        f"dogfood tool_turn_timeout_sec must stay \"300\"; found {values.get('tool_turn_timeout_sec')!r}"
+        f'dogfood tool_turn_timeout_sec must stay "300"; found {values.get("tool_turn_timeout_sec")!r}'
     )
     assert values.get("tool_corpus_max_bytes") == "15000", (
-        f"dogfood tool_corpus_max_bytes must stay \"15000\"; found {values.get('tool_corpus_max_bytes')!r}"
+        f'dogfood tool_corpus_max_bytes must stay "15000"; found {values.get("tool_corpus_max_bytes")!r}'
     )
     assert values.get("tool_max_tokens_per_turn") == "16000", (
-        f"dogfood tool_max_tokens_per_turn must stay \"16000\"; "
+        f'dogfood tool_max_tokens_per_turn must stay "16000"; '
         f"found {values.get('tool_max_tokens_per_turn')!r}"
     )
     assert values.get("tool_max_response_bytes") == "12000", (
-        f"dogfood tool_max_response_bytes must stay \"12000\"; "
+        f'dogfood tool_max_response_bytes must stay "12000"; '
         f"found {values.get('tool_max_response_bytes')!r}"
     )
 

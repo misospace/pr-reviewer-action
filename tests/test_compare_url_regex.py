@@ -186,9 +186,7 @@ def test_patterns_not_anchored_to_end():
 def test_enrichment_sh_no_longer_has_brittle_grep_pipelines():
     """Verify enrichment.sh is now a thin wrapper, not grep pipelines."""
     content = (ROOT / "scripts/sections/enrichment.sh").read_text(encoding="utf-8")
-    assert "run_enrichment.py" in content, (
-        "enrichment.sh should delegate to run_enrichment.py"
-    )
+    assert "run_enrichment.py" in content, "enrichment.sh should delegate to run_enrichment.py"
     # Should not contain the old brittle TARGET_VERSION grep pipeline
     assert 'TARGET_VERSION="$(jq -r' not in content, (
         "enrichment.sh should not contain TARGET_VERSION grep pipeline"

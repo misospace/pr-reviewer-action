@@ -4,7 +4,7 @@ import json
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pr_reviewer.metadata import parse_metadata, build_marker
 
@@ -58,9 +58,11 @@ def test_build_marker_default():
 
 def test_build_marker_with_previous():
     marker = build_marker(
-        head_sha="xyz789", base_sha="def456",
-        review_scope="incremental", previous_head_sha="abc123",
-        review_result="issues"
+        head_sha="xyz789",
+        base_sha="def456",
+        review_scope="incremental",
+        previous_head_sha="abc123",
+        review_result="issues",
     )
     data = parse_metadata(marker)
     assert data is not None
@@ -70,9 +72,12 @@ def test_build_marker_with_previous():
 
 def test_build_marker_roundtrip():
     original = {
-        "version": 1, "head_sha": "aaa", "base_sha": "bbb",
-        "review_scope": "incremental", "previous_head_sha": "ccc",
-        "review_result": "clean"
+        "version": 1,
+        "head_sha": "aaa",
+        "base_sha": "bbb",
+        "review_scope": "incremental",
+        "previous_head_sha": "ccc",
+        "review_result": "clean",
     }
     marker = build_marker(**original)
     parsed = parse_metadata(marker)

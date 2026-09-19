@@ -77,8 +77,7 @@ _THREADS_QUERY = (
 )
 
 _RESOLVE_MUTATION = (
-    "mutation($id: ID!) {"
-    " resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }"
+    "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }"
 )
 
 _MAX_THREADS_PAGE = 100
@@ -153,7 +152,7 @@ def extract_marker_fingerprint(body):
     start = body.find(FINDING_MARKER_PREFIX)
     if start == -1:
         return None
-    rest = body[start + len(FINDING_MARKER_PREFIX):]
+    rest = body[start + len(FINDING_MARKER_PREFIX) :]
     end = rest.find("-->")
     if end == -1:
         return None
@@ -269,10 +268,14 @@ def main(argv) -> int:
 
     data = _gh_graphql(
         [
-            "-f", f"query={_THREADS_QUERY}",
-            "-f", f"owner={owner}",
-            "-f", f"name={name}",
-            "-F", f"number={pr_number}",
+            "-f",
+            f"query={_THREADS_QUERY}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={pr_number}",
         ]
     )
     if data is None:
@@ -333,10 +336,14 @@ def main(argv) -> int:
             continue
         result = _run_gh(
             [
-                "api", f"repos/{repo}/pulls/{pr_number}/comments",
-                "--method", "POST",
-                "-F", f"in_reply_to={info['first_comment_id']}",
-                "-f", f"body={followup_body(item, head_sha)}",
+                "api",
+                f"repos/{repo}/pulls/{pr_number}/comments",
+                "--method",
+                "POST",
+                "-F",
+                f"in_reply_to={info['first_comment_id']}",
+                "-f",
+                f"body={followup_body(item, head_sha)}",
             ]
         )
         if result is not None:
@@ -353,9 +360,7 @@ def main(argv) -> int:
     if open_threads_out:
         surviving = sorted(fp for fp in matched if fp not in resolved_fps)
         try:
-            Path(open_threads_out).write_text(
-                json.dumps(surviving) + "\n", encoding="utf-8"
-            )
+            Path(open_threads_out).write_text(json.dumps(surviving) + "\n", encoding="utf-8")
         except OSError:
             print(f"  WARN: could not write {open_threads_out}", file=sys.stderr)
 

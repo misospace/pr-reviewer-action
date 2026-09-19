@@ -94,11 +94,11 @@ def patch_transport(monkeypatch, tmp_path: Path, behavior=None, *, sleep=0.0):
     (role, attempt, payload) calls in arrival order.
     """
     if behavior is None:
+
         def behavior(role, attempt):  # noqa: ARG001
             return openai_response("")
-    prompts = {
-        role: run_specialists.load_specialist_prompt(role) for role in ROLES
-    }
+
+    prompts = {role: run_specialists.load_specialist_prompt(role) for role in ROLES}
     calls: list[tuple[str, int, dict]] = []
 
     def fake(base_url, api_format, payload, api_key, attempt_timeout):
@@ -237,9 +237,7 @@ def test_roles_run_concurrently(tmp_path, monkeypatch):
     patch_transport(
         monkeypatch,
         tmp_path,
-        behavior=lambda role, attempt: openai_response(
-            json.dumps({"role": role, "leads": []})
-        ),
+        behavior=lambda role, attempt: openai_response(json.dumps({"role": role, "leads": []})),
         sleep=0.8,
     )
 
@@ -284,9 +282,7 @@ def test_one_role_transport_failure_retried_once(tmp_path, monkeypatch):
     assert by_name["tests"]["status"] == "ok"
     assert agg["any_errors"] is True
 
-    response = json.loads(
-        (ws / "specialist-security.response.json").read_text(encoding="utf-8")
-    )
+    response = json.loads((ws / "specialist-security.response.json").read_text(encoding="utf-8"))
     assert set(response) == {"error"}
     assert "HTTP 500 boom" in response["error"]
     # The pure role artifact is the empty #607 shape with the transport error.
@@ -378,9 +374,7 @@ def test_timeout_not_retried(tmp_path, monkeypatch):
     agg = aggregate(ws)
     assert all(r["status"] == "error" for r in agg["roles"])
     assert all(r["error_kind"] == "timeout" for r in agg["roles"])
-    response = json.loads(
-        (ws / "specialist-security.response.json").read_text(encoding="utf-8")
-    )
+    response = json.loads((ws / "specialist-security.response.json").read_text(encoding="utf-8"))
     assert set(response) == {"error"}
     assert "timed out" in response["error"]
 
@@ -395,9 +389,7 @@ def test_malformed_prose_degrades(tmp_path, monkeypatch):
     patch_transport(
         monkeypatch,
         tmp_path,
-        behavior=lambda role, attempt: openai_response(
-            "Sure! Here is my review: nothing usable"
-        ),
+        behavior=lambda role, attempt: openai_response("Sure! Here is my review: nothing usable"),
     )
 
     assert run_main(tmp_path, ws, corpus) == 0
@@ -461,7 +453,8 @@ def test_preexisting_request_symlink_is_guarded(tmp_path, monkeypatch):
     corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
     env_setup(tmp_path, monkeypatch)
     calls = patch_transport(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         behavior=lambda role, attempt: openai_response(make_leads_json(role)),
     )
 
@@ -491,7 +484,8 @@ def test_aggregate_symlink_refused_exit_1(tmp_path, monkeypatch):
     corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
     env_setup(tmp_path, monkeypatch)
     patch_transport(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         behavior=lambda role, attempt: openai_response(make_leads_json(role)),
     )
 
@@ -512,7 +506,8 @@ def test_artifacts_land_under_workspace_root_not_cwd(tmp_path, monkeypatch):
     corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
     env_setup(tmp_path, monkeypatch)
     patch_transport(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         behavior=lambda role, attempt: openai_response(make_leads_json(role)),
     )
     monkeypatch.chdir(cwd)
@@ -582,8 +577,6 @@ def test_worker_crash_writes_full_artifact_set(tmp_path, monkeypatch):
         artifact = role_artifact(ws, role)
         assert set(artifact) == {"version", "role", "leads", "truncated", "truncation", "errors"}
         assert any("worker exploded" in e for e in artifact["errors"])
-        response = json.loads(
-            (ws / f"specialist-{role}.response.json").read_text(encoding="utf-8")
-        )
+        response = json.loads((ws / f"specialist-{role}.response.json").read_text(encoding="utf-8"))
         assert set(response) == {"error"}
         assert "worker exploded" in response["error"]

@@ -90,8 +90,7 @@ def resolve_mcp_tool_name(tool_name, mcp_routes):
     if tool_name in mcp_routes:
         return tool_name
     wanted = re.sub(r"[^a-z0-9]", "", tool_name.lower())
-    matches = [k for k in mcp_routes
-               if re.sub(r"[^a-z0-9]", "", k.lower()) == wanted]
+    matches = [k for k in mcp_routes if re.sub(r"[^a-z0-9]", "", k.lower()) == wanted]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -146,9 +145,7 @@ def _usage_with_cache_ratio(usage_acc):
     return {
         **usage_acc,
         "cache_hit_ratio": (
-            round(usage_acc["cached_prompt_tokens"] / prompt_tokens, 3)
-            if prompt_tokens
-            else 0.0
+            round(usage_acc["cached_prompt_tokens"] / prompt_tokens, 3) if prompt_tokens else 0.0
         ),
     }
 
@@ -278,7 +275,9 @@ def build_planning_context(max_bytes, corpus_path=None):
             head_budget = budget // 2
             tail_budget = budget - head_budget
             head = focused_raw[:head_budget].decode("utf-8", errors="ignore")
-            tail = focused_raw[-tail_budget:].decode("utf-8", errors="ignore") if tail_budget else ""
+            tail = (
+                focused_raw[-tail_budget:].decode("utf-8", errors="ignore") if tail_budget else ""
+            )
             clipped = head + marker + tail
         any_clipped = True
         return clipped
@@ -334,15 +333,20 @@ def build_planning_context(max_bytes, corpus_path=None):
         bounds = starts + [len(lines)]
         for i in range(len(starts)):
             title = lines[starts[i]][2:].strip()
-            if title in ("PR Classification", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff"):
-                regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
+            if title in (
+                "PR Classification",
+                "Related Code Context",
+                "Repository Map",
+                "PR Files (truncated)",
+                "Version Hints from Diff",
+            ):
+                regions.setdefault(title, "\n".join(lines[starts[i] : bounds[i + 1]]).rstrip())
         if lines[0].startswith("# Repository Standards and Conventions"):
             end = corpus_text.find("\n# Changed Manifest Context")
             if end > 0:
                 regions["standards"] = corpus_text[:end].rstrip()
 
     repo_map_max_bytes = env_int_bounded("REPO_MAP_MAX_BYTES", 12000, 1, 200000)
-
 
     def _repo_map_excerpt(path, cap):
         """Framed repository-map excerpt that never slices the rendered doc.
@@ -399,13 +403,24 @@ def build_planning_context(max_bytes, corpus_path=None):
         any_clipped = True
         return final
 
-
     plan = [
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
         ("Related Code Context", "Related Code Context", "related-code.truncated.md", 16000, None),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
-        ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
-        ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
+        (
+            "Version Hints from Diff",
+            "Version Hints from Diff",
+            "version-hints.truncated.txt",
+            2500,
+            "text",
+        ),
+        (
+            "standards",
+            "Repository Standards and Conventions",
+            "standards-context.capped.md",
+            6000,
+            None,
+        ),
     ]
 
     for region_key, title, excerpt_path, cap, fence in plan:
@@ -436,13 +451,19 @@ def build_planning_context(max_bytes, corpus_path=None):
             map_section = _repo_map_excerpt("repo-map.md", map_cap)
         if map_section is not None:
             related_index = next(
-                (index for index, section in enumerate(sections)
-                 if section.startswith("# Related Code Context")),
+                (
+                    index
+                    for index, section in enumerate(sections)
+                    if section.startswith("# Related Code Context")
+                ),
                 -1,
             )
             classification_index = next(
-                (index for index, section in enumerate(sections)
-                 if section.startswith("# PR Classification")),
+                (
+                    index
+                    for index, section in enumerate(sections)
+                    if section.startswith("# PR Classification")
+                ),
                 -1,
             )
             insert_at = related_index + 1 if related_index >= 0 else classification_index + 1
@@ -563,9 +584,7 @@ def replace_harness_findings_section(corpus, body):
     bounds = starts + [len(lines)]
     for idx, start in enumerate(starts):
         if lines[start][2:].strip().startswith("Tool Harness Findings"):
-            return "\n".join(
-                lines[: start + 1] + body.split("\n") + lines[bounds[idx + 1] :]
-            )
+            return "\n".join(lines[: start + 1] + body.split("\n") + lines[bounds[idx + 1] :])
     return corpus
 
 
@@ -743,8 +762,11 @@ def run_native_loop(
     )
     for srv_name, srv_url in parse_server_specs(os.getenv("TOOL_MCP_SERVERS", "")):
         toolset = McpToolset(
-            srv_name, srv_url, os.getenv("TOOL_MCP_TOKEN", ""),
-            timeout=request_timeout, name_prefixes=name_prefixes,
+            srv_name,
+            srv_url,
+            os.getenv("TOOL_MCP_TOKEN", ""),
+            timeout=request_timeout,
+            name_prefixes=name_prefixes,
         )
         try:
             connect_error = toolset.connect()
@@ -776,9 +798,14 @@ def run_native_loop(
         f"{', '.join(sorted(allowed_gh_api_repos)) if allowed_gh_api_repos else '(none)'}\n"
         f"Allowed hosts for web_fetch: "
         f"{', '.join(allowed_hosts) if allowed_hosts else '(none)'}\n"
-        + ("web_search is available — use it to find a page's URL when you don't "
-           "know it, then web_fetch the best result.\n" if search_url else "")
-        + "\nGather the evidence needed to review this PR corpus:\n\n" + corpus_text
+        + (
+            "web_search is available — use it to find a page's URL when you don't "
+            "know it, then web_fetch the best result.\n"
+            if search_url
+            else ""
+        )
+        + "\nGather the evidence needed to review this PR corpus:\n\n"
+        + corpus_text
     )
 
     max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
@@ -813,9 +840,7 @@ def run_native_loop(
         # (error key) — is retried once non-streamed before the loop gives up.
         response = None
         try:
-            response = run_chat_request(
-                base_url, api_format, payload, api_key, turn_timeout
-            )
+            response = run_chat_request(base_url, api_format, payload, api_key, turn_timeout)
             usable = not (payload.get("stream") and response.get("error"))
         except Exception:
             if not payload.get("stream"):
@@ -828,9 +853,7 @@ def run_native_loop(
             )
             fallback = {k: v for k, v in payload.items() if k != "stream_options"}
             fallback["stream"] = False
-            response = run_chat_request(
-                base_url, api_format, fallback, api_key, turn_timeout
-            )
+            response = run_chat_request(base_url, api_format, fallback, api_key, turn_timeout)
         _accumulate_usage(usage_acc, response, api_format)
         return response
 
@@ -842,19 +865,21 @@ def run_native_loop(
         # single-underscore mcp_server_tool a steering prompt may carry) is
         # resolved when unambiguous — the route set is still the allowlisted,
         # read-only-filtered one, so this loosens nothing.
-        if split_namespaced(tool_name) or (
-            mcp_routes and tool_name.startswith("mcp_")
-        ):
+        if split_namespaced(tool_name) or (mcp_routes and tool_name.startswith("mcp_")):
             routed = resolve_mcp_tool_name(tool_name, mcp_routes)
             if routed is None:
                 advertised = ", ".join(sorted(mcp_routes)) or "(none configured)"
-                return {"tool": tool_name, "status": "error",
-                        "result": {"error": (
-                            f"Unknown MCP tool: {tool_name}. "
-                            f"Advertised MCP tools: {advertised}")}}
+                return {
+                    "tool": tool_name,
+                    "status": "error",
+                    "result": {
+                        "error": (
+                            f"Unknown MCP tool: {tool_name}. Advertised MCP tools: {advertised}"
+                        )
+                    },
+                }
             if routed != tool_name:
-                print(f"  MCP tool name '{tool_name}' resolved to '{routed}'",
-                      file=sys.stderr)
+                print(f"  MCP tool name '{tool_name}' resolved to '{routed}'", file=sys.stderr)
             toolset = mcp_routes[routed]
             _, bare_tool = split_namespaced(routed)
             res = toolset.call(bare_tool, args if isinstance(args, dict) else {})
@@ -863,9 +888,7 @@ def run_native_loop(
             text, _ = mask_and_truncate(res.get("content", ""), max_response_bytes)
             return {"tool": tool_name, "status": "ok", "result": {"content": text}}
 
-        normalized_name, normalized_args = normalize_tool_request(
-            {"tool": tool_name, "args": args}
-        )
+        normalized_name, normalized_args = normalize_tool_request({"tool": tool_name, "args": args})
         return execute_tool_request(
             normalized_name,
             normalized_args,
@@ -888,9 +911,7 @@ def run_native_loop(
     # is counted in usage_acc and it gets the same streamed-turn fallback.
     summarize_fn = None
     if os.getenv("TOOL_LOOP_SUMMARIZE", "false").strip().lower() == "true":
-        summarize_max_tokens = env_int_bounded(
-            "TOOL_LOOP_SUMMARIZE_MAX_TOKENS", 512, 128, 4096
-        )
+        summarize_max_tokens = env_int_bounded("TOOL_LOOP_SUMMARIZE_MAX_TOKENS", 512, 128, 4096)
 
         def summarize_fn(block):  # noqa: F811 — None vs callable by config
             summarizer = Conversation(system=_SUMMARIZER_SYSTEM)
@@ -1081,9 +1102,7 @@ def _summarize_loop_outcome(result, outcome, build_evidence_digest):
         if executed.result.get("status") == "ok":
             result["executed_request_count"] += 1
         result["tool_results"].append(executed.result)
-        md_lines.extend(
-            tool_result_md_lines(i + 1, executed.tool, executed.args, executed.result)
-        )
+        md_lines.extend(tool_result_md_lines(i + 1, executed.tool, executed.args, executed.result))
 
     # Cross-run evidence memory: a compact digest of what this review gathered,
     # carried forward so the next incremental review of this PR reuses it
@@ -1121,12 +1140,10 @@ def main():
     # The legacy names are read as a fallback for one release (removed in
     # v3.0.0); the new name takes precedence.
     turn_timeout = int(
-        os.getenv("TOOL_TURN_TIMEOUT_SEC")
-        or os.getenv("TOOL_PLANNING_TIMEOUT_SEC", "60")
+        os.getenv("TOOL_TURN_TIMEOUT_SEC") or os.getenv("TOOL_PLANNING_TIMEOUT_SEC", "60")
     )
     corpus_max_bytes = int(
-        os.getenv("TOOL_CORPUS_MAX_BYTES")
-        or os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000")
+        os.getenv("TOOL_CORPUS_MAX_BYTES") or os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000")
     )
     max_requests = env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)
     request_timeout = env_int_bounded("TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300)
@@ -1193,10 +1210,7 @@ def main():
         request_timeout,
         max_requests,
         turn_timeout,
-        int(
-            os.getenv("TOOL_MAX_TOKENS_PER_TURN")
-            or os.getenv("TOOL_PLANNING_MAX_TOKENS", "400")
-        ),
+        int(os.getenv("TOOL_MAX_TOKENS_PER_TURN") or os.getenv("TOOL_PLANNING_MAX_TOKENS", "400")),
         result,
     )
     if not handled:

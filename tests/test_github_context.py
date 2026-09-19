@@ -27,7 +27,9 @@ class TestExtractLinkedIssueRefs:
         assert refs[0].repo == "owner/repo"
 
     def test_fixes_with_repo(self):
-        refs = extract_linked_issue_refs("Fixes misospace/another-repo#456", default_repo="owner/repo")
+        refs = extract_linked_issue_refs(
+            "Fixes misospace/another-repo#456", default_repo="owner/repo"
+        )
         assert len(refs) == 1
         assert refs[0].number == 456
         assert refs[0].repo == "misospace/another-repo"
@@ -79,6 +81,7 @@ class TestExtractLinkedIssueRefs:
 class TestLinkedIssuesToJson:
     def test_serialises_correctly(self):
         from pr_reviewer.github_context import LinkedIssueRef
+
         items = [
             LinkedIssueRef(ref="#1", repo="owner/repo", number=1),
             LinkedIssueRef(ref="other/repo#5", repo="other/repo", number=5),

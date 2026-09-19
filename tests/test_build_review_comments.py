@@ -61,7 +61,13 @@ deleted file mode 100644
 
 
 def _finding(file="app/serve.py", line=12, severity="blocker", message="bad", category="security"):
-    return {"severity": severity, "category": category, "file": file, "line": line, "message": message}
+    return {
+        "severity": severity,
+        "category": category,
+        "file": file,
+        "line": line,
+        "message": message,
+    }
 
 
 class TestCommentableLines:
@@ -93,12 +99,14 @@ class TestBuildComments:
     def test_anchorable_finding_becomes_comment(self):
         comments, skipped = build_comments([_finding(line=12)], DIFF)
         assert skipped == 0
-        assert comments == [{
-            "path": "app/serve.py",
-            "line": 12,
-            "side": "RIGHT",
-            "body": comments[0]["body"],
-        }]
+        assert comments == [
+            {
+                "path": "app/serve.py",
+                "line": 12,
+                "side": "RIGHT",
+                "body": comments[0]["body"],
+            }
+        ]
         assert "bad" in comments[0]["body"]
         assert "Blocker" in comments[0]["body"]
         assert "(security)" in comments[0]["body"]
@@ -287,7 +295,9 @@ class TestMainCli:
         findings_file = tmp_path / "findings.json"
         out_file = tmp_path / "comments.json"
         findings_file.write_text("not json")
-        assert main(["prog", str(findings_file), str(tmp_path / "missing.diff"), str(out_file)]) == 0
+        assert (
+            main(["prog", str(findings_file), str(tmp_path / "missing.diff"), str(out_file)]) == 0
+        )
         assert json.loads(out_file.read_text()) == []
 
 

@@ -22,8 +22,8 @@ from pathlib import Path
 
 # Reserved internal metadata patterns — must stay in sync with action.yml.
 RESERVED_PATTERNS = [
-    re.compile(r'<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->', re.IGNORECASE),
-    re.compile(r'<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->', re.IGNORECASE),
+    re.compile(r"<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->", re.IGNORECASE),
+    re.compile(r"<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->", re.IGNORECASE),
 ]
 
 
@@ -57,10 +57,7 @@ def main() -> None:
     stripped = strip_reserved_markers(content)
 
     # Count replacements for reporting
-    total = sum(
-        len(p.findall(content))
-        for p in RESERVED_PATTERNS
-    )
+    total = sum(len(p.findall(content)) for p in RESERVED_PATTERNS)
 
     if args.dry_run:
         print(f"{total} marker(s) stripped (dry run).")

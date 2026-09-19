@@ -125,7 +125,7 @@ class TestMaskSecretsBearer:
     """Bearer token redaction."""
 
     def test_bearer_token(self):
-        text = 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
+        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
         result = mask_secrets(text)
         assert "[REDACTED]" in result
 
@@ -440,9 +440,7 @@ class TestMaskSecretsAdversarial:
         assert "[REDACTED]" in result
 
     def test_multiple_secrets(self):
-        text = (
-            "api_key=sk-abc123def456ghij7890 and token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
-        )
+        text = "api_key=sk-abc123def456ghij7890 and token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
         result = mask_secrets(text)
         assert result.count("[REDACTED]") == 2
 

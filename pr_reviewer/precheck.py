@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
 logger = logging.getLogger(__name__)
 
 
@@ -144,66 +145,68 @@ def compute_diff_fingerprint(diff_content: str) -> str:
     return hashlib.sha256(diff_content.encode("utf-8")).hexdigest()
 
 
-_EXACT_CONFIG_KEYS = frozenset((
-    # Provider endpoints/versions (never the API keys themselves)
-    "ANTHROPIC_VERSION",
-    "AZURE_DEPLOYMENT_ID",
-    "AZURE_OPENAI_API_VERSION",
-    "AZURE_OPENAI_ENDPOINT",
-    "OPENAI_BASE_URL",
-    # Review-affecting settings the original shell compute_config_hash
-    # included explicitly; dropping any of these means a config change
-    # no longer invalidates a stale review.
-    "ACTION_REF",
-    "CONTEXT_LIMIT_MODE",
-    "MODEL_CONTEXT_TOKENS",
-    "REVIEW_ROUTING_MODE",
-    "REVIEW_SCOPE",
-    "ESCALATE_ON_RISK_FLAGS",
-    "SYSTEM_PROMPT",
-    "STANDARDS_FILE_CANDIDATES",
-    "LINEAR_API_KEY_CONFIGURED",
-    "LINEAR_ISSUE_PREFIXES",
-    "LINEAR_ISSUE_TIMEOUT_SEC",
-    "LINEAR_ENABLE_FOR_FORKS",
-    "EVIDENCE_PROVIDER_TIMEOUT_SEC",
-    "EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES",
-    "SARIF_FILES",
-    "SARIF_MAX_FINDINGS",
-    "EVIDENCE_BLOCKER_ENFORCEMENT",
-    "EVIDENCE_ENABLE_FOR_FORKS",
-    "TOOL_MODE",
-    "TOOL_MAX_REQUESTS",
-    "TOOL_MAX_ROUNDS",
-    # #540: renamed from TOOL_PLANNING_* (the plan_execute planner they were
-    # named for was removed in #304). The legacy names stay in the allowlist
-    # for one release so a workflow still passing them keeps a stable
-    # fingerprint (removed in v3.0.0).
-    "TOOL_TURN_TIMEOUT_SEC",
-    "TOOL_CORPUS_MAX_BYTES",
-    "TOOL_MAX_TOKENS_PER_TURN",
-    "TOOL_PLANNING_TIMEOUT_SEC",
-    "TOOL_PLANNING_MAX_CONTEXT_BYTES",
-    "TOOL_PLANNING_MAX_TOKENS",
-    "TOOL_MAX_RESPONSE_BYTES",
-    "TOOL_ALLOWED_GH_API_REPOS",
-    "TOOL_REQUEST_TIMEOUT_SEC",
-    "TOOL_FAILURE_ENFORCEMENT",
-    "TOOL_MIN_SUCCESSFUL_REQUESTS",
-    "TOOL_ENABLE_FOR_FORKS",
-    "RELATED_CODE_CONTEXT",
-    "RELATED_CODE_MAX_BYTES",
-    "REPO_MAP_CONTEXT",
-    "REPO_MAP_MAX_BYTES",
-    "PR_THREAD_CONTEXT",
-    "PR_THREAD_MAX_BYTES",
-    # #608: deep-review toggle. Enabling it changes what runs over the corpus,
-    # so a toggle must invalidate a stale comment. The phase deadline is
-    # fingerprinted too: a shorter deadline can turn advisory leads into
-    # recorded timeouts, which changes the run.
-    "DEEP_REVIEW",
-    "DEEP_REVIEW_TIMEOUT_SEC",
-))
+_EXACT_CONFIG_KEYS = frozenset(
+    (
+        # Provider endpoints/versions (never the API keys themselves)
+        "ANTHROPIC_VERSION",
+        "AZURE_DEPLOYMENT_ID",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_ENDPOINT",
+        "OPENAI_BASE_URL",
+        # Review-affecting settings the original shell compute_config_hash
+        # included explicitly; dropping any of these means a config change
+        # no longer invalidates a stale review.
+        "ACTION_REF",
+        "CONTEXT_LIMIT_MODE",
+        "MODEL_CONTEXT_TOKENS",
+        "REVIEW_ROUTING_MODE",
+        "REVIEW_SCOPE",
+        "ESCALATE_ON_RISK_FLAGS",
+        "SYSTEM_PROMPT",
+        "STANDARDS_FILE_CANDIDATES",
+        "LINEAR_API_KEY_CONFIGURED",
+        "LINEAR_ISSUE_PREFIXES",
+        "LINEAR_ISSUE_TIMEOUT_SEC",
+        "LINEAR_ENABLE_FOR_FORKS",
+        "EVIDENCE_PROVIDER_TIMEOUT_SEC",
+        "EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES",
+        "SARIF_FILES",
+        "SARIF_MAX_FINDINGS",
+        "EVIDENCE_BLOCKER_ENFORCEMENT",
+        "EVIDENCE_ENABLE_FOR_FORKS",
+        "TOOL_MODE",
+        "TOOL_MAX_REQUESTS",
+        "TOOL_MAX_ROUNDS",
+        # #540: renamed from TOOL_PLANNING_* (the plan_execute planner they were
+        # named for was removed in #304). The legacy names stay in the allowlist
+        # for one release so a workflow still passing them keeps a stable
+        # fingerprint (removed in v3.0.0).
+        "TOOL_TURN_TIMEOUT_SEC",
+        "TOOL_CORPUS_MAX_BYTES",
+        "TOOL_MAX_TOKENS_PER_TURN",
+        "TOOL_PLANNING_TIMEOUT_SEC",
+        "TOOL_PLANNING_MAX_CONTEXT_BYTES",
+        "TOOL_PLANNING_MAX_TOKENS",
+        "TOOL_MAX_RESPONSE_BYTES",
+        "TOOL_ALLOWED_GH_API_REPOS",
+        "TOOL_REQUEST_TIMEOUT_SEC",
+        "TOOL_FAILURE_ENFORCEMENT",
+        "TOOL_MIN_SUCCESSFUL_REQUESTS",
+        "TOOL_ENABLE_FOR_FORKS",
+        "RELATED_CODE_CONTEXT",
+        "RELATED_CODE_MAX_BYTES",
+        "REPO_MAP_CONTEXT",
+        "REPO_MAP_MAX_BYTES",
+        "PR_THREAD_CONTEXT",
+        "PR_THREAD_MAX_BYTES",
+        # #608: deep-review toggle. Enabling it changes what runs over the corpus,
+        # so a toggle must invalidate a stale comment. The phase deadline is
+        # fingerprinted too: a shorter deadline can turn advisory leads into
+        # recorded timeouts, which changes the run.
+        "DEEP_REVIEW",
+        "DEEP_REVIEW_TIMEOUT_SEC",
+    )
+)
 
 
 def _collect_config_lines() -> list[str]:
@@ -226,8 +229,7 @@ def _collect_config_lines() -> list[str]:
     _CONFIG_KEYS = sorted(
         k
         for k in os.environ
-        if (k.startswith("AI_") and not k.endswith("_API_KEY"))
-        or k in _EXACT_CONFIG_KEYS
+        if (k.startswith("AI_") and not k.endswith("_API_KEY")) or k in _EXACT_CONFIG_KEYS
     )
     for key in _CONFIG_KEYS:
         lines.append(f"{key}={os.environ[key]}")
@@ -297,9 +299,7 @@ def compute_config_hash(config_lines: list[str] | None = None) -> str:
 
     # Filter out comments and blank lines, then sort for determinism
     filtered = sorted(
-        line.strip()
-        for line in config_lines
-        if line.strip() and not line.strip().startswith("#")
+        line.strip() for line in config_lines if line.strip() and not line.strip().startswith("#")
     )
     if not filtered:
         return ""
@@ -382,9 +382,7 @@ def _extract_previous_fingerprints(comment_body: str) -> list[str]:
     return _FP_RE.findall(comment_body)
 
 
-def fingerprints_match(
-    current_fp: str, previous_fingerprints: list[str]
-) -> bool:
+def fingerprints_match(current_fp: str, previous_fingerprints: list[str]) -> bool:
     """Check if the current fingerprint matches any previously recorded one.
 
     Parameters
@@ -744,9 +742,7 @@ def resolve_review_scope(
     if scope == "full":
         return full
     if scope not in ("", "auto", "incremental"):
-        logger.warning(
-            "Invalid REVIEW_SCOPE %r; defaulting to auto", review_scope
-        )
+        logger.warning("Invalid REVIEW_SCOPE %r; defaulting to auto", review_scope)
 
     if not previous_head_sha or not previous_base_sha:
         return full
@@ -758,9 +754,7 @@ def resolve_review_scope(
         )
         return full
     if compare_range_ok is False:
-        logger.info(
-            "Review scope fallback: previous→current range is not comparable"
-        )
+        logger.info("Review scope fallback: previous→current range is not comparable")
         return full
     if previous_needs_full_review:
         logger.info(
@@ -772,10 +766,8 @@ def resolve_review_scope(
     return ScopeResolution(
         effective_review_scope="incremental",
         previous_head_sha=previous_head_sha,
-        baseline_clean=(previous_review_result or "").strip().lower()
-        in ("", "clean"),
+        baseline_clean=(previous_review_result or "").strip().lower() in ("", "clean"),
     )
-
 
 
 # Findings about CI state describe the *run*, not the diff. The diff-unchanged
@@ -810,6 +802,7 @@ def has_ci_state_findings(findings: object) -> bool:
     if not isinstance(findings, list):
         return False
     return any(looks_like_ci_state_finding(f) for f in findings)
+
 
 def evaluate_precheck(
     diff_content: str,
@@ -887,14 +880,8 @@ def evaluate_precheck(
     reason = "New or forced changes detected"
     if ci_state_findings_open and fingerprints_match(broad, previous_fingerprints):
         reason = "Diff unchanged, but a CI-state finding is still open"
-    elif (
-        previous_needs_full_review
-        and fingerprints_match(broad, previous_fingerprints)
-    ):
-        reason = (
-            "Diff unchanged, but a carried finding needs a full review "
-            "to be assessed (#544)"
-        )
+    elif previous_needs_full_review and fingerprints_match(broad, previous_fingerprints):
+        reason = "Diff unchanged, but a carried finding needs a full review to be assessed (#544)"
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=marker_fp,
@@ -917,9 +904,7 @@ def _decision_to_outputs(decision: ReviewDecision) -> tuple[bool, str]:
     return True, ""
 
 
-def build_precheck_payload(
-    result: PrecheckResult, scope: ScopeResolution
-) -> dict:
+def build_precheck_payload(result: PrecheckResult, scope: ScopeResolution) -> dict:
     """Assemble the JSON payload the CLI writes to stdout.
 
     When the decision does not run a review the scope fields are reset to
@@ -1040,7 +1025,6 @@ def _read_previous_fingerprints() -> list[str]:
     return fingerprints
 
 
-
 def _read_previous_findings() -> list:
     """Carried findings the shell wrapper wrote from the last review's marker.
 
@@ -1054,6 +1038,7 @@ def _read_previous_findings() -> list:
     except (OSError, ValueError):
         return []
     return data if isinstance(data, list) else []
+
 
 def main() -> None:
     """CLI entry point for the precheck module.
@@ -1077,9 +1062,7 @@ def main() -> None:
         force_review=force_review,
         skip_if_diff_unchanged=skip_if_diff_unchanged,
         ci_state_findings_open=has_ci_state_findings(_read_previous_findings()),
-        previous_needs_full_review=_env_flag(
-            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
-        ),
+        previous_needs_full_review=_env_flag("PREVIOUS_NEEDS_FULL_REVIEW", default=False),
     )
     scope = resolve_review_scope(
         os.environ.get("REVIEW_SCOPE", "auto"),
@@ -1089,16 +1072,12 @@ def main() -> None:
         force_review=force_review,
         previous_head_is_ancestor=_env_validation_flag("PREVIOUS_HEAD_IS_ANCESTOR"),
         compare_range_ok=_env_validation_flag("COMPARE_RANGE_OK"),
-        previous_needs_full_review=_env_flag(
-            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
-        ),
+        previous_needs_full_review=_env_flag("PREVIOUS_NEEDS_FULL_REVIEW", default=False),
     )
 
     print(json.dumps(build_precheck_payload(result, scope), indent=2))
 
-    pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get(
-        "GITHUB_PR_NUMBER", ""
-    )
+    pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get("GITHUB_PR_NUMBER", "")
     if pr_number:
         try:
             comments = _load_pr_comments(pr_number)
@@ -1109,15 +1088,11 @@ def main() -> None:
             _write_previous_dismissals(
                 comments,
                 _resolve_maintainers(),
-                output_path=os.environ.get(
-                    "PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"
-                ),
+                output_path=os.environ.get("PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"),
                 workspace_root=os.environ.get("GITHUB_WORKSPACE") or os.getcwd(),
             )
         except Exception as exc:  # noqa: BLE001 — best-effort
-            logging.getLogger(__name__).warning(
-                "Dismissal write skipped: %s", exc
-            )
+            logging.getLogger(__name__).warning("Dismissal write skipped: %s", exc)
 
 
 def _write_previous_dismissals(
@@ -1160,9 +1135,7 @@ def _write_previous_dismissals(
     # Path-traversal / symlink / null-byte defense. Mirrors the reader-side
     # _resolve_artifact_path containment check.
     if "\x00" in str(output_path):
-        logging.getLogger(__name__).warning(
-            "output_path contains null byte; refusing to write"
-        )
+        logging.getLogger(__name__).warning("output_path contains null byte; refusing to write")
         return 0
     if workspace_root is not None:
         resolved_root = Path(workspace_root).resolve()
@@ -1220,9 +1193,7 @@ def _write_previous_dismissals(
             rows, target_path=output_path, workspace_root=workspace_root
         )
     except (OSError, ValueError) as exc:
-        logging.getLogger(__name__).warning(
-            "Failed to write %s: %s", output_path, exc
-        )
+        logging.getLogger(__name__).warning("Failed to write %s: %s", output_path, exc)
         return 0
 
 
@@ -1265,9 +1236,7 @@ def _load_pr_comments(pr_number: str) -> list[dict]:
     except ImportError:
         return []
     except Exception as exc:  # noqa: BLE001 — best-effort fetch
-        logging.getLogger(__name__).warning(
-            "PR comment fetch failed for #%s: %s", pr_number, exc
-        )
+        logging.getLogger(__name__).warning("PR comment fetch failed for #%s: %s", pr_number, exc)
         return []
 
 
@@ -1343,9 +1312,7 @@ def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> s
     except Exception as exc:  # noqa: BLE001 — repo-level lookup
         # Fail closed: if the repo lookup itself failed, no candidate's
         # permission is verified, so nobody may dismiss (#581).
-        logging.getLogger(__name__).warning(
-            "Maintainer permission lookup failed: %s", exc
-        )
+        logging.getLogger(__name__).warning("Maintainer permission lookup failed: %s", exc)
         return set()
 
 

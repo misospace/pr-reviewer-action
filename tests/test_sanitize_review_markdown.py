@@ -260,8 +260,8 @@ class TestSanitizeMention:
 
     def test_user_mention_neutralized(self):
         result = sanitize_markdown("Thanks @octocat for the fix")
-        assert "@​octocat" in result      # zero-width space inserted
-        assert "@octocat" not in result          # raw (linkable) form gone
+        assert "@​octocat" in result  # zero-width space inserted
+        assert "@octocat" not in result  # raw (linkable) form gone
 
     def test_team_mention_neutralized(self):
         result = sanitize_markdown("cc @acme/platform-team")

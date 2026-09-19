@@ -12,9 +12,7 @@ import re
 from pathlib import Path
 
 
-def _force_request_changes(
-    output_path: str, section_md: str, reason: str
-) -> tuple[bool, str]:
+def _force_request_changes(output_path: str, section_md: str, reason: str) -> tuple[bool, str]:
     """Append an enforcement section to the review markdown and force the
     verdict to ``request_changes``. Shared by all enforcement rules so the
     output-mutation discipline lives in one place."""
@@ -54,9 +52,7 @@ def apply_evidence_blocker_enforcement(
         return False, ""
 
     blocker_ids = [
-        p["id"]
-        for p in evidence.get("providers", [])
-        if p.get("provider_severity") == "blocker"
+        p["id"] for p in evidence.get("providers", []) if p.get("provider_severity") == "blocker"
     ]
     ids_str = ", ".join(blocker_ids)
 
@@ -218,8 +214,7 @@ def normalize_enforced_review_markdown(
                     "## Final Recommendation\n"
                     "Request changes. The following enforcement check(s) require this PR "
                     "to be treated as blocking even if the model's initial review text was approving:\n\n"
-                    f"{reasons_bullet}\n\n"
-                    + markdown.lstrip()
+                    f"{reasons_bullet}\n\n" + markdown.lstrip()
                 )
             else:
                 banner = (
@@ -275,9 +270,7 @@ def apply_verdict_policy(
             source = "findings"
 
     data["verdict_source"] = source
-    Path(output_path).write_text(
-        json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
     return source
 
 

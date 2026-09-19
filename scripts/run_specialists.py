@@ -201,9 +201,7 @@ def _build_payload(
         return payload
 
     token_field = (
-        "max_completion_tokens"
-        if tokens_param == "max_completion_tokens"
-        else "max_tokens"
+        "max_completion_tokens" if tokens_param == "max_completion_tokens" else "max_tokens"
     )
     payload = {
         "model": model,
@@ -370,19 +368,26 @@ def _run_role(
     ) -> dict[str, Any]:
         if cancel.is_set():
             return _role_entry(
-                role, artifact, status="error",
+                role,
+                artifact,
+                status="error",
                 error_kind=error_kind or "timeout",
                 elapsed_sec=time.monotonic() - started,
             )
         if not _guarded_write(
-            workspace_root, f"specialist-{role}.json", _json_text(artifact),
+            workspace_root,
+            f"specialist-{role}.json",
+            _json_text(artifact),
             abort=cancel,
         ):
             if cancel.is_set():
                 # The reaper won the race for this write and recorded the
                 # timeout; not a guard refusal.
                 return _role_entry(
-                    role, artifact, status="error", error_kind="timeout",
+                    role,
+                    artifact,
+                    status="error",
+                    error_kind="timeout",
                     elapsed_sec=time.monotonic() - started,
                 )
             guard_artifact = _empty_artifact(role)
@@ -396,11 +401,17 @@ def _run_role(
                 # the entry still reports it.
                 pass
             return _role_entry(
-                role, guard_artifact, status="error", error_kind="guard",
+                role,
+                guard_artifact,
+                status="error",
+                error_kind="guard",
                 elapsed_sec=time.monotonic() - started,
             )
         return _role_entry(
-            role, artifact, status=status, error_kind=error_kind,
+            role,
+            artifact,
+            status=status,
+            error_kind=error_kind,
             elapsed_sec=time.monotonic() - started,
         )
 
@@ -408,7 +419,9 @@ def _run_role(
         try:
             system = load_specialist_prompt(role)
         except (OSError, ValueError) as exc:
-            raise _RoleFailure("input", f"role prompt fragment unavailable: {mask_secrets(str(exc))}")
+            raise _RoleFailure(
+                "input", f"role prompt fragment unavailable: {mask_secrets(str(exc))}"
+            )
 
         payload = _build_payload(
             api_format=api_format,
@@ -424,7 +437,9 @@ def _run_role(
         # The request artifact is the payload itself — structurally secret-
         # free (the key travels only in the transport's 0600 curl config).
         if not _guarded_write(
-            workspace_root, f"specialist-{role}.request.json", _json_text(payload),
+            workspace_root,
+            f"specialist-{role}.request.json",
+            _json_text(payload),
             abort=cancel,
         ):
             raise _RoleFailure("guard", "refused to write the request artifact")
@@ -438,9 +453,7 @@ def _run_role(
                 raise _RoleFailure("timeout", "specialist phase deadline exceeded")
             attempt_timeout = min(float(role_timeout_sec), remaining)
             try:
-                response = request_fn(
-                    base_url, api_format, payload, api_key, attempt_timeout
-                )
+                response = request_fn(base_url, api_format, payload, api_key, attempt_timeout)
             except Exception as exc:  # noqa: BLE001 - fail-soft by design
                 masked = str(mask_secrets(str(exc)))[:500]
                 if "timed out" in masked.lower():
@@ -450,9 +463,7 @@ def _run_role(
                     delay = min(RETRY_DELAY_SEC, max(0.0, deadline - time.monotonic()))
                     if delay > 0:
                         if cancel.wait(delay):
-                            raise _RoleFailure(
-                                "timeout", "specialist phase deadline exceeded"
-                            )
+                            raise _RoleFailure("timeout", "specialist phase deadline exceeded")
                     continue
                 raise last_error
 
@@ -496,9 +507,7 @@ def _run_role(
             _json_text({"error": f"{failure.kind}: {failure.message}"}),
             abort=cancel,
         )
-        return finish(
-            failure_artifact, status="error", error_kind=failure.kind
-        )
+        return finish(failure_artifact, status="error", error_kind=failure.kind)
 
 
 def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str]]:
@@ -516,9 +525,7 @@ def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Run the deep-review specialist passes (#608)."
-    )
+    parser = argparse.ArgumentParser(description="Run the deep-review specialist passes (#608).")
     parser.add_argument(
         "--corpus",
         default="review-corpus.truncated.md",
@@ -567,9 +574,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             artifact["errors"].append(f"input: {corpus_error}")
             _guarded_write(workspace_root, f"specialist-{role}.json", _json_text(artifact))
             entries.append(
-                _role_entry(
-                    role, artifact, status="error", error_kind="input", elapsed_sec=0.0
-                )
+                _role_entry(role, artifact, status="error", error_kind="input", elapsed_sec=0.0)
             )
     else:
         user_message = f"{_USER_PREFIX}\n\n{corpus}"
@@ -586,18 +591,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             try:
                 results[role] = _run_role_inner(role)
             except Exception as exc:  # noqa: BLE001 - last-resort guard
-                message = (
-                    f"transport: specialist worker crashed: "
-                    f"{mask_secrets(str(exc))[:500]}"
-                )
+                message = f"transport: specialist worker crashed: {mask_secrets(str(exc))[:500]}"
                 artifact = _empty_artifact(role)
                 artifact["errors"].append(message)
                 _write_role_failure_artifacts(
-                    workspace_root, role, artifact, message,
+                    workspace_root,
+                    role,
+                    artifact,
+                    message,
                     cancel=cancels[role],
                 )
                 results[role] = _role_entry(
-                    role, artifact, status="error", error_kind="transport",
+                    role,
+                    artifact,
+                    status="error",
+                    error_kind="transport",
                     elapsed_sec=time.monotonic() - phase_started,
                 )
 
@@ -637,14 +645,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             threads[role].join(timeout=max(0.0, remaining))
             if threads[role].is_alive():
                 cancels[role].set()
-                timeout_message = (
-                    f"timeout: specialist phase exceeded {phase_timeout_sec}s"
-                )
+                timeout_message = f"timeout: specialist phase exceeded {phase_timeout_sec}s"
                 artifact = _empty_artifact(role)
                 artifact["errors"].append(timeout_message)
-                _write_role_failure_artifacts(
-                    workspace_root, role, artifact, timeout_message
-                )
+                _write_role_failure_artifacts(workspace_root, role, artifact, timeout_message)
                 results[role] = _role_entry(
                     role,
                     artifact,
@@ -669,9 +673,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
         "total_leads": sum(entry["lead_count"] for entry in entries),
-        "any_errors": any(
-            entry["status"] != "ok" or entry["errors_count"] for entry in entries
-        ),
+        "any_errors": any(entry["status"] != "ok" or entry["errors_count"] for entry in entries),
         "roles": entries,
     }
     if not _guarded_write(workspace_root, "specialists.json", _json_text(aggregate)):

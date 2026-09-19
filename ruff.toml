@@ -1,0 +1,29 @@
+# Ruff lint baseline for pr-reviewer-action.
+#
+# This repo has no committed lint configuration; ruff's default rule set
+# (UP, SIM, PL, BLE, EXE, RUF, ...) was never adopted by the codebase and
+# fires hundreds of style-only findings across legacy code. This pins a
+# conservative baseline that matches the style the code is written in:
+# pyflakes (F) and core pycodestyle correctness (E4/E7/E9).
+#
+# Relaxed (style, not correctness):
+#   E402 - module-level import not at top: 100+ files import after sys.path
+#          setup / guards (the scripts are entry points, not a package).
+#   E741 - ambiguous variable name `l`: legacy tests use `l = ...` for loop
+#          locals and the suite asserts on those names.
+#   E731 - lambda assignment: a few modules assign lambdas to module-level
+#          names; that pattern predates this baseline.
+#   F401 - imported but unused: scripts/ and pr_reviewer/ deliberately keep
+#          re-export import blocks (e.g. run_tool_harness.py re-imports the
+#          transport + executor names so existing call sites and tests keep
+#          working). Removing them breaks the suite, so they are exempt.
+#
+# Import-order (I) rules are not enabled: the existing import blocks are
+# load-ordered around the E402-style guards and re-export shims, and
+# auto-reordering them risks the same breakage.
+
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E402", "E741", "E731", "F401"]

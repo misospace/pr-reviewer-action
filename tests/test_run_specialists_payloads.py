@@ -29,13 +29,9 @@ import run_specialists  # noqa: E402
 ROLES = ("correctness", "security", "tests")
 
 #: Valid OpenAI-shaped response: choices[0].message.content, empty leads.
-_OPENAI_OK = {
-    "choices": [{"message": {"role": "assistant", "content": '{"leads": []}'}}]
-}
+_OPENAI_OK = {"choices": [{"message": {"role": "assistant", "content": '{"leads": []}'}}]}
 #: Valid Anthropic-shaped response: content text blocks; echoes role "tests".
-_ANTHROPIC_OK = {
-    "content": [{"type": "text", "text": '{"role": "tests", "leads": []}'}]
-}
+_ANTHROPIC_OK = {"content": [{"type": "text", "text": '{"role": "tests", "leads": []}'}]}
 #: A valid lead set (no echoed role) so every role gets a clean "ok" artifact.
 _LEADS_OK = {
     "choices": [
@@ -79,8 +75,7 @@ def _make_fake(captured, response, delay=0.0):
     return fake
 
 
-def _run_main(monkeypatch, tmp_path, env_overrides=None, base=None,
-              response=_OPENAI_OK, delay=0.0):
+def _run_main(monkeypatch, tmp_path, env_overrides=None, base=None, response=_OPENAI_OK, delay=0.0):
     """Run run_specialists.main() with a controlled env and captured fake.
 
     Returns (exit_code, workspace_root, captured_calls).
@@ -113,13 +108,9 @@ def _run_main(monkeypatch, tmp_path, env_overrides=None, base=None,
     corpus.write_text("corpus line one\n", encoding="utf-8")
 
     captured = []
-    monkeypatch.setattr(
-        run_specialists, "run_chat_request", _make_fake(captured, response, delay)
-    )
+    monkeypatch.setattr(run_specialists, "run_chat_request", _make_fake(captured, response, delay))
 
-    rc = run_specialists.main(
-        ["--corpus", str(corpus), "--workspace-root", str(ws)]
-    )
+    rc = run_specialists.main(["--corpus", str(corpus), "--workspace-root", str(ws)])
     return rc, ws, captured
 
 
@@ -179,9 +170,7 @@ def test_temperature_unset_omitted(monkeypatch, tmp_path):
 def test_response_format_json_object(monkeypatch, tmp_path):
     rc, _, captured = _run_main(monkeypatch, tmp_path, {"AI_RESPONSE_FORMAT": "json_object"})
     assert rc == 0
-    assert all(
-        c["payload"]["response_format"] == {"type": "json_object"} for c in captured
-    )
+    assert all(c["payload"]["response_format"] == {"type": "json_object"} for c in captured)
 
 
 def test_response_format_json_schema_downgrades(monkeypatch, tmp_path):
@@ -288,9 +277,7 @@ def test_per_attempt_timeout_capped_by_role_timeout(monkeypatch, tmp_path):
 
 def test_aggregate_deadline_reaps_stragglers(monkeypatch, tmp_path):
     start = time.monotonic()
-    rc, ws, _ = _run_main(
-        monkeypatch, tmp_path, {"DEEP_REVIEW_TIMEOUT_SEC": "1"}, delay=3.0
-    )
+    rc, ws, _ = _run_main(monkeypatch, tmp_path, {"DEEP_REVIEW_TIMEOUT_SEC": "1"}, delay=3.0)
     wall = time.monotonic() - start
     assert rc == 0
     assert wall < 3.0
@@ -342,9 +329,7 @@ def test_api_key_never_leaks_to_artifacts_or_output(monkeypatch, tmp_path, capsy
     assert "sk-secret-KEY123" not in out.err
     for role in ROLES:
         artifact = _read_json(ws, f"specialist-{role}.json")
-        assert set(artifact) == {
-            "version", "role", "leads", "truncated", "truncation", "errors"
-        }
+        assert set(artifact) == {"version", "role", "leads", "truncated", "truncation", "errors"}
 
 
 # --- 12. stdout hygiene ---------------------------------------------------------

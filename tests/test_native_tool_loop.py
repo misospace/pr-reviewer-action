@@ -67,9 +67,7 @@ def openai_tool_call_response(calls, content=None):
 
 def openai_text_response(text):
     return {
-        "choices": [
-            {"finish_reason": "stop", "message": {"role": "assistant", "content": text}}
-        ]
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]
     }
 
 
@@ -156,7 +154,9 @@ def test_two_hop_chain_then_stop():
     post = scripted_post(
         [
             openai_tool_call_response([("c1", "read_file", '{"path": "machineconfig.yaml"}')]),
-            openai_tool_call_response([("c2", "web_fetch", '{"url": "https://example.com/matrix"}')]),
+            openai_tool_call_response(
+                [("c2", "web_fetch", '{"url": "https://example.com/matrix"}')]
+            ),
             openai_text_response("evidence: matrix says supported"),
         ]
     )
@@ -218,9 +218,7 @@ def test_error_tool_result_is_marked_and_loop_continues():
         conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
     )
     assert outcome.stop_reason == STOP_MODEL_DONE
-    error_results = [
-        e for e in conv.events if e["kind"] == "tool_result" and e["is_error"]
-    ]
+    error_results = [e for e in conv.events if e["kind"] == "tool_result" and e["is_error"]]
     assert len(error_results) == 1
 
 
@@ -257,9 +255,7 @@ def test_tool_call_budget_exhaustion():
     # The refused call still got a (synthetic error) result.
     assert conv.open_tool_call_ids() == set()
     budget_notes = [
-        e
-        for e in conv.events
-        if e["kind"] == "tool_result" and "budget" in e["content"].lower()
+        e for e in conv.events if e["kind"] == "tool_result" and "budget" in e["content"].lower()
     ]
     assert len(budget_notes) == 1
 
@@ -376,8 +372,10 @@ def test_wall_clock_triggers_mid_flight():
 def _big_execute(nbytes):
     """execute_fn returning a large result body to push the conversation over
     the context budget."""
+
     def execute(name, args):
         return {"tool": name, "status": "ok", "result": {"content": "Z" * nbytes}}
+
     return execute
 
 
@@ -386,8 +384,7 @@ def test_summarize_fn_folds_oldest_results_when_over_budget():
     post = scripted_post(
         [
             openai_tool_call_response(
-                [("c1", "read_file", '{"path": "a"}'),
-                 ("c2", "read_file", '{"path": "b"}')]
+                [("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]
             ),
             openai_text_response("done"),
         ]
@@ -426,8 +423,7 @@ def test_empty_digest_falls_back_to_truncation():
     post = scripted_post(
         [
             openai_tool_call_response(
-                [("c1", "read_file", '{"path": "a"}'),
-                 ("c2", "read_file", '{"path": "b"}')]
+                [("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]
             ),
             openai_text_response("done"),
         ]
@@ -459,8 +455,7 @@ def test_no_summarize_fn_truncates_as_before():
     post = scripted_post(
         [
             openai_tool_call_response(
-                [("c1", "read_file", '{"path": "a"}'),
-                 ("c2", "read_file", '{"path": "b"}')]
+                [("c1", "read_file", '{"path": "a"}'), ("c2", "read_file", '{"path": "b"}')]
             ),
             openai_text_response("done"),
         ]
@@ -623,9 +618,7 @@ def test_payloads_carry_tools_and_history():
         return responses.pop(0)
 
     execute, _log = recording_execute()
-    drive_tool_loop(
-        conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets()
-    )
+    drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
     assert len(seen_payloads) == 2
     assert all("tools" in p for p in seen_payloads)
     assert seen_payloads[0]["stream"] is False
@@ -693,7 +686,11 @@ def test_round_calls_execute_concurrently_and_in_order():
         return {"tool": tool, "status": "ok", "result": {"path": args["path"]}}
 
     outcome = drive_tool_loop(
-        conv, post, execute, api_format="openai", model="m",
+        conv,
+        post,
+        execute,
+        api_format="openai",
+        model="m",
         budgets=LoopBudgets(max_tool_calls=3),
     )
     assert len(outcome.executed) == 3

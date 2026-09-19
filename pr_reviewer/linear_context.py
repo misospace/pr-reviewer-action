@@ -111,9 +111,9 @@ def fetch_issue(
     timeout: int = 20,
 ) -> dict[str, Any]:
     """Fetch one Linear issue by human-readable identifier."""
-    request_body = json.dumps(
-        {"query": _ISSUE_QUERY, "variables": {"id": identifier}}
-    ).encode("utf-8")
+    request_body = json.dumps({"query": _ISSUE_QUERY, "variables": {"id": identifier}}).encode(
+        "utf-8"
+    )
     request = Request(
         api_url,
         data=request_body,
@@ -173,9 +173,7 @@ def fetch_issue(
     }
 
 
-def render_markdown(
-    issues: list[dict[str, Any]], errors: list[tuple[str, str]]
-) -> str:
+def render_markdown(issues: list[dict[str, Any]], errors: list[tuple[str, str]]) -> str:
     """Render fetched Linear issues as untrusted fenced JSON corpus data."""
     parts: list[str] = []
     for issue in issues:
@@ -205,9 +203,7 @@ def collect_from_pr(
     errors: list[tuple[str, str]] = []
     for identifier in extract_issue_identifiers(str(pr.get("title") or ""), prefixes):
         try:
-            issues.append(
-                fetch_issue(identifier, api_key, api_url=api_url, timeout=timeout)
-            )
+            issues.append(fetch_issue(identifier, api_key, api_url=api_url, timeout=timeout))
         except LinearContextError as exc:
             errors.append((identifier, str(exc)))
     return issues, errors
@@ -252,13 +248,10 @@ def main(argv: list[str] | None = None) -> int:
     Path(args.output_json).write_text(
         json.dumps(issues, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    Path(args.output_markdown).write_text(
-        render_markdown(issues, errors), encoding="utf-8"
-    )
+    Path(args.output_markdown).write_text(render_markdown(issues, errors), encoding="utf-8")
     if errors:
         print(
-            f"linear_context: fetched {len(issues)} issue(s), "
-            f"{len(errors)} fetch failure(s)",
+            f"linear_context: fetched {len(issues)} issue(s), {len(errors)} fetch failure(s)",
             file=sys.stderr,
         )
     return 0

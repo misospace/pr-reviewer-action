@@ -76,13 +76,9 @@ class TestResolvePlatformOverrides(unittest.TestCase):
         # An empty override means "no configured Forgejo URL"; the server-host
         # inference still applies on auto.
         with _env(GITHUB_SERVER_URL="https://forgejo.example.com"):
-            self.assertEqual(
-                resolve_platform(platform="auto", forgejo_api_url=""), "forgejo"
-            )
+            self.assertEqual(resolve_platform(platform="auto", forgejo_api_url=""), "forgejo")
         with _env(GITHUB_SERVER_URL="https://github.com"):
-            self.assertEqual(
-                resolve_platform(platform="auto", forgejo_api_url=""), "github"
-            )
+            self.assertEqual(resolve_platform(platform="auto", forgejo_api_url=""), "github")
 
     def test_empty_platform_override_defaults_to_github(self):
         with _env(PLATFORM="forgejo"):

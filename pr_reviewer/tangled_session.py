@@ -181,7 +181,9 @@ def load_config(env: Mapping[str, str] | None = None) -> SessionConfig:
         try:
             timeout = max(1, int(raw_timeout))
         except ValueError:
-            raise TangledConfigError("ATPROTO_TIMEOUT must be an integer number of seconds") from None
+            raise TangledConfigError(
+                "ATPROTO_TIMEOUT must be an integer number of seconds"
+            ) from None
     return SessionConfig(host=host, handle=handle, app_password=app_password, timeout=timeout)
 
 
@@ -358,7 +360,9 @@ class TangledSession:
                 return self._xrpc_post(path, payload, authorized=True, _retried=True)
             raise TangledSessionError(_describe_failure(path, exc.code, code)) from None
         except (URLError, TimeoutError, OSError) as exc:
-            raise TangledSessionError(f"ATProto request to {self._config.host} failed: network error") from exc
+            raise TangledSessionError(
+                f"ATProto request to {self._config.host} failed: network error"
+            ) from exc
         if len(raw) > MAX_RESPONSE_BYTES:
             raise TangledSessionError(f"ATProto response to {path} exceeded the size limit")
         try:

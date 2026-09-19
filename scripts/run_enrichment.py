@@ -50,6 +50,7 @@ from pr_reviewer.enrichment import (  # noqa: E402
     parse_allowed_hosts,
     select_target_version,
 )
+
 # fetch_url / gh_api_call are re-exported here so existing tests can reach
 # them as run_enrichment.<name>; render_linked_sources looks them up in the
 # pr_reviewer.linked_sources namespace.
@@ -62,10 +63,13 @@ def _parse_allowed_repos(raw: str | None) -> set[str] | None:
         return None
     items = {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
     return items or None
+
+
 from pr_reviewer.linked_sources import render_linked_sources  # noqa: E402
 
 
 # --- File I/O helpers (injectable for tests) ---
+
 
 def read_file(name: str) -> str:
     p = Path(name)
@@ -79,6 +83,7 @@ def write_file(name: str, content: str) -> None:
 
 
 # --- Main ---
+
 
 def main() -> None:
     pr_body = read_file("pr-body.txt")
@@ -107,7 +112,10 @@ def main() -> None:
 
     version_hints = extract_version_hints(diff, limit=None)
     write_file("version-hints.txt", "\n".join(version_hints) + ("\n" if version_hints else ""))
-    write_file("version-hints.truncated.txt", "\n".join(version_hints[:180]) + ("\n" if version_hints else ""))
+    write_file(
+        "version-hints.truncated.txt",
+        "\n".join(version_hints[:180]) + ("\n" if version_hints else ""),
+    )
 
     ghcr_images = extract_ghcr_images(version_hints, diff)
     write_file("ghcr-images.txt", "\n".join(ghcr_images) + ("\n" if ghcr_images else ""))

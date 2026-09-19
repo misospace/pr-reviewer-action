@@ -29,7 +29,11 @@ EVIDENCE_SCRIPT = _SCRIPTS_DIR / "run_evidence_providers.py"
 def test_run_provider_argv_json_and_truncation():
     entry = run_provider(
         1,
-        {"id": "argv", "command": [sys.executable, "-c", "print('x' * 300)"], "max_output_bytes": 256},
+        {
+            "id": "argv",
+            "command": [sys.executable, "-c", "print('x' * 300)"],
+            "max_output_bytes": 256,
+        },
         default_timeout=5,
         default_max_output=1024,
     )
@@ -42,7 +46,11 @@ def test_run_provider_argv_json_and_truncation():
 def test_run_provider_shell_string_json():
     entry = run_provider(
         2,
-        {"id": "shell", "command": "printf '{\\\"severity\\\":\\\"warning\\\"}'", "output_format": "json"},
+        {
+            "id": "shell",
+            "command": 'printf \'{\\"severity\\":\\"warning\\"}\'',
+            "output_format": "json",
+        },
         default_timeout=5,
         default_max_output=1024,
     )
@@ -55,7 +63,11 @@ def test_run_provider_shell_string_json():
 def test_run_provider_timeout_shape():
     entry = run_provider(
         3,
-        {"id": "timeout", "command": [sys.executable, "-c", "import time; time.sleep(2)"], "timeout_sec": 1},
+        {
+            "id": "timeout",
+            "command": [sys.executable, "-c", "import time; time.sleep(2)"],
+            "timeout_sec": 1,
+        },
         default_timeout=1,
         default_max_output=1024,
     )
@@ -63,6 +75,7 @@ def test_run_provider_timeout_shape():
     assert entry["exit_code"] is None
     assert entry["stdout_truncated"] is False
     assert entry["output_format"] == "text"
+
 
 HELPER_JSON_FINDINGS = """\
 #!/usr/bin/env python3
@@ -100,9 +113,7 @@ sys.stderr.write("token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\\n")
 """
 
 
-def _run_with_config(
-    config_data, tmp_path: Path, extra_env=None
-) -> subprocess.CompletedProcess:
+def _run_with_config(config_data, tmp_path: Path, extra_env=None) -> subprocess.CompletedProcess:
     config_file = tmp_path / "providers.json"
     config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
     env = os.environ.copy()
@@ -126,6 +137,7 @@ def _load_json_output(tmp_path: Path) -> dict:
 
 
 # ── Core function tests: normalize_severity ─────────────────────────
+
 
 def test_normalize_severity_info():
     assert normalize_severity("info") == "info"
@@ -165,6 +177,7 @@ def test_normalize_severity_whitespace():
 
 # ── Core function tests: severity_rank ──────────────────────────────
 
+
 def test_severity_rank_blocker():
     assert severity_rank("blocker") == 3
 
@@ -178,6 +191,7 @@ def test_severity_rank_info():
 
 
 # ── Core function tests: parse_findings ─────────────────────────────
+
 
 def test_parse_findings_empty_dict():
     severity, findings = parse_findings({})
@@ -294,6 +308,7 @@ def test_parse_findings_empty_sources_becomes_empty_string():
 
 # ── Core function tests: env_int ────────────────────────────────────
 
+
 def test_env_int_valid():
     with mock.patch.dict(os.environ, {"TEST_ENV_INT": "42"}):
         assert env_int("TEST_ENV_INT", 10) == 42
@@ -374,7 +389,11 @@ class TestSarifEvidence:
         env["GITHUB_WORKSPACE"] = str(tmp_path)
         result = subprocess.run(
             [sys.executable, str(EVIDENCE_SCRIPT)],
-            cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         assert result.returncode == 0
         assert _load_json_output(tmp_path)["configured"] is False
@@ -403,7 +422,9 @@ class TestSarifEvidence:
         data = _load_json_output(tmp_path)
         assert [entry["id"] for entry in data["providers"]] == ["command", "sarif-1", "sarif-2"]
 
-    @pytest.mark.parametrize("sarif_files, expected", [("missing.sarif", "not found"), ("bad.sarif", "parse")])
+    @pytest.mark.parametrize(
+        "sarif_files, expected", [("missing.sarif", "not found"), ("bad.sarif", "parse")]
+    )
     def test_malformed_or_missing_sarif_is_an_error(self, tmp_path: Path, sarif_files, expected):
         path = tmp_path / sarif_files
         if sarif_files == "bad.sarif":
@@ -532,6 +553,7 @@ class TestSarifEvidence:
 
 # ── Integration tests: no providers configured ─────────────────────
 
+
 class TestNoConfig:
     def test_empty_env(self, tmp_path: Path):
         result = _run_with_config({}, tmp_path)
@@ -558,6 +580,7 @@ class TestNoConfig:
 
 
 # ── Integration tests: stdout capture ──────────────────────────────
+
 
 class TestStdoutCapture:
     def test_json_stdout_with_findings(self, tmp_path: Path):
@@ -588,6 +611,7 @@ class TestStdoutCapture:
 
 # ── Integration tests: stderr capture ───────────────────────────────
 
+
 class TestStderrCapture:
     def test_stderr_is_captured(self, tmp_path: Path):
         helper = tmp_path / "stderr_provider.py"
@@ -601,7 +625,11 @@ class TestStderrCapture:
         assert "[REDACTED]" in p["stderr"]
 
     def test_stderr_only_provider(self, tmp_path: Path):
-        config = {"providers": [{"id": "test-stderr-only", "command": 'echo "no stdout, only stderr" >&2; exit 0'}]}
+        config = {
+            "providers": [
+                {"id": "test-stderr-only", "command": 'echo "no stdout, only stderr" >&2; exit 0'}
+            ]
+        }
         result = _run_with_config(config, tmp_path)
         assert result.returncode == 0
         data = _load_json_output(tmp_path)
@@ -610,6 +638,7 @@ class TestStderrCapture:
 
 
 # ── Integration tests: silent provider (no output) ─────────────────
+
 
 class TestSilentProvider:
     def test_silent_provider_no_crash(self, tmp_path: Path):
@@ -623,7 +652,9 @@ class TestSilentProvider:
         assert p["stderr"].strip() == ""
 
     def test_silent_providers_list(self, tmp_path: Path):
-        config = {"providers": [{"id": "s1", "command": "true"}, {"id": "s2", "command": "echo -n ''"}]}
+        config = {
+            "providers": [{"id": "s1", "command": "true"}, {"id": "s2", "command": "echo -n ''"}]
+        }
         result = _run_with_config(config, tmp_path)
         assert result.returncode == 0
         data = _load_json_output(tmp_path)
@@ -633,6 +664,7 @@ class TestSilentProvider:
 
 
 # ── Integration tests: nonzero exit code ───────────────────────────
+
 
 class TestNonzeroExit:
     def test_nonzero_exit_status(self, tmp_path: Path):
@@ -655,6 +687,7 @@ class TestNonzeroExit:
 
 
 # ── Integration tests: blocker severity ────────────────────────────
+
 
 class TestBlockerProvider:
     def test_blocker_severity_sets_flag(self, tmp_path: Path):
@@ -681,6 +714,7 @@ class TestBlockerProvider:
 
 # ── Integration tests: secret redaction ─────────────────────────────
 
+
 class TestSecretRedaction:
     def test_stdout_secrets_redacted(self, tmp_path: Path):
         helper = tmp_path / "secret_stdout.py"
@@ -696,7 +730,9 @@ class TestSecretRedaction:
     def test_stderr_secrets_redacted(self, tmp_path: Path):
         helper = tmp_path / "secret_stderr.py"
         helper.write_text(HELPER_SECRET_STDERR)
-        config = {"providers": [{"id": "test-stderr-redact", "command": f"{sys.executable} {helper}"}]}
+        config = {
+            "providers": [{"id": "test-stderr-redact", "command": f"{sys.executable} {helper}"}]
+        }
         result = _run_with_config(config, tmp_path)
         assert result.returncode == 0
         data = _load_json_output(tmp_path)
@@ -706,6 +742,7 @@ class TestSecretRedaction:
 
 
 # ── Integration tests: markdown output ─────────────────────────────
+
 
 class TestMarkdownOutput:
     def test_markdown_file_created(self, tmp_path: Path):
@@ -774,6 +811,7 @@ class TestMarkdownOutput:
 
 # ── Integration tests: command format (argv vs shell string) ───────
 
+
 class TestCommandFormat:
     def test_argv_command_executes_directly(self, tmp_path: Path):
         """Argv array commands run via subprocess with no shell interpretation."""
@@ -820,6 +858,7 @@ class TestCommandFormat:
 
 # ── Unit tests: shell-string trust-boundary WARN log ───────────────
 
+
 class TestShellStringWarnLog:
     """Verify that run_provider emits a WARNING for shell-string commands.
 
@@ -849,6 +888,7 @@ class TestShellStringWarnLog:
 
 # ── Integration tests: fork enablement skip behavior ────────────────
 
+
 class TestForkEnablement:
     """Tests for evidence_enable_for_forks skip logic.
 
@@ -856,6 +896,7 @@ class TestForkEnablement:
     verify the flag normalization used by the shell condition:
       IS_FORK_PR == "true" && EVIDENCE_ENABLE_FOR_FORKS != "true" (case-insensitive)
     """
+
     def _should_skip(self, is_fork_pr: str, enable_for_forks: str | None = None) -> bool:
         value = (enable_for_forks or "false").strip().lower()
         return is_fork_pr == "true" and value != "true"
@@ -953,7 +994,10 @@ class TestParallelExecution:
     def test_model_api_keys_scrubbed_from_provider_env(self, tmp_path: Path):
         config = {
             "providers": [
-                {"id": "env-probe", "command": "echo \"key=[${AI_API_KEY:-}] fb=[${AI_FALLBACK_API_KEY:-}] primary=[${AI_PRIMARY_API_KEY:-}] smart=[${AI_SMART_API_KEY:-}] linear=[${LINEAR_API_KEY:-}] gh=[${GH_TOKEN:-}]\""}
+                {
+                    "id": "env-probe",
+                    "command": 'echo "key=[${AI_API_KEY:-}] fb=[${AI_FALLBACK_API_KEY:-}] primary=[${AI_PRIMARY_API_KEY:-}] smart=[${AI_SMART_API_KEY:-}] linear=[${LINEAR_API_KEY:-}] gh=[${GH_TOKEN:-}]"',
+                }
             ]
         }
         result = _run_caps(
@@ -1064,14 +1108,17 @@ class TestMarkdownCaps:
     def test_stdout_is_head_tail_capped_in_markdown(self, tmp_path: Path):
         config = {
             "providers": [
-                {"id": "chatty", "command": "python3 -c \"print('START'); print('x' * 9000); print('THE-ERROR-AT-END')\""}
+                {
+                    "id": "chatty",
+                    "command": "python3 -c \"print('START'); print('x' * 9000); print('THE-ERROR-AT-END')\"",
+                }
             ]
         }
         result = _run_caps(config, tmp_path, {"EVIDENCE_MARKDOWN_STDOUT_BYTES": "1000"})
         assert result.returncode == 0, f"stderr: {result.stderr}"
         md = (tmp_path / "evidence-providers.md").read_text()
         assert "START" in md
-        assert "THE-ERROR-AT-END" in md          # tail survives
+        assert "THE-ERROR-AT-END" in md  # tail survives
         assert "…[middle truncated]…" in md
         # JSON summary keeps the full (per-provider capped) stdout.
         data = _load_json_output(tmp_path)
@@ -1079,8 +1126,7 @@ class TestMarkdownCaps:
 
     def test_aggregate_cap_stops_further_embeds(self, tmp_path: Path):
         providers = [
-            {"id": f"p{i}", "command": "python3 -c \"print('y' * 3000)\""}
-            for i in range(4)
+            {"id": f"p{i}", "command": "python3 -c \"print('y' * 3000)\""} for i in range(4)
         ]
         result = _run_caps(
             {"providers": providers},

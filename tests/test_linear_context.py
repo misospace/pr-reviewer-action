@@ -151,14 +151,14 @@ def test_workspace_module_cannot_shadow_action_adapter(tmp_path):
 
 def test_incremental_corpus_changes_only_when_linear_is_enabled():
     corpus_source = (_REPO_ROOT / "scripts/sections/corpus.sh").read_text()
-    incremental_setup = corpus_source.split(
-        'if [[ "$corpus_type" == "incremental" ]]; then', 1
-    )[1].split("      local head_sha", 1)[0]
+    incremental_setup = corpus_source.split('if [[ "$corpus_type" == "incremental" ]]; then', 1)[
+        1
+    ].split("      local head_sha", 1)[0]
     assert "cat linear-issues.md" in incremental_setup
     assert "cat linked-issues.md" not in incremental_setup
 
     full_setup = corpus_source.split(
-        '    else\n      # context.sh leaves linked-issues.md empty', 1
+        "    else\n      # context.sh leaves linked-issues.md empty", 1
     )[1].split('      echo "# PR Files (truncated)"', 1)[0]
     assert "cat linked-issues.md" in full_setup
 
@@ -175,18 +175,21 @@ def test_cli_with_no_matching_title_writes_empty_artifacts(tmp_path, monkeypatch
         lambda *_args, **_kwargs: pytest.fail("network should not be called"),
     )
 
-    assert linear_context.main(
-        [
-            "--pr-json",
-            str(pr_json),
-            "--prefixes",
-            "DST,LAB",
-            "--output-json",
-            str(output_json),
-            "--output-markdown",
-            str(output_markdown),
-        ]
-    ) == 0
+    assert (
+        linear_context.main(
+            [
+                "--pr-json",
+                str(pr_json),
+                "--prefixes",
+                "DST,LAB",
+                "--output-json",
+                str(output_json),
+                "--output-markdown",
+                str(output_markdown),
+            ]
+        )
+        == 0
+    )
     assert json.loads(output_json.read_text()) == []
     assert output_markdown.read_text() == ""
 
@@ -215,18 +218,21 @@ def test_cli_ignores_environment_endpoint_override(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(linear_context, "urlopen", fake_urlopen)
-    assert linear_context.main(
-        [
-            "--pr-json",
-            str(pr_json),
-            "--prefixes",
-            "LAB",
-            "--output-json",
-            str(output_json),
-            "--output-markdown",
-            str(output_markdown),
-        ]
-    ) == 0
+    assert (
+        linear_context.main(
+            [
+                "--pr-json",
+                str(pr_json),
+                "--prefixes",
+                "LAB",
+                "--output-json",
+                str(output_json),
+                "--output-markdown",
+                str(output_markdown),
+            ]
+        )
+        == 0
+    )
     assert requested_urls == [linear_context.LINEAR_API_URL]
 
 

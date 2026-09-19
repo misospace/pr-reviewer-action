@@ -62,7 +62,9 @@ class TestApplyEvidenceBlockerEnforcement:
     def test_missing_evidence_file(self, tmp_path):
         output_path = tmp_path / "ai-output.json"
         output_path.write_text(json.dumps({"verdict": "approve", "review_markdown": "ok"}))
-        result = apply_evidence_blocker_enforcement(str(tmp_path / "missing.json"), str(output_path))
+        result = apply_evidence_blocker_enforcement(
+            str(tmp_path / "missing.json"), str(output_path)
+        )
         assert result == (False, "")
 
     def test_invalid_json_evidence(self, tmp_path):
@@ -406,10 +408,22 @@ class TestApplyVerdictPolicy:
         return out
 
     def _blocker(self):
-        return {"severity": "blocker", "category": "bug", "file": "a.py", "line": 1, "message": "bad"}
+        return {
+            "severity": "blocker",
+            "category": "bug",
+            "file": "a.py",
+            "line": 1,
+            "message": "bad",
+        }
 
     def _minor(self):
-        return {"severity": "minor", "category": "style", "file": None, "line": None, "message": "meh"}
+        return {
+            "severity": "minor",
+            "category": "style",
+            "file": None,
+            "line": None,
+            "message": "meh",
+        }
 
     def test_model_policy_is_a_no_op(self, tmp_path):
         out = self._write(tmp_path, "approve", [self._blocker()])
@@ -472,10 +486,14 @@ class TestApplyVerdictPolicy:
     def test_enforcement_still_overrides_gated_approve(self, tmp_path):
         out = self._write(tmp_path, "approve", [self._minor()])
         evidence = tmp_path / "evidence-providers.json"
-        evidence.write_text(json.dumps({
-            "has_blocker": True,
-            "providers": [{"id": "sec-scan", "provider_severity": "blocker"}],
-        }))
+        evidence.write_text(
+            json.dumps(
+                {
+                    "has_blocker": True,
+                    "providers": [{"id": "sec-scan", "provider_severity": "blocker"}],
+                }
+            )
+        )
         apply_verdict_policy("findings_severity_gated", str(out))
         apply_all_enforcement(
             evidence_blocker_enabled=True,

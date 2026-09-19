@@ -63,7 +63,13 @@ def source_file(path: str, *symbols: tuple[str, str] | str, deleted: bool = Fals
         else:
             name, confidence = value, "high"
         values.append({"name": name, "kind": "function", "confidence": confidence, "line": 1})
-    result = {"path": path, "language": "python", "symbols": values, "imports": [], "identifiers": []}
+    result = {
+        "path": path,
+        "language": "python",
+        "symbols": values,
+        "imports": [],
+        "identifiers": [],
+    }
     if deleted:
         result["deleted"] = True
     return result
@@ -214,7 +220,9 @@ def test_git_timeout_degrades_to_explicit_error(tmp_path, monkeypatch):
         return None, "", "command timed out: after 0.1s"
 
     monkeypatch.setattr(related_context, "_run_git", timeout)
-    result = build_related_context(anchors(source_file("module.py", "target")), root, git_timeout_sec=0.1)
+    result = build_related_context(
+        anchors(source_file("module.py", "target")), root, git_timeout_sec=0.1
+    )
     assert result["truncated"] is True
     assert any("timed out" in error for error in result["errors"])
 
@@ -223,12 +231,19 @@ def test_secret_redaction_and_hostile_markdown_are_safe(tmp_path):
     snippet = "token=supersecret123 ` ```` boundary\nnext"
     related = {
         "version": 1,
-        "files": [{
-            "path": "weird`path\n.py",
-            "symbols": [{"name": "target", "references": [{"path": "hostile`path.py", "line": 2, "snippet": snippet}]}],
-            "tests": ["tests/test_`hostile.py"],
-            "manifests": ["pyproject.toml"],
-        }],
+        "files": [
+            {
+                "path": "weird`path\n.py",
+                "symbols": [
+                    {
+                        "name": "target",
+                        "references": [{"path": "hostile`path.py", "line": 2, "snippet": snippet}],
+                    }
+                ],
+                "tests": ["tests/test_`hostile.py"],
+                "manifests": ["pyproject.toml"],
+            }
+        ],
         "truncated": False,
         "errors": [],
     }
@@ -243,7 +258,10 @@ def test_secret_redaction_and_hostile_markdown_are_safe(tmp_path):
 
 def test_caps_expose_default_bounds():
     assert (MAX_SYMBOLS, MAX_REFERENCES_PER_SYMBOL, MAX_REFERENCES, MAX_MANIFESTS_PER_FILE) == (
-        40, 20, 200, 20
+        40,
+        20,
+        200,
+        20,
     )
 
 
@@ -286,7 +304,10 @@ def test_global_reference_cap_marks_later_symbols_unsearched(tmp_path):
     )
     symbols = result["files"][0]["symbols"]
     assert symbols == [
-        {"name": "first", "references": [{"path": "a_reference.py", "line": 1, "snippet": "first()"}]},
+        {
+            "name": "first",
+            "references": [{"path": "a_reference.py", "line": 1, "snippet": "first()"}],
+        },
         {"name": "second", "references": []},
     ]
     assert result["truncated"] is True
@@ -310,15 +331,22 @@ def test_manifest_cap_is_explicit_and_deterministic(tmp_path):
 def test_json_cap_preserves_valid_json_and_hard_limit():
     related = {
         "version": 1,
-        "files": [{
-            "path": "module.py",
-            "symbols": [{"name": "target", "references": [
-                {"path": f"ref_{index}.py", "line": index, "snippet": "x" * 1000}
-                for index in range(300)
-            ]}],
-            "tests": [],
-            "manifests": [],
-        }],
+        "files": [
+            {
+                "path": "module.py",
+                "symbols": [
+                    {
+                        "name": "target",
+                        "references": [
+                            {"path": f"ref_{index}.py", "line": index, "snippet": "x" * 1000}
+                            for index in range(300)
+                        ],
+                    }
+                ],
+                "tests": [],
+                "manifests": [],
+            }
+        ],
         "truncated": False,
         "errors": [],
         "truncation": {"truncated": False, "reasons": []},
@@ -345,9 +373,9 @@ def test_load_json_errors_do_not_render_oserror_details(tmp_path, monkeypatch):
 def test_cli_writes_versioned_json_and_markdown(tmp_path):
     root = make_repo(tmp_path, {"module.py": "def target():\n    return 1\n"})
     anchor_path = tmp_path / "change-anchors.json"
-    anchor_path.write_text(json.dumps(anchors(source_file("module.py", "target"))), encoding="utf-8")
-    json_out = tmp_path / "related-code.json"
-    md_out = tmp_path / "related-code.md"
+    anchor_path.write_text(
+        json.dumps(anchors(source_file("module.py", "target"))), encoding="utf-8"
+    )
     proc = subprocess.run(
         [
             sys.executable,

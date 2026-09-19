@@ -238,10 +238,7 @@ class TestSelectiveStripping:
 class TestMarkdownRobustness:
     def test_does_not_match_hash_inside_code_fence(self):
         """A '# Linked Issue' line inside a code block is not a real heading."""
-        text = (
-            "## Summary\n\n```\n## Linked Issue Fit\nnot a heading\n```\n\n"
-            "## Sources\n\nok.\n"
-        )
+        text = "## Summary\n\n```\n## Linked Issue Fit\nnot a heading\n```\n\n## Sources\n\nok.\n"
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # The line inside the fence is preserved.
         assert "## Linked Issue Fit" in result
@@ -249,11 +246,7 @@ class TestMarkdownRobustness:
 
     def test_preserves_surrounding_blank_line_layout(self):
         """Stripping doesn't leave huge blank gaps or eat unrelated content."""
-        text = (
-            "## Summary\n\nA.\n\n"
-            "## Linked Issue Fit\n\nNope.\n\n"
-            "## Sources\n\nB.\n"
-        )
+        text = "## Summary\n\nA.\n\n## Linked Issue Fit\n\nNope.\n\n## Sources\n\nB.\n"
         result = strip_empty_conditional_sections(text, ABSENT_ALL)
         # No runs of 3+ newlines remain.
         assert "\n\n\n" not in result
@@ -301,11 +294,13 @@ class TestEdgeCaseInputs:
         """An empty input file is handled without error (in-place CLI path)."""
         import subprocess
         import sys
+
         f = tmp_path / "empty.md"
         f.write_text("")
         r = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "strip_empty_conditional_sections.py"), str(f)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={"PATH": "/usr/bin:/bin"},
         )
         assert r.returncode == 0
@@ -327,7 +322,8 @@ class TestEdgeCaseInputs:
         kept.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(kept)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "true"},
         )
         assert r.returncode == 0
@@ -337,7 +333,8 @@ class TestEdgeCaseInputs:
         stripped.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(stripped)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={"PATH": "/usr/bin:/bin", "STANDARDS_PRESENT": "false"},
         )
         assert r.returncode == 0
@@ -380,9 +377,7 @@ class TestToolHarness:
         assert "## Summary" in result
         assert "## Sources" in result
 
-    @pytest.mark.parametrize(
-        "heading", ["## Tool Harness Findings", "## Tool Harness Results"]
-    )
+    @pytest.mark.parametrize("heading", ["## Tool Harness Findings", "## Tool Harness Results"])
     def test_present_harness_section_is_kept(self, heading):
         text = f"## Summary\n\nLGTM.\n\n{heading}\n\ngh_api (ok): 3 calls.\n"
         assert strip_empty_conditional_sections(text, PRESENT_ALL) == text
@@ -466,9 +461,7 @@ class TestToolHarness:
         real = "## Tool Harness Findings (incremental review)\n\nfiller.\n"
         assert strip_empty_conditional_sections(real, ABSENT_ALL).strip() == ""
 
-    @pytest.mark.parametrize(
-        "heading", ["## Tool Harness Findings", "## Tool Harness Results"]
-    )
+    @pytest.mark.parametrize("heading", ["## Tool Harness Findings", "## Tool Harness Results"])
     def test_tool_harness_present_env_is_honored_via_cli(self, tmp_path, heading):
         """TOOL_HARNESS_PRESENT is read on the in-place CLI path.
 
@@ -487,7 +480,8 @@ class TestToolHarness:
         kept.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(kept)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={"PATH": "/usr/bin:/bin", "TOOL_HARNESS_PRESENT": "true"},
         )
         assert r.returncode == 0
@@ -497,7 +491,8 @@ class TestToolHarness:
         stripped.write_text(body)
         r = subprocess.run(
             [sys.executable, script, str(stripped)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={"PATH": "/usr/bin:/bin", "TOOL_HARNESS_PRESENT": "false"},
         )
         assert r.returncode == 0

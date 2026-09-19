@@ -51,9 +51,8 @@ def http_json(url, headers=None):
 def registry_targets(repo: str):
     if repo.startswith("docker.io/"):
         repo_path = repo[len("docker.io/") :]
-        token_url = (
-            "https://auth.docker.io/token?service=registry.docker.io&scope="
-            + parse.quote(f"repository:{repo_path}:pull", safe=":")
+        token_url = "https://auth.docker.io/token?service=registry.docker.io&scope=" + parse.quote(
+            f"repository:{repo_path}:pull", safe=":"
         )
         base_url = "https://registry-1.docker.io"
         return repo_path, token_url, base_url
@@ -64,13 +63,10 @@ def registry_targets(repo: str):
         )
         base_url = "https://ghcr.io"
         return repo_path, token_url, base_url
-    if repo.count("/") == 1 and not repo.startswith(
-        ("quay.io/", "gcr.io/", "registry.k8s.io/")
-    ):
+    if repo.count("/") == 1 and not repo.startswith(("quay.io/", "gcr.io/", "registry.k8s.io/")):
         repo_path = repo
-        token_url = (
-            "https://auth.docker.io/token?service=registry.docker.io&scope="
-            + parse.quote(f"repository:{repo_path}:pull", safe=":")
+        token_url = "https://auth.docker.io/token?service=registry.docker.io&scope=" + parse.quote(
+            f"repository:{repo_path}:pull", safe=":"
         )
         base_url = "https://registry-1.docker.io"
         return repo_path, token_url, base_url
@@ -168,9 +164,7 @@ def github_repo_from_source(source: Optional[str]):
     if not source:
         return None
     src = source.strip()
-    match = re.search(
-        r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s?#]+)", src, re.IGNORECASE
-    )
+    match = re.search(r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s?#]+)", src, re.IGNORECASE)
     if match:
         owner = match.group("owner")
         repo = match.group("repo")
@@ -240,9 +234,7 @@ def fetch_github_compare(
         result["commits"] = [
             {
                 "sha": (commit.get("sha") or "")[:12],
-                "message": (
-                    (commit.get("commit") or {}).get("message") or ""
-                ).splitlines()[0],
+                "message": ((commit.get("commit") or {}).get("message") or "").splitlines()[0],
             }
             for commit in (data.get("commits") or [])[:15]
         ]
@@ -302,9 +294,7 @@ def fetch_all_metadata(changes, deadline=None, max_workers=8):
         return {pairs[0]: fetch_digest_metadata(repo, digest, deadline)}
     with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
         metas = list(
-            executor.map(
-                lambda pair: fetch_digest_metadata(pair[0], pair[1], deadline), pairs
-            )
+            executor.map(lambda pair: fetch_digest_metadata(pair[0], pair[1], deadline), pairs)
         )
     return dict(zip(pairs, metas))
 
@@ -350,9 +340,7 @@ def parse_diff(diff_text: str):
                 buckets.setdefault(key, {"old": [], "new": []})
             continue
 
-        match_digest_only = re.match(
-            r'^([+-])\s*digest:\s*[\'"]?(sha256:[0-9a-f]{64})', raw
-        )
+        match_digest_only = re.match(r'^([+-])\s*digest:\s*[\'"]?(sha256:[0-9a-f]{64})', raw)
         if match_digest_only and current_repo:
             sign = match_digest_only.group(1)
             digest = match_digest_only.group(2)
@@ -362,9 +350,7 @@ def parse_diff(diff_text: str):
             buckets[key]["old" if sign == "-" else "new"].append(digest)
             continue
 
-        match_image = re.match(
-            r'^([+-])\s*image:\s*[\'"]?([^\'"\s,]+@sha256:[0-9a-f]{64})', raw
-        )
+        match_image = re.match(r'^([+-])\s*image:\s*[\'"]?([^\'"\s,]+@sha256:[0-9a-f]{64})', raw)
         if match_image:
             sign = match_image.group(1)
             image_ref = match_image.group(2)
@@ -472,17 +458,13 @@ def main():
             new_rev = new_meta.get("revision")
             if old_rev and new_rev:
                 if old_rev != new_rev:
-                    lines.append(
-                        "- Revision changed: **yes** (new code revision present)"
-                    )
+                    lines.append("- Revision changed: **yes** (new code revision present)")
                 else:
                     lines.append(
                         "- Revision changed: **no** (likely rebuild or republish of same source revision)"
                     )
             else:
-                lines.append(
-                    "- Revision changed: **unknown** (missing OCI revision labels)"
-                )
+                lines.append("- Revision changed: **unknown** (missing OCI revision labels)")
 
             if mismatch:
                 lines.append(
@@ -504,17 +486,13 @@ def main():
                     f"- Compare summary: status={short(compare.get('status'))}, total_commits={short(compare.get('total_commits'))}, ahead_by={short(compare.get('ahead_by'))}, behind_by={short(compare.get('behind_by'))}"
                 )
             elif compare.get("error"):
-                lines.append(
-                    f"- Compare lookup: **unavailable** ({short(compare.get('error'))})"
-                )
+                lines.append(f"- Compare lookup: **unavailable** ({short(compare.get('error'))})")
 
             commits = compare.get("commits") or []
             if commits:
                 lines.append("- Commits between old/new revision:")
                 for commit in commits:
-                    lines.append(
-                        f"  - `{short(commit.get('sha'))}` {short(commit.get('message'))}"
-                    )
+                    lines.append(f"  - `{short(commit.get('sha'))}` {short(commit.get('message'))}")
 
             files = compare.get("files") or []
             if files:

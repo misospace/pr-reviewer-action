@@ -264,9 +264,7 @@ def test_valid_line_variants_normalize_to_an_int(raw, expected):
 
 
 def test_non_array_leads_is_a_visible_error_with_empty_leads():
-    result = normalize_specialist_output(
-        {"role": "tests", "leads": "not-an-array"}, role="tests"
-    )
+    result = normalize_specialist_output({"role": "tests", "leads": "not-an-array"}, role="tests")
     assert result["leads"] == []
     assert any("'leads' is not an array" in e for e in result["errors"])
 
@@ -345,9 +343,7 @@ def test_utf8_byte_cap_holds_exactly_and_drops_trailing_whole_leads():
     # genuine byte test, not a char-count alias.
     payload = {
         "role": "security",
-        "leads": [
-            {"message": "日本語 lead " + str(i), "severity": "major"} for i in range(6)
-        ],
+        "leads": [{"message": "日本語 lead " + str(i), "severity": "major"} for i in range(6)],
     }
     result = normalize_specialist_output(payload, role="security")
     uncapped = render_specialist_markdown(result)
@@ -528,9 +524,7 @@ def test_identical_input_produces_identical_output():
         ],
     }
     first = normalize_specialist_output(payload, role="security")
-    second = normalize_specialist_output(
-        json.loads(json.dumps(payload)), role="security"
-    )
+    second = normalize_specialist_output(json.loads(json.dumps(payload)), role="security")
     assert first == second
     # Round-trips through JSON without loss.
     assert json.loads(json.dumps(first)) == first
@@ -543,8 +537,7 @@ def test_output_order_is_stable_across_calls():
     }
     orders = {
         tuple(
-            lead["message"]
-            for lead in normalize_specialist_output(payload, role="tests")["leads"]
+            lead["message"] for lead in normalize_specialist_output(payload, role="tests")["leads"]
         )
         for _ in range(5)
     }
@@ -765,9 +758,7 @@ def test_cli_normalizes_valid_input_inside_workspace(tmp_path):
     input_path = tmp_path / "leads.json"
     output_path = tmp_path / "specialist-security.json"
     input_path.write_text(
-        json.dumps(
-            {"role": "security", "leads": [{"message": "ok", "severity": "major"}]}
-        ),
+        json.dumps({"role": "security", "leads": [{"message": "ok", "severity": "major"}]}),
         encoding="utf-8",
     )
     env = dict(os.environ)
@@ -804,9 +795,7 @@ def test_cli_relative_output_is_workspace_root_relative(tmp_path, monkeypatch):
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     input_path = tmp_path / "in.json"
-    input_path.write_text(
-        json.dumps({"role": "security", "leads": []}), encoding="utf-8"
-    )
+    input_path.write_text(json.dumps({"role": "security", "leads": []}), encoding="utf-8")
     rc = main(
         [
             "--role",

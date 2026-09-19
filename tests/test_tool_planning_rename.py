@@ -109,9 +109,7 @@ def test_new_inputs_declared_and_documented():
         )
     readme = (_REPO_ROOT / "README.md").read_text()
     for name in _NEW_INPUT_NAMES:
-        assert f"`{name}`" in readme, (
-            f"README must document the renamed input '{name}'"
-        )
+        assert f"`{name}`" in readme, f"README must document the renamed input '{name}'"
 
 
 def test_action_yml_does_not_forward_legacy_env_names():
@@ -123,9 +121,7 @@ def test_action_yml_does_not_forward_legacy_env_names():
     """
     action = (_REPO_ROOT / "action.yml").read_text()
     offenders = [
-        line
-        for line in action.splitlines()
-        if re.match(r"^\s+TOOL_PLANNING_[A-Z_]+:", line)
+        line for line in action.splitlines() if re.match(r"^\s+TOOL_PLANNING_[A-Z_]+:", line)
     ]
     assert not offenders, (
         "action.yml env blocks must not forward the legacy TOOL_PLANNING_* "
@@ -164,9 +160,7 @@ def test_legacy_names_confined_to_deprecation_sites():
         for name, _line in mentions:
             per_name[name] = per_name.get(name, 0) + 1
         for name, count in per_name.items():
-            allowed = (
-                allowed_env if name in _LEGACY_ENV_NAMES else allowed_input
-            )
+            allowed = allowed_env if name in _LEGACY_ENV_NAMES else allowed_input
             if allowed is None:
                 violations.append(
                     f"{rel}: legacy {name} reference is not allowed in this "
@@ -175,8 +169,7 @@ def test_legacy_names_confined_to_deprecation_sites():
                 )
             elif count > allowed:
                 violations.append(
-                    f"{rel}: legacy name '{name}' appears {count} times "
-                    f"(allowed {allowed})"
+                    f"{rel}: legacy name '{name}' appears {count} times (allowed {allowed})"
                 )
     assert not violations, (
         "legacy tool_planning_* names escaped the deprecation-alias sites:\n"
@@ -192,9 +185,9 @@ def test_shell_and_python_read_new_name_first():
         ("TOOL_CORPUS_MAX_BYTES", "TOOL_PLANNING_MAX_CONTEXT_BYTES"),
         ("TOOL_MAX_TOKENS_PER_TURN", "TOOL_PLANNING_MAX_TOKENS"),
     ):
-        assert re.search(
-            rf'{new}="\${{{new}:-\${{{legacy}:-', config_sh
-        ), f"config.sh must default {new} from the legacy {legacy}"
+        assert re.search(rf'{new}="\${{{new}:-\${{{legacy}:-', config_sh), (
+            f"config.sh must default {new} from the legacy {legacy}"
+        )
 
     harness = (_REPO_ROOT / "scripts" / "run_tool_harness.py").read_text()
     for new, legacy in (
@@ -202,12 +195,10 @@ def test_shell_and_python_read_new_name_first():
         ("TOOL_CORPUS_MAX_BYTES", "TOOL_PLANNING_MAX_CONTEXT_BYTES"),
         ("TOOL_MAX_TOKENS_PER_TURN", "TOOL_PLANNING_MAX_TOKENS"),
     ):
-        assert re.search(
-            rf'os\.getenv\("{new}"\)\s*\n\s*or os\.getenv\("{legacy}"', harness
-        ), f"run_tool_harness.py must read {new} with {legacy} as fallback"
+        assert re.search(rf'os\.getenv\("{new}"\)\s+or\s+os\.getenv\("{legacy}"', harness), (
+            f"run_tool_harness.py must read {new} with {legacy} as fallback"
+        )
 
     precheck = (_REPO_ROOT / "pr_reviewer" / "precheck.py").read_text()
     for name in _NEW_ENV_NAMES:
-        assert f'"{name}"' in precheck, (
-            f"precheck.py fingerprint allowlist must include '{name}'"
-        )
+        assert f'"{name}"' in precheck, f"precheck.py fingerprint allowlist must include '{name}'"

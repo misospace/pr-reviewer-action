@@ -112,7 +112,7 @@ def parse_dismiss_directive(comment_body: str) -> list[dict]:
         line = _strip_blockquote(raw_line).strip()
         if not line.startswith(_DISMISS_PREFIX):
             continue
-        rest = line[len(_DISMISS_PREFIX):].lstrip()
+        rest = line[len(_DISMISS_PREFIX) :].lstrip()
         if not rest:
             continue
         # First try colon-separator; then em-dash; then hyphen. The hyphen
@@ -208,16 +208,13 @@ def write_dismissed_findings(
             link_target = target
         if not (link_target == resolved_root or resolved_root in link_target.parents):
             raise ValueError(
-                f"target_path {target_path!r} resolves outside "
-                f"workspace_root {workspace_root!r}"
+                f"target_path {target_path!r} resolves outside workspace_root {workspace_root!r}"
             )
         if "\x00" in str(target_path):
             raise ValueError(f"target_path contains null byte: {target_path!r}")
         for part in Path(target_str).parts:
             if part == "..":
-                raise ValueError(
-                    f"target_path {target_path!r} contains '..' segment"
-                )
+                raise ValueError(f"target_path {target_path!r} contains '..' segment")
     else:
         target_str = os.fspath(target_path)
         if "\x00" in target_str:
@@ -292,8 +289,7 @@ def load_dismissed_findings(
         item_file = item.get("file")
         target_cat = target.get("category")
         target_file = target.get("file")
-        if (item_cat is None or item_file is None
-                or target_cat is None or target_file is None):
+        if item_cat is None or item_file is None or target_cat is None or target_file is None:
             continue
         if item_cat != target_cat or item_file != target_file:
             continue
@@ -519,15 +515,12 @@ def apply_carry_forward(
                 by = mask_secrets(str(by_raw)) if by_raw else "a maintainer"
                 suffix = f" — {reason}" if reason else ""
                 lines.append(
-                    f"- [{i['id']}] ({i['severity']}) {i['message']} "
-                    f"_(dismissed by {by}{suffix})_"
+                    f"- [{i['id']}] ({i['severity']}) {i['message']} _(dismissed by {by}{suffix})_"
                 )
         if open_items:
             lines.append("")
             lines.append("Still open (carried forward):")
-            lines.extend(
-                f"- [{i['id']}] ({i['severity']}) {i['message']}" for i in open_items
-            )
+            lines.extend(f"- [{i['id']}] ({i['severity']}) {i['message']}" for i in open_items)
         data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
 
     # Fail-closed verdict: surviving carried blockers block, regardless of
@@ -544,9 +537,7 @@ def apply_carry_forward(
         )
         summary["forced_request_changes"] = True
 
-    Path(output_path).write_text(
-        json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
 
     # Surface the escalation signal to the bash side (#544): the reviewer
     # step reads the file after enforcement, and the publish step persists

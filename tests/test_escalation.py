@@ -96,9 +96,7 @@ class TestShouldEscalate:
             "It rambles for a while to clear the low-confidence length bar "
             "and looks plausible without addressing what matters here.",
         )
-        _write_classification(
-            tmp_path, must_check=["verify file path sanitization"]
-        )
+        _write_classification(tmp_path, must_check=["verify file path sanitization"])
         escalate, reasons = should_escalate(on_incomplete=True)
         assert "incomplete_required_checks" in reasons
 
@@ -118,12 +116,14 @@ class TestShouldEscalate:
             must_check=["verify no breaking API changes in upstream release"],
         )
         (tmp_path / "classification.json").write_text(
-            json.dumps({
-                "pr_kind": "dependency_upgrade",
-                "risk_flags": [],
-                "route_signals": ["dependency_upgrade"],
-                "must_check": ["verify no breaking API changes in upstream release"],
-            })
+            json.dumps(
+                {
+                    "pr_kind": "dependency_upgrade",
+                    "risk_flags": [],
+                    "route_signals": ["dependency_upgrade"],
+                    "must_check": ["verify no breaking API changes in upstream release"],
+                }
+            )
         )
         escalate, reasons = should_escalate()
         assert escalate is False
@@ -185,10 +185,12 @@ class TestShouldEscalate:
         _write_fast_output(tmp_path)
         _write_classification(tmp_path)
         (tmp_path / "tool-harness.json").write_text(
-            json.dumps({
-                "executed_request_count": 2,
-                "tool_results": [{"status": "error"}, {"status": "error"}],
-            })
+            json.dumps(
+                {
+                    "executed_request_count": 2,
+                    "tool_results": [{"status": "error"}, {"status": "error"}],
+                }
+            )
         )
         escalate, reasons = should_escalate()
         assert reasons == ["tool_or_evidence_blockers"]

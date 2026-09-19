@@ -246,8 +246,10 @@ class TestMainOutput:
                 "repo_source": None,
             }
 
-        with mock.patch.object(ida, "fetch_digest_metadata", fake_fetch), \
-                mock.patch.object(ida, "fetch_github_compare", fake_compare):
+        with (
+            mock.patch.object(ida, "fetch_digest_metadata", fake_fetch),
+            mock.patch.object(ida, "fetch_github_compare", fake_compare),
+        ):
             ida.main()
 
         out = (tmp_path / "image-digest-context.md").read_text()

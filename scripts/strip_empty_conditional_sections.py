@@ -89,6 +89,7 @@ def _normalise_title(heading_text: str) -> str:
             break
     return " ".join(t.split())
 
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 # CommonMark fenced code block opening: up to 3 leading spaces, then 3+ backticks
 # or tildes. A line that opens a fence suspends heading parsing until it closes.
@@ -249,9 +250,7 @@ def main() -> None:
 
     if args.dry_run:
         removed = [
-            k
-            for k in list(SECTION_HEADINGS) + list(SECTION_TITLES)
-            if _section_absent(k, present)
+            k for k in list(SECTION_HEADINGS) + list(SECTION_TITLES) if _section_absent(k, present)
         ]
         sys.stdout.write(stripped)
         sys.stderr.write(

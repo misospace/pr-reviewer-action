@@ -103,7 +103,8 @@ def _normalise_file_list(file_list: Iterable[Any] | None) -> list[dict[str, Any]
 
 
 def _changed_paths(
-    anchor_files: list[dict[str, Any]], file_list: list[dict[str, Any]],
+    anchor_files: list[dict[str, Any]],
+    file_list: list[dict[str, Any]],
 ) -> tuple[set[str], set[str]]:
     changed: set[str] = set()
     deleted: set[str] = set()
@@ -130,7 +131,9 @@ def _error(kind: str, detail: Any = "") -> str:
 
 
 def _run_git(
-    argv: list[str], workspace: str, timeout: float,
+    argv: list[str],
+    workspace: str,
+    timeout: float,
 ) -> tuple[int | None, str, str]:
     try:
         proc = subprocess.run(
@@ -266,7 +269,9 @@ def git_grep_references(
 def _is_test_path(path: str) -> bool:
     parts = [part.lower() for part in path.split("/")]
     base = parts[-1] if parts else ""
-    if any(part in {"test", "tests", "spec", "specs", "testing", "__tests__"} for part in parts[:-1]):
+    if any(
+        part in {"test", "tests", "spec", "specs", "testing", "__tests__"} for part in parts[:-1]
+    ):
         return True
     return bool(_TEST_BASE_RE.match(base)) or base.endswith("_test.go")
 
@@ -341,7 +346,7 @@ def _discover_manifests(changed_path: str, tracked: set[str]) -> tuple[list[str]
         for path in tracked:
             if not _is_manifest(path) or not path.startswith(prefix):
                 continue
-            remainder = path[len(prefix):]
+            remainder = path[len(prefix) :]
             if "/" not in remainder:
                 local.append(path)
         manifests.extend(sorted(local))
@@ -545,7 +550,10 @@ def build_related_context(
 
 
 def _json_dump(value: dict[str, Any], indent: int) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=min(max(0, int(indent)), 8), sort_keys=False) + "\n"
+    return (
+        json.dumps(value, ensure_ascii=False, indent=min(max(0, int(indent)), 8), sort_keys=False)
+        + "\n"
+    )
 
 
 def _mark_json_cap(related: dict[str, Any]) -> None:
@@ -609,7 +617,8 @@ def _minimal_json_artifact(related: dict[str, Any]) -> dict[str, Any]:
     if (
         isinstance(version, bool)
         or not isinstance(version, (int, float, str))
-        or isinstance(version, str) and len(version) > 100
+        or isinstance(version, str)
+        and len(version) > 100
     ):
         version = ARTIFACT_VERSION
     minimal = {
@@ -638,7 +647,9 @@ def render_related_context_json(related: dict[str, Any], indent: int = 2) -> str
             rendered = _json_dump(bounded, indent)
             if len(rendered.encode("utf-8")) <= cap:
                 bounded["truncation"]["omitted_output_bytes"] = max(
-                    0, len(_json_dump(related, indent).encode("utf-8")) - len(rendered.encode("utf-8"))
+                    0,
+                    len(_json_dump(related, indent).encode("utf-8"))
+                    - len(rendered.encode("utf-8")),
                 )
                 return _json_dump(bounded, indent)
             if not stage(bounded):
@@ -719,12 +730,20 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
     truncation = related.get("truncation") or {}
     if related.get("truncated") or truncation.get("truncated"):
         reasons = ", ".join(str(reason) for reason in truncation.get("reasons") or [])
-        lines.extend(["## Bounds", "", f"_Output is bounded and incomplete ({_display(reasons or 'cap reached')})._"])
+        lines.extend(
+            [
+                "## Bounds",
+                "",
+                f"_Output is bounded and incomplete ({_display(reasons or 'cap reached')})._",
+            ]
+        )
     return lines
 
 
 def render_related_context_markdown(
-    related: dict[str, Any], *, max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
+    related: dict[str, Any],
+    *,
+    max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
 ) -> str:
     """Render a compact line-bounded Markdown artifact with safe code spans."""
     lines = _render_lines(related)
@@ -772,7 +791,9 @@ def _load_json(path: str) -> tuple[Any, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build bounded related-code context from change anchors.")
+    parser = argparse.ArgumentParser(
+        description="Build bounded related-code context from change anchors."
+    )
     parser.add_argument("--anchors", default="change-anchors.json")
     parser.add_argument("--files", default="")
     parser.add_argument("--workspace", "--workspace-root", dest="workspace", default="")
@@ -789,7 +810,9 @@ def main(argv: list[str] | None = None) -> int:
         file_data, file_error = _load_json(args.files)
     if not isinstance(file_data, list):
         file_data = file_data.get("files", []) if isinstance(file_data, dict) else []
-    result = build_related_context(anchor_data, workspace, file_data, git_timeout_sec=args.git_timeout)
+    result = build_related_context(
+        anchor_data, workspace, file_data, git_timeout_sec=args.git_timeout
+    )
     if anchor_error:
         result["errors"].insert(0, anchor_error)
         result["truncated"] = True

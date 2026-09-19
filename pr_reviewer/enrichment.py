@@ -37,13 +37,14 @@ def extract_urls(body: str, diff: str, limit: int | None = 25) -> list[str]:
 def normalize_url(url: str) -> str:
     """Normalize redirect.github.com to github.com."""
     if url.startswith("https://redirect.github.com/"):
-        return "https://github.com/" + url[len("https://redirect.github.com/"):]
+        return "https://github.com/" + url[len("https://redirect.github.com/") :]
     if url.startswith("http://redirect.github.com/"):
-        return "http://github.com/" + url[len("http://redirect.github.com/"):]
+        return "http://github.com/" + url[len("http://redirect.github.com/") :]
     return url
 
 
 # --- Host allowlist ---
+
 
 def parse_allowed_hosts(raw: str) -> set[str]:
     """Parse comma-separated ALLOWED_SOURCE_HOSTS into a lowercase set."""
@@ -233,18 +234,10 @@ def extract_compare_shas(version_hints: list[str]) -> tuple[str, str] | None:
 
 # --- URL classification ---
 
-_GH_RELEASE_RE = re.compile(
-    r"^https?://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)"
-)
-_GH_COMPARE_RE = re.compile(
-    r"^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+)"
-)
-_FORGE_RELEASE_RE = re.compile(
-    r"^https?://([^/]+)/([^/]+)/([^/]+)/releases/tag/([^/?#]+)"
-)
-_FORGE_COMPARE_RE = re.compile(
-    r"^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)"
-)
+_GH_RELEASE_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/releases/tag/([^/?#]+)")
+_GH_COMPARE_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/compare/([^?#]+)")
+_FORGE_RELEASE_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/releases/tag/([^/?#]+)")
+_FORGE_COMPARE_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/compare/([^?#]+)")
 
 
 def classify_url(url: str) -> dict | None:

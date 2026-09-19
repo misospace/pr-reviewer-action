@@ -40,6 +40,7 @@ def safe_run(args, timeout_sec):
             "stderr": (exc.stderr or "") if isinstance(exc.stderr, str) else "",
         }
 
+
 def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
     """POST a wire-ready chat payload via curl and return the parsed JSON.
 
@@ -63,7 +64,9 @@ def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
         "Content-Type: application/json",
     ]
     if api_format == "anthropic":
-        curl_args.extend(["-H", f"anthropic-version: {os.getenv('ANTHROPIC_VERSION', '2023-06-01')}"])
+        curl_args.extend(
+            ["-H", f"anthropic-version: {os.getenv('ANTHROPIC_VERSION', '2023-06-01')}"]
+        )
 
     # Streaming keeps bytes flowing so proxies with a short idle/read timeout
     # (Cloudflare's 100s edge timer etc.) don't 524 a long thinking-model turn.

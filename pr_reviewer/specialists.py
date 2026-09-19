@@ -237,9 +237,7 @@ def _normalize_lead(
         file_path = _sanitize_string(file_path.strip())
         while file_path.startswith("./"):
             file_path = file_path[2:]
-        file_path = (
-            _bounded_text(file_path, MAX_FILE_CHARS, "message_chars", result) or None
-        )
+        file_path = _bounded_text(file_path, MAX_FILE_CHARS, "message_chars", result) or None
     else:
         file_path = None
 
@@ -283,16 +281,13 @@ def normalize_specialist_output(
     if role not in SPECIALIST_ROLES:
         _add_error(
             result,
-            f"unknown specialist role: {role!r}; "
-            f"expected one of {list(SPECIALIST_ROLES_ORDER)}",
+            f"unknown specialist role: {role!r}; expected one of {list(SPECIALIST_ROLES_ORDER)}",
         )
         return result
     result["role"] = role
 
     max_leads = _cap(max_leads, MAX_LEADS, "max_leads", result)
-    max_message_chars = _cap(
-        max_message_chars, MAX_MESSAGE_CHARS, "max_message_chars", result
-    )
+    max_message_chars = _cap(max_message_chars, MAX_MESSAGE_CHARS, "max_message_chars", result)
 
     if not isinstance(payload, dict):
         _add_error(result, "specialist payload must be a JSON object")
@@ -302,10 +297,7 @@ def normalize_specialist_output(
     # error, but the requested ``role`` is authoritative, so we continue.
     echoed = payload.get("role")
     if echoed is not None:
-        if (
-            not isinstance(echoed, str)
-            or echoed.strip().lower() not in SPECIALIST_ROLES
-        ):
+        if not isinstance(echoed, str) or echoed.strip().lower() not in SPECIALIST_ROLES:
             _add_error(
                 result,
                 f"payload role {echoed!r} is not a known specialist role",
@@ -364,9 +356,7 @@ def normalize_specialist_output(
 
 def _strip_markdown_fence(text: str) -> str | None:
     stripped = text.strip()
-    if not (
-        stripped.startswith("```") and stripped.endswith("```") and len(stripped) >= 6
-    ):
+    if not (stripped.startswith("```") and stripped.endswith("```") and len(stripped) >= 6):
         return None
     body = stripped[3:-3]
     # Drop a leading language tag on the opening fence, e.g. "```json".
@@ -472,8 +462,7 @@ def prompt_fragment_path(role: str) -> Path:
     """Path of the role's trust-framed prompt fragment on disk."""
     if role not in SPECIALIST_ROLES:
         raise ValueError(
-            f"unknown specialist role: {role!r}; "
-            f"expected one of {list(SPECIALIST_ROLES_ORDER)}"
+            f"unknown specialist role: {role!r}; expected one of {list(SPECIALIST_ROLES_ORDER)}"
         )
     return _repo_root() / "scripts" / "prompt_fragments" / f"specialist_{role}.txt"
 
@@ -511,9 +500,7 @@ def _safe_fence(content: str) -> tuple[str, str]:
     the content, which would close the block early and let the specialist's
     text inject markdown into the surrounding prompt.
     """
-    longest = max(
-        (len(m.group(0)) for m in _BACKTICK_RUN_RE.finditer(content)), default=0
-    )
+    longest = max((len(m.group(0)) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
     if longest + 1 > _MAX_FENCE:
         # Neutralize any run of 11+ backticks to a run of 10 so the fence can
         # always be chosen strictly longer than the content's longest run.
@@ -551,9 +538,7 @@ def _lead_line(lead: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _assemble_specialist_markdown(
-    header: str, lead_lines: list[str], note: str | None
-) -> str:
+def _assemble_specialist_markdown(header: str, lead_lines: list[str], note: str | None) -> str:
     """Wrap *lead_lines* in a fence that a hostile message cannot close.
 
     A zero-lead document carries no fence (nothing to close); a lead document
@@ -660,9 +645,7 @@ def _read_input(path: str) -> tuple[str | None, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Normalize a specialist's JSON lead output."
-    )
+    parser = argparse.ArgumentParser(description="Normalize a specialist's JSON lead output.")
     parser.add_argument(
         "--role", required=True, help="One of: " + ", ".join(SPECIALIST_ROLES_ORDER)
     )

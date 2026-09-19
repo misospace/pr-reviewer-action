@@ -67,6 +67,7 @@ def _header_field(value: Any) -> str:
     text = _CONTROL_RE.sub("", text)
     return text.strip()[:_HEADER_FIELD_MAX_CHARS]
 
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -120,7 +121,9 @@ def _comment_sort_key(comment: dict[str, Any]) -> tuple[tuple[int, str], str]:
 
 
 def _prepare(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized = (comment for comment in (_normalize_comment(raw) for raw in comments) if comment is not None)
+    normalized = (
+        comment for comment in (_normalize_comment(raw) for raw in comments) if comment is not None
+    )
     return sorted(normalized, key=_comment_sort_key)
 
 

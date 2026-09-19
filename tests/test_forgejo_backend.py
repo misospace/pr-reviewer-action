@@ -138,10 +138,12 @@ REVIEW = {
     "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/pulls/42#pullrequestreview-55",
 }
 
+
 def _make_create_response(input_body: str) -> tuple[int, str]:
     """Return a create comment response that reflects the input body."""
     resp = dict(NEW_COMMENT, body=input_body)
     return (201, json.dumps(resp))
+
 
 EDITED_COMMENT = {
     "id": 1,
@@ -211,6 +213,7 @@ def _forgejo_env_patch() -> Any:
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
 
 class TestAuthenticatedRepoPermission(unittest.TestCase):
     @_PATCH_FORGEJO
@@ -293,8 +296,9 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
             json.dumps({"permissions": {"admin": False, "push": True, "pull": True}}),
         )
 
-        with _forgejo_env_patch(), patch.object(
-            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
+        with (
+            _forgejo_env_patch(),
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
         ):
             result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
 
@@ -319,8 +323,12 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
         ]
 
         stdout = io.StringIO()
-        with _forgejo_env_patch(), redirect_stdout(stdout), patch.object(
-            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        with (
+            _forgejo_env_patch(),
+            redirect_stdout(stdout),
+            patch.object(
+                sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+            ),
         ):
             fb.main()
 
@@ -331,8 +339,13 @@ class TestAuthenticatedRepoPermission(unittest.TestCase):
         mock_curl.return_value = (401, json.dumps({"message": "unauthorized"}))
 
         stdout = io.StringIO()
-        with _forgejo_env_patch(), redirect_stdout(stdout), redirect_stderr(io.StringIO()), patch.object(
-            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        with (
+            _forgejo_env_patch(),
+            redirect_stdout(stdout),
+            redirect_stderr(io.StringIO()),
+            patch.object(
+                sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+            ),
         ):
             with self.assertRaises(SystemExit) as ctx:
                 fb.main()
@@ -353,10 +366,14 @@ class TestAuthenticatedRepoPermissionUnknownPayload(unittest.TestCase):
         it returns ``"unknown"`` and emits an actionable warning."""
         # Newer Forgejo/Gitea occasionally omit the permissions object for
         # private repos when the bearer lacks the right scope.
-        mock_curl.return_value = (200, json.dumps({"id": 1, "full_name": "misospace/pr-reviewer-action"}))
+        mock_curl.return_value = (
+            200,
+            json.dumps({"id": 1, "full_name": "misospace/pr-reviewer-action"}),
+        )
 
-        with _forgejo_env_patch(), patch.object(
-            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
+        with (
+            _forgejo_env_patch(),
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
         ):
             with self.assertLogs(level="WARNING") as captured:
                 result = fb.get_authenticated_repo_permission("misospace/pr-reviewer-action")
@@ -419,10 +436,14 @@ class TestAuthenticatedRepoPermissionUnknownPayload(unittest.TestCase):
         )
 
         stdout = io.StringIO()
-        with _forgejo_env_patch(), patch.object(
-            fb, "FORGEJO_AUTH_METHOD", "authorized_integration"
-        ), redirect_stdout(stdout), redirect_stderr(io.StringIO()), patch.object(
-            sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+        with (
+            _forgejo_env_patch(),
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            redirect_stdout(stdout),
+            redirect_stderr(io.StringIO()),
+            patch.object(
+                sys, "argv", ["forgejo_backend", "repo-permission", "misospace/pr-reviewer-action"]
+            ),
         ):
             # main() should return without SystemExit: "unknown" is not None.
             fb.main()
@@ -447,9 +468,7 @@ class TestAuthenticatedRepoPermissionPreflightScript(unittest.TestCase):
     def _resolve_script_path():
         import os
 
-        repo_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), os.pardir)
-        )
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
         return os.path.join(repo_root, "scripts", "check_review_needed.sh")
 
     def _extract_preflight_gate_block(self):
@@ -503,10 +522,7 @@ class TestAuthenticatedRepoPermissionPreflightScript(unittest.TestCase):
                     "}\n"
                 )
                 if skip_opt is not None:
-                    f.write(
-                        f"export FORGEJO_SKIP_PERMISSION_PREFLIGHT="
-                        f"$(printf %q '{skip_opt}')\n"
-                    )
+                    f.write(f"export FORGEJO_SKIP_PERMISSION_PREFLIGHT=$(printf %q '{skip_opt}')\n")
                 f.write(gate_block + "\n")
                 f.write('echo "gate_passed"\n')
 
@@ -566,10 +582,7 @@ class TestAuthenticatedRepoPermissionPreflightScript(unittest.TestCase):
         self.assertEqual(
             proc.returncode,
             0,
-            msg=(
-                f"preflight with opt-in should proceed; stderr was:\n"
-                f"{proc.stderr}"
-            ),
+            msg=(f"preflight with opt-in should proceed; stderr was:\n{proc.stderr}"),
         )
         self.assertIn("gate_passed", proc.stdout)
         # And the opt-in path must still emit a warning so operators notice.
@@ -586,8 +599,7 @@ class TestAuthenticatedRepoPermissionPreflightScript(unittest.TestCase):
                     proc.returncode,
                     0,
                     msg=(
-                        f"preflight refused recognized {permission_value!r}; "
-                        f"stderr:\n{proc.stderr}"
+                        f"preflight refused recognized {permission_value!r}; stderr:\n{proc.stderr}"
                     ),
                 )
                 self.assertIn("gate_passed", proc.stdout)
@@ -599,8 +611,14 @@ class TestGetPrMetadata(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_returns_metadata_dict(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (200, json.dumps(PR_META)),
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (404, '{"message":"Not Found"}'),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (
+                200,
+                json.dumps(PR_META),
+            ),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (
+                404,
+                '{"message":"Not Found"}',
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -615,7 +633,10 @@ class TestGetPrMetadata(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_head_sha(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (200, json.dumps(PR_META)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (
+                200,
+                json.dumps(PR_META),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -627,7 +648,10 @@ class TestGetPrMetadata(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_base_ref(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (200, json.dumps(PR_META)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42": (
+                200,
+                json.dumps(PR_META),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -639,7 +663,10 @@ class TestGetPrMetadata(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_not_found_returns_none(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (404, '{"message":"Not Found"}'),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (
+                404,
+                '{"message":"Not Found"}',
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -655,7 +682,10 @@ class TestGetPrDiff(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_returns_diff_text(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42.diff": (200, PR_DIFF),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42.diff": (
+                200,
+                PR_DIFF,
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -684,7 +714,10 @@ class TestListComments(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_returns_comment_list(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -697,7 +730,10 @@ class TestListComments(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_comment_has_required_fields(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -714,7 +750,10 @@ class TestListComments(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_marker_present_in_first_comment(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -726,7 +765,10 @@ class TestListComments(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_comment_user_field(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -742,7 +784,10 @@ class TestCreateComment(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_creates_comment(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (201, json.dumps(NEW_COMMENT)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                201,
+                json.dumps(NEW_COMMENT),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -756,12 +801,18 @@ class TestCreateComment(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_body_reflected(self, mock_curl):
         call_count = [0]
+
         def _run(method, url, **kwargs):
             call_count[0] += 1
             # Extract body from kwargs (the POST data)
-            input_body = kwargs.get("data", {}).get("body", "default") if isinstance(kwargs.get("data"), dict) else "default"
+            input_body = (
+                kwargs.get("data", {}).get("body", "default")
+                if isinstance(kwargs.get("data"), dict)
+                else "default"
+            )
             resp = dict(NEW_COMMENT, body=input_body)
             return (201, json.dumps(resp))
+
         mock_curl.side_effect = _run
 
         with _forgejo_env_patch():
@@ -777,14 +828,21 @@ class TestEditLastComment(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_edits_matching_comment(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/comments/1": (200, json.dumps(EDITED_COMMENT)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/comments/1": (
+                200,
+                json.dumps(EDITED_COMMENT),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
         with _forgejo_env_patch():
             result = fb.edit_last_comment(
-                "misospace/pr-reviewer-action", 42,
+                "misospace/pr-reviewer-action",
+                42,
                 f"{COMMENT_MARKER}\nUpdated review comment",
             )
 
@@ -807,7 +865,8 @@ class TestEditLastComment(unittest.TestCase):
 
         with _forgejo_env_patch():
             result = fb.edit_last_comment(
-                "misospace/pr-reviewer-action", 999,
+                "misospace/pr-reviewer-action",
+                999,
                 f"{COMMENT_MARKER}\nFresh review",
             )
 
@@ -821,7 +880,10 @@ class TestFetchIssue(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_returns_issue_body(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/100": (200, json.dumps(ISSUE)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/100": (
+                200,
+                json.dumps(ISSUE),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -836,7 +898,10 @@ class TestFetchIssue(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_not_found_returns_none(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/999": (404, '{"message":"Not Found"}'),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/999": (
+                404,
+                '{"message":"Not Found"}',
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -859,7 +924,10 @@ class TestCompareCommits(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_forgejo_compare_uses_api_endpoint(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/compare/abc...def": (200, json.dumps(self._COMPARE)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/compare/abc...def": (
+                200,
+                json.dumps(self._COMPARE),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -881,12 +949,15 @@ class TestCompareCommits(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_github_compare_uses_gh_api(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, json.dumps(self._COMPARE))) as mock_gh:
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.object(fb, "_gh", return_value=(0, json.dumps(self._COMPARE))) as mock_gh,
+        ):
             result = fb.compare_commits("misospace/pr-reviewer-action", "abc...def")
 
         mock_gh.assert_called_once_with(
-            "api", "repos/misospace/pr-reviewer-action/compare/abc...def",
+            "api",
+            "repos/misospace/pr-reviewer-action/compare/abc...def",
             timeout_sec=fb.GH_API_TIMEOUT_SEC,
         )
         self.assertEqual(result["commits"][0]["sha"], "def")
@@ -898,7 +969,10 @@ class TestListPrFiles(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_returns_file_list(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (200, json.dumps(PR_FILES)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (
+                200,
+                json.dumps(PR_FILES),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -911,7 +985,10 @@ class TestListPrFiles(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_file_has_required_fields(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (200, json.dumps(PR_FILES)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (
+                200,
+                json.dumps(PR_FILES),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -927,7 +1004,10 @@ class TestListPrFiles(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_first_file_is_main_py(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (200, json.dumps(PR_FILES)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/files": (
+                200,
+                json.dumps(PR_FILES),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -954,33 +1034,45 @@ class TestGitHubMode(unittest.TestCase):
         "title": "Add new feature",
         "state": "open",
         "user": {"login": "contributor"},
-        "head": {"sha": "abc123def456", "ref": "feature-branch", "repo": {"full_name": "outsider/pr-reviewer-action"}},
-        "base": {"sha": "789xyz000", "ref": "main", "repo": {"full_name": "misospace/pr-reviewer-action"}},
+        "head": {
+            "sha": "abc123def456",
+            "ref": "feature-branch",
+            "repo": {"full_name": "outsider/pr-reviewer-action"},
+        },
+        "base": {
+            "sha": "789xyz000",
+            "ref": "main",
+            "repo": {"full_name": "misospace/pr-reviewer-action"},
+        },
         "draft": False,
     }
 
     def test_get_pr_metadata_uses_gh_api_rest(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, json.dumps(self.GH_REST_PR))) as mock_gh:
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.object(fb, "_gh", return_value=(0, json.dumps(self.GH_REST_PR))) as mock_gh,
+        ):
             result = fb.get_pr_metadata("misospace/pr-reviewer-action", 42)
 
         mock_gh.assert_called_once_with(
-            "api", "repos/misospace/pr-reviewer-action/pulls/42",
+            "api",
+            "repos/misospace/pr-reviewer-action/pulls/42",
             timeout_sec=fb.GH_API_TIMEOUT_SEC,
         )
         self.assertEqual(result["number"], 42)
         self.assertEqual(result["head"]["repo"]["full_name"], "outsider/pr-reviewer-action")
 
     def test_get_pr_metadata_returns_none_on_gh_failure(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(1, '{"message":"Not Found"}')):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.object(fb, "_gh", return_value=(1, '{"message":"Not Found"}')),
+        ):
             result = fb.get_pr_metadata("misospace/pr-reviewer-action", 999)
 
         self.assertIsNone(result)
 
     def test_get_pr_diff_returns_empty_on_gh_failure(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(1, "")):
+        with patch.object(fb, "FORGEJO_API_URL", ""), patch.object(fb, "_gh", return_value=(1, "")):
             result = fb.get_pr_diff("misospace/pr-reviewer-action", 42)
 
         self.assertEqual(result, "")
@@ -993,8 +1085,10 @@ class TestGitHubMode(unittest.TestCase):
             "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-77",
             "body": "hello",
         }
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, json.dumps(gh_comment))) as mock_gh:
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.object(fb, "_gh", return_value=(0, json.dumps(gh_comment))) as mock_gh,
+        ):
             result = fb.create_comment("misospace/pr-reviewer-action", 42, "hello")
 
         args = mock_gh.call_args[0]
@@ -1007,8 +1101,10 @@ class TestGitHubMode(unittest.TestCase):
         self.assertEqual(result["html_url"], gh_comment["html_url"])
 
     def test_create_comment_malformed_json_returns_none(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", return_value=(0, "not json")):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.object(fb, "_gh", return_value=(0, "not json")),
+        ):
             result = fb.create_comment("misospace/pr-reviewer-action", 42, "hello")
 
         self.assertIsNone(result)
@@ -1021,7 +1117,11 @@ class TestGitHubMode(unittest.TestCase):
             {"id": 1, "body": f"{COMMENT_MARKER}\nold", "updated_at": "2026-06-11T11:30:00Z"},
             {"id": 2, "body": "no marker here", "updated_at": "2026-06-11T11:40:00Z"},
         ]
-        patched = {"id": 1, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-1", "body": "updated"}
+        patched = {
+            "id": 1,
+            "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-1",
+            "body": "updated",
+        }
 
         def _fake_gh(*args, timeout_sec=None):
             if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments"):
@@ -1035,31 +1135,34 @@ class TestGitHubMode(unittest.TestCase):
             self.assertIn("--input", args)
             return 0, json.dumps(patched)
 
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", side_effect=_fake_gh):
+        with patch.object(fb, "FORGEJO_API_URL", ""), patch.object(fb, "_gh", side_effect=_fake_gh):
             result = fb.edit_last_comment("misospace/pr-reviewer-action", 42, "updated")
 
         self.assertEqual(result["id"], 1)
         self.assertEqual(result["html_url"], patched["html_url"])
 
     def test_edit_last_comment_falls_back_to_create_when_no_marker(self):
-        created = {"id": 3, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-3", "body": "fresh"}
+        created = {
+            "id": 3,
+            "html_url": "https://github.com/misospace/pr-reviewer-action/pull/42#issuecomment-3",
+            "body": "fresh",
+        }
 
         def _fake_gh(*args, timeout_sec=None):
             # The list (no --method) and the create (--method POST) both
             # target .../issues/42/comments, so disambiguate on --method.
-            if args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments") \
-                    and "--method" not in args:
+            if (
+                args[:2] == ("api", "repos/misospace/pr-reviewer-action/issues/42/comments")
+                and "--method" not in args
+            ):
                 return 0, json.dumps([])
             return 0, json.dumps(created)
 
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.object(fb, "_gh", side_effect=_fake_gh):
+        with patch.object(fb, "FORGEJO_API_URL", ""), patch.object(fb, "_gh", side_effect=_fake_gh):
             result = fb.edit_last_comment("misospace/pr-reviewer-action", 42, "fresh")
 
         self.assertEqual(result["id"], 3)
         self.assertEqual(result["html_url"], created["html_url"])
-
 
 
 class TestNativeReviews(unittest.TestCase):
@@ -1068,7 +1171,10 @@ class TestNativeReviews(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_list_pr_reviews_normalizes_state(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews": (200, json.dumps([REVIEW])),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews": (
+                200,
+                json.dumps([REVIEW]),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -1103,9 +1209,14 @@ class TestNativeReviews(unittest.TestCase):
         self.assertIsNotNone(result)
         review_call = calls[-1]
         data = review_call[2]["data"]
-        self.assertEqual(review_call[1], f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews")
+        self.assertEqual(
+            review_call[1],
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews",
+        )
         self.assertEqual(data["event"], "REQUEST_CHANGES")
-        self.assertEqual(data["comments"], [{"path": "test.txt", "new_position": 2, "body": "anchored"}])
+        self.assertEqual(
+            data["comments"], [{"path": "test.txt", "new_position": 2, "body": "anchored"}]
+        )
 
     @_PATCH_FORGEJO
     def test_create_native_review_uses_forgejo_approved_state(self, mock_curl):
@@ -1121,7 +1232,9 @@ class TestNativeReviews(unittest.TestCase):
         mock_curl.side_effect = _run
 
         with _forgejo_env_patch():
-            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "APPROVE", "looks good")
+            result = fb.create_native_review(
+                "misospace/pr-reviewer-action", 42, "APPROVE", "looks good"
+            )
 
         self.assertIsNotNone(result)
         self.assertEqual(seen["data"], {"body": "looks good", "event": "APPROVED"})
@@ -1138,7 +1251,9 @@ class TestNativeReviews(unittest.TestCase):
         mock_curl.side_effect = _run
 
         with _forgejo_env_patch():
-            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "CHANGES_REQUESTED", "needs work")
+            result = fb.create_native_review(
+                "misospace/pr-reviewer-action", 42, "CHANGES_REQUESTED", "needs work"
+            )
 
         self.assertIsNotNone(result)
         self.assertEqual(seen["data"], {"body": "needs work", "event": "REQUEST_CHANGES"})
@@ -1172,7 +1287,9 @@ class TestNativeReviews(unittest.TestCase):
 
         with _forgejo_env_patch():
             result = fb.create_pr_review_from_payload(
-                "misospace/pr-reviewer-action", 42, {"body": "b", "event": "COMMENT", "commit_id": ""}
+                "misospace/pr-reviewer-action",
+                42,
+                {"body": "b", "event": "COMMENT", "commit_id": ""},
             )
 
         self.assertIsNotNone(result)
@@ -1189,7 +1306,9 @@ class TestNativeReviews(unittest.TestCase):
         mock_curl.side_effect = _run
 
         with _forgejo_env_patch():
-            result = fb.create_native_review("misospace/pr-reviewer-action", 42, "COMMENT", "advisory")
+            result = fb.create_native_review(
+                "misospace/pr-reviewer-action", 42, "COMMENT", "advisory"
+            )
 
         self.assertIsNotNone(result)
         self.assertEqual(seen["data"], {"body": "advisory", "event": "COMMENT"})
@@ -1247,7 +1366,10 @@ class TestNativeReviews(unittest.TestCase):
 
         self.assertEqual(result, 55)
         self.assertEqual(seen["method"], "POST")
-        self.assertEqual(seen["url"], f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews/55/dismissals")
+        self.assertEqual(
+            seen["url"],
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/42/reviews/55/dismissals",
+        )
         self.assertEqual(seen["data"], {"message": "Superseded"})
 
 
@@ -1255,8 +1377,11 @@ class TestIsForkPr(unittest.TestCase):
     """Fork detection must key off head.repo.full_name and fail closed."""
 
     def _meta(self, fixture):
-        return patch.object(fb, "get_pr_metadata", return_value=fb._forgejo_pr_to_github(
-            fixture, "misospace", "pr-reviewer-action"))
+        return patch.object(
+            fb,
+            "get_pr_metadata",
+            return_value=fb._forgejo_pr_to_github(fixture, "misospace", "pr-reviewer-action"),
+        )
 
     def test_same_repo_pr_is_not_fork(self):
         with self._meta(PR_META):
@@ -1310,7 +1435,10 @@ class TestErrorBodyOnStdout(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_404_returns_none_for_metadata(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (404, '{"message":"Not Found"}'),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/pulls/999": (
+                404,
+                '{"message":"Not Found"}',
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -1326,7 +1454,10 @@ class TestCommentMarkerEnv(unittest.TestCase):
     @_PATCH_FORGEJO
     def test_default_marker_in_comments(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (200, json.dumps(COMMENTS)),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/issues/42/comments": (
+                200,
+                json.dumps(COMMENTS),
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -1345,22 +1476,35 @@ class TestGetCommitStatus(unittest.TestCase):
     than re-encoding GitHub's shape.
     """
 
-    _COMBINED = json.dumps({
-        "state": "success",
-        "sha": "abc123def456",
-        "total_count": 2,
-        "statuses": [
-            {"id": 10, "status": "pending", "context": "pr-reviewer-action",
-             "description": "AI PR Review"},
-            {"id": 11, "status": "success", "context": "golangci-lint",
-             "description": "Lint passed"},
-        ],
-    })
+    _COMBINED = json.dumps(
+        {
+            "state": "success",
+            "sha": "abc123def456",
+            "total_count": 2,
+            "statuses": [
+                {
+                    "id": 10,
+                    "status": "pending",
+                    "context": "pr-reviewer-action",
+                    "description": "AI PR Review",
+                },
+                {
+                    "id": 11,
+                    "status": "success",
+                    "context": "golangci-lint",
+                    "description": "Lint passed",
+                },
+            ],
+        }
+    )
 
     @_PATCH_FORGEJO
     def test_normalizes_per_status_field(self, mock_curl):
         url_map = {
-            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/commits/abc123def456/status": (200, self._COMBINED),
+            f"{FORGEJO_BASE}/api/v1/repos/misospace/pr-reviewer-action/commits/abc123def456/status": (
+                200,
+                self._COMBINED,
+            ),
         }
         mock_curl.side_effect = _make_curl_mock(url_map)
 
@@ -1397,7 +1541,12 @@ class TestForgeEnrichment(unittest.TestCase):
 
     @_PATCH_FORGEJO
     def test_release_normalises_to_github_subset(self, mock_curl):
-        url_map = {"https://codeberg.org/api/v1/repos/o/r/releases/tags/v0.4.21": (200, json.dumps(self._RELEASE))}
+        url_map = {
+            "https://codeberg.org/api/v1/repos/o/r/releases/tags/v0.4.21": (
+                200,
+                json.dumps(self._RELEASE),
+            )
+        }
         mock_curl.side_effect = _make_curl_mock(url_map)
         result = fb.fetch_forge_release("codeberg.org", "o/r", "v0.4.21")
         self.assertEqual(result["tag_name"], "v0.4.21")
@@ -1411,7 +1560,9 @@ class TestForgeEnrichment(unittest.TestCase):
 
     @_PATCH_FORGEJO
     def test_compare_returns_raw_object(self, mock_curl):
-        url_map = {"https://codeberg.org/api/v1/repos/o/r/compare/a...b": (200, json.dumps(self._COMPARE))}
+        url_map = {
+            "https://codeberg.org/api/v1/repos/o/r/compare/a...b": (200, json.dumps(self._COMPARE))
+        }
         mock_curl.side_effect = _make_curl_mock(url_map)
         result = fb.fetch_forge_compare("codeberg.org", "o/r", "a...b")
         self.assertEqual(result["total_commits"], 2)
@@ -1423,8 +1574,10 @@ class TestForgeEnrichment(unittest.TestCase):
 
     def test_token_sent_only_to_configured_instance(self):
         # Token goes to the configured host only, never to other forges.
-        with patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"), \
-             patch.object(fb, "FORGEJO_TOKEN", "SECRET"):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"),
+            patch.object(fb, "FORGEJO_TOKEN", "SECRET"),
+        ):
             self.assertEqual(fb._enrich_token_for_host("git.example.com"), "SECRET")
             self.assertEqual(fb._enrich_token_for_host("codeberg.org"), "")
 
@@ -1436,9 +1589,11 @@ class TestForgeEnrichment(unittest.TestCase):
             seen["token"] = token
             return 200, json.dumps(self._RELEASE)
 
-        with patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"), \
-             patch.object(fb, "FORGEJO_TOKEN", "SECRET"), \
-             patch.object(fb, "_curl", side_effect=_spy):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", "https://git.example.com"),
+            patch.object(fb, "FORGEJO_TOKEN", "SECRET"),
+            patch.object(fb, "_curl", side_effect=_spy),
+        ):
             fb.fetch_forge_release("codeberg.org", "o/r", "v1")
         self.assertEqual(seen["token"], "")
 
@@ -1447,7 +1602,7 @@ class TestForgeEnrichment(unittest.TestCase):
         captured = {}
 
         class _Proc:
-            stdout = b'{}\n200'
+            stdout = b"{}\n200"
             returncode = 0
 
         def _fake_run(cmd, **kwargs):
@@ -1520,8 +1675,7 @@ class TestDiffPositions(unittest.TestCase):
     def test_multiple_hunks_diff_position_continues(self):
         """diff_position continues across hunks within the same file."""
         diff = self._diff(
-            "@@ -1,2 +1,2 @@\n hunk1a\n hunk1b\n"
-            "@@ -10,2 +10,2 @@\n hunk2a\n hunk2b\n"
+            "@@ -1,2 +1,2 @@\n hunk1a\n hunk1b\n@@ -10,2 +10,2 @@\n hunk2a\n hunk2b\n"
         )
         result = fb._diff_positions(diff)
         # Hunk 1: {1: 1, 2: 2}, Hunk 2: {10: 3, 11: 4} — dp continues
@@ -1552,28 +1706,23 @@ class TestDiffPositions(unittest.TestCase):
             "@@ -1,1 +1,1 @@\n beta_line\n"
         )
         result = fb._diff_positions(diff)
-        self.assertEqual(result, {
-            "alpha.py": {1: 1},
-            "beta.py": {1: 1},
-        })
+        self.assertEqual(
+            result,
+            {
+                "alpha.py": {1: 1},
+                "beta.py": {1: 1},
+            },
+        )
 
     def test_dev_null_path_ignored(self):
         """+++ /dev/null means no target path (file deletion)."""
-        diff = (
-            "diff --git a/old.py b/old.py\n"
-            "+++ /dev/null\n"
-            "@@ -1,1 +0,0 @@\n-removed\n"
-        )
+        diff = "diff --git a/old.py b/old.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-removed\n"
         result = fb._diff_positions(diff)
         self.assertEqual(result, {})
 
     def test_path_without_b_prefix(self):
         """Path without b/ prefix is used as-is."""
-        diff = (
-            "diff --git a/raw.py b/raw.py\n"
-            "+++ raw.py\n"
-            "@@ -1,1 +1,1 @@\n line\n"
-        )
+        diff = "diff --git a/raw.py b/raw.py\n+++ raw.py\n@@ -1,1 +1,1 @@\n line\n"
         result = fb._diff_positions(diff)
         self.assertEqual(result, {"raw.py": {1: 1}})
 
@@ -1607,12 +1756,20 @@ class TestDiffPositions(unittest.TestCase):
         #   added: dp=4, {12: 4}, ctx3: dp=5, {13: 5}, ctx4: dp=6, {14: 6}
         # Hunk 2 (new_line=51):
         #   tail_ctx: dp=7, {51: 7}, removed: dp=8 (no entry), added: dp=9, {52: 9}
-        self.assertEqual(result, {
-            "main.py": {
-                10: 1, 11: 2, 12: 4, 13: 5, 14: 6,
-                51: 7, 52: 9,
+        self.assertEqual(
+            result,
+            {
+                "main.py": {
+                    10: 1,
+                    11: 2,
+                    12: 4,
+                    13: 5,
+                    14: 6,
+                    51: 7,
+                    52: 9,
+                },
             },
-        })
+        )
 
     def test_return_type_structure(self):
         """Verify the return type is dict[str, dict[int, int]]."""
@@ -1628,17 +1785,22 @@ class TestDiffPositions(unittest.TestCase):
 
     def test_diff_position_continues_across_hunks(self):
         """diff_position does NOT reset between hunks in the same file."""
-        diff = self._diff(
-            "@@ -1,3 +1,3 @@\n a\n b\n c\n"
-            "@@ -20,2 +20,2 @@\n x\n y\n"
-        )
+        diff = self._diff("@@ -1,3 +1,3 @@\n a\n b\n c\n@@ -20,2 +20,2 @@\n x\n y\n")
         result = fb._diff_positions(diff)
         # Hunk 1: {1: 1, 2: 2, 3: 3}
         # Hunk 2: {20: 4, 21: 5} — dp continues from hunk 1
-        self.assertEqual(result, {"test.py": {
-            1: 1, 2: 2, 3: 3,
-            20: 4, 21: 5,
-        }})
+        self.assertEqual(
+            result,
+            {
+                "test.py": {
+                    1: 1,
+                    2: 2,
+                    3: 3,
+                    20: 4,
+                    21: 5,
+                }
+            },
+        )
 
     def test_consecutive_additions(self):
         """Multiple consecutive additions each get their own position."""
@@ -1672,10 +1834,13 @@ class TestDiffPositions(unittest.TestCase):
             "@@ -1,1 +1,1 @@\n second_a\n"
         )
         result = fb._diff_positions(diff)
-        self.assertEqual(result, {
-            "first.py": {1: 1, 2: 2},
-            "second.py": {1: 1},
-        })
+        self.assertEqual(
+            result,
+            {
+                "first.py": {1: 1, 2: 2},
+                "second.py": {1: 1},
+            },
+        )
 
 
 class TestIsForgejoMode(unittest.TestCase):
@@ -1689,21 +1854,27 @@ class TestIsForgejoMode(unittest.TestCase):
 
     def test_platform_github_overrides_forgejo_url(self):
         # The regression: explicit PLATFORM=github must win over a populated URL.
-        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.dict(os.environ, {"PLATFORM": "github"}, clear=False):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.dict(os.environ, {"PLATFORM": "github"}, clear=False),
+        ):
             self.assertFalse(fb._is_forgejo_mode())
 
     def test_platform_forgejo_explicit(self):
-        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.dict(os.environ, {"PLATFORM": "forgejo"}, clear=False):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.dict(os.environ, {"PLATFORM": "forgejo"}, clear=False),
+        ):
             self.assertTrue(fb._is_forgejo_mode())
 
     def test_url_only_still_forgejo(self):
         # No PLATFORM set → treated as auto → a populated FORGEJO_API_URL
         # (the monkeypatched module attribute) still flips to forgejo. This is
         # the behaviour the whole existing test suite relies on.
-        with patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             self.assertTrue(fb._is_forgejo_mode())
 
     def test_empty_url_stays_github_even_on_forgejo_runner(self):
@@ -1711,13 +1882,16 @@ class TestIsForgejoMode(unittest.TestCase):
         # URL. Without a FORGEJO_API_URL this module cannot build API URLs, so
         # it must stay in GitHub mode rather than curl an empty base (the
         # auto rule's server_url inference must not leak in here).
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.dict(os.environ, {"GITHUB_SERVER_URL": "https://forgejo.example.com"}, clear=True):
+        with (
+            patch.object(fb, "FORGEJO_API_URL", ""),
+            patch.dict(
+                os.environ, {"GITHUB_SERVER_URL": "https://forgejo.example.com"}, clear=True
+            ),
+        ):
             self.assertFalse(fb._is_forgejo_mode())
 
     def test_default_github_when_no_url(self):
-        with patch.object(fb, "FORGEJO_API_URL", ""), \
-             patch.dict(os.environ, {}, clear=True):
+        with patch.object(fb, "FORGEJO_API_URL", ""), patch.dict(os.environ, {}, clear=True):
             self.assertFalse(fb._is_forgejo_mode())
 
 
@@ -1732,11 +1906,15 @@ JW_FIXTURE_BASE = FORGEJO_BASE
 
 def _jwt_env_patch():
     """Patch env for authorized_integration mode."""
-    return patch.dict(os.environ, {
-        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://forgejo.example.com/api/actions/oidc/token?request=1",
-        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-request-token-secret",
-        "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE": _AUDIENCE,
-    }, clear=False)
+    return patch.dict(
+        os.environ,
+        {
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://forgejo.example.com/api/actions/oidc/token?request=1",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-request-token-secret",
+            "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE": _AUDIENCE,
+        },
+        clear=False,
+    )
 
 
 def _mock_oidc_response(body=None, status=200):
@@ -1761,9 +1939,11 @@ class TestAuthorizedIntegrationJwtFetch(unittest.TestCase):
     def test_fetch_jwt_success(self):
         mock_resp = _mock_oidc_response()
         mock_urlopen = Mock(return_value=mock_resp)
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             jwt = fb._fetch_authorized_integration_jwt()
         self.assertEqual(jwt, _JWT_TOKEN)
         called_request = mock_urlopen.call_args[0][0]
@@ -1771,9 +1951,11 @@ class TestAuthorizedIntegrationJwtFetch(unittest.TestCase):
 
     def test_fetch_jwt_caches_and_reuses(self):
         mock_urlopen = Mock(return_value=_mock_oidc_response())
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             jwt1 = fb._get_jwt()
             jwt2 = fb._get_jwt()
         self.assertEqual(jwt1, _JWT_TOKEN)
@@ -1782,60 +1964,81 @@ class TestAuthorizedIntegrationJwtFetch(unittest.TestCase):
 
     def test_fetch_jwt_refetch_after_ttl_expiry(self):
         mock_urlopen = Mock(return_value=_mock_oidc_response())
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", mock_urlopen),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             fb._get_jwt()
-            fb._JWT_CACHE_TIME -= (fb._JWT_TTL_SECONDS + 1)
+            fb._JWT_CACHE_TIME -= fb._JWT_TTL_SECONDS + 1
             fb._get_jwt()
         self.assertEqual(mock_urlopen.call_count, 2)
 
     def test_fetch_jwt_missing_env_raises_actionable_error(self):
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("ACTIONS_ID_TOKEN_REQUEST_URL", str(ctx.exception))
         self.assertIn("enable-openid-connect: true", str(ctx.exception))
 
     def test_fetch_jwt_missing_audience_raises(self):
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", ""), \
-             patch.dict(os.environ, {
-                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.com/token?x=1",
-                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "tok",
-             }, clear=True):
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", ""),
+            patch.dict(
+                os.environ,
+                {
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.com/token?x=1",
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "tok",
+                },
+                clear=True,
+            ),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", str(ctx.exception))
 
     def test_fetch_jwt_oidc_http_error_raises(self):
         error = urllib.error.HTTPError(
-            "https://example.com/token", 500, "Internal Server Error",
-            {}, io.BytesIO(b'{"message":"server error"}'),
+            "https://example.com/token",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b'{"message":"server error"}'),
         )
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch.object(fb, "_report_http_error"):
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch.object(fb, "_report_http_error"),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("HTTP 500", str(ctx.exception))
 
     def test_fetch_jwt_missing_value_field_raises(self):
         mock_resp = _mock_oidc_response(body=json.dumps({"not_value": "huh"}))
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", return_value=mock_resp), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch.object(fb, "_report_http_error"):
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", return_value=mock_resp),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch.object(fb, "_report_http_error"),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn(".value", str(ctx.exception))
 
     def test_fetch_jwt_network_error_raises(self):
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
-                   side_effect=urllib.error.URLError("connection refused")), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch(
+                "pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("connection refused"),
+            ),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("network error", str(ctx.exception))
@@ -1849,47 +2052,58 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
         fb._JWT_CACHE_TIME = 0.0
 
     def test_jwt_mode_returns_bearer_header(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN),
+        ):
             header = fb._resolve_auth_header(None)
         self.assertEqual(header, f"Bearer {_JWT_TOKEN}")
 
     def test_jwt_mode_explicit_empty_token_unauthenticated(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             header = fb._resolve_auth_header("")
         self.assertIsNone(header)
 
     def test_jwt_mode_explicit_pat_override(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch():
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+        ):
             header = fb._resolve_auth_header("some-pat-token")
         self.assertEqual(header, "token some-pat-token")
 
     def test_token_mode_default_returns_pat_header(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
-             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
-             patch.object(fb, "GH_TOKEN", ""):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "token"),
+            patch.object(fb, "FORGEJO_TOKEN", "my-pat"),
+            patch.object(fb, "GH_TOKEN", ""),
+        ):
             header = fb._resolve_auth_header(None)
         self.assertEqual(header, "token my-pat")
 
     def test_token_mode_empty_token_unauthenticated(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
-             patch.object(fb, "FORGEJO_TOKEN", ""), \
-             patch.object(fb, "GH_TOKEN", ""):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "token"),
+            patch.object(fb, "FORGEJO_TOKEN", ""),
+            patch.object(fb, "GH_TOKEN", ""),
+        ):
             header = fb._resolve_auth_header("")
         self.assertIsNone(header)
 
     def test_curl_uses_bearer_in_jwt_mode(self):
         """JWT auth header is delivered via --config file, not argv."""
         captured_cmd = []
+
         def fake_run(cmd, **kwargs):
             captured_cmd.extend(cmd)
             mock_proc = Mock()
@@ -1897,12 +2111,14 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
             mock_proc.returncode = 0
             return mock_proc
 
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN), \
-             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", FORGEJO_BASE),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch.object(fb, "_get_jwt", return_value=_JWT_TOKEN),
+            patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run),
+        ):
             fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
 
         # --config file must be present
@@ -1913,6 +2129,7 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
     def test_curl_uses_token_in_token_mode(self):
         """PAT auth header is delivered via --config file, not argv."""
         captured_cmd = []
+
         def fake_run(cmd, **kwargs):
             captured_cmd.extend(cmd)
             mock_proc = Mock()
@@ -1920,10 +2137,12 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
             mock_proc.returncode = 0
             return mock_proc
 
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
-             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
-             patch.object(fb, "GH_TOKEN", ""), \
-             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "token"),
+            patch.object(fb, "FORGEJO_TOKEN", "my-pat"),
+            patch.object(fb, "GH_TOKEN", ""),
+            patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run),
+        ):
             fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
 
         # --config file must be present
@@ -1934,8 +2153,10 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
     def test_curl_auth_config_file_permissions(self):
         """The --config file is created with 0600 permissions."""
         import stat as stat_mod
+
         captured_config_path = []
         original_fchmod = os.fchmod
+
         def track_fchmod(fd, mode):
             captured_config_path.append(mode)
             return original_fchmod(fd, mode)
@@ -1946,11 +2167,13 @@ class TestAuthorizedIntegrationAuthHeaders(unittest.TestCase):
             mock_proc.returncode = 0
             return mock_proc
 
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
-             patch.object(fb, "FORGEJO_TOKEN", "my-pat"), \
-             patch.object(fb, "GH_TOKEN", ""), \
-             patch("os.fchmod", side_effect=track_fchmod), \
-             patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "token"),
+            patch.object(fb, "FORGEJO_TOKEN", "my-pat"),
+            patch.object(fb, "GH_TOKEN", ""),
+            patch("os.fchmod", side_effect=track_fchmod),
+            patch("pr_reviewer.forgejo_backend.subprocess.run", side_effect=fake_run),
+        ):
             fb._curl("GET", f"{FORGEJO_BASE}/api/v1/user")
 
         self.assertTrue(captured_config_path)
@@ -1965,23 +2188,29 @@ class TestEnrichTokenForHostJwtMode(unittest.TestCase):
         fb._JWT_CACHE_TIME = 0.0
 
     def test_configured_host_returns_none_in_jwt_mode(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+        ):
             token = fb._enrich_token_for_host("forgejo.example.com")
         self.assertIsNone(token)
 
     def test_unconfigured_host_returns_empty_in_jwt_mode(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"), \
-             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "authorized_integration"),
+            patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+        ):
             token = fb._enrich_token_for_host("codeberg.org")
         self.assertEqual(token, "")
 
     def test_configured_host_returns_pat_in_token_mode(self):
-        with patch.object(fb, "FORGEJO_AUTH_METHOD", "token"), \
-             patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"), \
-             patch.object(fb, "FORGEJO_TOKEN", "my-pat"):
+        with (
+            patch.object(fb, "FORGEJO_AUTH_METHOD", "token"),
+            patch.object(fb, "FORGEJO_API_URL", "https://forgejo.example.com"),
+            patch.object(fb, "FORGEJO_TOKEN", "my-pat"),
+        ):
             token = fb._enrich_token_for_host("forgejo.example.com")
         self.assertEqual(token, "my-pat")
 
@@ -1995,13 +2224,18 @@ class TestJwtMasking(unittest.TestCase):
 
     def test_jwt_does_not_leak_in_runtime_error_message(self):
         error = urllib.error.HTTPError(
-            "https://example.com/token", 401, "Unauthorized",
-            {}, io.BytesIO(json.dumps({"value": _JWT_TOKEN}).encode()),
+            "https://example.com/token",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(json.dumps({"value": _JWT_TOKEN}).encode()),
         )
-        with patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error), \
-             patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch.object(fb, "_report_http_error"):
+        with (
+            patch("pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=error),
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch.object(fb, "_report_http_error"),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 fb._fetch_authorized_integration_jwt()
         self.assertIn("401", str(ctx.exception))
@@ -2029,7 +2263,8 @@ class TestGhTimeout(unittest.TestCase):
         """(a) A hung ``gh`` process is killed and (-1, "") is returned,
         mirroring safe_run's TimeoutExpired pattern."""
         with mock.patch.object(
-            fb.subprocess, "run",
+            fb.subprocess,
+            "run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
         ) as mock_run:
             rc, out = fb._gh("pr", "view", "1", timeout_sec=1)
@@ -2084,10 +2319,13 @@ class TestGhTimeout(unittest.TestCase):
         """(a) _gh_api_json forwards the timeout and returns (-1, "") on
         TimeoutExpired."""
         with mock.patch.object(
-            fb.subprocess, "run",
+            fb.subprocess,
+            "run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
         ) as mock_run:
-            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1)
+            rc, out = fb._gh_api_json(
+                "POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1
+            )
         self.assertEqual(rc, -1)
         self.assertEqual(out, "")
         kwargs = mock_run.call_args.kwargs
@@ -2109,11 +2347,17 @@ class TestGhTimeout(unittest.TestCase):
             real_unlink(path)
             unlinked.append(path)
 
-        with mock.patch.object(
-            fb.subprocess, "run",
-            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
-        ), mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink):
-            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1)
+        with (
+            mock.patch.object(
+                fb.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
+            ),
+            mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink),
+        ):
+            rc, out = fb._gh_api_json(
+                "POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=1
+            )
         self.assertEqual(rc, -1)
         self.assertEqual(out, "")
         self.assertEqual(len(unlinked), 1, "temp payload file must be unlinked on timeout")
@@ -2137,9 +2381,13 @@ class TestGhTimeout(unittest.TestCase):
             real_unlink(path)
             unlinked.append(path)
 
-        with mock.patch.object(fb.subprocess, "run", return_value=proc), \
-                mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink):
-            rc, out = fb._gh_api_json("POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=5)
+        with (
+            mock.patch.object(fb.subprocess, "run", return_value=proc),
+            mock.patch.object(fb.os, "unlink", side_effect=tracking_unlink),
+        ):
+            rc, out = fb._gh_api_json(
+                "POST", "repos/o/r/issues/1/comments", {"body": "x"}, timeout_sec=5
+            )
         self.assertEqual(rc, 0)
         self.assertEqual(out, '{"id": 7}')
         self.assertEqual(len(unlinked), 1)
@@ -2173,10 +2421,13 @@ class TestJwtCacheConcurrency(unittest.TestCase):
             time.sleep(0.05)
             return _mock_oidc_response()
 
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
-                   side_effect=slow_urlopen) as mock_urlopen:
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch(
+                "pr_reviewer.forgejo_backend.urllib.request.urlopen", side_effect=slow_urlopen
+            ) as mock_urlopen,
+        ):
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
             for t in threads:
                 t.start()
@@ -2204,30 +2455,42 @@ class TestJwtCacheConcurrency(unittest.TestCase):
         # Cache hit: fresh cache -> no fetch
         fb._JWT_CACHE = _JWT_TOKEN
         fb._JWT_CACHE_TIME = time.time()
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
-                   return_value=_mock_oidc_response()) as mock_urlopen:
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch(
+                "pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                return_value=_mock_oidc_response(),
+            ) as mock_urlopen,
+        ):
             self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
         self.assertEqual(mock_urlopen.call_count, 0)
 
         # Cache miss: cleared cache -> exactly one fetch
         fb._JWT_CACHE = None
         fb._JWT_CACHE_TIME = 0.0
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
-                   return_value=_mock_oidc_response()) as mock_urlopen:
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch(
+                "pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                return_value=_mock_oidc_response(),
+            ) as mock_urlopen,
+        ):
             self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
         self.assertEqual(mock_urlopen.call_count, 1)
 
         # TTL expiry: stale cache -> exactly one fetch
         fb._JWT_CACHE = "stale-token"
         fb._JWT_CACHE_TIME = time.time() - fb._JWT_TTL_SECONDS - 10
-        with patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE), \
-             _jwt_env_patch(), \
-             patch("pr_reviewer.forgejo_backend.urllib.request.urlopen",
-                   return_value=_mock_oidc_response()) as mock_urlopen:
+        with (
+            patch.object(fb, "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", _AUDIENCE),
+            _jwt_env_patch(),
+            patch(
+                "pr_reviewer.forgejo_backend.urllib.request.urlopen",
+                return_value=_mock_oidc_response(),
+            ) as mock_urlopen,
+        ):
             self.assertEqual(fb._get_jwt(), _JWT_TOKEN)
         self.assertEqual(mock_urlopen.call_count, 1)
 

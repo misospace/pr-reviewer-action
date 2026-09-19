@@ -95,7 +95,9 @@ def test_load_config_is_environment_driven(monkeypatch):
 def test_load_config_defaults_host_and_timeout(monkeypatch):
     monkeypatch.delenv("ATPROTO_HOST", raising=False)
     monkeypatch.delenv("ATPROTO_TIMEOUT", raising=False)
-    config = tangled_session.load_config({"ATPROTO_HANDLE": HANDLE, "ATPROTO_APP_PASSWORD": APP_PASSWORD})
+    config = tangled_session.load_config(
+        {"ATPROTO_HANDLE": HANDLE, "ATPROTO_APP_PASSWORD": APP_PASSWORD}
+    )
     assert config.host == tangled_session.DEFAULT_HOST
     assert config.timeout == tangled_session.DEFAULT_TIMEOUT
 
@@ -360,7 +362,9 @@ def test_server_echoed_material_never_reaches_exceptions(monkeypatch):
     # XRPC message; only the bounded machine error name may surface.
     echo = {
         "error": "AuthorizationDenied",
-        "message": (f"invalid identifier {HANDLE} password {APP_PASSWORD} jwt {ACCESS_JWT} refresh {REFRESH_JWT}"),
+        "message": (
+            f"invalid identifier {HANDLE} password {APP_PASSWORD} jwt {ACCESS_JWT} refresh {REFRESH_JWT}"
+        ),
     }
     _install_urlopen(
         monkeypatch,
@@ -407,7 +411,8 @@ def test_module_has_no_review_comment_semantics():
     public = [
         n
         for n in vars(tangled_session)
-        if not n.startswith("_") and getattr(vars(tangled_session)[n], "__module__", module_name) == module_name
+        if not n.startswith("_")
+        and getattr(vars(tangled_session)[n], "__module__", module_name) == module_name
     ]
     for name in public:
         lowered = name.lower()
@@ -431,7 +436,9 @@ def test_module_has_no_review_comment_semantics():
 def test_module_uses_stdlib_http_only():
     source = (_REPO_ROOT / "pr_reviewer" / "tangled_session.py").read_text(encoding="utf-8")
     import_lines = {
-        line.split()[1].split(".")[0] for line in source.splitlines() if line.startswith(("import ", "from "))
+        line.split()[1].split(".")[0]
+        for line in source.splitlines()
+        if line.startswith(("import ", "from "))
     }
     stdlib_only = {
         "__future__",
@@ -493,7 +500,8 @@ def test_redirect_handler_rejects_every_30x_status():
         # not urllib's default one (which copies Authorization on the hop).
         assert any(isinstance(h, tangled_session._RejectRedirects) for h in handler.handlers)
         assert not any(
-            isinstance(h, urllib.request.HTTPRedirectHandler) and not isinstance(h, tangled_session._RejectRedirects)
+            isinstance(h, urllib.request.HTTPRedirectHandler)
+            and not isinstance(h, tangled_session._RejectRedirects)
             for h in handler.handlers
         ), f"status {status}"
 
@@ -524,7 +532,9 @@ def test_same_host_redirect_is_still_rejected(monkeypatch):
 
 
 def test_get_session_establishes_once_and_caches(monkeypatch):
-    calls = _install_urlopen(monkeypatch, [_FakeResponse(SESSION_RESPONSE), _FakeResponse(RECORD_RESPONSE)])
+    calls = _install_urlopen(
+        monkeypatch, [_FakeResponse(SESSION_RESPONSE), _FakeResponse(RECORD_RESPONSE)]
+    )
     monkeypatch.setenv("ATPROTO_HOST", HOST)
     monkeypatch.setenv("ATPROTO_HANDLE", HANDLE)
     monkeypatch.setenv("ATPROTO_APP_PASSWORD", APP_PASSWORD)
@@ -534,7 +544,9 @@ def test_get_session_establishes_once_and_caches(monkeypatch):
         first = tangled_session.get_session()
         second = tangled_session.get_session()
         assert first is second
-        assert [c["request"].full_url for c in calls] == [f"{HOST}{tangled_session.CREATE_SESSION_PATH}"]
+        assert [c["request"].full_url for c in calls] == [
+            f"{HOST}{tangled_session.CREATE_SESSION_PATH}"
+        ]
         # module-level helpers route through the cached session
         assert tangled_session.create_record("ok", {"text": "hi"}) == RECORD_RESPONSE
         assert len(calls) == 2

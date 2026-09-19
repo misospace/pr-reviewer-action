@@ -23,10 +23,16 @@ class TestBuildEvidenceDigest:
 
     def test_falls_back_to_ledger_without_final_text(self):
         entries = [
-            {"tool": "read_file", "args": {"path": "talos/machineconfig.yaml.j2"},
-             "content": "install: factory.talos.dev/installer:v1.13.4"},
-            {"tool": "web_fetch", "args": {"url": "https://docs.siderolabs.com/matrix"},
-             "content": "Kubernetes 1.32 to 1.36 supported on Talos 1.13"},
+            {
+                "tool": "read_file",
+                "args": {"path": "talos/machineconfig.yaml.j2"},
+                "content": "install: factory.talos.dev/installer:v1.13.4",
+            },
+            {
+                "tool": "web_fetch",
+                "args": {"url": "https://docs.siderolabs.com/matrix"},
+                "content": "Kubernetes 1.32 to 1.36 supported on Talos 1.13",
+            },
         ]
         digest = build_evidence_digest(entries, "")
         assert "read_file path=talos/machineconfig.yaml.j2" in digest
@@ -56,7 +62,12 @@ class TestBuildEvidenceDigest:
         assert len(digest) == MAX_DIGEST_CHARS
 
     def test_skips_malformed_entries(self):
-        entries = ["notadict", {"args": {}}, {"tool": ""}, {"tool": "git_grep", "args": {"pattern": "tok"}, "content": "hit"}]
+        entries = [
+            "notadict",
+            {"args": {}},
+            {"tool": ""},
+            {"tool": "git_grep", "args": {"pattern": "tok"}, "content": "hit"},
+        ]
         digest = build_evidence_digest(entries, "")
         assert digest == "- git_grep pattern=tok → hit"
 
@@ -68,7 +79,9 @@ class TestLoadEvidenceMemory:
         return str(p)
 
     def test_valid_round_trip(self, tmp_path):
-        path = self._write(tmp_path, {"digest": "- read_file → v1.13.4", "head_sha": "abc123def456"})
+        path = self._write(
+            tmp_path, {"digest": "- read_file → v1.13.4", "head_sha": "abc123def456"}
+        )
         mem = load_evidence_memory(path)
         assert mem["digest"] == "- read_file → v1.13.4"
         assert mem["head_sha"] == "abc123def456"
@@ -109,7 +122,9 @@ class TestLoadEvidenceMemory:
         # user-controlled-path traversal vector. A symlinked file still loads
         # correctly (read-only follow), and its content is sanitized all the same.
         real = tmp_path / "real-evidence.json"
-        real.write_text(json.dumps({"digest": "linked <x>fact", "head_sha": "ff"}), encoding="utf-8")
+        real.write_text(
+            json.dumps({"digest": "linked <x>fact", "head_sha": "ff"}), encoding="utf-8"
+        )
         link = tmp_path / "previous-evidence.json"
         link.symlink_to(real)
         mem = load_evidence_memory(str(link))

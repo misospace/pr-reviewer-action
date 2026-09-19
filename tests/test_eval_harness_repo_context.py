@@ -94,9 +94,7 @@ def check(run_number: int, run_value: ReviewRun) -> dict:
 def read_target(number: int) -> str:
     checks = scenario(number)["expected_evidence"]["checks"]
     read_checks = [
-        check
-        for check in checks
-        if check["type"] == "tool_call" and check["tool"] == "read_file"
+        check for check in checks if check["type"] == "tool_call" and check["tool"] == "read_file"
     ]
     assert len(read_checks) == 1
     path_needles = read_checks[0]["args_contains"]["path"]
@@ -124,7 +122,14 @@ def test_repo_context_corpus_schema_and_load() -> None:
     ]
 
     for pr in loaded.prs:
-        assert {"number", "repo_full_name", "url", "title", "known_findings", "expected_evidence"} <= pr.keys()
+        assert {
+            "number",
+            "repo_full_name",
+            "url",
+            "title",
+            "known_findings",
+            "expected_evidence",
+        } <= pr.keys()
         expected = pr["expected_evidence"]
         assert isinstance(expected.get("description"), str)
         assert "grader-only" in expected["description"].lower()
@@ -238,7 +243,9 @@ def test_unrelated_tool_and_path_do_not_satisfy_change_anchors_test() -> None:
         ),
     )
     assert result["passed"] is False
-    assert {item["id"] for item in result["checks"] if not item["passed"]} == {"read_change_anchors_test_path"}
+    assert {item["id"] for item in result["checks"] if not item["passed"]} == {
+        "read_change_anchors_test_path"
+    }
 
 
 def test_run_review_caller_scenario_passes_and_fails() -> None:
@@ -286,7 +293,10 @@ def test_max_tool_calls_threshold_is_deterministic() -> None:
     over = check(599, run(599, "Clean change; approve.", [call("list_tree", "src")] * 4))
     assert under["passed"] is True
     assert over["passed"] is False
-    assert any(item["id"] == "limits_unnecessary_tool_calls" and not item["passed"] for item in over["checks"])
+    assert any(
+        item["id"] == "limits_unnecessary_tool_calls" and not item["passed"]
+        for item in over["checks"]
+    )
 
 
 def test_errored_run_fails_repository_context_checks() -> None:
@@ -308,7 +318,11 @@ def test_old_agentic_canonical_behavior_is_unchanged() -> None:
         review_markdown="Verified against the Talos support matrix.",
         tool_calls=[
             call("read_file", "talos/main/machineconfig.yaml.j2"),
-            {"tool": "web_fetch", "args": {"url": "https://www.talos.dev/support-matrix"}, "status": "ok"},
+            {
+                "tool": "web_fetch",
+                "args": {"url": "https://www.talos.dev/support-matrix"},
+                "status": "ok",
+            },
         ],
     )
     failing = ReviewRun(

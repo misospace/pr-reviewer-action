@@ -31,7 +31,13 @@ from resolve_finding_threads import (
 
 
 def _finding(file="app/serve.py", line=12, severity="blocker", message="bad", category="security"):
-    return {"severity": severity, "category": category, "file": file, "line": line, "message": message}
+    return {
+        "severity": severity,
+        "category": category,
+        "file": file,
+        "line": line,
+        "message": message,
+    }
 
 
 def _carried(finding, index=0):
@@ -149,7 +155,9 @@ class TestFollowupBody:
         assert FOLLOWUP_MARKER_PREFIX not in body
 
 
-def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutation_exit=0, reply_exit=0):
+def _install_fake_gh(
+    tmp_path, monkeypatch, threads_response, list_exit=0, mutation_exit=0, reply_exit=0
+):
     """Drop a fake gh on PATH that logs calls and replays canned responses.
 
     On non-zero exit the fake still prints a JSON error body to stdout,
@@ -164,24 +172,24 @@ def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutat
     gh.write_text(
         "#!/usr/bin/env bash\n"
         f"echo \"$*\" >> '{log}'\n"
-        "if [[ \"$*\" == *resolveReviewThread* ]]; then\n"
+        'if [[ "$*" == *resolveReviewThread* ]]; then\n'
         f"  if [ {mutation_exit} -ne 0 ]; then\n"
-        "    echo '{\"message\":\"Resource not accessible by integration\"}'\n"
+        '    echo \'{"message":"Resource not accessible by integration"}\'\n'
         f"    exit {mutation_exit}\n"
         "  fi\n"
-        "  echo '{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}'\n"
+        '  echo \'{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}\'\n'
         "  exit 0\n"
         "fi\n"
-        "if [[ \"$*\" == *in_reply_to* ]]; then\n"
+        'if [[ "$*" == *in_reply_to* ]]; then\n'
         f"  if [ {reply_exit} -ne 0 ]; then\n"
-        "    echo '{\"message\":\"Resource not accessible by integration\"}'\n"
+        '    echo \'{"message":"Resource not accessible by integration"}\'\n'
         f"    exit {reply_exit}\n"
         "  fi\n"
         "  echo '{\"id\": 4242}'\n"
         "  exit 0\n"
         "fi\n"
         f"if [ {list_exit} -ne 0 ]; then\n"
-        "  echo '{\"message\":\"API rate limit exceeded\",\"documentation_url\":\"https://docs.github.com\"}'\n"
+        '  echo \'{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com"}\'\n'
         f"  exit {list_exit}\n"
         "fi\n"
         f"cat '{response_file}'\n",
@@ -193,11 +201,7 @@ def _install_fake_gh(tmp_path, monkeypatch, threads_response, list_exit=0, mutat
 
 
 def _threads_payload(nodes):
-    return {
-        "data": {
-            "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
-        }
-    }
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}}
 
 
 def _persisted(finding):
@@ -361,14 +365,20 @@ class TestMainEndToEnd:
         prev, found = _write_inputs(
             tmp_path,
             [_persisted(f) for f in findings],
-            [{"id": f"P{i + 1}", "resolution": "still_open", "message": f["message"]} for i, f in enumerate(findings)],
+            [
+                {"id": f"P{i + 1}", "resolution": "still_open", "message": f["message"]}
+                for i, f in enumerate(findings)
+            ],
         )
         monkeypatch.setenv("INLINE_FINDINGS_MAX", "1")
         log = _install_fake_gh(
             tmp_path,
             monkeypatch,
             _threads_payload(
-                [_thread(f"T{i}", finding_marker(f), comment_id=100 + i) for i, f in enumerate(findings)]
+                [
+                    _thread(f"T{i}", finding_marker(f), comment_id=100 + i)
+                    for i, f in enumerate(findings)
+                ]
             ),
         )
         assert main(["prog", prev, found]) == 0
