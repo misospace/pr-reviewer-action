@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.5.0](https://github.com/misospace/pr-reviewer-action/compare/v2.4.0...v2.5.0) (2026-09-19)
+
+
+### Features
+
+* **review:** add bounded specialist advisory-contract module ([#612](https://github.com/misospace/pr-reviewer-action/issues/612)) ([535f1b3](https://github.com/misospace/pr-reviewer-action/commit/535f1b384b4c245c6b51d57176ceac51510bbc88))
+* **review:** add deep-review specialist advisory passes ([#608](https://github.com/misospace/pr-reviewer-action/issues/608)) ([#623](https://github.com/misospace/pr-reviewer-action/issues/623)) ([8b4f314](https://github.com/misospace/pr-reviewer-action/commit/8b4f314e829219e8a583983a21291d2763b02ee9))
+* **review:** add requirement ledger with coverage credit ([#624](https://github.com/misospace/pr-reviewer-action/issues/624)) ([#628](https://github.com/misospace/pr-reviewer-action/issues/628)) ([f2e5c3b](https://github.com/misospace/pr-reviewer-action/commit/f2e5c3b9d1b07239692361c1a0daded2c538b6e8))
+* **tangled:** add ATProto CI session and record client ([#587](https://github.com/misospace/pr-reviewer-action/issues/587)) ([#611](https://github.com/misospace/pr-reviewer-action/issues/611)) ([d3b6fa2](https://github.com/misospace/pr-reviewer-action/commit/d3b6fa2221b277602fb677035391c315f797d48b))
+
 ## [2.4.0](https://github.com/misospace/pr-reviewer-action/compare/v2.3.3...v2.4.0) (2026-09-16)
 
 
