@@ -7,6 +7,12 @@ set -euo pipefail
 # enters, and both the toggle and the phase deadline must land in the config
 # fingerprint. Static grep checks (same idiom as test_advisory_parallel.sh) —
 # the sections rely on orchestrator globals and are not executable standalone.
+#
+# #609 moved the phase from review.sh into corpus.sh (before the native_loop
+# tool harness starts) so the rendered "# Specialist Review Leads" section is
+# already in the corpus when the final reviewer takes its first planning
+# turn; the ordering checks below pin the NEW placement and the rebuild +
+# guidance-substitution seams it introduced.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -39,39 +45,64 @@ check_contains "DEEP_REVIEW_TIMEOUT_SEC must be >= 1" "$CONFIG" 'DEEP_REVIEW_TIM
 check_contains "DEEP_REVIEW_TIMEOUT_SEC invalid value degrades to 600" "$CONFIG" 'DEEP_REVIEW_TIMEOUT_SEC=600'
 
 echo ""
-echo "=== review.sh: specialist phase launched in the background ==="
-check "exactly one run_specialists.py reference" \
-  "$(grep -c 'run_specialists.py' "$REVIEW_SH" || true)" "1"
+echo "=== corpus.sh: specialist phase launched in the background (#609 placement) ==="
+CORPUS_SH="$ROOT_DIR/scripts/sections/corpus.sh"
+CORPUS="$(cat "$CORPUS_SH")"
+check "exactly one run_specialists.py LAUNCH in corpus.sh" \
+  "$(grep -c '^[[:space:]]*python3 "$SCRIPT_DIR/run_specialists.py"' "$CORPUS_SH" || true)" "1"
+check_not_contains "review.sh no longer launches specialists (moved in #609)" \
+  "$REVIEW" 'run_specialists.py'
 check_contains "launch line runs as a background job with the phase log" \
-  "$REVIEW" '--corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &'
-check_contains "launch records the pid" "$REVIEW" 'SPECIALISTS_PID=$!'
-deep_gate_line="$(grep -n 'DEEP_REVIEW" | tr' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
-launch_line="$(grep -n 'run_specialists.py' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
+  "$CORPUS" '--corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &'
+check_contains "launch records the pid" "$CORPUS" 'SPECIALISTS_PID=$!'
+deep_gate_line="$(grep -n 'if \[\[ "$(printf .*"\$DEEP_REVIEW" | tr' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+launch_line="$(grep -n '^[[:space:]]*python3 "$SCRIPT_DIR/run_specialists.py"' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
 check "launch is inside the deep_review gate (gate precedes launch)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$launch_line" ] && [ "$launch_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
 
 echo ""
-echo "=== review.sh: launch precedes the final reviewer ==="
+echo "=== corpus.sh: launch AND reap precede the native-loop tool harness (#609) ==="
+# The native-loop conversation IS the final reviewer in native_loop mode: its
+# FIRST tool-planning turn must already see the rendered leads, so the phase
+# must be fully reaped (and the corpus rebuilt with the reserved section)
+# before run_tool_harness.py starts. All later consumers (review.sh's
+# native-verdict path and the primary model call) live in a section sourced
+# after corpus.sh by run_review.sh, so the in-file ordering here transitively
+# precedes them — which the next block pins at the source-order level.
+harness_line="$(grep -n 'run_tool_harness.py' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+check "launch precedes the tool harness" \
+  "$([ -n "$launch_line" ] && [ -n "$harness_line" ] && [ "$launch_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
+reap_line="$(grep -n 'harvest_specialist_phase$' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+check "reap precedes the tool harness" \
+  "$([ -n "$reap_line" ] && [ -n "$harness_line" ] && [ "$reap_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
+rebuild_line="$(grep -n 'cp review-corpus.md review-corpus.truncated.md' "$CORPUS_SH" | sed -n 2p | cut -d: -f1 || true)"
+check "the lead-reserved rebuild + re-copy precede the tool harness" \
+  "$([ -n "$rebuild_line" ] && [ -n "$harness_line" ] && [ "$rebuild_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
+run_review_sh="$ROOT_DIR/scripts/run_review.sh"
+corpus_src_line="$(grep -n 'sections/corpus.sh' "$run_review_sh" | tail -1 | cut -d: -f1 || true)"
+review_src_line="$(grep -n 'sections/review.sh' "$run_review_sh" | tail -1 | cut -d: -f1 || true)"
+check "corpus.sh is sourced before review.sh (consumers follow the rebuild)" \
+  "$([ -n "$corpus_src_line" ] && [ -n "$review_src_line" ] && [ "$corpus_src_line" -lt "$review_src_line" ] && echo yes || echo no)" "yes"
 native_verdict_line="$(grep -n 'NATIVE_VERDICT_USED' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
 primary_call_line="$(grep -n 'call_model_tier primary' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
-check "launch precedes the native-verdict path" \
-  "$([ -n "$launch_line" ] && [ -n "$native_verdict_line" ] && [ "$launch_line" -lt "$native_verdict_line" ] && echo yes || echo no)" "yes"
-check "launch precedes the primary model call" \
-  "$([ -n "$launch_line" ] && [ -n "$primary_call_line" ] && [ "$launch_line" -lt "$primary_call_line" ] && echo yes || echo no)" "yes"
-reap_line="$(grep -n 'wait "$SPECIALISTS_PID"' "$REVIEW_SH" | head -1 | cut -d: -f1 || true)"
-check "reap precedes the native-verdict path" \
-  "$([ -n "$reap_line" ] && [ -n "$native_verdict_line" ] && [ "$reap_line" -lt "$native_verdict_line" ] && echo yes || echo no)" "yes"
-check "reap precedes the primary model call" \
-  "$([ -n "$reap_line" ] && [ -n "$primary_call_line" ] && [ "$reap_line" -lt "$primary_call_line" ] && echo yes || echo no)" "yes"
+check "the native-verdict path exists downstream (sanity: ordering premise holds)" \
+  "$([ -n "$native_verdict_line" ] && [ -n "$primary_call_line" ] && echo yes || echo no)" "yes"
 
 echo ""
-echo "=== review.sh: specialist phase reaped, fail-soft ==="
-check_contains "reap guards the wait against set -e" "$REVIEW" 'wait "$SPECIALISTS_PID" || status=$?'
-check "exactly one reap of the specialist phase (old trailing block gone)" \
-  "$(grep -c 'wait "$SPECIALISTS_PID"' "$REVIEW_SH" || true)" "1"
+echo "=== corpus.sh: rebuild + guidance only from the rendered section (#609) ==="
+check_contains "corpus rebuild is gated on a non-empty specialists.md" "$CORPUS" 'if [ -s specialists.md ]; then'
+check_contains "guidance fragment applied after the reap" "$CORPUS" 'apply_specialist_leads_fragment'
+check_contains "lockstep guard clears a stale leads signal" "$CORPUS" '# Specialist Review Leads'
+check_contains "lockstep guard truncates the signal" "$CORPUS" ': > specialist-leads-present.txt'
+
+echo ""
+echo "=== corpus.sh: specialist phase reaped, fail-soft ==="
+check_contains "reap guards the wait against set -e" "$CORPUS" 'wait "$SPECIALISTS_PID" || status=$?'
+check "exactly one reap of the specialist phase" \
+  "$(grep -c 'wait "$SPECIALISTS_PID"' "$CORPUS_SH" || true)" "1"
 check_contains "fail-soft text on specialist failure" \
-  "$REVIEW" 'specialist phase exited ${status}; continuing (advisory passes never block the final review)'
-check_not_contains "old post-escalation placement is gone" \
+  "$CORPUS" 'specialist phase exited ${status}; continuing (advisory passes never block the final review)'
+check_not_contains "old review.sh launch placement is gone" \
   "$REVIEW" 'python3 "$SCRIPT_DIR/run_specialists.py" \'
 
 echo ""
@@ -109,7 +140,9 @@ for name in \
   specialist-security.json \
   specialist-tests.json \
   specialists.json \
-  specialists.phase.log; do
+  specialists.phase.log \
+  specialists.md \
+  specialist-leads-present.txt; do
   check_contains "guard list includes $name" "$ARTIFACTS" "$name"
 done
 

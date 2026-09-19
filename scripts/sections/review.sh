@@ -84,46 +84,11 @@ The corpus lists Open Findings From the Previous Review. Answer EVERY one: inclu
   log "Carry-forward active: $(jq 'length' previous-findings.json) open finding(s) from the previous review"
 fi
 
-# ── Deep review (#608): opt-in specialist leads, run concurrently ──────────
-# When DEEP_REVIEW=true, launch the three fixed specialist roles
-# (correctness / security / tests — pr_reviewer/specialists.py) as a
-# BACKGROUND JOB over the same truncated review corpus, reusing the primary
-# model settings. The three roles run concurrently WITH EACH OTHER (the
-# runner fans them out on internal threads); the phase as a whole is launched
-# here and fully reaped (wait on SPECIALISTS_PID) BEFORE the final reviewer
-# path below enters, so a follow-up (#609) can feed specialists.json into the
-# final synthesis. Fail-soft: a specialist that times out or fails is
-# recorded as an error in specialists.json and the final reviewer still runs
-# — never blocked, never aborted (the wait is guarded with || status=$?
-# against set -e). Advisory only: the leads never touch the verdict,
-# enforcement, or the published review body in this iteration. When
-# DEEP_REVIEW is false the gate is not entered and the normal path is
-# preserved untouched (no timer entries, no artifacts).
-DEEP_REVIEW_ACTIVE="false"
-SPECIALISTS_PID=""
-if [[ "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-  DEEP_REVIEW_ACTIVE="true"
-  section_timer_start "specialists"
-  python3 "$SCRIPT_DIR/run_specialists.py" --corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &
-  SPECIALISTS_PID=$!
-  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the review corpus (pid $SPECIALISTS_PID)"
-fi
-
-# Reap the specialist phase fully BEFORE the final reviewer path (the #371
-# harvest idiom): a nonzero phase status only logs an error — advisory passes
-# never block the final review.
-harvest_specialist_phase() {
-  [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]] || return 0
-  [[ -n "${SPECIALISTS_PID:-}" ]] || return 0
-  local status=0
-  wait "$SPECIALISTS_PID" || status=$?
-  cat specialists.phase.log 2>/dev/null || true
-  if [ "$status" -ne 0 ]; then
-    error "specialist phase exited ${status}; continuing (advisory passes never block the final review)"
-  fi
-  section_timer_end
-}
-harvest_specialist_phase
+# The deep-review specialist phase (#608) moved into corpus.sh in #609: the
+# rendered leads must already be in the corpus when the native_loop tool
+# harness takes its FIRST planning turn (the harness runs inside corpus.sh),
+# and before any final-reviewer path below enters. Only the specialist summary
+# rows in the step summary still read specialists.json from here.
 
 PRIMARY_OK=0
 # native_loop in-conversation verdict (#205): when the tool loop produced its

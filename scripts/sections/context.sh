@@ -29,6 +29,25 @@ if [[ "$IS_FORK_PR" == "true" ]]; then
   log "Detected cross-repository pull request"
 fi
 
+# ── Specialist lead artifacts reset (#609) ───────────────────────────
+# Truncate the #609 corpus-feed artifacts (the bounded "Specialist Review
+# Leads" section and its presence signal) BEFORE anything can consume a stale
+# value. The call is UNCONDITIONAL — not gated on DEEP_REVIEW — because a
+# reused workspace whose previous run had deep_review on must not present a
+# stale presence signal into a run where deep_review is off (the system-prompt
+# fragment gate and the corpus section both read the file). A fresh run always
+# starts from empty artifacts; run_specialists.py re-writes them (with empty
+# content where there is no section) before the corpus step can read them.
+# Create-if-missing so a first-time workspace is also covered.
+reset_specialist_lead_artifacts() {
+  # NOTE: one redirection per file — `: > a b` would truncate ONLY `a` and
+  # silently ignore `b`, which is exactly the stale-signal leak this exists to
+  # prevent.
+  : > specialists.md
+  : > specialist-leads-present.txt
+}
+reset_specialist_lead_artifacts
+
 if [[ -s pr.diff ]]; then
   log "Reusing PR diff fetched by precheck"
 else

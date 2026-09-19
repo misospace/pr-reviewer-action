@@ -361,13 +361,14 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     echo
   } > review-corpus.body.md
 
-  # MAX_CORPUS is the total budget (standards + body + reserved ledger). Cap
-  # the standards section first, carve out the reserved ledger section, then
-  # give the body the remaining budget so a large standards file or ledger can't
+  # MAX_CORPUS is the total budget (standards + body + reserved ledger +
+  # reserved specialist leads). Cap the standards section first, carve out the
+  # reserved ledger and specialist-lead sections, then give the body the
+  # remaining budget so a large standards file, ledger, or lead section can't
   # silently blow past the model's context window.
   local std_cap=16000
   truncate_clean standards-context.md standards-context.capped.md "$std_cap" '…[standards truncated]'
-  local std_bytes ledger_bytes body_budget
+  local std_bytes ledger_bytes sp_bytes body_budget
   std_bytes="$(wc -c < standards-context.capped.md | tr -d ' ')"
 
   # ── Explicit Requirement Ledger (#624) — reserved, like standards ─────
@@ -399,7 +400,27 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
     ledger_bytes=0
   fi
 
-  body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes ))
+  # ── Specialist Review Leads (#609) — reserved, but LAST ─────────────────
+  # specialists.md is the advisory lead section rendered by run_specialists.py
+  # at the end of the deep-review phase (empty whenever deep review is
+  # disabled, no usable lead survived, or the section could not fit its own
+  # SPECIALISTS_SECTION_MAX_BYTES cap). Its exact bytes are carved out of the
+  # body budget below — reserved like the ledger — and the block is appended
+  # after the truncated body and after the ledger, never truncated itself.
+  # Authority order is deliberate: standards (first) > explicit requirement
+  # ledger > advisory leads (last), so specialist content can never evict
+  # higher-authority standards/ledger material. The same fits-sanity the
+  # ledger applies (drop when it cannot fit a sane reservation) keeps this
+  # assembly and the run_specialists.py presence signal in lockstep.
+  sp_bytes=0
+  if [ -s specialists.md ]; then
+    sp_bytes="$(wc -c < specialists.md | tr -d ' ')"
+    if [ "$sp_bytes" -ge "$MAX_CORPUS" ]; then
+      sp_bytes=0
+    fi
+  fi
+
+  body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes - sp_bytes ))
   [ "$body_budget" -lt 4000 ] && body_budget=4000
   truncate_clean review-corpus.body.md review-corpus.body.truncated.md "$body_budget" \
     '```
@@ -407,13 +428,19 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 
   # Prepend the (capped) standards section — first and highest-authority,
   # truncation-exempt (see tests/test_corpus_standards_survival.sh) — then the
-  # truncated body, then the reserved ledger block last.
+  # truncated body, then the reserved ledger block, then the reserved
+  # specialist-lead block (#609) last: lowest authority, appended after
+  # everything, never sliced by truncation (whole-section granularity).
   {
     echo "# Repository Standards and Conventions ($STANDARDS_FILE)"
     cat standards-context.capped.md
     echo
     cat review-corpus.body.truncated.md
     cat requirement-ledger.section.md
+    if [ "$sp_bytes" -gt 0 ]; then
+      cat specialists.md
+      echo
+    fi
   } > review-corpus.md
 
   # Lockstep guard: the system-prompt fragment was already substituted from
@@ -427,6 +454,18 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
      && ! grep -qF '# Explicit Requirement Ledger' review-corpus.md; then
     log "WARNING: requirement-ledger-present.txt is set but the ledger section is missing from review-corpus.md; clearing the stale signal"
     : > requirement-ledger-present.txt
+  fi
+
+  # Lockstep guard (#609): the specialist guidance fragment is substituted
+  # from specialist-leads-present.txt right after the specialist phase
+  # (below), so a non-empty signal must correspond to a "# Specialist Review
+  # Leads" section in the final corpus. Unreachable by construction —
+  # run_specialists.py applies the identical MAX_CORPUS fits-sanity before
+  # writing both artifacts — asserted defensively.
+  if [ -s specialist-leads-present.txt ] \
+     && ! grep -qF '# Specialist Review Leads' review-corpus.md; then
+    log "WARNING: specialist-leads-present.txt is set but the specialist section is missing from review-corpus.md; clearing the stale signal"
+    : > specialist-leads-present.txt
   fi
 }
 
@@ -448,6 +487,79 @@ else
 fi
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
+
+# ── Deep review (#608/#609): specialist leads feed the final corpus ────────
+# The three fixed specialist roles (correctness / security / tests —
+# pr_reviewer/specialists.py) run as a BACKGROUND JOB over the just-built
+# truncated review corpus, reusing the primary model settings. The three
+# roles run concurrently WITH EACH OTHER (the runner fans them out on
+# internal threads); the phase is fully reaped BEFORE anything below enters —
+# critically before the native_loop tool harness starts, so the final
+# reviewer's FIRST tool-planning turn already sees the rendered leads and can
+# spend tool calls verifying the best ones instead of discovering them after
+# the tool budget is gone. This placement replaced the older review.sh
+# launch (#609); review.sh only summarizes specialists.json in the step
+# summary now. Fail-soft: a specialist that times out or fails is recorded
+# as an error in the artifacts and the final reviewer still runs — never
+# blocked, never aborted (the wait is guarded with || status=$? against
+# set -e). Advisory only: specialist leads never touch enforcement, the
+# verdict policy, or the published body directly; the final reviewer remains
+# the sole verdict authority. When DEEP_REVIEW is false the gate is not
+# entered and the normal path is preserved untouched (no timer entries, no
+# artifacts, no corpus change — the disabled-run corpus stays byte-identical
+# to a pre-#609 build).
+DEEP_REVIEW_ACTIVE="false"
+SPECIALISTS_PID=""
+if [[ "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+  DEEP_REVIEW_ACTIVE="true"
+  section_timer_start "specialists"
+  python3 "$SCRIPT_DIR/run_specialists.py" --corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &
+  SPECIALISTS_PID=$!
+  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the review corpus (pid $SPECIALISTS_PID)"
+fi
+
+# Reap the specialist phase fully before anything consumes its output (the
+# #371 harvest idiom): a nonzero phase status only logs an error — advisory
+# passes never block the final review.
+harvest_specialist_phase() {
+  [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]] || return 0
+  [[ -n "${SPECIALISTS_PID:-}" ]] || return 0
+  local status=0
+  wait "$SPECIALISTS_PID" || status=$?
+  cat specialists.phase.log 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    error "specialist phase exited ${status}; continuing (advisory passes never block the final review)"
+  fi
+  section_timer_end
+}
+harvest_specialist_phase
+
+# Rebuild the corpus with the reserved "# Specialist Review Leads" block
+# (build_review_corpus carves its exact bytes out of the body budget and
+# appends it last, after the ledger) whenever the rendered section is
+# non-empty; both modes' corpora therefore carry the leads before the final
+# review call and before native-loop planning. When deep review is disabled
+# or no usable lead survived, specialists.md is empty and NO rebuild
+# happens — disabled output stays byte-for-byte as before.
+if [ -s specialists.md ]; then
+  log "deep_review: rebuilding corpus with the reserved specialist-lead section"
+  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
+    build_review_corpus "incremental"
+  else
+    build_review_corpus "full"
+  fi
+  cp review-corpus.md review-corpus.truncated.md
+fi
+
+# Substitute the specialist guidance fragment into the default system prompt
+# (config.sh): substituted iff run_specialists.py left a non-empty
+# specialist-leads-present.txt signal, so the final reviewer is told to
+# verify/deduplicate the leads it can actually see; called unconditionally so
+# the {{SPECIALIST_LEADS_GUIDANCE}} placeholder is stripped on every other
+# path and never leaks to the model. Runs before the native_loop harness
+# launches below, so its conversation inherits the guidance-substituted
+# SYSTEM_PROMPT.
+apply_specialist_leads_fragment
 
 case "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" in native_loop) TOOL_HARNESS_ENABLED="true" ;; *) TOOL_HARNESS_ENABLED="false" ;; esac
 if [[ "$TOOL_HARNESS_ENABLED" == "true" ]]; then
