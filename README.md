@@ -1139,6 +1139,10 @@ Copyable workflows are included in [`examples/`](examples):
 - [`examples/workflow-self-hosted.yml`](examples/workflow-self-hosted.yml)
 - [`examples/workflow-cloud.yml`](examples/workflow-cloud.yml)
 
+### 📊 Specialist corpus & deep A/B
+
+The `eval-harness` workflow (`.github/workflows/eval-harness.yaml`) runs `scripts/eval_harness.py` against the graded corpora — `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and `evals/corpus-specialists.json` — on the weekly scheduled sweep and on demand. The specialist corpus adds a deep-review A/B: the `deep` dispatch input (or `--deep-review false|true|both` locally) runs the specialist phase, deep runs are labelled `<mode>+deep` in the report, and each fixture's `specialist_expectations` (`lead_generated`, `lead_disposition` with `verified` / `rejected` / `unused` / `not_adopted`, `final_findings_count`, `dedupe_final_findings`) is graded against the run's specialist telemetry from `specialists.json` and `specialist-<role>.json`. The report gains per-mode `specialist_capability_runs`, `specialist_capability_passes`, and `specialist_capability_pass_rate` in `mode_summary`. The scheduled sweep stays standard-only, and the production default is unchanged: `deep_review` is still off by default.
+
 ## 📌 Version pinning and releases
 
 The action is versioned via Git tags (e.g., `v2.0.5`). The examples in this README use a floating major tag as a shorthand; in production workflows, pin to a specific version tag or commit SHA for reproducible runs:

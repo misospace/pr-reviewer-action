@@ -30,6 +30,18 @@ on:
         required: false
         default: ""
         type: string
+      # Deep-review specialist A/B (issue #610): 'false' keeps the run
+      # standard-only (the scheduled sweep default), 'true' runs the deep
+      # specialist phase only, 'both' runs standard and deep for each mode.
+      deep:
+        description: "Deep-review specialist A/B: false, true, or both"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+          - "both"
   schedule:
     # Weekly Monday 06:00 UTC regression sweep on main.
     - cron: "0 6 * * 1"
@@ -74,6 +86,9 @@ jobs:
           MODES="${{ inputs.modes || 'tools_off native_loop' }}"
           RUNS_PER_MODE="${{ inputs.runs-per-mode || 10 }}"
           MAX_PRS="${{ inputs.max-prs || '' }}"
+          # 'false' when the input is absent (the scheduled sweep) so the
+          # weekly run stays standard-only (issue #610).
+          DEEP="${{ inputs.deep || 'false' }}"
 
           OUT_DIR="eval-report"
           mkdir -p "$OUT_DIR"
@@ -89,7 +104,8 @@ jobs:
           if [ -n "$MAX_PRS" ]; then
             CMD+=(--max-prs "$MAX_PRS")
           fi
-          CMD+=(--runs-per-mode "$RUNS_PER_MODE" --output "$OUT_DIR/eval-report.json")
+          CMD+=(--runs-per-mode "$RUNS_PER_MODE" --deep-review "$DEEP" \
+                --output "$OUT_DIR/eval-report.json")
 
           echo "Running: ${CMD[*]}"
           "${CMD[@]}"

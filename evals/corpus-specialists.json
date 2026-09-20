@@ -1,0 +1,197 @@
+{
+  "benchmark_corpus": [
+    {
+      "number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/547",
+      "title": "fix(forgejo): make the Authorized Integration JWT cache thread-safe",
+      "known_findings": [
+        {
+          "category": "security",
+          "severity": "high",
+          "description": "Concurrent _get_jwt() calls can pass the TTL check together and issue duplicate OIDC token-exchange POSTs.",
+          "file_path": "pr_reviewer/forgejo_backend.py"
+        }
+      ],
+      "specialist_expectations": {
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race, the final reviewer should verify it against the diff and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+        "checks": [
+          {
+            "id": "security_lead_generated",
+            "type": "lead_generated",
+            "role": "security",
+            "min": 1,
+            "category_any": ["security", "auth", "authentication", "concurrency", "race", "token"],
+            "message_any_contains": ["jwt", "token", "ttl", "race", "expir", "concurren"]
+          },
+          {
+            "id": "security_lead_adopted",
+            "type": "lead_disposition",
+            "role": "security",
+            "disposition": "verified",
+            "category_any": ["security", "auth", "authentication", "concurrency", "race", "token"],
+            "message_any_contains": ["jwt", "token", "ttl", "race", "expir", "concurren"]
+          },
+          {
+            "id": "security_lead_not_adopted_hallucination",
+            "type": "lead_disposition",
+            "role": "security",
+            "disposition": "not_adopted",
+            "category_any": ["secret", "secrets", "credentials"],
+            "message_any_contains": ["hardcoded secret", "secret leak"],
+            "finding_category_any": ["secret", "secrets", "security", "credentials"],
+            "finding_description_any_contains": ["hardcoded secret", "secret leak"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 551,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/551",
+      "title": "fix(carry-forward): propagate needs_full_review so unverifiable carried findings trigger a full review next run",
+      "known_findings": [
+        {
+          "category": "correctness",
+          "severity": "high",
+          "description": "Case-2 carried findings loop forever on incremental diffs when needs_full_review was not propagated, so the next review re-enters the same unverifiable state.",
+          "file_path": "pr_reviewer/carry_forward.py"
+        }
+      ],
+      "specialist_expectations": {
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap and the final reviewer should verify it against the diff and adopt it.",
+        "checks": [
+          {
+            "id": "correctness_lead_generated",
+            "type": "lead_generated",
+            "role": "correctness",
+            "min": 1,
+            "category_any": ["correctness", "regression", "state", "loop"],
+            "message_any_contains": ["needs_full_review", "carry", "incremental", "loop", "stuck"]
+          },
+          {
+            "id": "correctness_lead_adopted",
+            "type": "lead_disposition",
+            "role": "correctness",
+            "disposition": "verified",
+            "category_any": ["correctness", "regression", "state", "loop"],
+            "message_any_contains": ["needs_full_review", "carry", "incremental", "loop", "stuck"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 612,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/612",
+      "title": "feat(review): add bounded specialist advisory-contract module",
+      "known_findings": [],
+      "specialist_expectations": {
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization, and the final reviewer should adopt that as a coverage finding.",
+        "checks": [
+          {
+            "id": "tests_lead_generated",
+            "type": "lead_generated",
+            "role": "tests",
+            "min": 1,
+            "category_any": ["tests", "testing", "coverage", "test-gap"],
+            "message_any_contains": ["coverage", "sever", "alias", "normal", "cap"]
+          },
+          {
+            "id": "tests_lead_adopted",
+            "type": "lead_disposition",
+            "role": "tests",
+            "disposition": "verified",
+            "category_any": ["tests", "testing", "coverage", "test-gap"],
+            "message_any_contains": ["coverage", "sever", "alias", "normal", "cap"],
+            "finding_category_any": ["tests", "testing", "coverage", "test-gap"],
+            "finding_description_any_contains": ["coverage", "test", "sever"]
+          }
+        ]
+      }
+    },
+    {
+      "number": 622,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/622",
+      "title": "ci(codeql): add CodeQL python analysis workflow",
+      "known_findings": [],
+      "expected_evidence": {
+        "description": "Grader-only evidence for the negative control; not a reviewer recipe. A simple CI workflow addition must keep the tool loop lean, with no more than four tool calls.",
+        "checks": [
+          {
+            "id": "limits_tool_calls",
+            "type": "max_tool_calls",
+            "max": 4
+          }
+        ]
+      },
+      "specialist_expectations": {
+        "negative_control": true,
+        "description": "Grader-only rationale for the negative control; not a reviewer recipe. Deep review must not invent findings on a simple CI workflow addition, and no specialist lead is expected on this change.",
+        "checks": [
+          {
+            "id": "no_final_findings",
+            "type": "final_findings_count",
+            "max": 0
+          },
+          {
+            "id": "no_duplicated_findings",
+            "type": "dedupe_final_findings",
+            "max": 0
+          }
+        ]
+      }
+    },
+    {
+      "number": 597,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/597",
+      "title": "fix(precheck): fail closed when the @ai-reviewer dismiss permission check can't run",
+      "known_findings": [
+        {
+          "category": "security",
+          "severity": "high",
+          "description": "Precheck must fail closed when the @ai-reviewer dismiss permission check can't run, instead of proceeding as if the permission were granted.",
+          "file_path": "pr_reviewer/precheck.py"
+        }
+      ],
+      "specialist_expectations": {
+        "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap, the two overlapping leads must collapse into one final finding, and the final reviewer should verify and adopt it.",
+        "checks": [
+          {
+            "id": "security_lead_generated",
+            "type": "lead_generated",
+            "role": "security",
+            "min": 1,
+            "category_any": ["security", "permission", "auth"],
+            "message_any_contains": ["dismiss", "permission", "fail"]
+          },
+          {
+            "id": "correctness_lead_generated",
+            "type": "lead_generated",
+            "role": "correctness",
+            "min": 1,
+            "category_any": ["correctness", "fail-open", "permission"],
+            "message_any_contains": ["dismiss", "permission", "fail"]
+          },
+          {
+            "id": "overlapping_leads_deduped",
+            "type": "dedupe_final_findings",
+            "max": 1,
+            "finding_category_any": ["security", "correctness", "permission", "dismiss"],
+            "finding_description_any_contains": ["dismiss", "permission", "fail"]
+          },
+          {
+            "id": "precheck_lead_adopted",
+            "type": "lead_disposition",
+            "role": ["security", "correctness"],
+            "disposition": "verified",
+            "category_any": ["security", "correctness", "permission", "dismiss", "auth"],
+            "message_any_contains": ["dismiss", "permission", "fail"]
+          }
+        ]
+      }
+    }
+  ]
+}

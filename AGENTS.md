@@ -223,7 +223,8 @@ none rather than guessing.
 ## Eval harness runbook
 
 The evaluation harness (`scripts/eval_harness.py`) and its graded corpora
-(`evals/corpus-agentic.json` and `evals/corpus-repo-context.json`) are wired
+(`evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and
+`evals/corpus-specialists.json`) are wired
 into CI by the `eval-harness` workflow (`.github/workflows/eval-harness.yaml`). Use this runbook for manual
 runs or when triaging a failing scheduled regression sweep.
 
@@ -260,9 +261,12 @@ The `eval-harness` workflow has two triggers:
 
 - **`workflow_dispatch`** — runs on demand from the Actions tab. Inputs:
   `corpus` (default `evals/corpus-agentic.json`; choose
-  `evals/corpus-repo-context.json` for the repository-context fixtures), `modes`
-  (default `tools_off native_loop`), `runs-per-mode` (default `10`), `max-prs`
-  (blank = corpus default).
+  `evals/corpus-repo-context.json` for the repository-context fixtures,
+  `evals/corpus-specialists.json` for the deep-review specialist fixtures),
+  `modes` (default `tools_off native_loop`), `runs-per-mode` (default `10`),
+  `max-prs` (blank = corpus default), `deep` (choice `false` / `true` /
+  `both`, default `false` — the deep-review specialist A/B; absent inputs,
+  i.e. the scheduled run, default to standard-only).
 - **`schedule`** — weekly Monday 06:00 UTC sweep against `main`. The
   scheduled run additionally posts a Markdown summary to
   `GITHUB_STEP_SUMMARY` and as a comment on issue #472 so regressions are
@@ -279,3 +283,56 @@ failed vs. the previous baseline. A pass rate below `0.95` or any
 non-empty `regressions` list should block the release; inspect the
 artifact, reproduce locally with the command above, then fix the prompt or
 routing regression in the action before re-running.
+
+### Specialist corpus & deep A/B
+
+`evals/corpus-specialists.json` grades the deep-review specialist phase
+(#610): each fixture carries `specialist_expectations` that the harness
+checks against the normalized specialist telemetry on the run
+(`run.specialists`, loaded from the run's `specialists.json` aggregate and
+`specialist-<role>.json` per-role artifacts). Run it with the same
+harness:
+
+```bash
+python scripts/eval_harness.py \
+    --corpus evals/corpus-specialists.json \
+    --modes native_loop \
+    --deep-review both \
+    --runs-per-mode 10 \
+    --model "$AI_MODEL" \
+    --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" \
+    --github-token "$GITHUB_TOKEN" \
+    --output eval-report/eval-report-specialists.json
+```
+
+`--deep-review false|true|both` controls the A/B; deep runs are labelled
+`<mode>+deep` in the report (e.g. `native_loop+deep`) and get their own
+mode summary. A fixture's `specialist_expectations` may declare these
+check types:
+
+- `lead_generated` — at least `min` (default 1) leads for `role` (a single
+  role or a list) matching the lead predicates `category_any`, `file_any`,
+  and `message_any_contains` (loose, case-insensitive substrings).
+- `lead_disposition` — the disposition the final reviewer must have given a
+  matching lead: `verified` (a matching final finding exists), `rejected`
+  (a lead was generated but no matching finding was adopted), `unused`
+  (no lead at all), `not_adopted` (no matching final finding, whether or
+  not a lead existed — a hallucinated lead must never be adopted), or `any`
+  (a lead was generated). Finding-side needles override via
+  `finding_category_any` / `finding_description_any_contains`.
+- `final_findings_count` — `min` (default 0) / optional `max` on the
+  finding predicate against the run's findings.
+- `dedupe_final_findings` — same as `final_findings_count` with a default
+  `max` of 1: overlapping leads must collapse into a single final finding.
+
+The report carries `specialist_capability_runs`,
+`specialist_capability_passes`, and `specialist_capability_pass_rate` per
+mode in `mode_summary` (plus the per-PR `specialist_capability` detail and
+`specialist_capability_pass_rate`), and each run's `specialists`
+telemetry. One fixture is flagged `negative_control`: it asserts the deep
+run invents no findings (`final_findings_count` / `dedupe_final_findings`
+max 0) while a `max_tool_calls` bound in its `expected_evidence` keeps the
+tool loop lean. The weekly scheduled sweep remains standard-only (`deep`
+absent → `false`), and none of this changes production defaults:
+`deep_review` is still off by default for action users.
