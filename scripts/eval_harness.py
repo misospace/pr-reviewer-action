@@ -97,11 +97,18 @@ class ReviewRun:
     # normalized telemetry from the run's specialist artifacts.
     deep_review: bool = False
     specialists: dict[str, Any] | None = None
+    # The exact PR-head commit this run reviewed (the checked-out
+    # refs/pull/<PR>/head); None when the run errored before/without
+    # materializing the PR head.
+    commit_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "mode": self.mode,
-            "pr_number": self.pr_number,
+        d: dict[str, Any] = {"mode": self.mode, "pr_number": self.pr_number}
+        if self.commit_sha is not None:
+            # Additive, near pr_number: present only once the run
+            # materialized a PR head; None runs keep the pre-existing shape.
+            d["commit_sha"] = self.commit_sha
+        d.update({
             "repo_full_name": self.repo_full_name,
             "tokens_input": self.tokens_input,
             "tokens_output": self.tokens_output,
@@ -116,7 +123,8 @@ class ReviewRun:
             "model_used": self.model_used,
             "deep_review": self.deep_review,
             "specialists": self.specialists,
-        }
+        })
+        return d
 
 
 @dataclass
@@ -1045,6 +1053,58 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
         return
 
 
+def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None, str]:
+    """Fetch refs/pull/<pr>/head from origin and detach onto it.
+
+    Returns (ok, commit_sha, error). Never leaves the run silently on the
+    default branch: any fetch/checkout/rev-parse failure yields ok=False
+    with a human-readable error and commit_sha None (or the partial value).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_path), "fetch", "--no-tags", "--force",
+                "origin", f"+refs/pull/{pr_number}/head:refs/pull/{pr_number}/head",
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if result.returncode != 0:
+            return (
+                False, None,
+                f"fetch refs/pull/{pr_number}/head failed (exit "
+                f"{result.returncode}): {result.stderr[:300]}",
+            )
+
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_path), "checkout",
+                "--force", "--detach", "FETCH_HEAD",
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if result.returncode != 0:
+            return (
+                False, None,
+                f"checkout PR head failed (exit {result.returncode}): "
+                f"{result.stderr[:300]}",
+            )
+
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        sha = result.stdout.strip()
+        if result.returncode != 0 or not sha:
+            return (False, None, "could not resolve checked-out HEAD")
+
+        return (True, sha, "")
+    except subprocess.TimeoutExpired:
+        return (
+            False, None,
+            "git timed out while materializing the PR head",
+        )
+
+
 def run_review_for_pr(
     pr_entry: dict[str, Any],
     mode: str,
@@ -1055,9 +1115,12 @@ def run_review_for_pr(
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
-    This is the integration point with the actual review pipeline.
-    Currently produces stub results; real implementation will call
-    run_review.sh with appropriate TOOL_MODE settings. The orchestrator's
+    This is the integration point with the actual review pipeline. The run
+    materializes the corpus PR's exact head revision (refs/pull/<PR>/head,
+    fetched from the clone's origin and checked out detached) before
+    invoking the orchestrator, so filesystem context and specialist
+    artifact roots match the PR under review rather than the default
+    branch. The orchestrator's
     GITHUB_WORKSPACE is pinned to the run's repo clone, because the
     production helpers resolve their workspace from it, never from cwd.
 
@@ -1110,6 +1173,19 @@ def run_review_for_pr(
         if not repo_path.exists():
             run.error = f"Repo {repo_full_name} not available locally"
             return run
+
+        # Materialize the corpus PR's exact head revision (detached) before
+        # any context is read: a cloned/reused repo_path sits on the
+        # default branch until we check the PR head out, and every
+        # filesystem-based context (repo map, related-code, native
+        # read_file/git_grep, tree exploration, specialist verification)
+        # would otherwise come from the current default-branch tree.
+        ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+        if not ok:
+            run.error = f"PR head not materialized: {err}"
+            run.wall_clock_sec = time.monotonic() - start
+            return run
+        run.commit_sha = sha
 
         # Drop stale run artifacts so a reused workspace can never present a
         # prior run's verdict/tool trace/specialists as this run's.

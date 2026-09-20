@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -122,8 +123,14 @@ with open("env-snapshot.json", "w", encoding="utf-8") as f:
     json.dump(snap, f)
 PY
 __BODY__
+__HEAD_RECORD__
 exit 0
 """
+
+# Optional trailing body line (record_head=True): records the HEAD the
+# orchestrator subprocess actually observed in the run cwd, so a test can
+# assert the PR head was checked out — not just the in-process value.
+HEAD_RECORD = "git rev-parse HEAD > head.txt"
 
 OUTPUT_BODY = """if [ -f ai-output.json ]; then
   echo "stale ai-output.json at entry" >&2
@@ -202,6 +209,8 @@ def _write_fake_script(
     specialists_payload: str = SPECIALISTS_PAYLOAD,
     malformed_aggregate: bool = False,
     workspace_rooted: bool = False,
+    pr_number: int = PR_NUMBER,
+    record_head: bool = False,
 ) -> Path:
     if write_output:
         if workspace_rooted:
@@ -229,18 +238,73 @@ def _write_fake_script(
     script = (
         FAKE_SCRIPT_TEMPLATE
         .replace("__EXPECT_REPO__", REPO)
-        .replace("__EXPECT_PR__", str(PR_NUMBER))
+        .replace("__EXPECT_PR__", str(pr_number))
         .replace("__BODY__", body)
+        .replace("__HEAD_RECORD__", HEAD_RECORD if record_head else "")
     )
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
     return path
 
 
-def _work_dir_with_repo(tmp_path: Path) -> Path:
-    repo_path = tmp_path / REPO_DIR_NAME
-    repo_path.mkdir(parents=True, exist_ok=True)
-    return repo_path
+def _git(path: Path, *args: str) -> str:
+    """Run a git command in `path`; return stripped stdout (checked)."""
+    result = subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_origin_repo(
+    tmp_path: Path, prs: tuple[int, ...]
+) -> tuple[Path, str, dict[int, str]]:
+    """Create a local origin git repo advertising refs/pull/<pr>/head.
+
+    Commits a marker file on main (the returned base_sha), then, for each
+    PR number, rewrites the marker (content = str(pr)) and advertises that
+    commit as refs/pull/<pr>/head. The marker never collides with a name
+    the harness or the fake orchestrator writes (ai-output.json, ...), so
+    planted artifacts stay untracked and checkout --force never conflicts.
+    A repo-local committer identity keeps the helper independent of any
+    global git config.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-b", "main")
+    _git(origin, "config", "user.email", "eval@test")
+    _git(origin, "config", "user.name", "eval")
+    (origin / "marker.txt").write_text("base\n", encoding="utf-8")
+    _git(origin, "add", "marker.txt")
+    _git(origin, "commit", "-m", "base")
+    base_sha = _git(origin, "rev-parse", "HEAD")
+    shas: dict[int, str] = {}
+    for pr in prs:
+        (origin / "marker.txt").write_text(f"{pr}\n", encoding="utf-8")
+        _git(origin, "add", "marker.txt")
+        _git(origin, "commit", "-m", f"pr {pr}")
+        sha = _git(origin, "rev-parse", "HEAD")
+        _git(origin, "update-ref", f"refs/pull/{pr}/head", sha)
+        # Keep main parked at the base: the PR commit is reachable ONLY via
+        # refs/pull/<pr>/head, so a fresh clone (main) starts at base and a
+        # plain fetch cannot serve the PR head.
+        _git(origin, "update-ref", "refs/heads/main", base_sha)
+        shas[pr] = sha
+    return origin, base_sha, shas
+
+
+def _work_dir_with_repo(
+    tmp_path: Path, prs: tuple[int, ...] = (PR_NUMBER,)
+) -> Path:
+    """Materialize the run's repo dir as a real git clone of a local origin.
+
+    The clone's origin advertises refs/pull/<pr>/head for each of `prs`,
+    so the harness can fetch and detach onto the corpus PR's exact head
+    with no network access.
+    """
+    origin, _, _ = _init_origin_repo(tmp_path, prs)
+    _git(tmp_path, "clone", str(origin), REPO_DIR_NAME)
+    return tmp_path / REPO_DIR_NAME
 
 
 def _read_snapshot(repo_path: Path) -> dict:
@@ -577,6 +641,137 @@ class TestRunReviewForPrBoundary:
         assert run.specialists["total_leads"] == 2
         assert (repo_path / "specialists.json").is_file()
         assert (repo_path / "specialist-security.json").is_file()
+
+
+class TestRevisionFidelity:
+    """The run must review the corpus PR's exact head revision.
+
+    The repo dir is a real clone of a local origin advertising
+    refs/pull/<pr>/head (offline), and with record_head the fake
+    orchestrator records the HEAD it actually observed in the run cwd — so
+    these tests prove the subprocess itself ran on the PR head, not just
+    that an in-process value was set.
+    """
+
+    def _clone_origin(
+        self, tmp_path: Path, prs: tuple[int, ...]
+    ) -> tuple[Path, str, dict[int, str]]:
+        origin, base_sha, shas = _init_origin_repo(tmp_path, prs)
+        _git(tmp_path, "clone", str(origin), REPO_DIR_NAME)
+        return tmp_path / REPO_DIR_NAME, base_sha, shas
+
+    def test_checks_out_the_requested_pr_head_per_fixture(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path, base_sha, shas = self._clone_origin(tmp_path, (547, 551))
+        # The fixtures are distinct revisions, and neither is the default
+        # branch tip.
+        assert shas[547] != shas[551]
+        assert shas[547] != base_sha
+        assert shas[551] != base_sha
+
+        script_547 = _write_fake_script(
+            tmp_path / "fake_547.sh", deep=True, pr_number=547,
+            record_head=True,
+        )
+        script_551 = _write_fake_script(
+            tmp_path / "fake_551.sh", deep=True, pr_number=551,
+            record_head=True,
+        )
+        entry_547 = {"number": 547, "repo_full_name": REPO}
+        entry_551 = {"number": 551, "repo_full_name": REPO}
+
+        # ONE work dir, three consecutive runs: 547 -> 551 -> 547. A reused
+        # repo_path must be re-checked-out onto the requested head each time
+        # (reuse is not "already materialized"), and repeated same-PR runs
+        # are stable. After each call, the orchestrator's recorded head.txt
+        # must show the head that call reviewed.
+        for entry, script, expected_sha in (
+            (entry_547, script_547, shas[547]),
+            (entry_551, script_551, shas[551]),
+            (entry_547, script_547, shas[547]),
+        ):
+            run = run_review_for_pr(
+                entry, "native_loop", tmp_path, MODEL_CONFIG,
+                deep_review=True, review_script=script,
+            )
+            assert run.error is None
+            assert run.commit_sha == expected_sha
+            # The orchestrator subprocess observed the PR head in its cwd.
+            assert (
+                repo_path / "head.txt"
+            ).read_text(encoding="utf-8").strip() == expected_sha
+
+    def test_repeated_runs_use_the_same_exact_head(self, tmp_path: Path) -> None:
+        _, _, shas = self._clone_origin(tmp_path, (547,))
+        script = _write_fake_script(
+            tmp_path / "fake_547.sh", deep=True, pr_number=547,
+        )
+        entry = {"number": 547, "repo_full_name": REPO}
+
+        first = run_review_for_pr(
+            entry, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+        second = run_review_for_pr(
+            entry, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        assert first.error is None
+        assert second.error is None
+        assert first.commit_sha == second.commit_sha == shas[547]
+
+    def test_missing_pr_ref_fails_closed_no_default_branch_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path, base_sha, _ = self._clone_origin(tmp_path, (547,))
+        # A fake orchestrator that WOULD succeed if it ran.
+        script = _write_fake_script(
+            tmp_path / "fake_999.sh", deep=True, pr_number=999,
+            record_head=True,
+        )
+        entry = {"number": 999, "repo_full_name": REPO}
+
+        run = run_review_for_pr(
+            entry, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        # Fail-closed: the run errored and recorded no commit.
+        assert run.error is not None
+        assert "PR head not materialized" in run.error
+        assert run.commit_sha is None
+        # The orchestrator never ran: no artifacts at all in the run cwd.
+        assert not (repo_path / "env-snapshot.json").exists()
+        assert not (repo_path / "ai-output.json").exists()
+        # No silent fallback: HEAD is still the default branch's base.
+        assert _git(repo_path, "rev-parse", "HEAD") == base_sha
+
+    def test_checkout_does_not_disturb_stale_reset_or_symlinks(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path, _, shas = self._clone_origin(tmp_path, (547,))
+        # An untracked stale verdict in the git-backed repo dir: the
+        # checkout must not trip over it, and the run must still consume
+        # fresh artifacts (the fake orchestrator exits 43 if a stale
+        # ai-output.json survives the reset).
+        (repo_path / "ai-output.json").write_text(
+            '{"verdict": "approve", "review_markdown": "stale"}',
+            encoding="utf-8",
+        )
+        script = _write_fake_script(
+            tmp_path / "fake_547.sh", deep=True, pr_number=547,
+        )
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        assert run.error is None
+        assert run.commit_sha == shas[547]
+        assert run.verdict == "request_changes"
 
 
 if __name__ == "__main__":
