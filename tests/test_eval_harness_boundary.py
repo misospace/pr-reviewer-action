@@ -7,12 +7,15 @@ live models) and verifies end-to-end:
     the orchestrator runs),
   - artifact parsing (ai-output.json -> verdict/findings, analysis_engine.txt
     -> model_used, ai-response.primary.json -> tokens, tool-harness.json ->
-    tool_calls, specialists.json + specialist-<role>.json -> telemetry).
+    tool_calls, specialists.json + specialist-<role>.json -> telemetry),
+  - adversarial boundary tokens: symlinked stale artifacts, NUL/control
+    bytes in finding content, path-shaped finding files.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +25,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from eval_harness import run_review_for_pr
+from eval_harness import evaluate_specialist_expectations, run_review_for_pr
 
 
 REPO = "misospace/pr-reviewer-action"
@@ -71,6 +74,31 @@ SPECIALIST_SECURITY_PAYLOAD = (
     '"message": "Concurrent JWT cache race"}], '
     '"truncated": false, "errors": []}'
 )
+
+# NUL (\\u0000) and ESC (\\u001b) are written to ai-output.json as JSON
+# escapes, so the decoded artifact carries a literal NUL in the finding
+# message and control chars in the review markdown.
+NUL_OUTPUT_PAYLOAD = (
+    '{"verdict": "request_changes", '
+    '"review_markdown": "lead \\u001b[31m in body", '
+    '"verdict_source": "findings_severity_gated", '
+    '"findings": [{"severity": "blocker", "category": "security", '
+    '"file": "pr_reviewer/forgejo_backend.py", "line": 142, '
+    '"message": "JWT\\u0000cache race"}]}'
+)
+
+# A finding whose `file` is a path-escape-shaped string: the scoring
+# predicates must treat it as plain text, never a filesystem path.
+ESCAPING_OUTPUT_PAYLOAD = (
+    '{"verdict": "request_changes", '
+    '"review_markdown": "body", '
+    '"verdict_source": "findings_severity_gated", '
+    '"findings": [{"severity": "blocker", "category": "security", '
+    '"file": "../../etc/passwd", "line": 1, '
+    '"message": "path-shaped file"}]}'
+)
+
+MALFORMED_AGGREGATE_PAYLOAD = "{not json"
 
 # The fake orchestrator: bakes its expectations into the script text (the
 # caller passes no expectations of its own), snapshots the env contract,
@@ -122,19 +150,40 @@ __SPECIALIST_SECURITY__
 JSON
 """
 
+# Like DEEP_BLOCK, but the specialists.json aggregate is a SYMLINK to a
+# malformed-JSON file: the load path must degrade to the derived-from-role
+# files fallback instead of raising.
+MALFORMED_DEEP_BLOCK = """cat > bad-aggregate.json <<'JSON'
+__SPECIALISTS__
+JSON
+ln -sf bad-aggregate.json specialists.json
+cat > specialist-security.json <<'JSON'
+__SPECIALIST_SECURITY__
+JSON
+"""
+
 NO_OUTPUT_BODY = 'echo "fallback body from stdout"\n'
 
 
 def _write_fake_script(
-    path: Path, deep: bool, write_output: bool = True
+    path: Path,
+    deep: bool,
+    write_output: bool = True,
+    ai_output: str = AI_OUTPUT_PAYLOAD,
+    specialists_payload: str = SPECIALISTS_PAYLOAD,
+    malformed_aggregate: bool = False,
 ) -> Path:
     if write_output:
-        deep_block = DEEP_BLOCK.replace(
-            "__SPECIALISTS__", SPECIALISTS_PAYLOAD
-        ).replace("__SPECIALIST_SECURITY__", SPECIALIST_SECURITY_PAYLOAD) if deep else ""
+        block = MALFORMED_DEEP_BLOCK if malformed_aggregate else DEEP_BLOCK
+        deep_block = (
+            block.replace("__SPECIALISTS__", specialists_payload)
+            .replace("__SPECIALIST_SECURITY__", SPECIALIST_SECURITY_PAYLOAD)
+            if deep
+            else ""
+        )
         body = (
             OUTPUT_BODY
-            .replace("__AI_OUTPUT__", AI_OUTPUT_PAYLOAD)
+            .replace("__AI_OUTPUT__", ai_output)
             .replace("__ANALYSIS_ENGINE__", ANALYSIS_ENGINE)
             .replace("__AI_RESPONSE__", AI_RESPONSE_PAYLOAD)
             .replace("__TOOL_HARNESS__", TOOL_HARNESS_PAYLOAD)
@@ -274,6 +323,145 @@ class TestRunReviewForPrBoundary:
         # No artifacts at all: no tool trace, no specialist telemetry.
         assert run.tool_calls == []
         assert run.specialists is None
+
+    def test_symlinked_stale_ai_output_is_reset_not_followed(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        # A stale ai-output.json that is a symlink to a live file: the reset
+        # must unlink the link itself, never follow it onto the target.
+        (repo_path / "evil-target.json").write_text(
+            '{"verdict": "approve", "review_markdown": "EVIL"}',
+            encoding="utf-8",
+        )
+        os.symlink("evil-target.json", repo_path / "ai-output.json")
+        script = _write_fake_script(tmp_path / "fake_run_review.sh", deep=True)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        # If the reset had followed/kept the link, the fake orchestrator
+        # would have seen ai-output.json at entry and exited 43.
+        assert run.error is None
+        assert run.verdict == "request_changes"
+        assert run.review_markdown == "fake review body"
+        # Only the link was removed; the target file is untouched.
+        assert (repo_path / "evil-target.json").exists()
+        assert not (repo_path / "ai-output.json").is_symlink()
+
+    def test_null_bytes_and_control_chars_in_findings_content_fail_soft(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(
+            tmp_path / "fake_run_review.sh", deep=True,
+            ai_output=NUL_OUTPUT_PAYLOAD,
+        )
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        assert run.error is None
+        assert run.verdict == "request_changes"
+        # Control bytes survive normalization verbatim (strip() leaves NUL).
+        assert run.review_markdown == "lead \x1b[31m in body"
+        assert run.findings[0]["message"] == "JWT\x00cache race"
+
+        expectations = {
+            "description": "control-laden jwt lead",
+            "effectiveness_checks": [
+                {
+                    "id": "jwt",
+                    "type": "final_findings_count",
+                    "min": 1,
+                    "message_any_contains": "jwt",
+                    "finding_file_any": ["forgejo_backend"],
+                }
+            ],
+        }
+        # Pure substring predicates: the NUL/ESC bytes in the message do not
+        # perturb scoring — 1 matching finding (>= min 1, file grounded), so
+        # the check passes and the result is deterministic.
+        scored = evaluate_specialist_expectations(run, expectations)
+        assert scored is not None
+        assert scored["checks"][0]["passed"] is True
+        assert scored["effectiveness_passed"] is True
+        assert scored["lead_passed"] is None
+        assert scored["passed"] is True
+        assert evaluate_specialist_expectations(run, expectations) == scored
+
+    def test_symlinked_specialists_artifact_malformed_target_fail_soft(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(
+            tmp_path / "fake_run_review.sh", deep=True,
+            specialists_payload=MALFORMED_AGGREGATE_PAYLOAD,
+            malformed_aggregate=True,
+        )
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        assert run.error is None
+        # The script's symlink to the malformed aggregate is still in place;
+        # the loader read through it, got unparseable JSON, and fell back.
+        assert (repo_path / "specialists.json").is_symlink()
+        spec = run.specialists
+        assert spec is not None
+        assert spec["derived"] is True
+        # Telemetry derived from the per-role files: security's one lead,
+        # nothing from the unreadable aggregate, no exception.
+        assert spec["total_leads"] == 1
+        assert spec["any_errors"] is False
+        assert spec["leads_by_role"]["security"][0]["message"] == "Concurrent JWT cache race"
+        assert spec["leads_by_role"]["correctness"] == []
+        assert spec["leads_by_role"]["tests"] == []
+        security = next(r for r in spec["roles"] if r["role"] == "security")
+        assert security["status"] == "ok"
+        assert security["lead_count"] == 1
+
+    def test_path_like_needles_do_not_escape_workspace(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(
+            tmp_path / "fake_run_review.sh", deep=False,
+            ai_output=ESCAPING_OUTPUT_PAYLOAD,
+        )
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is None
+        assert run.findings[0]["file"] == "../../etc/passwd"
+
+        expectations = {
+            "description": "path-shaped finding file is plain text",
+            "effectiveness_checks": [
+                {
+                    "id": "no-match",
+                    "type": "final_findings_count",
+                    "min": 1,
+                    "finding_file_any": ["forgejo_backend"],
+                },
+                {
+                    "id": "substring-match",
+                    "type": "final_findings_count",
+                    "min": 1,
+                    "finding_file_any": ["passwd"],
+                },
+            ],
+        }
+        # Pure string matching, never a filesystem: "../../etc/passwd"
+        # matches nothing on "forgejo_backend" but matches "passwd" as a
+        # bare substring, and neither check touches a path.
+        scored = evaluate_specialist_expectations(run, expectations)
+        assert scored is not None
+        by_id = {c["id"]: c for c in scored["checks"]}
+        assert by_id["no-match"]["passed"] is False
+        assert by_id["substring-match"]["passed"] is True
+        assert scored["effectiveness_passed"] is False
 
 
 if __name__ == "__main__":
