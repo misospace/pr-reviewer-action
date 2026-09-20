@@ -1057,7 +1057,9 @@ def run_review_for_pr(
 
     This is the integration point with the actual review pipeline.
     Currently produces stub results; real implementation will call
-    run_review.sh with appropriate TOOL_MODE settings.
+    run_review.sh with appropriate TOOL_MODE settings. The orchestrator's
+    GITHUB_WORKSPACE is pinned to the run's repo clone, because the
+    production helpers resolve their workspace from it, never from cwd.
 
     Args:
         pr_entry: Corpus entry for one PR (with url, number, repo_full_name).
@@ -1138,6 +1140,10 @@ def run_review_for_pr(
         env["AI_BASE_URL"] = model_config.get("base_url", "")
         env["AI_MODEL"] = model_config.get("model", "")
         env["AI_API_KEY"] = model_config.get("api_key", "")
+        # Production helpers prefer GITHUB_WORKSPACE over cwd: pin it to this
+        # run's temp clone so an ambient Actions value cannot steer the
+        # orchestrator at the workflow checkout.
+        env["GITHUB_WORKSPACE"] = str(repo_path)
         if tool_mode_arg:
             env["TOOL_MODE"] = tool_mode_arg
         if deep_review:

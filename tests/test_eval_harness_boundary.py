@@ -117,7 +117,7 @@ fi
 
 python3 - <<'PY'
 import json, os
-snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE")}
+snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE", "GITHUB_WORKSPACE")}
 with open("env-snapshot.json", "w", encoding="utf-8") as f:
     json.dump(snap, f)
 PY
@@ -164,6 +164,35 @@ JSON
 
 NO_OUTPUT_BODY = 'echo "fallback body from stdout"\n'
 
+# Like OUTPUT_BODY, but mirrors the production helpers' workspace-root
+# behavior: every artifact is written under $GITHUB_WORKSPACE (never bare
+# cwd), and the script refuses to run (exit 45) when GITHUB_WORKSPACE is
+# not the run cwd — so a leaked ambient workspace value would abort it.
+WORKSPACE_ROOTED_BODY = """if [ "${GITHUB_WORKSPACE}" != "${PWD}" ]; then
+  echo "GITHUB_WORKSPACE is not the run cwd" >&2
+  exit 45
+fi
+cat > "$GITHUB_WORKSPACE/ai-output.json" <<'JSON'
+__AI_OUTPUT__
+JSON
+printf '__ANALYSIS_ENGINE__\\n' > "$GITHUB_WORKSPACE/analysis_engine.txt"
+cat > "$GITHUB_WORKSPACE/ai-response.primary.json" <<'JSON'
+__AI_RESPONSE__
+JSON
+__DEEP_BLOCK__
+cat > "$GITHUB_WORKSPACE/tool-harness.json" <<'JSON'
+__TOOL_HARNESS__
+JSON
+"""
+
+WORKSPACE_ROOTED_DEEP_BLOCK = """cat > "$GITHUB_WORKSPACE/specialists.json" <<'JSON'
+__SPECIALISTS__
+JSON
+cat > "$GITHUB_WORKSPACE/specialist-security.json" <<'JSON'
+__SPECIALIST_SECURITY__
+JSON
+"""
+
 
 def _write_fake_script(
     path: Path,
@@ -172,9 +201,15 @@ def _write_fake_script(
     ai_output: str = AI_OUTPUT_PAYLOAD,
     specialists_payload: str = SPECIALISTS_PAYLOAD,
     malformed_aggregate: bool = False,
+    workspace_rooted: bool = False,
 ) -> Path:
     if write_output:
-        block = MALFORMED_DEEP_BLOCK if malformed_aggregate else DEEP_BLOCK
+        if workspace_rooted:
+            body_template = WORKSPACE_ROOTED_BODY
+            block = WORKSPACE_ROOTED_DEEP_BLOCK
+        else:
+            body_template = OUTPUT_BODY
+            block = MALFORMED_DEEP_BLOCK if malformed_aggregate else DEEP_BLOCK
         deep_block = (
             block.replace("__SPECIALISTS__", specialists_payload)
             .replace("__SPECIALIST_SECURITY__", SPECIALIST_SECURITY_PAYLOAD)
@@ -182,7 +217,7 @@ def _write_fake_script(
             else ""
         )
         body = (
-            OUTPUT_BODY
+            body_template
             .replace("__AI_OUTPUT__", ai_output)
             .replace("__ANALYSIS_ENGINE__", ANALYSIS_ENGINE)
             .replace("__AI_RESPONSE__", AI_RESPONSE_PAYLOAD)
@@ -462,6 +497,86 @@ class TestRunReviewForPrBoundary:
         assert by_id["no-match"]["passed"] is False
         assert by_id["substring-match"]["passed"] is True
         assert scored["effectiveness_passed"] is False
+
+    def test_workspace_env_pinned_to_the_temp_clone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        # An ambient GITHUB_WORKSPACE, as set by a real Actions runner,
+        # points at the workflow checkout — not this run's temp clone.
+        ambient = tmp_path / "ambient-actions-checkout"
+        ambient.mkdir()
+        monkeypatch.setenv("GITHUB_WORKSPACE", str(ambient))
+        script = _write_fake_script(tmp_path / "fake_run_review.sh", deep=True)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        assert run.error is None
+        snap = _read_snapshot(repo_path)
+        # The orchestrator's workspace is pinned to the temp clone,
+        # never the ambient Actions checkout.
+        assert snap["GITHUB_WORKSPACE"] == str(repo_path)
+        assert snap["GITHUB_WORKSPACE"] != str(ambient)
+
+    def test_workspace_pinned_for_standard_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        ambient = tmp_path / "ambient-actions-checkout"
+        ambient.mkdir()
+        monkeypatch.setenv("GITHUB_WORKSPACE", str(ambient))
+        script = _write_fake_script(tmp_path / "fake_run_review.sh", deep=False)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is None
+        snap = _read_snapshot(repo_path)
+        assert snap["GITHUB_WORKSPACE"] == str(repo_path)
+        # The pin is unconditional: standard runs get it too, and
+        # DEEP_REVIEW stays absent/empty for them.
+        assert snap["DEEP_REVIEW"] in (None, "")
+
+    def test_artifacts_consumed_from_the_temp_clone_not_the_ambient_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        ambient = tmp_path / "ambient-actions-checkout"
+        ambient.mkdir()
+        # A stale verdict planted in the ambient checkout: if the
+        # orchestrator's workspace leaked to it, this decoy would be read
+        # back as this run's verdict.
+        decoy = '{"verdict": "approve", "review_markdown": "AMBIENT-DECOY"}'
+        (ambient / "ai-output.json").write_text(decoy, encoding="utf-8")
+        monkeypatch.setenv("GITHUB_WORKSPACE", str(ambient))
+        # Workspace-rooted fake: writes under $GITHUB_WORKSPACE (production
+        # behavior) and exits 45 if that is not the run cwd (the pin proof).
+        script = _write_fake_script(
+            tmp_path / "fake_run_review.sh", deep=True, workspace_rooted=True,
+        )
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            deep_review=True, review_script=script,
+        )
+
+        # The pin held: the workspace-rooted script completed (exit 0, not
+        # the 45 guard) and consumed the temp clone's artifacts.
+        assert run.error is None
+        assert run.verdict == "request_changes"
+        assert "AMBIENT-DECOY" not in run.review_markdown
+        # The ambient decoy is untouched on disk.
+        assert (ambient / "ai-output.json").read_text(encoding="utf-8") == decoy
+        # Deep specialist telemetry loaded from the temp clone's artifacts.
+        assert run.specialists is not None
+        assert run.specialists["total_leads"] == 2
+        assert (repo_path / "specialists.json").is_file()
+        assert (repo_path / "specialist-security.json").is_file()
 
 
 if __name__ == "__main__":
