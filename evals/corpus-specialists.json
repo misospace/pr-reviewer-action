@@ -14,8 +14,8 @@
         }
       ],
       "specialist_expectations": {
-        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race, the final reviewer should verify it against the diff and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
-        "checks": [
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+        "lead_checks": [
           {
             "id": "security_lead_generated",
             "type": "lead_generated",
@@ -30,16 +30,24 @@
             "role": "security",
             "disposition": "verified",
             "category_any": ["security", "auth", "authentication", "concurrency", "race", "token"],
-            "message_any_contains": ["jwt", "token", "ttl", "race", "expir", "concurren"]
+            "message_any_contains": ["jwt", "token", "ttl", "race", "expir", "concurren"],
+            "finding_file_any": ["forgejo_backend"]
+          }
+        ],
+        "effectiveness_checks": [
+          {
+            "id": "expected_finding_detected",
+            "type": "final_findings_count",
+            "min": 1,
+            "finding_category_any": ["security"],
+            "finding_description_any_contains": ["jwt", "token", "race", "ttl", "concurren"],
+            "finding_file_any": ["forgejo_backend"]
           },
           {
-            "id": "security_lead_not_adopted_hallucination",
-            "type": "lead_disposition",
-            "role": "security",
-            "disposition": "not_adopted",
-            "category_any": ["secret", "secrets", "credentials"],
-            "message_any_contains": ["hardcoded secret", "secret leak"],
-            "finding_category_any": ["secret", "secrets", "security", "credentials"],
+            "id": "no_hallucinated_secret_finding",
+            "type": "final_findings_count",
+            "max": 0,
+            "finding_category_any": ["secret", "secrets", "credentials"],
             "finding_description_any_contains": ["hardcoded secret", "secret leak"]
           }
         ]
@@ -59,8 +67,8 @@
         }
       ],
       "specialist_expectations": {
-        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap and the final reviewer should verify it against the diff and adopt it.",
-        "checks": [
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap in carry_forward and the final reviewer should verify it against the diff with a finding grounded in that file and adopt it.",
+        "lead_checks": [
           {
             "id": "correctness_lead_generated",
             "type": "lead_generated",
@@ -75,7 +83,18 @@
             "role": "correctness",
             "disposition": "verified",
             "category_any": ["correctness", "regression", "state", "loop"],
-            "message_any_contains": ["needs_full_review", "carry", "incremental", "loop", "stuck"]
+            "message_any_contains": ["needs_full_review", "carry", "incremental", "loop", "stuck"],
+            "finding_file_any": ["carry_forward"]
+          }
+        ],
+        "effectiveness_checks": [
+          {
+            "id": "expected_finding_detected",
+            "type": "final_findings_count",
+            "min": 1,
+            "finding_category_any": ["correctness"],
+            "finding_description_any_contains": ["needs_full_review", "carry", "incremental", "loop", "stuck"],
+            "finding_file_any": ["carry_forward"]
           }
         ]
       }
@@ -87,8 +106,8 @@
       "title": "feat(review): add bounded specialist advisory-contract module",
       "known_findings": [],
       "specialist_expectations": {
-        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization, and the final reviewer should adopt that as a coverage finding.",
-        "checks": [
+        "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization in the specialists module, and the final reviewer should adopt that as a coverage finding grounded in that file.",
+        "lead_checks": [
           {
             "id": "tests_lead_generated",
             "type": "lead_generated",
@@ -104,8 +123,17 @@
             "disposition": "verified",
             "category_any": ["tests", "testing", "coverage", "test-gap"],
             "message_any_contains": ["coverage", "sever", "alias", "normal", "cap"],
+            "finding_file_any": ["specialists"]
+          }
+        ],
+        "effectiveness_checks": [
+          {
+            "id": "expected_coverage_finding",
+            "type": "final_findings_count",
+            "min": 1,
             "finding_category_any": ["tests", "testing", "coverage", "test-gap"],
-            "finding_description_any_contains": ["coverage", "test", "sever"]
+            "finding_description_any_contains": ["coverage", "test", "sever", "alias", "cap"],
+            "finding_file_any": ["specialists"]
           }
         ]
       }
@@ -129,7 +157,8 @@
       "specialist_expectations": {
         "negative_control": true,
         "description": "Grader-only rationale for the negative control; not a reviewer recipe. Deep review must not invent findings on a simple CI workflow addition, and no specialist lead is expected on this change.",
-        "checks": [
+        "lead_checks": [],
+        "effectiveness_checks": [
           {
             "id": "no_final_findings",
             "type": "final_findings_count",
@@ -157,8 +186,8 @@
         }
       ],
       "specialist_expectations": {
-        "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap, the two overlapping leads must collapse into one final finding, and the final reviewer should verify and adopt it.",
-        "checks": [
+        "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap in the precheck, the two overlapping leads must collapse into one final finding grounded in that file, and the final reviewer should verify and adopt it.",
+        "lead_checks": [
           {
             "id": "security_lead_generated",
             "type": "lead_generated",
@@ -176,19 +205,31 @@
             "message_any_contains": ["dismiss", "permission", "fail"]
           },
           {
-            "id": "overlapping_leads_deduped",
-            "type": "dedupe_final_findings",
-            "max": 1,
-            "finding_category_any": ["security", "correctness", "permission", "dismiss"],
-            "finding_description_any_contains": ["dismiss", "permission", "fail"]
-          },
-          {
             "id": "precheck_lead_adopted",
             "type": "lead_disposition",
             "role": ["security", "correctness"],
             "disposition": "verified",
             "category_any": ["security", "correctness", "permission", "dismiss", "auth"],
-            "message_any_contains": ["dismiss", "permission", "fail"]
+            "message_any_contains": ["dismiss", "permission", "fail"],
+            "finding_file_any": ["precheck"]
+          }
+        ],
+        "effectiveness_checks": [
+          {
+            "id": "expected_finding_detected",
+            "type": "final_findings_count",
+            "min": 1,
+            "finding_category_any": ["security", "correctness", "permission", "dismiss"],
+            "finding_description_any_contains": ["dismiss", "permission", "fail"],
+            "finding_file_any": ["precheck"]
+          },
+          {
+            "id": "overlapping_leads_deduped",
+            "type": "dedupe_final_findings",
+            "max": 1,
+            "finding_category_any": ["security", "correctness", "permission", "dismiss"],
+            "finding_description_any_contains": ["dismiss", "permission", "fail"],
+            "finding_file_any": ["precheck"]
           }
         ]
       }

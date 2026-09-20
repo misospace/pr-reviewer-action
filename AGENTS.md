@@ -308,31 +308,50 @@ python scripts/eval_harness.py \
 
 `--deep-review false|true|both` controls the A/B; deep runs are labelled
 `<mode>+deep` in the report (e.g. `native_loop+deep`) and get their own
-mode summary. A fixture's `specialist_expectations` may declare these
-check types:
+mode summary. Each fixture's `specialist_expectations` splits into two
+grading scopes so the A/B stays honest:
 
-- `lead_generated` — at least `min` (default 1) leads for `role` (a single
-  role or a list) matching the lead predicates `category_any`, `file_any`,
-  and `message_any_contains` (loose, case-insensitive substrings).
-- `lead_disposition` — the disposition the final reviewer must have given a
-  matching lead: `verified` (a matching final finding exists), `rejected`
-  (a lead was generated but no matching finding was adopted), `unused`
-  (no lead at all), `not_adopted` (no matching final finding, whether or
-  not a lead existed — a hallucinated lead must never be adopted), or `any`
-  (a lead was generated). Finding-side needles override via
-  `finding_category_any` / `finding_description_any_contains`.
-- `final_findings_count` — `min` (default 0) / optional `max` on the
-  finding predicate against the run's findings.
-- `dedupe_final_findings` — same as `final_findings_count` with a default
-  `max` of 1: overlapping leads must collapse into a single final finding.
+- `lead_checks` — deep-only diagnostics, graded **only** on
+  `<mode>+deep` runs (a standard run cannot produce leads, so scoring one
+  against them would inflate the deep side by definition):
+  - `lead_generated` — at least `min` (default 1) leads for `role` (a
+    single role or a list) matching the lead predicates `category_any`,
+    `file_any`, and `message_any_contains` (loose, case-insensitive
+    substrings).
+  - `lead_disposition` — the disposition the final reviewer must have
+    given a matching lead: `verified`, `rejected`, `unused`,
+    `not_adopted`, or `any`. **`verified` requires concrete evidence**:
+    the check must carry a non-empty `finding_file_any`, and the adopted
+    final finding's `file` must match it — a finding that merely repeats
+    the specialist's wording with no file grounding computes `rejected`,
+    never `verified`. Finding-side needles override via
+    `finding_category_any` / `finding_description_any_contains`, and
+    `finding_line: true` additionally requires a line.
+- `effectiveness_checks` — the comparable A/B subset, graded on **every**
+  run (standard and deep alike) against the run's final findings (the
+  production `message`/`file`/`line` shape consumed from `ai-output.json`):
+  `final_findings_count` (`min`/`max` on the finding predicate) and
+  `dedupe_final_findings` (default `max` 1: overlapping leads must
+  collapse into a single final finding). Every fixture must declare at
+  least one effectiveness check, so standard-vs-deep always compares the
+  same final-review capability.
 
-The report carries `specialist_capability_runs`,
-`specialist_capability_passes`, and `specialist_capability_pass_rate` per
-mode in `mode_summary` (plus the per-PR `specialist_capability` detail and
-`specialist_capability_pass_rate`), and each run's `specialists`
-telemetry. One fixture is flagged `negative_control`: it asserts the deep
-run invents no findings (`final_findings_count` / `dedupe_final_findings`
-max 0) while a `max_tool_calls` bound in its `expected_evidence` keeps the
-tool loop lean. The weekly scheduled sweep remains standard-only (`deep`
+The report tallies the scopes separately per mode in `mode_summary`:
+`specialist_effectiveness_runs` / `_passes` / `_pass_rate` (populated on
+both the standard and the `+deep` label — this is the comparable
+headline) and `specialist_lead_runs` / `_passes` / `_pass_rate` (deep
+labels only; the standard label's lead rate is `None`). Per-PR entries
+carry the per-label rate dicts and the per-run `specialist_capability`
+detail (each check tagged `scope`), alongside each run's `specialists`
+telemetry. The harness drives the real boundary: it passes `REPO` and
+`PR_NUMBER` to `run_review.sh`, resets stale per-run artifacts
+(`ai-output.json`, `ai-response.*.json`, `specialists.json`, …) per run,
+and loads the final review from `ai-output.json` (verdict, markdown,
+production-shape findings, `verdict_source`), with model/tokens from
+`analysis_engine.txt` and the per-tier `ai-response.*.json` usage. One
+fixture is flagged `negative_control`: it asserts a clean run invents no
+findings (`final_findings_count` / `dedupe_final_findings` max 0) while a
+`max_tool_calls` bound in its `expected_evidence` keeps the tool loop
+lean. The weekly scheduled sweep remains standard-only (`deep`
 absent → `false`), and none of this changes production defaults:
 `deep_review` is still off by default for action users.
