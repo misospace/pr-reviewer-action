@@ -14,12 +14,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import pytest
 
 from build_review_comments import (
-    FINDING_MARKER_PREFIX,
     build_comments,
     commentable_lines,
     diff_positions,
-    finding_fingerprint,
-    finding_marker,
     finding_to_body,
     main,
 )
@@ -166,109 +163,40 @@ class TestFindingBody:
         assert "(other)" not in body
 
 
-class TestFindingFingerprint:
-    def test_comment_body_carries_marker(self):
-        finding = _finding(line=12)
-        comments, _ = build_comments([finding], DIFF)
-        assert len(comments) == 1
-        assert comments[0]["body"].endswith(finding_marker(finding))
-        assert FINDING_MARKER_PREFIX in comments[0]["body"]
+class TestNoSuppression:
+    """#617: fingerprint/suppression machinery is gone. A finding that the
+    old suppressed-fingerprint set would have skipped must still yield a
+    comment, and inline bodies carry no finding marker."""
 
-    def test_deterministic_and_content_sensitive(self):
-        assert finding_fingerprint(_finding()) == finding_fingerprint(_finding())
-        assert finding_fingerprint(_finding()) != finding_fingerprint(_finding(line=13))
-        assert finding_fingerprint(_finding()) != finding_fingerprint(_finding(message="other"))
-
-    def test_none_file_and_line_fingerprint(self):
-        # Carried findings can have file/line of None; must not raise.
-        fp = finding_fingerprint(_finding(file=None, line=None))
-        assert len(fp) == 16
-
-    def test_marker_roundtrip_preserves_fingerprint(self, tmp_path):
-        """A finding fingerprinted at comment time must fingerprint
-        identically after the metadata-marker persist/load round-trip
-        (jq message[0:200] persist, load_carried_findings re-sanitize)."""
-        if str(_REPO_ROOT) not in sys.path:
-            sys.path.insert(0, str(_REPO_ROOT))
-        from pr_reviewer.carry_forward import load_carried_findings
-
-        # Message long enough that the cut lands on whitespace — the
-        # strip-after-truncate edge case.
-        long_message = ("a" * 199) + " trailing tail that gets cut off " + ("b" * 50)
-        for original in (
-            _finding(),
-            _finding(message=long_message),
-            _finding(file=None, line=None, severity="major", category="bug"),
-        ):
-            # Simulate build_metadata_marker's open_findings projection.
-            persisted = {
-                "severity": original["severity"],
-                "category": original["category"],
-                "file": original["file"],
-                "line": original["line"],
-                "message": str(original["message"])[:200],
-            }
-            path = tmp_path / "previous-findings.json"
-            path.write_text(json.dumps([persisted]), encoding="utf-8")
-            carried = load_carried_findings(str(path))
-            assert len(carried) == 1
-            assert finding_fingerprint(carried[0]) == finding_fingerprint(original)
-
-
-class TestSuppression:
-    def test_resolved_findings_skipped(self):
+    def test_resolved_findings_still_yield_comments(self):
+        # A resolution=='resolved' finding used to be skipped; now nothing
+        # reads the resolution field, so every anchorable finding comments.
         resolved = _finding(line=12)
         resolved["resolution"] = "resolved"
-        comments, skipped = build_comments([resolved, _finding(line=13, message="open")], DIFF)
-        assert len(comments) == 1
-        assert "open" in comments[0]["body"]
-        assert skipped == 1
+        comments, skipped = build_comments(
+            [resolved, _finding(line=13, message="open")], DIFF
+        )
+        assert len(comments) == 2
+        assert skipped == 0
+        assert "bad" in comments[0]["body"]
+        assert "open" in comments[1]["body"]
 
-    def test_still_open_carried_findings_not_skipped_without_suppression(self):
-        carried = _finding(line=12)
-        carried["resolution"] = "still_open"
-        carried["carried_over"] = True
-        comments, _ = build_comments([carried], DIFF)
-        assert len(comments) == 1
-
-    def test_suppressed_fingerprints_skipped(self):
+    def test_previously_suppressed_fingerprint_still_yields_comment(self):
+        # The finding would have matched the old suppressed-fingerprint set;
+        # with the mechanism removed it is emitted like any other.
         threaded = _finding(line=12, message="already has a thread")
         fresh = _finding(line=13, message="brand new")
-        from build_review_comments import finding_fingerprint
+        comments, skipped = build_comments([threaded, fresh], DIFF)
+        assert len(comments) == 2
+        assert skipped == 0
+        assert "already has a thread" in comments[0]["body"]
+        assert "brand new" in comments[1]["body"]
 
-        comments, skipped = build_comments(
-            [threaded, fresh], DIFF, suppressed={finding_fingerprint(threaded)}
-        )
+    def test_comment_body_carries_no_finding_marker(self):
+        comments, _ = build_comments([_finding(line=12)], DIFF)
         assert len(comments) == 1
-        assert "brand new" in comments[0]["body"]
-        assert skipped == 1
-
-    def test_main_reads_suppression_file_from_env(self, tmp_path, monkeypatch):
-        threaded = _finding(line=12, message="already threaded")
-        from build_review_comments import finding_fingerprint
-
-        findings_file = tmp_path / "findings.json"
-        findings_file.write_text(json.dumps([threaded]))
-        diff_file = tmp_path / "pr.diff"
-        diff_file.write_text(DIFF)
-        suppress_file = tmp_path / "finding-threads.json"
-        suppress_file.write_text(json.dumps([finding_fingerprint(threaded)]))
-        out_file = tmp_path / "comments.json"
-        monkeypatch.setenv("SUPPRESS_FINDINGS_FILE", str(suppress_file))
-        assert main(["prog", str(findings_file), str(diff_file), str(out_file)]) == 0
-        assert json.loads(out_file.read_text()) == []
-
-    def test_missing_or_garbage_suppression_file_ignored(self, tmp_path, monkeypatch):
-        from build_review_comments import load_suppressed_fingerprints
-
-        assert load_suppressed_fingerprints(None) == set()
-        assert load_suppressed_fingerprints(str(tmp_path / "absent.json")) == set()
-        garbage = tmp_path / "garbage.json"
-        garbage.write_text("not json")
-        assert load_suppressed_fingerprints(str(garbage)) == set()
-        not_list = tmp_path / "obj.json"
-        not_list.write_text('{"a": 1}')
-        assert load_suppressed_fingerprints(str(not_list)) == set()
+        assert "ai-pr-review-finding" not in comments[0]["body"]
+        assert "<!--" not in comments[0]["body"]
 
 
 class TestMainCli:
@@ -304,9 +232,7 @@ class TestActionWiring:
     def test_all_publish_steps_receive_findings(self):
         # The single publish dispatcher (#303) carries one superset env block
         # serving all three modes (comment, review_comment, review_verdict), so
-        # FINDINGS/INLINE_FINDINGS each appear once. FINDINGS lets
-        # build_metadata_marker persist open_findings — without it,
-        # carry-forward never engages.
+        # FINDINGS/INLINE_FINDINGS each appear once.
         assert self.ACTION.count("FINDINGS: ${{ steps.review.outputs.findings }}") == 1
         assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline_findings }}") == 1
 

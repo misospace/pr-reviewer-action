@@ -11,6 +11,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_platform_api.sh" >&2
+    exit 0
+  fi
+done
+
 _TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$_TEST_DIR/.." && pwd)"
 SEAM="$SCRIPT_DIR/scripts/platform_api.sh"

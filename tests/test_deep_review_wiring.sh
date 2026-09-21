@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_deep_review_wiring.sh" >&2
+    exit 0
+  fi
+done
+
 # Wiring assertions for #608 (deep review): when deep_review is enabled, the
 # specialist phase must be launched as a background job and fully reaped
 # (wait guarded against set -e, fail-soft) BEFORE the final reviewer path

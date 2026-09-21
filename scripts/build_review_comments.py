@@ -10,14 +10,8 @@ Usage: build_review_comments.py FINDINGS_JSON_FILE DIFF_FILE OUTPUT_FILE
 
 Environment:
   INLINE_FINDINGS_MAX     maximum comments to emit (default 20)
-  SUPPRESS_FINDINGS_FILE  optional JSON array of finding fingerprints that
-                          already have a live review thread (written by
-                          resolve_finding_threads.py); matching findings are
-                          skipped so a carried-forward finding gets a thread
-                          reply instead of a duplicate anchored comment (#209)
 """
 
-import hashlib
 import json
 import os
 import re
@@ -40,44 +34,6 @@ _SEVERITY_LABELS = {
     "minor": "Minor",
     "info": "Info",
 }
-
-# Hidden marker correlating an inline comment with its finding across runs
-# (#208). The fingerprint is content-based because carried finding ids are
-# positional (P1..Pn, assigned per-run by carry_forward.load_carried_findings)
-# and therefore not stable between runs.
-FINDING_MARKER_PREFIX = "<!-- ai-pr-review-finding:"
-
-# Must match the truncation build_metadata_marker applies when persisting
-# open_findings (message[0:200]), so a finding fingerprinted here at comment
-# time equals the fingerprint of the same finding after a marker round-trip.
-_FINGERPRINT_MESSAGE_CHARS = 200
-
-
-def finding_fingerprint(finding: dict) -> str:
-    """Stable content fingerprint for correlating a finding across runs.
-
-    Computed from the fields the metadata marker persists (severity,
-    category, file, line, message truncated to 200 chars), normalized the
-    way carry_forward.load_carried_findings re-reads them. The trailing
-    strip mirrors the load-side strip-after-truncate so a cut that lands on
-    whitespace fingerprints identically on both sides.
-    """
-    severity = finding.get("severity") or "info"
-    category = finding.get("category") or "other"
-    file_path = finding.get("file") or ""
-    line = finding.get("line")
-    line_part = (
-        str(line)
-        if isinstance(line, int) and not isinstance(line, bool) and line > 0
-        else ""
-    )
-    message = str(finding.get("message") or "").strip()[:_FINGERPRINT_MESSAGE_CHARS].strip()
-    canon = "\x1f".join([str(severity), str(category), str(file_path), line_part, message])
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
-
-
-def finding_marker(finding: dict) -> str:
-    return f"{FINDING_MARKER_PREFIX}{finding_fingerprint(finding)} -->"
 
 
 def commentable_lines(diff_text: str) -> dict:
@@ -165,30 +121,14 @@ def finding_to_body(finding: dict) -> str:
     return sanitize_markdown(mask_secrets(body), link_mode=link_mode)
 
 
-def load_suppressed_fingerprints(path) -> set:
-    """Read the fingerprint set resolve_finding_threads.py emitted, if any."""
-    if not path:
-        return set()
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return set()
-    if not isinstance(data, list):
-        return set()
-    return {item for item in data if isinstance(item, str) and item}
-
-
-def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=None):
+def build_comments(findings, diff_text: str, max_comments: int = 20):
     """Return (comments, skipped_count) for the anchorable findings.
 
-    Skipped findings include the non-anchorable ones, findings the model
-    marked resolved (a fixed finding needs no fresh comment — its thread is
-    resolved separately), and findings whose fingerprint already has a live
-    review thread (those get a thread reply instead, #209).
+    Skipped findings are the non-anchorable ones (no valid new-side diff
+    line) and non-object entries.
     """
     if not isinstance(findings, list):
         return [], 0
-    suppressed = suppressed or set()
 
     use_forgejo_positions = (
         os.getenv("REVIEW_COMMENT_POSITION_BACKEND", "").lower() in {"forgejo", "gitea"}
@@ -203,12 +143,6 @@ def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=
         if not isinstance(finding, dict):
             skipped += 1
             continue
-        if finding.get("resolution") == "resolved":
-            skipped += 1
-            continue
-        if suppressed and finding_fingerprint(finding) in suppressed:
-            skipped += 1
-            continue
         path = finding.get("file")
         line = finding.get("line")
         if (
@@ -220,12 +154,9 @@ def build_comments(findings, diff_text: str, max_comments: int = 20, suppressed=
         ):
             skipped += 1
             continue
-        # The marker is appended after sanitization: it is generated locally
-        # from hex digits and must survive verbatim for the next run's
-        # thread-resolution matching.
         comment = {
             "path": path,
-            "body": finding_to_body(finding) + "\n\n" + finding_marker(finding),
+            "body": finding_to_body(finding),
         }
         if use_forgejo_positions:
             comment["new_position"] = position_map[path][line]
@@ -256,15 +187,13 @@ def main(argv) -> int:
     except ValueError:
         max_comments = 20
 
-    suppressed = load_suppressed_fingerprints(os.getenv("SUPPRESS_FINDINGS_FILE"))
-
-    comments, skipped = build_comments(findings, diff_text, max_comments, suppressed)
+    comments, skipped = build_comments(findings, diff_text, max_comments)
     Path(output_path).write_text(
         json.dumps(comments, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(
         f"inline findings: {len(comments)} anchored comment(s), "
-        f"{skipped} finding(s) skipped (not anchorable, resolved, or already threaded)",
+        f"{skipped} finding(s) skipped (not anchorable)",
         file=sys.stderr,
     )
     return 0

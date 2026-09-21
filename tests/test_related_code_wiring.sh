@@ -6,6 +6,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_related_code_wiring.sh" >&2
+    exit 0
+  fi
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" )/../scripts" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PASS=0
@@ -14,7 +22,7 @@ source "$ROOT_DIR/tests/_lib/assert.sh"
 
 BLOCK="$(mktemp)"
 WORK="$(mktemp -d)"
-REAL_PYTHON3="/usr/bin/python3"
+REAL_PYTHON3="$(command -v python3)"
 trap 'rm -f "$BLOCK"; rm -rf "$WORK"' EXIT
 
 python3 - "$SCRIPT_DIR/sections/corpus.sh" "$BLOCK" <<'PY'

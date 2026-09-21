@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_required_checks.sh" >&2
+    exit 0
+  fi
+done
+
 # Wiring tests for required-check validation (#157/#158) and the
 # build_metadata_marker rewrite (required_checks field + the incremental
 # marker corruption fix).

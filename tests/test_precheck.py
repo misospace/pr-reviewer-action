@@ -5,10 +5,6 @@ and _detect_incremental_scope. (The review-scope resolver was removed in #615:
 v3 runs a full review of the current PR on every non-skipped run.)
 """
 
-import sys
-
-import pytest
-
 from pr_reviewer.precheck import (
     EMPTY_DIFF_FINGERPRINT,
     MAX_INCREMENTAL_FILES,
@@ -221,39 +217,9 @@ class TestShouldReviewIntegration:
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
 
-# ── #536 Case 1: a CI-state finding must survive the diff-unchanged guard ────
-
-def test_looks_like_ci_state_finding_matches_a_ci_blocker():
-    from pr_reviewer.precheck import looks_like_ci_state_finding
-
-    assert looks_like_ci_state_finding(
-        {"message": "CI is in a terminal failure state for this commit: 'npm audit' failed"}
-    )
-    assert looks_like_ci_state_finding({"message": "The Build check is failing on this commit"})
-
-
-def test_looks_like_ci_state_finding_ignores_ordinary_findings():
-    from pr_reviewer.precheck import looks_like_ci_state_finding
-
-    assert not looks_like_ci_state_finding({"message": "This function returns the wrong type"})
-    assert not looks_like_ci_state_finding({"message": ""})
-    assert not looks_like_ci_state_finding({"message": None})
-    assert not looks_like_ci_state_finding("not a dict")
-    assert not looks_like_ci_state_finding(None)
-
-
-def test_has_ci_state_findings_tolerates_junk():
-    from pr_reviewer.precheck import has_ci_state_findings
-
-    assert has_ci_state_findings([{"message": "checks are failing"}])
-    assert not has_ci_state_findings([])
-    assert not has_ci_state_findings(None)
-    assert not has_ci_state_findings("nope")
-    assert not has_ci_state_findings([{"message": "a normal bug"}, 7, None])
-
-
 def test_evaluate_precheck_skips_when_diff_unchanged():
-    """Baseline: the guard still works when no CI-state finding is open."""
+    """The diff-unchanged guard: an unchanged fingerprint skips, no other
+    signals are consulted."""
     from pr_reviewer.precheck import evaluate_precheck, ReviewDecision
 
     first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
@@ -263,378 +229,69 @@ def test_evaluate_precheck_skips_when_diff_unchanged():
     assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
 
 
-def test_evaluate_precheck_reviews_anyway_when_a_ci_state_finding_is_open():
-    """A CI-state blocker can clear without the diff moving, so an unchanged
-    fingerprint must not short-circuit the re-review. (#536 Case 1)"""
-    from pr_reviewer.precheck import evaluate_precheck, ReviewDecision
+# ── #617: the carried-findings inputs are gone from the contract ───────────
 
-    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck(
-        "diff --git a/x b/x\n+one\n",
-        [first.broad_fingerprint],
-        config_hash="c",
-        ci_state_findings_open=True,
-    )
-    assert again.decision == ReviewDecision.REVIEW_NEEDED
-    assert "CI-state" in again.reason
-    # the fingerprint itself is unchanged; only the decision differs
-    assert again.broad_fingerprint == first.broad_fingerprint
+def test_evaluate_precheck_signature_drops_legacy_inputs():
+    """The should-review contract no longer accepts carried-findings state:
+    no previous_needs_full_review, no ci_state_findings_open."""
+    import inspect
+
+    from pr_reviewer.precheck import evaluate_precheck
+
+    params = inspect.signature(evaluate_precheck).parameters
+    assert "previous_needs_full_review" not in params
+    assert "ci_state_findings_open" not in params
+    assert set(params) == {
+        "diff_content",
+        "previous_fingerprints",
+        "config_hash",
+        "force_review",
+        "skip_if_diff_unchanged",
+    }
 
 
-# ── #544: the flag must also defeat the diff-unchanged skip guard ──────────
-
-def test_diff_unchanged_guard_deferred_when_previous_needed_full_review():
-    """The only way to clear a not_verifiable_from_delta finding is the full
-    review the flag requests; skipping would strand the PR on the same
-    incremental diff forever. (#544)"""
+def test_legacy_marker_state_does_not_affect_the_decision():
+    """A marker published by old runs carries legacy keys (open_findings /
+    evidence_digest / needs_full_review). They must stay parseable (old
+    comments must remain readable) but have NO effect: an unchanged
+    fingerprint skips — there is no force path anymore."""
+    from pr_reviewer.metadata import parse_metadata
     from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
 
-    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck(
-        "diff --git a/x b/x\n+one\n",
-        [first.broad_fingerprint],
-        config_hash="c",
-        previous_needs_full_review=True,
+    diff = "diff --git a/x b/x\n+one\n"
+    first = evaluate_precheck(diff, [], config_hash="c")
+
+    # A legacy comment body the way the shell caller consumed it: the
+    # fingerprint marker (source of PREV_FINGERPRINTS) plus the metadata
+    # marker with carried-findings state.
+    legacy_body = (
+        f"<!-- ai-pr-review-fingerprint:{first.broad_fingerprint} -->\n"
+        "<!-- ai-pr-reviewer:{"
+        '"version":1,"head_sha":"abc","base_sha":"def",'
+        '"review_result":"issues",'
+        '"open_findings":[{"id":"P1","message":"carried"}],'
+        '"evidence_digest":"sha256:deadbeef",'
+        '"needs_full_review":true'
+        '} -->'
     )
-    assert again.decision == ReviewDecision.REVIEW_NEEDED
-    assert "full review" in again.reason
-    # the fingerprint itself is unchanged; only the decision differs
-    assert again.broad_fingerprint == first.broad_fingerprint
 
+    # The legacy state is still readable out of the marker...
+    legacy_meta = parse_metadata(legacy_body)
+    assert legacy_meta["needs_full_review"] is True
+    assert legacy_meta["open_findings"] == [{"id": "P1", "message": "carried"}]
 
-def test_diff_unchanged_guard_still_skips_without_the_flag():
-    from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
+    # ...and the caller's fingerprint extraction is the only input that
+    # reaches the decision. Unchanged fingerprint -> SKIP, no force.
+    prev_fps = [
+        line.removeprefix("<!-- ai-pr-review-fingerprint:")
+        .removesuffix(" -->")
+        for line in legacy_body.splitlines()
+        if line.startswith("<!-- ai-pr-review-fingerprint:")
+    ]
+    assert prev_fps == [first.broad_fingerprint]
 
-    first = evaluate_precheck("diff --git a/x b/x\n+one\n", [], config_hash="c")
-    again = evaluate_precheck(
-        "diff --git a/x b/x\n+one\n",
-        [first.broad_fingerprint],
-        config_hash="c",
-        previous_needs_full_review=False,
-    )
+    again = evaluate_precheck(diff, prev_fps, config_hash="c")
     assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
+    assert again.broad_fingerprint == first.broad_fingerprint
 
 
-# --- #543: the dismissal writer must actually be reachable in production ---
-
-
-class TestDismissalWiring:
-    """Both defects here are 'the code exists but never runs', which is the
-    same failure mode #543 was filed about. Unit tests on the helpers pass
-    either way, so these pin the wiring instead."""
-
-    def test_token_accepts_the_spelling_action_yml_provides(self, monkeypatch):
-        # action.yml's precheck step sets GH_TOKEN. GITHUB_TOKEN is not an
-        # automatic Actions variable, so reading only GITHUB_TOKEN left the
-        # fetch tokenless in production and it returned [] on every run.
-        from pr_reviewer.precheck import _github_token
-
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.setenv("GH_TOKEN", "gh-token-value")
-        assert _github_token() == "gh-token-value"
-
-        monkeypatch.setenv("GITHUB_TOKEN", "github-token-value")
-        assert _github_token() == "github-token-value"
-
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        assert _github_token() == ""
-
-    def test_load_pr_comments_does_not_bail_on_gh_token_alone(self, monkeypatch):
-        # The early return is `not (token and repo and pr_number)`. With only
-        # GH_TOKEN set this used to short-circuit before any fetch, which is
-        # indistinguishable from "no dismissals" downstream.
-        import pr_reviewer.precheck as precheck
-
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-
-        reached = {}
-
-        class _Boom(Exception):
-            pass
-
-        def _explode(*a, **kw):
-            reached["fetch"] = True
-            raise _Boom()
-
-        monkeypatch.setattr(precheck, "_github_token", lambda: "t")
-        # Any import of github inside the function is fine; we only need to
-        # know the guard let us past it.
-        monkeypatch.setitem(
-            __import__("sys").modules, "github", type("m", (), {"Github": _explode})
-        )
-        assert precheck._load_pr_comments("7") == []
-        assert reached.get("fetch"), "guard returned before attempting the fetch"
-
-    def test_writer_guard_is_armed_on_the_production_path(self, tmp_path, monkeypatch):
-        # _write_previous_dismissals only checks containment when
-        # workspace_root is passed. main() omitting it left every path check
-        # inert -- the same shape as #543's defect 2 on the reader side.
-        import inspect
-
-        import pr_reviewer.precheck as precheck
-
-        src = inspect.getsource(precheck.main)
-        assert "_write_previous_dismissals(" in src
-        call = src[src.index("_write_previous_dismissals(") :]
-        call = call[: call.index("\n            )") + 1]
-        assert "workspace_root=" in call, (
-            "main() must pass workspace_root or the containment guard in "
-            "_write_previous_dismissals never runs in production"
-        )
-
-    def test_writer_refuses_a_path_outside_the_workspace(self, tmp_path):
-        from pr_reviewer.precheck import _write_previous_dismissals
-
-        outside = tmp_path.parent / "escaped-dismissals.json"
-        if outside.exists():
-            outside.unlink()
-        comments = [
-            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss P1: nope"}
-        ]
-        written = _write_previous_dismissals(
-            comments,
-            {"owner"},
-            output_path=str(outside),
-            workspace_root=str(tmp_path),
-        )
-        assert written == 0
-        assert not outside.exists()
-
-
-class TestResolveMaintainersFailsClosed:
-    """#581: ``_resolve_maintainers`` is the security gate for the
-    ``@ai-reviewer dismiss`` directive, so it must fail closed. The old
-    code returned the *unfiltered* candidate set whenever GitHub
-    permission verification was impossible (missing PyGithub, a repo-level
-    error, or every per-user lookup failing) — which let any login the
-    operator listed in ``DISMISSAL_MAINTAINERS`` / the bare
-    ``GITHUB_REPOSITORY_OWNER`` dismiss findings in production, because the
-    action runs bare ``python3`` with no ``pip install`` and PyGithub was
-    never pinned. Only the documented local-development branch (no token)
-    may return the unfiltered set, and no other path may."""
-
-    # Env is cleared per test so the function never sees a stray token /
-    # repo from the surrounding shell; tests set exactly what they assert on.
-    @pytest.fixture(autouse=True)
-    def _clean_env(self, monkeypatch):
-        for var in (
-            "DISMISSAL_MAINTAINERS",
-            "GITHUB_REPOSITORY_OWNER",
-            "GITHUB_REPOSITORY",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
-    def _candidates(self):
-        return {"alice", "bob"}
-
-    def test_import_error_fails_closed(self, monkeypatch):
-        # PyGithub missing -> the check cannot run -> nobody may dismiss.
-        # The old code returned the unfiltered candidates here.
-        import pr_reviewer.precheck as precheck
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", None)
-
-        assert precheck._resolve_maintainers() == set()
-
-    def test_import_error_with_owner_candidate_fails_closed(self, monkeypatch):
-        # Same, but the candidate set comes from GITHUB_REPOSITORY_OWNER
-        # (the default) rather than an explicit DISMISSAL_MAINTAINERS.
-        import pr_reviewer.precheck as precheck
-
-        monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "owner")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", None)
-
-        assert precheck._resolve_maintainers() == set()
-
-    def test_repo_level_error_fails_closed(self, monkeypatch):
-        # PyGithub is importable but the repo lookup itself blows up.
-        import pr_reviewer.precheck as precheck
-
-        class _Repo:
-            def get_collaborator_permission(self, _u):
-                return "admin"
-
-        class _BoomRepo(Exception):
-            pass
-
-        class _Github:
-            def __init__(self, *a, **kw):
-                pass
-
-            def get_repo(self, _name):
-                raise _BoomRepo("transient 5xx")
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
-
-        assert precheck._resolve_maintainers() == set()
-
-    def test_all_per_user_lookups_fail_fails_closed(self, monkeypatch):
-        # PyGithub and the repo are fine, but every candidate's own
-        # get_collaborator_permission raises (404 / secondary rate limit).
-        # The old code did ``return permitted or candidates`` here, i.e. it
-        # fell back to the unfiltered set; now nobody is admitted.
-        import pr_reviewer.precheck as precheck
-
-        class _UserLookupError(Exception):
-            pass
-
-        class _Repo:
-            def get_collaborator_permission(self, _u):
-                raise _UserLookupError("404 not a collaborator")
-
-        class _Github:
-            def __init__(self, *a, **kw):
-                pass
-
-            def get_repo(self, _name):
-                return _Repo()
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
-
-        assert precheck._resolve_maintainers() == set()
-
-    def test_partial_failure_admits_only_verified(self, monkeypatch):
-        # One candidate verifies as admin, the other's lookup raises. The
-        # verified one is admitted; the unverifiable one is dropped rather
-        # than let through by a fallback to the candidate set.
-        import pr_reviewer.precheck as precheck
-
-        class _UserLookupError(Exception):
-            pass
-
-        class _Repo:
-            def get_collaborator_permission(self, username):
-                if username == "alice":
-                    return "admin"
-                raise _UserLookupError("404")
-
-        class _Github:
-            def __init__(self, *a, **kw):
-                pass
-
-            def get_repo(self, _name):
-                return _Repo()
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
-
-        assert precheck._resolve_maintainers() == {"alice"}
-
-    def test_verified_maintain_and_admin_are_admitted(self, monkeypatch):
-        # Happy path: admin/maintain are admitted, none/read are not.
-        import pr_reviewer.precheck as precheck
-
-        perms = {"admin_u": "admin", "maintain_u": "maintain", "read_u": "read"}
-
-        class _Repo:
-            def get_collaborator_permission(self, username):
-                return perms[username]
-
-        class _Github:
-            def __init__(self, *a, **kw):
-                pass
-
-            def get_repo(self, _name):
-                return _Repo()
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "admin_u,maintain_u,read_u")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        monkeypatch.setitem(sys.modules, "github", type("m", (), {"Github": _Github}))
-
-        assert precheck._resolve_maintainers() == {"admin_u", "maintain_u"}
-
-    def test_no_token_local_dev_returns_unfiltered_candidates(self, monkeypatch):
-        # The one intended fail-open path: no token means verification is
-        # impossible by definition, so the (operator-configured) candidate
-        # set is returned unchanged for local development.
-        import pr_reviewer.precheck as precheck
-
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        # No token in any spelling -> documented local-dev branch.
-        assert precheck._resolve_maintainers() == self._candidates()
-
-    def test_token_with_candidates_but_no_repo_fails_closed(self, monkeypatch):
-        # Token + candidates but no GITHUB_REPOSITORY: the permission check
-        # cannot run against an unknown repository, so this path must fail
-        # closed (return set()) rather than fall back to the unfiltered
-        # candidate set (#581 / review feedback). The old combined guard
-        # ``if not (repo_name and tok and candidates): return candidates``
-        # failed open on exactly this combination.
-        import pr_reviewer.precheck as precheck
-
-        # Defensive: if a stray PyGithub mock were loaded by a previous
-        # test, the import branch must still not silently admit candidates.
-        # We do NOT set GITHUB_REPOSITORY here.
-        monkeypatch.setenv("DISMISSAL_MAINTAINERS", "alice,bob")
-        monkeypatch.setenv("GH_TOKEN", "t")
-        # Sanity: a token really is present (the env fixture clears it).
-        assert precheck._github_token() == "t"
-
-        assert precheck._resolve_maintainers() == set()
-
-    def test_no_token_owner_default_returns_unfiltered_candidate(self, monkeypatch):
-        # Local-dev branch when the candidate set is the bare owner.
-        import pr_reviewer.precheck as precheck
-
-        monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "owner")
-        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        assert precheck._resolve_maintainers() == {"owner"}
-
-    def test_writer_dismisses_nothing_on_empty_maintainers(self, tmp_path, monkeypatch):
-        # The security boundary: _write_previous_dismissals is only ever
-        # called by main(), which feeds it _resolve_maintainers(). When that
-        # is empty (verification impossible in production) the directive
-        # must dismiss NOTHING, not "everyone" — the old ``if maintainers
-        # and ...`` gate treated an empty set as no-op and let any author
-        # through, widening the #581 hole past the candidate set.
-        import pr_reviewer.precheck as precheck
-
-        comments = [
-            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: bogus"}
-        ]
-        written = precheck._write_previous_dismissals(
-            comments,
-            set(),
-            output_path=str(tmp_path / "previous-dismissals.json"),
-            workspace_root=str(tmp_path),
-        )
-        assert written == 0
-        assert not (tmp_path / "previous-dismissals.json").exists()
-
-    def test_writer_still_honours_verified_maintainer(self, tmp_path, monkeypatch):
-        # Sanity: a non-empty (verified) maintainer set still lets the
-        # matching author's directive through, so the fail-closed empty-set
-        # guard above does not over-broaden.
-        import pr_reviewer.precheck as precheck
-
-        comments = [
-            {"id": 1, "author": "owner", "body": "@ai-reviewer dismiss F1: legit"}
-        ]
-        written = precheck._write_previous_dismissals(
-            comments,
-            {"owner"},
-            output_path=str(tmp_path / "previous-dismissals.json"),
-            workspace_root=str(tmp_path),
-        )
-        assert written == 1
-        assert (tmp_path / "previous-dismissals.json").exists()

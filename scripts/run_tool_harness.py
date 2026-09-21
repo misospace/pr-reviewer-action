@@ -797,9 +797,8 @@ def run_native_loop(
     a corpus-only review (the plan_execute planner fallback was removed in
     #304), and this function leaves no output files behind in that case.
     """
-    # Repo root on sys.path for the pr_reviewer package (mirrors
-    # resolve_finding_threads.py). Imported lazily so the legacy planner
-    # paths never depend on the package being importable.
+    # Repo root on sys.path for the pr_reviewer package. Imported lazily so
+    # the legacy planner paths never depend on the package being importable.
     repo_root = str(_SCRIPTS_DIR.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -820,7 +819,6 @@ def run_native_loop(
         parse_server_specs,
         split_namespaced,
     )
-    from pr_reviewer.evidence_memory import build_evidence_digest  # noqa: PLC0415
 
     # web_search is advertised only when a search endpoint is configured.
     search_url = os.getenv("SEARCH_URL", "").strip()
@@ -1046,7 +1044,7 @@ def run_native_loop(
     # and its Tool Harness Findings section still holds the pre-harness
     # placeholder. Substituting a real section there (below) is what stops the
     # review from reporting "planning pending" on a run that gathered evidence.
-    harness_markdown = _summarize_loop_outcome(result, outcome, build_evidence_digest)
+    harness_markdown = _summarize_loop_outcome(result, outcome)
 
     # ── In-conversation verdict (#205, Option 1) ─────────────────────────────
     # The loop's final turn produces the review verdict itself — preserving the
@@ -1137,13 +1135,12 @@ def run_native_loop(
     return True
 
 
-def _summarize_loop_outcome(result, outcome, build_evidence_digest):
+def _summarize_loop_outcome(result, outcome):
     """Fold the loop outcome into `result` and return the harness markdown.
 
     Runs BEFORE the verdict turn so the verdict corpus can be corrected with
     real findings; the outputs themselves are written after it, once the
-    verdict's token usage has been accumulated. build_evidence_digest is passed
-    in because run_native_loop imports the pr_reviewer package lazily.
+    verdict's token usage has been accumulated.
     """
     result["mode"] = "native_loop"
     result["rounds"] = outcome.rounds
@@ -1179,25 +1176,6 @@ def _summarize_loop_outcome(result, outcome, build_evidence_digest):
         md_lines.extend(
             tool_result_md_lines(i + 1, executed.tool, executed.args, executed.result)
         )
-
-    # Cross-run evidence memory: a compact digest of what this review gathered,
-    # carried forward so the next incremental review of this PR reuses it
-    # instead of re-running the same reads/fetches. Prefer the model's own
-    # closing summary; else a deterministic ledger of the successful calls. The
-    # tool output it draws from was already secret-masked + size-capped by the
-    # executor. run_review.sh surfaces this into the metadata marker.
-    digest_entries = [
-        {
-            "tool": executed.tool,
-            "args": executed.args,
-            "content": (executed.result.get("result") or {}).get("content", ""),
-        }
-        for executed in outcome.executed
-        if executed.result.get("status") == "ok"
-    ]
-    evidence_digest = build_evidence_digest(digest_entries, outcome.final_text)
-    if evidence_digest:
-        result["evidence_digest"] = evidence_digest
 
     if outcome.final_text:
         md_lines.append("## Evidence summary (from the tool loop, untrusted)")

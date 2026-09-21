@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_context_budget.sh" >&2
+    exit 0
+  fi
+done
+
 # Tests for the context-budget derivation (apply_context_limits) and the
 # UTF-8/newline-safe truncate_clean helper in run_review.sh. These are extracted
 # and exercised in isolation since the main driver has no end-to-end harness.

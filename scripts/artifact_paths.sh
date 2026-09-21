@@ -7,7 +7,7 @@ assert_safe_artifact_paths() {
   local path
   local -a artifact_paths=(
     pr.diff pr-object.json pr.json pr-body.txt changed-files.json precheck-result.json
-    previous-review-meta.json previous-findings.json previous-evidence.json
+    previous-review-meta.json
     linked-issues.md urls.all.txt urls.txt
     version-hints.txt version-hints.truncated.txt ghcr-images.txt compare-shas.txt
     linked-sources.md manifest-context.md image-digest-context.md
@@ -22,7 +22,7 @@ assert_safe_artifact_paths() {
     review-body.md inline-comments.json
     findings.json review-request.json
     review-verdict-body.md inline-findings-body.md
-    review-comments.json finding-threads.json resolve-findings.json
+    review-comments.json
     pr-files.json pr-files.raw.json
     linked-issue.raw.json linked-issues.json linked-issues.merged.json
     linked-issue.filtered.json

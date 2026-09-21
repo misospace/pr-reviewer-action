@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_classification_steering.sh" >&2
+    exit 0
+  fi
+done
+
 # Tests for classification→prompt steering: build_user_message() in
 # run_review.sh injects pr_kind / risk_flags / must_check into the user
 # message, and the default system prompt explains how to treat them.

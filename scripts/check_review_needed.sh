@@ -113,68 +113,35 @@ case "$(printf '%s' "$PUBLISH_MODE" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # ── extract_review_metadata (restored plumbing) ───────────────────────
-# Roundtrip test (tests/test_carry_forward_roundtrip.sh) extracts this via
-# regex and sources it; this is the live implementation it exercises. Logic
-# remains in shell because it parses a stored published comment body that
-# contains reviewer-emitted metadata (not actionable config inputs),
-# independent of precheck decision logic. Writes previous-review-meta.json
-# (the #544 needs_full_review flag plus private review_result state) and the
-# carried-forward artifacts the review step consumes: previous-findings.json
-# (open findings) and previous-evidence.json (evidence digest, tagged with the
-# gathered-at head SHA).
+# A roundtrip test extracts this via regex and sources it; this is the live
+# implementation it exercises. Logic remains in shell because it parses a
+# stored published comment body that contains reviewer-emitted metadata
+# (not actionable config inputs), independent of precheck decision logic.
+# Writes previous-review-meta.json carrying only the prior review_result —
+# private state the diff-unchanged skip uses to re-emit the prior verdict and
+# the review step uses for dirty-baseline escalation.
 extract_review_metadata() {
   local comment_body="$1"
 
-  rm -f previous-review-meta.json previous-findings.json previous-evidence.json
+  rm -f previous-review-meta.json
 
   printf '%s' "$comment_body" | python3 -c "
 import json, re, sys
 from pr_reviewer.metadata import parse_metadata
 data = parse_metadata(sys.stdin.read())
 if data:
-    def hexsan(v):
-        return re.sub(r'[^0-9a-fA-F]', '', str(v or ''))[:64]
     def enumsan(v):
         return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
     meta = {
-        # #544: the previous review could not assess a carried finding from
-        # its delta; the next run must be a fresh full review
-        # (PREVIOUS_NEEDS_FULL_REVIEW defeats the diff-unchanged guard).
-        'needs_full_review': bool(data.get('needs_full_review')),
         # Private precheck state for dirty-baseline escalation. This remains
         # internal: review_result is not restored as an action output.
         'review_result': enumsan(data.get('review_result')),
     }
     with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
         json.dump(meta, fh, ensure_ascii=False)
-    raw = data.get('open_findings')
-    sanitized = []
-    if isinstance(raw, list):
-        for item in raw[:20]:
-            if not isinstance(item, dict):
-                continue
-            message = item.get('message')
-            if not isinstance(message, str) or not message.strip():
-                continue
-            line = item.get('line')
-            sanitized.append({
-                'severity': enumsan(item.get('severity')),
-                'category': enumsan(item.get('category')),
-                'file': str(item.get('file'))[:200] if isinstance(item.get('file'), str) else None,
-                'line': line if isinstance(line, int) and not isinstance(line, bool) and line > 0 else None,
-                'message': re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', message)[:200],
-            })
-    with open('previous-findings.json', 'w', encoding='utf-8') as fh:
-        json.dump(sanitized, fh, ensure_ascii=False)
-    digest = data.get('evidence_digest')
-    if isinstance(digest, str) and digest.strip():
-        clean = re.sub(r'[\x00-\x08\x0b-\x1f<>]', '', digest)[:2000]
-        with open('previous-evidence.json', 'w', encoding='utf-8') as fh:
-            json.dump({'digest': clean, 'head_sha': hexsan(data.get('head_sha'))}, fh, ensure_ascii=False)
 " 2>/dev/null || true
 
   if [[ -f previous-review-meta.json ]]; then
-    LAST_NEEDS_FULL_REVIEW="$(jq -r '.needs_full_review // false' previous-review-meta.json 2>/dev/null || echo false)"
     LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
   fi
 }
@@ -188,21 +155,12 @@ if [[ -n "$last_broad_fingerprint" ]]; then
 else
   unset PREV_FINGERPRINTS 2>/dev/null || true
 fi
-# Make sure nothing from the runner environment leaks into the
-# should-review decision.
-unset PREVIOUS_NEEDS_FULL_REVIEW 2>/dev/null || true
-
-# Extract the last review's metadata BEFORE the precheck: the
-# needs_full_review flag (#544) must reach the should-review decision —
-# otherwise the diff-unchanged guard would skip the fresh full review the
-# flag requests, and the PR would loop on the same diff forever.
-LAST_NEEDS_FULL_REVIEW="false"
+# Extract the last review's metadata BEFORE the precheck: the prior
+# review_result must reach the should-review decision — the diff-unchanged
+# skip path re-emits it as the carried verdict.
 LAST_REVIEW_RESULT=""
 if [[ -n "$last_comment_body" ]]; then
   extract_review_metadata "$last_comment_body"
-fi
-if [[ "$LAST_NEEDS_FULL_REVIEW" == "true" ]]; then
-  export PREVIOUS_NEEDS_FULL_REVIEW="true"
 fi
 
 # ── precheck call #1: marker-only should-review decision ──────────────
@@ -251,7 +209,7 @@ if data:
 fi
 
 # (The last review's metadata was extracted before precheck call #1 above,
-# so the needs_full_review flag can reach the should-review decision, #544.)
+# so the prior review_result can reach the should-review decision.)
 
 # ── Get the PR object once (review path only) ─────────────────────────
 if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then

@@ -62,15 +62,6 @@ if [[ "$(printf '%s' "$AI_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; t
   STREAM_BOOL="true"
 fi
 
-# Carry-forward (#193) follows the artifact the precheck extracted from the
-# previous managed marker, independent of review scope: v3 reviews the current
-# PR in full but still preserves the existing cross-run finding behavior.
-CARRY_FORWARD_ACTIVE="false"
-if [ -s previous-findings.json ] \
-  && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
-  CARRY_FORWARD_ACTIVE="true"
-fi
-
 # Preserve the incremental-era dirty-baseline escalation trigger as private
 # review state. The precheck carries the prior marker's review_result only to
 # this step; baseline_clean remains removed from the public action API.
@@ -80,11 +71,6 @@ if [[ "${PREVIOUS_REVIEW_RESULT:-}" == "issues" ]]; then
 fi
 
 USER_MESSAGE="$(build_user_message classification.json)"
-if [[ "$CARRY_FORWARD_ACTIVE" == "true" ]]; then
-  USER_MESSAGE="$USER_MESSAGE
-The corpus lists Open Findings From the Previous Review. Answer EVERY one: include a finding with the same id and a resolution of resolved (the current PR demonstrably fixes it) or still_open. Unresolved carried findings stay open."
-  log "Carry-forward active: $(jq 'length' previous-findings.json) open finding(s) from the previous review"
-fi
 
 # The deep-review specialist phase (#608) moved into corpus.sh in #609: the
 # rendered leads must already be in the corpus when the native_loop tool
@@ -288,7 +274,7 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" != "off" ]] && 
   TOOL_FAILURE_ENABLED="true"
 fi
 
-apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$CARRY_FORWARD_ACTIVE"
+apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"
 
 # ── Requirement Coverage merge (#624) ────────────────────────────────
 # Fold the reviewer's requirement_coverage claims (from the parsed
@@ -304,17 +290,6 @@ if [ -s requirement-ledger.json ]; then
     --ledger requirement-ledger.json \
     --output requirement-coverage.json 2>/dev/null || true
 fi
-
-# The incremental-era "insufficient review" escalation (#544) is gone with
-# the incremental scope: current runs review the PR in full, so carry-forward
-# never raises needs_full_review — a carried finding the model cannot verify
-# as fixed simply stays open for the next review. The action contract still
-# declares the output, so emit it as a constant false; drop any stale
-# workspace flag file so a reused workspace cannot leak one in. Legacy
-# markers published before v3 full-only may still carry the flag, and the
-# precheck's reader for those (check_review_needed.sh) is unchanged.
-NEEDS_FULL_REVIEW="false"
-rm -f needs-full-review.json
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
@@ -342,17 +317,6 @@ FD_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   echo "$FD_DELIM"
 } >> "$OUTPUT_FILE"
 
-# Cross-run evidence memory (#265): the native_loop's gathered-evidence digest,
-# carried into the metadata marker by the publish step so the next review
-# reuses it. Empty for non-native modes / when no evidence was gathered.
-# Same random-delimiter defense — the digest is tool/model-influenced text.
-ED_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-{
-  echo "evidence_digest<<$ED_DELIM"
-  jq -r '.evidence_digest // ""' tool-harness.json 2>/dev/null || true
-  echo "$ED_DELIM"
-} >> "$OUTPUT_FILE"
-
 # Compact tool trace output: expose which read-only tools ran without copying
 # model-controlled arguments into action outputs. Full, redacted arguments and
 # results remain in tool-harness.md for the review corpus and runner logs.
@@ -367,12 +331,6 @@ log "Analysis complete. Writing outputs..."
 jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
 echo "$ANALYSIS_ENGINE" > analysis_engine.txt
-
-# Action-contract output: constant false under v3 full-only reviews. Kept
-# because action.yml declares it and the publish step consumes it; the
-# publish step persists the flag into the metadata marker only when true,
-# which current runs no longer produce.
-echo "needs_full_review=$NEEDS_FULL_REVIEW" >> "$OUTPUT_FILE"
 
 # Cache hit ratio: per-review prompt-cache effectiveness signal from the
 # tool harness (native_loop). Exported as a step output so the publish step

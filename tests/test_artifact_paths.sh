@@ -12,7 +12,7 @@ source "$ROOT_DIR/scripts/artifact_paths.sh"
 new_paths=(
   findings.json review-request.json
   review-verdict-body.md inline-findings-body.md
-  review-comments.json finding-threads.json resolve-findings.json
+  review-comments.json
   pr-files.json pr-files.raw.json
   linked-issue.raw.json linked-issues.json linked-issues.merged.json
   linked-issue.filtered.json

@@ -675,28 +675,32 @@ class TestFindingsNormalization:
         out = self._parse_findings([{"message": f"f{i}"} for i in range(80)])
         assert len(out) == 50
 
-    def test_id_and_resolution_preserved(self):
+    def test_id_and_resolution_never_survive(self):
+        """#617: findings never carry id/resolution through the parse — the
+        carried-findings machinery that consumed them is gone, and any
+        resolution value (known, alias, or hostile) is dropped the same way."""
         out = self._parse_findings([
             {"message": "carried", "id": "P1", "resolution": "resolved"},
             {"message": "alias", "id": "P2", "resolution": "FIXED"},
             {"message": "open", "id": "P3", "resolution": "still_open"},
-            {"message": "unknown", "id": "P4", "resolution": "not_verifiable"},
+            {"message": "unknown", "id": "P4",
+             "resolution": "not_verifiable_from_delta"},
         ])
-        assert [(f["id"], f["resolution"]) for f in out] == [
-            ("P1", "resolved"), ("P2", "resolved"), ("P3", "still_open"),
-            ("P4", "not_verifiable_from_delta"),
-        ]
+        assert len(out) == 4
+        for f in out:
+            assert "id" not in f
+            assert "resolution" not in f
 
-    def test_invalid_id_and_resolution_dropped(self):
+    def test_hostile_id_and_resolution_values_dropped(self):
         out = self._parse_findings([
             {"message": "a", "id": "../;rm -rf", "resolution": "maybe?"},
             {"message": "b", "id": 7, "resolution": ["resolved"]},
             {"message": "c"},
         ])
-        assert out[0]["id"] == "rm-rf"
-        assert "resolution" not in out[0]
-        assert "id" not in out[1] and "resolution" not in out[1]
-        assert "id" not in out[2]
+        assert [f["message"] for f in out] == ["a", "b", "c"]
+        for f in out:
+            assert "id" not in f
+            assert "resolution" not in f
 
     def test_weak_model_without_findings_unchanged(self):
         result = parse_response(_openai_with(self.BASE))

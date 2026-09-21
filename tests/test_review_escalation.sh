@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_review_escalation.sh" >&2
+    exit 0
+  fi
+done
+
 # Wiring tests for fast→smart escalation (#160). Decision logic is covered in
 # tests/test_escalation.py; these assert the orchestration contracts.
 
@@ -77,8 +85,8 @@ check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" \
   "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
 check "baseline_clean public output remains removed" \
   "$(printf '%s' "$ACTION" | grep -c 'baseline_clean:' || true)" "0"
-check "review step always emits needs_full_review=false" \
-  "$(grep -c 'NEEDS_FULL_REVIEW="false"' "$RUN_REVIEW")" "1"
+check "review step no longer emits needs_full_review at all (#617)" \
+  "$(grep -c 'NEEDS_FULL_REVIEW' "$RUN_REVIEW")" "0"
 for obsolete_text in 'Incremental Review Insufficient' 'this review is incremental' 'the next run will be a full review'; do
   check "review step drops obsolete full-rerun text: $obsolete_text" \
     "$(grep -F -c "$obsolete_text" "$RUN_REVIEW" || true)" "0"

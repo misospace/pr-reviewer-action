@@ -26,11 +26,6 @@ Environment inputs:
   honoured).
 - ``FORCE_REVIEW``: ``true`` bypasses the diff-unchanged guard.
 - ``SKIP_IF_DIFF_UNCHANGED``: ``true`` (default) enables the guard.
-- ``PREVIOUS_NEEDS_FULL_REVIEW``: ``true`` when the last review's
-  carry-forward step flagged a carried finding it could not assess from
-  its delta (``needs_full_review`` in the metadata marker, #544). Defeats
-  the diff-unchanged guard so the next run is a fresh full review that
-  can actually clear the finding instead of skipping.
 
 ``diff_fingerprint`` is the diff's own fingerprint (``empty-diff``
 placeholder for an empty diff); ``broad_fingerprint`` is the marker form
@@ -46,7 +41,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 logger = logging.getLogger(__name__)
 
@@ -646,39 +640,6 @@ def should_review(
 # ---------------------------------------------------------------------------
 
 
-# Findings about CI state describe the *run*, not the diff. The diff-unchanged
-# guard compares a fingerprint of the diff, so a red-to-green CI transition
-# leaves the fingerprint identical and the review short-circuits — the PR then
-# stays blocked on a condition that has since cleared. Detecting them from the
-# carried finding is heuristic, and deliberately biased toward re-reviewing: a
-# false positive costs one extra review, a false negative strands the PR.
-_CI_STATE_PATTERN = re.compile(
-    r"\bci\b.*\b(?:fail(?:ed|ing|ure)?|red|pending|not green|terminal)\b"
-    r"|\b(?:check|workflow|job)s?\b.*\b(?:fail(?:ed|ing|ure)?|pending)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def looks_like_ci_state_finding(finding: object) -> bool:
-    """True when a carried finding is about CI state rather than the diff.
-
-    Such a finding can be resolved without the diff changing at all, so it must
-    not be short-circuited by the diff-unchanged guard.
-    """
-    if not isinstance(finding, dict):
-        return False
-    message = finding.get("message")
-    if not isinstance(message, str) or not message.strip():
-        return False
-    return bool(_CI_STATE_PATTERN.search(message))
-
-
-def has_ci_state_findings(findings: object) -> bool:
-    """True when any carried finding is about CI state."""
-    if not isinstance(findings, list):
-        return False
-    return any(looks_like_ci_state_finding(f) for f in findings)
-
 def evaluate_precheck(
     diff_content: str,
     previous_fingerprints: list[str],
@@ -686,8 +647,6 @@ def evaluate_precheck(
     config_hash: Optional[str] = None,
     force_review: bool = False,
     skip_if_diff_unchanged: bool = True,
-    ci_state_findings_open: bool = False,
-    previous_needs_full_review: bool = False,
 ) -> PrecheckResult:
     """Run the action's should-review decision over a diff.
 
@@ -713,16 +672,6 @@ def evaluate_precheck(
         Bypasses the diff-unchanged guard.
     skip_if_diff_unchanged : bool
         Enables the diff-unchanged guard.
-    ci_state_findings_open : bool
-        The previous review left a finding about CI state open. Such a finding
-        can clear without the diff changing, so the diff-unchanged guard must
-        not short-circuit it (#536).
-    previous_needs_full_review : bool
-        The previous review flagged a carried finding it could not assess
-        from its delta (#544). The diff-unchanged guard must not
-        short-circuit it either: the only way to clear the finding is the
-        full review this flag requests, and skipping would strand the PR
-        on the same incremental diff forever.
 
     Returns
     -------
@@ -740,8 +689,6 @@ def evaluate_precheck(
 
     if (
         not force_review
-        and not ci_state_findings_open
-        and not previous_needs_full_review
         and skip_if_diff_unchanged
         and fingerprints_match(broad, previous_fingerprints)
     ):
@@ -753,23 +700,12 @@ def evaluate_precheck(
             reason="Diff unchanged since last review",
         )
 
-    reason = "New or forced changes detected"
-    if ci_state_findings_open and fingerprints_match(broad, previous_fingerprints):
-        reason = "Diff unchanged, but a CI-state finding is still open"
-    elif (
-        previous_needs_full_review
-        and fingerprints_match(broad, previous_fingerprints)
-    ):
-        reason = (
-            "Diff unchanged, but a carried finding needs a full review "
-            "to be assessed (#544)"
-        )
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=marker_fp,
         config_hash=config_hash,
         broad_fingerprint=broad,
-        reason=reason,
+        reason="New or forced changes detected",
     )
 
 
@@ -880,21 +816,6 @@ def _read_previous_fingerprints() -> list[str]:
     return fingerprints
 
 
-
-def _read_previous_findings() -> list:
-    """Carried findings the shell wrapper wrote from the last review's marker.
-
-    Absent or unreadable is treated as "none": the guard then behaves exactly
-    as it did before, which is the safe direction for a file that only ever
-    adds reasons to review.
-    """
-    try:
-        with open("previous-findings.json", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    return data if isinstance(data, list) else []
-
 def main() -> None:
     """CLI entry point for the precheck module.
 
@@ -915,265 +836,9 @@ def main() -> None:
         previous_fingerprints,
         force_review=force_review,
         skip_if_diff_unchanged=skip_if_diff_unchanged,
-        ci_state_findings_open=has_ci_state_findings(_read_previous_findings()),
-        previous_needs_full_review=_env_flag(
-            "PREVIOUS_NEEDS_FULL_REVIEW", default=False
-        ),
     )
 
     print(json.dumps(build_precheck_payload(result), indent=2))
-
-    pr_number = os.environ.get("PR_NUMBER", "") or os.environ.get(
-        "GITHUB_PR_NUMBER", ""
-    )
-    if pr_number:
-        try:
-            comments = _load_pr_comments(pr_number)
-            # workspace_root is what ARMS the containment guard in
-            # _write_previous_dismissals; omitting it skips every path check
-            # on the only production call path. scripts/sections/config.sh
-            # resolves the reader's root the same way.
-            _write_previous_dismissals(
-                comments,
-                _resolve_maintainers(),
-                output_path=os.environ.get(
-                    "PREVIOUS_DISMISSALS_PATH", "previous-dismissals.json"
-                ),
-                workspace_root=os.environ.get("GITHUB_WORKSPACE") or os.getcwd(),
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort
-            logging.getLogger(__name__).warning(
-                "Dismissal write skipped: %s", exc
-            )
-
-
-def _write_previous_dismissals(
-    comments: list[dict],
-    maintainers: set[str],
-    output_path: str = "previous-dismissals.json",
-    workspace_root: str | Path | None = None,
-) -> int:
-    """Parse `@ai-reviewer dismiss <id>: <reason>` directives from PR comments.
-
-    Each parsed row is enriched with ``dismissed_by`` (the comment author)
-    when the author appears in ``maintainers``. Returns the number of
-    dismissals written.
-
-    Fails closed on an empty ``maintainers`` set: when the precheck's
-    ``_resolve_maintainers()`` could not verify anyone (PyGithub missing,
-    a lookup error) it returns ``set()``, and the directive must be
-    honoured by *nobody* then — not by everyone (#581).
-
-    Guards: ``output_path`` is validated against ``workspace_root`` when
-    provided (no symlinks pointing outside, no ``..`` segments, no null
-    bytes). The file is only written if at least one directive was parsed;
-    existing dismissals are preserved on empty fetches (read-before-write
-    merge) so a transient GitHub outage cannot wipe prior dismissals.
-    """
-    from pr_reviewer.carry_forward import (
-        parse_dismiss_directive,
-        write_dismissed_findings,
-    )
-
-    # Fail closed on an empty maintainer set. The ``if maintainers and ...``
-    # gate below treats an *empty* set as "honor everyone", which would let
-    # any author dismiss findings the moment verification degrades. An
-    # unverified maintainer set must dismiss nothing, not all of them
-    # (#581). A non-empty (verified or local-dev) set proceeds to the
-    # per-comment author check.
-    if not maintainers:
-        return 0
-
-    # Path-traversal / symlink / null-byte defense. Mirrors the reader-side
-    # _resolve_artifact_path containment check.
-    if "\x00" in str(output_path):
-        logging.getLogger(__name__).warning(
-            "output_path contains null byte; refusing to write"
-        )
-        return 0
-    if workspace_root is not None:
-        resolved_root = Path(workspace_root).resolve()
-        target = Path(output_path).resolve()
-        if target.is_symlink():
-            link_target = target.resolve()
-        else:
-            link_target = target
-        if not (link_target == resolved_root or resolved_root in link_target.parents):
-            logging.getLogger(__name__).warning(
-                "output_path %s resolves outside workspace_root %s; refusing",
-                output_path,
-                workspace_root,
-            )
-            return 0
-        for part in Path(output_path).parts:
-            if part == "..":
-                logging.getLogger(__name__).warning(
-                    "output_path %s contains '..' segment; refusing",
-                    output_path,
-                )
-                return 0
-
-    rows: list[dict] = []
-    for c in comments or []:
-        author = (c.get("author") or "").strip()
-        body = c.get("body") or ""
-        # parse_dismiss_directive returns a list of {"id","reason"} dicts,
-        # not a single tuple. Iterate them.
-        matches = parse_dismiss_directive(body) or []
-        if not matches:
-            continue
-        if maintainers and author and author not in maintainers:
-            # Non-maintainer authors are ignored — directive must come from a maintainer.
-            continue
-        for m in matches:
-            finding_id = m.get("id") or ""
-            reason = m.get("reason") or ""
-            if not finding_id:
-                continue
-            rows.append(
-                {
-                    "id": finding_id,
-                    "reason": reason,
-                    "dismissed_by": author,
-                    "comment_id": c.get("id"),
-                }
-            )
-    if not rows:
-        # No directives parsed — preserve any prior dismissals file rather
-        # than silently clobbering it on every precheck run.
-        return 0
-    try:
-        return write_dismissed_findings(
-            rows, target_path=output_path, workspace_root=workspace_root
-        )
-    except (OSError, ValueError) as exc:
-        logging.getLogger(__name__).warning(
-            "Failed to write %s: %s", output_path, exc
-        )
-        return 0
-
-
-def _github_token() -> str:
-    """Return the GitHub token, accepting either spelling.
-
-    action.yml's precheck step sets GH_TOKEN, and GITHUB_TOKEN is NOT an
-    automatic Actions variable. Reading only GITHUB_TOKEN left the dismissal
-    fetch tokenless in production, so it returned [] on every run and the
-    directive stayed dead -- the defect #543 exists to fix. Mirrors
-    platform.py and forgejo_backend.py, which already accept both.
-    """
-    return os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
-
-
-def _load_pr_comments(pr_number: str) -> list[dict]:
-    """Fetch issue comments for ``pr_number`` via the GitHub API.
-
-    Returns an empty list on any failure (no token, network error, etc.) —
-    carry-forward is best-effort and must never break the precheck. A
-    15-second timeout bounds the step's runtime against slow responses.
-    """
-    token = _github_token()
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    if not (token and repo and pr_number):
-        return []
-    try:
-        from github import Github
-
-        gh = Github(token, per_page=100, timeout=15)
-        issue = gh.get_repo(repo).get_issue(int(pr_number))
-        return [
-            {
-                "id": c.id,
-                "author": c.user.login if c.user else "",
-                "body": c.body or "",
-            }
-            for c in issue.get_comments()
-        ]
-    except ImportError:
-        return []
-    except Exception as exc:  # noqa: BLE001 — best-effort fetch
-        logging.getLogger(__name__).warning(
-            "PR comment fetch failed for #%s: %s", pr_number, exc
-        )
-        return []
-
-
-def _resolve_maintainers(repo: str | None = None, token: str | None = None) -> set[str]:
-    """Return the set of GitHub usernames permitted to dismiss findings.
-
-    Performs a GitHub permissions check via ``get_collaborator_permission``
-    for each candidate username in ``DISMISSAL_MAINTAINERS`` (or
-    ``GITHUB_REPOSITORY_OWNER``) when a token and repo are available; only
-    usernames with ``admin`` or ``maintain`` permission are admitted.
-
-    This is the security gate for the ``@ai-reviewer dismiss`` directive,
-    so it fails closed: it returns an empty set whenever the permission
-    check cannot actually be performed — PyGithub is not installed, the
-    repo lookup errors, or a candidate's own lookup errors. An unverified
-    candidate set would let any listed login dismiss findings, so those
-    paths yield ``set()`` instead of the candidates. The unverified
-    candidate set is returned only from the documented local-development
-    branch (no token: verification is impossible by definition, and local
-    development has no external reviewers to exploit it).
-    """
-    candidates: set[str] = set()
-    explicit = os.environ.get("DISMISSAL_MAINTAINERS", "")
-    if explicit:
-        candidates = {u.strip() for u in explicit.split(",") if u.strip()}
-    else:
-        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
-        if owner:
-            candidates = {owner}
-
-    repo_name = repo or os.environ.get("GITHUB_REPOSITORY", "")
-    tok = token or _github_token()
-    # Fail closed on each verification-impossible condition separately so the
-    # semantics are explicit (#581 / review feedback):
-    #   - no candidates       -> set()        nothing to verify, nobody may dismiss
-    #   - no token            -> candidates   documented local-dev fallback
-    #   - token present, no repo -> set()      cannot verify against a missing
-    #                                          repository identity, so nobody
-    #                                          may dismiss
-    # Only when all three are present do we proceed to the live permission check.
-    if not candidates:
-        return set()
-    if not tok:
-        return candidates
-    if not repo_name:
-        return set()
-
-    try:
-        from github import Github
-    except ImportError:
-        # PyGithub is not installed, so the permission check cannot run.
-        # Fail closed: an empty set means no dismissal is honoured rather
-        # than treating the unfiltered candidate set as verified (#581).
-        return set()
-
-    permitted: set[str] = set()
-    try:
-        gh = Github(tok, timeout=10)
-        gh_repo = gh.get_repo(repo_name)
-        for username in candidates:
-            try:
-                perm = gh_repo.get_collaborator_permission(username)
-                if perm in ("admin", "maintain"):
-                    permitted.add(username)
-            except Exception as exc:  # noqa: BLE001 — single-user lookup
-                # Fail closed: an error on this user's lookup means their
-                # permission could not be verified, so they are not
-                # admitted (#581).
-                logging.getLogger(__name__).debug(
-                    "Permission check failed for %s: %s", username, exc
-                )
-        return permitted
-    except Exception as exc:  # noqa: BLE001 — repo-level lookup
-        # Fail closed: if the repo lookup itself failed, no candidate's
-        # permission is verified, so nobody may dismiss (#581).
-        logging.getLogger(__name__).warning(
-            "Maintainer permission lookup failed: %s", exc
-        )
-        return set()
 
 
 if __name__ == "__main__":

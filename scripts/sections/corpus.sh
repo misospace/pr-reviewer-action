@@ -200,27 +200,6 @@ if len(final.encode("utf-8")) <= cap:
 PY
 }
 
-# Cross-run context is keyed by precheck artifacts, not review scope. The
-# precheck writes these only from the last managed marker, so a full v3
-# re-review can retain the same findings/evidence context as its predecessor.
-render_previous_review_context() {
-  if [ -s previous-findings.json ] \
-    && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
-    PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
-from pr_reviewer.carry_forward import load_carried_findings, render_carried_findings_section
-print(render_carried_findings_section(load_carried_findings()), end='')
-" 2>/dev/null || echo "(Previous review findings could not be loaded)"
-  fi
-
-  if [ "$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ] \
-    && [ -s previous-evidence.json ]; then
-    PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
-from pr_reviewer.evidence_memory import load_evidence_memory, render_evidence_memory_section
-print(render_evidence_memory_section(load_evidence_memory()), end='')
-" 2>/dev/null || true
-  fi
-}
-
 build_review_corpus() {
   build_bounded_repo_map
 
@@ -274,7 +253,6 @@ build_review_corpus() {
       cat linked-issues.md
       echo
     fi
-    render_previous_review_context
     echo "# PR Files (truncated)"
     echo '```json'
     cat pr-files.truncated.json

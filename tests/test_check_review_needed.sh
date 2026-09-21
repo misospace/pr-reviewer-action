@@ -10,7 +10,7 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 # Dependency preflight
-for dep in python3; do
+for dep in python3 rg; do
   if ! command -v "$dep" &>/dev/null; then
     echo "SKIP: $dep is not available — cannot run test_check_review_needed.sh" >&2
     exit 0
@@ -586,6 +586,48 @@ set_empty_comments
 RESULT="$(run_precheck)"
 check "diff-unchanged skip without marker leaves verdict empty" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" ""
 check "diff-unchanged skip without marker leaves verdict_source empty" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" ""
+
+# ── Test 27: legacy carried-findings marker: verdict carry-forward (#617) ──
+# Pre-#617 markers can still carry open_findings / evidence_digest /
+# needs_full_review state. A diff-unchanged skip must re-emit the prior
+# verdict from review_result alone — the open-finding metadata is inert.
+echo ""
+echo "=== Test 27: legacy carried-findings marker + unchanged diff carries the verdict ==="
+set_empty_comments
+LEGACY_FP="$(run_precheck | grep '^diff_fingerprint=' | head -1 | cut -d= -f2-)"
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${LEGACY_FP} -->
+<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"h\",\"base_sha\":\"b\",\"review_result\":\"issues\",\"needs_full_review\":true,\"open_findings\":[{\"severity\":\"blocker\",\"message\":\"still open\"}],\"evidence_digest\":\"- read_file prior evidence\"} -->"
+RESULT="$(run_precheck)"
+check "legacy marker: should_review=false on unchanged diff" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "legacy marker: skip_reason=diff-unchanged" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "diff-unchanged"
+check "legacy marker: verdict=request_changes" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "request_changes"
+check "legacy marker: verdict_source=carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
+
+# ── Test 28: legacy marker + changed diff → no carried artifacts written ──
+echo ""
+echo "=== Test 28: legacy carried-findings marker + changed diff reviews, writes no carried artifacts ==="
+ORIG_DIFF="$FIXED_DIFF"
+FIXED_DIFF="${FIXED_DIFF}
++carried-state-change"
+RESULT="$(run_precheck)"
+FIXED_DIFF="$ORIG_DIFF"
+check "changed diff: should_review=true" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+for f in previous-findings.json previous-evidence.json needs-full-review.json; do
+  check "no $f in workspace" \
+    "$( [[ -e "$WORKDIR/$f" ]] && echo present || echo absent )" "absent"
+done
+check "previous-review-meta.json has exactly one key" \
+  "$(jq -c 'keys' "$WORKDIR/previous-review-meta.json")" '["review_result"]'
+check "previous-review-meta.json carries the prior review_result" \
+  "$(jq -r '.review_result' "$WORKDIR/previous-review-meta.json")" "issues"
+
+# ── Test 29: no script or action.yml touches the removed artifacts (#617) ──
+echo ""
+echo "=== Test 29: no script produces or consumes the removed carried artifacts ==="
+# rg exits 1 on zero matches; swallow it so set -e does not kill the test.
+HITS="$( { rg -l --no-messages 'previous-findings\.json|previous-evidence\.json|needs-full-review\.json|previous-dismissals\.json|finding-threads\.json' "$ROOT_DIR/scripts" "$ROOT_DIR/action.yml" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+check "zero references to removed carried artifacts in scripts/ + action.yml" "$HITS" "0"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

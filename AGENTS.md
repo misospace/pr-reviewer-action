@@ -4,7 +4,7 @@ This is a GitHub Action that analyzes pull requests using OpenAI-compatible or A
 
 ## What it does
 
-The action collects rich PR context (diff, files, linked issues, version hints, image digests, repo impact/history, standards files), runs a deterministic rule-based classification (PR kind, risk flags, required checks), assembles a review corpus, routes the review to a fast or smart model (optional), sends it to an LLM via OpenAI `POST /chat/completions` or Anthropic `POST /messages`, parses the JSON verdict + markdown body + optional structured findings, validates/enforces the result (required checks, findings severity gating, carried-forward findings, evidence/tool enforcement), and publishes via one of three modes (`comment`, `review_comment`, `review_verdict`).
+The action collects rich PR context (diff, files, linked issues, version hints, image digests, repo impact/history, standards files), runs a deterministic rule-based classification (PR kind, risk flags, required checks), assembles a review corpus, routes the review to a fast or smart model (optional), sends it to an LLM via OpenAI `POST /chat/completions` or Anthropic `POST /messages`, parses the JSON verdict + markdown body + optional structured findings, validates/enforces the result (required checks, findings severity gating, evidence/tool enforcement), and publishes via one of three modes (`comment`, `review_comment`, `review_verdict`).
 
 ## Key files
 
@@ -26,8 +26,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`completeness.py`** — Required-check completeness validation: keyword-matches `review_markdown` against `must_check` items
 - **`enforcement.py`** — Verdict policy (`model` / `findings_severity_gated`), findings normalization, evidence/tool enforcement; records `verdict_source`
 - **`escalation.py`** — Post-hoc escalation triggers for fast reviews (request_changes, low confidence, incomplete checks, blockers, dirty baseline)
-- **`carry_forward.py`** — Carried-forward open findings for re-reviews; surviving blockers force `request_changes` (`verdict_source: carry_forward`)
-- **`metadata.py`** — Managed metadata marker (fingerprint, scope, open findings) embedded in published comments
+- **`metadata.py`** — Managed metadata marker (fingerprint, scope) embedded in published comments
 - **`github_context.py`** — PR metadata/GitHub and Forgejo linked-issue reference helpers
 - **`linear_context.py`** — Optional deterministic Linear adapter: recognizes configured `TEAM-123` identifiers in PR titles, fetches issue/spec context through Linear GraphQL, and normalizes it into linked-issue corpus/classification data
 - **`response_parser.py`** — Tolerant model-output parsing (JSON in fences/prose, verdict + findings extraction)
@@ -46,13 +45,12 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 ### Publishing and output hygiene
 
 - **`scripts/publish.sh`** — Publish dispatcher (extracted from the `Publish review` step's inline `run:` block in #541): the `verify_pr_head.sh` publication-boundary pre-guard plus the three `PUBLISH_MODE` case arms (comment / review_comment / review_verdict), parametrized on the env the step exports. Sourced helpers come from `scripts/publish_helpers.sh`; unit-tested by `tests/test_publish_dispatch.sh`
-- **`scripts/publish_helpers.sh`** — Shared publish functions: sanitize, metadata marker build, native review cleanup, finding-thread resolution
+- **`scripts/publish_helpers.sh`** — Shared publish functions: sanitize, metadata marker build, native review cleanup
 - **`scripts/sanitize_review_markdown.py`** — Neutralizes upstream GitHub auto-links (PR/issue/commit URLs, `owner/repo#123`, bare `#123`) in review output. `UPSTREAM_LINK_MODE` (`inert` default / `togithub`, #561) controls whether PR/issue/commit/compare URLs become plain text or clickable `https://togithub.com/...` links; shorthand refs stay inert in both modes
 - **`scripts/strip_metadata_markers.py`** — Strips reserved `<!-- ai-pr-review-*:... -->` markers from model output before publishing
 - **`scripts/strip_empty_conditional_sections.py`** — Deterministic backstop for #415: removes model-confabulated `## Linked Issue Fit` / `## Evidence Provider Findings` / `## Standards Compliance` sections when the corpus provided no such context. Presence mirrors the exact `[ -s linked-issues.md ]` / `[ -s evidence-providers.md ]` / `[ -s standards-present.txt ]` gates `corpus.sh` uses; fence-aware (won't match `#` headings inside code blocks); invoked from `sanitize_review_markdown`. Sections are matched by leading phrase with the trailing noun dropped (`linked issue`, `evidence provider`, `standards`), and an unreported signal defaults to present — never strip a section the caller forgot to report on
 - **`scripts/redact.py`** — Shared secret-redaction pipeline applied to tool and evidence-provider output
 - **`scripts/build_review_comments.py`** — Builds line-anchored inline review comments from structured findings, validated against the PR diff
-- **`scripts/resolve_finding_threads.py`** — Resolves/replies on existing finding threads by content fingerprint on re-review
 - **`scripts/strip_source_text.py`** — Strips fetched source text where needed for corpus hygiene
 
 ### Enrichment
@@ -86,15 +84,14 @@ run_review.sh                   → collects context → classifies → builds c
   ├─ run_specialists.py         → Deep-review specialist passes (#608) → bounded advisory leads feed the reserved corpus section (#609), reaped before the tool harness
   ├─ run_tool_harness.py        → Tool harness planning + execution (once or loop)
   ├─ model_call.sh              → Fast/smart routing, retries, streaming, fallback
-  └─ pr_reviewer.{completeness,enforcement,escalation,carry_forward,conversation,requirement_coverage}
-                                 → required-check validation, verdict policy, escalation, carried findings,
+  └─ pr_reviewer.{completeness,enforcement,escalation,conversation,requirement_coverage}
+                                 → required-check validation, verdict policy, escalation,
                                    per-requirement coverage credit artifact after enforcement (#624)
 publish (scripts/publish.sh)    → sanitize markdown → strip markers → build managed body → publish
   ├─ publish_mode=comment        → gh pr comment --edit-last --create-if-none (sticky)
   ├─ publish_mode=review_comment → sticky comment + optional inline-findings COMMENT review
   └─ publish_mode=review_verdict → native approve/request_changes (guardrailed) + inline comments
-     ├─ cleanup_native_reviews   → dismiss/stub previous managed reviews
-     └─ resolve_finding_threads  → resolve or reply on existing finding threads
+     └─ cleanup_native_reviews   → dismiss/stub previous managed reviews
 ```
 
 ## Review corpus sections (in order)
@@ -106,20 +103,19 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 5. Repository Map (bounded deterministic structure of Git-tracked paths)
 6. PR Thread Context (bounded recent PR conversation comments; managed comments filtered, redacted, fence-safe)
 7. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles)
-8. Carried-Forward Open Findings / Evidence Memory (rendered after linked-issue context, when present)
-9. PR Files (truncated JSON with patches)
-10. Version Hints from Diff
-11. PR Diff (truncated)
-12. Tool Harness Findings (planned + executed tool results)
-13. Evidence Providers (user-defined command output)
-14. Image Digest Provenance
-15. Linked Sources (fetched URLs, GitHub releases/compare metadata)
-16. Repository Impact Scan (git grep hits for extracted terms)
-17. Repository History (git log context for extracted terms)
-18. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
-19. Specialist Review Leads (deep review only: a bounded advisory leads block appended last, after the reserved ledger block; never truncated itself)
+8. PR Files (truncated JSON with patches)
+9. Version Hints from Diff
+10. PR Diff (truncated)
+11. Tool Harness Findings (planned + executed tool results)
+12. Evidence Providers (user-defined command output)
+13. Image Digest Provenance
+14. Linked Sources (fetched URLs, GitHub releases/compare metadata)
+15. Repository Impact Scan (git grep hits for extracted terms)
+16. Repository History (git log context for extracted terms)
+17. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
+18. Specialist Review Leads (deep review only: a bounded advisory leads block appended last, after the reserved ledger block; never truncated itself)
 
-Note: `MAX_CORPUS` truncation applies to sections 1–17; the standards section is always preserved in full. The #624 **Explicit Requirement Ledger** is a reserved block appended after the body (never truncated itself): its exact bytes are carved out of the body budget, it is emitted on the single review corpus whenever the ledger is non-empty, and the same fits-the-reservation predicate gates the `requirement-ledger-present.txt` signal — so the system-prompt guidance can never be enabled for a corpus that lacks the section (lockstep). A ledger that cannot fit a sane reservation is dropped from both. The #609 **Specialist Review Leads** is a second reserved block, appended **last** (after the ledger block), so the authority order is standards > ledger > advisory leads and specialist content can never evict higher-authority material: its exact bytes are likewise carved out of the body budget, it is emitted on the single corpus only when `deep_review` is enabled and a non-empty section survives, and the same fits-the-reservation predicate gates the `specialist-leads-present.txt` signal (lockstep; a stale signal is cleared by the guard in `corpus.sh` when the section ends up missing). When `deep_review` is disabled — or no usable lead survives — `specialists.md` is empty and no rebuild happens, so the disabled-run corpus stays byte-identical to a pre-#609 build.
+Note: `MAX_CORPUS` truncation applies to sections 1–16; the standards section is always preserved in full. The #624 **Explicit Requirement Ledger** is a reserved block appended after the body (never truncated itself): its exact bytes are carved out of the body budget, it is emitted on the single review corpus whenever the ledger is non-empty, and the same fits-the-reservation predicate gates the `requirement-ledger-present.txt` signal — so the system-prompt guidance can never be enabled for a corpus that lacks the section (lockstep). A ledger that cannot fit a sane reservation is dropped from both. The #609 **Specialist Review Leads** is a second reserved block, appended **last** (after the ledger block), so the authority order is standards > ledger > advisory leads and specialist content can never evict higher-authority material: its exact bytes are likewise carved out of the body budget, it is emitted on the single corpus only when `deep_review` is enabled and a non-empty section survives, and the same fits-the-reservation predicate gates the `specialist-leads-present.txt` signal (lockstep; a stale signal is cleared by the guard in `corpus.sh` when the section ends up missing). When `deep_review` is disabled — or no usable lead survives — `specialists.md` is empty and no rebuild happens, so the disabled-run corpus stays byte-identical to a pre-#609 build.
 
 The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 
@@ -192,7 +188,7 @@ See `action.yml` (the source of truth) or the README's grouped input tables for 
 ## Outputs summary
 
 - `verdict`: `"approve"` or `"request_changes"`
-- `verdict_source`: `"model"`, `"findings"`, or `"carry_forward"`
+- `verdict_source`: `"model"`, `"findings"`, or `"carry_forward"` (an unchanged-diff skip retains the prior verdict)
 - `required_checks`: `"complete"`, `"incomplete"`, or `"none"`
 - `review_route` / `escalation_reason`: routing outcome (`legacy`/`fast`/`smart`/`escalated`) and trigger names
 - `findings`: normalized structured findings as a JSON array

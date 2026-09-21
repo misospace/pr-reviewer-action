@@ -24,7 +24,7 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 - 🧭 **Deterministic PR classification** — rule-based risk flags and required checklists keep small models focused and honest
 - ⚡ **Fast/smart model routing** — boring PRs go to a cheap model, scary ones escalate to a smarter one automatically
 - 🔍 **Structured findings** — severity-tagged findings, optional line-anchored inline comments, and a severity-gated verdict policy
-- 💸 **Token-saving by design** — unchanged-diff skip (zero model calls), full re-reviews only when something changed, and carry-forward of unresolved findings
+- 💸 **Token-saving by design** — unchanged-diff skip (zero model calls), full re-reviews only when something changed
 - 🛡️ **Safe by default** — approvals off, fork enrichment off, read-only tool allowlists, secret redaction, link sanitization
 - 🧰 **Extensible** — repo-defined evidence providers, a bounded read-only tool harness, repo-local rules (`AGENTS.md`/`CLAUDE.md`) and prompt overrides
 
@@ -87,7 +87,7 @@ flowchart LR
     B --> C[Collect context<br/>diff · issues · sources · evidence · tools]
     C --> D[Classify PR<br/>rule-based risk flags]
     D --> E[Route & call model<br/>primary / smart / fallback]
-    E --> F[Validate & enforce<br/>required checks · findings · carry-forward]
+    E --> F[Validate & enforce<br/>required checks · findings]
     F --> G[Publish<br/>comment / native review]
 ```
 
@@ -100,7 +100,7 @@ What it supports:
 | ✅ Evidence providers for repo-specific checks | ✅ Read-only tool harness (single-round or iterative planning) |
 | ✅ Managed PR comment publishing | ✅ Automatic skip when the effective PR diff is unchanged |
 | ✅ Linked issue ingestion (`Fixes #123`, `Closes owner/repo#456`) | ✅ Repo-provided rules via `CLAUDE.md`, `AGENTS.md`, or a custom file |
-| ✅ Upstream link sanitizer for published reviews | ✅ Re-reviews with carried-forward findings |
+| ✅ Upstream link sanitizer for published reviews | ✅ Unchanged-diff skip retains the prior verdict |
 
 ## 🖥️ Platform support
 
@@ -114,15 +114,12 @@ The action works on **GitHub** and **Forgejo** (1.4.x). Set `platform: auto` (de
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
 | Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
 | Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
-| Thread resolution (`resolveReviewThread`) | ✅ Full | ❌ Skipped (no GraphQL) |
-| Thread follow-up replies (`in_reply_to`) | ✅ Full | ❌ Skipped — suppression-file dedup only |
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST) |
 | Evidence providers | ✅ Full | ✅ Full |
 | Tool harness | ✅ Full | ✅ Full |
-| Re-reviews + carry-forward | ✅ Full | ✅ Full |
 | Fast/smart model routing | ✅ Full | ✅ Full |
 
-> **Note:** On Forgejo, features requiring GitHub's GraphQL API (thread resolution, review minimization, thread follow-up replies) are skipped with a clear log line. The core review pipeline and all REST-based features work fully.
+> **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. The core review pipeline and all REST-based features work fully.
 
 ## 🧠 Review pipeline features
 
@@ -270,7 +267,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews: a stub review (below ~80 chars) or substantive Unknowns content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation; concise confident reviews are not escalated, regardless of diff size (`auto` mode) | No | `true` |
 | `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
 | `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
-| `escalate_on_dirty_baseline` | Escalate reviews that carry unresolved findings from a prior `request_changes` review, so the smart model verifies whether the current PR resolves them (`auto` mode) | No | `true` |
+| `escalate_on_dirty_baseline` | Escalate reviews whose prior review's metadata marker recorded a `request_changes` verdict (marker `review_result`), so re-reviewing a previously flagged PR runs on the smart model (`auto` mode) | No | `true` |
 
 </details>
 
@@ -373,7 +370,6 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `tool_loop_wall_clock_sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `120` |
 | `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
 | `tool_loop_summarize_max_tokens` | Maximum completion tokens for each result-summarization call when `tool_loop_summarize` is enabled | No | `512` |
-| `tool_evidence_memory` | Carry the evidence a `tool_mode: native_loop` review gathers across reviews of the same PR: a compact digest of what it read/fetched is stored in the metadata marker and reused by the next review (re-verifying only what changed) instead of re-gathering. On by default; `false` to disable. No effect on non-native modes | No | `true` |
 | `tool_turn_timeout_sec` | Timeout in seconds for each model turn of the `tool_mode=native_loop` exchange | No | `60` |
 | `tool_corpus_max_bytes` | Maximum corpus bytes passed into the `native_loop` conversation's first turn | No | `50000` |
 | `tool_max_tokens_per_turn` | Maximum completion tokens for each model turn of the `tool_mode=native_loop` exchange | No | `400` |
@@ -434,7 +430,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Output | Description |
 |--------|-------------|
 | `verdict` | `approve` or `request_changes` |
-| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict, or an unresolved carried blocker forced `request_changes`) |
+| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |
@@ -908,14 +904,6 @@ With `inline_findings: "true"` and a native publish mode, findings that carry a 
 
 Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline_findings_max` (default 20).
 
-**Thread lifecycle on re-review.** Each inline comment carries a hidden content fingerprint of its finding. On a later re-review, the action matches existing review threads by that fingerprint and keeps them alive instead of stacking duplicates:
-
-- A carried finding the model answered with `resolution: resolved` (the same fail-closed rule that drives the verdict) gets its thread **resolved** via the GraphQL `resolveReviewThread` mutation.
-- A carried finding that survives (`still_open`, `not_verifiable_from_delta`, or unanswered) gets a short **reply on its existing thread** ("Still open after this push…") instead of a fresh duplicate anchored comment. Replies are stamped with the head SHA, so a re-run on the same push never posts the same follow-up twice, and are capped by `inline_findings_max`.
-- A still-open carried finding whose thread no longer exists falls back to a fresh anchored comment as before.
-
-Best-effort throughout: API failures (e.g. read-only tokens on fork PRs) warn and never fail the publish.
-
 ```yaml
 - uses: misospace/pr-reviewer-action@v2
   with:
@@ -963,7 +951,7 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_fast_low_confidence` — the review is a **stub** (below ~80 chars, e.g. "LGTM.") or carries substantive "Unknowns or Needs Verification" content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation because the smart model cannot manufacture missing evidence. A concise but real review is trusted **regardless of diff size**: the review length is no longer scaled with the diff. Genuinely under-reviewed risky PRs are still caught by `request_changes`, substantive Unknowns, blockers, and risk-flag routing.
 - `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
-- `escalate_on_dirty_baseline` — the prior review requested changes and left unresolved findings for this full re-review. Let the smart model verify whether the current PR resolves those blockers.
+- `escalate_on_dirty_baseline` — the prior review's metadata marker recorded a request_changes verdict (marker `review_result`). Re-reviewing a PR that was previously flagged is worth running on the smart model.
 
 Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
@@ -976,9 +964,6 @@ Key behaviors:
 - **Changed diff (or config) → fresh full review**: any new push, force-push, rebase, or config change gets a complete review of the current PR. The repo-aware context added in v2.4.0 (repository map, related code, PR thread context) keeps that full review well-informed without you doing anything.
 - **Unchanged diff → skip, zero model calls**: the prior verdict is carried forward (`verdict_source: carry_forward`) and the run ends without spending a single token on a review.
 - **Forced re-review**: add the `ai-review` label (or set `force_review: "true"`) to run a fresh full review even when the fingerprint matches — see [Forcing a re-review](#-forcing-a-re-review).
-- **Carried-forward findings (cumulative verdict)**: when a review requests changes, its findings are persisted in the managed metadata marker (`open_findings`). The next full re-review receives them as a high-priority corpus section and must answer each with `resolved` or `still_open`. Findings the model does not convincingly resolve survive into the new review's `findings` output, and a surviving blocker forces `request_changes` (`verdict_source: carry_forward`) — fixing one of three blockers cannot rubber-stamp the other two. The published review lists what is resolved and what is still open, so the latest review always reflects total PR state (useful since superseded reviews are dismissed and hidden).
-- **Legacy `needs_full_review` markers**: a marker written by an older incremental review can still defeat the unchanged-diff skip once, ensuring its next run receives a full review. Current v3 full reviews never create this flag; a carried finding that cannot be verified stays open and follows the normal fail-closed verdict path instead of causing a re-review loop.
-- **Cross-run evidence memory (`tool_mode: native_loop`)**: a native_loop review gathers evidence with read-only tools (reading configs, fetching support matrices). A compact digest of that evidence is persisted in the same metadata marker (`evidence_digest`, tagged with the head SHA it was gathered at). The next review receives it as a corpus section and reuses it — re-verifying anything that may have changed in the current PR or repository state — instead of re-running the same reads and fetches. On by default (`tool_evidence_memory`); the framing is fail-safe (prior evidence is context, not ground truth, and may be stale).
 
 ## 🔧 Local model troubleshooting
 

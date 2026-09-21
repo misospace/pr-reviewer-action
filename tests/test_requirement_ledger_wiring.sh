@@ -275,7 +275,6 @@ corpus = open(sys.argv[1]).read()
 config = open(sys.argv[2]).read()
 out = []
 for src, name in ((corpus, "build_bounded_repo_map"),
-                   (corpus, "render_previous_review_context"),
                    (corpus, "build_review_corpus"),
                    (config, "truncate_clean")):
     m = re.search(rf"^{name}\(\) \{{\n(.*?)\n\}}\n", src, re.S | re.M)
@@ -324,7 +323,6 @@ run_corpus() {
     MAX_DIFF=8000 \
     STANDARDS_FILE="AGENTS.md" \
     CI_CHECKS_FILE="" \
-    TOOL_EVIDENCE_MEMORY="true" \
     build_review_corpus )
 }
 

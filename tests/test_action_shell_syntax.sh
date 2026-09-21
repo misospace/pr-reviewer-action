@@ -91,7 +91,9 @@ extract_and_check_run_blocks() {
 
       # Write block to temp file, replace ${{ }} expressions, then check syntax
       local tmpfile
-      tmpfile="$(mktemp /tmp/pr_reviewer_action_shell_XXXXXX.sh)"
+      # mktemp requires the X's at the end of the template (busybox rejects a
+      # suffix after them), so the temp file carries no .sh extension.
+      tmpfile="$(mktemp /tmp/pr_reviewer_action_shell_XXXXXX)"
       printf '%s\n' "${block_lines[@]}" | sed 's/\${{[^}]*}}/GITHUB_EXPR/g' > "$tmpfile"
 
       local stderr_output

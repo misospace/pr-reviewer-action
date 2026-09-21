@@ -36,8 +36,6 @@ def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
                  required_checks: str | None = None,
                  review_route: str | None = None,
                  escalation_reason: list[str] | None = None,
-                 evidence_digest: str | None = None,
-                 open_findings: list[dict] | None = None,
                  cache_hit_ratio: float | None = None) -> str:
     """Build a metadata marker string for insertion into managed comments."""
     data = {
@@ -52,10 +50,6 @@ def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
         data["review_route"] = review_route
     if escalation_reason is not None:
         data["escalation_reason"] = escalation_reason
-    if evidence_digest is not None:
-        data["evidence_digest"] = evidence_digest[:2000]
-    if open_findings is not None:
-        data["open_findings"] = open_findings[:20]
     if cache_hit_ratio is not None:
         data["cache_hit_ratio"] = cache_hit_ratio
     return f"<!-- ai-pr-reviewer:{json.dumps(data, separators=(',', ':'))} -->"

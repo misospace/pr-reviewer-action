@@ -35,19 +35,34 @@ def test_build_marker_escalation_reason():
     assert data.get("escalation_reason") == reasons
 
 
-def test_build_marker_evidence_digest():
-    marker = build_marker(head_sha="abc", evidence_digest="sha256:abc123")
-    data = parse_metadata(marker)
-    assert data is not None
-    assert data.get("evidence_digest") == "sha256:abc123"
+def test_build_marker_signature_has_no_carried_findings_params():
+    """#617: the carried-findings state is no longer part of the marker
+    contract — build_marker must not even accept the old fields."""
+    import inspect
+
+    params = inspect.signature(build_marker).parameters
+    assert "evidence_digest" not in params
+    assert "open_findings" not in params
+    assert "needs_full_review" not in params
 
 
-def test_build_marker_open_findings():
-    findings = [{"severity": "high", "path": "a.py"}]
-    marker = build_marker(head_sha="abc", open_findings=findings)
+def test_build_marker_never_emits_carried_findings_keys():
+    """Even an issues verdict must not re-introduce the legacy keys."""
+    marker = build_marker(
+        head_sha="abc",
+        base_sha="def",
+        review_result="issues",
+        required_checks="ci/build",
+        review_route="fast",
+        escalation_reason=["security"],
+        cache_hit_ratio=0.5,
+    )
     data = parse_metadata(marker)
     assert data is not None
-    assert data.get("open_findings") == findings
+    assert data["review_result"] == "issues"
+    assert "evidence_digest" not in data
+    assert "open_findings" not in data
+    assert "needs_full_review" not in data
 
 
 def test_build_marker_cache_hit_ratio():
@@ -58,26 +73,23 @@ def test_build_marker_cache_hit_ratio():
 
 
 def test_build_marker_round_trip_all_fields():
-    findings = [{"severity": "medium", "path": "b.py"}]
     marker = build_marker(
         head_sha="abc123",
         base_sha="def456",
+        review_result="issues",
         required_checks="ci/build",
         review_route="fast",
         escalation_reason=["security"],
-        evidence_digest="sha256:xyz",
-        open_findings=findings,
         cache_hit_ratio=0.5,
     )
     data = parse_metadata(marker)
     assert data is not None
     assert data["head_sha"] == "abc123"
     assert data["base_sha"] == "def456"
+    assert data["review_result"] == "issues"
     assert data.get("required_checks") == "ci/build"
     assert data.get("review_route") == "fast"
     assert data.get("escalation_reason") == ["security"]
-    assert data.get("evidence_digest") == "sha256:xyz"
-    assert data.get("open_findings") == findings
     assert data.get("cache_hit_ratio") == 0.5
 
 

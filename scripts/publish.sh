@@ -111,11 +111,6 @@ case "$PUBLISH_MODE" in
     # Use gh pr comment instead for visibility, with --edit-last/--create-if-none for sticky behavior.
     platform_comment_sticky "$REPO" "$PR_NUMBER" "$BODY_FILE"
 
-    # Resolve threads of carried findings this review verified as fixed,
-    # and reply on threads still open (#208, #209). Must precede the
-    # comment build so finding-threads.json suppresses duplicates.
-    resolve_finding_threads
-
     # Optionally attach line-anchored inline comments from the structured
     # findings as a separate native COMMENT review. It carries the managed
     # marker so the next run's cleanup marks it superseded. Best-effort:
@@ -123,7 +118,7 @@ case "$PUBLISH_MODE" in
     if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
       printf '%s' "$FINDINGS" > findings.json
       COMMENTS_JSON="[]"
-      if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
+      if INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
         COMMENTS_JSON="$(cat review-comments.json)"
       fi
       if [ -n "$COMMENTS_JSON" ] && [ "$COMMENTS_JSON" != "[]" ]; then
@@ -200,18 +195,13 @@ case "$PUBLISH_MODE" in
       cat review-verdict-markdown.raw.md
     } > "$BODY_FILE"
 
-    # Resolve threads of carried findings this review verified as fixed,
-    # and reply on threads still open (#208, #209). Must precede the
-    # comment build so finding-threads.json suppresses duplicates.
-    resolve_finding_threads
-
     # Build line-anchored inline comments from the structured findings
     # when enabled. Anchors are validated against pr.diff (written by the
     # review step); non-anchorable findings stay in the body only.
     COMMENTS_JSON="[]"
     if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${FINDINGS:-}" ]; then
       printf '%s' "$FINDINGS" > findings.json
-      if SUPPRESS_FINDINGS_FILE=finding-threads.json INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
+      if INLINE_FINDINGS_MAX="${INLINE_FINDINGS_MAX:-20}" python3 "${GITHUB_ACTION_PATH}/scripts/build_review_comments.py" findings.json pr.diff review-comments.json; then
         COMMENTS_JSON="$(cat review-comments.json)"
       fi
     fi

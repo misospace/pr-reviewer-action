@@ -42,7 +42,6 @@ corpus = open(sys.argv[1]).read()
 config = open(sys.argv[2]).read()
 out = []
 for src, name in ((corpus, "build_bounded_repo_map"),
-                  (corpus, "render_previous_review_context"),
                   (corpus, "build_review_corpus"),
                   (config, "truncate_clean")):
     m = re.search(rf"^{name}\(\) \{{\n(.*?)\n\}}\n", src, re.S | re.M)
@@ -93,8 +92,6 @@ setup_corpus_workdir() {
   : > "$d/pr-thread.md"
   : > "$d/related-code.truncated.md"
   : > "$d/linear-issues.md"
-  : > "$d/previous-findings.json"
-  : > "$d/previous-evidence.json"
   : > "$d/tool-harness.md"
   : > "$d/evidence-providers.md"
   : > "$d/repo-map.md"
@@ -111,7 +108,6 @@ run_corpus() {
     MAX_DIFF=8000 \
     STANDARDS_FILE="AGENTS.md" \
     CI_CHECKS_FILE="" \
-    TOOL_EVIDENCE_MEMORY="true" \
     build_review_corpus )
 }
 
@@ -125,22 +121,6 @@ sp_lockstep() {
     check "lockstep ($label): signal=$sig section=$hdr" MISMATCH ok
   fi
 }
-
-# ── a. prior review artifacts render in the v3 corpus ─────────────────────
-echo "=== a. corpus retains carried findings and evidence memory ==="
-d="$WORK/a"
-setup_corpus_workdir "$d"
-printf '[{"severity":"major","category":"bug","file":"x.py","line":3,"message":"prior finding"}]\n' > "$d/previous-findings.json"
-printf '{"digest":"- read_file → prior evidence","head_sha":"deadbeef"}\n' > "$d/previous-evidence.json"
-run_corpus "$d" 220000
-check_contains "corpus renders prior findings" \
-  "$(<"$d/review-corpus.md")" "# Open Findings From the Previous Review"
-check_contains "corpus renders prior finding content" \
-  "$(<"$d/review-corpus.md")" "prior finding"
-check_contains "corpus renders prior evidence" \
-  "$(<"$d/review-corpus.md")" "# Evidence Gathered by the Previous Review"
-check_contains "corpus renders prior evidence digest" \
-  "$(<"$d/review-corpus.md")" "prior evidence"
 
 # ── b. reserved placement, fixed order, bytes intact ──────────────────────
 echo "=== b. corpus reserves the specialist-lead block after the ledger ==="

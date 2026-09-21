@@ -158,10 +158,10 @@ def test_native_loop_two_hops_writes_outputs(monkeypatch, tmp_path):
     assert "v1.13.4" in md
     assert "v1.36.2" in md
 
-    # Cross-run evidence memory: the loop's closing summary becomes the digest
-    # carried into tool-harness.json (which run_review.sh folds into the marker).
-    assert result["evidence_digest"] == "Talos v1.13.4 with k8s v1.36.2."
-    assert harness["evidence_digest"] == "Talos v1.13.4 with k8s v1.36.2."
+    # #617: cross-run evidence memory is gone — the loop's closing summary is
+    # no longer folded into tool-harness.json (only the markdown keeps it).
+    assert "evidence_digest" not in result
+    assert "evidence_digest" not in harness
 
 
 def _make_sse_line(data):

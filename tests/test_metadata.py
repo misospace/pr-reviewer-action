@@ -106,6 +106,27 @@ def test_parse_metadata_non_object_rejected():
     assert parsed == {"a": 1}
 
 
+def test_parse_metadata_round_trips_legacy_carried_findings_marker():
+    """#617: comments published by old runs carry the carried-findings state
+    (open_findings / evidence_digest / needs_full_review). The parser must
+    keep returning those keys verbatim so old managed comments stay
+    readable — they are simply inert for the should-review decision."""
+    body = (
+        "<!-- ai-pr-reviewer:{"
+        '"version":1,"head_sha":"abc","base_sha":"def",'
+        '"review_result":"issues",'
+        '"open_findings":[{"id":"P1","message":"carried"}],'
+        '"evidence_digest":"sha256:deadbeef",'
+        '"needs_full_review":true'
+        '} -->\n# AI Review\n\nstale body'
+    )
+    parsed = parse_metadata(body)
+    assert parsed is not None
+    assert parsed["open_findings"] == [{"id": "P1", "message": "carried"}]
+    assert parsed["evidence_digest"] == "sha256:deadbeef"
+    assert parsed["needs_full_review"] is True
+
+
 if __name__ == "__main__":
     test_parse_metadata_found()
     test_parse_metadata_with_previous_head()

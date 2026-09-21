@@ -9,7 +9,6 @@ by markdown code fences or prose.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from typing import Any
 
@@ -287,21 +286,6 @@ _FINDING_CATEGORIES = {
 _MAX_FINDINGS = 50
 _MAX_FINDING_MESSAGE_CHARS = 2000
 
-# Resolution labels for carried-forward findings (#193). The model is asked to
-# answer each previous open finding with one of these; anything else is
-# dropped so downstream logic treats a missing resolution as fail-closed.
-_RESOLUTION_ALIASES = {
-    "resolved": "resolved",
-    "fixed": "resolved",
-    "addressed": "resolved",
-    "still_open": "still_open",
-    "open": "still_open",
-    "unresolved": "still_open",
-    "not_verifiable_from_delta": "not_verifiable_from_delta",
-    "not_verifiable": "not_verifiable_from_delta",
-    "unknown": "not_verifiable_from_delta",
-}
-_MAX_FINDING_ID_CHARS = 16
 
 
 def _normalize_findings(value: Any) -> list[dict[str, Any]]:
@@ -365,20 +349,6 @@ def _normalize_findings(value: Any) -> list[dict[str, Any]]:
             "line": line,
             "message": message,
         }
-
-        # Optional carry-forward fields (#193): a short id referencing a
-        # finding from the previous review, and the model's resolution
-        # judgment for it. Preserved only when well-formed.
-        raw_id = item.get("id")
-        if isinstance(raw_id, str):
-            clean_id = re.sub(r"[^A-Za-z0-9_-]", "", raw_id)[:_MAX_FINDING_ID_CHARS]
-            if clean_id:
-                finding["id"] = clean_id
-        raw_resolution = item.get("resolution")
-        if isinstance(raw_resolution, str):
-            resolution = _RESOLUTION_ALIASES.get(raw_resolution.strip().lower())
-            if resolution:
-                finding["resolution"] = resolution
 
         findings.append(finding)
         if len(findings) >= _MAX_FINDINGS:

@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_compare_sha_extraction.sh" >&2
+    exit 0
+  fi
+done
+
 # Post-migration verification: the brittle grep pipelines have been moved to
 # pr_reviewer/enrichment.py. This test verifies the shell no longer contains
 # the fragile patterns, and that the Python module handles the same edge cases.

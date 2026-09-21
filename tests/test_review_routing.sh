@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_review_routing.sh" >&2
+    exit 0
+  fi
+done
+
 # Tests for fast/smart model routing (#159): resolve_review_route() extracted
 # from run_review.sh, plus wiring assertions.
 

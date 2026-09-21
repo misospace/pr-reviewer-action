@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_model_call.sh" >&2
+    exit 0
+  fi
+done
+
 # Tests for scripts/model_call.sh curl_model(): HTTP-status handling, body
 # preservation, and exit-code contract, driven by a mock `curl` on PATH.
 

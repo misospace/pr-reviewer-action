@@ -9,6 +9,14 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
+# Dependency preflight
+for dep in python3; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "SKIP: $dep is not available — cannot run test_step_summary.sh" >&2
+    exit 0
+  fi
+done
+
 # Tests for write_step_summary() in run_review.sh: emits a markdown table to
 # GITHUB_STEP_SUMMARY with verdict, budget, and truncation flags; no-ops when
 # GITHUB_STEP_SUMMARY is unset.

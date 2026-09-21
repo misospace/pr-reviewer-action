@@ -159,57 +159,14 @@ cleanup_native_reviews() {
   fi
 }
 
-# Manage inline finding threads for carried findings (#208, #209): resolve
-# threads this run verified as fixed, reply on threads still open, and write
-# finding-threads.json so the comment builder suppresses duplicates.
-# Requires env: GH_TOKEN, REPO, PR_NUMBER, GITHUB_ACTION_PATH; optional
-# FINDINGS, INLINE_FINDINGS, HEAD_SHA, INLINE_FINDINGS_MAX. Best-effort:
-# never fails the publish — the python script exits 0 on API errors and this
-# wrapper swallows the rest. Gated on inline_findings because without it no
-# marker-bearing threads can exist, and on a non-empty previous-findings.json
-# because thread management only makes sense when this run carried findings
-# forward. Must run BEFORE build_review_comments.py so the suppression file
-# exists when comments are built.
-resolve_finding_threads() {
-  rm -f finding-threads.json
-  if [ "$(printf '%s' "${INLINE_FINDINGS:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]; then
-    return 0
-  fi
-  if [ ! -s previous-findings.json ]; then
-    return 0
-  fi
-  printf '%s' "${FINDINGS:-[]}" > resolve-findings.json
-  if ! python3 "${GITHUB_ACTION_PATH}/scripts/resolve_finding_threads.py" previous-findings.json resolve-findings.json finding-threads.json; then
-    echo "  WARN: finding-thread management failed; continuing" >&2
-  fi
-  return 0
-}
-
 # Build metadata marker JSON string.
-# Requires env: HEAD_SHA, REVIEW_RESULT; optional FINDINGS
-# (JSON array — persisted as open_findings when the review found issues, so
-# the next incremental review can carry them forward, #193) and NEEDS_FULL_REVIEW
-# (true when a carried finding could not be assessed, so the next run's
-# precheck forces a fresh full review, #544).
+# Requires env: HEAD_SHA, REVIEW_RESULT
 # Args: $1 = base_sha
 # Outputs: metadata marker string to stdout
 build_metadata_marker() {
   local base_sha="$1"
 
-  # FINDINGS comes from the review step output; tolerate anything malformed.
-  local findings_json="${FINDINGS:-[]}"
-  if ! printf '%s' "$findings_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    findings_json="[]"
-  fi
-
   # Built with jq to keep the marker a single declarative expression.
-  # Cross-run evidence memory (#265): the native_loop's gathered-evidence
-  # digest, persisted so the next incremental review can reuse it. Omitted when
-  # evidence memory is disabled or no digest was produced; capped defensively
-  # (the producer already capped it, but the marker stays small regardless).
-  local evmem
-  evmem="$(printf '%s' "${TOOL_EVIDENCE_MEMORY:-true}" | tr '[:upper:]' '[:lower:]')"
-
   local marker_json
   marker_json="$(jq -nc \
     --arg head "${HEAD_SHA:-unknown}" \
@@ -218,24 +175,12 @@ build_metadata_marker() {
     --arg checks "${REQUIRED_CHECKS:-}" \
     --arg route "${REVIEW_ROUTE:-}" \
     --arg esc "${ESCALATION_REASON:-}" \
-    --arg evidence "${EVIDENCE_DIGEST:-}" \
-    --arg evmem "$evmem" \
-    --argjson findings "$findings_json" \
     --arg chr "${CACHE_HIT_RATIO:-}" \
-    --arg nfr "$(printf '%s' "${NEEDS_FULL_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" \
     '{version: 1, head_sha: $head, base_sha: $base, review_result: $result}
       + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
       + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
       + (if $esc == "" then {} else {escalation_reason: ($esc | split(","))} end)
-      + (if $evmem != "false" and $evidence != "" then {evidence_digest: ($evidence | .[0:2000])} else {} end)
-     + (if $result == "issues" and ($findings | length) > 0
-        then {open_findings: ($findings
-          | map(select(type == "object" and (.resolution // "") != "resolved")
-              | {severity, category, file, line, message: ((.message // "") | tostring | .[0:200])})
-          | .[0:20])}
-        else {} end)
-     + (if $nfr == "true" then {needs_full_review: true} else {} end)
-     + (if $chr != "" and $chr != "-" then {cache_hit_ratio: ($chr | tonumber)} else {} end)')"
+      + (if $chr != "" and $chr != "-" then {cache_hit_ratio: ($chr | tonumber)} else {} end)')"
   printf '<!-- ai-pr-reviewer:%s -->' "$marker_json"
 }
 

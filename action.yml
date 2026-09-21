@@ -219,9 +219,10 @@ inputs:
     default: "false"
   escalate_on_dirty_baseline:
     description: >-
-      Escalate a review that carries unresolved findings from a prior review whose verdict
-      requested changes (review_routing_mode=auto only). Judging whether the current PR
-      resolves previously found blockers is worth running on the smart model.
+      Escalate a review whose prior review's metadata marker recorded a
+      request_changes verdict (marker review_result) — i.e. the PR was
+      previously flagged (review_routing_mode=auto only). Re-reviewing such a
+      PR on the smart model is worth the extra cost.
     required: false
     default: "true"
   ai_stream:
@@ -467,16 +468,6 @@ inputs:
       tool_loop_summarize is enabled. Keep it small — the digest should be terse.
     required: false
     default: "512"
-  tool_evidence_memory:
-    description: >-
-      Carry the evidence a tool_mode=native_loop review gathers across
-      reviews of the same PR. The review stores a compact digest of
-      what it read/fetched in its metadata marker; the next review
-      reuses it (re-verifying only what changed) instead of
-      re-gathering from scratch. On by default; set "false" to disable.
-      No effect on non-native modes.
-    required: false
-    default: "true"
   tool_max_requests:
     description: Maximum number of tool requests the harness executes when tool_mode is enabled
     required: false
@@ -597,8 +588,8 @@ inputs:
       'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL:
       non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo';
       otherwise 'github'. Set 'forgejo' or 'github' explicitly to override
-      auto-detection. On Forgejo, features requiring GitHub GraphQL (thread
-      resolution, review minimization) degrade gracefully with a log line;
+       auto-detection. On Forgejo, features requiring GitHub GraphQL
+       (review minimization) degrade gracefully with a log line;
       the REST backend handles core PR operations. Linked-source enrichment
       always targets github.com regardless of this setting.
     required: false
@@ -695,7 +686,7 @@ outputs:
     description: AI verdict, approve or request_changes
     value: ${{ steps.review.outputs.verdict || steps.precheck.outputs.verdict }}
   verdict_source:
-    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict or an unresolved carried blocker forces request_changes)
+    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)
     value: ${{ steps.review.outputs.verdict_source || steps.precheck.outputs.verdict_source }}
   required_checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
@@ -733,9 +724,6 @@ outputs:
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
-  needs_full_review:
-    description: Legacy compatibility output for old markers that request one full re-review; v3 reviews always emit false
-    value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
     value: ${{ steps.review.outputs.tool_calls }}
@@ -980,9 +968,8 @@ runs:
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
-        IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
-      run: bash "${{ github.action_path }}/scripts/run_review.sh"
+         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
+       run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
     - name: Publish review
       # Single dispatcher for all three publish modes. One superset env block
@@ -1011,9 +998,6 @@ runs:
         ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
         REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
-        EVIDENCE_DIGEST: ${{ steps.review.outputs.evidence_digest }}
-        NEEDS_FULL_REVIEW: ${{ steps.review.outputs.needs_full_review }}
-        TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
         ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
         CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
