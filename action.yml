@@ -588,8 +588,8 @@ inputs:
       'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL:
       non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo';
       otherwise 'github'. Set 'forgejo' or 'github' explicitly to override
-       auto-detection. On Forgejo, features requiring GitHub GraphQL
-       (review minimization) degrade gracefully with a log line;
+      auto-detection. On Forgejo, features requiring GitHub GraphQL
+      (review minimization) degrade gracefully with a log line;
       the REST backend handles core PR operations. Linked-source enrichment
       always targets github.com regardless of this setting.
     required: false
@@ -968,8 +968,8 @@ runs:
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
-         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-       run: bash "${{ github.action_path }}/scripts/run_review.sh"
+        IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
+      run: bash "${{ github.action_path }}/scripts/run_review.sh"
 
     - name: Publish review
       # Single dispatcher for all three publish modes. One superset env block
