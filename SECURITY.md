@@ -48,7 +48,7 @@ A malicious PR could attempt prompt injection by embedding fake metadata markers
 The action uses a defense-in-depth approach:
 
 1. **Publish-time stripping** — Before publishing a managed PR comment, `scripts/strip_metadata_markers.py` is invoked on the model-generated markdown to remove any matching reserved marker patterns. The trusted markers (sha + fingerprint) are then appended *after* stripping, so only genuine ones survive.
-2. **Precheck reads first occurrence only** — The precheck parser uses `sed -n` with `head -n 1` to extract only the first occurrence of each marker from the comment body, providing a second layer of defense against any residual injection.
+2. **Precheck reads the first fingerprint occurrence only** — The precheck parser uses `sed -n` with `head -n 1` to extract only the first occurrence of the fingerprint marker from the comment body, providing a second layer of defense against any residual injection. The SHA marker has no reader; it is retained for publication traceability.
 
 ### Reserved patterns
 
