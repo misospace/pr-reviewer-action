@@ -900,9 +900,10 @@ def compare_commits(repo_full_name: str, spec: str) -> dict[str, Any] | None:
     """Return compare metadata for ``base...head``.
 
     Forgejo/Gitea expose the compare endpoint at
-    ``/repos/{owner}/{repo}/compare/{base}...{head}``. Callers use failure as
-    a fail-closed signal for incremental review scope, so return ``None`` on
-    any non-200 response or malformed payload rather than fabricating data.
+    ``/repos/{owner}/{repo}/compare/{base}...{head}``. Callers treat failure
+    as fail-closed (no compare metadata for the linked-source enrichment), so
+    return ``None`` on any non-200 response or malformed payload rather than
+    fabricating data.
     """
     owner, repo = _parse_repo(repo_full_name)
 

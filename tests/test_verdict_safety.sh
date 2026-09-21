@@ -71,14 +71,14 @@ ACTION_YML="$ROOT_DIR/action.yml"
 PUBLISH_SH="$ROOT_DIR/scripts/publish.sh"
 
 # The verdict/comment publish paths no longer consult the removed scope API or
-# baseline_clean. Dirty-baseline escalation remains a review-routing input until
-# #618, but it does not restore the removed publication guardrail.
+# baseline_clean. Dirty-baseline escalation is removed in #618 as well; none of
+# it restores the removed publication guardrail.
 for needle in 'review_scope' 'effective_review_scope' 'baseline_clean'; do
   check "action.yml drops $needle" \
     "$(grep -c "$needle" "$ACTION_YML" || true)" "0"
 done
-check "action.yml retains dirty-baseline escalation" \
-  "$(grep -c 'escalate_on_dirty_baseline:' "$ACTION_YML" || true)" "1"
+check "action.yml drops dirty-baseline escalation (#618)" \
+  "$(grep -c 'escalate_on_dirty_baseline:' "$ACTION_YML" || true)" "0"
 
 # publish.sh drops the incremental header, the withheld-approval advisory, and
 # the scope/baseline guardrail inputs entirely.

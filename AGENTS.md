@@ -25,7 +25,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`classifier.py`** — Deterministic PR classification: `pr_kind`, `risk_flags`, `must_check` checklist (no model calls)
 - **`completeness.py`** — Required-check completeness validation: keyword-matches `review_markdown` against `must_check` items
 - **`enforcement.py`** — Verdict policy (`model` / `findings_severity_gated`), findings normalization, evidence/tool enforcement; records `verdict_source`
-- **`escalation.py`** — Post-hoc escalation triggers for fast reviews (request_changes, low confidence, incomplete checks, blockers, dirty baseline)
+- **`escalation.py`** — Post-hoc escalation triggers for fast reviews (request_changes, low confidence, incomplete checks, blockers)
 - **`metadata.py`** — Managed metadata marker (fingerprint, review result, and review context) embedded in published comments
 - **`github_context.py`** — PR metadata/GitHub and Forgejo linked-issue reference helpers
 - **`linear_context.py`** — Optional deterministic Linear adapter: recognizes configured `TEAM-123` identifiers in PR titles, fetches issue/spec context through Linear GraphQL, and normalizes it into linked-issue corpus/classification data

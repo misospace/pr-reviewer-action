@@ -144,9 +144,7 @@ def should_escalate(
     on_request_changes: bool = True,
     on_low_confidence: bool = True,
     on_blockers: bool = True,
-    on_dirty_baseline: bool = True,
     on_planning_failure: bool = False,
-    dirty_baseline: bool = False,
     output_path: str = "ai-output.json",
     classification_path: str = "classification.json",
     evidence_path: str = "evidence-providers.json",
@@ -185,11 +183,5 @@ def should_escalate(
 
     if on_planning_failure and _has_planning_failure(harness):
         reasons.append("tool_planning_failed")
-
-    # Incremental review against a baseline the previous review flagged: the
-    # resolution judgment ("does this delta fix that blocker?") is exactly
-    # what the smart model is for (#193).
-    if on_dirty_baseline and dirty_baseline:
-        reasons.append("dirty_baseline")
 
     return bool(reasons), reasons

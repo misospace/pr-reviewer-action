@@ -71,18 +71,18 @@ check_contains "input escalate_on_incomplete_required_checks" "$ACTION" "escalat
 check_contains "input escalate_on_fast_request_changes" "$ACTION" "escalate_on_fast_request_changes:"
 check_contains "input escalate_on_fast_low_confidence" "$ACTION" "escalate_on_fast_low_confidence:"
 check_contains "input escalate_on_tool_or_evidence_blockers" "$ACTION" "escalate_on_tool_or_evidence_blockers:"
-# #615 removes the public scope API only. Dirty-baseline escalation remains
-# until #618, using the private prior review_result signal instead of the
-# removed baseline_clean output.
-check_contains "input escalate_on_dirty_baseline" "$ACTION" "escalate_on_dirty_baseline:"
-check_contains "review step receives ESCALATE_ON_DIRTY_BASELINE" "$ACTION" \
-  "ESCALATE_ON_DIRTY_BASELINE: \${{ inputs.escalate_on_dirty_baseline }}"
-check_contains "review step receives private previous review result" "$ACTION" \
-  "PREVIOUS_REVIEW_RESULT: \${{ steps.precheck.outputs.previous_review_result || '' }}"
-check_contains "run_review derives dirty_baseline from prior issues verdict" "$SRC" \
-  '[[ "${PREVIOUS_REVIEW_RESULT:-}" == "issues" ]]'
-check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" \
-  "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
+# #618 removes dirty-baseline escalation entirely: the input, the review-step
+# env wiring, and the private prior-review-result signal are all gone.
+check "action.yml drops escalate_on_dirty_baseline" \
+  "$(printf '%s' "$ACTION" | grep -c 'escalate_on_dirty_baseline' || true)" "0"
+check "action.yml drops ESCALATE_ON_DIRTY_BASELINE" \
+  "$(printf '%s' "$ACTION" | grep -c 'ESCALATE_ON_DIRTY_BASELINE' || true)" "0"
+check "config.sh drops ESCALATE_ON_DIRTY_BASELINE" \
+  "$(grep -c 'ESCALATE_ON_DIRTY_BASELINE' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
+check "review.sh drops DIRTY_BASELINE" \
+  "$(grep -c 'DIRTY_BASELINE' "$RUN_REVIEW" || true)" "0"
+check "review.sh drops PREVIOUS_REVIEW_RESULT" \
+  "$(grep -c 'PREVIOUS_REVIEW_RESULT' "$RUN_REVIEW" || true)" "0"
 check "baseline_clean public output remains removed" \
   "$(printf '%s' "$ACTION" | grep -c 'baseline_clean:' || true)" "0"
 check "review step no longer emits needs_full_review at all (#617)" \

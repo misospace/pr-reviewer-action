@@ -62,14 +62,6 @@ if [[ "$(printf '%s' "$AI_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; t
   STREAM_BOOL="true"
 fi
 
-# Preserve the incremental-era dirty-baseline escalation trigger as private
-# review state. The precheck carries the prior marker's review_result only to
-# this step; baseline_clean remains removed from the public action API.
-DIRTY_BASELINE="false"
-if [[ "${PREVIOUS_REVIEW_RESULT:-}" == "issues" ]]; then
-  DIRTY_BASELINE="true"
-fi
-
 USER_MESSAGE="$(build_user_message classification.json)"
 
 # The deep-review specialist phase (#608) moved into corpus.sh in #609: the
@@ -224,9 +216,7 @@ escalate, reasons = should_escalate(
     on_request_changes=('$ESCALATE_ON_FAST_REQUEST_CHANGES' == 'true'),
     on_low_confidence=('$ESCALATE_ON_FAST_LOW_CONFIDENCE' == 'true'),
     on_blockers=('$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS' == 'true'),
-    on_dirty_baseline=('$ESCALATE_ON_DIRTY_BASELINE' == 'true'),
     on_planning_failure=('$ESCALATE_ON_TOOL_PLANNING_FAILURE' == 'true'),
-    dirty_baseline=('$DIRTY_BASELINE' == 'true'),
 )
 print('yes ' + ','.join(reasons) if escalate else 'no')
 " 2>/dev/null || echo no)"

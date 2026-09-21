@@ -1,10 +1,9 @@
 """Unit tests for pr_reviewer.precheck — extracted from check_review_needed.sh.
 
-Covers fingerprinting, config hashing, incremental scope detection,
-previous fingerprint extraction, and the main decision logic.
+Covers fingerprinting, config hashing, previous fingerprint extraction,
+and the main decision logic.
 """
 
-import json
 import os
 import tempfile
 
@@ -16,17 +15,12 @@ from pr_reviewer.precheck import (
     EMPTY_DIFF_FINGERPRINT,
     FP_DELIMITER,
     FP_PREFIX,
-    MAX_INCREMENTAL_FILES,
-    MAX_INCREMENTAL_LINES,
-    MIN_INCREMENTAL_RATIO,
     PrecheckResult,
     ReviewDecision,
     _collect_config_lines,
     _decision_to_outputs,
-    _detect_incremental_scope,
     _extract_previous_fingerprints,
     _format_output,
-    _parse_diff_stats,
     build_broad_fingerprint,
     build_marker_fingerprint,
     build_precheck_payload,
@@ -214,112 +208,6 @@ class TestFingerprintsMatch:
 
 
 # ---------------------------------------------------------------------------
-# _parse_diff_stats
-# ---------------------------------------------------------------------------
-
-
-class TestParseDiffStats:
-    def test_empty_diff(self):
-        stats = _parse_diff_stats("")
-        assert stats["files"] == []
-        assert stats["total_lines"] == 0
-
-    def test_single_file_change(self):
-        diff = (
-            "diff --git a/file.txt b/file.txt\n"
-            "--- a/file.txt\n"
-            "+++ b/file.txt\n"
-            "@@ -1,3 +1,4 @@\n"
-            "-old line\n"
-            "+new line\n"
-            "+another new line\n"
-            " unchanged\n"
-        )
-        stats = _parse_diff_stats(diff)
-        assert "file.txt" in stats["files"]
-
-    def test_multiple_files(self):
-        diff = (
-            "diff --git a/file1.txt b/file1.txt\n"
-            "--- a/file1.txt\n"
-            "+++ b/file1.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-            "diff --git a/file2.py b/file2.py\n"
-            "--- a/file2.py\n"
-            "+++ b/file2.py\n"
-            "@@ -1 +1 @@\n-x\n+y\n"
-        )
-        stats = _parse_diff_stats(diff)
-        assert len(stats["files"]) == 2
-        assert "file1.txt" in stats["files"]
-        assert "file2.py" in stats["files"]
-
-
-# ---------------------------------------------------------------------------
-# _detect_incremental_scope
-# ---------------------------------------------------------------------------
-
-
-class TestDetectIncrementalScope:
-    def test_empty_diff_returns_none(self):
-        assert _detect_incremental_scope("") is None
-
-    def test_whitespace_only_returns_none(self):
-        assert _detect_incremental_scope("   \n  ") is None
-
-    def test_small_diff_is_incremental(self):
-        diff = (
-            "diff --git a/small.txt b/small.txt\n"
-            "--- a/small.txt\n"
-            "+++ b/small.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-        )
-        result = _detect_incremental_scope(diff)
-        assert result is not None
-        assert len(result["files"]) == 1
-
-    def test_too_many_files_not_incremental(self):
-        # Create a diff with more than MAX_INCREMENTAL_FILES files
-        lines = []
-        for i in range(MAX_INCREMENTAL_FILES + 1):
-            lines.append(f"diff --git a/file{i}.txt b/file{i}.txt\n")
-            lines.append("--- a/file{i}.txt\n")
-            lines.append("+++ b/file{i}.txt\n")
-            lines.append("@@ -1 +1 @@\n-old\n+new\n")
-        diff = "".join(lines)
-        result = _detect_incremental_scope(diff)
-        assert result is None
-
-    def test_too_many_lines_not_incremental(self):
-        # Create a diff with more than MAX_INCREMENTAL_LINES lines
-        lines = ["diff --git a/big.txt b/big.txt\n"]
-        lines.append("--- a/big.txt\n")
-        lines.append("+++ b/big.txt\n")
-        lines.append("@@ -1 +1 @@\n")
-        for i in range(MAX_INCREMENTAL_LINES + 1):
-            lines.append(f"+line {i}\n")
-        diff = "".join(lines)
-        result = _detect_incremental_scope(diff)
-        assert result is None
-
-    def test_incremental_returns_file_list(self):
-        diff = (
-            "diff --git a/a.txt b/a.txt\n"
-            "--- a/a.txt\n"
-            "+++ b/a.txt\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-            "diff --git a/b.txt b/b.txt\n"
-            "--- a/b.txt\n"
-            "+++ b/b.txt\n"
-            "@@ -1 +1 @@\n-x\n+y\n"
-        )
-        result = _detect_incremental_scope(diff)
-        assert result is not None
-        assert "a.txt" in result["files"]
-        assert "b.txt" in result["files"]
-
-
-# ---------------------------------------------------------------------------
 # extract_config_lines
 # ---------------------------------------------------------------------------
 
@@ -372,8 +260,7 @@ class TestShouldReview:
 
     def test_new_changes_needs_review(self):
         diff = self._make_diff()
-        # Disable incremental detection to verify REVIEW_NEEDED path
-        result = should_review(diff, [], [], enable_incremental_detection=False)
+        result = should_review(diff, [], [])
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
     def test_already_reviewed_skips(self):
@@ -391,21 +278,6 @@ class TestShouldReview:
         result = should_review(diff, config, [broad_fp])
         assert result.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
 
-    def test_incremental_skips_when_enabled(self):
-        diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=True
-        )
-        # Small single-file change should be incremental
-        assert result.decision == ReviewDecision.SKIP_INCREMENTAL
-
-    def test_incremental_disabled_needs_review(self):
-        diff = self._make_diff()
-        result = should_review(
-            diff, [], [], enable_incremental_detection=False
-        )
-        assert result.decision == ReviewDecision.REVIEW_NEEDED
-
     def test_result_contains_fingerprints(self):
         diff = self._make_diff()
         config = ["MODEL=gpt-4"]
@@ -413,15 +285,6 @@ class TestShouldReview:
         assert len(result.diff_fingerprint) == 64
         assert len(result.config_hash) == 64
         assert FP_DELIMITER in result.broad_fingerprint
-
-    def test_incremental_result_has_scope(self):
-        diff = self._make_diff()
-        result = should_review(diff, [], [], enable_incremental_detection=True)
-        if result.decision == ReviewDecision.SKIP_INCREMENTAL:
-            assert result.incremental_scope is not None
-            scope = json.loads(result.incremental_scope)
-            assert "files" in scope
-            assert "line_count" in scope
 
 
 # ---------------------------------------------------------------------------
@@ -445,25 +308,6 @@ class TestFormatOutput:
         assert "BROAD_FINGERPRINT=abc123|def456" in output
         assert "REASON=New changes" in output
 
-    def test_incremental_fields(self):
-        result = PrecheckResult(
-            decision=ReviewDecision.SKIP_INCREMENTAL,
-            diff_fingerprint="abc",
-            config_hash="",
-            broad_fingerprint="abc",
-            incremental_scope='{"files":["a.txt"]}',
-            incremental_files=["a.txt"],
-            incremental_line_count=5,
-            total_files=1,
-            total_lines=5,
-            reason="Incremental",
-        )
-        output = _format_output(result)
-        assert "INCREMENTAL_SCOPE=" in output
-        assert "INCREMENTAL_FILES=a.txt" in output
-        assert "INCREMENTAL_LINE_COUNT=5" in output
-        assert "TOTAL_FILES=1" in output
-
 
 # ---------------------------------------------------------------------------
 # Integration: end-to-end workflow
@@ -486,10 +330,7 @@ class TestEndToEnd:
         config = ["MODEL=gpt-4", "TEMPERATURE=0.7"]
         result = should_review(diff, config, [])
 
-        assert result.decision in (
-            ReviewDecision.REVIEW_NEEDED,
-            ReviewDecision.SKIP_INCREMENTAL,
-        )
+        assert result.decision == ReviewDecision.REVIEW_NEEDED
         assert len(result.diff_fingerprint) == 64
         assert len(result.config_hash) == 64
 
@@ -503,7 +344,7 @@ class TestEndToEnd:
         )
         config = ["MODEL=gpt-4"]
 
-        # First run — needs review (or incremental)
+        # First run — needs review
         first = should_review(diff, config, [])
         broad_fp = first.broad_fingerprint
 
@@ -963,11 +804,6 @@ class TestBuildPrecheckPayload:
         should, reason = _decision_to_outputs(ReviewDecision.SKIP_NO_CHANGES)
         assert should is False
         assert reason == "no-changes"
-
-    def test_decision_to_outputs_skip_incremental_still_reviews(self):
-        should, reason = _decision_to_outputs(ReviewDecision.SKIP_INCREMENTAL)
-        assert should is True
-        assert reason == ""
 
     def test_payload_keys_complete(self):
         result = PrecheckResult(

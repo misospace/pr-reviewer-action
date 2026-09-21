@@ -112,40 +112,6 @@ case "$(printf '%s' "$PUBLISH_MODE" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-# ── extract_review_metadata (restored plumbing) ───────────────────────
-# A roundtrip test extracts this via regex and sources it; this is the live
-# implementation it exercises. Logic remains in shell because it parses a
-# stored published comment body that contains reviewer-emitted metadata
-# (not actionable config inputs), independent of precheck decision logic.
-# Writes previous-review-meta.json carrying only the prior review_result —
-# private state the diff-unchanged skip uses to re-emit the prior verdict and
-# the review step uses for dirty-baseline escalation.
-extract_review_metadata() {
-  local comment_body="$1"
-
-  rm -f previous-review-meta.json
-
-  printf '%s' "$comment_body" | python3 -c "
-import json, re, sys
-from pr_reviewer.metadata import parse_metadata
-data = parse_metadata(sys.stdin.read())
-if data:
-    def enumsan(v):
-        return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
-    meta = {
-        # Private precheck state for dirty-baseline escalation. This remains
-        # internal: review_result is not restored as an action output.
-        'review_result': enumsan(data.get('review_result')),
-    }
-    with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
-        json.dump(meta, fh, ensure_ascii=False)
-" 2>/dev/null || true
-
-  if [[ -f previous-review-meta.json ]]; then
-    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
-  fi
-}
-
 # Extract the PR head SHA and broad fingerprint from the last published comment.
 last_pr_sha="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-sha:\([^>]*\) -->$/\1/p' | head -n 1)"
 last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | head -n 1)"
@@ -155,14 +121,6 @@ if [[ -n "$last_broad_fingerprint" ]]; then
 else
   unset PREV_FINGERPRINTS 2>/dev/null || true
 fi
-# Extract the last review's metadata BEFORE the precheck: the prior
-# review_result must reach the should-review decision — the diff-unchanged
-# skip path re-emits it as the carried verdict.
-LAST_REVIEW_RESULT=""
-if [[ -n "$last_comment_body" ]]; then
-  extract_review_metadata "$last_comment_body"
-fi
-
 # ── precheck call #1: marker-only should-review decision ──────────────
 # Runs before the PR object fetch so a diff-unchanged skip costs no
 # platform I/O beyond the diff and the comment/review lookup.
@@ -207,9 +165,6 @@ if data:
   } >> "$OUTPUT_FILE"
   exit 0
 fi
-
-# (The last review's metadata was extracted before precheck call #1 above,
-# so the prior review_result can reach the should-review decision.)
 
 # ── Get the PR object once (review path only) ─────────────────────────
 if ! platform_pr_get "$REPO" "$PR_NUMBER" > pr-object.json 2>/dev/null; then
@@ -276,7 +231,4 @@ fi
   echo "is_fork_pr=$IS_FORK_PR"
   echo "resolved_platform=$RESOLVED_PLATFORM"
   echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
-  # Private review-step signal for dirty-baseline escalation; intentionally
-  # absent from the public action outputs.
-  echo "previous_review_result=$LAST_REVIEW_RESULT"
 } >> "$OUTPUT_FILE"

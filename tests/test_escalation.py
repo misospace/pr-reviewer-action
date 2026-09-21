@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -212,6 +213,13 @@ class TestShouldEscalate:
             on_blockers=False,
         )
         assert escalate is False and reasons == []
+
+    def test_dirty_baseline_parameters_removed(self):
+        """#618 removes the incremental-era dirty-baseline escalation trigger
+        entirely: should_escalate no longer accepts its parameters."""
+        params = inspect.signature(should_escalate).parameters
+        assert "dirty_baseline" not in params
+        assert "on_dirty_baseline" not in params
 
     def test_missing_files_do_not_escalate(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

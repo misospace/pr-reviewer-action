@@ -330,7 +330,7 @@ def _forgejo_translate(full_path, repo_key):
         # /issues/N/comments        →  /api/v1/repos/o/r/issues/N/comments
         return f"/api/v1/repos/{repo_key}{rest}"
 
-    # Compare base...head (used by the incremental scope check).
+    # Compare base...head (used by linked-source version-diff enrichment).
     if rest == "/compare" or rest.startswith("/compare/"):
         spec = rest[len("/compare/"):]
         return f"/api/v1/repos/{repo_key}/compare/{spec}"

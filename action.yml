@@ -217,14 +217,6 @@ inputs:
       in tool-harness.json and the step summary.
     required: false
     default: "false"
-  escalate_on_dirty_baseline:
-    description: >-
-      Escalate a review whose prior review's metadata marker recorded a
-      request_changes verdict (marker review_result) — i.e. the PR was
-      previously flagged (review_routing_mode=auto only). Re-reviewing such a
-      PR on the smart model is worth the extra cost.
-    required: false
-    default: "true"
   ai_stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false
@@ -903,8 +895,6 @@ runs:
         ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
         ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
-        ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
-        PREVIOUS_REVIEW_RESULT: ${{ steps.precheck.outputs.previous_review_result || '' }}
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}

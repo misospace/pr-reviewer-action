@@ -1,7 +1,7 @@
 """Pre-check logic extracted from scripts/check_review_needed.sh.
 
-Core functions for diff fingerprinting, incremental scope detection,
-config hash computation, and review metadata transport.
+Core functions for diff fingerprinting, config hash computation, and
+review metadata transport.
 
 These replace the shell implementations with testable Python code.
 
@@ -39,7 +39,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 logger = logging.getLogger(__name__)
@@ -63,11 +63,6 @@ EMPTY_DIFF_FINGERPRINT = "empty-diff"
 # the ai-pr-review-fingerprint comment marker: `<diff_fp>|cfg:<config_hash>`.
 CONFIG_HASH_MARKER = "cfg:"
 
-# Incremental scope detection constants
-MAX_INCREMENTAL_FILES = 20
-MAX_INCREMENTAL_LINES = 500
-MIN_INCREMENTAL_RATIO = 0.1
-
 
 class ReviewDecision(str, Enum):
     """Possible outcomes of the review-needed decision."""
@@ -75,7 +70,6 @@ class ReviewDecision(str, Enum):
     REVIEW_NEEDED = "review_needed"
     SKIP_NO_CHANGES = "skip_no_changes"
     SKIP_ALREADY_REVIEWED = "skip_already_reviewed"
-    SKIP_INCREMENTAL = "skip_incremental"
 
 
 @dataclass
@@ -86,11 +80,6 @@ class PrecheckResult:
     diff_fingerprint: str = ""
     config_hash: str = ""
     broad_fingerprint: str = ""
-    incremental_scope: Optional[str] = None
-    incremental_files: list = field(default_factory=list)
-    incremental_line_count: int = 0
-    total_files: int = 0
-    total_lines: int = 0
     reason: str = ""
 
 
@@ -375,107 +364,6 @@ def fingerprints_match(
 
 
 # ---------------------------------------------------------------------------
-# Incremental scope detection
-# ---------------------------------------------------------------------------
-
-
-def _parse_diff_stats(diff_content: str) -> dict:
-    """Parse file change statistics from a git diff.
-
-    Returns a dict with keys:
-    - ``files``: list of changed file paths
-    - ``total_lines``: total lines added + removed
-    - ``file_line_counts``: dict mapping file path to (added, removed) tuple
-    """
-    files = []
-    total_lines = 0
-    file_line_counts: dict[str, tuple[int, int]] = {}
-
-    # Match diff headers like "diff --git a/path b/path" or "--- a/path" / "+++ b/path"
-    current_file = None
-    for line in diff_content.splitlines():
-        # Detect new file from diff header
-        if line.startswith("diff --git"):
-            parts = line.split()
-            if len(parts) >= 4:
-                current_file = parts[3]
-                if current_file.startswith("b/"):
-                    current_file = current_file[2:]
-                files.append(current_file)
-                file_line_counts[current_file] = (0, 0)
-        elif line.startswith("--- a/") or line.startswith("+++ b/"):
-            pass  # skip unified diff headers
-        elif current_file and line.startswith("@@ "):
-            # Parse hunk header for line counts: @@ -x,y +a,b @@
-            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
-            if match:
-                added = int(match.group(2)) if match.group(2) else 1
-                file_line_counts[current_file] = (added, file_line_counts[current_file][1])
-                total_lines += added
-        elif current_file and line.startswith("+"):
-            total_lines += 1
-            added, removed = file_line_counts.get(current_file, (0, 0))
-            file_line_counts[current_file] = (added + 1, removed)
-        elif current_file and line.startswith("-"):
-            total_lines += 1
-            added, removed = file_line_counts.get(current_file, (0, 0))
-            file_line_counts[current_file] = (added, removed + 1)
-
-    return {
-        "files": files,
-        "total_lines": total_lines,
-        "file_line_counts": file_line_counts,
-    }
-
-
-def _detect_incremental_scope(diff_content: str) -> Optional[dict]:
-    """Detect if changes are incremental (small subset of total).
-
-    Returns a dict with scope information if the diff qualifies as
-    incremental, or None otherwise.
-
-    Incremental criteria:
-    - Number of changed files <= MAX_INCREMENTAL_FILES
-    - Total lines changed <= MAX_INCREMENTAL_LINES
-    - Ratio of changed lines to total is >= MIN_INCREMENTAL_RATIO
-      (to avoid flagging tiny changes in huge diffs)
-
-    Parameters
-    ----------
-    diff_content : str
-        Raw git diff output.
-
-    Returns
-    -------
-    Optional[dict]
-        Dict with ``files``, ``line_count``, ``total_files``, ``total_lines``
-        if incremental, or None.
-    """
-    if not diff_content or not diff_content.strip():
-        return None
-
-    stats = _parse_diff_stats(diff_content)
-    num_files = len(stats["files"])
-    total_lines = stats["total_lines"]
-
-    # Check incremental criteria
-    if num_files > MAX_INCREMENTAL_FILES:
-        return None
-    if total_lines > MAX_INCREMENTAL_LINES:
-        return None
-
-    # Build scope description from changed files
-    scope_files = stats["files"][:MAX_INCREMENTAL_FILES]
-
-    return {
-        "files": scope_files,
-        "line_count": total_lines,
-        "total_files": num_files,
-        "total_lines": total_lines,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Config line extraction
 # ---------------------------------------------------------------------------
 
@@ -547,8 +435,6 @@ def should_review(
     diff_content: str,
     config_lines: list[str],
     previous_fingerprints: list[str],
-    *,
-    enable_incremental_detection: bool = True,
 ) -> PrecheckResult:
     """Determine whether a PR review is needed.
 
@@ -562,8 +448,6 @@ def should_review(
         Configuration lines in key=value format.
     previous_fingerprints : list[str]
         Fingerprints from previous reviews/comments on this PR.
-    enable_incremental_detection : bool
-        Whether to perform incremental scope detection.
 
     Returns
     -------
@@ -605,27 +489,7 @@ def should_review(
             reason=f"Already reviewed (diff fingerprint {diff_fp[:12]}...)",
         )
 
-    # Step 5: Incremental scope detection
-    if enable_incremental_detection:
-        incremental = _detect_incremental_scope(diff_content)
-        if incremental:
-            return PrecheckResult(
-                decision=ReviewDecision.SKIP_INCREMENTAL,
-                diff_fingerprint=diff_fp,
-                config_hash=config_hash,
-                broad_fingerprint=broad_fp,
-                incremental_scope=json.dumps(incremental),
-                incremental_files=incremental["files"],
-                incremental_line_count=incremental["line_count"],
-                total_files=incremental["total_files"],
-                total_lines=incremental["total_lines"],
-                reason=(
-                    f"Incremental changes: {len(incremental['files'])} files, "
-                    f"{incremental['line_count']} lines"
-                ),
-            )
-
-    # Step 6: Default — review needed
+    # Step 5: Default — review needed
     return PrecheckResult(
         decision=ReviewDecision.REVIEW_NEEDED,
         diff_fingerprint=diff_fp,
@@ -710,11 +574,7 @@ def evaluate_precheck(
 
 
 def _decision_to_outputs(decision: ReviewDecision) -> tuple[bool, str]:
-    """Map a ReviewDecision to the action's (should_review, skip_reason).
-
-    ``SKIP_INCREMENTAL`` still runs a review: in the action, incremental
-    is a scope (resolved from metadata), not a reason to skip.
-    """
+    """Map a ReviewDecision to the action's (should_review, skip_reason)."""
     if decision is ReviewDecision.SKIP_ALREADY_REVIEWED:
         return False, "diff-unchanged"
     if decision is ReviewDecision.SKIP_NO_CHANGES:
@@ -752,13 +612,6 @@ def _format_output(result: PrecheckResult) -> str:
         f"BROAD_FINGERPRINT={result.broad_fingerprint}",
         f"REASON={result.reason}",
     ]
-    if result.incremental_scope:
-        lines.append(f"INCREMENTAL_SCOPE={result.incremental_scope}")
-    if result.incremental_files:
-        lines.append(f"INCREMENTAL_FILES={','.join(result.incremental_files)}")
-    lines.append(f"INCREMENTAL_LINE_COUNT={result.incremental_line_count}")
-    lines.append(f"TOTAL_FILES={result.total_files}")
-    lines.append(f"TOTAL_LINES={result.total_lines}")
     return "\n".join(lines)
 
 

@@ -570,14 +570,14 @@ check "diff-unchanged skip carries approve" "$(echo "$RESULT" | grep '^verdict='
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
 
 echo ""
-echo "=== Test 25b: review path forwards private prior review result ==="
+echo "=== Test 25b: review path emits no prior review result ==="
 set_comments "<!-- ai-pr-reviewer -->
 <!-- ai-pr-review-fingerprint:${CARRY_FORWARD_FP} -->
 <!-- ai-pr-reviewer: {\"review_result\": \"issues\"} -->"
 RESULT="$(AI_MODEL=dirty-baseline-model run_precheck)"
 check "changed config still reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
-check "review path forwards prior issues result privately" \
-  "$(echo "$RESULT" | grep '^previous_review_result=' | head -1 | cut -d= -f2)" "issues"
+check "review path emits no previous_review_result output" \
+  "$(echo "$RESULT" | grep -c '^previous_review_result=')" "0"
 
 # ── Test 26: diff-unchanged skip with no marker leaves verdict empty ──────
 echo ""
@@ -604,6 +604,26 @@ check "legacy marker: skip_reason=diff-unchanged" "$(echo "$RESULT" | grep '^ski
 check "legacy marker: verdict=request_changes" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "request_changes"
 check "legacy marker: verdict_source=carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
 
+# ── Test 27b: v2-era marker with incremental-only metadata: inert (#618) ──
+# A v2 managed comment can carry incremental-only state (review_scope,
+# previous_head_sha / previous_base_sha, baseline_clean, ...). None of it
+# may reach the precheck output or the decision: the fingerprint alone
+# decides, and an unchanged diff still carries the prior verdict forward.
+echo ""
+echo "=== Test 27b: v2 incremental-only marker is inert; matching fingerprint carries the verdict ==="
+set_empty_comments
+V2_LEGACY_FP="$(run_precheck | grep '^diff_fingerprint=' | head -1 | cut -d= -f2-)"
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${V2_LEGACY_FP} -->
+<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"h\",\"base_sha\":\"b\",\"review_scope\":\"incremental\",\"previous_head_sha\":\"1111111111111111111111111111111111111111\",\"previous_base_sha\":\"2222222222222222222222222222222222222222\",\"baseline_clean\":true,\"needs_full_review\":true,\"open_findings\":[{\"severity\":\"blocker\",\"message\":\"still open\"}],\"evidence_digest\":\"sha256:beef\",\"review_result\":\"issues\"} -->"
+RESULT="$(run_precheck)"
+check "v2 marker: should_review=false on unchanged diff" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "v2 marker: skip_reason=diff-unchanged" "$(echo "$RESULT" | grep '^skip_reason=' | head -1 | cut -d= -f2)" "diff-unchanged"
+check "v2 marker: precheck output carries no incremental-only keys" \
+  "$(echo "$RESULT" | grep -cE '^(review_scope|previous_head_sha|previous_base_sha|baseline_clean|incremental_scope|incremental_files|incremental_line_count|total_files|total_lines)=')" "0"
+check "v2 marker: verdict=request_changes" "$(echo "$RESULT" | grep '^verdict=' | head -1 | cut -d= -f2)" "request_changes"
+check "v2 marker: verdict_source=carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
+
 # ── Test 28: legacy marker + changed diff → no carried artifacts written ──
 echo ""
 echo "=== Test 28: legacy carried-findings marker + changed diff reviews, writes no carried artifacts ==="
@@ -613,14 +633,10 @@ FIXED_DIFF="${FIXED_DIFF}
 RESULT="$(run_precheck)"
 FIXED_DIFF="$ORIG_DIFF"
 check "changed diff: should_review=true" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
-for f in previous-findings.json previous-evidence.json needs-full-review.json; do
+for f in previous-findings.json previous-evidence.json needs-full-review.json previous-review-meta.json; do
   check "no $f in workspace" \
     "$( [[ -e "$WORKDIR/$f" ]] && echo present || echo absent )" "absent"
 done
-check "previous-review-meta.json has exactly one key" \
-  "$(jq -c 'keys' "$WORKDIR/previous-review-meta.json")" '["review_result"]'
-check "previous-review-meta.json carries the prior review_result" \
-  "$(jq -r '.review_result' "$WORKDIR/previous-review-meta.json")" "issues"
 
 # ── Test 29: no script or action.yml touches the removed artifacts (#617) ──
 echo ""

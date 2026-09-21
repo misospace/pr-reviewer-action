@@ -1,17 +1,14 @@
 """Direct unit tests for pr_reviewer.precheck pure functions.
 
-Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
-and _detect_incremental_scope. (The review-scope resolver was removed in #615:
-v3 runs a full review of the current PR on every non-skipped run.)
+Issue #512 acceptance: cover compute_diff_fingerprint and
+compute_config_hash. (The review-scope resolver was removed in #615 and the
+incremental scope detector with it in v3: v3 runs a full review of the
+current PR on every non-skipped run.)
 """
 
 from pr_reviewer.precheck import (
     EMPTY_DIFF_FINGERPRINT,
-    MAX_INCREMENTAL_FILES,
-    MAX_INCREMENTAL_LINES,
-    MIN_INCREMENTAL_RATIO,
     ReviewDecision,
-    _detect_incremental_scope,
     build_broad_fingerprint,
     build_marker_fingerprint,
     _collect_config_lines,
@@ -108,58 +105,6 @@ class TestComputeConfigHash:
         assert compute_config_hash(["A=x\x00y"]) != compute_config_hash(["A=xy"])
 
 
-class TestDetectIncrementalScope:
-    """Tests for _detect_incremental_scope."""
-
-    def _make_diff(self, files: int = 1, added_lines_per_file: int = 1) -> str:
-        parts = []
-        for i in range(files):
-            parts.append(f"diff --git a/f{i}.txt b/f{i}.txt\n")
-            parts.append("--- a/f{i}.txt\n")
-            parts.append("+++ b/f{i}.txt\n")
-            parts.append("@@ -1 +1 @@\n")
-            for _ in range(added_lines_per_file):
-                parts.append("+line\n")
-        return "".join(parts)
-
-    def test_empty_returns_none(self):
-        assert _detect_incremental_scope("") is None
-
-    def test_whitespace_returns_none(self):
-        assert _detect_incremental_scope("   \n\t\n  ") is None
-
-    def test_small_diff_is_incremental(self):
-        result = _detect_incremental_scope(self._make_diff(files=1, added_lines_per_file=1))
-        assert result is not None
-        assert result["files"] == ["f0.txt"]
-        assert result["total_files"] == 1
-        assert result["line_count"] >= 1
-
-    def test_too_many_files_not_incremental(self):
-        diff = self._make_diff(files=MAX_INCREMENTAL_FILES + 1, added_lines_per_file=1)
-        assert _detect_incremental_scope(diff) is None
-
-    def test_too_many_lines_not_incremental(self):
-        diff = self._make_diff(files=1, added_lines_per_file=MAX_INCREMENTAL_LINES + 1)
-        assert _detect_incremental_scope(diff) is None
-
-    def test_multiple_small_files_incremental(self):
-        diff = self._make_diff(files=MAX_INCREMENTAL_FILES, added_lines_per_file=2)
-        result = _detect_incremental_scope(diff)
-        assert result is not None
-        assert result["total_files"] == MAX_INCREMENTAL_FILES
-
-    def test_large_context_ratio_too_small(self):
-        # A tiny change embedded in a huge diff context: ratio below threshold.
-        lines = ["diff --git a/big.txt b/big.txt\n"]
-        lines.extend(["@@ -1 +1 @@\n"] + ["+x\n"] * 5)
-        lines.extend(["@@ -1000 +1000 @@\n"] + [" unchanged context line\n"] * 1000)
-        diff = "".join(lines)
-        # The ratio gate returns None when MIN_INCREMENTAL_RATIO is not met.
-        result = _detect_incremental_scope(diff)
-        assert result is None or result["line_count"] <= MAX_INCREMENTAL_LINES
-
-
 class TestBroadAndMarkerFingerprint:
     """Tests for helper fingerprint builders."""
 
@@ -213,7 +158,7 @@ class TestShouldReviewIntegration:
 
     def test_new_changes_need_review(self):
         diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n"
-        result = should_review(diff, [], [], enable_incremental_detection=False)
+        result = should_review(diff, [], [])
         assert result.decision == ReviewDecision.REVIEW_NEEDED
 
 
@@ -251,47 +196,73 @@ def test_evaluate_precheck_signature_drops_legacy_inputs():
 
 
 def test_legacy_marker_state_does_not_affect_the_decision():
-    """A marker published by old runs carries legacy keys (open_findings /
-    evidence_digest / needs_full_review). They must stay parseable (old
-    comments must remain readable) but have NO effect: an unchanged
-    fingerprint skips — there is no force path anymore."""
+    """A marker published by old runs carries legacy keys (review_scope /
+    previous_head_sha / open_findings / evidence_digest /
+    needs_full_review). They must stay parseable (old comments must remain
+    readable) but have NO effect: an unchanged fingerprint skips — there is
+    no force path anymore — and the v2-era scope fields never force a
+    partial review. A marker with them must decide identically to the same
+    marker without them."""
     from pr_reviewer.metadata import parse_metadata
     from pr_reviewer.precheck import ReviewDecision, evaluate_precheck
 
     diff = "diff --git a/x b/x\n+one\n"
     first = evaluate_precheck(diff, [], config_hash="c")
 
-    # A legacy comment body the way the shell caller consumed it: the
+    # A v2-era comment body the way the shell caller consumed it: the
     # fingerprint marker (source of PREV_FINGERPRINTS) plus the metadata
-    # marker with carried-findings state.
+    # marker with carried-findings and incremental-era scope state.
     legacy_body = (
         f"<!-- ai-pr-review-fingerprint:{first.broad_fingerprint} -->\n"
         "<!-- ai-pr-reviewer:{"
         '"version":1,"head_sha":"abc","base_sha":"def",'
+        '"review_scope":"incremental",'
+        '"previous_head_sha":"1111111111111111111111111111111111111111",'
         '"review_result":"issues",'
         '"open_findings":[{"id":"P1","message":"carried"}],'
         '"evidence_digest":"sha256:deadbeef",'
         '"needs_full_review":true'
         '} -->'
     )
+    # The same marker carrying only the fields v3 reads.
+    clean_body = (
+        f"<!-- ai-pr-review-fingerprint:{first.broad_fingerprint} -->\n"
+        "<!-- ai-pr-reviewer:{"
+        '"version":1,"head_sha":"abc","base_sha":"def",'
+        '"review_result":"issues"'
+        '} -->'
+    )
+
+    def prev_fps_of(body: str) -> list[str]:
+        return [
+            line.removeprefix("<!-- ai-pr-review-fingerprint:")
+            .removesuffix(" -->")
+            for line in body.splitlines()
+            if line.startswith("<!-- ai-pr-review-fingerprint:")
+        ]
 
     # The legacy state is still readable out of the marker...
     legacy_meta = parse_metadata(legacy_body)
+    assert legacy_meta["review_scope"] == "incremental"
+    assert legacy_meta["previous_head_sha"] == "1111111111111111111111111111111111111111"
     assert legacy_meta["needs_full_review"] is True
     assert legacy_meta["open_findings"] == [{"id": "P1", "message": "carried"}]
 
     # ...and the caller's fingerprint extraction is the only input that
-    # reaches the decision. Unchanged fingerprint -> SKIP, no force.
-    prev_fps = [
-        line.removeprefix("<!-- ai-pr-review-fingerprint:")
-        .removesuffix(" -->")
-        for line in legacy_body.splitlines()
-        if line.startswith("<!-- ai-pr-review-fingerprint:")
-    ]
-    assert prev_fps == [first.broad_fingerprint]
-
-    again = evaluate_precheck(diff, prev_fps, config_hash="c")
-    assert again.decision == ReviewDecision.SKIP_ALREADY_REVIEWED
-    assert again.broad_fingerprint == first.broad_fingerprint
+    # reaches the decision: unchanged fingerprint -> SKIP, no force, and the
+    # legacy marker decides identically to the same marker without it.
+    assert prev_fps_of(legacy_body) == [first.broad_fingerprint]
+    with_legacy = evaluate_precheck(diff, prev_fps_of(legacy_body), config_hash="c")
+    with_clean = evaluate_precheck(diff, prev_fps_of(clean_body), config_hash="c")
+    assert (
+        with_legacy.decision
+        == with_clean.decision
+        == ReviewDecision.SKIP_ALREADY_REVIEWED
+    )
+    assert (
+        with_legacy.broad_fingerprint
+        == with_clean.broad_fingerprint
+        == first.broad_fingerprint
+    )
 
 

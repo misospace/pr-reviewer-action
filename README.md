@@ -267,7 +267,6 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews: a stub review (below ~80 chars) or substantive Unknowns content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation; concise confident reviews are not escalated, regardless of diff size (`auto` mode) | No | `true` |
 | `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
 | `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
-| `escalate_on_dirty_baseline` | Escalate reviews whose prior review's metadata marker recorded a `request_changes` verdict (marker `review_result`), so re-reviewing a previously flagged PR runs on the smart model (`auto` mode) | No | `true` |
 
 </details>
 
@@ -951,7 +950,6 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_fast_low_confidence` — the review is a **stub** (below ~80 chars, e.g. "LGTM.") or carries substantive "Unknowns or Needs Verification" content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation because the smart model cannot manufacture missing evidence. A concise but real review is trusted **regardless of diff size**: the review length is no longer scaled with the diff. Genuinely under-reviewed risky PRs are still caught by `request_changes`, substantive Unknowns, blockers, and risk-flag routing.
 - `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
-- `escalate_on_dirty_baseline` — the prior review's metadata marker recorded a request_changes verdict (marker `review_result`). Re-reviewing a PR that was previously flagged is worth running on the smart model.
 
 Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
@@ -1143,6 +1141,7 @@ To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-
 v3 removes the review-scope selection seam. If your workflow sets any of these, delete the line — there is no replacement to swap in:
 
 - input `review_scope`
+- input `escalate_on_dirty_baseline` (dirty-baseline escalation is fully removed — no replacement)
 - outputs `effective_review_scope`, `previous_head_sha`, `baseline_clean`
 
 Every review is now a full review of the current PR. Unchanged diffs (diff + config fingerprint matching the last managed review) still skip with zero model calls and carry the prior verdict forward, and a forced re-review — the `ai-review` label or `force_review: "true"` — still runs a fresh full review. Workflows that set none of these are unaffected.
