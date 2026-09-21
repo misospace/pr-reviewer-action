@@ -434,7 +434,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Output | Description |
 |--------|-------------|
 | `verdict` | `approve` or `request_changes` |
-| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (the previous verdict was carried forward on a diff-unchanged skip) |
+| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict, or an unresolved carried blocker forced `request_changes`) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |

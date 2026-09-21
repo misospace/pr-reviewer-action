@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import suppress
 import sys
 from pathlib import Path
 
@@ -545,7 +546,5 @@ def _clear_needs_full_review_flag(flag_path: Path) -> None:
     compatibility path, which reads the previously *published* marker —
     never a workspace artifact — so a stale workspace file is pure noise.
     """
-    try:
+    with suppress(FileNotFoundError):
         flag_path.unlink()
-    except FileNotFoundError:
-        pass

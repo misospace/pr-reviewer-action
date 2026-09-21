@@ -219,7 +219,7 @@ class TestNoEscalationFlag:
         assert summary["open"] == 2
         assert summary["forced_request_changes"] is True
         assert not (tmp_path / "needs-full-review.json").exists()
-        data = json.loads(open(out).read())
+        data = json.loads(Path(out).read_text(encoding="utf-8"))
         assert data["verdict"] == "request_changes"
         assert data["verdict_source"] == "carry_forward"
 
