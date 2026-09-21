@@ -52,26 +52,28 @@ def test_build_marker_default():
     assert data["version"] == 1
     assert data["head_sha"] == "abc123"
     assert data["base_sha"] == "def456"
-    assert data["review_scope"] == "full"
+    # v3 (#615): the scope-selection seam is gone — markers no longer carry
+    # review_scope or previous_head_sha.
+    assert "review_scope" not in data
     assert "previous_head_sha" not in data
 
 
-def test_build_marker_with_previous():
+def test_build_marker_omits_removed_scope_fields():
+    # #615: build_marker no longer accepts review_scope/previous_head_sha and
+    # never emits them, regardless of review_result.
     marker = build_marker(
-        head_sha="xyz789", base_sha="def456",
-        review_scope="incremental", previous_head_sha="abc123",
-        review_result="issues"
+        head_sha="xyz789", base_sha="def456", review_result="issues"
     )
     data = parse_metadata(marker)
     assert data is not None
-    assert data["previous_head_sha"] == "abc123"
-    assert data["review_scope"] == "incremental"
+    assert data["review_result"] == "issues"
+    assert "review_scope" not in data
+    assert "previous_head_sha" not in data
 
 
 def test_build_marker_roundtrip():
     original = {
         "version": 1, "head_sha": "aaa", "base_sha": "bbb",
-        "review_scope": "incremental", "previous_head_sha": "ccc",
         "review_result": "clean"
     }
     marker = build_marker(**original)
@@ -110,6 +112,6 @@ if __name__ == "__main__":
     test_parse_metadata_no_marker()
     test_parse_metadata_invalid_json()
     test_build_marker_default()
-    test_build_marker_with_previous()
+    test_build_marker_omits_removed_scope_fields()
     test_build_marker_roundtrip()
     print("All metadata tests passed!")

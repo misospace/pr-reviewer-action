@@ -217,13 +217,6 @@ inputs:
       in tool-harness.json and the step summary.
     required: false
     default: "false"
-  escalate_on_dirty_baseline:
-    description: >-
-      Escalate incremental reviews whose baseline review found issues (review_routing_mode=auto
-      only). Judging whether a delta resolves a previously-found blocker is exactly the
-      judgment worth running on the smart model.
-    required: false
-    default: "true"
   ai_stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false
@@ -470,11 +463,11 @@ inputs:
   tool_evidence_memory:
     description: >-
       Carry the evidence a tool_mode=native_loop review gathers across
-      incremental reviews of the same PR. The review stores a compact digest of
-      what it read/fetched in its metadata marker; the next incremental review
-      reuses it (re-verifying only what the delta touched) instead of
-      re-gathering from scratch. On by default; set "false" to disable. No
-      effect on full reviews or non-native modes.
+      reviews of the same PR. The review stores a compact digest of
+      what it read/fetched in its metadata marker; the next review
+      reuses it (re-verifying only what changed) instead of
+      re-gathering from scratch. On by default; set "false" to disable.
+      No effect on non-native modes.
     required: false
     default: "true"
   tool_max_requests:
@@ -689,22 +682,13 @@ inputs:
     description: If true, proceed with review after timeout instead of failing. If false, abort the action on timeout. Default true.
     required: false
     default: "true"
-  review_scope:
-    description: >-
-      Controls whether the action reviews the full PR or only changes since the
-      last managed review. auto performs a full review first, then incremental
-      reviews on later PR synchronize events when safe. Accepted values: auto,
-      full, incremental.
-    required: false
-    default: "auto"
-
 outputs:
 
   verdict:
     description: AI verdict, approve or request_changes
     value: ${{ steps.review.outputs.verdict || steps.precheck.outputs.verdict }}
   verdict_source:
-    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when a carried-forward blocker survived an incremental review or the previous verdict was carried forward on a diff-unchanged skip)
+    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when the previous verdict was carried forward on a diff-unchanged skip)
     value: ${{ steps.review.outputs.verdict_source || steps.precheck.outputs.verdict_source }}
   required_checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
@@ -739,20 +723,11 @@ outputs:
   ci_status_final:
     description: Final CI state (success/failure) when ci_status_check completed
     value: ${{ steps.ci_status.outputs.ci_status_final }}
-  effective_review_scope:
-    description: Effective review scope used (full or incremental)
-    value: ${{ steps.precheck.outputs.effective_review_scope }}
-  previous_head_sha:
-    description: Previous head SHA when effective scope is incremental
-    value: ${{ steps.precheck.outputs.previous_head_sha }}
-  baseline_clean:
-    description: Whether the full-review baseline was clean (for verdict safety)
-    value: ${{ steps.precheck.outputs.baseline_clean }}
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
   needs_full_review:
-    description: Whether this incremental review could not assess a carried finding from its delta (true → the next run resolves full scope)
+    description: Whether a carried finding could not be assessed from this review's delta (true → the next run forces a fresh review)
     value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
@@ -787,7 +762,6 @@ runs:
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         COMMENT_MARKER: ${{ inputs.comment_marker }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
-        REVIEW_SCOPE: ${{ inputs.review_scope }}
         SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
         FORCE_REVIEW: ${{ inputs.force_review }}
         REREVIEW_LABEL: ${{ inputs.rereview_label }}
@@ -807,7 +781,6 @@ runs:
         ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
         ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
-        ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
         ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
         SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
@@ -935,8 +908,6 @@ runs:
         ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
         ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
         ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
-        ESCALATE_ON_DIRTY_BASELINE: ${{ inputs.escalate_on_dirty_baseline }}
-        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
@@ -1000,9 +971,6 @@ runs:
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
-        REVIEW_SCOPE: ${{ inputs.review_scope }}
-        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
-        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
         TOOL_EVIDENCE_MEMORY: ${{ inputs.tool_evidence_memory }}
       run: bash "${{ github.action_path }}/scripts/run_review.sh"
@@ -1047,11 +1015,8 @@ runs:
         ALLOW_APPROVE: ${{ inputs.allow_approve }}
         APPROVE_FORKS: ${{ inputs.approve_forks }}
         PUBLISH_MODE: ${{ inputs.publish_mode }}
-        EFFECTIVE_SCOPE: ${{ steps.precheck.outputs.effective_review_scope || 'full' }}
         BASE_SHA: ${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}
-        PREVIOUS_HEAD_SHA: ${{ steps.precheck.outputs.previous_head_sha || '' }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-        BASELINE_CLEAN: ${{ steps.precheck.outputs.baseline_clean || 'false' }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: bash "${{ github.action_path }}/scripts/publish.sh"
 

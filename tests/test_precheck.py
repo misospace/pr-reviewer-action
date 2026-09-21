@@ -1,8 +1,8 @@
 """Direct unit tests for pr_reviewer.precheck pure functions.
 
 Issue #512 acceptance: cover compute_diff_fingerprint, compute_config_hash,
-resolve_review_scope (including validation-flag fallbacks), and
-_detect_incremental_scope.
+and _detect_incremental_scope. (The review-scope resolver was removed in #615:
+v3 runs a full review of the current PR on every non-skipped run.)
 """
 
 import sys
@@ -15,7 +15,6 @@ from pr_reviewer.precheck import (
     MAX_INCREMENTAL_LINES,
     MIN_INCREMENTAL_RATIO,
     ReviewDecision,
-    ScopeResolution,
     _detect_incremental_scope,
     build_broad_fingerprint,
     build_marker_fingerprint,
@@ -24,7 +23,6 @@ from pr_reviewer.precheck import (
     compute_diff_fingerprint,
     evaluate_precheck,
     fingerprints_match,
-    resolve_review_scope,
     should_review,
 )
 
@@ -166,98 +164,6 @@ class TestDetectIncrementalScope:
         assert result is None or result["line_count"] <= MAX_INCREMENTAL_LINES
 
 
-class TestResolveReviewScope:
-    """Tests for resolve_review_scope including validation-flag fallbacks."""
-
-    def _resolve(
-        self,
-        review_scope="auto",
-        previous_head_sha="abc123",
-        previous_base_sha="def456",
-        previous_review_result="",
-        *,
-        force_review=False,
-        previous_head_is_ancestor=None,
-        compare_range_ok=None,
-    ):
-        return resolve_review_scope(
-            review_scope=review_scope,
-            previous_head_sha=previous_head_sha,
-            previous_base_sha=previous_base_sha,
-            previous_review_result=previous_review_result,
-            force_review=force_review,
-            previous_head_is_ancestor=previous_head_is_ancestor,
-            compare_range_ok=compare_range_ok,
-        )
-
-    def test_force_review_returns_full(self):
-        scope = self._resolve(force_review=True)
-        assert scope.effective_review_scope == "full"
-        assert scope.previous_head_sha == ""
-        assert scope.baseline_clean is False
-
-    def test_full_scope_request(self):
-        scope = self._resolve(review_scope="full")
-        assert scope.effective_review_scope == "full"
-
-    def test_missing_previous_head_returns_full(self):
-        scope = self._resolve(previous_head_sha="")
-        assert scope.effective_review_scope == "full"
-
-    def test_missing_previous_base_returns_full(self):
-        scope = self._resolve(previous_base_sha="")
-        assert scope.effective_review_scope == "full"
-
-    def test_invalid_scope_degrades_to_auto_and_falls_through(self):
-        # With valid metadata and validation flags None, an invalid scope
-        # degrades to auto and resolves to incremental.
-        scope = self._resolve(review_scope="banana")
-        assert scope.effective_review_scope == "incremental"
-
-    def test_incremental_scope_request(self):
-        scope = self._resolve(review_scope="incremental")
-        assert scope.effective_review_scope == "incremental"
-        assert scope.previous_head_sha == "abc123"
-
-    def test_auto_scope_resolves_to_incremental(self):
-        scope = self._resolve(review_scope="auto")
-        assert scope.effective_review_scope == "incremental"
-
-    def test_previous_head_is_ancestor_false_returns_full(self):
-        scope = self._resolve(previous_head_is_ancestor=False)
-        assert scope.effective_review_scope == "full"
-
-    def test_compare_range_ok_false_returns_full(self):
-        scope = self._resolve(compare_range_ok=False)
-        assert scope.effective_review_scope == "full"
-
-    def test_previous_head_is_ancestor_none_does_not_gate(self):
-        # None means caller did not assert; other conditions satisfied.
-        scope = self._resolve(previous_head_is_ancestor=None, compare_range_ok=True)
-        assert scope.effective_review_scope == "incremental"
-
-    def test_compare_range_ok_none_does_not_gate(self):
-        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=None)
-        assert scope.effective_review_scope == "incremental"
-
-    def test_both_validation_flags_true_incremental(self):
-        scope = self._resolve(previous_head_is_ancestor=True, compare_range_ok=True)
-        assert scope.effective_review_scope == "incremental"
-        assert scope.baseline_clean is True
-
-    def test_baseline_clean_with_clean_result(self):
-        scope = self._resolve(previous_review_result="clean")
-        assert scope.baseline_clean is True
-
-    def test_baseline_clean_with_empty_result(self):
-        scope = self._resolve(previous_review_result="")
-        assert scope.baseline_clean is True
-
-    def test_baseline_dirty_with_issues_result(self):
-        scope = self._resolve(previous_review_result="issues")
-        assert scope.baseline_clean is False
-
-
 class TestBroadAndMarkerFingerprint:
     """Tests for helper fingerprint builders."""
 
@@ -373,28 +279,6 @@ def test_evaluate_precheck_reviews_anyway_when_a_ci_state_finding_is_open():
     assert "CI-state" in again.reason
     # the fingerprint itself is unchanged; only the decision differs
     assert again.broad_fingerprint == first.broad_fingerprint
-
-
-# ── #536 Case 2: an unassessable carried finding forces a full review ────────
-
-def test_resolve_review_scope_forces_full_when_previous_needed_it():
-    """An incremental review would reach the same not_verifiable verdict for the
-    same reason, and fail-closed would keep the PR blocked. (#536 Case 2)"""
-    from pr_reviewer.precheck import resolve_review_scope
-
-    r = resolve_review_scope(
-        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=True
-    )
-    assert r.effective_review_scope == "full"
-
-
-def test_resolve_review_scope_still_increments_without_the_flag():
-    from pr_reviewer.precheck import resolve_review_scope
-
-    r = resolve_review_scope(
-        "auto", "a" * 40, "b" * 40, "issues", previous_needs_full_review=False
-    )
-    assert r.effective_review_scope == "incremental"
 
 
 # ── #544: the flag must also defeat the diff-unchanged skip guard ──────────

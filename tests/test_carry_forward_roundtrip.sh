@@ -49,15 +49,15 @@ FINDINGS='[
   {"severity":"minor","category":"style","file":null,"line":null,"message":"naming nit"},
   {"severity":"major","category":"bug","file":"x.py","line":3,"message":"was fixed","id":"P2","resolution":"resolved"}
 ]'
-MARKER="$(HEAD_SHA=abc123 EFFECTIVE_SCOPE=full REVIEW_RESULT=issues FINDINGS="$FINDINGS" build_metadata_marker "b" "")"
+MARKER="$(HEAD_SHA=abc123 REVIEW_RESULT=issues FINDINGS="$FINDINGS" build_metadata_marker "b")"
 check_contains "marker carries open_findings" "$MARKER" '"open_findings":'
 check_contains "unresolved blocker persisted" "$MARKER" "token not validated"
 check_not_contains "resolved finding filtered out of the marker" "$MARKER" "was fixed"
 
-MARKER_CLEAN="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean FINDINGS="$FINDINGS" build_metadata_marker "b" "")"
+MARKER_CLEAN="$(HEAD_SHA=h REVIEW_RESULT=clean FINDINGS="$FINDINGS" build_metadata_marker "b")"
 check_not_contains "clean reviews persist no findings" "$MARKER_CLEAN" "open_findings"
 
-MARKER_BADF="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=issues FINDINGS='not json' build_metadata_marker "b" "")"
+MARKER_BADF="$(HEAD_SHA=h REVIEW_RESULT=issues FINDINGS='not json' build_metadata_marker "b")"
 check_not_contains "malformed FINDINGS tolerated" "$MARKER_BADF" "open_findings"
 check_contains "malformed FINDINGS still yields a marker" "$MARKER_BADF" '"review_result":"issues"'
 
@@ -67,7 +67,6 @@ cd "$TMP"
 ln -sf "$ROOT_DIR/pr_reviewer" pr_reviewer
 BODY="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER")"
 extract_review_metadata "$BODY"
-check "head sha extracted alongside findings" "$LAST_HEAD_SHA" "abc123"
 COUNT="$(jq 'length' previous-findings.json)"
 check "both unresolved findings extracted" "$COUNT" "2"
 check "severity survives the round trip" "$(jq -r '.[0].severity' previous-findings.json)" "blocker"
@@ -96,16 +95,16 @@ check "carried findings get sequential ids" "$LOADED" "P1:blocker;P2:minor"
 echo ""
 echo "=== Cross-run evidence memory: marker persists → precheck extracts → load reuses ==="
 # build_metadata_marker carries the evidence digest, tagged with HEAD_SHA.
-MARKER_EV="$(HEAD_SHA=deadbeef EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="- read_file → installer:v1.13.4" build_metadata_marker "b" "")"
+MARKER_EV="$(HEAD_SHA=deadbeef REVIEW_RESULT=clean EVIDENCE_DIGEST="- read_file → installer:v1.13.4" build_metadata_marker "b")"
 check_contains "marker carries evidence_digest" "$MARKER_EV" '"evidence_digest":'
 check_contains "digest content persisted" "$MARKER_EV" "installer:v1.13.4"
 
 # Disabled → omitted even when a digest was produced.
-MARKER_EVOFF="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="x" TOOL_EVIDENCE_MEMORY=false build_metadata_marker "b" "")"
+MARKER_EVOFF="$(HEAD_SHA=h REVIEW_RESULT=clean EVIDENCE_DIGEST="x" TOOL_EVIDENCE_MEMORY=false build_metadata_marker "b")"
 check_not_contains "evidence memory off omits the digest" "$MARKER_EVOFF" "evidence_digest"
 
 # No digest (non-native / nothing gathered) → no field.
-MARKER_EVEMPTY="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean build_metadata_marker "b" "")"
+MARKER_EVEMPTY="$(HEAD_SHA=h REVIEW_RESULT=clean build_metadata_marker "b")"
 check_not_contains "no digest yields no evidence_digest field" "$MARKER_EVEMPTY" "evidence_digest"
 
 # Precheck extracts it into previous-evidence.json, tagged with the gathered-at sha.
@@ -126,7 +125,7 @@ check_contains "rendered section tags the gathered-at sha" "$RENDERED_EV" "deadb
 # precheck's shell-embedded regex BEFORE the file is written (the regex doubling
 # is correct inside bash's double-quoted python3 -c string — this guards it).
 DIGEST_HOSTILE="$(printf 'fact v1.13.4 \007 <script>alert(1)</script> end')"
-MARKER_HOSTILE="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=clean EVIDENCE_DIGEST="$DIGEST_HOSTILE" build_metadata_marker "b" "")"
+MARKER_HOSTILE="$(HEAD_SHA=h REVIEW_RESULT=clean EVIDENCE_DIGEST="$DIGEST_HOSTILE" build_metadata_marker "b")"
 BODY_HOSTILE="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_HOSTILE")"
 extract_review_metadata "$BODY_HOSTILE"
 HOSTILE_DIGEST="$(jq -r '.digest' previous-evidence.json)"
@@ -137,16 +136,25 @@ check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.
 echo ""
 echo "=== Incremental-insufficient escalation (#544): marker persists → precheck extracts → review reads ==="
 # Publish: the review step's needs_full_review output is persisted in the marker.
-MARKER_NFR="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=true build_metadata_marker "b" "p")"
+MARKER_NFR="$(HEAD_SHA=h REVIEW_RESULT=issues NEEDS_FULL_REVIEW=true build_metadata_marker "b")"
 check_contains "marker carries needs_full_review" "$MARKER_NFR" '"needs_full_review":true'
 
-MARKER_NFR_OFF="$(HEAD_SHA=h EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues NEEDS_FULL_REVIEW=false build_metadata_marker "b" "p")"
+MARKER_NFR_OFF="$(HEAD_SHA=h REVIEW_RESULT=issues NEEDS_FULL_REVIEW=false build_metadata_marker "b")"
 check_not_contains "flag omitted when false" "$MARKER_NFR_OFF" "needs_full_review"
 
-# Precheck: extraction surfaces LAST_NEEDS_FULL_REVIEW for the scope resolver.
+# Precheck: extraction surfaces LAST_NEEDS_FULL_REVIEW (#544) so the next run's
+# diff-unchanged guard is defeated and the run is a fresh full review.
 BODY_NFR="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_NFR")"
 extract_review_metadata "$BODY_NFR"
 check "precheck extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
+
+# An OLD-shape marker (still carrying review_scope/previous_head_sha) must
+# parse without error and still propagate needs_full_review + open findings.
+BODY_OLD_NFR="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' \
+  '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_scope":"incremental","previous_head_sha":"p","review_result":"issues","needs_full_review":true,"open_findings":[{"severity":"blocker","message":"still open nit"}]} -->')"
+extract_review_metadata "$BODY_OLD_NFR"
+check "old-shape marker still extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
+check "old-shape marker still extracts its open finding" "$(jq 'length' previous-findings.json)" "1"
 
 # Review side: the helper the bash reviewer step imports reads the flag file.
 NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "

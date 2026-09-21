@@ -43,35 +43,38 @@ echo "=== Functional: build_metadata_marker carries required_checks ==="
 # shellcheck source=/dev/null
 source "$HELPER_SCRIPT"
 
-MARKER="$(HEAD_SHA=headsha EFFECTIVE_SCOPE=full REVIEW_RESULT=clean REQUIRED_CHECKS=incomplete \
-  build_metadata_marker "basesha" "")"
+MARKER="$(HEAD_SHA=headsha REVIEW_RESULT=clean REQUIRED_CHECKS=incomplete \
+  build_metadata_marker "basesha")"
 check_contains "marker carries required_checks" "$MARKER" '"required_checks":"incomplete"'
 check_contains "marker keeps review_result" "$MARKER" '"review_result":"clean"'
 check_contains "marker terminates with -->" "$MARKER" " -->"
 
-MARKER_NONE="$(HEAD_SHA=headsha EFFECTIVE_SCOPE=full REVIEW_RESULT=clean REQUIRED_CHECKS=none \
-  build_metadata_marker "basesha" "")"
+MARKER_NONE="$(HEAD_SHA=headsha REVIEW_RESULT=clean REQUIRED_CHECKS=none \
+  build_metadata_marker "basesha")"
 check "required_checks=none omitted from marker" \
   "$(printf '%s' "$MARKER_NONE" | grep -c 'required_checks' || true)" "0"
 
 echo ""
-echo "=== Functional: incremental marker is complete and parseable (regression) ==="
-# The old string-surgery builder dropped review_result and the closing ' -->'
-# whenever previous_head_sha was appended, making incremental markers
-# unparseable (next run silently degraded to a full review).
-MARKER_INC="$(HEAD_SHA=headsha EFFECTIVE_SCOPE=incremental REVIEW_RESULT=issues REQUIRED_CHECKS=complete \
-  build_metadata_marker "basesha" "prevsha")"
-check_contains "incremental marker keeps review_result" "$MARKER_INC" '"review_result":"issues"'
-check_contains "incremental marker carries previous_head_sha" "$MARKER_INC" '"previous_head_sha":"prevsha"'
-check_contains "incremental marker terminates with -->" "$MARKER_INC" " -->"
+echo "=== Functional: marker is complete and parseable (regression) ==="
+# The old string-surgery builder dropped review_result and the closing ' -->',
+# making markers unparseable. v3 (#615) also removed the scope fields: a
+# marker must never carry review_scope or previous_head_sha.
+MARKER_INC="$(HEAD_SHA=headsha REVIEW_RESULT=issues REQUIRED_CHECKS=complete \
+  build_metadata_marker "basesha")"
+check_contains "marker keeps review_result" "$MARKER_INC" '"review_result":"issues"'
+check_contains "marker terminates with -->" "$MARKER_INC" " -->"
+check "marker omits removed review_scope" \
+  "$(printf '%s' "$MARKER_INC" | grep -c 'review_scope' || true)" "0"
+check "marker omits removed previous_head_sha" \
+  "$(printf '%s' "$MARKER_INC" | grep -c 'previous_head_sha' || true)" "0"
 
 PARSED="$(printf '%s' "$MARKER_INC" | PYTHONPATH="$ROOT_DIR" python3 -c "
 import sys
 from pr_reviewer.metadata import parse_metadata
 data = parse_metadata(sys.stdin.read())
-print('unparseable' if data is None else f\"{data['review_scope']}|{data['review_result']}|{data['previous_head_sha']}|{data.get('required_checks')}\")
+print('unparseable' if data is None else f\"{data['review_result']}|{data.get('required_checks')}|{data.get('review_scope')}|{data.get('previous_head_sha')}\")
 ")"
-check "parse_metadata reads the incremental marker" "$PARSED" "incremental|issues|prevsha|complete"
+check "parse_metadata reads the marker without scope fields" "$PARSED" "issues|complete|None|None"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -186,16 +186,15 @@ resolve_finding_threads() {
 }
 
 # Build metadata marker JSON string.
-# Requires env: HEAD_SHA, EFFECTIVE_SCOPE, REVIEW_RESULT; optional FINDINGS
+# Requires env: HEAD_SHA, REVIEW_RESULT; optional FINDINGS
 # (JSON array — persisted as open_findings when the review found issues, so
 # the next incremental review can carry them forward, #193) and NEEDS_FULL_REVIEW
-# (true when a carried finding could not be assessed from this delta, so the
-# next run's precheck resolves full scope, #544).
-# Args: $1 = base_sha, $2 = previous_head_sha (optional, empty if not incremental)
+# (true when a carried finding could not be assessed, so the next run's
+# precheck forces a fresh full review, #544).
+# Args: $1 = base_sha
 # Outputs: metadata marker string to stdout
 build_metadata_marker() {
   local base_sha="$1"
-  local previous_head_sha="${2:-}"
 
   # FINDINGS comes from the review step output; tolerate anything malformed.
   local findings_json="${FINDINGS:-[]}"
@@ -203,10 +202,7 @@ build_metadata_marker() {
     findings_json="[]"
   fi
 
-  # Built with jq instead of string surgery: the old "${marker%,*}" trick for
-  # appending previous_head_sha cut at the LAST comma, silently dropping
-  # review_result and the closing " -->" — which made incremental markers
-  # unparseable and degraded the next run back to a full review.
+  # Built with jq to keep the marker a single declarative expression.
   # Cross-run evidence memory (#265): the native_loop's gathered-evidence
   # digest, persisted so the next incremental review can reuse it. Omitted when
   # evidence memory is disabled or no digest was produced; capped defensively
@@ -218,23 +214,20 @@ build_metadata_marker() {
   marker_json="$(jq -nc \
     --arg head "${HEAD_SHA:-unknown}" \
     --arg base "$base_sha" \
-    --arg scope "${EFFECTIVE_SCOPE}" \
     --arg result "${REVIEW_RESULT}" \
     --arg checks "${REQUIRED_CHECKS:-}" \
     --arg route "${REVIEW_ROUTE:-}" \
     --arg esc "${ESCALATION_REASON:-}" \
-    --arg prev "$previous_head_sha" \
     --arg evidence "${EVIDENCE_DIGEST:-}" \
     --arg evmem "$evmem" \
     --argjson findings "$findings_json" \
     --arg chr "${CACHE_HIT_RATIO:-}" \
     --arg nfr "$(printf '%s' "${NEEDS_FULL_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" \
-    '{version: 1, head_sha: $head, base_sha: $base, review_scope: $scope, review_result: $result}
-     + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
-     + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
-     + (if $esc == "" then {} else {escalation_reason: ($esc | split(","))} end)
-     + (if $scope == "incremental" and $prev != "" then {previous_head_sha: $prev} else {} end)
-     + (if $evmem != "false" and $evidence != "" then {evidence_digest: ($evidence | .[0:2000])} else {} end)
+    '{version: 1, head_sha: $head, base_sha: $base, review_result: $result}
+      + (if $checks == "" or $checks == "none" then {} else {required_checks: $checks} end)
+      + (if $route == "" or $route == "legacy" then {} else {review_route: $route} end)
+      + (if $esc == "" then {} else {escalation_reason: ($esc | split(","))} end)
+      + (if $evmem != "false" and $evidence != "" then {evidence_digest: ($evidence | .[0:2000])} else {} end)
      + (if $result == "issues" and ($findings | length) > 0
         then {open_findings: ($findings
           | map(select(type == "object" and (.resolution // "") != "resolved")

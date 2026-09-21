@@ -115,12 +115,9 @@ ESCALATE_ON_FAST_REQUEST_CHANGES="${ESCALATE_ON_FAST_REQUEST_CHANGES:-true}"
 ESCALATE_ON_FAST_LOW_CONFIDENCE="${ESCALATE_ON_FAST_LOW_CONFIDENCE:-true}"
 ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS="${ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS:-true}"
 ESCALATE_ON_TOOL_PLANNING_FAILURE="${ESCALATE_ON_TOOL_PLANNING_FAILURE:-false}"
-ESCALATE_ON_DIRTY_BASELINE="${ESCALATE_ON_DIRTY_BASELINE:-true}"
-# Default true: only the precheck can assert a dirty baseline; standalone runs
-# (smoke test, manual) have no baseline signal and must not over-escalate.
-BASELINE_CLEAN="${BASELINE_CLEAN:-true}"
-REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
-EFFECTIVE_SCOPE="${EFFECTIVE_SCOPE:-full}"
+# Scope resolution removed (#615): every review is full. Retained only so the incremental corpus/carry-forward branches (#616/#617) stay parseable and inert.
+EFFECTIVE_SCOPE="full"
+# Nothing populates it since #615; consumed only by unreachable incremental corpus branches.
 PREVIOUS_HEAD_SHA="${PREVIOUS_HEAD_SHA:-}"
 # Per-check CI results written by wait_for_ci.sh when ci_status_check=true.
 # Empty/absent when CI gating is off or no external checks ran.
@@ -401,8 +398,6 @@ ESCALATE_ON_FAST_REQUEST_CHANGES="$(printf '%s' "$ESCALATE_ON_FAST_REQUEST_CHANG
 ESCALATE_ON_FAST_LOW_CONFIDENCE="$(printf '%s' "$ESCALATE_ON_FAST_LOW_CONFIDENCE" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS="$(printf '%s' "$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_TOOL_PLANNING_FAILURE="$(printf '%s' "$ESCALATE_ON_TOOL_PLANNING_FAILURE" | tr '[:upper:]' '[:lower:]')"
-ESCALATE_ON_DIRTY_BASELINE="$(printf '%s' "$ESCALATE_ON_DIRTY_BASELINE" | tr '[:upper:]' '[:lower:]')"
-BASELINE_CLEAN="$(printf '%s' "$BASELINE_CLEAN" | tr '[:upper:]' '[:lower:]')"
 
 # The fallback endpoint/format/key inherit from the primary when the caller leaves them
 # blank (action.yml), so AI_FALLBACK_BASE_URL is non-empty here even for a caller that

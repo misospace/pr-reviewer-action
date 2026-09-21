@@ -9,7 +9,10 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 0
 fi
 
-# Tests for PR verdict safety: incremental reviews require clean full baseline for approval
+# Approval guardrails. Since #615 every review is a full review of the current
+# PR — there is no incremental/baseline gate anymore. Approve requires
+# allow_approve=true, and a cross-repository PR additionally requires
+# approve_forks=true; request_changes never approves.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASS=0
@@ -17,89 +20,73 @@ FAIL=0
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-# Core verdict safety evaluation extracted from action.yml publish_verdict step.
+# Core verdict approval evaluation extracted from scripts/publish.sh guardrails.
 evaluate_verdict_approval() {
-  local verdict="$1" allow_approve="$2" effective_scope="$3" baseline_clean="$4" approve_forks="$5" is_fork_pr="$6"
+  local verdict="$1" allow_approve="$2" approve_forks="$3" is_fork_pr="$4"
 
   local can_approve=false
 
   if [ "$verdict" = "approve" ] && [ "$(printf '%s' "$allow_approve" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-    # For incremental reviews, require a trusted clean full baseline
-    if [ "$effective_scope" = "incremental" ] && [ "$baseline_clean" != "true" ]; then
-      can_approve=false
-    else
-      # Check fork gate
-      if [ "$is_fork_pr" != "true" ]; then
-        can_approve=true
-      elif [ "$(printf '%s' "$approve_forks" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-        can_approve=true
-      fi
+    # Check fork gate
+    if [ "$is_fork_pr" != "true" ]; then
+      can_approve=true
+    elif [ "$(printf '%s' "$approve_forks" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+      can_approve=true
     fi
   fi
 
   printf '%s' "$can_approve"
 }
 
-echo "=== Verdict Safety: incremental without baseline → deny approval ==="
-result="$(evaluate_verdict_approval "approve" "true" "incremental" "false" "false" "false")"
-check "deny approval for incremental without clean baseline" "$result" "false"
-
-echo ""
-echo "=== Verdict Safety: incremental with clean baseline → allow (non-fork) ==="
-result="$(evaluate_verdict_approval "approve" "true" "incremental" "true" "false" "false")"
-check "allow approval for incremental with clean baseline" "$result" "true"
-
-echo ""
-echo "=== Verdict Safety: full review with allow_approve → allow ==="
-result="$(evaluate_verdict_approval "approve" "true" "full" "true" "false" "false")"
-check "allow approval for full review" "$result" "true"
-
-echo ""
-echo "=== Verdict Safety: incremental with issues baseline → deny ==="
-result="$(evaluate_verdict_approval "approve" "true" "incremental" "false" "false" "false")"
-check "deny approval when prior review had issues" "$result" "false"
-
-echo ""
-echo "=== Verdict Safety: request_changes never approves ==="
-result="$(evaluate_verdict_approval "request_changes" "true" "incremental" "true" "false" "false")"
-check "never approve for request_changes" "$result" "false"
-
-echo ""
-echo "=== Verdict Safety: incremental on fork with clean baseline → check approve_forks ==="
-result="$(evaluate_verdict_approval "approve" "true" "incremental" "true" "false" "true")"
-check "deny fork incremental approval when approve_forks=false" "$result" "false"
-result="$(evaluate_verdict_approval "approve" "true" "incremental" "true" "true" "true")"
-check "allow fork incremental approval when approve_forks=true" "$result" "true"
+echo "=== Verdict Safety: approve with allow_approve on a non-fork → allow ==="
+result="$(evaluate_verdict_approval "approve" "true" "false" "false")"
+check "allow approval for a non-fork with allow_approve" "$result" "true"
 
 echo ""
 echo "=== Verdict Safety: allow_approve=false blocks all approvals ==="
-result="$(evaluate_verdict_approval "approve" "false" "full" "true" "false" "false")"
-check "deny when allow_approve=false regardless of scope" "$result" "false"
+result="$(evaluate_verdict_approval "approve" "false" "true" "false")"
+check "deny when allow_approve=false" "$result" "false"
 
 echo ""
-echo "=== Verdict Safety: case-insensitive flags ==="
-result="$(evaluate_verdict_approval "approve" "TRUE" "incremental" "true" "false" "false")"
+echo "=== Verdict Safety: request_changes never approves ==="
+result="$(evaluate_verdict_approval "request_changes" "true" "true" "false")"
+check "never approve for request_changes" "$result" "false"
+
+echo ""
+echo "=== Verdict Safety: fork needs approve_forks ==="
+result="$(evaluate_verdict_approval "approve" "true" "false" "true")"
+check "deny fork approval when approve_forks=false" "$result" "false"
+result="$(evaluate_verdict_approval "approve" "true" "true" "true")"
+check "allow fork approval when approve_forks=true" "$result" "true"
+
+echo ""
+echo "=== Verdict Safety: case-insensitive allow_approve ==="
+result="$(evaluate_verdict_approval "approve" "TRUE" "false" "false")"
 check "TRUE (uppercase) allow_approve works" "$result" "true"
-result="$(evaluate_verdict_approval "approve" "true" "INCREMENTAL" "true" "false" "false")"
-check "INCREMENTAL scope not matched (case-sensitive)" "$result" "true"
 
 echo ""
-echo "=== action.yml integration checks ==="
-ACTION_YML="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/action.yml"
-# The verdict-step shell was extracted from action.yml into scripts/publish.sh
-# (#541); the per-mode text assertions target that script.
-PUBLISH_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/publish.sh"
+echo "=== v3 seam removal: scope plumbing is gone from the action contract ==="
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ACTION_YML="$ROOT_DIR/action.yml"
+PUBLISH_SH="$ROOT_DIR/scripts/publish.sh"
 
-check_exists "action.yml has EFFECTIVE_SCOPE reference in verdict step" \
-  "$(grep -c 'EFFECTIVE_SCOPE' "$ACTION_YML" || echo 0)"
-check_exists "action.yml has BASELINE_CLEAN reference in verdict step" \
-  "$(grep -c 'BASELINE_CLEAN' "$ACTION_YML" || echo 0)"
-check_exists "publish.sh marks incremental reviews in the header" \
-  "$(grep -c 'AI Automated Review (incremental)' "$PUBLISH_SH" || echo 0)"
-check_exists "publish.sh has carried-forward disclaimer text" \
-  "$(grep -c 'carried forward' "$PUBLISH_SH" || echo 0)"
-check_exists "publish.sh explains dirty-baseline withheld approvals" \
-  "$(grep -c 'Approval withheld' "$PUBLISH_SH" || echo 0)"
+# The verdict/comment publish paths no longer consult scope or baseline.
+for needle in 'review_scope' 'effective_review_scope' 'baseline_clean' 'ESCALATE_ON_DIRTY_BASELINE'; do
+  check "action.yml drops $needle" \
+    "$(grep -c "$needle" "$ACTION_YML" || true)" "0"
+done
+
+# publish.sh drops the incremental header, the withheld-approval advisory, and
+# the scope/baseline guardrail inputs entirely.
+check "publish.sh drops EFFECTIVE_SCOPE" "$(grep -c 'EFFECTIVE_SCOPE' "$PUBLISH_SH" || true)" "0"
+check "publish.sh drops BASELINE_CLEAN" "$(grep -c 'BASELINE_CLEAN' "$PUBLISH_SH" || true)" "0"
+check "publish.sh drops the incremental review header" \
+  "$(grep -c 'AI Automated Review (incremental)' "$PUBLISH_SH" || true)" "0"
+check "publish.sh drops the dirty-baseline 'Approval withheld' advisory" \
+  "$(grep -c 'Approval withheld' "$PUBLISH_SH" || true)" "0"
+# The generic policy advisory that replaced it stays.
+check_contains "publish.sh keeps the 'Approval blocked by policy' advisory" \
+  "$(cat "$PUBLISH_SH")" "Approval blocked by policy"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

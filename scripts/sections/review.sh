@@ -70,13 +70,6 @@ if [[ "$EFFECTIVE_SCOPE" == "incremental" ]] && [ -s previous-findings.json ] \
   CARRY_FORWARD_ACTIVE="true"
 fi
 
-# Incremental review against a baseline the previous review flagged as having
-# issues. Used for the dirty-baseline escalation trigger.
-DIRTY_BASELINE="false"
-if [[ "$EFFECTIVE_SCOPE" == "incremental" && "$BASELINE_CLEAN" != "true" ]]; then
-  DIRTY_BASELINE="true"
-fi
-
 USER_MESSAGE="$(build_user_message classification.json)"
 if [[ "$CARRY_FORWARD_ACTIVE" == "true" ]]; then
   USER_MESSAGE="$USER_MESSAGE
@@ -236,9 +229,7 @@ escalate, reasons = should_escalate(
     on_request_changes=('$ESCALATE_ON_FAST_REQUEST_CHANGES' == 'true'),
     on_low_confidence=('$ESCALATE_ON_FAST_LOW_CONFIDENCE' == 'true'),
     on_blockers=('$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS' == 'true'),
-    on_dirty_baseline=('$ESCALATE_ON_DIRTY_BASELINE' == 'true'),
     on_planning_failure=('$ESCALATE_ON_TOOL_PLANNING_FAILURE' == 'true'),
-    dirty_baseline=('$DIRTY_BASELINE' == 'true'),
 )
 print('yes ' + ','.join(reasons) if escalate else 'no')
 " 2>/dev/null || echo no)"
@@ -391,12 +382,8 @@ jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
 echo "$ANALYSIS_ENGINE" > analysis_engine.txt
 
-echo "effective_review_scope=$EFFECTIVE_SCOPE" >> "$OUTPUT_FILE"
-if [[ -n "$PREVIOUS_HEAD_SHA" ]]; then
-  echo "previous_head_sha=$PREVIOUS_HEAD_SHA" >> "$OUTPUT_FILE"
-fi
 # Incremental-insufficient escalation (#544): the publish step persists this
-# into the metadata marker so the next run's precheck resolves full scope.
+# into the metadata marker so the next run is a fresh full review.
 echo "needs_full_review=$NEEDS_FULL_REVIEW" >> "$OUTPUT_FILE"
 
 # Cache hit ratio: per-review prompt-cache effectiveness signal from the
@@ -464,7 +451,6 @@ write_step_summary() {
     echo "| Required checks | ${required_checks_status} |"
     echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
-    echo "| Scope | ${EFFECTIVE_SCOPE} |"
     if [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]]; then
       local deep_review_leads deep_review_errors
       deep_review_leads="$(jq -r '.total_leads // 0' specialists.json 2>/dev/null || echo '?')"

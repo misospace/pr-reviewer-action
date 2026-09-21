@@ -134,7 +134,6 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
   export PR_NUMBER
   export COMMENT_MARKER='<!-- ai-pr-reviewer -->'
   export GITHUB_OUTPUT="$TMPDIR/precheck.out"
-  export REVIEW_SCOPE=auto
   export SKIP_IF_DIFF_UNCHANGED=true
   export FORCE_REVIEW=false
   export PUBLISH_MODE=comment

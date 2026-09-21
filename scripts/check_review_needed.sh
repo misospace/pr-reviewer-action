@@ -2,23 +2,16 @@
 set -euo pipefail
 
 # ── check_review_needed.sh → delegates to pr_reviewer/precheck.py ─────
-# Decision logic (should-review, scope, fingerprinting) lives in
-# precheck.py. The shell only performs platform I/O (diff/PR/comment
-# fetches) plus the range-validation probes (base continuity, git
-# ancestry, compare API) whose verdicts feed the Python scope resolver,
-# and writes the resulting decisions to $GITHUB_OUTPUT. See issue #497.
+# Decision logic (should-review, fingerprinting) lives in precheck.py.
+# The shell performs platform I/O (diff/PR/comment fetches) and writes
+# the resulting decisions to $GITHUB_OUTPUT. See issue #497.
 #
 # Flow:
 #   1. diff + last managed review body
-#   2. precheck.py call #1 — marker-only should-review decision; a skip
-#      exits here without fetching the PR object
+#   2. precheck.py — the single should-review decision; a skip exits here
+#      without fetching the PR object
 #   3. review path: PR object once → SHAs/fork → superseded guard →
-#      Forgejo permission preflight → range-validation probes →
-#      precheck.py call #2 for scope/baseline
-#
-# The shell never resolves scope or fingerprints itself: call #2 receives
-# the shell's validation verdicts (PREVIOUS_HEAD_IS_ANCESTOR,
-# COMPARE_RANGE_OK) and returns the authoritative scope state.
+#      Forgejo permission preflight → full review
 
 REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 PR_NUMBER="${PR_NUMBER:-}"
@@ -27,11 +20,10 @@ SKIP_IF_DIFF_UNCHANGED="${SKIP_IF_DIFF_UNCHANGED:-true}"
 FORCE_REVIEW="${FORCE_REVIEW:-false}"
 REREVIEW_LABEL="${REREVIEW_LABEL:-ai-review}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
-REVIEW_SCOPE="${REVIEW_SCOPE:-auto}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
-export FORCE_REVIEW SKIP_IF_DIFF_UNCHANGED REVIEW_SCOPE
+export FORCE_REVIEW SKIP_IF_DIFF_UNCHANGED
 # shellcheck source=scripts/platform_api.sh
 source "${SCRIPT_DIR}/platform_api.sh"
 # shellcheck source=scripts/artifact_paths.sh
@@ -66,9 +58,6 @@ if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" 
       {
         echo "should_review=false"
         echo "skip_reason=unrelated-label"
-        echo "effective_review_scope=full"
-        echo "previous_head_sha="
-        echo "baseline_clean=false"
         echo "head_sha="
         echo "base_sha="
         echo "is_fork_pr="
@@ -129,16 +118,12 @@ esac
 # remains in shell because it parses a stored published comment body that
 # contains reviewer-emitted metadata (not actionable config inputs),
 # independent of precheck decision logic. Writes previous-review-meta.json
-# plus the carried-forward state the review step consumes:
-# previous-findings.json (open findings) and previous-evidence.json
-# (evidence digest, tagged with the gathered-at head SHA).
+# (the #544 needs_full_review flag only) plus the carried-forward state
+# the review step consumes: previous-findings.json (open findings) and
+# previous-evidence.json (evidence digest, tagged with the gathered-at
+# head SHA).
 extract_review_metadata() {
   local comment_body="$1"
-
-  LAST_HEAD_SHA=""
-  LAST_BASE_SHA=""
-  LAST_REVIEW_SCOPE=""
-  LAST_REVIEW_RESULT=""
 
   rm -f previous-review-meta.json previous-findings.json previous-evidence.json
 
@@ -152,12 +137,9 @@ if data:
     def enumsan(v):
         return re.sub(r'[^a-z_]', '', str(v or '').lower())[:32]
     meta = {
-        'head_sha': hexsan(data.get('head_sha')),
-        'base_sha': hexsan(data.get('base_sha')),
-        'review_scope': enumsan(data.get('review_scope')),
-        'review_result': enumsan(data.get('review_result')),
         # #544: the previous review could not assess a carried finding from
-        # its delta; the next run must be full scope (PREVIOUS_NEEDS_FULL_REVIEW).
+        # its delta; the next run must be a fresh full review
+        # (PREVIOUS_NEEDS_FULL_REVIEW defeats the diff-unchanged guard).
         'needs_full_review': bool(data.get('needs_full_review')),
     }
     with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
@@ -189,10 +171,6 @@ if data:
 " 2>/dev/null || true
 
   if [[ -f previous-review-meta.json ]]; then
-    LAST_HEAD_SHA="$(jq -r '.head_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_BASE_SHA="$(jq -r '.base_sha // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_REVIEW_SCOPE="$(jq -r '.review_scope // ""' previous-review-meta.json 2>/dev/null || echo "")"
-    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
     LAST_NEEDS_FULL_REVIEW="$(jq -r '.needs_full_review // false' previous-review-meta.json 2>/dev/null || echo false)"
   fi
 }
@@ -206,22 +184,14 @@ if [[ -n "$last_broad_fingerprint" ]]; then
 else
   unset PREV_FINGERPRINTS 2>/dev/null || true
 fi
-# Scope metadata and validation verdicts are only asserted on the review
-# path (call #2 below); make sure nothing from the runner environment
-# leaks into call #1.
-unset PREVIOUS_HEAD_SHA PREVIOUS_BASE_SHA PREVIOUS_REVIEW_RESULT \
-  PREVIOUS_NEEDS_FULL_REVIEW \
-  PREVIOUS_HEAD_IS_ANCESTOR COMPARE_RANGE_OK 2>/dev/null || true
+# Make sure nothing from the runner environment leaks into the
+# should-review decision.
+unset PREVIOUS_NEEDS_FULL_REVIEW 2>/dev/null || true
 
-# Extract the last review's metadata BEFORE call #1: the needs_full_review
-# flag (#544) must reach the should-review decision, not just the scope
-# decision — otherwise the diff-unchanged guard would skip the very full
-# review the flag requests, and the PR would loop on the same incremental
-# diff forever.
-LAST_HEAD_SHA=""
-LAST_BASE_SHA=""
-LAST_REVIEW_SCOPE=""
-LAST_REVIEW_RESULT=""
+# Extract the last review's metadata BEFORE the precheck: the
+# needs_full_review flag (#544) must reach the should-review decision —
+# otherwise the diff-unchanged guard would skip the fresh full review the
+# flag requests, and the PR would loop on the same diff forever.
 LAST_NEEDS_FULL_REVIEW="false"
 if [[ -n "$last_comment_body" ]]; then
   extract_review_metadata "$last_comment_body"
@@ -241,9 +211,6 @@ diff_fingerprint="$(jq -r '.broad_fingerprint // ""' precheck-result.json)"
 
 if [[ "$should_review_decision" != "true" ]]; then
   {
-    echo "effective_review_scope=full"
-    echo "previous_head_sha="
-    echo "baseline_clean=false"
     echo "head_sha="
     echo "base_sha="
     echo "is_fork_pr="
@@ -293,9 +260,6 @@ IS_FORK_PR="$(derive_is_fork_pr pr-object.json)"
 if [[ -n "${EVENT_HEAD_SHA:-}" && -n "$CURRENT_HEAD_SHA" && "$EVENT_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
   echo "Skipping superseded review event: event head $EVENT_HEAD_SHA is no longer the current head ($CURRENT_HEAD_SHA)." >&2
   {
-    echo "effective_review_scope=full"
-    echo "previous_head_sha="
-    echo "baseline_clean=false"
     echo "head_sha=$CURRENT_HEAD_SHA"
     echo "base_sha=$CURRENT_BASE_SHA"
     echo "is_fork_pr=$IS_FORK_PR"
@@ -339,81 +303,14 @@ if [[ "$RESOLVED_PLATFORM" == "forgejo" ]]; then
   esac
 fi
 
-# ── Range-validation probes → verdicts for Python scope resolution ────
-# The shell performs the platform I/O; precheck.py turns the verdicts into
-# the scope decision (it does not run git or API calls itself). Unset means
-# "not asserted" (the check does not gate the baseline); false fails closed
-# to full scope.
-PREV_HEAD_IS_ANCESTOR=""
-COMPARE_RANGE_OK=""
-if [[ -n "$LAST_HEAD_SHA" && -n "$LAST_BASE_SHA" ]]; then
-  if [[ -n "$CURRENT_BASE_SHA" && "$CURRENT_BASE_SHA" != "$LAST_BASE_SHA" ]]; then
-    echo "Review scope fallback: base SHA changed from $LAST_BASE_SHA to $CURRENT_BASE_SHA" >&2
-    COMPARE_RANGE_OK="false"
-  elif [[ -n "$CURRENT_HEAD_SHA" ]]; then
-    if git merge-base --is-ancestor "$LAST_HEAD_SHA" "$CURRENT_HEAD_SHA" >/dev/null 2>&1; then
-      PREV_HEAD_IS_ANCESTOR="true"
-    else
-      echo "Review scope fallback: previous head $LAST_HEAD_SHA is not an ancestor of current head $CURRENT_HEAD_SHA (possible force-push/rebase)" >&2
-      PREV_HEAD_IS_ANCESTOR="false"
-    fi
-    if platform_compare "$REPO" "${LAST_HEAD_SHA}...${CURRENT_HEAD_SHA}" >/dev/null 2>&1; then
-      COMPARE_RANGE_OK="true"
-    else
-      echo "Review scope fallback: compare API failed for ${LAST_HEAD_SHA}...${CURRENT_HEAD_SHA}" >&2
-      COMPARE_RANGE_OK="false"
-    fi
-  else
-    echo "Review scope fallback: current head SHA unavailable; range cannot be validated" >&2
-    COMPARE_RANGE_OK="false"
-  fi
-fi
-
-if [[ -n "$PREV_HEAD_IS_ANCESTOR" ]]; then
-  export PREVIOUS_HEAD_IS_ANCESTOR="$PREV_HEAD_IS_ANCESTOR"
-else
-  unset PREVIOUS_HEAD_IS_ANCESTOR 2>/dev/null || true
-fi
-if [[ -n "$COMPARE_RANGE_OK" ]]; then
-  export COMPARE_RANGE_OK="$COMPARE_RANGE_OK"
-else
-  unset COMPARE_RANGE_OK 2>/dev/null || true
-fi
-export PREVIOUS_HEAD_SHA="$LAST_HEAD_SHA"
-export PREVIOUS_BASE_SHA="$LAST_BASE_SHA"
-export PREVIOUS_REVIEW_RESULT="$LAST_REVIEW_RESULT"
-# #544: the previous review flagged carried findings it could not assess from
-# its delta; precheck.py resolves full scope for this run (rule 4a).
-export PREVIOUS_NEEDS_FULL_REVIEW="$LAST_NEEDS_FULL_REVIEW"
-
-# ── precheck call #2: scope / baseline with validation verdicts ───────
-python3 -m pr_reviewer.precheck > precheck-result.json
-
-should_review_decision="$(jq -r '.should_review // false' precheck-result.json)"
-skip_reason="$(jq -r '.skip_reason // ""' precheck-result.json)"
-effective_review_scope="$(jq -r '.effective_review_scope // ""' precheck-result.json)"
-previous_head_sha="$(jq -r '.previous_head_sha // ""' precheck-result.json)"
-baseline_clean="$(jq -r '.baseline_clean // false' precheck-result.json)"
-diff_fingerprint="$(jq -r '.broad_fingerprint // ""' precheck-result.json)"
-
-# Sanity: if Python decided not to review, scope/baseline are not relevant.
-if [[ "$should_review_decision" != "true" ]]; then
-  effective_review_scope="full"
-  previous_head_sha=""
-  baseline_clean="false"
-fi
-
 # ── Output results ────────────────────────────────────────────────────
 {
-  echo "effective_review_scope=$effective_review_scope"
-  echo "previous_head_sha=$previous_head_sha"
-  echo "baseline_clean=$baseline_clean"
+  echo "should_review=true"
+  echo "skip_reason=$skip_reason"
+  echo "diff_fingerprint=$diff_fingerprint"
   echo "head_sha=$CURRENT_HEAD_SHA"
   echo "base_sha=$CURRENT_BASE_SHA"
   echo "is_fork_pr=$IS_FORK_PR"
-  echo "diff_fingerprint=$diff_fingerprint"
-  echo "should_review=$should_review_decision"
-  echo "skip_reason=$skip_reason"
   echo "resolved_platform=$RESOLVED_PLATFORM"
   echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
 } >> "$OUTPUT_FILE"

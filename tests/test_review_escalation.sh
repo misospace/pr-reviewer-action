@@ -63,9 +63,13 @@ check_contains "input escalate_on_incomplete_required_checks" "$ACTION" "escalat
 check_contains "input escalate_on_fast_request_changes" "$ACTION" "escalate_on_fast_request_changes:"
 check_contains "input escalate_on_fast_low_confidence" "$ACTION" "escalate_on_fast_low_confidence:"
 check_contains "input escalate_on_tool_or_evidence_blockers" "$ACTION" "escalate_on_tool_or_evidence_blockers:"
-check_contains "input escalate_on_dirty_baseline" "$ACTION" "escalate_on_dirty_baseline:"
-check_contains "review step receives BASELINE_CLEAN" "$ACTION" "BASELINE_CLEAN: \${{ steps.precheck.outputs.baseline_clean || 'false' }}"
-check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
+# v3 (#615): the dirty-baseline escalation input and its wiring are gone.
+check "input escalate_on_dirty_baseline removed" \
+  "$(printf '%s' "$ACTION" | grep -c 'escalate_on_dirty_baseline:' || true)" "0"
+check "review step no longer receives BASELINE_CLEAN" \
+  "$(printf '%s' "$ACTION" | grep -c 'BASELINE_CLEAN:' || true)" "0"
+check "run_review no longer wires dirty_baseline into should_escalate" \
+  "$(printf '%s' "$SRC" | grep -c 'dirty_baseline=' || true)" "0"
 check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
 check "publish step receives ESCALATION_REASON" \
   "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"

@@ -362,7 +362,7 @@ check "should_review=true when only an issue comment matches (review_verdict)" "
 
 # ── Test 13: skip path short-circuits the PR-object fetch ─────────────
 echo ""
-echo "=== Test 13: should_review=false short-circuits scope resolution ==="
+echo "=== Test 13: should_review=false short-circuits the PR-object fetch ==="
 rm -f /tmp/testfp_reviews.json
 set_empty_comments
 OUTPUT_FP_SC="$(run_precheck)"
@@ -375,7 +375,27 @@ RESULT="$(run_precheck)"
 check "should_review=false on matching fingerprint" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
 PULLS_FETCHES="$(grep -c 'api repos/test/repo/pulls/42$' /tmp/testfp_gh_calls.log || true)"
 check "PR object is not fetched when skipping" "$PULLS_FETCHES" "0"
-check "skip path still emits scope output" "$(echo "$RESULT" | grep -c '^effective_review_scope=')" "1"
+# v3 (#615): the scope-selection seam is gone — the skip path emits none of
+# the removed scope/baseline outputs.
+check "skip path emits no scope/baseline outputs" \
+  "$(echo "$RESULT" | grep -cE '^(effective_review_scope|previous_head_sha|baseline_clean)=')" "0"
+
+# ── Test 13b: prior-head ancestry is never consulted (#615) ───────────
+# An OLD-shape marker whose recorded head is not an ancestor of the current
+# head (a force-push/rebase shape) used to trigger a "Review scope fallback".
+# v3 removed that gate entirely: the fingerprint rule alone decides, so the
+# matching diff still skips with no scope-fallback diagnostic and no error.
+echo ""
+echo "=== Test 13b: non-ancestor previous head does not affect the skip ==="
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"deadbeef\",\"base_sha\":\"cafe0000\",\"review_scope\":\"incremental\",\"previous_head_sha\":\"0000000000000000000000000000000000000000\",\"review_result\":\"clean\"} -->
+<!-- ai-pr-review-fingerprint:${BROAD_FP_SC} -->
+APPROVE"
+: > /tmp/testfp_gh_calls.log
+RESULT="$(run_precheck)"
+check "should_review=false (fingerprint still skips)" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "false"
+check "no scope-fallback diagnostic for non-ancestor head" \
+  "$(echo "$RESULT" | grep -c 'Review scope fallback')" "0"
 
 # ── Test 14: review path emits PR facts and reusable files ───────────
 echo ""

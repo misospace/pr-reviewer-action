@@ -24,7 +24,7 @@ The action gathers PR metadata, diff context, linked issue context from PR-closi
 - 🧭 **Deterministic PR classification** — rule-based risk flags and required checklists keep small models focused and honest
 - ⚡ **Fast/smart model routing** — boring PRs go to a cheap model, scary ones escalate to a smarter one automatically
 - 🔍 **Structured findings** — severity-tagged findings, optional line-anchored inline comments, and a severity-gated verdict policy
-- 💸 **Token-saving by design** — unchanged-diff skip, incremental re-reviews, and carry-forward of unresolved findings
+- 💸 **Token-saving by design** — unchanged-diff skip (zero model calls), full re-reviews only when something changed, and carry-forward of unresolved findings
 - 🛡️ **Safe by default** — approvals off, fork enrichment off, read-only tool allowlists, secret redaction, link sanitization
 - 🧰 **Extensible** — repo-defined evidence providers, a bounded read-only tool harness, repo-local rules (`AGENTS.md`/`CLAUDE.md`) and prompt overrides
 
@@ -71,7 +71,7 @@ jobs:
 - [Usage recipes](#-usage-recipes)
 - [Publishing & verdicts](#-publishing--verdicts)
 - [Routing & escalation](#-routing--escalation)
-- [Token-saving with incremental reviews](#-token-saving-with-incremental-reviews)
+- [Token-saving with the unchanged-diff skip](#-token-saving-with-the-unchanged-diff-skip)
 - [Local model troubleshooting](#-local-model-troubleshooting)
 - [Notes](#-notes)
 - [Validation](#-validation)
@@ -100,7 +100,7 @@ What it supports:
 | ✅ Evidence providers for repo-specific checks | ✅ Read-only tool harness (single-round or iterative planning) |
 | ✅ Managed PR comment publishing | ✅ Automatic skip when the effective PR diff is unchanged |
 | ✅ Linked issue ingestion (`Fixes #123`, `Closes owner/repo#456`) | ✅ Repo-provided rules via `CLAUDE.md`, `AGENTS.md`, or a custom file |
-| ✅ Upstream link sanitizer for published reviews | ✅ Incremental re-reviews with carried-forward findings |
+| ✅ Upstream link sanitizer for published reviews | ✅ Re-reviews with carried-forward findings |
 
 ## 🖥️ Platform support
 
@@ -119,7 +119,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x). Set `platform: auto` (de
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST) |
 | Evidence providers | ✅ Full | ✅ Full |
 | Tool harness | ✅ Full | ✅ Full |
-| Incremental reviews + carry-forward | ✅ Full | ✅ Full |
+| Re-reviews + carry-forward | ✅ Full | ✅ Full |
 | Fast/smart model routing | ✅ Full | ✅ Full |
 
 > **Note:** On Forgejo, features requiring GitHub's GraphQL API (thread resolution, review minimization, thread follow-up replies) are skipped with a clear log line. The core review pipeline and all REST-based features work fully.
@@ -171,7 +171,7 @@ The result is exposed as the `required_checks` output (`complete` / `incomplete`
 
 ### 📒 Requirement ledger & coverage
 
-When the linked issues, the PR description, or the repository standards file state explicit requirements — acceptance-criteria bullets, `MUST`/`SHALL` sentences, or ordering invariants — the action extracts them into a bounded, deterministic **requirement ledger** (`pr_reviewer/requirement_ledger.py`) with content-derived ids and per-source provenance, and presents it to the final reviewer as an **Explicit Requirement Ledger** corpus section — reserved from the corpus budget on both full and incremental reviews (the same reservation that gates the reviewer guidance, so the guidance is never enabled without the section actually reaching the model). The reviewer must then report, for every listed requirement, a `requirement_coverage` entry of `satisfied` / `violated` / `unknown` backed by concrete evidence (`file`, `test`, `tool`, `ci`, or `diff`). Claims are validated deterministically against the ledger (`pr_reviewer/requirement_coverage.py`) into an internal `requirement-coverage.json` artifact: a claim without concrete evidence — or an invariant "satisfied" on a source-code glance alone, without observable test/tool/CI evidence — is downgraded to `unknown`, and `unknown` is never promoted. This is a completeness signal for review-quality tracking, not a verdict: it never changes the outcome by itself, and PRs whose inputs carry no explicit normative text see the existing behavior unchanged.
+When the linked issues, the PR description, or the repository standards file state explicit requirements — acceptance-criteria bullets, `MUST`/`SHALL` sentences, or ordering invariants — the action extracts them into a bounded, deterministic **requirement ledger** (`pr_reviewer/requirement_ledger.py`) with content-derived ids and per-source provenance, and presents it to the final reviewer as an **Explicit Requirement Ledger** corpus section — reserved from the corpus budget on every review (the same reservation that gates the reviewer guidance, so the guidance is never enabled without the section actually reaching the model). The reviewer must then report, for every listed requirement, a `requirement_coverage` entry of `satisfied` / `violated` / `unknown` backed by concrete evidence (`file`, `test`, `tool`, `ci`, or `diff`). Claims are validated deterministically against the ledger (`pr_reviewer/requirement_coverage.py`) into an internal `requirement-coverage.json` artifact: a claim without concrete evidence — or an invariant "satisfied" on a source-code glance alone, without observable test/tool/CI evidence — is downgraded to `unknown`, and `unknown` is never promoted. This is a completeness signal for review-quality tracking, not a verdict: it never changes the outcome by itself, and PRs whose inputs carry no explicit normative text see the existing behavior unchanged.
 
 ### 🔬 Deep review specialist leads
 
@@ -270,7 +270,6 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews: a stub review (below ~80 chars) or substantive Unknowns content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation; concise confident reviews are not escalated, regardless of diff size (`auto` mode) | No | `true` |
 | `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
 | `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
-| `escalate_on_dirty_baseline` | Escalate incremental reviews whose baseline review found issues (`auto` mode) | No | `true` |
 
 </details>
 
@@ -373,7 +372,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `tool_loop_wall_clock_sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `120` |
 | `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
 | `tool_loop_summarize_max_tokens` | Maximum completion tokens for each result-summarization call when `tool_loop_summarize` is enabled | No | `512` |
-| `tool_evidence_memory` | Carry the evidence a `native_loop` review gathers across incremental reviews of the same PR: a compact digest of what it read/fetched is stored in the metadata marker and reused by the next incremental review (re-verifying only what the delta touched) instead of re-gathering. On by default; `false` to disable. No effect on full reviews or non-native modes | No | `true` |
+| `tool_evidence_memory` | Carry the evidence a `tool_mode: native_loop` review gathers across reviews of the same PR: a compact digest of what it read/fetched is stored in the metadata marker and reused by the next review (re-verifying only what changed) instead of re-gathering. On by default; `false` to disable. No effect on non-native modes | No | `true` |
 | `tool_turn_timeout_sec` | Timeout in seconds for each model turn of the `tool_mode=native_loop` exchange | No | `60` |
 | `tool_corpus_max_bytes` | Maximum corpus bytes passed into the `native_loop` conversation's first turn | No | `50000` |
 | `tool_max_tokens_per_turn` | Maximum completion tokens for each model turn of the `tool_mode=native_loop` exchange | No | `400` |
@@ -409,11 +408,10 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 </details>
 
 <details>
-<summary><b>Review scope & CI gating</b> — incremental reviews, diff skip, waiting for CI</summary>
+<summary><b>Review behavior & CI gating</b> — diff skip, forced re-review, waiting for CI</summary>
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `review_scope` | Controls whether the action reviews the full PR or only changes since the last managed review. Accepted values: `auto` (default, full on first run, incremental on later safe updates), `full` (always full review), `incremental` (delta review, falls back to full if prior metadata unavailable) | No | `auto` |
 | `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (thread resolution, review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
 | `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
 | `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
@@ -421,7 +419,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `forgejo_authorized_integration_audience` | Audience identifier for the Forgejo Authorized Integration (the `aud` JWT claim). Not secret — safe to commit to public code. Required when `forgejo_auth_method` is `authorized_integration`; ignored when it is `token`. | No | `""` |
 | `forgejo_skip_permission_preflight` | If `true`, allow the review to proceed when the Forgejo precheck cannot read a recognizable permission from the server response (the token may well be fine; the server just didn't expose the field). Distinct from granting write access — only suppresses the unknown-payload failure with a warning. Enable only after verifying that the token can actually publish reviews, otherwise the model output will be lost. | No | `false` |
 | `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
-| `force_review` | Bypass the diff-unchanged guard and run a full PR review even when the fingerprint matches. Every forced review uses full scope to re-establish a clean baseline. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
+| `force_review` | Bypass the diff-unchanged guard and run a fresh review of the current PR even when the fingerprint matches. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
 | `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
 | `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
 | `ci_timeout_sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
@@ -435,7 +433,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Output | Description |
 |--------|-------------|
 | `verdict` | `approve` or `request_changes` |
-| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (a carried-forward blocker survived an incremental review) |
+| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (the previous verdict was carried forward on a diff-unchanged skip) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |
@@ -448,9 +446,6 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `diff_fingerprint` | Stable fingerprint of the current PR patch |
 | `ci_status_skipped` | `true` if CI status check was skipped, `false` if it completed |
 | `ci_status_final` | Final CI state (`success`/`failure`) when `ci_status_check` completed |
-| `effective_review_scope` | Effective scope used: `full` or `incremental` |
-| `previous_head_sha` | Previous head SHA when scope is `incremental` |
-| `baseline_clean` | Whether the full-review baseline was clean (for verdict safety) |
 
 ## 📖 Usage recipes
 
@@ -568,7 +563,7 @@ Rename the trigger label with the `rereview_label` input if `ai-review` collides
 
 For non-interactive callers, `force_review: "true"` bypasses the unchanged-diff guard and runs a full PR review. A `workflow_dispatch` or `repository_dispatch` event only does this when the consuming workflow explicitly maps its input or payload to the action's `force_review` input.
 
-Every forced review re-establishes a full baseline by reviewing the complete PR diff at full scope. This is necessary for verdict safety: with `publish_mode: review_verdict`, an incremental review can approve only on top of a trusted clean full baseline, so any PR that needs to clear a previous request_changes requires a full review.
+Every review is a full review of the current PR, so a forced re-review always sees the complete diff: with `publish_mode: review_verdict`, any PR that needs to clear a previous `request_changes` gets a fresh full review it can act on.
 
 ### 🧾 With evidence providers
 
@@ -829,7 +824,7 @@ Even when your workflow grants `pull-requests: write`, native PR review verdicts
 
 3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve_forks` is explicitly set to `"true"`.
 
-When a clean verdict is withheld by policy (`allow_approve: false`, a fork PR without `approve_forks`, or an incremental review without a clean baseline), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
+When a clean verdict is withheld by policy (`allow_approve: false`, or a fork PR without `approve_forks`), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
 
 ### 💬 Non-blocking review comments
 
@@ -912,7 +907,7 @@ With `inline_findings: "true"` and a native publish mode, findings that carry a 
 
 Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline_findings_max` (default 20).
 
-**Thread lifecycle on re-review.** Each inline comment carries a hidden content fingerprint of its finding. On a later incremental review, the action matches existing review threads by that fingerprint and keeps them alive instead of stacking duplicates:
+**Thread lifecycle on re-review.** Each inline comment carries a hidden content fingerprint of its finding. On a later re-review, the action matches existing review threads by that fingerprint and keeps them alive instead of stacking duplicates:
 
 - A carried finding the model answered with `resolution: resolved` (the same fail-closed rule that drives the verdict) gets its thread **resolved** via the GraphQL `resolveReviewThread` mutation.
 - A carried finding that survives (`still_open`, `not_verifiable_from_delta`, or unanswered) gets a short **reply on its existing thread** ("Still open after this push…") instead of a fresh duplicate anchored comment. Replies are stamped with the head SHA, so a re-run on the same push never posts the same follow-up twice, and are capped by `inline_findings_max`.
@@ -967,38 +962,21 @@ In `auto` mode, a fast review can also be **escalated after the fact**: the acti
 - `escalate_on_fast_low_confidence` — the review is a **stub** (below ~80 chars, e.g. "LGTM.") or carries substantive "Unknowns or Needs Verification" content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation because the smart model cannot manufacture missing evidence. A concise but real review is trusted **regardless of diff size**: the review length is no longer scaled with the diff. Genuinely under-reviewed risky PRs are still caught by `request_changes`, substantive Unknowns, blockers, and risk-flag routing.
 - `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
 - `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
-- `escalate_on_dirty_baseline` — this is an incremental review and the previous review found issues; judging whether the delta resolves them is run on the smart model.
 
-Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip and incremental scope keep that bounded.
+Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
-## 💾 Token-saving with incremental reviews
+## 💾 Token-saving with the unchanged-diff skip
 
-When `review_scope: auto` (the default), the action performs a full PR review on the first run. On subsequent pushes to the same PR, it attempts an **incremental review** that only analyzes the delta since the last managed review. This can significantly reduce token usage for large PRs with multiple commits.
+Every review is a full review of the current PR — there is no incremental/delta mode. What keeps that cheap is the precheck: when the diff + config fingerprint matches the last managed review, the action skips the LLM call entirely and carries the prior verdict forward. It's on by default (`skip_if_diff_unchanged`), so a fresh full review is only ever paid for when something actually changed.
 
 Key behaviors:
 
-- **First run**: Full PR review (same as before).
-- **Later pushes**: Incremental review of only new changes.
-- **Fallback**: Automatically falls back to full review when incremental comparison is unsafe (force-push, rebase, base branch change, missing metadata, etc.).
-- **Verdict safety**: With `publish_mode: review_verdict`, approvals based on incremental reviews require a trusted clean full-review baseline. If the baseline is dirty, a forced re-review (the `ai-review` label) escalates to full scope to re-establish it — see [Forcing a re-review](#-forcing-a-re-review).
-- **Carried-forward findings (cumulative verdict)**: when a review requests changes, its findings are persisted in the managed metadata marker (`open_findings`). The next incremental review receives them as a high-priority corpus section and must answer each with a `resolution`: `resolved`, `still_open`, or `not_verifiable_from_delta`. Findings the model does not convincingly resolve survive into the new review's `findings` output, and a surviving blocker forces `request_changes` (`verdict_source: carry_forward`) — fixing one of three blockers cannot rubber-stamp the other two. The published review lists what this push resolved and what is still open, so the latest review always reflects total PR state (useful since superseded reviews are dismissed and hidden).
-- **Incremental insufficient → full review next push**: when a carried finding is answered `not_verifiable_from_delta`, the resolving change is outside the incremental diff, so re-running an incremental review cannot clear it. The review step flags this in the published body ("N carried finding(s) could not be evaluated from this delta; this review is incremental only — push to rebase or apply the re-review label for a full review") and a step-summary warning, and persists `needs_full_review` in the metadata marker. The next run's precheck then resolves **full scope** automatically — the same escape hatch the `ai-review` label provides manually, without the label.
-- **Cross-run evidence memory (`tool_mode: native_loop`)**: a native_loop review gathers evidence with read-only tools (reading configs, fetching support matrices). A compact digest of that evidence is persisted in the same metadata marker (`evidence_digest`, tagged with the head SHA it was gathered at). The next incremental review receives it as a corpus section and reuses it — re-verifying only what the delta touched — instead of re-running the same reads and fetches. On by default (`tool_evidence_memory`); the framing is fail-safe (prior evidence is context, not ground truth, and may be stale).
-- **Header**: incremental reviews are titled `# AI Automated Review (incremental)`.
-
-You can force specific behavior:
-
-```yaml
-# Always do full reviews (original behavior)
-- uses: misospace/pr-reviewer-action@vX.Y.Z
-  with:
-    review_scope: full
-
-# Always attempt incremental (falls back safely)
-- uses: misospace/pr-reviewer-action@vX.Y.Z
-  with:
-    review_scope: incremental
-```
+- **Changed diff (or config) → fresh full review**: any new push, force-push, rebase, or config change gets a complete review of the current PR. The repo-aware context added in v2.4.0 (repository map, related code, PR thread context) keeps that full review well-informed without you doing anything.
+- **Unchanged diff → skip, zero model calls**: the prior verdict is carried forward (`verdict_source: carry_forward`) and the run ends without spending a single token on a review.
+- **Forced re-review**: add the `ai-review` label (or set `force_review: "true"`) to run a fresh full review even when the fingerprint matches — see [Forcing a re-review](#-forcing-a-re-review).
+- **Carried-forward findings (transitional)**: when a review requests changes, its findings are persisted in the managed metadata marker (`open_findings`), and a re-review may carry them forward as a high-priority corpus section to answer each with a `resolution`: `resolved`, `still_open`, or `not_verifiable_from_delta`; a surviving blocker forces `request_changes` (`verdict_source: carry_forward`). These cross-run carry-forward mechanisms are legacy from the incremental-review era and are being retired across v3 — prefer the unchanged-diff skip and forced re-review; don't build new dependencies on carry-forward.
+- **Carried finding that can't be assessed → fresh review next run**: when a carried finding can't be evaluated from the current diff, the review persists `needs_full_review` in the metadata marker, which defeats the diff-unchanged skip — the next run gets a fresh full review that can actually clear the finding. The same escape hatch the `ai-review` label provides, without the label.
+- **Cross-run evidence memory (`tool_mode: native_loop`)**: a native_loop review gathers evidence with read-only tools (reading configs, fetching support matrices). A compact digest of that evidence is persisted in the same metadata marker (`evidence_digest`, tagged with the head SHA it was gathered at). The next review receives it as a corpus section and reuses it — re-verifying only what changed — instead of re-running the same reads and fetches. On by default (`tool_evidence_memory`); the framing is fail-safe (prior evidence is context, not ground truth, and may be stale).
 
 ## 🔧 Local model troubleshooting
 
@@ -1172,6 +1150,15 @@ Releases are cut when features or fixes are ready (no fixed cadence). Tags are `
 To publish, run **Actions → Manual Release → Run workflow** with the target version. The workflow tags protected `main`, advances the matching floating major tag (`v1`, `v2`, and so on; stable releases only), and creates the GitHub release.
 
 To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-reviewer-action/releases) or enable Renovate to track the `misospace/pr-reviewer-action` dependency.
+
+### 🚚 v3 breaking changes
+
+v3 removes the review-scope selection seam. If your workflow sets any of these, delete the line — there is no replacement to swap in:
+
+- inputs `review_scope` and `escalate_on_dirty_baseline`
+- outputs `effective_review_scope`, `previous_head_sha`, `baseline_clean`
+
+Every review is now a full review of the current PR. Unchanged diffs (diff + config fingerprint matching the last managed review) still skip with zero model calls and carry the prior verdict forward, and a forced re-review — the `ai-review` label or `force_review: "true"` — still runs a fresh full review. Workflows that set none of these are unaffected.
 
 ## 🔐 Security
 

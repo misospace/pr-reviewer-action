@@ -32,7 +32,6 @@ def parse_metadata(body: str) -> Optional[dict]:
 
 
 def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
-                 review_scope: str = "full", previous_head_sha: str = "",
                  review_result: str = "clean",
                  required_checks: str | None = None,
                  review_route: str | None = None,
@@ -45,11 +44,8 @@ def build_marker(version: int = 1, head_sha: str = "", base_sha: str = "",
         "version": version,
         "head_sha": head_sha,
         "base_sha": base_sha,
-        "review_scope": review_scope,
         "review_result": review_result,
     }
-    if previous_head_sha:
-        data["previous_head_sha"] = previous_head_sha
     if required_checks is not None and required_checks not in ("", "none"):
         data["required_checks"] = required_checks
     if review_route is not None and review_route != "legacy":
