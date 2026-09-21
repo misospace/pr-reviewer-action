@@ -483,6 +483,42 @@ check_contains "Tool Harness Findings trigger is named in the omit directive" \
 check_contains "explicit '- findings: []' filler is forbidden" \
   "$BASE" 'no "- findings: []" filler'
 
+echo "=== the bundled default carries no carried-findings protocol (#617) ==="
+# #617 deleted the carried-findings subsystem: the corpus no longer renders an
+# "Open Findings From the Previous Review" section, response_parser no longer
+# preserves finding id/resolution, and needs_full_review is gone as runtime
+# state. The bundled prompt must not instruct the model to participate in that
+# protocol — neither the section trigger nor the resolution enum, including
+# the legacy delta-verdict spelling and the "delta diff" framing.
+LEGACY_NEEDLES=(
+  "Open Findings From the Previous Review"
+  "still_open"
+  "not_verifiable_from_delta"
+)
+for needle in "${LEGACY_NEEDLES[@]}"; do
+  check_not_contains "bundled default: no legacy carried-findings text ($needle)" \
+    "$BASE" "$needle"
+done
+# No fragment reintroduces the protocol either (substitution could re-add it).
+for frag in "$SCRIPT_DIR"/prompt_fragments/*.txt; do
+  FRAG_CONTENT="$(<"$frag")"
+  for needle in "${LEGACY_NEEDLES[@]}"; do
+    check_not_contains "$(basename "$frag"): no legacy carried-findings text ($needle)" \
+      "$FRAG_CONTENT" "$needle"
+  done
+done
+# And an assembled prompt (concise dial on, so the last placeholder is live)
+# ends clean: substituted fragments cannot revive the deleted protocol.
+OUT_LEGACY="$( cd "$WORK"
+  printf '{"pr_kind":"app_code"}' > classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1 REVIEW_VERBOSITY=concise
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+for needle in "${LEGACY_NEEDLES[@]}"; do
+  check_not_contains "assembled prompt: no legacy carried-findings text ($needle)" \
+    "$OUT_LEGACY" "$needle"
+done
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
