@@ -142,15 +142,12 @@ run_publish() {
     VERDICT="${VERDICT:-approve}" \
     REVIEW_MARKDOWN="## Review body" \
     ANALYSIS_ENGINE="openai/gpt-test" \
-    EFFECTIVE_SCOPE="${EFFECTIVE_SCOPE:-full}" \
     BASE_SHA=base123 \
-    PREVIOUS_HEAD_SHA="" \
     COMMENT_MARKER="<!-- ai-pr-reviewer -->" \
     PUBLISH_MODE="$PUBLISH_MODE" \
     ALLOW_APPROVE="${ALLOW_APPROVE:-false}" \
     APPROVE_FORKS="${APPROVE_FORKS:-false}" \
     IS_FORK_PR=false \
-    BASELINE_CLEAN=false \
     INLINE_FINDINGS="${INLINE_FINDINGS:-false}" \
     INLINE_FINDINGS_MAX=20 \
     FINDINGS="${FINDINGS:-}" \

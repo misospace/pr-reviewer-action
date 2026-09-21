@@ -847,7 +847,7 @@ class TestFetchIssue(unittest.TestCase):
 
 
 class TestCompareCommits(unittest.TestCase):
-    """Forgejo compare support backs fail-closed incremental scope checks."""
+    """Forgejo compare support for linked-source version-diff enrichment."""
 
     _COMPARE = {
         "html_url": "https://forgejo.example.com/misospace/pr-reviewer-action/compare/abc...def",

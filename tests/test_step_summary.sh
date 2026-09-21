@@ -53,7 +53,7 @@ echo '{"executed_request_count":2,"tool_calls":[{"tool":"read_file","status":"ok
 printf 'd%.0s' $(seq 1 100) > pr.diff
 printf 'c%.0s' $(seq 1 50) > review-corpus.md
 MAX_DIFF=10; MAX_CORPUS=1000
-ANALYSIS_ENGINE="qwen@local (openai)"; EFFECTIVE_SCOPE="full"
+ANALYSIS_ENGINE="qwen@local (openai)"
 CONTEXT_LIMIT_MODE="normal"; MODEL_CONTEXT_TOKENS=""; AI_FALLBACK_MODEL=""
 
 echo "=== Test: no-op when GITHUB_STEP_SUMMARY unset ==="

@@ -99,7 +99,7 @@ echo ""
 echo "=== Marker carries escalation metadata ==="
 # shellcheck source=/dev/null
 source "$ROOT_DIR/scripts/publish_helpers.sh"
-MARKER="$(HEAD_SHA=h EFFECTIVE_SCOPE=full REVIEW_RESULT=issues REQUIRED_CHECKS=incomplete \
+MARKER="$(HEAD_SHA=h REVIEW_RESULT=issues REQUIRED_CHECKS=incomplete \
   REVIEW_ROUTE=escalated ESCALATION_REASON="fast_request_changes,fast_low_confidence" \
   build_metadata_marker "b" "")"
 check_contains "marker carries review_route=escalated" "$MARKER" '"review_route":"escalated"'

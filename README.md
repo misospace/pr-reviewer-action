@@ -1047,7 +1047,7 @@ on_model_failure: notice   # visible explanation instead of a long red check
 
 - **Reserved comment markers**: The managed PR comment uses HTML comment markers for internal metadata. These are reserved and must not appear in model-generated review markdown:
   - `<!-- ai-pr-review-fingerprint:<value> -->` — stable patch + config fingerprint used by the precheck to skip unchanged diffs.
-  - `<!-- ai-pr-review-sha:<sha> -->` — PR head SHA used to detect out-of-date reviews.
+  - `<!-- ai-pr-review-sha:<sha> -->` — PR head SHA the review was published against, recorded in the managed comment for traceability (the precheck skip decision keys solely on the fingerprint marker).
 
   The action strips any matching markers from model output before publishing (see `scripts/strip_metadata_markers.py`). The precheck parser reads only the **first** occurrence of each marker for defense in depth.
 - `ai_api_format=openai` posts to `/chat/completions` and parses `choices[0].message.content`.

@@ -112,8 +112,7 @@ case "$(printf '%s' "$PUBLISH_MODE" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-# Extract the PR head SHA and broad fingerprint from the last published comment.
-last_pr_sha="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-sha:\([^>]*\) -->$/\1/p' | head -n 1)"
+# Extract the broad fingerprint from the last published comment.
 last_broad_fingerprint="$(printf '%s\n' "$last_comment_body" | sed -n 's/^<!-- ai-pr-review-fingerprint:\([^>]*\) -->$/\1/p' | head -n 1)"
 
 if [[ -n "$last_broad_fingerprint" ]]; then

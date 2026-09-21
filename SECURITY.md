@@ -34,10 +34,10 @@ This action reviews pull requests with an LLM and optional auxiliary tooling. Th
 
 ## Reserved Metadata Markers
 
-The managed PR comment uses HTML comment markers to embed internal metadata for diff-skip and staleness detection:
+The managed PR comment uses HTML comment markers to embed internal metadata for diff-skip and publication traceability:
 
 - `<!-- ai-pr-review-fingerprint:<value> -->` — stable patch + config fingerprint used by the precheck to skip unchanged diffs.
-- `<!-- ai-pr-review-sha:<sha> -->` — PR head SHA used to detect out-of-date reviews.
+- `<!-- ai-pr-review-sha:<sha> -->` — PR head SHA the review was published against (traceability; injection-stripping keeps it trustworthy).
 
 ### Threat
 

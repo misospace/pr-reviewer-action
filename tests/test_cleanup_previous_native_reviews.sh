@@ -148,7 +148,7 @@ check_contains "publish step wires COMMENT_MARKER in env" \
 
 # Every published body must emit the marker preamble (sticky COMMENT_MARKER +
 # METADATA_MARKER + head-sha + fingerprint) so the precheck can find prior
-# state; otherwise skip-if-unchanged / incremental scope silently never trigger
+# state; otherwise skip-if-unchanged silently never triggers
 # (regression guard). The preamble is emitted via emit_review_markers
 # (publish_helpers.sh); its exact content and ordering are asserted in
 # tests/test_emit_review_markers.sh.
