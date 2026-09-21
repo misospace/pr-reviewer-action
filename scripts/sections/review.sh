@@ -82,7 +82,7 @@ fi
 USER_MESSAGE="$(build_user_message classification.json)"
 if [[ "$CARRY_FORWARD_ACTIVE" == "true" ]]; then
   USER_MESSAGE="$USER_MESSAGE
-The corpus lists Open Findings From the Previous Review. Answer EVERY one: include a finding with the same id and a resolution of resolved, still_open, or not_verifiable_from_delta. Claim resolved only when the current PR demonstrably fixes it."
+The corpus lists Open Findings From the Previous Review. Answer EVERY one: include a finding with the same id and a resolution of resolved (the current PR demonstrably fixes it) or still_open. Unresolved carried findings stay open."
   log "Carry-forward active: $(jq 'length' previous-findings.json) open finding(s) from the previous review"
 fi
 
@@ -305,41 +305,16 @@ if [ -s requirement-ledger.json ]; then
     --output requirement-coverage.json 2>/dev/null || true
 fi
 
-# ── Incremental-insufficient escalation (#544) ───────────────────────
-# apply_carry_forward writes needs-full-review.json when a carried finding
-# was marked not_verifiable_from_delta: the resolving change is outside the
-# incremental diff, so re-running an incremental review cannot clear it.
-# This run stays incremental (the corpus was delta-only), but the flag is
-# persisted into the metadata marker by the publish step, so the NEXT run's
-# precheck resolves full scope (PREVIOUS_NEEDS_FULL_REVIEW) — the same
-# escape hatch the ai-review label provides manually.
+# The incremental-era "insufficient review" escalation (#544) is gone with
+# the incremental scope: current runs review the PR in full, so carry-forward
+# never raises needs_full_review — a carried finding the model cannot verify
+# as fixed simply stays open for the next review. The action contract still
+# declares the output, so emit it as a constant false; drop any stale
+# workspace flag file so a reused workspace cannot leak one in. Legacy
+# markers published before v3 full-only may still carry the flag, and the
+# precheck's reader for those (check_review_needed.sh) is unchanged.
 NEEDS_FULL_REVIEW="false"
-UNVERIFIABLE_COUNT="0"
-if [[ -s needs-full-review.json ]]; then
-  NEEDS_FULL_REVIEW="$(jq -r '.needs_full_review // false' needs-full-review.json 2>/dev/null || echo false)"
-  UNVERIFIABLE_COUNT="$(jq -r '.unverifiable // 0' needs-full-review.json 2>/dev/null || echo 0)"
-fi
-if [[ "$NEEDS_FULL_REVIEW" == "true" ]]; then
-  log "Incremental review insufficient: $UNVERIFIABLE_COUNT carried finding(s) could not be evaluated from this delta; the next run will be a full review"
-  # In-body section so the published review explains why it is incremental
-  # only and what clears the block. The text is static (no model/PR input),
-  # so it cannot carry prompt injection.
-  UNVERIFIABLE_COUNT="$UNVERIFIABLE_COUNT" python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-n = int(os.environ.get("UNVERIFIABLE_COUNT") or 0)
-data = json.loads(Path("ai-output.json").read_text(encoding="utf-8", errors="replace"))
-data["review_markdown"] = str(data.get("review_markdown") or "") + (
-    "\n\n## Incremental Review Insufficient\n\n"
-    f"{n} carried finding(s) could not be evaluated from this delta; this "
-    "review is incremental only — push to rebase or apply the re-review "
-    "label for a full review."
-)
-Path("ai-output.json").write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
-PY
-  echo "::warning title=AI review: incremental insufficient::$UNVERIFIABLE_COUNT carried finding(s) could not be evaluated from this delta; the next run will be a full review."
-fi
+rm -f needs-full-review.json
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
@@ -368,8 +343,8 @@ FD_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 } >> "$OUTPUT_FILE"
 
 # Cross-run evidence memory (#265): the native_loop's gathered-evidence digest,
-# carried into the metadata marker by the publish step so the next incremental
-# review reuses it. Empty for non-native modes / when no evidence was gathered.
+# carried into the metadata marker by the publish step so the next review
+# reuses it. Empty for non-native modes / when no evidence was gathered.
 # Same random-delimiter defense — the digest is tool/model-influenced text.
 ED_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 {
@@ -393,8 +368,10 @@ jq -r '.review_markdown' ai-output.json > review-body.md
 echo "$(jq -r '.verdict' ai-output.json)" > verdict.txt
 echo "$ANALYSIS_ENGINE" > analysis_engine.txt
 
-# Incremental-insufficient escalation (#544): the publish step persists this
-# into the metadata marker so the next run is a fresh full review.
+# Action-contract output: constant false under v3 full-only reviews. Kept
+# because action.yml declares it and the publish step consumes it; the
+# publish step persists the flag into the metadata marker only when true,
+# which current runs no longer produce.
 echo "needs_full_review=$NEEDS_FULL_REVIEW" >> "$OUTPUT_FILE"
 
 # Cache hit ratio: per-review prompt-cache effectiveness signal from the
@@ -471,9 +448,6 @@ write_step_summary() {
       else
         echo "| Deep review | ${deep_review_leads} specialist lead(s) (advisory only) |"
       fi
-    fi
-    if [[ "${NEEDS_FULL_REVIEW:-false}" == "true" ]]; then
-      echo "| Incremental insufficient | ${UNVERIFIABLE_COUNT:-0} carried finding(s) not evaluable from delta — next run full |"
     fi
     echo "| Budget | ${budget_desc} |"
     echo "| Diff bytes | ${diff_bytes} (truncated: ${diff_trunc}) |"

@@ -134,16 +134,18 @@ check_not_contains "angle brackets stripped from digest by precheck" "$HOSTILE_D
 check_contains "real fact preserved through sanitization" "$HOSTILE_DIGEST" "v1.13.4"
 
 echo ""
-echo "=== Incremental-insufficient escalation (#544): marker persists → precheck extracts → review reads ==="
-# Publish: the review step's needs_full_review output is persisted in the marker.
+echo "=== Legacy needs_full_review flag: marker persists → precheck extracts; current runs never create it ==="
+# Publish: markers published before v3 full-only may carry the flag; the
+# publish helper still persists it so the precheck's compatibility path can
+# read it on the next run.
 MARKER_NFR="$(HEAD_SHA=h REVIEW_RESULT=issues NEEDS_FULL_REVIEW=true build_metadata_marker "b")"
 check_contains "marker carries needs_full_review" "$MARKER_NFR" '"needs_full_review":true'
 
 MARKER_NFR_OFF="$(HEAD_SHA=h REVIEW_RESULT=issues NEEDS_FULL_REVIEW=false build_metadata_marker "b")"
 check_not_contains "flag omitted when false" "$MARKER_NFR_OFF" "needs_full_review"
 
-# Precheck: extraction surfaces LAST_NEEDS_FULL_REVIEW (#544) so the next run's
-# diff-unchanged guard is defeated and the run is a fresh full review.
+# Precheck: extraction of an existing marker flag still surfaces
+# LAST_NEEDS_FULL_REVIEW, defeating the diff-unchanged guard (#544 compat).
 BODY_NFR="$(printf '<!-- ai-pr-reviewer -->\n%s\n# AI Automated Review\nbody' "$MARKER_NFR")"
 extract_review_metadata "$BODY_NFR"
 check "precheck extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
@@ -156,20 +158,27 @@ extract_review_metadata "$BODY_OLD_NFR"
 check "old-shape marker still extracts needs_full_review=true" "$LAST_NEEDS_FULL_REVIEW" "true"
 check "old-shape marker still extracts its open finding" "$(jq 'length' previous-findings.json)" "1"
 
-# Review side: the helper the bash reviewer step imports reads the flag file.
-NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "
-from pr_reviewer.carry_forward import read_needs_full_review
-import json
-print(json.dumps(read_needs_full_review('needs-full-review.json')))
-")"
-check "missing flag file reads as not-needed" "$NFR_READ" '{"needs_full_review": false, "unverifiable": 0, "ids": []}'
+# Review side (v3 full-only): a current run never creates the flag. A stale
+# flag file (simulating a reused workspace) is cleared by
+# apply_carry_forward, and a carried finding marked
+# not_verifiable_from_delta stays open without raising the flag.
 printf '{"needs_full_review": true, "unverifiable": 2, "ids": ["P1", "P2"]}\n' > needs-full-review.json
-NFR_READ="$(PYTHONPATH="$ROOT_DIR" python3 -c "
-from pr_reviewer.carry_forward import read_needs_full_review
-import json
-print(json.dumps(read_needs_full_review('needs-full-review.json')))
+cat > ai-output.json <<'JSON'
+{"verdict": "approve", "review_markdown": "body", "findings": [{"id": "P1", "message": "still open nit", "resolution": "not_verifiable_from_delta"}]}
+JSON
+NFR_RESULT="$(PYTHONPATH="$ROOT_DIR" python3 -c "
+import json, os
+from pr_reviewer.carry_forward import apply_carry_forward
+summary = apply_carry_forward(workspace_root=os.getcwd())
+print(json.dumps({
+    'needs_full_review': summary['needs_full_review'],
+    'unverifiable': summary['unverifiable'],
+    'open': summary['open'],
+    'flag_exists': os.path.exists('needs-full-review.json'),
+}))
 ")"
-check "flag file reads as needed" "$NFR_READ" '{"needs_full_review": true, "unverifiable": 2, "ids": ["P1", "P2"]}'
+check "current run never raises the flag and clears the stale one" "$NFR_RESULT" \
+  '{"needs_full_review": false, "unverifiable": 1, "open": 1, "flag_exists": false}'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

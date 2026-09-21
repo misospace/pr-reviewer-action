@@ -129,9 +129,12 @@ class TestRenderEvidenceMemorySection:
         assert "Evidence Gathered by the Previous Review" in out
         assert "abcdef012345" in out  # head_sha[:12]
         assert "- read_file → v1.13.4" in out
-        # Fail-safe framing: must re-verify the delta, untrusted data.
+        # Fail-safe framing: must re-verify against current PR state, untrusted data.
         assert "re-verify" in out.lower()
         assert "untrusted data" in out.lower()
+        # Full-PR-state framing: no incremental-delta wording remains.
+        assert "incremental" not in out.lower()
+        assert "delta" not in out.lower()
 
     def test_no_sha_omits_gathered_at(self):
         out = render_evidence_memory_section({"digest": "fact", "head_sha": ""})

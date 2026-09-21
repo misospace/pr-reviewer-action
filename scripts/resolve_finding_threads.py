@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Manage inline finding threads across incremental reviews (#208, #209).
+"""Manage inline finding threads across repeated reviews (#208, #209).
 
 A previous run posted line-anchored inline comments carrying a content
-fingerprint marker (see build_review_comments.finding_marker). On an
-incremental review this script matches the PR's open review threads by that
+fingerprint marker (see build_review_comments.finding_marker). On a later
+review this script matches the PR's open review threads by that
 marker and, for each carried finding:
 
 - resolution "resolved" (carry-forward's fail-closed rule): the thread is
@@ -200,7 +200,7 @@ def threads_to_resolve(thread_nodes, fingerprints: set) -> list:
 def followup_body(item: dict, head_sha: str) -> str:
     """Reply text for a carried finding that survived this review."""
     if item.get("resolution") == "not_verifiable_from_delta":
-        text = "Not verifiable from this push's delta; carried forward as open."
+        text = "Not verified by this review; carried forward as open."
     else:
         text = "Still open after this push; carried forward."
     if head_sha:

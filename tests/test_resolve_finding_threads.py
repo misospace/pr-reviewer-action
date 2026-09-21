@@ -145,7 +145,9 @@ class TestFollowupBody:
 
     def test_not_verifiable(self):
         body = followup_body({"resolution": "not_verifiable_from_delta"}, "")
-        assert "Not verifiable" in body
+        assert "Not verified" in body
+        assert "delta" not in body.lower()
+        assert "incremental" not in body.lower()
         assert FOLLOWUP_MARKER_PREFIX not in body
 
 

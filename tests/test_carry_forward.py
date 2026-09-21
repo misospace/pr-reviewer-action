@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pr_reviewer.carry_forward import (  # noqa: E402
     apply_carry_forward,
     load_carried_findings,
-    read_needs_full_review,
     render_carried_findings_section,
 )
 
@@ -78,6 +77,16 @@ class TestRenderSection:
         assert "[P1] (blocker/security) `auth.go:10` — token not validated" in section
         assert '"resolution"' in section
 
+    def test_full_pr_wording(self, tmp_path):
+        """v3 full-only: the corpus prompt covers the current PR in full and
+        offers only the meaningful resolved / still_open outcomes."""
+        path = _carried(tmp_path, [BLOCKER])
+        section = render_carried_findings_section(load_carried_findings(path))
+        assert "current PR" in section
+        # Incremental-era wording must not leak into the prompt.
+        assert "delta" not in section
+        assert "not_verifiable_from_delta" not in section
+
 
 class TestApplyCarryForward:
     def test_noop_without_carried_findings(self, tmp_path):
@@ -130,6 +139,10 @@ class TestApplyCarryForward:
         )
         summary = apply_carry_forward(carried, out)
         assert summary["open"] == 1
+        # Fail-closed: stays an open finding, and raises no escalation flag
+        # (v3 full-only: there is no delta to be unverifiable from).
+        assert summary["needs_full_review"] is False
+        assert not (tmp_path / "needs-full-review.json").exists()
         data = json.loads(open(out).read())
         assert data["verdict"] == "request_changes"
 
@@ -166,9 +179,8 @@ class TestApplyCarryForward:
             "open": 2,
             "dismissed": 0,
             "forced_request_changes": True,
-            # No finding was marked not_verifiable_from_delta, so an
-            # incremental re-review can still assess these. (#536)
             "unverifiable": 0,
+            # v3 full-only: the flag is never raised for current runs.
             "needs_full_review": False,
         }
         data = json.loads(open(out).read())
@@ -177,17 +189,19 @@ class TestApplyCarryForward:
         assert "P3" in merged_ids and "P2" in merged_ids
 
 
-class TestNeedsFullReviewPropagation:
-    """#544: the needs_full_review signal must reach the bash consumer.
-
-    The contract the reviewer step (scripts/sections/review.sh) and the
-    publish step (build_metadata_marker) rely on: apply_carry_forward
-    writes needs-full-review.json next to the output file when a carried
-    finding is marked not_verifiable_from_delta, and read_needs_full_review
-    is the helper the bash side imports to consume it.
+class TestNoEscalationFlag:
+    """v3 full-only: apply_carry_forward never produces the needs-full-review
+    flag for current runs. A carried finding marked
+    not_verifiable_from_delta fails closed as an open finding (a carried
+    blocker still forces request_changes) but creates no escalation
+    artifact, and a stale needs-full-review.json left in a reused workspace
+    by an older run is cleared on every run. The only remaining reader of
+    the flag is the precheck's legacy marker-compatibility path, which reads
+    the previously published marker — never a workspace artifact (see
+    tests/test_carry_forward_roundtrip.sh and tests/test_precheck.py).
     """
 
-    def test_unverifiable_writes_flag_file(self, tmp_path):
+    def test_not_verifiable_never_writes_flag_file(self, tmp_path):
         carried = _carried(tmp_path, [BLOCKER, MINOR])
         out = _output(
             tmp_path,
@@ -198,23 +212,18 @@ class TestNeedsFullReviewPropagation:
             ],
         )
         summary = apply_carry_forward(carried, out)
+        # Unverifiable is observability only; the flag never goes true.
         assert summary["unverifiable"] == 1
-        assert summary["needs_full_review"] is True
+        assert summary["needs_full_review"] is False
+        # Fail-closed: both findings stay open; the carried blocker blocks.
+        assert summary["open"] == 2
+        assert summary["forced_request_changes"] is True
+        assert not (tmp_path / "needs-full-review.json").exists()
+        data = json.loads(open(out).read())
+        assert data["verdict"] == "request_changes"
+        assert data["verdict_source"] == "carry_forward"
 
-        flag_path = tmp_path / "needs-full-review.json"
-        assert flag_path.exists()
-        flag = json.loads(flag_path.read_text(encoding="utf-8"))
-        assert flag["needs_full_review"] is True
-        assert flag["unverifiable"] == 1
-        assert flag["ids"] == ["P1"]
-
-        # The helper the bash side imports sees the same contract.
-        read = read_needs_full_review(str(flag_path))
-        assert read["needs_full_review"] is True
-        assert read["unverifiable"] == 1
-        assert read["ids"] == ["P1"]
-
-    def test_no_unverifiable_removes_stale_flag(self, tmp_path):
+    def test_stale_flag_cleared_on_carried_run(self, tmp_path):
         # A stale flag from an earlier run in the same workspace must not
         # leak into this one.
         (tmp_path / "needs-full-review.json").write_text(
@@ -230,26 +239,16 @@ class TestNeedsFullReviewPropagation:
         summary = apply_carry_forward(carried, out)
         assert summary["needs_full_review"] is False
         assert not (tmp_path / "needs-full-review.json").exists()
-        assert read_needs_full_review(str(tmp_path / "needs-full-review.json")) == {
-            "needs_full_review": False,
-            "unverifiable": 0,
-            "ids": [],
-        }
 
-    def test_no_carried_findings_no_flag(self, tmp_path):
+    def test_stale_flag_cleared_without_carried_findings(self, tmp_path):
+        (tmp_path / "needs-full-review.json").write_text(
+            json.dumps({"needs_full_review": True, "unverifiable": 1, "ids": ["P9"]}),
+            encoding="utf-8",
+        )
         out = _output(tmp_path, verdict="approve", findings=[])
         summary = apply_carry_forward(str(tmp_path / "absent.json"), out)
         assert summary["needs_full_review"] is False
         assert not (tmp_path / "needs-full-review.json").exists()
-
-    def test_reader_tolerates_missing_and_malformed(self, tmp_path):
-        empty = {"needs_full_review": False, "unverifiable": 0, "ids": []}
-        assert read_needs_full_review(str(tmp_path / "absent.json")) == empty
-        bad = tmp_path / "needs-full-review.json"
-        bad.write_text("{not json", encoding="utf-8")
-        assert read_needs_full_review(str(bad)) == empty
-        bad.write_text("[1, 2]", encoding="utf-8")
-        assert read_needs_full_review(str(bad)) == empty
 
 class TestDismissalPath:
     """End-to-end path: comment + previous-findings + previous-dismissals → summary."""

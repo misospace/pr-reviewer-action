@@ -77,6 +77,12 @@ check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" \
   "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
 check "baseline_clean public output remains removed" \
   "$(printf '%s' "$ACTION" | grep -c 'baseline_clean:' || true)" "0"
+check "review step always emits needs_full_review=false" \
+  "$(grep -c 'NEEDS_FULL_REVIEW="false"' "$RUN_REVIEW")" "1"
+for obsolete_text in 'Incremental Review Insufficient' 'this review is incremental' 'the next run will be a full review'; do
+  check "review step drops obsolete full-rerun text: $obsolete_text" \
+    "$(grep -F -c "$obsolete_text" "$RUN_REVIEW" || true)" "0"
+done
 check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
 check "publish step receives ESCALATION_REASON" \
   "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"

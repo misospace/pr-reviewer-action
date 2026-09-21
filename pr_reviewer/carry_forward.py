@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Carry-forward of open findings across incremental reviews (#193).
+"""Carry-forward of open findings across reviews of the same PR (#193).
 
-A full review that requests changes records its findings in the metadata
-marker. The next incremental review receives them as "open findings" and the
-model must answer each with a resolution (resolved / still_open /
-not_verifiable_from_delta). This module applies the deterministic side:
-findings the model did not convincingly resolve survive into the new review's
-findings array, and a surviving blocker forces request_changes — closing the
-one-push amnesia where fixing one of three blockers rubber-stamped the rest.
+A review that requests changes records its findings in the metadata marker.
+The next review of the same PR receives them as "open findings" and the model
+must answer each with a resolution (resolved / still_open; the parser still
+accepts the legacy not_verifiable_from_delta form, which is treated as open).
+This module applies the deterministic side: findings the model did not
+convincingly resolve survive into the new review's findings array, and a
+surviving blocker forces request_changes — closing the one-push amnesia where
+fixing one of three blockers rubber-stamped the rest.
 
 Fail-closed by design: a carried finding with no matching resolution, or one
 the model marked not_verifiable_from_delta, counts as still open. The one
@@ -365,11 +366,11 @@ def render_carried_findings_section(carried: list[dict]) -> str:
         "# Open Findings From the Previous Review",
         "",
         "The previous review of this PR left the findings below open. This",
-        "delta review MUST answer each one: include a finding in the findings",
-        'array with the same "id" and a "resolution" of "resolved" (this',
-        'delta demonstrably fixes it), "still_open", or',
-        '"not_verifiable_from_delta". Only claim "resolved" when the delta',
-        "diff shows the fix; unverifiable findings stay open.",
+        "review covers the current PR in full: answer each one by including a",
+        'finding in the findings array with the same "id" and a "resolution"',
+        'of "resolved" (the current PR demonstrably fixes it) or',
+        '"still_open". Only claim "resolved" when the current PR state shows',
+        "the fix; anything you cannot verify as fixed stays open.",
         "",
     ]
     for f in carried:
@@ -399,13 +400,14 @@ def apply_carry_forward(
     "dismissed": n, "unverifiable": n, "needs_full_review": bool,
     "forced_request_changes": bool}.
 
-    Propagation contract (#544): when ``needs_full_review`` is true, the
-    module also writes ``needs-full-review.json`` (next to ``output_path``)
-    so the bash reviewer step can detect it after enforcement, and the
-    publish step persists it into the metadata marker so the NEXT run's
-    precheck resolves full scope (``PREVIOUS_NEEDS_FULL_REVIEW``). When the
-    flag is false the file is removed so a stale flag from an earlier run
-    in the same workspace cannot leak into this one.
+    ``needs_full_review`` is always False: current runs review the PR in
+    full, so a carried finding the model marked
+    ``not_verifiable_from_delta`` simply stays open for the next review —
+    there is no delta to be "unverifiable from" and no escalation flag to
+    raise. The ``unverifiable`` count is observability only (it feeds the
+    carry-forward log line). A stale ``needs-full-review.json`` left in a
+    reused workspace by an older run is cleared so it cannot leak into
+    this run.
     """
     carried = load_carried_findings(carried_path)
     dismissed = load_dismissed_findings(
@@ -422,12 +424,10 @@ def apply_carry_forward(
         "needs_full_review": False,
         "forced_request_changes": False,
     }
+    # Current runs never raise the escalation flag; drop a stale one from an
+    # earlier run in the same workspace so it cannot leak into this one.
+    _clear_needs_full_review_flag(Path(output_path).parent / "needs-full-review.json")
     if not carried:
-        # No carried findings → nothing can be unverifiable; clear any stale
-        # flag from an earlier run in the same workspace (#544).
-        _write_needs_full_review_flag(
-            Path(output_path).parent / "needs-full-review.json", False, 0, set()
-        )
         return summary
 
     data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
@@ -441,21 +441,11 @@ def apply_carry_forward(
         if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
 
-    # Track findings the model marked not_verifiable_from_delta separately.
-    # Under the carry-forward fail-closed rule these are counted as open
-    # (#536 Case 2), but the *cause* matters: a verdict of
-    # not_verifiable_from_delta means the resolving change is outside the
-    # incremental diff the model could see, so re-running an incremental
-    # review cannot clear them either. Escalate to a full review and tell
-    # the reader why the PR is still blocked.
-    unverifiable_ids: set[str] = set(
-        f["id"]
-        for f in findings
-        if isinstance(f, dict)
-        and isinstance(f.get("id"), str)
-        and f.get("resolution") == "not_verifiable_from_delta"
-    )
-
+    # A carried finding the model marked not_verifiable_from_delta is
+    # counted as open under the fail-closed rule and tallied for the
+    # carry-forward log line — it raises no escalation flag, because this
+    # run reviewed the full current PR: the finding simply stays open for
+    # the next review to re-assess.
     dismissed_ids = {d["id"] for d in dismissed}
     resolved_items: list[dict] = []
     open_items: list[dict] = []
@@ -469,10 +459,7 @@ def apply_carry_forward(
             continue
         if resolutions.get(item["id"]) == "resolved":
             resolved_items.append(item)
-        elif item["id"] in unverifiable_ids:
-            # Carried finding whose resolving change is outside the
-            # incremental diff. Counted as open for fail-closed purposes,
-            # but flagged so a full review is requested (#536 Case 2).
+        elif resolutions.get(item["id"]) == "not_verifiable_from_delta":
             unverifiable_items.append(item)
             open_items.append(item)
         else:
@@ -481,7 +468,6 @@ def apply_carry_forward(
     summary["open"] = len(open_items)
     summary["dismissed"] = len(dismissed_items)
     summary["unverifiable"] = len(unverifiable_items)
-    summary["needs_full_review"] = bool(unverifiable_items)
 
     # Merge surviving carried findings the model did not re-report itself.
     answered_ids = set(resolutions)
@@ -531,7 +517,7 @@ def apply_carry_forward(
         data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
 
     # Fail-closed verdict: surviving carried blockers block, regardless of
-    # what the delta-only verdict said. Dismissals remove a finding from
+    # what the model's verdict said. Dismissals remove a finding from
     # "still open" entirely, so they do not contribute here.
     open_blockers = [i for i in open_items if i["severity"] == "blocker"]
     if open_blockers and data.get("verdict") != "request_changes":
@@ -548,65 +534,18 @@ def apply_carry_forward(
         json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    # Surface the escalation signal to the bash side (#544): the reviewer
-    # step reads the file after enforcement, and the publish step persists
-    # it into the metadata marker for the next run's precheck.
-    _write_needs_full_review_flag(
-        Path(output_path).parent / "needs-full-review.json",
-        summary["needs_full_review"],
-        summary["unverifiable"],
-        unverifiable_ids,
-    )
     return summary
 
 
-def _write_needs_full_review_flag(
-    flag_path: Path, needs_full_review: bool, unverifiable: int, ids: set[str]
-) -> None:
-    """Write (or clear) the escalation flag file the bash side reads (#544)."""
-    if needs_full_review:
-        flag_path.write_text(
-            json.dumps(
-                {
-                    "needs_full_review": True,
-                    "unverifiable": unverifiable,
-                    "ids": sorted(ids),
-                },
-                ensure_ascii=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-    else:
-        try:
-            flag_path.unlink()
-        except FileNotFoundError:
-            pass
+def _clear_needs_full_review_flag(flag_path: Path) -> None:
+    """Drop a stale needs-full-review.json left by an older run.
 
-
-def read_needs_full_review(path: str = "needs-full-review.json") -> dict:
-    """Read the escalation flag written by :func:`apply_carry_forward`.
-
-    Returns ``{"needs_full_review": bool, "unverifiable": int, "ids":
-    [str, ...]}``; a missing, unreadable, or malformed file yields
-    ``{"needs_full_review": False, "unverifiable": 0, "ids": []}`` so a
-    broken flag can never force a full review (the fail-closed carry-forward
-    verdict already blocks the PR in that case).
+    Current runs review the PR in full and never raise the flag; the only
+    remaining reader of a marker-borne flag is the precheck's legacy
+    compatibility path, which reads the previously *published* marker —
+    never a workspace artifact — so a stale workspace file is pure noise.
     """
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {"needs_full_review": False, "unverifiable": 0, "ids": []}
-    if not isinstance(data, dict):
-        return {"needs_full_review": False, "unverifiable": 0, "ids": []}
-    ids = data.get("ids")
-    if not isinstance(ids, list):
-        ids = []
-    unverifiable = data.get("unverifiable")
-    if not isinstance(unverifiable, int) or isinstance(unverifiable, bool):
-        unverifiable = len(ids)
-    return {
-        "needs_full_review": bool(data.get("needs_full_review")),
-        "unverifiable": unverifiable,
-        "ids": [str(i) for i in ids],
-    }
+        flag_path.unlink()
+    except FileNotFoundError:
+        pass

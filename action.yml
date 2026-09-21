@@ -734,7 +734,7 @@ outputs:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
   needs_full_review:
-    description: Whether a carried finding could not be assessed from this review's delta (true → the next run forces a fresh review)
+    description: Legacy compatibility output for old markers that request one full re-review; v3 reviews always emit false
     value: ${{ steps.review.outputs.needs_full_review }}
   tool_calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
