@@ -274,8 +274,9 @@ corpus = open(sys.argv[1]).read()
 config = open(sys.argv[2]).read()
 out = []
 for src, name in ((corpus, "build_bounded_repo_map"),
-                  (corpus, "build_review_corpus"),
-                  (config, "truncate_clean")):
+                   (corpus, "render_previous_review_context"),
+                   (corpus, "build_review_corpus"),
+                   (config, "truncate_clean")):
     m = re.search(rf"^{name}\(\) \{{\n(.*?)\n\}}\n", src, re.S | re.M)
     if not m:
         sys.exit(f"could not extract {name}")

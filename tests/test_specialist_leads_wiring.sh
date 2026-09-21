@@ -42,8 +42,9 @@ corpus = open(sys.argv[1]).read()
 config = open(sys.argv[2]).read()
 out = []
 for src, name in ((corpus, "build_bounded_repo_map"),
-                 (corpus, "build_review_corpus"),
-                 (config, "truncate_clean")):
+                  (corpus, "render_previous_review_context"),
+                  (corpus, "build_review_corpus"),
+                  (config, "truncate_clean")):
     m = re.search(rf"^{name}\(\) \{{\n(.*?)\n\}}\n", src, re.S | re.M)
     if not m:
         sys.exit(f"could not extract {name}")
@@ -93,6 +94,8 @@ setup_corpus_workdir() {
   : > "$d/related-code.truncated.md"
   : > "$d/linear-issues.md"
   : > "$d/incremental.diff"
+  : > "$d/previous-findings.json"
+  : > "$d/previous-evidence.json"
   : > "$d/tool-harness.md"
   : > "$d/evidence-providers.md"
   : > "$d/repo-map.md"
@@ -125,8 +128,26 @@ sp_lockstep() {
   fi
 }
 
-# ── a. reserved placement, fixed order, bytes intact (full + incremental) ──
-echo "=== a. corpus reserves the specialist-lead block after the ledger ==="
+# ── a. prior review artifacts render in a full v3 corpus ──────────────────
+echo "=== a. full corpus retains carried findings and evidence memory ==="
+for scope in full incremental; do
+  d="$WORK/a-context-$scope"
+  setup_corpus_workdir "$d"
+  printf '[{"severity":"major","category":"bug","file":"x.py","line":3,"message":"prior finding"}]\n' > "$d/previous-findings.json"
+  printf '{"digest":"- read_file → prior evidence","head_sha":"deadbeef"}\n' > "$d/previous-evidence.json"
+  run_corpus "$d" 220000 "$scope"
+  check_contains "$scope corpus renders prior findings" \
+    "$(<"$d/review-corpus.md")" "# Open Findings From the Previous Review"
+  check_contains "$scope corpus renders prior finding content" \
+    "$(<"$d/review-corpus.md")" "prior finding"
+  check_contains "$scope corpus renders prior evidence" \
+    "$(<"$d/review-corpus.md")" "# Evidence Gathered by the Previous Review"
+  check_contains "$scope corpus renders prior evidence digest" \
+    "$(<"$d/review-corpus.md")" "prior evidence"
+done
+
+# ── b. reserved placement, fixed order, bytes intact (full + incremental) ──
+echo "=== b. corpus reserves the specialist-lead block after the ledger ==="
 for scope in full incremental; do
   d="$WORK/a-$scope"
   setup_corpus_workdir "$d"

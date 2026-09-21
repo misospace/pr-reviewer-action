@@ -63,13 +63,20 @@ check_contains "input escalate_on_incomplete_required_checks" "$ACTION" "escalat
 check_contains "input escalate_on_fast_request_changes" "$ACTION" "escalate_on_fast_request_changes:"
 check_contains "input escalate_on_fast_low_confidence" "$ACTION" "escalate_on_fast_low_confidence:"
 check_contains "input escalate_on_tool_or_evidence_blockers" "$ACTION" "escalate_on_tool_or_evidence_blockers:"
-# v3 (#615): the dirty-baseline escalation input and its wiring are gone.
-check "input escalate_on_dirty_baseline removed" \
-  "$(printf '%s' "$ACTION" | grep -c 'escalate_on_dirty_baseline:' || true)" "0"
-check "review step no longer receives BASELINE_CLEAN" \
-  "$(printf '%s' "$ACTION" | grep -c 'BASELINE_CLEAN:' || true)" "0"
-check "run_review no longer wires dirty_baseline into should_escalate" \
-  "$(printf '%s' "$SRC" | grep -c 'dirty_baseline=' || true)" "0"
+# #615 removes the public scope API only. Dirty-baseline escalation remains
+# until #618, using the private prior review_result signal instead of the
+# removed baseline_clean output.
+check_contains "input escalate_on_dirty_baseline" "$ACTION" "escalate_on_dirty_baseline:"
+check_contains "review step receives ESCALATE_ON_DIRTY_BASELINE" "$ACTION" \
+  "ESCALATE_ON_DIRTY_BASELINE: \${{ inputs.escalate_on_dirty_baseline }}"
+check_contains "review step receives private previous review result" "$ACTION" \
+  "PREVIOUS_REVIEW_RESULT: \${{ steps.precheck.outputs.previous_review_result || '' }}"
+check_contains "run_review derives dirty_baseline from prior issues verdict" "$SRC" \
+  '[[ "${PREVIOUS_REVIEW_RESULT:-}" == "issues" ]]'
+check_contains "run_review wires dirty_baseline into should_escalate" "$SRC" \
+  "dirty_baseline=('\$DIRTY_BASELINE' == 'true')"
+check "baseline_clean public output remains removed" \
+  "$(printf '%s' "$ACTION" | grep -c 'baseline_clean:' || true)" "0"
 check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
 check "publish step receives ESCALATION_REASON" \
   "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"

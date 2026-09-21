@@ -118,10 +118,10 @@ esac
 # remains in shell because it parses a stored published comment body that
 # contains reviewer-emitted metadata (not actionable config inputs),
 # independent of precheck decision logic. Writes previous-review-meta.json
-# (the #544 needs_full_review flag only) plus the carried-forward state
-# the review step consumes: previous-findings.json (open findings) and
-# previous-evidence.json (evidence digest, tagged with the gathered-at
-# head SHA).
+# (the #544 needs_full_review flag plus private review_result state) and the
+# carried-forward artifacts the review step consumes: previous-findings.json
+# (open findings) and previous-evidence.json (evidence digest, tagged with the
+# gathered-at head SHA).
 extract_review_metadata() {
   local comment_body="$1"
 
@@ -141,6 +141,9 @@ if data:
         # its delta; the next run must be a fresh full review
         # (PREVIOUS_NEEDS_FULL_REVIEW defeats the diff-unchanged guard).
         'needs_full_review': bool(data.get('needs_full_review')),
+        # Private precheck state for dirty-baseline escalation. This remains
+        # internal: review_result is not restored as an action output.
+        'review_result': enumsan(data.get('review_result')),
     }
     with open('previous-review-meta.json', 'w', encoding='utf-8') as fh:
         json.dump(meta, fh, ensure_ascii=False)
@@ -172,6 +175,7 @@ if data:
 
   if [[ -f previous-review-meta.json ]]; then
     LAST_NEEDS_FULL_REVIEW="$(jq -r '.needs_full_review // false' previous-review-meta.json 2>/dev/null || echo false)"
+    LAST_REVIEW_RESULT="$(jq -r '.review_result // ""' previous-review-meta.json 2>/dev/null || echo "")"
   fi
 }
 
@@ -193,6 +197,7 @@ unset PREVIOUS_NEEDS_FULL_REVIEW 2>/dev/null || true
 # otherwise the diff-unchanged guard would skip the fresh full review the
 # flag requests, and the PR would loop on the same diff forever.
 LAST_NEEDS_FULL_REVIEW="false"
+LAST_REVIEW_RESULT=""
 if [[ -n "$last_comment_body" ]]; then
   extract_review_metadata "$last_comment_body"
 fi
@@ -313,4 +318,7 @@ fi
   echo "is_fork_pr=$IS_FORK_PR"
   echo "resolved_platform=$RESOLVED_PLATFORM"
   echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
+  # Private review-step signal for dirty-baseline escalation; intentionally
+  # absent from the public action outputs.
+  echo "previous_review_result=$LAST_REVIEW_RESULT"
 } >> "$OUTPUT_FILE"

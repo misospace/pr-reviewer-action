@@ -570,6 +570,17 @@ check "diff-unchanged skip carries approve" "$(echo "$RESULT" | grep '^verdict='
 check "diff-unchanged skip marks verdict_source carry_forward" "$(echo "$RESULT" | grep '^verdict_source=' | head -1 | cut -d= -f2)" "carry_forward"
 
 echo ""
+echo "=== Test 25b: review path forwards private prior review result ==="
+set_comments "<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${CARRY_FORWARD_FP} -->
+<!-- ai-pr-reviewer: {\"review_result\": \"issues\"} -->"
+RESULT="$(AI_MODEL=dirty-baseline-model run_precheck)"
+check "changed config still reviews" "$(echo "$RESULT" | grep '^should_review=' | head -1 | cut -d= -f2)" "true"
+check "review path forwards prior issues result privately" \
+  "$(echo "$RESULT" | grep '^previous_review_result=' | head -1 | cut -d= -f2)" "issues"
+
+# ── Test 26: diff-unchanged skip with no marker leaves verdict empty ──────
+echo ""
 echo "=== Test 26: diff-unchanged skip with no marker leaves verdict empty ==="
 set_empty_comments
 RESULT="$(run_precheck)"

@@ -62,18 +62,27 @@ if [[ "$(printf '%s' "$AI_STREAM" | tr '[:upper:]' '[:lower:]')" == "true" ]]; t
   STREAM_BOOL="true"
 fi
 
-# Carry-forward (#193) is active when this is an incremental review and the
-# precheck extracted open findings from the previous review's marker.
+# Carry-forward (#193) follows the artifact the precheck extracted from the
+# previous managed marker, independent of review scope: v3 reviews the current
+# PR in full but still preserves the existing cross-run finding behavior.
 CARRY_FORWARD_ACTIVE="false"
-if [[ "$EFFECTIVE_SCOPE" == "incremental" ]] && [ -s previous-findings.json ] \
+if [ -s previous-findings.json ] \
   && [ "$(jq 'length' previous-findings.json 2>/dev/null || echo 0)" -gt 0 ]; then
   CARRY_FORWARD_ACTIVE="true"
+fi
+
+# Preserve the incremental-era dirty-baseline escalation trigger as private
+# review state. The precheck carries the prior marker's review_result only to
+# this step; baseline_clean remains removed from the public action API.
+DIRTY_BASELINE="false"
+if [[ "${PREVIOUS_REVIEW_RESULT:-}" == "issues" ]]; then
+  DIRTY_BASELINE="true"
 fi
 
 USER_MESSAGE="$(build_user_message classification.json)"
 if [[ "$CARRY_FORWARD_ACTIVE" == "true" ]]; then
   USER_MESSAGE="$USER_MESSAGE
-The corpus lists Open Findings From the Previous Review. Answer EVERY one: include a finding with the same id and a resolution of resolved, still_open, or not_verifiable_from_delta. Claim resolved only when this delta demonstrably fixes it."
+The corpus lists Open Findings From the Previous Review. Answer EVERY one: include a finding with the same id and a resolution of resolved, still_open, or not_verifiable_from_delta. Claim resolved only when the current PR demonstrably fixes it."
   log "Carry-forward active: $(jq 'length' previous-findings.json) open finding(s) from the previous review"
 fi
 
@@ -229,7 +238,9 @@ escalate, reasons = should_escalate(
     on_request_changes=('$ESCALATE_ON_FAST_REQUEST_CHANGES' == 'true'),
     on_low_confidence=('$ESCALATE_ON_FAST_LOW_CONFIDENCE' == 'true'),
     on_blockers=('$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS' == 'true'),
+    on_dirty_baseline=('$ESCALATE_ON_DIRTY_BASELINE' == 'true'),
     on_planning_failure=('$ESCALATE_ON_TOOL_PLANNING_FAILURE' == 'true'),
+    dirty_baseline=('$DIRTY_BASELINE' == 'true'),
 )
 print('yes ' + ','.join(reasons) if escalate else 'no')
 " 2>/dev/null || echo no)"
