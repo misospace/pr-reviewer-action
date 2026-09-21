@@ -123,10 +123,10 @@ PY
 
 : > linked-issues.md
 if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
-  # The "# Linked Issue Context" header is emitted by scripts/sections/corpus.sh
-  # in the incremental=false branch, so we deliberately do not prepend it
-  # here. Doing so previously produced a duplicate header in the rendered
-  # corpus whenever at least one linked issue was present (#399).
+  # The "# Linked Issue Context" header is emitted by scripts/sections/corpus.sh,
+  # so we deliberately do not prepend it here. Doing so previously produced a
+  # duplicate header in the rendered corpus whenever at least one linked issue
+  # was present (#399).
   jq -c '.[]' linked-issues.json | while IFS= read -r item; do
     issue_repo="$(printf '%s' "$item" | jq -r '.repo')"
     issue_number="$(printf '%s' "$item" | jq -r '.number')"

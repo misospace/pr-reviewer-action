@@ -12,7 +12,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 
 - **`action.yml`** — Action definition with all inputs/outputs and composite run steps (precheck → CI wait → review → publish). Publishing is a single `Publish review` step with one superset `env:` block; the step body is a one-liner that runs `scripts/publish.sh`, which dispatches on `$PUBLISH_MODE` (comment / review_comment / review_verdict) using helpers from `scripts/publish_helpers.sh`.
 - **`scripts/platform_api.sh`** — Platform seam (#221): every host-forge API call goes through `platform_*` functions (github backend = the exact pre-seam `gh` invocations; forgejo backend = `pr_reviewer/forgejo_backend.py`, rolling out across 1.4.x). `github_enrich_*` functions are for linked-source enrichment and always target github.com. `pr_reviewer/platform.py` is the Python mirror for script consumers.
-- **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, decides full vs. incremental scope, and skips if unchanged since last managed comment (unless `force_review=true`)
+- **`scripts/check_review_needed.sh`** — Precheck: computes `git patch-id --stable` fingerprint, and skips if unchanged since last managed comment (unless `force_review=true`)
 - **Re-review trigger** — adding the `rereview_label` (default `ai-review`) to a PR forces a fresh review (`check_review_needed.sh` reads the `labeled` event from `GITHUB_EVENT_PATH`, sets `force_review`, and skips unrelated labels; the label is removed post-publish in `action.yml`). Labels are maintainer-only, so no command-auth gate is needed.
 - **`scripts/wait_for_ci.sh`** — Optional CI gating: polls the Checks API until checks reach a terminal state (`ci_status_check=true`), then renders the per-check outcomes to `CI_CHECKS_FILE` for the review corpus
 - **`scripts/run_review.sh`** — Main review orchestrator: sources the section modules under `scripts/sections/` in order (collects context, builds corpus, classifies, routes, calls model, validates and enforces verdicts)
@@ -26,7 +26,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 - **`completeness.py`** — Required-check completeness validation: keyword-matches `review_markdown` against `must_check` items
 - **`enforcement.py`** — Verdict policy (`model` / `findings_severity_gated`), findings normalization, evidence/tool enforcement; records `verdict_source`
 - **`escalation.py`** — Post-hoc escalation triggers for fast reviews (request_changes, low confidence, incomplete checks, blockers, dirty baseline)
-- **`carry_forward.py`** — Carried-forward open findings for incremental reviews; surviving blockers force `request_changes` (`verdict_source: carry_forward`)
+- **`carry_forward.py`** — Carried-forward open findings for re-reviews; surviving blockers force `request_changes` (`verdict_source: carry_forward`)
 - **`metadata.py`** — Managed metadata marker (fingerprint, scope, open findings) embedded in published comments
 - **`github_context.py`** — PR metadata/GitHub and Forgejo linked-issue reference helpers
 - **`linear_context.py`** — Optional deterministic Linear adapter: recognizes configured `TEAM-123` identifiers in PR titles, fetches issue/spec context through Linear GraphQL, and normalizes it into linked-issue corpus/classification data
@@ -74,7 +74,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 ## Architecture
 
 ```
-check_review_needed.sh          → should_review + diff_fingerprint + effective scope (full/incremental)
+check_review_needed.sh          → should_review + diff_fingerprint
 wait_for_ci.sh (optional)       → block until CI checks are terminal + emit per-check results
 run_review.sh                   → collects context → classifies → builds corpus → routes → calls model → validates/enforces
   ├─ gh pr view/diff/api        → PR metadata, files, linked issues
@@ -105,8 +105,8 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 4. Related Code Context (bounded deterministic references, tests, and manifests)
 5. Repository Map (bounded deterministic structure of Git-tracked paths)
 6. PR Thread Context (bounded recent PR conversation comments; managed comments filtered, redacted, fence-safe)
-7. Incremental Review Delta + Carried-Forward Open Findings (incremental scope only)
-8. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles; Linear context is retained for incremental reviews)
+7. Linked Issue Context (from Fixes/Closes references in PR body and optional configured Linear identifiers in PR titles)
+8. Carried-Forward Open Findings / Evidence Memory (rendered after linked-issue context, when present)
 9. PR Files (truncated JSON with patches)
 10. Version Hints from Diff
 11. PR Diff (truncated)
@@ -119,7 +119,7 @@ publish (scripts/publish.sh)    → sanitize markdown → strip markers → buil
 18. Repository Standards and Conventions (from AGENTS.md, CLAUDE.md, etc.)
 19. Specialist Review Leads (deep review only: a bounded advisory leads block appended last, after the reserved ledger block; never truncated itself)
 
-Note: `MAX_CORPUS` truncation applies to sections 1–17; the standards section is always preserved in full. The #624 **Explicit Requirement Ledger** is a reserved block appended after the body (never truncated itself): its exact bytes are carved out of the body budget, it is emitted on both full and incremental corpora whenever the ledger is non-empty, and the same fits-the-reservation predicate gates the `requirement-ledger-present.txt` signal — so the system-prompt guidance can never be enabled for a corpus that lacks the section (lockstep). A ledger that cannot fit a sane reservation is dropped from both. The #609 **Specialist Review Leads** is a second reserved block, appended **last** (after the ledger block), so the authority order is standards > ledger > advisory leads and specialist content can never evict higher-authority material: its exact bytes are likewise carved out of the body budget, it is emitted on both corpora only when `deep_review` is enabled and a non-empty section survives, and the same fits-the-reservation predicate gates the `specialist-leads-present.txt` signal (lockstep; a stale signal is cleared by the guard in `corpus.sh` when the section ends up missing). When `deep_review` is disabled — or no usable lead survives — `specialists.md` is empty and no rebuild happens, so the disabled-run corpus stays byte-identical to a pre-#609 build.
+Note: `MAX_CORPUS` truncation applies to sections 1–17; the standards section is always preserved in full. The #624 **Explicit Requirement Ledger** is a reserved block appended after the body (never truncated itself): its exact bytes are carved out of the body budget, it is emitted on the single review corpus whenever the ledger is non-empty, and the same fits-the-reservation predicate gates the `requirement-ledger-present.txt` signal — so the system-prompt guidance can never be enabled for a corpus that lacks the section (lockstep). A ledger that cannot fit a sane reservation is dropped from both. The #609 **Specialist Review Leads** is a second reserved block, appended **last** (after the ledger block), so the authority order is standards > ledger > advisory leads and specialist content can never evict higher-authority material: its exact bytes are likewise carved out of the body budget, it is emitted on the single corpus only when `deep_review` is enabled and a non-empty section survives, and the same fits-the-reservation predicate gates the `specialist-leads-present.txt` signal (lockstep; a stale signal is cleared by the guard in `corpus.sh` when the section ends up missing). When `deep_review` is disabled — or no usable lead survives — `specialists.md` is empty and no rebuild happens, so the disabled-run corpus stays byte-identical to a pre-#609 build.
 
 The standards section is always *emitted* — it carries an explicit "standards context unavailable" note when nothing resolved — so `[ -s standards-context.md ]` cannot tell the publish step whether a standards file existed. `corpus.sh` writes `standards-present.txt` (the resolved path, or truncated) as that signal, and the publish step turns it into `STANDARDS_PRESENT` for the section stripper.
 
@@ -200,7 +200,6 @@ See `action.yml` (the source of truth) or the README's grouped input tables for 
 - `analysis_engine`: Model and endpoint string (e.g. `qwen3-32b@http://llama-server.internal:8080/v1`)
 - `should_review` / `skip_reason` / `diff_fingerprint`: precheck results
 - `ci_status_skipped` / `ci_status_final`: CI gating results
-- `effective_review_scope` / `previous_head_sha` / `baseline_clean`: incremental-review state
 
 ## Filing issues for the autonomous loop
 

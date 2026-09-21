@@ -33,10 +33,11 @@ set -euo pipefail
 #      from sections/corpus.sh, truncate_clean from sections/config.sh — the
 #      same function-extraction pattern as test_related_code_wiring.sh — and
 #      driven hermetically): a non-empty requirement-ledger.md is RESERVED as
-#      a final "# Explicit Requirement Ledger" block on every path (full AND
-#      incremental): its bytes are carved out of the MAX_CORPUS budget like
-#      the standards section, the block is appended after the truncated body
-#      and is never eaten by truncation, even when the body is far over the
+#      a final "# Explicit Requirement Ledger" block on the single corpus
+#      path (the initial build and every rebuild, including the native-loop
+#      rebuild): its bytes are carved out of the MAX_CORPUS budget like the
+#      standards section, the block is appended after the truncated body and
+#      is never eaten by truncation, even when the body is far over the
 #      budget; and the presence signal and the section stay in lockstep
 #      (non-empty signal iff the section is present) across the ledger ×
 #      truncation-pressure combinations.
@@ -309,7 +310,6 @@ setup_corpus_workdir() {
   : > "$d/pr-thread.md"
   : > "$d/related-code.truncated.md"
   : > "$d/linear-issues.md"
-  : > "$d/incremental.diff"
   : > "$d/tool-harness.md"
   : > "$d/evidence-providers.md"
   : > "$d/repo-map.md"
@@ -324,9 +324,8 @@ run_corpus() {
     MAX_DIFF=8000 \
     STANDARDS_FILE="AGENTS.md" \
     CI_CHECKS_FILE="" \
-    PREVIOUS_HEAD_SHA="0000000000000000000000000000000000000000" \
     TOOL_EVIDENCE_MEMORY="true" \
-    build_review_corpus "$3" )
+    build_review_corpus )
 }
 
 lockstep_check() {
@@ -340,29 +339,28 @@ lockstep_check() {
   fi
 }
 
-# f1. full path, ledger present, no truncation pressure
+# f1. single corpus path, ledger present, no truncation pressure. Follow-up
+# push corpora carry the current full-PR context (PR Files / Version Hints /
+# PR Diff sections), never an incremental delta.
 setup_corpus_workdir "$WORK/c1"
 printf '%s\n' "$LEDGER_MD" > "$WORK/c1/requirement-ledger.md"
 printf 'aaaaaaaaaaaabb\n' > "$WORK/c1/requirement-ledger-present.txt"
-run_corpus "$WORK/c1" 220000 full
-check_contains "full: ledger section present in final corpus" \
+run_corpus "$WORK/c1" 220000
+check_contains "corpus: ledger section present in final corpus" \
   "$(<"$WORK/c1/review-corpus.md")" "# Explicit Requirement Ledger"
-check_contains "full: ledger content intact (no truncation of the block)" \
+check_contains "corpus: ledger content intact (no truncation of the block)" \
   "$(<"$WORK/c1/review-corpus.md")" "second reserved line"
-check "full: ledger section is the final corpus block (after Repository History)" \
+check "corpus: ledger section is the final corpus block (after Repository History)" \
   "$(awk '/^# Repository History$/{h=NR} /^# Explicit Requirement Ledger$/{l=NR} END{if (h && l && l>h) print "ok"; else print "bad"}' "$WORK/c1/review-corpus.md")" \
   "ok"
-
-# f2. incremental path also reserves the ledger
-setup_corpus_workdir "$WORK/c2"
-printf '%s\n' "$LEDGER_MD" > "$WORK/c2/requirement-ledger.md"
-printf 'aaaaaaaaaaaabb\n' > "$WORK/c2/requirement-ledger-present.txt"
-printf -- '--- a/b.py\n+++ b/b.py\n@@ -1 +1,2 @@\n+y\n' > "$WORK/c2/incremental.diff"
-run_corpus "$WORK/c2" 220000 incremental
-check_contains "incremental: ledger section present in final corpus" \
-  "$(<"$WORK/c2/review-corpus.md")" "# Explicit Requirement Ledger"
-check_contains "incremental: ledger content intact" \
-  "$(<"$WORK/c2/review-corpus.md")" "second reserved line"
+check_contains "corpus carries the current PR files section" \
+  "$(<"$WORK/c1/review-corpus.md")" "# PR Files (truncated)"
+check_contains "corpus carries the version-hints section" \
+  "$(<"$WORK/c1/review-corpus.md")" "# Version Hints from Diff"
+check_contains "corpus carries the current PR diff section" \
+  "$(<"$WORK/c1/review-corpus.md")" "# PR Diff (truncated)"
+check_not_contains "no incremental delta heading in the single corpus shape" \
+  "$(<"$WORK/c1/review-corpus.md")" "Incremental Review Delta"
 
 # f3. truncation pressure: the body is far over budget; the ledger still lands
 setup_corpus_workdir "$WORK/c3"
@@ -372,7 +370,7 @@ open(sys.argv[1], "w", encoding="utf-8").write("y" * 40000 + "\n")
 PY
 printf '%s\n' "$LEDGER_MD" > "$WORK/c3/requirement-ledger.md"
 printf 'aaaaaaaaaaaabb\n' > "$WORK/c3/requirement-ledger-present.txt"
-run_corpus "$WORK/c3" 20000 full
+run_corpus "$WORK/c3" 20000
 check_contains "pressure: body was truncated (marker present)" \
   "$(<"$WORK/c3/review-corpus.md")" "…[review corpus truncated to fit the model context budget]"
 check_contains "pressure: ledger section survives the truncation" \
@@ -385,20 +383,51 @@ check "pressure: final corpus stays within MAX_CORPUS + standards-header slack" 
 
 # f4. no-ledger runs keep the section out (both with and without pressure)
 setup_corpus_workdir "$WORK/c4"
-run_corpus "$WORK/c4" 220000 full
+run_corpus "$WORK/c4" 220000
 setup_corpus_workdir "$WORK/c5"
 python3 - "$WORK/c5/linked-sources.md" <<'PY'
 import sys
 open(sys.argv[1], "w", encoding="utf-8").write("y" * 40000 + "\n")
 PY
-run_corpus "$WORK/c5" 20000 full
+run_corpus "$WORK/c5" 20000
 
 # f5. signal and section are biconditionally in step, across all combinations
-lockstep_check "$WORK/c1" "full, ledger"
-lockstep_check "$WORK/c2" "incremental, ledger"
+lockstep_check "$WORK/c1" "ledger"
 lockstep_check "$WORK/c3" "pressure, ledger"
-lockstep_check "$WORK/c4" "full, no ledger"
+lockstep_check "$WORK/c4" "no ledger"
 lockstep_check "$WORK/c5" "pressure, no ledger"
+
+# f6. a rebuild (tool-harness / native-loop) does not switch scope or lose
+# sections: build twice and compare the level-1 heading sets.
+setup_corpus_workdir "$WORK/c6"
+printf '%s\n' "$LEDGER_MD" > "$WORK/c6/requirement-ledger.md"
+printf 'aaaaaaaaaaaabb\n' > "$WORK/c6/requirement-ledger-present.txt"
+run_corpus "$WORK/c6" 220000
+grep '^# ' "$WORK/c6/review-corpus.md" | sort > "$WORK/c6/headings.1"
+run_corpus "$WORK/c6" 220000
+grep '^# ' "$WORK/c6/review-corpus.md" | sort > "$WORK/c6/headings.2"
+if cmp -s "$WORK/c6/headings.1" "$WORK/c6/headings.2"; then
+  REBUILD_HEADINGS=ok
+else
+  REBUILD_HEADINGS="differs: $(diff "$WORK/c6/headings.1" "$WORK/c6/headings.2" | head -5)"
+fi
+check "rebuild: level-1 heading set unchanged between builds" "$REBUILD_HEADINGS" "ok"
+
+# f7. large PR: oversized diff/files inputs are truncated so the final corpus
+# stays within the MAX_CORPUS cap.
+setup_corpus_workdir "$WORK/c7"
+python3 - "$WORK/c7/pr.diff.truncated" <<'PY'
+import sys
+open(sys.argv[1], "w", encoding="utf-8").write("+ big diff line\n" * 8000)
+PY
+python3 - "$WORK/c7/pr-files.truncated.json" <<'PY'
+import sys
+open(sys.argv[1], "w", encoding="utf-8").write('[{"filename":"big.py","patch":"+x\n"}]\n' * 2000)
+PY
+run_corpus "$WORK/c7" 20000
+C7_BYTES="$(wc -c < "$WORK/c7/review-corpus.md" | tr -d ' ')"
+if [ "$C7_BYTES" -le 20100 ]; then C7_SIZE=ok; else C7_SIZE="too large: $C7_BYTES"; fi
+check "large PR: final corpus stays within MAX_CORPUS + standards-header slack" "$C7_SIZE" "ok"
 
 # ── g. stale-artifact reset before the fail-soft build ─────────────────
 echo "=== g. build_requirement_ledger resets stale artifacts first ==="
@@ -499,7 +528,7 @@ check "oversize: presence signal is NOT written (does not fit)" \
   "$(wc -c < "$WORK/oversize/requirement-ledger-present.txt" | tr -d ' ')" "0"
 setup_corpus_workdir "$WORK/oversize2"
 cp "$WORK/oversize/requirement-ledger.md" "$WORK/oversize2/requirement-ledger.md"
-run_corpus "$WORK/oversize2" 100 full
+run_corpus "$WORK/oversize2" 100
 check_not_contains "oversize: ledger section is NOT in the final corpus" \
   "$(<"$WORK/oversize2/review-corpus.md")" "# Explicit Requirement Ledger"
 lockstep_check "$WORK/oversize2" "oversize, no signal, no section"

@@ -364,7 +364,6 @@ class TestToolHarness:
         [
             "## Tool Harness Findings",
             "## Tool Harness Results",
-            "## Tool Harness Findings (incremental review)",
             "## tool harness findings",
         ],
     )
@@ -401,9 +400,9 @@ class TestToolHarness:
             "### Tool Harness Findings Are Dropped on Reused Workspaces",
             # A section-shaped noun that is not one of the two real titles.
             "### Tool Harness Summary Is Truncated",
-            # A parenthetical that is part of the finding, not the corpus's
-            # "(incremental review)" qualifier. Stripping any trailing
-            # parenthetical would normalise these onto a title and delete them.
+            # A parenthetical that is part of the finding. Stripping any
+            # trailing parenthetical would normalise these onto a title and
+            # delete them.
             "### Tool Harness Results (Fork Skip)",
             "### Tool Harness Findings (see below)",
             "### Tool Harness Results (leak secrets)",
@@ -455,16 +454,6 @@ class TestToolHarness:
         """Fail-safe: a caller that never reports on the key strips nothing."""
         text = "## Tool Harness Findings\n\n3 calls executed.\n"
         assert strip_empty_conditional_sections(text, {}) == text
-
-    def test_only_the_corpus_qualifier_is_stripped(self):
-        """The corpus emits one qualifier on this header and no other.
-
-        A general "strip any trailing parenthetical" would delete a finding
-        headed "### Tool Harness Results (Fork Skip)", so the qualifier is an
-        allowlist. This pins both directions at once.
-        """
-        real = "## Tool Harness Findings (incremental review)\n\nfiller.\n"
-        assert strip_empty_conditional_sections(real, ABSENT_ALL).strip() == ""
 
     @pytest.mark.parametrize(
         "heading", ["## Tool Harness Findings", "## Tool Harness Results"]

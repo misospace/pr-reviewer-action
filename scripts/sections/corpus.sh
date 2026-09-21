@@ -78,9 +78,8 @@ PY
 }
 
 build_pr_thread_context() {
-  # Bounded recent PR conversation comments (#578). Scope-independent: the
-  # thread is about the whole PR, so this is built once and embedded in both
-  # full and incremental corpora.
+  # Bounded recent PR conversation comments (#578): the thread is about the
+  # whole PR, so it is built once and embedded in the review corpus.
   local empty_artifact
   local artifacts="pr-thread.json pr-thread.md"
   for empty_artifact in $artifacts; do
@@ -223,8 +222,6 @@ print(render_evidence_memory_section(load_evidence_memory()), end='')
 }
 
 build_review_corpus() {
-  local corpus_type="${1:-full}"  # 'full' or 'incremental'
-
   build_bounded_repo_map
 
   # Build non-standards body first (this is the portion subject to truncation)
@@ -269,66 +266,36 @@ build_review_corpus() {
       echo
     fi
 
-    if [[ "$corpus_type" == "incremental" ]]; then
-      # Linear is opt-in. Preserve its issue/spec context across incremental
-      # reviews without changing the existing default treatment of linked
-      # GitHub or Forgejo issues when the adapter is disabled.
-      if [ -s linear-issues.md ]; then
-        echo "# Linked Issue Context"
-        cat linear-issues.md
-        echo
-      fi
-      local head_sha
-      head_sha="$(jq -r '.headRefOid' pr.json 2>/dev/null || echo 'unknown')"
-      echo "# Incremental Review Delta"
-      echo "_Reviewing changes from $PREVIOUS_HEAD_SHA to $head_sha. This is not a full re-review of the entire PR._"
-      echo
-      if [ -f incremental.diff ]; then
-        echo '```diff'
-        truncate_clean incremental.diff incremental.diff.truncated "$MAX_DIFF" '…[delta truncated]'
-        cat incremental.diff.truncated
-        echo '```'
-      else
-        echo "(No incremental diff available)"
-      fi
-      echo
-      render_previous_review_context
-    else
-      # context.sh leaves linked-issues.md empty when there's no linked issue
-      # (#399/#400) so the model sees no section boundary to react to. Gate
-      # the header the same way, matching the CI Check Results pattern below.
-      if [ -s linked-issues.md ]; then
-        echo "# Linked Issue Context"
-        cat linked-issues.md
-        echo
-      fi
-      render_previous_review_context
-      echo "# PR Files (truncated)"
-      echo '```json'
-      cat pr-files.truncated.json
-      echo '```'
-      echo
-      echo "# Version Hints from Diff"
-      echo '```text'
-      cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
-      echo '```'
-      echo
-      echo "# PR Diff (truncated)"
-      echo '```diff'
-      cat pr.diff.truncated
-      echo '```'
+    # context.sh leaves linked-issues.md empty when there's no linked issue
+    # (#399/#400) so the model sees no section boundary to react to. Gate
+    # the header the same way, matching the CI Check Results pattern below.
+    if [ -s linked-issues.md ]; then
+      echo "# Linked Issue Context"
+      cat linked-issues.md
       echo
     fi
+    render_previous_review_context
+    echo "# PR Files (truncated)"
+    echo '```json'
+    cat pr-files.truncated.json
+    echo '```'
+    echo
+    echo "# Version Hints from Diff"
+    echo '```text'
+    cat version-hints.truncated.txt 2>/dev/null || echo "(none)"
+    echo '```'
+    echo
+    echo "# PR Diff (truncated)"
+    echo '```diff'
+    cat pr.diff.truncated
+    echo '```'
+    echo
 
     # High-value evidence comes BEFORE linked sources / repo scans so that when
     # the corpus overflows the budget, the noisy low-value sections at the tail
     # are dropped first instead of this evidence.
     if [ -s tool-harness.md ]; then
-      if [[ "$corpus_type" == "incremental" ]]; then
-        echo "# Tool Harness Findings (incremental review)"
-      else
-        echo "# Tool Harness Findings"
-      fi
+      echo "# Tool Harness Findings"
       cat tool-harness.md
       echo
     fi
@@ -375,14 +342,14 @@ build_review_corpus() {
   std_bytes="$(wc -c < standards-context.capped.md | tr -d ' ')"
 
   # ── Explicit Requirement Ledger (#624) — reserved, like standards ─────
-  # Rebuild the ledger section from scratch on EVERY assembly (full,
-  # incremental, and the native_loop rebuild all go through this function),
-  # exactly once, into requirement-ledger.section.md: the header line + the
-  # exact bytes of requirement-ledger.md + a trailing blank line. Its size is
-  # subtracted from the body budget below, so the body truncation can never
-  # eat it — the block is appended after the truncated body, never truncated
-  # itself, and scope-independent (full, incremental, and the native-loop
-  # rebuild all reserve it). The ledger content is already hard-capped at
+  # Rebuild the ledger section from scratch on EVERY assembly (the initial
+  # build and every rebuild all go through this function), exactly once,
+  # into requirement-ledger.section.md: the header line + the
+  # exact bytes of requirement-ledger.md + a trailing blank line. Its size
+  # is subtracted from the body budget below, so the body truncation can
+  # never eat it — the block is appended after the truncated body, never
+  # truncated itself, and every assembly reserves it. The ledger content
+  # is already hard-capped at
   # MAX_LEDGER_MARKDOWN_BYTES (8192) by the renderer. The same fits-sanity
   # that gated the presence signal in context.sh applies here — the section's
   # measured bytes equal the ledger bytes plus the framing (the header line
@@ -473,21 +440,14 @@ build_review_corpus() {
 }
 
 section_timer_start "corpus-building"
-log "Building review corpus (scope: $EFFECTIVE_SCOPE)..."
+log "Building review corpus..."
 
 log "Building PR-thread context..."
 build_pr_thread_context
 
-if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-  fetch_incremental_patch "$PREVIOUS_HEAD_SHA" "$(jq -r '.headRefOid' pr.json 2>/dev/null || echo "")" incremental.diff
-  log "Building related-code context from incremental diff..."
-  build_related_code_context incremental.diff ""
-  build_review_corpus "incremental"
-else
-  log "Building related-code context from full diff..."
-  build_related_code_context pr.diff pr-files.json
-  build_review_corpus "full"
-fi
+log "Building related-code context from full diff..."
+build_related_code_context pr.diff pr-files.json
+build_review_corpus
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
@@ -540,17 +500,13 @@ harvest_specialist_phase
 # Rebuild the corpus with the reserved "# Specialist Review Leads" block
 # (build_review_corpus carves its exact bytes out of the body budget and
 # appends it last, after the ledger) whenever the rendered section is
-# non-empty; both modes' corpora therefore carry the leads before the final
+# non-empty; the rebuilt corpus therefore carries the leads before the final
 # review call and before native-loop planning. When deep review is disabled
 # or no usable lead survived, specialists.md is empty and NO rebuild
 # happens — disabled output stays byte-for-byte as before.
 if [ -s specialists.md ]; then
   log "deep_review: rebuilding corpus with the reserved specialist-lead section"
-  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-    build_review_corpus "incremental"
-  else
-    build_review_corpus "full"
-  fi
+  build_review_corpus
   cp review-corpus.md review-corpus.truncated.md
 fi
 
@@ -582,12 +538,6 @@ EOF
 EOF
     fi
   fi
-  # Rebuild with the same scope used before the harness ran; build_review_corpus
-  # defaults to "full", which would silently discard an incremental delta review.
-  if [[ "$EFFECTIVE_SCOPE" == "incremental" && -n "$PREVIOUS_HEAD_SHA" ]]; then
-    build_review_corpus "incremental"
-  else
-    build_review_corpus "full"
-  fi
+  build_review_corpus
   cp review-corpus.md review-corpus.truncated.md
 fi

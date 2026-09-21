@@ -105,16 +105,33 @@ check "Phase-2 emits 'known non-Forgejo host' corpus note" \
   "$(grep -c 'Raw HTML fetch skipped for known non-Forgejo host' "$LINKED_SOURCES_PY")" "1"
 
 echo ""
-echo "=== Test: no tokens on curl argv in the incremental fetch ==="
-check "incremental fetch passes the token via --config, not argv" \
-  "$(grep -c 'Authorization: token \$GH_TOKEN" \\' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
-check "incremental fetch uses curl_config_escape helper" \
-  "$(grep -c 'curl_config_escape "Authorization: token' "$ROOT_DIR/scripts/sections/config.sh")" "1"
+echo "=== Test: no incremental compare-diff fetch remains in review config ==="
+check "config.sh no longer defines fetch_incremental_patch" \
+  "$(grep -c 'fetch_incremental_patch' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
+check "config.sh no longer uses curl_config_escape" \
+  "$(grep -c 'curl_config_escape' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
+check "config.sh no longer references incremental.diff" \
+  "$(grep -c 'incremental\.diff' "$ROOT_DIR/scripts/sections/config.sh" || true)" "0"
 # HTML stripping lives only in pr_reviewer/linked_sources.py (via
 # strip_source_text.py); context.sh must not grow a parallel shell
 # implementation again.
 check "context.sh has no parallel strip implementation" \
   "$(grep -c 'strip_source_to_text' "$ROOT_DIR/scripts/sections/context.sh" || true)" "0"
+
+echo ""
+echo "=== Test: exactly one corpus construction path in the corpus module (#616) ==="
+# The review corpus collapsed to the single full-PR shape: no incremental
+# scope, no compare-diff fetch during review execution.
+check "corpus.sh has no 'incremental' references" \
+  "$(grep -ic 'incremental' "$ROOT_DIR/scripts/sections/corpus.sh" || true)" "0"
+check "corpus.sh has no corpus_type" \
+  "$(grep -c 'corpus_type' "$ROOT_DIR/scripts/sections/corpus.sh" || true)" "0"
+check "corpus.sh has no EFFECTIVE_SCOPE" \
+  "$(grep -c 'EFFECTIVE_SCOPE' "$ROOT_DIR/scripts/sections/corpus.sh" || true)" "0"
+check "corpus.sh has no PREVIOUS_HEAD_SHA" \
+  "$(grep -c 'PREVIOUS_HEAD_SHA' "$ROOT_DIR/scripts/sections/corpus.sh" || true)" "0"
+check "tool-harness corpus titles dropped 'Incremental Review Delta'" \
+  "$(grep -c 'Incremental Review Delta' "$ROOT_DIR/scripts/run_tool_harness.py" || true)" "0"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

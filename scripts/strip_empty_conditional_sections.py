@@ -69,13 +69,6 @@ SECTION_TITLES = {
     "tool_harness_results": "tool harness results",
 }
 
-# The qualifiers the corpus header actually carries. An allowlist, not a general
-# "strip any trailing parenthetical": corpus.sh emits exactly one of these, while
-# a finding headed "### Tool Harness Results (Fork Skip)" would normalise straight
-# onto a title under the general form and be deleted with its body, which is the
-# false strip this whole approach exists to avoid.
-_TITLE_QUALIFIERS = ("(incremental review)",)
-
 # The trailing punctuation and closing hashes an ATX heading may end with.
 _TITLE_TRIM_RE = re.compile(r"[\s:;.,\u2013\u2014#-]+$")
 
@@ -83,10 +76,6 @@ _TITLE_TRIM_RE = re.compile(r"[\s:;.,\u2013\u2014#-]+$")
 def _normalise_title(heading_text: str) -> str:
     """Reduce a heading to its bare title, for whole-title comparison."""
     t = _TITLE_TRIM_RE.sub("", heading_text.strip().lower())
-    for qualifier in _TITLE_QUALIFIERS:
-        if t.endswith(qualifier):
-            t = _TITLE_TRIM_RE.sub("", t[: -len(qualifier)])
-            break
     return " ".join(t.split())
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")

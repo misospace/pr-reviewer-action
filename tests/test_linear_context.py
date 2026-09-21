@@ -149,18 +149,22 @@ def test_workspace_module_cannot_shadow_action_adapter(tmp_path):
     assert json.loads(output_json.read_text()) == []
 
 
-def test_incremental_corpus_changes_only_when_linear_is_enabled():
-    corpus_source = (_REPO_ROOT / "scripts/sections/corpus.sh").read_text()
-    incremental_setup = corpus_source.split(
-        'if [[ "$corpus_type" == "incremental" ]]; then', 1
-    )[1].split("      local head_sha", 1)[0]
-    assert "cat linear-issues.md" in incremental_setup
-    assert "cat linked-issues.md" not in incremental_setup
+def test_corpus_embeds_linear_context_through_the_single_linked_issue_path():
+    """#616: the corpus collapsed to one full-PR path.
 
-    full_setup = corpus_source.split(
-        '    else\n      # context.sh leaves linked-issues.md empty', 1
-    )[1].split('      echo "# PR Files (truncated)"', 1)[0]
-    assert "cat linked-issues.md" in full_setup
+    Linear context reaches it through context.sh, which appends
+    linear-issues.md into linked-issues.md when the adapter is enabled, so
+    corpus.sh emits only the linked-issues.md form and never references the
+    incremental delta scope or its linear-only emission again.
+    """
+    corpus_source = (_REPO_ROOT / "scripts/sections/corpus.sh").read_text()
+    assert "cat linked-issues.md" in corpus_source
+    assert "linear-issues.md" not in corpus_source
+    assert "corpus_type" not in corpus_source
+    assert "Incremental Review Delta" not in corpus_source
+
+    context_source = (_REPO_ROOT / "scripts/sections/context.sh").read_text()
+    assert "cat linear-issues.md >> linked-issues.md" in context_source
 
 
 def test_cli_with_no_matching_title_writes_empty_artifacts(tmp_path, monkeypatch):

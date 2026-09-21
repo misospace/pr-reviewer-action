@@ -56,7 +56,6 @@ def _run(monkeypatch, tmp_path, responses):
 
     monkeypatch.setattr(rth, "run_chat_request", fake_request)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
 
     result = {
         "mode": "plan_execute_once",
@@ -254,7 +253,6 @@ def test_native_loop_falls_back_to_non_streamed_turn(monkeypatch, tmp_path):
     """A streamed turn that can't be reassembled is retried non-streamed,
     covering both triggers: a 200 error body and a transport raise (#204)."""
     monkeypatch.setenv("AI_STREAM", "true")
-    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
     monkeypatch.chdir(tmp_path)
     (tmp_path / "machineconfig.yaml.j2").write_text(
         "install: factory.talos.dev/installer:v1.13.4\n", encoding="utf-8"
@@ -342,7 +340,6 @@ def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled):
 
     monkeypatch.setattr(tl, "drive_tool_loop", fake_drive)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
     if enabled:
         monkeypatch.setenv("TOOL_LOOP_SUMMARIZE", "true")
     else:
@@ -415,7 +412,6 @@ def test_native_loop_request_error_records_usage_and_error(monkeypatch, tmp_path
 
     monkeypatch.setattr(rth, "run_chat_request", boom)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
     monkeypatch.setenv("AI_STREAM", "false")
     result = {
         "mode": "plan_execute_once",
@@ -449,7 +445,6 @@ def _run_capturing(monkeypatch, tmp_path, api_format, responses):
 
     monkeypatch.setattr(rth, "run_chat_request", fake_request)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("EFFECTIVE_SCOPE", "full")
     monkeypatch.setenv("AI_STREAM", "false")
     result = {
         "mode": "plan_execute_once",
@@ -918,10 +913,13 @@ class TestReplaceHarnessFindingsSection:
         assert "# Tool Harness Findings\nreal body\n\n# Image Digest Provenance" in out
         assert "planning pending" not in out
 
-    def test_incremental_header_suffix_is_preserved(self):
-        corpus = "# Tool Harness Findings (incremental review)\nplaceholder\n\n# Next\nx\n"
+    def test_qualified_header_line_is_preserved_verbatim(self):
+        # Generic contract: whatever the level-1 header line says, only the
+        # body is replaced (#616 removed the corpus's "(incremental review)"
+        # qualifier; the preservation behavior itself is unchanged).
+        corpus = "# Tool Harness Findings (something)\nplaceholder\n\n# Next\nx\n"
         out = rth.replace_harness_findings_section(corpus, "real body\n")
-        assert out.startswith("# Tool Harness Findings (incremental review)\nreal body")
+        assert out.startswith("# Tool Harness Findings (something)\nreal body")
         assert out.endswith("# Next\nx\n")
 
     def test_absent_section_returns_corpus_unchanged(self):

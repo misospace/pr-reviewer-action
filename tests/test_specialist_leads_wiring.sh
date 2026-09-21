@@ -93,7 +93,6 @@ setup_corpus_workdir() {
   : > "$d/pr-thread.md"
   : > "$d/related-code.truncated.md"
   : > "$d/linear-issues.md"
-  : > "$d/incremental.diff"
   : > "$d/previous-findings.json"
   : > "$d/previous-evidence.json"
   : > "$d/tool-harness.md"
@@ -112,9 +111,8 @@ run_corpus() {
     MAX_DIFF=8000 \
     STANDARDS_FILE="AGENTS.md" \
     CI_CHECKS_FILE="" \
-    PREVIOUS_HEAD_SHA="0000000000000000000000000000000000000000" \
     TOOL_EVIDENCE_MEMORY="true" \
-    build_review_corpus "$3" )
+    build_review_corpus )
 }
 
 sp_lockstep() {
@@ -128,52 +126,48 @@ sp_lockstep() {
   fi
 }
 
-# ── a. prior review artifacts render in a full v3 corpus ──────────────────
-echo "=== a. full corpus retains carried findings and evidence memory ==="
-for scope in full incremental; do
-  d="$WORK/a-context-$scope"
-  setup_corpus_workdir "$d"
-  printf '[{"severity":"major","category":"bug","file":"x.py","line":3,"message":"prior finding"}]\n' > "$d/previous-findings.json"
-  printf '{"digest":"- read_file → prior evidence","head_sha":"deadbeef"}\n' > "$d/previous-evidence.json"
-  run_corpus "$d" 220000 "$scope"
-  check_contains "$scope corpus renders prior findings" \
-    "$(<"$d/review-corpus.md")" "# Open Findings From the Previous Review"
-  check_contains "$scope corpus renders prior finding content" \
-    "$(<"$d/review-corpus.md")" "prior finding"
-  check_contains "$scope corpus renders prior evidence" \
-    "$(<"$d/review-corpus.md")" "# Evidence Gathered by the Previous Review"
-  check_contains "$scope corpus renders prior evidence digest" \
-    "$(<"$d/review-corpus.md")" "prior evidence"
-done
+# ── a. prior review artifacts render in the v3 corpus ─────────────────────
+echo "=== a. corpus retains carried findings and evidence memory ==="
+d="$WORK/a"
+setup_corpus_workdir "$d"
+printf '[{"severity":"major","category":"bug","file":"x.py","line":3,"message":"prior finding"}]\n' > "$d/previous-findings.json"
+printf '{"digest":"- read_file → prior evidence","head_sha":"deadbeef"}\n' > "$d/previous-evidence.json"
+run_corpus "$d" 220000
+check_contains "corpus renders prior findings" \
+  "$(<"$d/review-corpus.md")" "# Open Findings From the Previous Review"
+check_contains "corpus renders prior finding content" \
+  "$(<"$d/review-corpus.md")" "prior finding"
+check_contains "corpus renders prior evidence" \
+  "$(<"$d/review-corpus.md")" "# Evidence Gathered by the Previous Review"
+check_contains "corpus renders prior evidence digest" \
+  "$(<"$d/review-corpus.md")" "prior evidence"
 
-# ── b. reserved placement, fixed order, bytes intact (full + incremental) ──
+# ── b. reserved placement, fixed order, bytes intact ──────────────────────
 echo "=== b. corpus reserves the specialist-lead block after the ledger ==="
-for scope in full incremental; do
-  d="$WORK/a-$scope"
-  setup_corpus_workdir "$d"
-  printf '%s\n' "$LEDGER_MD" > "$d/requirement-ledger.md"
-  printf 'aaaaaaaaaaaa\n' > "$d/requirement-ledger-present.txt"
-  printf '%s' "$SP_MD" > "$d/specialists.md"
-  printf '%s\n' "$(wc -c < "$d/specialists.md" | tr -d ' ')" > "$d/specialist-leads-present.txt"
-  run_corpus "$d" 220000 "$scope"
-  check_contains "$scope: specialist section present" \
-    "$(<"$d/review-corpus.md")" "# Specialist Review Leads"
-  check "$scope: section AFTER the requirement ledger block" \
-    "$(awk '/^# Explicit Requirement Ledger$/{l=NR} /^# Specialist Review Leads$/{s=NR} END{if (l && s && s>l) print "ok"; else print "bad"}' "$d/review-corpus.md")" "ok"
-  check "$scope: role headings in fixed order correctness->security->tests" \
-    "$(awk '/^## Correctness$/{c=NR} /^## Security$/{e=NR} /^## Tests$/{t=NR} END{if (c && e && t && c<e && e<t) print "ok"; else print "bad"}' "$d/review-corpus.md")" "ok"
-  # Whole-section granularity: the first `sp_bytes` bytes of the corpus tail
-  # (from the section header to EOF) equal specialists.md byte-for-byte.
-  sp_bytes="$(wc -c < "$d/specialists.md" | tr -d ' ')"
-  if cmp -s \
-      <(awk '/^# Specialist Review Leads$/{f=1} f' "$d/review-corpus.md" | head -c "$sp_bytes") \
-      "$d/specialists.md"; then
-    check "$scope: section bytes survive intact (never sliced)" ok ok
-  else
-    check "$scope: section bytes survive intact (never sliced)" differs ok
-  fi
-  sp_lockstep "$d" "$scope"
-done
+d="$WORK/b-reserve"
+setup_corpus_workdir "$d"
+printf '%s\n' "$LEDGER_MD" > "$d/requirement-ledger.md"
+printf 'aaaaaaaaaaaa\n' > "$d/requirement-ledger-present.txt"
+printf '%s' "$SP_MD" > "$d/specialists.md"
+printf '%s\n' "$(wc -c < "$d/specialists.md" | tr -d ' ')" > "$d/specialist-leads-present.txt"
+run_corpus "$d" 220000
+check_contains "specialist section present" \
+  "$(<"$d/review-corpus.md")" "# Specialist Review Leads"
+check "section AFTER the requirement ledger block" \
+  "$(awk '/^# Explicit Requirement Ledger$/{l=NR} /^# Specialist Review Leads$/{s=NR} END{if (l && s && s>l) print "ok"; else print "bad"}' "$d/review-corpus.md")" "ok"
+check "role headings in fixed order correctness->security->tests" \
+  "$(awk '/^## Correctness$/{c=NR} /^## Security$/{e=NR} /^## Tests$/{t=NR} END{if (c && e && t && c<e && e<t) print "ok"; else print "bad"}' "$d/review-corpus.md")" "ok"
+# Whole-section granularity: the first `sp_bytes` bytes of the corpus tail
+# (from the section header to EOF) equal specialists.md byte-for-byte.
+sp_bytes="$(wc -c < "$d/specialists.md" | tr -d ' ')"
+if cmp -s \
+    <(awk '/^# Specialist Review Leads$/{f=1} f' "$d/review-corpus.md" | head -c "$sp_bytes") \
+    "$d/specialists.md"; then
+  check "section bytes survive intact (never sliced)" ok ok
+else
+  check "section bytes survive intact (never sliced)" differs ok
+fi
+sp_lockstep "$d" "reserved"
 
 # ── b. truncation pressure: reserved blocks outlive the body budget ───────
 echo "=== b. reserved specialist block survives truncation pressure ==="
@@ -187,7 +181,7 @@ printf '%s\n' "$LEDGER_MD" > "$d/requirement-ledger.md"
 printf 'aaaaaaaaaaaa\n' > "$d/requirement-ledger-present.txt"
 printf '%s' "$SP_MD" > "$d/specialists.md"
 printf '%s\n' "$(wc -c < "$d/specialists.md" | tr -d ' ')" > "$d/specialist-leads-present.txt"
-run_corpus "$d" 20000 full
+run_corpus "$d" 20000
 CORPUS_CONTENT="$(<"$d/review-corpus.md")"
 check_contains "pressure: body truncation notice present" "$CORPUS_CONTENT" \
   "[review corpus truncated to fit the model context budget]"
@@ -207,7 +201,7 @@ d="$WORK/c"
 setup_corpus_workdir "$d"
 printf '%s\n' "$LEDGER_MD" > "$d/requirement-ledger.md"
 printf 'aaaaaaaaaaaa\n' > "$d/requirement-ledger-present.txt"
-run_corpus "$d" 220000 full
+run_corpus "$d" 220000
 check_not_contains "absent: no specialist section in corpus" \
   "$(<"$d/review-corpus.md")" "# Specialist Review Leads"
 check_contains "absent: ledger block still present (no regression)" \
@@ -223,7 +217,7 @@ setup_corpus_workdir "$d"
   python3 -c 'print("z" * 4000)'
 } > "$d/specialists.md"
 printf 'pre-existing-stale-signal\n' > "$d/specialist-leads-present.txt"
-run_corpus "$d" 100 full
+run_corpus "$d" 100
 check_not_contains "oversize: section dropped from the corpus" \
   "$(<"$d/review-corpus.md")" "# Specialist Review Leads"
 check "oversize: lockstep guard truncated the presence signal to 0 bytes" \

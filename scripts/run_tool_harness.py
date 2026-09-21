@@ -308,7 +308,6 @@ def build_planning_context(max_bytes, corpus_path=None):
             "PR Classification",
             "Related Code Context",
             "Repository Map",
-            "Incremental Review Delta",
             "Linked Issue Context",
             "PR Files (truncated)",
             "Version Hints from Diff",
@@ -649,9 +648,9 @@ def replace_harness_findings_section(corpus, body):
     """Swap the body of the corpus's Tool Harness Findings section.
 
     Sections are delimited by level-1 ATX headers — the same rule
-    build_review_corpus emits and dedupe_verdict_corpus splits on. The header
-    line itself is preserved (it carries the "(incremental review)" suffix on
-    delta reviews). Returns the corpus unchanged when the section is absent.
+    build_review_corpus emits and dedupe_verdict_corpus splits on. The
+    header line itself is preserved. Returns the corpus unchanged when the
+    section is absent.
     """
     lines = corpus.split("\n")
     starts = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
