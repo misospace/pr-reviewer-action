@@ -845,9 +845,14 @@ runs:
         fi
         # The file carries tokens (GH_TOKEN, FORGEJO_TOKEN, ...): umask 077 +
         # mktemp keep it owner-only, outside the reviewed workspace. The
-        # runner cleans $RUNNER_TEMP up after the job.
+        # runner cleans $RUNNER_TEMP up after the job, but the file must not
+        # outlive this action even then: the EXIT trap below removes it if
+        # serialization fails before the path is published, and the
+        # 'Clean up shared environment' step removes it after the last
+        # consumer runs.
         umask 077
         shared_env_file="$(mktemp "${RUNNER_TEMP:-/tmp}/shared-env.XXXXXXXX")"
+        trap 'rm -f -- "$shared_env_file"' EXIT
         # Keep in lockstep with the env block above (pinned by
         # tests/test_shared_env_wiring.sh).
         keys=(
@@ -938,8 +943,12 @@ runs:
             printf '%s\0%s\0' "$key" "${!key}"
           done
         } > "$shared_env_file"
-        # Only the path crosses the step boundary — never a value.
+        # Only the path crosses the step boundary — never a value. Once the
+        # path is published the consumers own the lifecycle; drop the EXIT
+        # trap so the success path does NOT delete the file out from under
+        # them (the 'Clean up shared environment' step deletes it later).
         echo "path=$shared_env_file" >> "$GITHUB_OUTPUT"
+        trap - EXIT
 
     - name: Check whether review is needed
       id: precheck
@@ -1044,6 +1053,25 @@ runs:
         source "${{ github.action_path }}/scripts/load_shared_env.sh"
         load_shared_env "$SHARED_ENV_FILE"
         bash "${{ github.action_path }}/scripts/run_review.sh"
+
+    - name: Clean up shared environment
+      # Action-scoped lifecycle for the shared env file (#641): it carries
+      # tokens (GH_TOKEN, FORGEJO_TOKEN, TOOL_MCP_TOKEN, ...), so it must not
+      # outlive the composite action — not when should_review is false and
+      # this step is the only consumer left, not when the review failed, and
+      # not when an earlier internal step failed after the file was created.
+      # if: always() guarantees the deletion runs on every one of those paths;
+      # the body is fail-soft so a cleanup problem can never replace the real
+      # action result. The step receives only the file path, never a value.
+      if: always()
+      shell: bash
+      env:
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
+      run: |
+        if [ -n "${SHARED_ENV_FILE:-}" ]; then
+          rm -f -- "$SHARED_ENV_FILE" 2>/dev/null || true
+        fi
+        exit 0
 
     - name: Publish review
       # Single dispatcher for all three publish modes. One superset env block

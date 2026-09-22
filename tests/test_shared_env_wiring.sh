@@ -17,21 +17,31 @@ fi
 #   - the precheck and the review step source scripts/load_shared_env.sh and
 #     load that file explicitly in their run bodies;
 #   - $GITHUB_ENV is never touched, so the caller's job environment is never
-#     mutated and no shared value outlives the composite action.
+#     mutated and no shared value outlives the composite action;
+#   - the file's lifecycle is action-scoped: an `if: always()` fail-soft
+#     'Clean up shared environment' step deletes it after the last consumer
+#     (even when the review is skipped or fails), and the export step removes
+#     it itself if serialization fails before the path was published.
 #
 # This test pins:
-#   1. shared values reaching BOTH the precheck and the review step;
-#   2. independence from $GITHUB_ENV (zero references in action.yml; a mock
-#      $GITHUB_ENV stays byte-empty through the whole flow);
-#   3. byte-exact round-trips of multiline, empty, and shell-sensitive values
+#   1. shared values reaching BOTH the precheck and the review step, and the
+#      file still existing while they need it (cleanup ordered after review);
+#   2. the file being absent after the cleanup stage (functional deletion +
+#      idempotent re-run);
+#   3. cleanup being structurally `if: always()` and fail-soft;
+#   4. an export failure after mktemp leaving no secret-bearing file behind;
+#   5. independence from $GITHUB_ENV (zero functional references in
+#      action.yml; a mock $GITHUB_ENV stays byte-empty through the whole
+#      flow);
+#   6. byte-exact round-trips of multiline, empty, and shell-sensitive values
 #      through export AND load;
-#   4. no secrets in any step log;
-#   5. the caller/job environment is not mutated (nothing written to a
+#   7. no secrets in any step log;
+#   8. the caller/job environment is not mutated (nothing written to a
 #      $GITHUB_ENV-style sink; loaded values override a caller-owned var only
 #      inside the consuming process, matching old step-env precedence);
-#   6. the file is created owner-only (umask 077);
-#   7. lockstep between the step's env block and the export key list;
-#   8. the #641 acceptance headroom (review-step env count cut by >= 40%).
+#   9. the file is created owner-only (umask 077);
+#  10. lockstep between the step's env block and the export key list;
+#  11. the #641 acceptance headroom (review-step env count cut by >= 40%).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -138,6 +148,36 @@ if [ "$review_count" -le 65 ]; then
 else
   FAIL=$((FAIL + 1)); echo "  FAIL: review step has $review_count env vars (> 65)"
 fi
+
+echo ""
+echo "=== cleanup: action-scoped file lifecycle ==="
+cleanup_section="$(awk '/name: Clean up shared environment/,/name: Publish review/' "$ACTION_YML")"
+publish_line="$(grep -n 'name: Publish review' "$ACTION_YML" | cut -d: -f1)"
+cleanup_line="$(grep -n 'name: Clean up shared environment' "$ACTION_YML" | cut -d: -f1)"
+check_contains "cleanup step exists" "$cleanup_section" 'name: Clean up shared environment'
+check_contains "cleanup is structurally always() (skipped review and failed steps included)" \
+  "$cleanup_section" 'if: always()'
+check "cleanup runs after the last consumer and before publish" \
+  "$([ "$review_line" -lt "$cleanup_line" ] && [ "$cleanup_line" -lt "$publish_line" ] && echo yes || echo no)" "yes"
+cleanup_env_keys="$(printf '%s\n' "$cleanup_section" | sed -n '/^      env:$/,/^      run:/p' | grep -E '^        [A-Z_0-9]+: ' | sed 's/^        //; s/: .*//')"
+check "cleanup receives only the path, never a value" "$cleanup_env_keys" "SHARED_ENV_FILE"
+check_contains "cleanup uses safe deletion" "$cleanup_section" 'rm -f -- "$SHARED_ENV_FILE"'
+check_contains "cleanup is fail-soft (rm failure cannot fail the step)" "$cleanup_section" '|| true'
+check_contains "cleanup always exits 0" "$cleanup_section" 'exit 0'
+check_contains "cleanup tolerates an unset path (export never ran)" "$cleanup_section" '[ -n "${SHARED_ENV_FILE:-}" ]'
+check "cleanup body never references GITHUB_ENV" \
+  "$(printf '%s\n' "$cleanup_section" | grep -vE '^[[:space:]]*#' | grep -c 'GITHUB_ENV' || true)" "0"
+
+echo ""
+echo "=== export step: partial-failure path removes the file itself ==="
+check_contains "EXIT trap installed right after mktemp" "$step_section" "trap 'rm -f -- \"\$shared_env_file\"' EXIT"
+trap_line="$(printf '%s\n' "$step_section" | grep -n "trap 'rm -f" | cut -d: -f1 | head -1)"
+publish_path_line="$(printf '%s\n' "$step_section" | grep -n 'echo "path=' | cut -d: -f1 | head -1)"
+trap_clear_line="$(printf '%s\n' "$step_section" | grep -n 'trap - EXIT' | cut -d: -f1 | head -1)"
+check "trap is installed before the path is published" \
+  "$([ -n "$trap_line" ] && [ -n "$publish_path_line" ] && [ "$trap_line" -lt "$publish_path_line" ] && echo yes || echo no)" "yes"
+check "trap is cleared only after the path is published" \
+  "$([ -n "$trap_clear_line" ] && [ "$trap_clear_line" -gt "$publish_path_line" ] && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== functional: export + load round-trip values byte-for-byte ==="
@@ -310,6 +350,53 @@ if GITHUB_OUTPUT="$TMP/github_output2" bash -c "source $TMP/export_body.sh" >/de
 else
   PASS=$((PASS + 1)); echo "  PASS: missing env binding exits non-zero"
 fi
+
+echo ""
+echo "=== functional: cleanup stage deletes the file, fail-soft ==="
+printf '%s\n' "$cleanup_section" | sed -n '/^      run: |$/,$p' | sed '1d' | sed 's/^        //' > "$TMP/cleanup_body.sh"
+: > "$TMP/cleanup.stdout" 2> "$TMP/cleanup.stderr"
+cleanup_rc=0
+SHARED_ENV_FILE="$shared_env_file" bash "$TMP/cleanup_body.sh" > "$TMP/cleanup.stdout" 2> "$TMP/cleanup.stderr" || cleanup_rc=$?
+check "cleanup body exits 0" "$cleanup_rc" "0"
+check "shared env file is gone after the cleanup stage" "$([ -f "$shared_env_file" ] && echo present || echo gone)" "gone"
+# Idempotent: a second run (file already gone) still exits 0.
+cleanup_rc=0
+SHARED_ENV_FILE="$shared_env_file" bash "$TMP/cleanup_body.sh" >/dev/null 2>&1 || cleanup_rc=$?
+check "cleanup is idempotent when the file is already gone" "$cleanup_rc" "0"
+# Unset path (export step never ran): still exits 0, deletes nothing.
+cleanup_rc=0
+env -u SHARED_ENV_FILE bash "$TMP/cleanup_body.sh" >/dev/null 2>&1 || cleanup_rc=$?
+check "cleanup exits 0 when the path was never published" "$cleanup_rc" "0"
+
+echo ""
+echo "=== functional: export failure after mktemp leaves no file behind ==="
+mock_runner_temp="$TMP/runner_temp"
+mkdir -p "$mock_runner_temp"
+: > "$TMP/github_output_fail"
+export_fail_rc=0
+GITHUB_OUTPUT="$TMP/github_output_fail" RUNNER_TEMP="$mock_runner_temp" \
+  bash "$TMP/export_body.sh" > /dev/null 2> "$TMP/export_fail.stderr" || export_fail_rc=$?
+if [ "$export_fail_rc" -ne 0 ]; then
+  PASS=$((PASS + 1)); echo "  PASS: export body fails loudly when keys are unbound (rc=$export_fail_rc)"
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL: export body should have failed with unbound keys"
+fi
+leftovers="$(find "$mock_runner_temp" -type f | wc -l | tr -d ' ')"
+check "no secret-bearing file left after the failed export" "$leftovers" "0"
+check "failed export published no path" "$(wc -c < "$TMP/github_output_fail" | tr -d ' ')" "0"
+
+# Success path contrast: after a successful export the file MUST still exist
+# (the EXIT trap is cleared once the path is published) so consumers can load it.
+: > "$TMP/github_output2"
+GITHUB_OUTPUT="$TMP/github_output2" RUNNER_TEMP="$mock_runner_temp" \
+  bash -c 'set -a; source "$1"; set +a; shift; source "$1"; shift; source "$1"' \
+  _ "$caller_env_file" "$export_env_file" "$TMP/export_body.sh" > /dev/null 2>&1
+check "export body exits 0 on the success path" "$?" "0"
+success_file="$(sed -n 's/^path=//p' "$TMP/github_output2")"
+check "shared file still exists after a successful export (consumers need it)" \
+  "$([ -n "$success_file" ] && [ -f "$success_file" ] && echo present || echo gone)" "present"
+check "successful export leaves no extra files in RUNNER_TEMP" \
+  "$(find "$mock_runner_temp" -type f | wc -l | tr -d ' ')" "1"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
