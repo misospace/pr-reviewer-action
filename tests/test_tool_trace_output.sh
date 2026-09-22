@@ -15,8 +15,10 @@ source "$SCRIPT_DIR/_lib/assert.sh"
 REVIEW="$ROOT_DIR/scripts/sections/review.sh"
 ACTION="$ROOT_DIR/action.yml"
 check_contains "review emits tool_calls output" "$(cat "$REVIEW")" 'echo "tool_calls<<$TC_DELIM"'
-check_contains "tool_calls output projects tool and status" "$(cat "$REVIEW")" '.tool_calls[]? | {tool, status}'
-check_contains "step summary reports executed tool count" "$(cat "$REVIEW")" 'Tool calls | ${tool_call_count} executed'
+check_contains "tool_calls output attributes primary calls" "$(cat "$REVIEW")" 'tier:"primary",tool,status'
+check_contains "tool_calls output attributes smart calls" "$(cat "$REVIEW")" 'tier:"smart",tool,status'
+check_contains "step summary reports primary tool count" "$(cat "$REVIEW")" 'Primary tools | ${tool_call_count} executed'
+check_contains "step summary reports smart tool use" "$(cat "$REVIEW")" 'Smart tools |'
 check_contains "action exposes tool_calls output" "$(cat "$ACTION")" 'tool_calls:'
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
