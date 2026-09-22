@@ -120,6 +120,15 @@ _forgejo_jq() {
 
 # ── Core PR I/O ─────────────────────────────────────────────────────────
 
+_platform_fixture_enabled() {
+  [[ "${SEMANTIC_FIXTURE_MODE:-false}" == "true" && -n "${SEMANTIC_FIXTURE_DIR:-}" ]]
+}
+
+_platform_fixture_file() {
+  local name="$1"
+  cat "${SEMANTIC_FIXTURE_DIR}/.semantic-fixture/${name}"
+}
+
 platform_authenticated_repo_permission() {
   # $1=repo → read|write|admin on stdout (Forgejo), or "unknown" on GitHub:
   # GitHub App/GITHUB_TOKEN permissions are unit-scoped and cannot be inferred
@@ -134,7 +143,9 @@ platform_authenticated_repo_permission() {
 platform_pr_get() {
   # $1=repo $2=pr_number [extra gh api flags, e.g. --jq] → PR object
   # (GitHub REST shape, or the --jq projection) on stdout
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    _platform_fixture_file pr.json
+  elif _platform_is_forgejo; then
     _forgejo_jq get-pr-metadata "$@"
   else
     local repo="$1" num="$2"
@@ -145,7 +156,9 @@ platform_pr_get() {
 
 platform_pr_head_sha() {
   # $1=repo $2=pr_number → head sha on stdout
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    git -C "${SEMANTIC_FIXTURE_DIR}" rev-parse HEAD
+  elif _platform_is_forgejo; then
     _forgejo_py get-pr-metadata "$1" "$2" | jq -r '.head.sha // empty'
   else
     gh api "repos/$1/pulls/$2" --jq '.head.sha'
@@ -154,7 +167,9 @@ platform_pr_head_sha() {
 
 platform_pr_diff() {
   # $1=repo $2=pr_number → unified diff on stdout
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    _platform_fixture_file diff
+  elif _platform_is_forgejo; then
     _forgejo_py get-pr-diff "$1" "$2"
   else
     gh pr diff "$2" --repo "$1"
@@ -163,7 +178,9 @@ platform_pr_diff() {
 
 platform_pr_files() {
   # $1=repo $2=pr_number → first page of changed files (GitHub REST shape)
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    _platform_fixture_file files.json
+  elif _platform_is_forgejo; then
     _forgejo_py list-pr-files "$1" "$2"
   else
     gh api "repos/$1/pulls/$2/files?per_page=100"
@@ -172,7 +189,9 @@ platform_pr_files() {
 
 platform_issue_get() {
   # $1=repo $2=issue_number → issue object on stdout
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    printf '{"number":%s,"title":"","state":"open","html_url":"","labels":[],"body":""}\n' "$2"
+  elif _platform_is_forgejo; then
     _forgejo_py fetch-issue "$1" "$2"
   else
     gh api "repos/$1/issues/$2"
@@ -181,7 +200,9 @@ platform_issue_get() {
 
 platform_issue_comments() {
   # $1=repo $2=issue_number → first page of issue comments
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    printf '[]\n'
+  elif _platform_is_forgejo; then
     _forgejo_py list-comments "$1" "$2"
   else
     gh api "repos/$1/issues/$2/comments?per_page=100"
@@ -190,6 +211,10 @@ platform_issue_comments() {
 
 platform_pr_review_comments() {
   # $1=repo $2=pr_number → up to the 100 most recent PR conversation
+  if _platform_fixture_enabled; then
+    printf '[]\n'
+    return 0
+  fi
   # (top-level issue) comments, normalized to {id,user,created_at,updated_at,body}.
   # PR conversation comments are issue comments in both data models, so both
   # branches emit the same normalized JSON shape for pr_thread.py (#578). The
@@ -209,6 +234,10 @@ platform_pr_review_comments() {
 
 platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
+  if _platform_fixture_enabled; then
+    printf '{"commits":[],"files":[],"total_commits":0}\n'
+    return 0
+  fi
   # object (or the --jq projection) on stdout
   if _platform_is_forgejo; then
     _forgejo_jq compare "$@"
@@ -223,7 +252,9 @@ platform_compare() {
 
 platform_comment_sticky() {
   # $1=repo $2=pr_number $3=body_file — edit the managed comment or create it
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    return 0
+  elif _platform_is_forgejo; then
     _forgejo_py edit-last-comment "$1" "$2" "$(cat "$3")" >/dev/null
   else
     gh pr comment "$2" --repo "$1" --edit-last --create-if-none --body-file "$3"
@@ -232,7 +263,9 @@ platform_comment_sticky() {
 
 platform_pr_reviews() {
   # $1=repo $2=pr_number [first-page|paginate] → reviews JSON
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    printf '[]\n'
+  elif _platform_is_forgejo; then
     _forgejo_py list-pr-reviews "$1" "$2"
   elif [[ "${3:-first-page}" == "paginate" ]]; then
     gh api "repos/$1/pulls/$2/reviews" --paginate
@@ -243,7 +276,9 @@ platform_pr_reviews() {
 
 platform_review_create_json() {
   # $1=repo $2=pr_number $3=request_json_file — POST a review (inline comments)
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    return 0
+  elif _platform_is_forgejo; then
     _forgejo_py create-review-json "$1" "$2" "$3"
   else
     gh api "repos/$1/pulls/$2/reviews" --method POST --input "$3"
@@ -252,6 +287,9 @@ platform_review_create_json() {
 
 platform_review_native() {
   # $1=repo $2=pr_number $3=APPROVE|REQUEST_CHANGES|COMMENT $4=body_file
+  if _platform_fixture_enabled; then
+    return 0
+  fi
   case "$3" in
     APPROVE|REQUEST_CHANGES|COMMENT) ;;
     *) echo "Unsupported native review event: $3" >&2; return 2 ;;
@@ -269,7 +307,9 @@ platform_review_native() {
 
 platform_review_dismiss() {
   # $1=repo $2=pr_number $3=review_id $4=message
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    return 0
+  elif _platform_is_forgejo; then
     _forgejo_py dismiss-review "$1" "$2" "$3" "$4"
   else
     gh api "repos/$1/pulls/$2/reviews/$3/dismissals" --method PUT -f message="$4" --jq '.id'
@@ -278,6 +318,10 @@ platform_review_dismiss() {
 
 platform_graphql() {
   # GraphQL passthrough (comment minimisation). GitHub-only API surface; the
+  if _platform_fixture_enabled; then
+    printf '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}\n'
+    return 0
+  fi
   # forgejo path must degrade at the call site per #227, not crash here.
   if _platform_is_forgejo; then
     _forgejo_unimplemented "graphql"
@@ -299,7 +343,9 @@ platform_collaborator_permission() {
 
 platform_check_runs() {
   # $1=repo $2=sha → check-runs JSON
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    printf '{"check_runs":[],"total_count":0}\n'
+  elif _platform_is_forgejo; then
     # Forgejo has no check-runs API — return empty structure so the
     # wait_for_ci.sh jq summary produces zero external checks. The commit
     # statuses path (platform_commit_status) carries the CI signal.
@@ -311,7 +357,9 @@ platform_check_runs() {
 
 platform_commit_status() {
   # $1=repo $2=sha → combined commit status JSON
-  if _platform_is_forgejo; then
+  if _platform_fixture_enabled; then
+    printf '{"statuses":[],"total_count":0,"state":"pending"}\n'
+  elif _platform_is_forgejo; then
     _forgejo_py commit-status "$1" "$2"
   else
     gh api "repos/$1/commits/$2/status"

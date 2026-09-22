@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 644,
+  "provenance": {"historical_pr": 644, "state": "pre-fix", "source": "compact reconstruction of the removed-runtime prompt inputs"},
+  "pr_json": {"number": 644, "title": "refactor(review): remove deleted runtime protocol", "body": "", "head": {"sha": "fixture-644-head", "ref": "refactor/remove-runtime"}, "base": {"sha": "fixture-644-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 2, "additions": 4, "deletions": 20, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/644"},
+  "diff": "diff --git a/scripts/default_system_prompt.txt b/scripts/default_system_prompt.txt\n--- a/scripts/default_system_prompt.txt\n+++ b/scripts/default_system_prompt.txt\n@@ -1,3 +1,3 @@\n-Use the removed runtime protocol for tool requests.\n+Use the runtime for tool requests.\n diff --git a/scripts/run_tool_harness.py b/scripts/run_tool_harness.py\n--- a/scripts/run_tool_harness.py\n+++ b/scripts/run_tool_harness.py\n@@ -1,4 +1,2 @@\n-legacy_runtime_protocol()\n-run_legacy_protocol()\n",
+  "pr_files": [{"filename": "scripts/default_system_prompt.txt", "status": "modified", "additions": 1, "deletions": 1, "changes": 2}, {"filename": "scripts/run_tool_harness.py", "status": "modified", "additions": 0, "deletions": 2, "changes": 2}],
+  "files": [{"path": "scripts/default_system_prompt.txt", "content": "Use the removed runtime protocol for tool requests.\n"}, {"path": "scripts/run_tool_harness.py", "content": "def run_tools():\n    return execute_tools()\n"}, {"path": "README.md", "content": "The removed runtime protocol is still documented here.\n"}]
+}

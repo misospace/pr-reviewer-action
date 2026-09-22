@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,7 @@ if str(ROOT) not in sys.path:
 from pr_reviewer.semantic_eval import (
     SemanticCorpus,
     SemanticResult,
+    _safe_relative_path,
     SEMANTIC_EVAL_VERSION,
     _collect_signals_from_run,
     aggregate_semantic_runs,
@@ -186,21 +188,19 @@ class BenchmarkCorpus:
             validate_semantic_corpus(semantic)
         prs = data.get("benchmark_corpus", [])
         if not prs and semantic is not None:
-            seen: set[tuple[str, int]] = set()
             prs = []
             for scenario in semantic.scenarios:
-                pr_number = scenario.provenance.get("pr", scenario.number)
-                key = (scenario.repo_full_name, pr_number)
-                if key in seen:
-                    continue
-                seen.add(key)
-                prs.append({
-                    "number": pr_number,
+                entry = {
+                    "number": scenario.number,
                     "repo_full_name": scenario.repo_full_name,
                     "url": scenario.url,
                     "title": scenario.title,
                     "known_findings": scenario.known_findings,
-                })
+                }
+                if scenario.fixture is not None:
+                    fixture_data, fixture_path = _load_semantic_fixture(semantic, scenario.fixture)
+                    entry["_semantic_fixture"] = (fixture_data, fixture_path)
+                prs.append(entry)
         return cls(prs=prs, semantic_corpus=semantic)
 
 
@@ -1118,6 +1118,59 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
         return
 
 
+def _load_semantic_fixture(corpus: SemanticCorpus, fixture_ref: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+    if corpus.fixture_root is None:
+        raise ValueError("semantic fixture root is unavailable")
+    fixture_name = fixture_ref.get("path")
+    fixture_hash = fixture_ref.get("sha256")
+    if not _safe_relative_path(fixture_name):
+        raise ValueError(f"semantic fixture path is unsafe: {fixture_name}")
+    if not isinstance(fixture_hash, str) or re.fullmatch(r"[0-9a-f]{64}", fixture_hash) is None:
+        raise ValueError("semantic fixture sha256 must be 64 lowercase hexadecimal characters")
+    fixture_path = (corpus.fixture_root / fixture_name).resolve()
+    if corpus.fixture_root.resolve() not in fixture_path.parents:
+        raise ValueError(f"semantic fixture escapes corpus root: {fixture_name}")
+    raw = fixture_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != fixture_hash:
+        raise ValueError(f"semantic fixture hash mismatch for {fixture_path}")
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"semantic fixture must be an object: {fixture_path}")
+    return data, fixture_path
+
+
+def _materialize_semantic_fixture(
+    repo_path: Path,
+    fixture: dict[str, Any],
+) -> str:
+    repo_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(repo_path), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "eval@test"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "semantic-eval"], check=True)
+    for entry in fixture.get("files", []):
+        relative_name = entry["path"]
+        if not _safe_relative_path(relative_name):
+            raise ValueError(f"semantic fixture path is unsafe: {relative_name}")
+        relative = Path(str(relative_name))
+        destination = repo_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(str(entry["content"]), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True)
+    api_root = repo_path / ".semantic-fixture"
+    api_root.mkdir()
+    (api_root / "pr.json").write_text(json.dumps(fixture["pr_json"]), encoding="utf-8")
+    (api_root / "diff").write_text(str(fixture["diff"]), encoding="utf-8")
+    (api_root / "files.json").write_text(json.dumps(fixture["pr_files"]), encoding="utf-8")
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
 def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None, str]:
     """Fetch refs/pull/<pr>/head from origin and detach onto it.
 
@@ -1180,17 +1233,18 @@ def run_review_for_pr(
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
-    This is the integration point with the actual review pipeline. The run
-    materializes the corpus PR's exact head revision (refs/pull/<PR>/head,
-    fetched from the clone's origin and checked out detached) before
-    invoking the orchestrator, so filesystem context and specialist
-    artifact roots match the PR under review rather than the default
-    branch. The orchestrator's
+    This is the integration point with the actual review pipeline. Normal
+    benchmark entries materialize the corpus PR's exact head revision
+    (refs/pull/<PR>/head, fetched from the clone's origin and checked out
+    detached). Semantic fixture entries instead build a fresh local Git
+    repository from the immutable fixture and provide fixture-backed platform
+    responses, so they never fetch a live PR head. The orchestrator's
     GITHUB_WORKSPACE is pinned to the run's repo clone, because the
     production helpers resolve their workspace from it, never from cwd.
 
     Args:
         pr_entry: Corpus entry for one PR (with url, number, repo_full_name).
+          Semantic entries may carry the private `_semantic_fixture` tuple.
         mode: One of "tools_off", "native_loop".
         work_dir: Working directory for this run's artifacts.
         model_config: Model configuration (base_url, model, api_key, etc.).
@@ -1206,6 +1260,7 @@ def run_review_for_pr(
     """
     pr_number = pr_entry["number"]
     repo_full_name = pr_entry["repo_full_name"]
+    semantic_fixture = pr_entry.get("_semantic_fixture")
 
     run = ReviewRun(
         mode=run_label(mode, deep_review),
@@ -1226,18 +1281,21 @@ def run_review_for_pr(
             raise ValueError(f"Unknown mode: {mode}")
 
         # Build the review corpus and run the review
-        repo_path = work_dir / repo_full_name.replace("/", "-")
-        if not repo_path.exists():
-            # Clone or checkout the repo
-            subprocess.run(
-                ["git", "clone", f"https://github.com/{repo_full_name}.git", str(repo_path)],
-                check=False,  # may fail for private repos
-                capture_output=True,
-            )
-
-        if not repo_path.exists():
-            run.error = f"Repo {repo_full_name} not available locally"
-            return run
+        if semantic_fixture is not None:
+            repo_path = Path(tempfile.mkdtemp(prefix=f"semantic-{pr_number}-", dir=work_dir))
+            fixture_data = semantic_fixture[0]
+            run.commit_sha = _materialize_semantic_fixture(repo_path, fixture_data)
+        else:
+            repo_path = work_dir / repo_full_name.replace("/", "-")
+            if not repo_path.exists():
+                subprocess.run(
+                    ["git", "clone", f"https://github.com/{repo_full_name}.git", str(repo_path)],
+                    check=False,
+                    capture_output=True,
+                )
+            if not repo_path.exists():
+                run.error = f"Repo {repo_full_name} not available locally"
+                return run
 
         # Materialize the corpus PR's exact head revision (detached) before
         # any context is read: a cloned/reused repo_path sits on the
@@ -1245,12 +1303,13 @@ def run_review_for_pr(
         # filesystem-based context (repo map, related-code, native
         # read_file/git_grep, tree exploration, specialist verification)
         # would otherwise come from the current default-branch tree.
-        ok, sha, err = _checkout_pr_head(repo_path, pr_number)
-        if not ok:
-            run.error = f"PR head not materialized: {err}"
-            run.wall_clock_sec = time.monotonic() - start
-            return run
-        run.commit_sha = sha
+        if semantic_fixture is None:
+            ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+            if not ok:
+                run.error = f"PR head not materialized: {err}"
+                run.wall_clock_sec = time.monotonic() - start
+                return run
+            run.commit_sha = sha
 
         # Drop stale run artifacts so a reused workspace can never present a
         # prior run's verdict/tool trace/specialists as this run's.
@@ -1275,6 +1334,8 @@ def run_review_for_pr(
         # by scripts/sections/config.sh (it exits without them); AI_* are the
         # model endpoint.
         env = os.environ.copy()
+        python_dir = str(Path(sys.executable).resolve().parent)
+        env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env["GITHUB_TOKEN"] = model_config.get("github_token", "")
         env["REPO"] = pr_entry["repo_full_name"]
         env["PR_NUMBER"] = str(pr_number)
@@ -1286,6 +1347,11 @@ def run_review_for_pr(
         # orchestrator at the workflow checkout.
         env["GITHUB_WORKSPACE"] = str(repo_path)
         env["GITHUB_OUTPUT"] = str(repo_path / "eval-harness-output.txt")
+        if semantic_fixture is not None:
+            env["SEMANTIC_FIXTURE_DIR"] = str(repo_path)
+            env["SEMANTIC_FIXTURE_MODE"] = "true"
+            env["FORCE_REVIEW"] = "true"
+            env["SKIP_IF_DIFF_UNCHANGED"] = "false"
         if tool_mode_arg:
             env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
@@ -1392,10 +1458,15 @@ def evaluate_live_semantics(
         by_key[(benchmark.repo_full_name, benchmark.pr_number)] = benchmark.runs
     scenario_reports: list[dict[str, Any]] = []
     for scenario in corpus.scenarios:
-        pr_number = scenario.provenance.get("pr", scenario.number)
-        runs = by_key.get((scenario.repo_full_name, pr_number), [])
+        # Semantic scenarios can share historical PR provenance but each owns a
+        # distinct reconstructed fixture and therefore its own benchmark run.
+        runs = by_key.get((scenario.repo_full_name, scenario.number), [])
         per_run: list[SemanticResult] = []
         for run in runs:
+            expected_mode = scenario.review_mode
+            actual_mode = "deep" if run.mode.endswith("+deep") or run.mode == "deep" else "standard"
+            if expected_mode != "any" and actual_mode != expected_mode:
+                continue
             signals = _collect_signals_from_run(run)
             metadata = {
                 "mode": run.mode,

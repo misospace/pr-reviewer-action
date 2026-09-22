@@ -191,14 +191,14 @@ def test_live_negative_control_fails_parent_report() -> None:
     corpus = BenchmarkCorpus.from_file(CORPUS)
     run = ReviewRun(
         mode="tools_off",
-        pr_number=645,
+        pr_number=6451,
         repo_full_name="misospace/pr-reviewer-action",
         route="primary",
         stage="primary",
         findings=[_finding("The deleted declaration still exists in the runtime.", "primary")],
     )
     report = generate_report(
-        [BenchmarkResult(645, "misospace/pr-reviewer-action", [run])],
+        [BenchmarkResult(6451, "misospace/pr-reviewer-action", [run])],
         corpus,
     )
     semantic = report["semantic_eval"]

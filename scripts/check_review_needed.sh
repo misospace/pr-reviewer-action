@@ -45,6 +45,20 @@ else
   EFFECTIVE_FORGEJO_API_URL=""
 fi
 
+if [[ "${SEMANTIC_FIXTURE_MODE:-false}" == "true" ]]; then
+  {
+    echo "should_review=true"
+    echo "skip_reason=semantic-fixture"
+    echo "head_sha="
+    echo "base_sha="
+    echo "is_fork_pr=false"
+    echo "diff_fingerprint="
+    echo "resolved_platform=$RESOLVED_PLATFORM"
+    echo "effective_forgejo_api_url=$EFFECTIVE_FORGEJO_API_URL"
+  } >> "$OUTPUT_FILE"
+  exit 0
+fi
+
 # ── Label-driven re-review (#231) ─────────────────────────────────────
 if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
   event_action="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH" 2>/dev/null || echo "")"

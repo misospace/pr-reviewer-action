@@ -22,7 +22,7 @@ assert_safe_artifact_paths() {
     findings.json review-request.json
     review-verdict-body.md inline-findings-body.md
     review-comments.json
-    pr-files.json pr-files.raw.json
+    pr-files.json pr-files.raw.json files.json
     linked-issue.raw.json linked-issues.json linked-issues.merged.json
     linked-issue.filtered.json
     linear-issues.json linear-issues.md

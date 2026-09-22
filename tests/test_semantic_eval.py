@@ -19,6 +19,8 @@ from pr_reviewer.semantic_eval import (
     SIGNAL_KIND_TOOL,
     ReviewSignal,
     SemanticCorpus,
+    _collect_signals_from_run,
+    _run_finding_stage,
     SemanticCorpusError,
     aggregate_semantic_runs,
     classify_signal,
@@ -260,6 +262,55 @@ def test_diff_polarity_negative_control_rejects_saffron_claim() -> None:
     assert CAPABILITY_DIFF_POLARITY in result.forbidden_violations
 
 
+def test_unknown_stage_capability_is_counted_but_not_attributed() -> None:
+    result = evaluate_semantic_capability(
+        scenario(6451),
+        [ReviewSignal(SIGNAL_KIND_FINDING, "unknown", "The deleted declaration still exists in the runtime.")],
+        {"mode": "standard", "route": "primary"},
+    )
+    assert result.capability_hits[CAPABILITY_DIFF_POLARITY] == ["unknown"]
+    assert result.forbidden_violations == [CAPABILITY_DIFF_POLARITY]
+    assert result.stages_hit == []
+    assert not result.passed
+
+
+def test_explicit_finding_stage_wins_over_run_stage() -> None:
+    run = ReviewRun(
+        mode="native_loop",
+        pr_number=1,
+        repo_full_name="o/r",
+        stage="primary",
+        findings=[{"stage": "escalation", "message": "needs_full_review causes a redundant full review."}],
+    )
+    assert _run_finding_stage(run, run.findings[0]) == "escalation"
+    assert _collect_signals_from_run(run)[0].stage == "escalation"
+
+
+def test_finding_stage_falls_back_to_valid_run_stage_without_route() -> None:
+    run = ReviewRun(
+        mode="native_loop",
+        pr_number=1,
+        repo_full_name="o/r",
+        stage="primary",
+        findings=[{"message": "needs_full_review causes a redundant full review."}],
+    )
+    assert _run_finding_stage(run) == "primary"
+    signals = _collect_signals_from_run(run)
+    assert signals[0].stage == "primary"
+
+
+def test_unknown_run_stage_does_not_fallback_to_unknown_finding_stage() -> None:
+    run = ReviewRun(
+        mode="native_loop",
+        pr_number=1,
+        repo_full_name="o/r",
+        stage="unknown",
+        findings=[{"message": "needs_full_review causes a redundant full review."}],
+    )
+    assert _run_finding_stage(run) == "unknown"
+    assert _collect_signals_from_run(run)[0].stage == "unknown"
+
+
 def test_stage_attribution_rejects_wrong_stage() -> None:
     item = scenario(644)
     item.stage_attribution = "primary"
@@ -341,3 +392,181 @@ def test_offline_runner_rejects_no_runs_with_failure_report(tmp_path: Path) -> N
     assert result.returncode != 0
     assert "no offline runs" in result.stderr
     assert json.loads(report.read_text(encoding="utf-8"))["passed"] is False
+
+
+def test_fixture_references_are_immutable_and_hash_verified() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    assert corpus.fixture_root == CORPUS.parent
+    assert all(item.fixture and len(item.fixture["sha256"]) == 64 for item in corpus.scenarios)
+    assert all(Path(item.fixture["path"]).is_relative_to(Path("historical-dogfood")) for item in corpus.scenarios)
+
+
+@pytest.mark.parametrize("path", ["/tmp/fixture.json", "../fixture.json", "historical-dogfood/../../fixture.json", r"C:\\fixture.json"])
+def test_schema_rejects_unsafe_fixture_path(path: str) -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["fixture"] = dict(bad["fixture"], path=path)
+    with pytest.raises(SemanticCorpusError, match="safe relative path"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+@pytest.mark.parametrize("sha256", ["A" * 64, "0" * 63, "g" * 64])
+def test_schema_rejects_malformed_fixture_hash(sha256: str) -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["fixture"] = dict(bad["fixture"], sha256=sha256)
+    with pytest.raises(SemanticCorpusError, match="64 lowercase hexadecimal"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_schema_requires_route_for_stage_less_offline_findings() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["offline_runs"] = [{"findings": [{"message": "finding without a stage"}]}]
+    with pytest.raises(SemanticCorpusError, match="stage-less findings must declare route"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_fixture_hash_mismatch_is_rejected() -> None:
+    from eval_harness import _load_semantic_fixture
+
+    corpus = SemanticCorpus.from_file(CORPUS)
+    fixture = dict(corpus.scenarios[0].fixture)
+    fixture["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="hash mismatch"):
+        _load_semantic_fixture(corpus, fixture)
+
+
+def test_live_mode_filtering_uses_standard_and_deep_labels() -> None:
+    from eval_harness import BenchmarkCorpus, BenchmarkResult, evaluate_live_semantics
+
+    corpus = BenchmarkCorpus.from_file(CORPUS)
+    semantic = corpus.semantic_corpus
+    assert semantic is not None
+    runs = [
+        ReviewRun("native_loop", 638, "misospace/pr-reviewer-action"),
+        ReviewRun("native_loop+deep", 638, "misospace/pr-reviewer-action"),
+    ]
+    report = evaluate_live_semantics(semantic, [BenchmarkResult(638, "misospace/pr-reviewer-action", runs)])
+    assert report["per_scenario_summary"]["638"]["runs"] == 1
+    assert report["per_scenario_summary"]["638"]["review_mode"] == "standard"
+
+
+def test_live_semantics_keeps_scenarios_with_shared_pr_provenance_separate() -> None:
+    from eval_harness import BenchmarkCorpus, BenchmarkResult, evaluate_live_semantics
+
+    corpus = BenchmarkCorpus.from_file(CORPUS)
+    semantic = corpus.semantic_corpus
+    assert semantic is not None
+    runs = [
+        ReviewRun("native_loop+deep", 623, "misospace/pr-reviewer-action"),
+        ReviewRun("native_loop+deep", 6231, "misospace/pr-reviewer-action"),
+        ReviewRun("native_loop", 645, "misospace/pr-reviewer-action"),
+        ReviewRun("native_loop", 6451, "misospace/pr-reviewer-action"),
+    ]
+    report = evaluate_live_semantics(
+        semantic,
+        [
+            BenchmarkResult(623, "misospace/pr-reviewer-action", [runs[0]]),
+            BenchmarkResult(6231, "misospace/pr-reviewer-action", [runs[1]]),
+            BenchmarkResult(645, "misospace/pr-reviewer-action", [runs[2]]),
+            BenchmarkResult(6451, "misospace/pr-reviewer-action", [runs[3]]),
+        ],
+    )
+    summaries = report["per_scenario_summary"]
+    assert summaries["623"]["runs"] == 1
+    assert summaries["6231"]["runs"] == 1
+    assert summaries["645"]["runs"] == 1
+    assert summaries["6451"]["runs"] == 1
+
+
+def test_normal_benchmark_entries_do_not_require_semantic_fixture(tmp_path: Path) -> None:
+    from eval_harness import BenchmarkCorpus
+
+    path = tmp_path / "normal.json"
+    path.write_text(json.dumps({"benchmark_corpus": [{"number": 1, "repo_full_name": "o/r"}]}), encoding="utf-8")
+    corpus = BenchmarkCorpus.from_file(path)
+    assert corpus.prs == [{"number": 1, "repo_full_name": "o/r"}]
+
+
+def test_fixture_precheck_bypasses_fingerprint(tmp_path: Path) -> None:
+    output = tmp_path / "output.txt"
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "check_review_needed.sh")],
+        cwd=tmp_path,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "REPO": "fixture/repo",
+            "PR_NUMBER": "1",
+            "GITHUB_OUTPUT": str(output),
+            "SEMANTIC_FIXTURE_MODE": "true",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "should_review=true" in output.read_text(encoding="utf-8")
+    assert "skip_reason=semantic-fixture" in output.read_text(encoding="utf-8")
+    assert not (tmp_path / "pr.diff").exists()
+
+
+def test_fixture_run_materializes_pre_fix_files_without_pr_head_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import eval_harness
+    from eval_harness import BenchmarkCorpus, run_review_for_pr
+
+    entry = BenchmarkCorpus.from_file(CORPUS).prs[0]
+    commands: list[list[str]] = []
+    real_run = eval_harness.subprocess.run
+
+    def recording_run(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)):
+            commands.append([str(item) for item in command])
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(eval_harness.subprocess, "run", recording_run)
+    script = tmp_path / "fixture-run.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "test \"${FORCE_REVIEW:-}\" = true\n"
+        "test \"${SKIP_IF_DIFF_UNCHANGED:-}\" = false\n"
+        "test -f scripts/sections/corpus.sh\n"
+        "grep -F 'run_tool_harness' scripts/sections/corpus.sh\n"
+        "printf '%s\\n' '{\"verdict\":\"request_changes\",\"review_markdown\":\"fixture\",\"findings\":[]}' > ai-output.json\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    run = run_review_for_pr(
+        entry,
+        "native_loop",
+        tmp_path,
+        {"model": "fixture", "base_url": "", "api_key": "", "github_token": ""},
+        review_script=script,
+    )
+    assert run.error is None
+    assert run.verdict == "request_changes"
+    assert run.commit_sha
+    assert not (tmp_path / "misospace-pr-reviewer-action").exists()
+    assert not any(command and command[0] == "git" and "clone" in command for command in commands)
+    assert not any(command and command[0] == "git" and "fetch" in command for command in commands)
+    assert all("refs/pull/" not in " ".join(command) for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("number", "text"),
+    [
+        (638, "needs_full_review causes a redundant full review."),
+        (644, "The stale default prompt remains and references the deleted runtime protocol."),
+        (645, "Carried findings remain in the stale previous review state."),
+    ],
+)
+def test_escalation_findings_are_attributed_for_historical_scenarios(number: int, text: str) -> None:
+    route = "primary" if number == 644 else "escalated"
+    result = evaluate_semantic_capability(
+        scenario(number),
+        [ReviewSignal(SIGNAL_KIND_FINDING, "escalation", text)],
+        {"mode": "standard", "route": route, "stage": "escalation", "escalated": route == "escalated"},
+    )
+    assert result.passed
+    assert result.stages_hit == ["escalation"]

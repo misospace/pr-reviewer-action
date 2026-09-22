@@ -5,7 +5,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 SEMANTIC_CORPUS_VERSION = 1
@@ -93,6 +93,19 @@ def _truthy(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _safe_relative_path(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    windows_path = PureWindowsPath(value)
+    return not (
+        path.is_absolute()
+        or windows_path.is_absolute()
+        or ".." in path.parts
+        or ".." in windows_path.parts
+    )
+
+
 def _sentence_for_match(value: str, position: int) -> tuple[str, int]:
     start = max(value.rfind(mark, 0, position) for mark in ".!?\n") + 1
     end_candidates = [value.find(mark, position) for mark in ".!?\n"]
@@ -176,6 +189,7 @@ class SemanticScenario:
     known_findings: list[dict[str, Any]] = field(default_factory=list)
     expected_metrics: dict[str, Any] = field(default_factory=dict)
     diff_polarity: str | None = None
+    fixture: dict[str, Any] | None = None
     offline_runs: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -203,6 +217,7 @@ class SemanticScenario:
             known_findings=entry.get("known_findings", []),
             expected_metrics=entry.get("expected_metrics", {}),
             diff_polarity=entry.get("diff_polarity"),
+            fixture=entry.get("fixture"),
             offline_runs=entry.get("offline_runs", []),
         )
 
@@ -225,6 +240,7 @@ class SemanticScenario:
             "known_findings": self.known_findings,
             "expected_metrics": self.expected_metrics,
             "diff_polarity": self.diff_polarity,
+            "fixture": self.fixture,
             "offline_runs": self.offline_runs,
         }
 
@@ -234,6 +250,7 @@ class SemanticCorpus:
     scenarios: list[SemanticScenario] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int = SEMANTIC_CORPUS_VERSION
+    fixture_root: Path | None = field(default=None, repr=False)
 
     @classmethod
     def from_file(cls, path: Path) -> SemanticCorpus:
@@ -247,6 +264,7 @@ class SemanticCorpus:
             scenarios=[SemanticScenario.from_dict(item) for item in raw],
             metadata=dict(data.get("metadata", {})),
             version=int(data.get("version", SEMANTIC_CORPUS_VERSION)),
+            fixture_root=path.parent,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -286,6 +304,13 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
         _require(isinstance(scenario.stage_attribution, str) and scenario.stage_attribution in RECOGNISED_STAGES, f"{prefix}: stage_attribution {scenario.stage_attribution!r} not recognised")
         if scenario.diff_polarity is not None:
             _require(scenario.diff_polarity in RECOGNISED_DIFF_POLARITIES, f"{prefix}: diff_polarity {scenario.diff_polarity!r} not recognised")
+        if scenario.fixture is not None:
+            _require(isinstance(scenario.fixture, dict), f"{prefix}: fixture must be an object")
+            fixture_path = scenario.fixture.get("path")
+            fixture_hash = scenario.fixture.get("sha256")
+            _require(_truthy(fixture_path), f"{prefix}: fixture.path is required")
+            _require(_safe_relative_path(fixture_path), f"{prefix}: fixture.path must be a safe relative path")
+            _require(isinstance(fixture_hash, str) and re.fullmatch(r"[0-9a-f]{64}", fixture_hash) is not None, f"{prefix}: fixture.sha256 must be 64 lowercase hexadecimal characters")
         _require(_truthy(scenario.repo_full_name), f"{prefix}: repo_full_name is required")
         _require(_truthy(scenario.url), f"{prefix}: url is required")
         _require(_truthy(scenario.provenance.get("pr_url")), f"{prefix}: provenance.pr_url is required")
@@ -318,6 +343,12 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
                 _require(fixture["mode"] in RECOGNISED_MODES - {"any"}, f"{prefix}: offline run mode is not recognised")
             if "route" in fixture:
                 _require(fixture["route"] in RECOGNISED_ROUTES, f"{prefix}: offline run route is not recognised")
+            findings = fixture.get("findings", [])
+            _require(isinstance(findings, list), f"{prefix}: offline run findings must be a list")
+            for finding in findings:
+                _require(isinstance(finding, dict), f"{prefix}: offline run findings must be objects")
+            if any(not finding.get("stage") for finding in findings):
+                _require("route" in fixture, f"{prefix}: offline runs with stage-less findings must declare route")
         anchor_ids: set[str] = set()
         for anchor in scenario.expected_evidence_anchors:
             _require(isinstance(anchor, dict), f"{prefix}: evidence anchors must be objects")
@@ -408,12 +439,13 @@ def _run_stage(run: Any) -> str:
     return str(stage) if stage in RECOGNISED_SIGNAL_STAGES else "unknown"
 
 
-def _run_finding_stage(run: Any) -> str:
-    route = _run_route(run)
+def _run_finding_stage(run: Any, finding: Any = None) -> str:
+    if isinstance(finding, dict):
+        explicit_stage = finding.get("stage")
+        if explicit_stage in RECOGNISED_SIGNAL_STAGES:
+            return str(explicit_stage)
     stage = _run_stage(run)
-    if stage in {"primary", "escalation"} and route in {"primary", "fast", "smart", "legacy", "escalated", "escalation"}:
-        return stage
-    return "unknown"
+    return stage if stage in {"primary", "escalation"} else "unknown"
 
 
 def _signal_stage(value: Any, fallback: str) -> str:
@@ -451,7 +483,7 @@ def _collect_signals_from_run(run: Any) -> list[ReviewSignal]:
     for finding in _run_value(run, "findings", []) or []:
         if not isinstance(finding, dict):
             continue
-        signal_stage = _signal_stage(finding.get("stage"), finding_stage)
+        signal_stage = _run_finding_stage(run, finding)
         text = finding.get("description") or finding.get("message") or ""
         signals.append(ReviewSignal(SIGNAL_KIND_FINDING, signal_stage, str(text), meta=finding))
     for artifact in _run_value(run, "artifacts", []) or []:
@@ -490,7 +522,7 @@ def _collect_signals_from_run(run: Any) -> list[ReviewSignal]:
 
 
 def _anchor_matches(signal: ReviewSignal, anchor: dict[str, Any]) -> bool:
-    if signal.kind != anchor.get("kind"):
+    if signal.stage == "unknown" or signal.kind != anchor.get("kind"):
         return False
     if anchor.get("kind") == SIGNAL_KIND_TOOL and anchor.get("tool") != signal.meta.get("tool"):
         return False
