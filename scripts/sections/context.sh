@@ -122,6 +122,7 @@ print(json.dumps(linked_issues_to_json(items)))
 PY
 
 : > linked-issues.md
+: > linked-issue-labels.json
 if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
   # The "# Linked Issue Context" header is emitted by scripts/sections/corpus.sh,
   # so we deliberately do not prepend it here. Doing so previously produced a
@@ -135,6 +136,15 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
     echo "## $issue_ref" >> linked-issues.md
     if platform_issue_get "$issue_repo" "$issue_number" > linked-issue.raw.json 2>/dev/null; then
       jq '{number,title,state,html_url,labels:[.labels[]?.name],body}' linked-issue.raw.json > linked-issue.filtered.json
+      # #633: feed the fetched labels back into the canonical
+      # linked-issues.json — classifier.py consumes THIS file, so a GitHub
+      # security/audit/priority label must land here, not only in the
+      # rendered markdown (the bare-ref start below carries no labels, so
+      # linked risk flags never fired in real runs). Canonical label shape
+      # is [{name: str}] — the same shape Linear issue objects already
+      # carry. One record per ref; failed fetches simply write no record
+      # (fail-soft: the merged item keeps empty labels).
+      jq -c --arg ref "$issue_ref" '{ref: $ref, labels: [.labels[]? | {name: .}]}' linked-issue.filtered.json >> linked-issue-labels.json
       echo '```json' >> linked-issues.md
       head -c 12000 linked-issue.filtered.json >> linked-issues.md
       echo >> linked-issues.md
@@ -144,6 +154,19 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
     fi
     echo >> linked-issues.md
   done
+
+  # Merge the fetched GitHub labels back into the canonical
+  # linked-issues.json in place (identity preserved: ref/repo/number are
+  # kept, labels are additive). No second linked-issue representation is
+  # created — this is the same file classification consumes.
+  if [ -s linked-issue-labels.json ]; then
+    jq -s --slurpfile issues linked-issues.json '
+      map({key: .ref, value: .labels}) | from_entries as $labels_by_ref
+      | $issues[0] | map(. + {labels: ($labels_by_ref[.ref] // [])})
+    ' linked-issue-labels.json > linked-issues.enriched.json \
+      && mv linked-issues.enriched.json linked-issues.json
+  fi
+  rm -f linked-issue-labels.json
 else
   # Leave linked-issues.md empty when there are no linked issues so the
   # rendered section in scripts/sections/corpus.sh is just the bare

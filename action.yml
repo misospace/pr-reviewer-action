@@ -999,6 +999,16 @@ runs:
         REREVIEW_LABEL: ${{ inputs.rereview_label }}
         ACTION_REF: ${{ github.action_ref }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
+        # #633: with deep_review=auto, the precheck's stale-review detection
+        # hashes the same Linear state (priority/labels of configured
+        # identifiers) the review pipeline's Linear phase fetches, so a
+        # Linear priority/label change invalidates a stale managed comment.
+        # The key is bound HERE ONLY — it stays out of the shared env file
+        # and out of the config fingerprint (the *_API_KEY suffix is
+        # excluded); the builder uses it solely for the read-only issue
+        # lookup, and fork PRs never query Linear unless
+        # linear_enable_for_forks is set (the pipeline's own gate).
+        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
       run: |
         set -euo pipefail
         # Load the shared bindings (REPO, PR_NUMBER, AI_MODEL, TOOL_* , ...)

@@ -46,8 +46,15 @@ from pr_reviewer.precheck import (  # noqa: E402
 REPO = "misospace/pr-reviewer-action"
 
 
-def pr_object(title="Fix the thing", body="Fixes #12"):
-    return {"title": title, "body": body}
+def pr_object(title="Fix the thing", body="Fixes #12", fork=False):
+    repo = "misospace/pr-reviewer-action"
+    head = repo if not fork else "someone/pr-reviewer-action"
+    return {
+        "title": title,
+        "body": body,
+        "head": {"repo": {"full_name": head}},
+        "base": {"repo": {"full_name": repo}},
+    }
 
 
 def issue(number, labels):
@@ -305,6 +312,65 @@ def test_linear_invalid_prefix_config_fails_conservatively(monkeypatch):
     assert "linear prefixes invalid" in err
 
 
+def test_fork_pr_does_not_query_linear(monkeypatch):
+    """Fail-closed fork gate (the pipeline's own semantics): a fork PR must
+    not query private Linear data unless linear_enable_for_forks=true — the
+    collector is never called and Linear contributes nothing."""
+    with_linear(monkeypatch)
+    called = []
+
+    def collect(pr, prefixes, api_key, *, timeout=20):
+        called.append(True)
+        return [], []
+
+    responses = {
+        "repos/" + REPO + "/pulls/7": pr_object(title="OPS-42: fix", fork=True),
+    }
+    sig, err = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses), linear_collect=collect,
+    )
+    assert err == "" and sig is not None
+    assert called == []
+
+
+def test_fork_pr_with_forks_enabled_queries_linear(monkeypatch):
+    with_linear(monkeypatch)
+    monkeypatch.setenv("LINEAR_ENABLE_FOR_FORKS", "true")
+    called = []
+
+    def collect(pr, prefixes, api_key, *, timeout=20):
+        called.append(api_key)
+        return ([{"identifier": "OPS-42", "priority": 2, "labels": []}], [])
+
+    responses = {
+        "repos/" + REPO + "/pulls/7": pr_object(title="OPS-42: fix", fork=True),
+    }
+    sig, err = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses), linear_collect=collect,
+    )
+    assert err == "" and sig is not None
+    assert called == ["lin_key"]
+
+
+def test_head_repo_missing_counts_as_fork(monkeypatch):
+    """Mirror derive_is_fork_pr: an unusable head repo is a fork — Linear
+    stays gated (the pipeline could not have fetched it either)."""
+    with_linear(monkeypatch)
+    called = []
+
+    def collect(pr, prefixes, api_key, *, timeout=20):
+        called.append(True)
+        return [], []
+
+    responses = {
+        "repos/" + REPO + "/pulls/7": {"title": "OPS-42: fix", "body": "", "base": {"repo": {"full_name": REPO}}},
+    }
+    builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses), linear_collect=collect,
+    )
+    assert called == []
+
+
 # ── End-to-end: the stale-skip decision (#633 round 2) ─────────────
 
 
@@ -363,3 +429,17 @@ def build_marker_fingerprint_from_current(monkeypatch, diff):
     return build_marker_fingerprint(
         compute_diff_fingerprint(diff), compute_config_hash(_collect_config_lines())
     )
+
+
+def test_production_data_envelope_is_unwrapped():
+    """The python platform seam wraps successes as {"data": ...} (both
+    backends) — the builder must unwrap it, or it would read an empty PR
+    even with healthy tokens (the exact production-wiring bug the
+    integration harness caught)."""
+    api = fake_api(responses={
+        "repos/" + REPO + "/pulls/7": {"data": pr_object(title="OPS-42: fix")},
+        "repos/" + REPO + "/issues/12": {"data": issue(12, ["security"])},
+    })
+    sig, err = builder.build_signature(REPO, "7", api_fn=api, linear_collect=linear_issues([(2, [])]))
+    assert err == "" and sig is not None
+    # The unwrapped title's identifier drove the Linear fetch.

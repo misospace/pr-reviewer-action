@@ -301,6 +301,18 @@ check_contains "signature exported for the precheck config hash" "$CHECK" 'PRECH
 check_contains "build failure forces a fresh review (unique sentinel, never a stale skip)" \
   "$CHECK" 'unavailable-$$-$(date +%s)-${RANDOM:-0}'
 check_contains "failure warning explains the forced review" "$CHECK" 'could not determine every selection input'
+
+# #633: the precheck step must receive the Linear credential — the builder
+# hashes the same Linear state the review pipeline fetches. Bound on the
+# step only (never the shared env file); the *_API_KEY suffix keeps it out
+# of the config fingerprint.
+PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Wait for CI checks/' "$ACTION_YML")"
+check "precheck step binds LINEAR_API_KEY (auto fingerprint needs it)" \
+  "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear_api_key }}' || true)" "1"
+check "LINEAR_API_KEY is bound exactly twice (precheck + review steps; never the shared file)" \
+  "$(grep -c 'LINEAR_API_KEY:' "$ACTION_YML" || true)" "2"
+check "LINEAR_API_KEY stays out of the shared export block" \
+  "$(printf '%s\n' "$shared_env_section" | grep -c 'LINEAR_API_KEY' || true)" "0"
 check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
 

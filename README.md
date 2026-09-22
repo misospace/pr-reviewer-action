@@ -136,7 +136,7 @@ The classification is purely rule-based — no model calls are involved. It uses
 | `pr_kind` | One of: `renovate_digest_only`, `dependency_upgrade`, `app_code`, `k8s_manifest`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes`, `db_or_migration_changes` |
 | `risk_flags` | Detected risk indicators such as `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1`, `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` |
 | `changed_files_summary` | List of changed file paths (truncated to 50) |
-| `linked_issue_labels` | Labels from linked issues when available |
+| `linked_issue_labels` | Labels from linked issues when available. GitHub issue labels are fetched for each linked ref and merged back into the canonical `linked-issues.json` the classifier consumes (label shape `[{"name": …}]`, matching the Linear issue objects merged alongside; failed fetches degrade to empty labels), so a GitHub `security` / `audit` / `priority/p0` / `priority/p1` label really produces the corresponding linked risk flag |
 | `must_check` | Explicit checklist items derived from the classification (e.g., "review auth flow for regression" for `auth_changes`) |
 
 **Default required checks per risk class** (`must_check` is the union of the checks for the `pr_kind` and every detected risk flag — a PR classified as `app_code` that still trips the `auth_changes` flag gets the auth checklist):

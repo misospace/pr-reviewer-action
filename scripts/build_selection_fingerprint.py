@@ -95,20 +95,54 @@ def _labels_of(issue: object) -> list[str]:
     return names
 
 
+def _derive_is_fork(pr: object) -> bool:
+    """Mirror the action's ``derive_is_fork_pr`` (scripts/platform_api.sh)
+    exactly: an unusable head repo means fork, otherwise head != base."""
+    if not isinstance(pr, dict):
+        return True
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head_repo = (
+        (head.get("repo") if isinstance(head.get("repo"), dict) else {}) or {}
+    ).get("full_name")
+    base_repo = (
+        (base.get("repo") if isinstance(base.get("repo"), dict) else {}) or {}
+    ).get("full_name")
+    if not isinstance(head_repo, str) or not isinstance(base_repo, str):
+        return True
+    if not head_repo:
+        return True
+    return head_repo != base_repo
+
+
 def _linear_state(
-    title: str, *, linear_collect=None
+    title: str,
+    *,
+    is_fork: bool,
+    linear_collect=None,
 ) -> tuple[list[dict[str, object]], str]:
     """Fetch the Linear state that can affect classification. Returns
     ``(issues, error)``; a non-empty error means an input could not be
     determined and the caller must fail conservatively.
 
     Mirrors the pipeline gate exactly: Linear only affects classification
-    when BOTH ``LINEAR_ISSUE_PREFIXES`` and ``LINEAR_API_KEY`` are set and
-    the title carries a recognized identifier — otherwise it contributes
+    when BOTH ``LINEAR_ISSUE_PREFIXES`` and ``LINEAR_API_KEY`` are set, the
+    title carries a recognized identifier, and — fail-closed like the
+    pipeline's ``gate_feature_for_forks`` call — the PR is not a fork
+    unless ``LINEAR_ENABLE_FOR_FORKS=true``. Otherwise Linear contributes
     nothing and cannot change a selection."""
     prefixes_raw = os.environ.get("LINEAR_ISSUE_PREFIXES", "").strip()
     api_key = os.environ.get("LINEAR_API_KEY", "").strip()
     if not prefixes_raw or not api_key:
+        return [], ""
+    forks_allowed = (
+        os.environ.get("LINEAR_ENABLE_FOR_FORKS", "").strip().lower() == "true"
+    )
+    if is_fork and not forks_allowed:
+        # Fail-closed: a fork PR must not query private Linear data unless
+        # explicitly opted in — the same semantics as the review pipeline's
+        # Linear gate, so the fingerprint fetches exactly what the pipeline
+        # would.
         return [], ""
     try:
         prefixes = linear_context.parse_prefixes(prefixes_raw)
@@ -156,6 +190,18 @@ def collect_from_pr_safe(collect, title, prefixes, api_key, timeout):
         return [], [("linear", str(exc))]
 
 
+def _unwrap(response: object, what: str) -> object:
+    """Unwrap the platform seam's ``{"data": ...}`` success envelope (both
+    the GitHub and Forgejo backends wrap uniformly); ``{"error": ...}``
+    propagates unchanged so callers fail uniformly too."""
+    if (
+        isinstance(response, dict)
+        and set(response) == {"data"}
+    ):
+        return response["data"]
+    return response
+
+
 def build_signature(
     repo: str, pr_number: str, *, api_fn=None, linear_collect=None
 ) -> tuple[str | None, str]:
@@ -165,11 +211,14 @@ def build_signature(
     if api_fn is None:
         api_fn = platform_mod.gh_api
 
-    pr = api_fn(
-        f"repos/{repo}/pulls/{pr_number}",
-        allowed_repos="*",
-        current_repo=repo,
-        request_timeout=REQUEST_TIMEOUT_SEC,
+    pr = _unwrap(
+        api_fn(
+            f"repos/{repo}/pulls/{pr_number}",
+            allowed_repos="*",
+            current_repo=repo,
+            request_timeout=REQUEST_TIMEOUT_SEC,
+        ),
+        "pr",
     )
     if not isinstance(pr, dict) or pr.get("error"):
         return None, f"pr fetch failed: {pr.get('error') if isinstance(pr, dict) else 'unusable response'}"
@@ -179,11 +228,14 @@ def build_signature(
 
     issues: list[dict[str, object]] = []
     for item in extract_linked_issue_refs(body, default_repo=repo):
-        fetched = api_fn(
-            f"repos/{item.repo}/issues/{item.number}",
-            allowed_repos="*",
-            current_repo=repo,
-            request_timeout=REQUEST_TIMEOUT_SEC,
+        fetched = _unwrap(
+            api_fn(
+                f"repos/{item.repo}/issues/{item.number}",
+                allowed_repos="*",
+                current_repo=repo,
+                request_timeout=REQUEST_TIMEOUT_SEC,
+            ),
+            f"issue {item.ref}",
         )
         if isinstance(fetched, dict) and not fetched.get("error"):
             issues.append({
@@ -203,7 +255,7 @@ def build_signature(
             return None, f"linked issue {item.ref} fetch failed: {error}"
 
     linear_issues, linear_error = _linear_state(
-        title, linear_collect=linear_collect
+        title, is_fork=_derive_is_fork(pr), linear_collect=linear_collect
     )
     if linear_error:
         return None, linear_error
