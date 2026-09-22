@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "semantic_corpus": [
+    {
+      "number": 623,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+      "title": "feat(review): add deep-review specialist advisory passes (#608)",
+      "provenance": {"pr": 623, "issue": 608, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/623", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/608"},
+      "class": "control_flow_sequencing",
+      "review_mode": "deep",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": ["control_flow_sequencing"],
+      "expected_evidence_anchors": [
+        {"id": "reap-before-final", "kind": "mention", "any_of": ["reap before final", "wait for specialists", "join before final", "reaped before", "specialist phase must", "specialists must terminate", "specialists must complete"]},
+        {"id": "specialist-artifact", "kind": "tool", "tool": "read_file", "any_of": ["specialists.json", "specialists.phase.log"]}
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Launching specialists is not enough; every specialist must be terminated and reaped before the final review starts.",
+      "expected_metrics": {"max_tool_calls": 2},
+      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "review_markdown": "The specialist phase must reap before final review; specialists.json is available.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
+    },
+    {
+      "number": 6231,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+      "title": "feat(review): add deep-review specialist advisory passes (#608) - failure contract",
+      "provenance": {"pr": 623, "issue": 608, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/623", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/608"},
+      "class": "output_completeness",
+      "review_mode": "deep",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": ["output_completeness"],
+      "expected_evidence_anchors": [
+        {"id": "failure-path", "kind": "mention", "any_of": ["on catastrophic failure", "failure path", "error path", "fail-soft", "never written", "normalized output", "normalized artifact"]},
+        {"id": "aggregate-artifact", "kind": "tool", "tool": "read_file", "any_of": ["specialists.json", "specialists.phase.log"]}
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Per-role and aggregate specialist artifacts have a deterministic fail-soft contract on catastrophic failure.",
+      "expected_metrics": {"max_tool_calls": 2},
+      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "review_markdown": "On catastrophic failure, the fail-soft path still writes normalized output and specialists.json.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
+    },
+    {
+      "number": 638,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/638",
+      "title": "fix(review): preserve full-review loop semantics",
+      "provenance": {"pr": 638, "issue": 638, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/638", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/638"},
+      "class": "full_review_loop",
+      "review_mode": "standard",
+      "route": "primary+escalation",
+      "stage_attribution": "primary",
+      "expected_capabilities": ["full_review_loop"],
+      "expected_evidence_anchors": [{"id": "full-review-loop", "kind": "mention", "any_of": ["needs_full_review", "needs full review", "full-review loop", "full review loop", "rerun the full review", "run the full review"]}],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "A needs_full_review result must re-enter the complete review path rather than a partial loop.",
+      "expected_metrics": {"max_tool_calls": 3},
+      "offline_runs": [
+        {"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "needs_full_review re-enters the full review loop and runs the full PR review.", "tool_calls": []},
+        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "review_markdown": "The primary review escalated and needs_full_review re-enters the full review loop.", "tool_calls": [], "escalated": true}
+      ]
+    },
+    {
+      "number": 644,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/644",
+      "title": "refactor(review): remove deleted runtime protocol",
+      "provenance": {"pr": 644, "issue": 644, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/644", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/644"},
+      "class": "runtime_protocol",
+      "review_mode": "standard",
+      "route": "primary",
+      "stage_attribution": "primary",
+      "expected_capabilities": ["runtime_protocol"],
+      "expected_evidence_anchors": [{"id": "deleted-protocol", "kind": "mention", "any_of": ["deleted runtime protocol", "removed runtime protocol", "stale default prompt", "prompt references deleted", "prompt and runtime disagree"]}],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "The runtime protocol was deleted, but the bundled default prompt remained stale.",
+      "expected_metrics": {"max_tool_calls": 2},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "The deleted runtime protocol conflicts with the stale default prompt; prompt and runtime disagree.", "tool_calls": []}]
+    },
+    {
+      "number": 645,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+      "title": "refactor(review): remove carried findings and review metadata state",
+      "provenance": {"pr": 645, "issue": 645, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/645", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/645"},
+      "class": "stale_review_state",
+      "review_mode": "standard",
+      "route": "primary+escalation",
+      "stage_attribution": "primary",
+      "expected_capabilities": ["stale_review_state"],
+      "expected_evidence_anchors": [{"id": "stale-state", "kind": "mention", "any_of": ["stale previous review", "previous review state", "carried findings", "carry-forward state", "stale review metadata", "stale documentation", "docs still describe"]}],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Removed carried findings and cross-run review state must not survive in code, documentation, or behavior.",
+      "expected_metrics": {"max_tool_calls": 2},
+      "offline_runs": [
+        {"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "The docs still describe stale previous review state and carried findings.", "tool_calls": []},
+        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "review_markdown": "Escalation confirms the docs still describe stale previous review state and carried findings.", "tool_calls": [], "escalated": true}
+      ]
+    },
+    {
+      "number": 6451,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+      "title": "negative control: deleted declarations are absent",
+      "provenance": {"pr": 645, "issue": 645, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/645", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/645"},
+      "class": "negative_control",
+      "review_mode": "standard",
+      "route": "primary",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": ["diff_polarity", "stale_review_state"],
+      "negative_control": true,
+      "diff_polarity": "deletion",
+      "description": "Deleted declarations are absent; a review must not assert that removed declarations still exist.",
+      "expected_metrics": {"max_tool_calls": 2},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "Do not assert that deleted declarations still exist; the removed artifact is absent.", "tool_calls": []}]
+    },
+    {
+      "number": 8004,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/8004",
+      "title": "chore(deps): bump transitive runtime dependency (no surface change)",
+      "provenance": {"pr": 8004, "issue": 627, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/8004", "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/627"},
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": ["control_flow_sequencing", "output_completeness"],
+      "negative_control": true,
+      "description": "Clean negative control for #627: an unrelated dependency bump must not fabricate historical sequencing or failure-contract findings.",
+      "expected_metrics": {"max_tool_calls": 0},
+      "offline_runs": [
+        {"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "Trivial dependency bump. Clean change; approve.", "tool_calls": []},
+        {"mode": "deep", "stage": "escalation", "route": "primary+escalation", "escalated": true, "review_markdown": "No specialist or output-completeness issue is present; approve.", "tool_calls": []}
+      ]
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-09-21T00:00:00Z",
+    "description": "Compact reconstructed historical semantic regression corpus for issue #627. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
+    "issue_refs": [608, 627, 638, 644, 645],
+    "pr_refs": [623, 638, 644, 645, 8004],
+    "stages": ["specialist", "primary", "escalation", "any"],
+    "review_modes": ["standard", "deep", "any"],
+    "routes": ["primary", "escalation", "primary+escalation", "any"],
+    "capability_classes": ["control_flow_sequencing", "output_completeness", "full_review_loop", "runtime_protocol", "stale_review_state", "diff_polarity", "negative_control"]
+  }
+}

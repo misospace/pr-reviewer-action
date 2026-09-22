@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from pr_reviewer.semantic_eval import (
+    CAPABILITY_DIFF_POLARITY,
+    CAPABILITY_FULL_REVIEW_LOOP,
+    CAPABILITY_OUTPUT_COMPLETENESS,
+    CAPABILITY_RUNTIME_PROTOCOL,
+    CAPABILITY_SEQUENCING,
+    CAPABILITY_STALE_REVIEW_STATE,
+    SIGNAL_KIND_FINDING,
+    SIGNAL_KIND_MENTION,
+    SIGNAL_KIND_TOOL,
+    ReviewSignal,
+    SemanticCorpus,
+    SemanticCorpusError,
+    aggregate_semantic_runs,
+    classify_signal,
+    evaluate_semantic_capability,
+    validate_semantic_corpus,
+    evaluate_semantic_corpus,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+from eval_harness import ReviewRun
+
+CORPUS = ROOT / "evals" / "corpus-historical-dogfood.json"
+RUNNER = ROOT / "scripts" / "run_semantic_eval_ci.py"
+
+
+def scenario(number: int):
+    corpus = SemanticCorpus.from_file(CORPUS)
+    return next(item for item in corpus.scenarios if item.number == number)
+
+
+def mention(stage: str, text: str) -> ReviewSignal:
+    return ReviewSignal(SIGNAL_KIND_MENTION, stage, text)
+
+
+def tool(stage: str, text: str) -> ReviewSignal:
+    return ReviewSignal(SIGNAL_KIND_TOOL, stage, text, meta={"tool": "read_file"})
+
+
+def test_review_run_stage_is_additive_when_present() -> None:
+    run = ReviewRun(mode="native_loop", pr_number=1, repo_full_name="o/r", stage="escalation")
+    assert run.to_dict()["stage"] == "escalation"
+
+
+def test_corpus_is_valid_and_provenance_is_present() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    validate_semantic_corpus(corpus)
+    assert {item.number for item in corpus.scenarios} >= {623, 6231, 638, 644, 645, 6451, 8004}
+    assert all(item.provenance["pr_url"] for item in corpus.scenarios)
+
+
+def test_schema_rejects_duplicate_scenario_number() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    duplicate = corpus.scenarios[0].to_dict()
+    with pytest.raises(SemanticCorpusError, match="duplicate scenario number"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0], corpus.scenarios[0].from_dict(duplicate)]))
+
+
+def test_schema_rejects_unknown_capability() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["class"] = "unknown"
+    with pytest.raises(SemanticCorpusError, match="unknown class"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [("expected_metrics", {"unknown": 1}, "expected_metrics key"), ("expected_metrics", {"max_tool_calls": "2"}, "non-negative integer")],
+)
+def test_schema_rejects_malformed_metrics(field: str, value: object, message: str) -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad[field] = value
+    with pytest.raises(SemanticCorpusError, match=message):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_schema_rejects_duplicate_anchor_id() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["expected_evidence_anchors"] = [
+        {"id": "same", "kind": "mention", "any_of": ["one"]},
+        {"id": "same", "kind": "mention", "any_of": ["two"]},
+    ]
+    with pytest.raises(SemanticCorpusError, match="duplicate evidence anchor id"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_schema_rejects_bad_provenance_and_anchor_shape() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["provenance"] = []
+    with pytest.raises(SemanticCorpusError, match="provenance"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+    bad["provenance"] = corpus.scenarios[0].provenance
+    bad["expected_evidence_anchors"] = [{"kind": "mention", "any_of": "not-a-list"}]
+    with pytest.raises(SemanticCorpusError, match="non-empty"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_strict_mode_matching_rejects_missing_mode() -> None:
+    item = scenario(638)
+    result = evaluate_semantic_capability(item, [mention("primary", "needs_full_review reruns the full review loop.")])
+    assert not result.passed
+    assert any("review_mode=None" in violation for violation in result.applicability_violations)
+
+
+def test_equivalent_sequencing_finding_requires_artifact_anchor() -> None:
+    result = evaluate_semantic_capability(
+        scenario(623),
+        [
+            mention("primary", "The specialist phase waits for every role and is reaped before final review."),
+            tool("primary", "specialists.phase.log"),
+        ],
+        {"mode": "deep", "route": "primary"},
+    )
+    assert result.passed
+    assert CAPABILITY_SEQUENCING in result.capability_hits
+    assert result.stages_hit == ["primary"]
+
+
+def test_launch_only_sequencing_claim_fails() -> None:
+    result = evaluate_semantic_capability(
+        scenario(623),
+        [mention("primary", "Specialists launched before final review; looks good.")],
+        {"mode": "deep", "route": "primary"},
+    )
+    assert not result.passed
+    assert any(not item["satisfied"] for item in result.anchor_results)
+
+
+def test_failure_contract_rejects_happy_path_only() -> None:
+    result = evaluate_semantic_capability(
+        scenario(6231),
+        [mention("primary", "specialists.json looks correct on the happy path."), tool("primary", "specialists.json")],
+        {"mode": "deep", "route": "primary"},
+    )
+    assert not result.passed
+    assert CAPABILITY_OUTPUT_COMPLETENESS not in result.capability_hits
+
+
+def test_failure_contract_accepts_exceptional_parity() -> None:
+    result = evaluate_semantic_capability(
+        scenario(6231),
+        [mention("specialist", "On catastrophic failure the fail-soft normalized output is never written."), tool("specialist", "specialists.json")],
+        {"mode": "deep", "route": "primary"},
+    )
+    assert result.passed
+    assert result.stages_hit == ["specialist"]
+
+
+@pytest.mark.parametrize(
+    ("number", "capability", "text"),
+    [
+        (638, CAPABILITY_FULL_REVIEW_LOOP, "needs_full_review must rerun the complete full review loop."),
+        (644, CAPABILITY_RUNTIME_PROTOCOL, "The deleted runtime protocol leaves a stale default prompt."),
+        (645, CAPABILITY_STALE_REVIEW_STATE, "Carried findings leave stale previous review state."),
+    ],
+)
+def test_historical_capabilities(number: int, capability: str, text: str) -> None:
+    result = evaluate_semantic_capability(scenario(number), [mention("primary", text)], {"mode": "standard", "route": "primary"})
+    assert result.passed
+    assert capability in result.capability_hits
+
+
+def test_generic_finding_does_not_match() -> None:
+    assert classify_signal("LGTM, approve.") is None
+    result = evaluate_semantic_capability(scenario(644), [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "Routine refactor, no issues.")], {"mode": "standard", "route": "primary"})
+    assert not result.passed
+
+
+def test_diff_polarity_positive_capability_is_not_forced_false_positive() -> None:
+    item = scenario(6451)
+    item.negative_control = False
+    item.klass = CAPABILITY_DIFF_POLARITY
+    item.expected_capabilities = [CAPABILITY_DIFF_POLARITY]
+    item.forbidden_capabilities = []
+    item.diff_polarity = None
+    result = evaluate_semantic_capability(item, [mention("primary", "The deleted declaration still exists in the runtime.")], {"mode": "standard", "route": "primary"})
+    assert result.passed
+    assert result.forbidden_violations == []
+
+
+def test_diff_polarity_negative_control_stays_clean() -> None:
+    result = evaluate_semantic_capability(
+        scenario(6451),
+        [mention("primary", "The deleted declaration is absent; no remaining declaration is present.")],
+        {"mode": "standard", "route": "primary"},
+    )
+    assert result.passed
+    assert result.forbidden_violations == []
+
+
+def test_diff_polarity_negative_control_rejects_saffron_claim() -> None:
+    result = evaluate_semantic_capability(
+        scenario(6451),
+        [mention("primary", "The deleted declaration still exists in the runtime.")],
+        {"mode": "standard", "route": "primary"},
+    )
+    assert not result.passed
+    assert CAPABILITY_DIFF_POLARITY in result.forbidden_violations
+
+
+def test_stage_attribution_rejects_wrong_stage() -> None:
+    item = scenario(644)
+    item.stage_attribution = "primary"
+    result = evaluate_semantic_capability(item, [mention("escalation", "The deleted runtime protocol leaves a stale default prompt.")], {"mode": "standard", "route": "primary"})
+    assert not result.passed
+    assert result.stages_hit == ["escalation"]
+
+
+def test_aggregation_reports_quality_cost_and_escalation() -> None:
+    item = scenario(638)
+    good = evaluate_semantic_capability(item, [mention("primary", "needs_full_review reruns the full review loop.")], {"tool_calls": 1, "latency_sec": 1.0, "route": "primary", "mode": "standard"})
+    escalated = evaluate_semantic_capability(item, [mention("primary", "needs full review reruns the complete full-review loop.")], {"latency_sec": 2.0, "route": "primary+escalation", "mode": "standard", "escalated": True})
+    summary = aggregate_semantic_runs(item, [good, escalated])
+    assert summary["pass_rate"] == 1.0
+    assert summary["average_latency_sec"] == 1.5
+    assert summary["escalation_frequency"] == 0.5
+    assert summary["routes"] == ["primary", "primary+escalation"]
+
+
+def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> None:
+    report = tmp_path / "semantic-report.json"
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "--corpus", str(CORPUS), "--report", str(report)],
+        cwd=ROOT,
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["passed"] is True
+    assert payload["scenarios_evaluated"] == 7
+    assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0
+    assert payload["per_scenario_summary"]["638"]["routes"] == ["primary", "primary+escalation"]
+    assert payload["per_scenario_summary"]["645"]["routes"] == ["primary", "primary+escalation"]
+
+
+def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    negative = next(item for item in corpus.scenarios if item.number == 6451)
+    negative.offline_runs[0]["review_markdown"] = "The deleted declaration still exists in the runtime."
+    report = evaluate_semantic_corpus(corpus)
+    assert report["summary"]["false_positive_rate"] == 0.5
+    assert report["summary"]["false_positive_rate"] == report["negative_control_summary"]["false_positive_rate"]
+
+
+def test_evaluator_fails_when_expected_capability_is_missing() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    corpus.scenarios[0].offline_runs[0]["review_markdown"] = "Specialists launched before final review."
+    report = evaluate_semantic_corpus(corpus)
+    scenario_report = next(item for item in report["scenarios"] if item["scenario_number"] == 623)
+    assert report["passed"] is False
+    assert scenario_report["pass_rate"] == 0.0
+
+
+def test_offline_runner_writes_failure_report_for_uncovered_fixture(tmp_path: Path) -> None:
+    source = json.loads(CORPUS.read_text(encoding="utf-8"))
+    source["semantic_corpus"].append(dict(source["semantic_corpus"][0], number=999))
+    corpus = tmp_path / "bad.json"
+    corpus.write_text(json.dumps(source), encoding="utf-8")
+    report = tmp_path / "failure.json"
+    result = subprocess.run([sys.executable, str(RUNNER), "--corpus", str(corpus), "--output", str(report)], capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "unexpected scenario" in result.stderr
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert "error" in payload
+
+
+def test_offline_runner_rejects_no_runs_with_failure_report(tmp_path: Path) -> None:
+    source = json.loads(CORPUS.read_text(encoding="utf-8"))
+    source["semantic_corpus"][0]["offline_runs"] = []
+    corpus = tmp_path / "no-runs.json"
+    corpus.write_text(json.dumps(source), encoding="utf-8")
+    report = tmp_path / "no-runs-report.json"
+    result = subprocess.run([sys.executable, str(RUNNER), "--corpus", str(corpus), "--output", str(report)], capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "no offline runs" in result.stderr
+    assert json.loads(report.read_text(encoding="utf-8"))["passed"] is False

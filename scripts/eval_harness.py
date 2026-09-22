@@ -78,6 +78,7 @@ class ReviewRun:
     mode: str              # "tools_off", "native_loop"
     pr_number: int
     repo_full_name: str
+    stage: str | None = None
     tokens_input: int = 0
     tokens_output: int = 0
     wall_clock_sec: float = 0.0
@@ -108,6 +109,8 @@ class ReviewRun:
             # Additive, near pr_number: present only once the run
             # materialized a PR head; None runs keep the pre-existing shape.
             d["commit_sha"] = self.commit_sha
+        if self.stage is not None:
+            d["stage"] = self.stage
         d.update({
             "repo_full_name": self.repo_full_name,
             "tokens_input": self.tokens_input,
