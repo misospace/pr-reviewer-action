@@ -26,6 +26,7 @@ from pr_reviewer.semantic_eval import (
     classify_signal,
     evaluate_semantic_capability,
     validate_semantic_corpus,
+    validate_semantic_fixture_integrity,
     evaluate_semantic_corpus,
 )
 
@@ -425,6 +426,20 @@ def test_schema_requires_route_for_stage_less_offline_findings() -> None:
     bad["offline_runs"] = [{"findings": [{"message": "finding without a stage"}]}]
     with pytest.raises(SemanticCorpusError, match="stage-less findings must declare route"):
         validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_all_historical_fixtures_have_coherent_diff_and_head() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    for scenario_item in corpus.scenarios:
+        fixture_path = corpus.fixture_root / scenario_item.fixture["path"]
+        validate_semantic_fixture_integrity(json.loads(fixture_path.read_text(encoding="utf-8")))
+
+
+def test_fixture_integrity_rejects_tampered_head() -> None:
+    fixture = json.loads((ROOT / "evals" / "historical-dogfood" / "644.json").read_text(encoding="utf-8"))
+    fixture["files"][0]["content"] = "stale prompt\n"
+    with pytest.raises(SemanticCorpusError, match="new side does not match|reverse patch"):
+        validate_semantic_fixture_integrity(fixture)
 
 
 def test_fixture_hash_mismatch_is_rejected() -> None:

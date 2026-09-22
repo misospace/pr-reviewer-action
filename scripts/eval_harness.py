@@ -1479,6 +1479,7 @@ def evaluate_live_semantics(
             }
             per_run.append(evaluate_semantic_run(scenario, signals, metadata))
         aggregate = aggregate_semantic_runs(scenario, per_run)
+        aggregate["evaluation_missing"] = not per_run
         aggregate["provenance"] = scenario.provenance
         aggregate["class"] = scenario.klass
         aggregate["negative_control"] = scenario.negative_control
@@ -1494,6 +1495,11 @@ def evaluate_live_semantics(
         scenario_reports.append(aggregate)
     scored = [item for item in scenario_reports if item["runs"]]
     negative_controls = [item for item in scenario_reports if item["negative_control"]]
+    incomplete_scenarios = [
+        {"scenario_number": item["scenario_number"], "reason": "no applicable runs after mode filtering"}
+        for item in scenario_reports
+        if item["evaluation_missing"]
+    ]
     return {
         "evaluator_version": SEMANTIC_EVAL_VERSION,
         "corpus_version": corpus.version,
@@ -1512,11 +1518,13 @@ def evaluate_live_semantics(
             "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
             "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
         },
+        "incomplete_scenarios": incomplete_scenarios,
         "negative_control_summary": {
             "scenarios": len(negative_controls),
             "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
         },
-        "passed": bool(scored)
+        "passed": not incomplete_scenarios
+        and bool(scored)
         and all(item["pass_rate"] == 1.0 for item in scored)
         and all(item["false_positive_rate"] == 0.0 for item in negative_controls),
     }

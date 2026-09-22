@@ -184,7 +184,39 @@ def test_live_semantic_report_aggregates_routes_and_negative_controls() -> None:
     assert semantic["summary"]["average_tool_calls"] == 0.0
     assert semantic["summary"]["average_duplicate_count"] == 0.0
     assert semantic["summary"]["escalation_frequency"] == 0.0
-    assert semantic["passed"] is True
+    assert semantic["passed"] is False
+    assert semantic["incomplete_scenarios"]
+
+
+def test_standard_only_live_report_marks_deep_scenarios_incomplete() -> None:
+    corpus = BenchmarkCorpus.from_file(CORPUS)
+    runs = [
+        ReviewRun("tools_off", number, "misospace/pr-reviewer-action", route="primary", stage="primary")
+        for number in (638, 644, 645, 6451, 8004)
+    ]
+    semantic = generate_report(
+        [BenchmarkResult(run.pr_number, run.repo_full_name, [run]) for run in runs],
+        corpus,
+    )["semantic_eval"]
+    missing = {item["scenario_number"]: item["reason"] for item in semantic["incomplete_scenarios"]}
+    assert missing[623] == "no applicable runs after mode filtering"
+    assert missing[6231] == "no applicable runs after mode filtering"
+    assert semantic["per_scenario_summary"]["623"]["evaluation_missing"] is True
+    assert semantic["passed"] is False
+
+
+def test_full_covered_live_report_is_complete() -> None:
+    corpus = BenchmarkCorpus.from_file(CORPUS)
+    runs = []
+    for scenario in corpus.semantic_corpus.scenarios:
+        mode = "native_loop+deep" if scenario.review_mode == "deep" else "native_loop"
+        runs.append(ReviewRun(mode, scenario.number, scenario.repo_full_name, route="primary", stage="primary"))
+    semantic = generate_report(
+        [BenchmarkResult(run.pr_number, run.repo_full_name, [run]) for run in runs],
+        corpus,
+    )["semantic_eval"]
+    assert semantic["incomplete_scenarios"] == []
+    assert all(not item["evaluation_missing"] for item in semantic["scenarios"])
 
 
 def test_live_negative_control_fails_parent_report() -> None:

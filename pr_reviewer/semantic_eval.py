@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import subprocess
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -279,6 +281,80 @@ class SemanticCorpusError(ValueError):
     pass
 
 
+def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
+    files = fixture.get("files")
+    diff = fixture.get("diff")
+    if not isinstance(files, list):
+        raise SemanticCorpusError("semantic fixture files must be a list")
+    if not isinstance(diff, str):
+        raise SemanticCorpusError("semantic fixture diff must be a string")
+
+    expected: dict[str, bytes] = {}
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise SemanticCorpusError("semantic fixture files must contain objects")
+        path = entry.get("path")
+        content = entry.get("content")
+        if not isinstance(path, str) or not path or not _safe_relative_path(path):
+            raise SemanticCorpusError(f"semantic fixture file path is unsafe: {path!r}")
+        if path in expected:
+            raise SemanticCorpusError(f"semantic fixture contains duplicate file: {path}")
+        if not isinstance(content, str):
+            raise SemanticCorpusError(f"semantic fixture content must be text: {path}")
+        expected[path] = content.encode("utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="semantic-fixture-") as directory:
+        repo = Path(directory)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True)
+        for relative_name, content in expected.items():
+            destination = repo / relative_name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True)
+
+        result = subprocess.run(
+            ["git", "-C", str(repo), "apply", "--check", "--reverse"],
+            input=diff.encode("utf-8"), capture_output=True,
+        )
+        if result.returncode != 0:
+            raise SemanticCorpusError(
+                "semantic fixture reverse patch does not apply: "
+                + result.stderr.decode("utf-8", errors="replace").strip()
+            )
+        subprocess.run(
+            ["git", "-C", str(repo), "apply", "--reverse"],
+            input=diff.encode("utf-8"), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "apply", "--check"],
+            input=diff.encode("utf-8"), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "apply"],
+            input=diff.encode("utf-8"), check=True, capture_output=True,
+        )
+        actual_paths = {
+            path.decode("utf-8")
+            for path in subprocess.run(
+                ["git", "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True,
+            ).stdout.split(b"\0")
+            if path
+        }
+        if actual_paths != set(expected):
+            raise SemanticCorpusError(
+                "semantic fixture patch changed the tracked file set: "
+                f"expected {sorted(expected)}, got {sorted(actual_paths)}"
+            )
+        for relative_name, content in expected.items():
+            if (repo / relative_name).read_bytes() != content:
+                raise SemanticCorpusError(
+                    f"semantic fixture patch new side does not match files: {relative_name}"
+                )
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise SemanticCorpusError(message)
@@ -311,6 +387,18 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
             _require(_truthy(fixture_path), f"{prefix}: fixture.path is required")
             _require(_safe_relative_path(fixture_path), f"{prefix}: fixture.path must be a safe relative path")
             _require(isinstance(fixture_hash, str) and re.fullmatch(r"[0-9a-f]{64}", fixture_hash) is not None, f"{prefix}: fixture.sha256 must be 64 lowercase hexadecimal characters")
+            if corpus.fixture_root is not None:
+                fixture_file = (corpus.fixture_root / fixture_path).resolve()
+                _require(corpus.fixture_root.resolve() in fixture_file.parents, f"{prefix}: fixture path escapes corpus root")
+                if fixture_file.exists():
+                    try:
+                        fixture_data = json.loads(fixture_file.read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        raise SemanticCorpusError(f"{prefix}: fixture cannot be loaded") from exc
+                    try:
+                        validate_semantic_fixture_integrity(fixture_data)
+                    except (TypeError, AttributeError, SemanticCorpusError) as exc:
+                        raise SemanticCorpusError(f"{prefix}: fixture integrity failed: {exc}") from exc
         _require(_truthy(scenario.repo_full_name), f"{prefix}: repo_full_name is required")
         _require(_truthy(scenario.url), f"{prefix}: url is required")
         _require(_truthy(scenario.provenance.get("pr_url")), f"{prefix}: provenance.pr_url is required")
@@ -713,7 +801,8 @@ __all__ = [
     "SEMANTIC_EVAL_VERSION", "SIGNAL_KIND_FINDING", "SIGNAL_KIND_MENTION", "SIGNAL_KIND_TOOL",
      "ReviewSignal", "SemanticCorpus", "SemanticCorpusError", "SemanticResult", "SemanticScenario",
      "_collect_signals_from_run", "aggregate_semantic_runs", "classify_signal", "evaluate_semantic_capability",
-     "evaluate_semantic_corpus", "validate_semantic_corpus",
+      "evaluate_semantic_corpus", "validate_semantic_corpus", "validate_semantic_fixture_integrity",
+
 
 
 ]
