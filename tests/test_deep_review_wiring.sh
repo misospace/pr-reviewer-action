@@ -163,7 +163,7 @@ check "deep_review_timeout_sec input defaults to 600" \
   "$(awk '/^  deep_review_timeout_sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'600'"
 
 # #641 moved the shared env bindings into the "Export shared review environment"
-# step (a $GITHUB_ENV write consumed by the precheck and the review step), so
+# step (an action-local file consumed by the precheck and the review step), so
 # each binding now appears exactly once — in that step's env block — instead of
 # being duplicated across the precheck and review blocks. The assertion pins the
 # count AND the location, so a future edit that re-duplicates the binding or

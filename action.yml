@@ -734,11 +734,16 @@ runs:
         command -v python3 >/dev/null
 
     - name: Export shared review environment
+      id: shared_env
       # Single source of truth for the env vars the precheck and the review
       # step consume with identical bindings (#641). The env block below
-      # transports the input/github-context expressions; the run body copies
-      # them into $GITHUB_ENV so every later step inherits them without
-      # per-step duplication. Wiring rules:
+      # transports the input/github-context expressions; the run body
+      # serializes them into a NUL-separated key/value file under $RUNNER_TEMP
+      # (mktemp, umask 077) and publishes only the file path via a step
+      # output. The precheck and the review step load that file explicitly
+      # (scripts/load_shared_env.sh); $GITHUB_ENV is never used, so the
+      # caller's job environment is never mutated and no shared value outlives
+      # this composite action. Wiring rules:
       #   - an input both steps need: add it to the input definition plus this
       #     block only — nowhere else;
       #   - a single-step input goes in that step's own env block (still at
@@ -747,15 +752,14 @@ runs:
       #     raw inputs to resolve them (#367); downstream steps consume the
       #     resolved steps.precheck.outputs instead;
       #   - review-only inputs (AI_MAX_TOKENS, VERDICT_POLICY, ...) stay in
-      #     the review step's block: exporting them into $GITHUB_ENV would
-      #     widen the precheck's environment, whose AI_* sweep feeds the
-      #     config fingerprint and would silently invalidate every stored
-      #     review;
+      #     the review step's block: loading them in the precheck would widen
+      #     its environment, whose AI_* sweep feeds the config fingerprint
+      #     and would silently invalidate every stored review;
       #   - step-output-derived vars (CI_STATUS_*, IS_FORK_PR) stay in the
       #     step that consumes them.
       # The key list in the run body must match this env block 1:1 —
       # tests/test_shared_env_wiring.sh pins both directions and runs the
-      # export body end-to-end.
+      # export and load paths end-to-end.
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -835,10 +839,15 @@ runs:
         AI_FALLBACK_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_fallback_connect_timeout_sec }}
       run: |
         set -euo pipefail
-        if [ -z "${GITHUB_ENV:-}" ]; then
-          echo "::error::GITHUB_ENV is not set; cannot export the shared review environment." >&2
+        if [ -z "${GITHUB_OUTPUT:-}" ]; then
+          echo "::error::GITHUB_OUTPUT is not set; cannot publish the shared environment path." >&2
           exit 1
         fi
+        # The file carries tokens (GH_TOKEN, FORGEJO_TOKEN, ...): umask 077 +
+        # mktemp keep it owner-only, outside the reviewed workspace. The
+        # runner cleans $RUNNER_TEMP up after the job.
+        umask 077
+        shared_env_file="$(mktemp "${RUNNER_TEMP:-/tmp}/shared-env.XXXXXXXX")"
         # Keep in lockstep with the env block above (pinned by
         # tests/test_shared_env_wiring.sh).
         keys=(
@@ -916,33 +925,33 @@ runs:
           AI_FALLBACK_REQUEST_TIMEOUT_SEC
           AI_FALLBACK_CONNECT_TIMEOUT_SEC
         )
-        # The delimiter embeds this process's PID so an operator-supplied
-        # value cannot close the heredoc early.
-        delimiter="__SHARED_ENV_EOF_$$__"
-        for key in "${keys[@]}"; do
-          if [ -z "${!key+x}" ]; then
-            echo "::error::Shared env var '${key}' is listed in the export key list but not bound in the 'Export shared review environment' env block." >&2
-            exit 1
-          fi
-          # Heredoc form for every value: the runner copies the raw bytes
-          # between the marker and the delimiter line, so multiline values
-          # (system prompts, MCP server lists) round-trip byte-exactly and
-          # empty values stay empty.
-          {
-            printf '%s<<%s\n' "$key" "$delimiter"
-            printf '%s' "${!key}"
-            printf '\n%s\n' "$delimiter"
-          } >> "$GITHUB_ENV"
-        done
+        # The delimiter-free NUL framing cannot be forged by a value: NUL
+        # cannot appear in an environment value, so every value (multiline,
+        # empty, quotes, '=') round-trips byte-for-byte. Nothing is echoed to
+        # the step log.
+        {
+          for key in "${keys[@]}"; do
+            if [ -z "${!key+x}" ]; then
+              echo "::error::Shared env var '${key}' is listed in the export key list but not bound in the 'Export shared review environment' env block." >&2
+              exit 1
+            fi
+            printf '%s\0%s\0' "$key" "${!key}"
+          done
+        } > "$shared_env_file"
+        # Only the path crosses the step boundary — never a value.
+        echo "path=$shared_env_file" >> "$GITHUB_OUTPUT"
 
     - name: Check whether review is needed
       id: precheck
       shell: bash
       env:
-        # Shared input/github-context bindings are exported once by the 'Export shared
-        # review environment' step into $GITHUB_ENV (#641). Only the precheck-specific
-        # bindings remain: the raw PLATFORM / FORGEJO_API_URL inputs this step resolves
-        # (#367) and the precheck-only pass-throughs.
+        # Shared input/github-context bindings are serialized once by the
+        # 'Export shared review environment' step into an action-local file
+        # under $RUNNER_TEMP and loaded below (#641) — the caller's job
+        # environment is never touched. Only the precheck-specific bindings
+        # remain here: the raw PLATFORM / FORGEJO_API_URL inputs this step
+        # resolves (#367) and the precheck-only pass-throughs.
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
         PLATFORM: ${{ inputs.platform }}
         FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
@@ -953,7 +962,13 @@ runs:
         REREVIEW_LABEL: ${{ inputs.rereview_label }}
         ACTION_REF: ${{ github.action_ref }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
-      run: bash "${{ github.action_path }}/scripts/check_review_needed.sh"
+      run: |
+        set -euo pipefail
+        # Load the shared bindings (REPO, PR_NUMBER, AI_MODEL, TOOL_* , ...)
+        # from the action-local file before the precheck runs.
+        source "${{ github.action_path }}/scripts/load_shared_env.sh"
+        load_shared_env "$SHARED_ENV_FILE"
+        bash "${{ github.action_path }}/scripts/check_review_needed.sh"
 
     - name: Wait for CI checks to complete
       id: ci_status
@@ -983,11 +998,13 @@ runs:
       id: review
       shell: bash
       env:
-        # Shared input/github-context bindings arrive from the 'Export shared review
-        # environment' step via $GITHUB_ENV (#641). What remains: the resolved-platform
-        # overrides (#367), review-only inputs (kept out of $GITHUB_ENV so the precheck's
-        # AI_* config-fingerprint sweep sees an unchanged environment), and the
-        # step-output-derived vars this step consumes.
+        # Shared input/github-context bindings arrive from the action-local
+        # file built by 'Export shared review environment' and are loaded in
+        # the run body below (#641). What remains: the resolved-platform
+        # overrides (#367), review-only inputs (kept out of the shared file so
+        # the precheck's AI_* config-fingerprint sweep sees an unchanged
+        # environment), and the step-output-derived vars this step consumes.
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
@@ -1020,7 +1037,13 @@ runs:
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-      run: bash "${{ github.action_path }}/scripts/run_review.sh"
+      run: |
+        set -euo pipefail
+        # Load the shared bindings (GH_TOKEN, REPO, AI_MODEL, TOOL_* , ...)
+        # from the action-local file before the review runs.
+        source "${{ github.action_path }}/scripts/load_shared_env.sh"
+        load_shared_env "$SHARED_ENV_FILE"
+        bash "${{ github.action_path }}/scripts/run_review.sh"
 
     - name: Publish review
       # Single dispatcher for all three publish modes. One superset env block
