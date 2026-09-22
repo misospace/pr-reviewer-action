@@ -92,15 +92,15 @@ GH_REVIEW_COMMENTS_ARGS="$(<"$GH_REVIEW_COMMENTS_LOG")"
 check_contains "platform_pr_review_comments calls GitHub GraphQL" \
   "$GH_REVIEW_COMMENTS_ARGS" \
   "api graphql"
-check_contains "platform_pr_review_comments queries newest 100" \
+check_contains "platform_pr_review_comments queries newest 100 without orderBy" \
   "$GH_REVIEW_COMMENTS_ARGS" \
-  "comments(last: 100"
-check_contains "platform_pr_review_comments uses a supported IssueCommentOrderField" \
-  "$GH_REVIEW_COMMENTS_ARGS" \
-  "orderBy: {field: UPDATED_AT, direction: ASC}"
+  "comments(last: 100)"
 check_not_contains "platform_pr_review_comments sends no invalid CREATED_AT enum" \
   "$GH_REVIEW_COMMENTS_ARGS" \
   "CREATED_AT"
+check_not_contains "platform_pr_review_comments sends no orderBy clause (#631)" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "orderBy"
 check_contains "platform_pr_review_comments captures owner variable" \
   "$GH_REVIEW_COMMENTS_ARGS" \
   "owner=owner"
