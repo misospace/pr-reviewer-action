@@ -217,18 +217,22 @@ platform_pr_review_comments() {
   fi
   # (top-level issue) comments, normalized to {id,user,created_at,updated_at,body}.
   # PR conversation comments are issue comments in both data models, so both
-  # branches emit the same normalized JSON shape for pr_thread.py (#578). The
-  # Python renderer establishes chronological display order rather than
-  # relying on backend ordering.
+  # branches emit the same normalized JSON shape for pr_thread.py (#578).
+  # GitHub's IssueCommentOrderField has no CREATED_AT value (#631), so the
+  # query sends no orderBy at all — any order enum would change which 100
+  # comments `last: 100` selects — and the normalized result is sorted
+  # oldest-to-newest client-side by created_at with databaseId as the
+  # deterministic tiebreak. The Python renderer applies the same
+  # chronological order as defense in depth.
   if _platform_is_forgejo; then
     _forgejo_py list-comments "$1" "$2" | jq 'sort_by(.created_at // "") | reverse | .[0:100]'
   else
     local repo="$1" num="$2"
     local owner="${repo%%/*}" name="${repo#*/}"
     platform_graphql \
-      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100, orderBy: {field: CREATED_AT, direction: ASC}) { nodes { databaseId body createdAt updatedAt author { login } } } } } }' \
+      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }' \
       -f owner="$owner" -f name="$name" -F number="$num" |
-      jq '[.data.repository.pullRequest.comments.nodes[] | {id: .databaseId, user: (.author.login // ""), created_at: (.createdAt // ""), updated_at: (.updatedAt // ""), body: (.body // "")}]'
+      jq '[.data.repository.pullRequest.comments.nodes[] | {id: .databaseId, user: (.author.login // ""), created_at: (.createdAt // ""), updated_at: (.updatedAt // ""), body: (.body // "")}] | sort_by((.created_at // ""), (.id // 0))'
   fi
 }
 
