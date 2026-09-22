@@ -50,7 +50,7 @@ check_contains "harness classifies the verdict against the final contract" "$HAR
 check_contains "harness consumes the final parser" "$HARNESS" "from pr_reviewer.response_parser import"
 check_contains "harness drives a content-aware retry" "$HARNESS" "def produce_native_verdict("
 check_contains "retry is non-streamed" "$HARNESS" 'retry_payload["stream"] = False'
-check_contains "produced flag set only from the contract check" "$HARNESS" 'if verdict["ok"]:'
+check_contains "produced flag requires contract check and live deadline" "$HARNESS" 'if verdict["ok"] and (deadline is None or time.monotonic() < deadline):'
 check_contains "a produced verdict requires a reusable body" "$HARNESS" 'result["native_loop_verdict_produced"] = True'
 
 echo ""
