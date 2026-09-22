@@ -737,6 +737,62 @@ class TestLoadSpecialistTelemetry:
         assert tel["leads_by_role"]["security"][0]["message"] == "SQL injection via username"
         assert tel["leads_by_role"]["correctness"][0]["file"] == "api/pagination.py"
 
+    def test_auto_mode_aggregate_with_selection_and_skips_is_tolerated(self, tmp_path):
+        """#633 compat: an auto-mode aggregate (deep_review_mode + selection
+        telemetry, skipped entries in roles) parses without changes — skipped
+        statuses pass through, leads still load from the per-role files, and
+        no entry is invented for a role the selection skipped."""
+        self._write(tmp_path, "specialists.json", {
+            "version": 1,
+            "enabled": True,
+            "deep_review_mode": "auto",
+            "aggregate_elapsed_sec": 8.0,
+            "total_leads": 1,
+            "any_errors": False,
+            "roles": [
+                {"role": "correctness", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: no correctness-lane signal"},
+                {"role": "security", "status": "ok", "error_kind": None,
+                 "elapsed_sec": 8.0, "lead_count": 1, "errors_count": 0},
+                {"role": "tests", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: no tests-lane signal"},
+            ],
+            "selection": {
+                "version": 1,
+                "mode": "auto",
+                "classification_available": True,
+                "selected_roles": ["security"],
+                "skipped_roles": ["correctness", "tests"],
+                "decisions": [],
+                "zero_selection_reason": "",
+            },
+        })
+        self._write(tmp_path, "specialist-security.json", {
+            "role": "security",
+            "leads": [{"severity": "major", "category": "security",
+                       "file": "api/login.py", "line": 42,
+                       "message": "SQL injection via username"}],
+            "truncated": False, "errors": [],
+        })
+
+        tel = load_specialist_telemetry(tmp_path)
+        assert tel is not None
+        assert tel["derived"] is False
+        assert tel["total_leads"] == 1
+        assert tel["any_errors"] is False
+        assert [r["role"] for r in tel["roles"]] == list(SPECIALIST_ROLES)
+        by_role = {r["role"]: r for r in tel["roles"]}
+        assert by_role["security"]["status"] == "ok"
+        assert by_role["correctness"]["status"] == "skipped"
+        assert by_role["tests"]["status"] == "skipped"
+        assert [l["message"] for l in tel["leads_by_role"]["security"]] == [
+            "SQL injection via username"
+        ]
+        assert tel["leads_by_role"]["correctness"] == []
+        assert tel["leads_by_role"]["tests"] == []
+
     def test_derived_when_aggregate_missing(self, tmp_path):
         self._write(tmp_path, "specialist-correctness.json", {
             "role": "correctness",

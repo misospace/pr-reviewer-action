@@ -593,3 +593,182 @@ def test_worker_crash_writes_full_artifact_set(tmp_path, monkeypatch):
         )
         assert set(response) == {"error"}
         assert "worker exploded" in response["error"]
+
+
+# ── 15. Auto mode: deterministic role selection (#633) ─────────────
+
+
+def write_classification(ws: Path, payload: dict) -> Path:
+    path = ws / "classification.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_auto_mode_runs_only_selected_roles(tmp_path, monkeypatch):
+    """auth_changes classification → only the security specialist runs;
+    skipped roles are telemetry (status skipped + reason), produce no
+    per-role artifacts, and never count as errors."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "auth_changes",
+        "risk_flags": ["auth_changes"],
+        "changed_files_summary": ["src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == {"security"}
+
+    # Skipped roles: no artifacts at all.
+    for role in ("correctness", "tests"):
+        assert not (ws / f"specialist-{role}.json").exists()
+        assert not (ws / f"specialist-{role}.request.json").exists()
+        assert not (ws / f"specialist-{role}.response.json").exists()
+
+    agg = aggregate(ws)
+    assert agg["enabled"] is True
+    assert agg["deep_review_mode"] == "auto"
+    assert agg["total_leads"] == 1
+    assert agg["any_errors"] is False
+    assert [r["role"] for r in agg["roles"]] == list(ROLES)
+    by_name = {r["role"]: r for r in agg["roles"]}
+    assert by_name["security"]["status"] == "ok"
+    assert by_name["security"]["lead_count"] == 1
+    for role in ("correctness", "tests"):
+        assert by_name[role]["status"] == "skipped"
+        assert by_name[role]["error_kind"] is None
+        assert by_name[role]["lead_count"] == 0
+        assert "no correctness-lane signal" in by_name[role]["reason"] or \
+               "no tests-lane signal" in by_name[role]["reason"]
+
+    # The selection artifact is embedded verbatim.
+    assert agg["selection"]["selected_roles"] == ["security"]
+    assert agg["selection"]["skipped_roles"] == ["correctness", "tests"]
+    assert agg["selection"]["classification_available"] is True
+
+
+def test_auto_mode_zero_selection_makes_no_calls(tmp_path, monkeypatch):
+    """Docs-only trivial PR: zero roles, zero transport calls, aggregate
+    still written with the gate reason, section + signal stay empty."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": [".github/workflows/ci.yml", "README.md"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(monkeypatch, tmp_path)
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert calls == []
+    agg = aggregate(ws)
+    assert agg["deep_review_mode"] == "auto"
+    assert agg["total_leads"] == 0
+    assert agg["any_errors"] is False
+    assert all(r["status"] == "skipped" for r in agg["roles"])
+    assert agg["selection"]["zero_selection_reason"].startswith("trivial class")
+    assert (ws / "specialists.md").read_text(encoding="utf-8") == ""
+    assert (ws / "specialist-leads-present.txt").read_text(encoding="utf-8") == ""
+
+
+def test_auto_mode_can_select_all_three_roles(tmp_path, monkeypatch):
+    """A multi-signal PR (dependency kind + security + priority flags)
+    selects correctness, security, and tests — every role runs."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "dependency_upgrade",
+        "risk_flags": ["linked_priority_p0", "linked_security_issue", "auth_changes"],
+        "changed_files_summary": ["package-lock.json", "src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["selection"]["skipped_roles"] == []
+
+
+def test_true_mode_still_runs_all_three_despite_classification(tmp_path, monkeypatch):
+    """deep_review=true preserves v2.5 semantics exactly: all three roles run
+    even when auto selection would have skipped some; no selection artifact
+    is embedded."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    # Docs-only classification would select zero roles in auto mode.
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["README.md"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="true")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert "selection" not in agg
+    assert all(r["status"] == "ok" for r in agg["roles"])
+
+
+def test_auto_mode_missing_classification_selects_zero(tmp_path, monkeypatch):
+    """Fail-soft: no classification.json → zero roles with an explicit
+    unavailability reason, no calls, no exception."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(monkeypatch, tmp_path)
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert calls == []
+    agg = aggregate(ws)
+    assert agg["selection"]["classification_available"] is False
+    assert agg["selection"]["selected_roles"] == []
+    assert "classification unavailable" in agg["selection"]["zero_selection_reason"]
+
+
+def test_auto_mode_role_artifacts_and_section_cover_selected_roles_only(
+    tmp_path, monkeypatch
+):
+    """The #609 corpus section renders only the roles that ran: a skipped
+    role renders no block at all, not a zero-lead note."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "auth_changes",
+        "risk_flags": ["auth_changes"],
+        "changed_files_summary": ["src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    section = (ws / "specialists.md").read_text(encoding="utf-8")
+    assert "## Security" in section
+    assert "## Correctness" not in section
+    assert "## Tests" not in section
+    assert "no advisory leads" not in section

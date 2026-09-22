@@ -466,3 +466,73 @@ def test_output_independent_of_input_mapping_key_order():
         render_specialist_leads_section(shuffled, max_bytes=999)
         == render_specialist_leads_section(base, max_bytes=999)
     )
+
+
+# ---------------------------------------------------------------------------
+# Skipped roles (#633 auto selection)
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_roles_render_no_block_at_all():
+    """A role skipped by auto selection renders NO block — not even the
+    zero-lead note that would falsely imply the pass ran."""
+    results = _tiny_results()
+    doc = render_specialist_leads_section(
+        results, max_bytes=LARGE_CAP, skipped_roles=("tests",)
+    )
+    assert "## Correctness" in doc
+    assert "## Security" in doc
+    assert "## Tests" not in doc
+    assert "lead t0" not in doc
+    # The skipped role's leads contribute nothing anywhere.
+    for line in _lead_lines_of(results):
+        if "lead t0" in line:
+            assert line not in doc
+
+
+def test_skipped_roles_leads_do_not_count_against_byte_cap():
+    results = _tiny_results()
+    with_all = render_specialist_leads_section(results, max_bytes=LARGE_CAP)
+    without_tests = render_specialist_leads_section(
+        results, max_bytes=LARGE_CAP, skipped_roles=("tests",)
+    )
+    assert _byte_len(without_tests) < _byte_len(with_all)
+    # A cap that truncates the tests role's last lead leaves the other
+    # roles' leads untouched.
+    capped = render_specialist_leads_section(
+        results, max_bytes=_byte_len(without_tests) - 1, skipped_roles=("tests",)
+    )
+    assert "lead t0" not in capped
+    assert "lead c0" in capped
+
+
+def test_skipping_all_roles_returns_empty_section():
+    assert render_specialist_leads_section(
+        _tiny_results(), max_bytes=LARGE_CAP, skipped_roles=SPECIALIST_ROLES_ORDER
+    ) == ""
+
+
+def test_skipped_roles_default_keeps_v25_byte_identical_output():
+    """The parameter defaults to empty: existing callers get exactly the
+    pre-#633 bytes."""
+    results = _tiny_results()
+    assert (
+        render_specialist_leads_section(results, max_bytes=LARGE_CAP)
+        == render_specialist_leads_section(
+            results, max_bytes=LARGE_CAP, skipped_roles=()
+        )
+    )
+
+
+def test_skipped_roles_membership_is_order_independent():
+    results = _tiny_results()
+    a = render_specialist_leads_section(
+        results, max_bytes=LARGE_CAP, skipped_roles=("tests", "correctness")
+    )
+    b = render_specialist_leads_section(
+        results, max_bytes=LARGE_CAP, skipped_roles=("correctness", "tests")
+    )
+    assert a == b
+    assert "## Security" in a
+    assert "## Correctness" not in a
+    assert "## Tests" not in a

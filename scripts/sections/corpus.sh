@@ -457,7 +457,10 @@ section_timer_end
 # specialist gate is not entered; when ci_status_check is false the CI gate is
 # not entered — each normal path is preserved untouched (no artifacts, no
 # corpus change — a fully disabled run stays byte-identical to a pre-#609
-# build).
+# build). 'auto' (#633) enters the same gate: run_specialists.py
+# deterministically selects the roles from classification data (possibly
+# zero) and skipped roles are telemetry, not failures — an empty selection
+# leaves the corpus byte-identical to the disabled run.
 section_timer_start "review-gates"
 fork_specialist_gate
 join_specialist_gate

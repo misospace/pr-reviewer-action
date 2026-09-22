@@ -315,11 +315,14 @@ if [[ ! "$PR_THREAD_MAX_BYTES" =~ ^[0-9]+$ || "$PR_THREAD_MAX_BYTES" -lt 1 || "$
   PR_THREAD_MAX_BYTES=8000
 fi
 
-# Deep review toggle: normalize true/false and force lowercase so the review
-# gate ([[ "$DEEP_REVIEW" == "true" ]]) is case-insensitive. Any other value
-# degrades to off (advisory passes must never be enabled by a typo'd value).
+# Deep review toggle: normalize true/false/auto and force lowercase so the
+# review gate ([[ "$DEEP_REVIEW" == "true" ]]) is case-insensitive. 'auto'
+# (#633) enables the phase with deterministic classifier-driven role
+# selection (possibly zero roles); true preserves the v2.5 all-roles
+# behavior. Any other value degrades to off (advisory passes must never be
+# enabled by a typo'd value).
 case "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" in
-  true|false) DEEP_REVIEW="$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" ;;
+  true|false|auto) DEEP_REVIEW="$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" ;;
   *)
     error "Invalid DEEP_REVIEW '$DEEP_REVIEW'; defaulting to false"
     DEEP_REVIEW=false

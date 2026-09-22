@@ -3,11 +3,21 @@
 
 The execution layer for the advisory specialist passes defined by the #607
 contract module (:mod:`pr_reviewer.specialists`). Invoked from
-``scripts/sections/review.sh`` behind the ``DEEP_REVIEW=true`` gate — launched
-as a background job before the final reviewer path and reaped fail-soft
-*before* that path enters, so later tickets can feed the leads into the
-final synthesis; the three roles are concurrent with each other (internal
+``scripts/sections/corpus.sh`` behind the ``DEEP_REVIEW=true|auto`` gate —
+launched as a background job before the final reviewer path and reaped
+fail-soft *before* that path enters, so later tickets can feed the leads into
+the final synthesis; the three roles are concurrent with each other (internal
 daemon threads), not with the reviewer.
+
+``DEEP_REVIEW=true`` (v2.5 semantics, preserved exactly) runs all three fixed
+roles. ``DEEP_REVIEW=auto`` (#633) first resolves a deterministic,
+classifier-driven role selection (:mod:`pr_reviewer.role_selection` — a pure
+lookup on ``classification.json``'s ``pr_kind`` / ``risk_flags`` /
+changed-file classes, **no model call**) and runs only the selected roles;
+skipped roles are telemetry (aggregate entries with status ``skipped`` and
+the deterministic reason), never errors and never per-role artifacts. An
+empty selection still writes the aggregate plus empty section/signal
+artifacts, so the downstream corpus stays byte-identical to a disabled run.
 
 One model call per role (correctness / security / tests — the closed set in
 ``SPECIALIST_ROLES_ORDER``) runs **concurrently** on daemon threads, reusing
@@ -78,6 +88,7 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from pr_reviewer.role_selection import select_specialist_roles  # noqa: E402
 from pr_reviewer.specialists import (  # noqa: E402
     ARTIFACT_VERSION,
     DEFAULT_SPECIALIST_MAX_TOKENS,
@@ -367,6 +378,21 @@ def _role_entry(
     }
 
 
+def _skipped_entry(role: str, reason: str) -> dict[str, Any]:
+    """Aggregate entry for a role deterministically skipped by auto
+    selection (#633). Skipped roles are telemetry, not failures: no error
+    kind, no lead, and the deterministic reason the selector gave."""
+    return {
+        "role": role,
+        "status": "skipped",
+        "error_kind": None,
+        "elapsed_sec": 0.0,
+        "lead_count": 0,
+        "errors_count": 0,
+        "reason": reason,
+    }
+
+
 def _write_role_failure_artifacts(
     workspace_root: Path,
     role: str,
@@ -633,18 +659,63 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="",
         help="Root for all artifact writes (default: $GITHUB_WORKSPACE or cwd).",
     )
+    parser.add_argument(
+        "--classification",
+        default="classification.json",
+        help=(
+            "Classification artifact driving deep_review=auto role selection "
+            "(#633); resolved under the workspace root. Ignored in true mode."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    if not _env_bool("DEEP_REVIEW"):
-        # Off by default. review.sh already gates the invocation; this guards
-        # direct calls so the disabled path is provably call-free and
-        # write-free (no artifacts, no aggregate).
+    # true = all three roles (v2.5 semantics); auto = deterministic
+    # classifier-driven selection (#633), possibly zero roles. Anything else
+    # is disabled — review.sh/corpus.sh validate too; this guards direct
+    # calls so the disabled path is provably call-free and write-free.
+    deep_mode = _env_str("DEEP_REVIEW", "false").strip().lower()
+    if deep_mode not in ("true", "auto"):
         print("deep_review disabled; no specialist passes run")
         return 0
 
     workspace_root = Path(
         args.workspace_root or os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     ).resolve()
+
+    # ── #633 auto role selection ───────────────────────────────────────────
+    # Deterministic classification lookup (no model call). Fail-soft: an
+    # unreadable classification artifact selects zero roles with an explicit
+    # reason — never an exception, never a partially-run phase.
+    selection_artifact: Optional[dict[str, Any]] = None
+    roles_to_run: tuple[str, ...] = SPECIALIST_ROLES_ORDER
+    skipped_reasons: dict[str, str] = {}
+    if deep_mode == "auto":
+        classification: Any = None
+        classification_path = _resolve_artifact_path(
+            args.classification, workspace_root
+        )
+        if classification_path is not None:
+            try:
+                classification = json.loads(
+                    classification_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                classification = None
+        selection_artifact = select_specialist_roles(classification)
+        selected = set(selection_artifact["selected_roles"])
+        roles_to_run = tuple(
+            role for role in SPECIALIST_ROLES_ORDER if role in selected
+        )
+        for decision in selection_artifact["decisions"]:
+            if not decision.get("selected"):
+                skipped_reasons[decision["role"]] = decision["reason"]
+        selection_note = (
+            f"deep review mode auto: selected roles "
+            f"[{', '.join(roles_to_run) if roles_to_run else 'none'}]"
+        )
+        if not roles_to_run and selection_artifact["zero_selection_reason"]:
+            selection_note += f" — {selection_artifact['zero_selection_reason']}"
+        print(selection_note)
 
     base_url = _env_str("AI_BASE_URL")
     api_format = _env_str("AI_API_FORMAT", "openai").strip().lower()
@@ -666,9 +737,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     entries: list[dict[str, Any]] = []
     corpus, corpus_error, corpus_bytes = _read_corpus(args.corpus)
     if corpus is None:
-        # No corpus means no calls at all: every role is recorded as a soft
-        # input failure and the aggregate is still written.
+        # No corpus means no calls at all: every SELECTED role is recorded as
+        # a soft input failure and skipped roles keep their skip telemetry;
+        # the aggregate is still written.
         for role in SPECIALIST_ROLES_ORDER:
+            if role not in roles_to_run:
+                entries.append(_skipped_entry(role, skipped_reasons[role]))
+                continue
             artifact = _empty_artifact(role)
             artifact["errors"].append(f"input: {corpus_error}")
             _guarded_write(workspace_root, f"specialist-{role}.json", _json_text(artifact))
@@ -679,7 +754,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
     else:
         user_message = f"{_USER_PREFIX}\n\n{corpus}"
-        cancels = {role: threading.Event() for role in SPECIALIST_ROLES_ORDER}
+        cancels = {role: threading.Event() for role in roles_to_run}
         results: dict[str, dict[str, Any]] = {}
         threads: dict[str, threading.Thread] = {}
 
@@ -727,7 +802,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 request_fn=run_chat_request,
             )
 
-        for role in SPECIALIST_ROLES_ORDER:
+        for role in roles_to_run:
             thread = threading.Thread(
                 target=worker, args=(role,), name=f"specialist-{role}", daemon=True
             )
@@ -737,8 +812,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Collect in fixed role order against the ONE aggregate deadline: a
         # straggler past it is cancelled (its thread is a daemon and checks
         # the flag before writing, so it cannot race the timeout record) and
-        # never extends the phase.
+        # never extends the phase. Skipped roles keep their fixed-order
+        # telemetry slots without having run.
         for role in SPECIALIST_ROLES_ORDER:
+            if role not in threads:
+                entries.append(_skipped_entry(role, skipped_reasons[role]))
+                continue
             remaining = deadline - time.monotonic()
             threads[role].join(timeout=max(0.0, remaining))
             if threads[role].is_alive():
@@ -775,8 +854,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"{usage.get('completion_tokens')}"
                 f" cached={usage.get('cached_tokens')}"
             )
+        reason = f" — {entry['reason']}" if entry.get("reason") else ""
         print(
-            f"specialist {entry['role']}: {entry['status']}{suffix} — "
+            f"specialist {entry['role']}: {entry['status']}{suffix}{reason} — "
             f"{entry['lead_count']} lead(s), {entry['errors_count']} error(s), "
             f"{entry['elapsed_sec']}s{usage_note}"
         )
@@ -784,16 +864,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     aggregate = {
         "version": ARTIFACT_VERSION,
         "enabled": True,
+        # Requested deep-review mode ("true" = all roles, "auto" = the
+        # deterministic #633 selection below). Part of the config
+        # fingerprint via DEEP_REVIEW, so a mode switch invalidates a stale
+        # comment.
+        "deep_review_mode": deep_mode,
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
         "specialist_corpus_bytes": corpus_bytes,
         "specialist_max_tokens": max_tokens,
         "total_leads": sum(entry["lead_count"] for entry in entries),
+        # Skipped roles are telemetry, not failures: they never set
+        # any_errors (#633).
         "any_errors": any(
-            entry["status"] != "ok" or entry["errors_count"] for entry in entries
+            entry["status"] not in ("ok", "skipped") or entry["errors_count"]
+            for entry in entries
         ),
         "roles": entries,
     }
+    if selection_artifact is not None:
+        aggregate["selection"] = selection_artifact
     if not _guarded_write(workspace_root, "specialists.json", _json_text(aggregate)):
         print(
             "ERROR: refused to write specialists.json (workspace escape or "
@@ -819,7 +909,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_bytes = _env_int("SPECIALISTS_SECTION_MAX_BYTES", 12000)
         role_results = _read_role_artifacts(workspace_root)
         section = render_specialist_leads_section(
-            role_results, max_bytes=max_bytes
+            role_results,
+            max_bytes=max_bytes,
+            # Auto-skipped roles render no block at all — they ran no pass,
+            # so a zero-lead note would falsely imply they did (#633).
+            skipped_roles=frozenset(skipped_reasons),
         )
         # Fit sanity: a section that cannot fit the corpus budget is dropped
         # rather than allowed to crowd the rest of the corpus into

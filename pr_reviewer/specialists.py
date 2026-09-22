@@ -65,7 +65,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 # scripts/ hosts redact.py (the shared secret-redaction helper
 # scripts/run_specialists.py uses); resolve relative to this file so the
@@ -699,7 +699,10 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
 
 
 def render_specialist_leads_section(
-    role_results: Mapping[str, Any], *, max_bytes: int
+    role_results: Mapping[str, Any],
+    *,
+    max_bytes: int,
+    skipped_roles: Collection[str] = (),
 ) -> str:
     """Render the aggregate "Specialist Review Leads" corpus section (#609).
 
@@ -708,6 +711,13 @@ def render_specialist_leads_section(
     missing or unparseable. Only the three fixed roles render, in the fixed
     order of :data:`SPECIALIST_ROLES_ORDER` (``correctness``, ``security``,
     ``tests``); any other mapping keys are ignored.
+
+    ``skipped_roles`` (#633) names roles that were deterministically skipped
+    by classifier-driven auto selection — they ran no pass, so they render NO
+    block at all (not even the zero-lead note, which would falsely imply the
+    pass ran and found nothing). Skips are telemetry in the aggregate, not
+    section content. Membership is order-independent; iteration stays in the
+    fixed role order, so output remains deterministic.
 
     Behaviour contract:
 
@@ -738,9 +748,12 @@ def render_specialist_leads_section(
       every call (fixed role order, no timestamps, no dict-order
       dependence).
     """
+    active_roles = [
+        role for role in SPECIALIST_ROLES_ORDER if role not in set(skipped_roles)
+    ]
     role_lead_lines: list[list[str]] = []
     role_notes: list[str] = []
-    for role in SPECIALIST_ROLES_ORDER:
+    for role in active_roles:
         artifact = role_results.get(role) if role_results is not None else None
         lines: list[str] = []
         if isinstance(artifact, dict):
@@ -775,7 +788,7 @@ def render_specialist_leads_section(
                 f"## {role.capitalize()}", lines, note if not lines else None
             )
             for role, lines, note in zip(
-                SPECIALIST_ROLES_ORDER, lines_per_role, role_notes
+                active_roles, lines_per_role, role_notes
             )
         ]
         doc = "\n".join(
@@ -797,7 +810,7 @@ def render_specialist_leads_section(
         # Whole-lead granularity: drop the LAST lead of the LAST role that
         # still has leads (reverse fixed-role order), then rebuild.
         target = None
-        for i in range(len(SPECIALIST_ROLES_ORDER) - 1, -1, -1):
+        for i in range(len(active_roles) - 1, -1, -1):
             if role_lead_lines[i]:
                 target = i
                 break
