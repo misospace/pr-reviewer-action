@@ -123,6 +123,16 @@ PY
 
 : > linked-issues.md
 : > linked-issue-labels.json
+# #633: linked-metadata completeness for deterministic role selection. A
+# failed GitHub/Linear lookup means SELECTION-RELEVANT signals (security /
+# audit / priority labels, Linear priority) are UNKNOWN — role_selection.py
+# must see that uncertainty and fail toward scrutiny, not read missing
+# signals as absent ones. Known-disabled state (Linear skipped for a fork PR
+# by the LINEAR_ENABLE_FOR_FORKS gate) is NOT uncertainty.
+: > linked-metadata-status.json
+: > linked-issue-fetch-failures.txt
+LINEAR_FETCH_FAILURES_JSON='[]'
+LINEAR_KNOWN_DISABLED=false
 if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
   # The "# Linked Issue Context" header is emitted by scripts/sections/corpus.sh,
   # so we deliberately do not prepend it here. Doing so previously produced a
@@ -151,6 +161,7 @@ if [ "$(jq 'length' linked-issues.json)" -gt 0 ]; then
       echo '```' >> linked-issues.md
     else
       echo "(Could not fetch issue $issue_ref from $issue_repo)" >> linked-issues.md
+      printf '%s\n' "$issue_ref" >> linked-issue-fetch-failures.txt
     fi
     echo >> linked-issues.md
   done
@@ -184,13 +195,27 @@ if [[ -n "$LINEAR_API_KEY" && -n "$LINEAR_ISSUE_PREFIXES" ]]; then
   if gate_feature_for_forks "$LINEAR_ENABLE_FOR_FORKS" \
       linear-issues.md "" linear-issues.json "[]"; then
     : > linear-issues.md
+    # Known-disabled state, not uncertainty: the pipeline deliberately does
+    # not fetch Linear for fork PRs unless linear_enable_for_forks is set,
+    # so no selection signal is hidden here.
+    LINEAR_KNOWN_DISABLED=true
     log "Skipping Linear issue context for cross-repository PR"
   elif LINEAR_API_KEY="$LINEAR_API_KEY" python3 "$SCRIPT_DIR/../pr_reviewer/linear_context.py" \
       --pr-json pr.json \
       --prefixes "$LINEAR_ISSUE_PREFIXES" \
       --timeout "$LINEAR_ISSUE_TIMEOUT_SEC" \
       --output-json linear-issues.json \
-      --output-markdown linear-issues.md; then
+      --output-markdown linear-issues.md \
+      --errors-json linear-fetch-failures.json; then
+    # Per-identifier lookup failures are uncertainty (#633): a configured
+    # identifier whose priority/labels could not be fetched may have held
+    # selection-relevant signals. Partial success still merges the issues
+    # that WERE fetched.
+    if [ -s linear-fetch-failures.json ] \
+        && [ "$(jq 'length' linear-fetch-failures.json)" -gt 0 ]; then
+      LINEAR_FETCH_FAILURES_JSON="$(jq -c 'map(.[0])' linear-fetch-failures.json)"
+      error "Linear lookup failed for $(jq -r 'map(.[0]) | join(", ")' linear-fetch-failures.json); continuing with fetched issues (selection treats the missing metadata as uncertain)"
+    fi
     cat linear-issues.md >> linked-issues.md
     jq -s '.[0] + .[1]' linked-issues.json linear-issues.json > linked-issues.merged.json
     mv linked-issues.merged.json linked-issues.json
@@ -202,8 +227,27 @@ if [[ -n "$LINEAR_API_KEY" && -n "$LINEAR_ISSUE_PREFIXES" ]]; then
     error "Linear issue context adapter failed; continuing without Linear context"
     printf '[]\n' > linear-issues.json
     : > linear-issues.md
+    # The adapter itself failed (config/PR-JSON problem): any identifier the
+    # title carried could not be looked up — uncertainty, not absence (#633).
+     LINEAR_FETCH_FAILURES_JSON='["linear-adapter-failed"]'
   fi
 fi
+
+# Fold every failure record into the completeness status consumed by
+# classification (classifier.py --metadata-status) and, through it, by
+# deterministic role selection (#633).
+GH_FAILURES_JSON="$(jq -R . linked-issue-fetch-failures.txt 2>/dev/null | jq -s . || echo '[]')"
+jq -n \
+  --argjson github_failures "${GH_FAILURES_JSON:-[]}" \
+  --argjson linear_failures "$LINEAR_FETCH_FAILURES_JSON" \
+  --argjson linear_known_disabled "$LINEAR_KNOWN_DISABLED" \
+  '{
+    version: 1,
+    github_fetch_failures: $github_failures,
+    linear_fetch_failures: $linear_failures,
+    linear_known_disabled: $linear_known_disabled
+  }' > linked-metadata-status.json
+rm -f linked-issue-fetch-failures.txt linear-fetch-failures.json
 section_timer_end
 
 # ── Requirement Ledger (#624) ─────────────────────────────────────────

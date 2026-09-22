@@ -830,3 +830,60 @@ def test_auto_mode_future_kind_fails_conservatively(tmp_path, monkeypatch):
     assert agg["any_errors"] is False
     assert agg["selection"]["selected_roles"] == list(ROLES)
     assert agg["selection"]["zero_selection_reason"] == ""
+
+
+# ── 16. Metadata uncertainty runs all roles (#633 review fix, round 3) ─
+
+
+def test_auto_mode_metadata_uncertainty_runs_all_roles(tmp_path, monkeypatch):
+    """Fresh-review regression: a docs/meta-only PR whose GitHub linked-issue
+    fetch failed (classification carries linked_metadata_uncertain) must run
+    ALL roles — the zero-specialist gate must not fire on missing signals."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["README.md", "docs/usage.md"],
+        "linked_metadata_uncertain": True,
+        "linked_metadata_uncertainty": ["github linked issue #12 fetch failed"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    assert agg["selection"]["metadata_uncertain"] is True
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+
+
+def test_auto_mode_linear_uncertainty_runs_all_roles(tmp_path, monkeypatch):
+    """Fresh-review regression: a configured Linear identifier whose lookup
+    failed carries the same uncertainty — all roles, never zero."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["docs/readme.md"],
+        "linked_metadata_uncertain": True,
+        "linked_metadata_uncertainty": ["linear OPS-42 lookup failed"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["selection"]["metadata_uncertain"] is True

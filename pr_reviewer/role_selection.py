@@ -308,6 +308,23 @@ def _trivial_zero_reason(
 UNKNOWN_PR_KIND = "unknown"
 
 
+def _metadata_uncertainty(classification: dict) -> list[str]:
+    """Linked-issue/Linear selection-input uncertainty carried by the
+    classification contract (#633 review fix, round 3): a metadata source
+    that was EXPECTED but could not be determined (a failed GitHub
+    linked-issue label fetch, a failed configured Linear lookup) means
+    missing signals are not absent signals."""
+    if classification.get("linked_metadata_uncertain") is not True:
+        return []
+    raw = classification.get("linked_metadata_uncertainty")
+    if not isinstance(raw, list):
+        return ["linked metadata could not be fully determined"]
+    reasons = [
+        r for r in (_clean_str(item) for item in raw) if r
+    ]
+    return reasons or ["linked metadata could not be fully determined"]
+
+
 def _is_conservative_fallback(usable: bool, kind: str) -> bool:
     """True when the classification gives no deterministic basis to skip a
     role: the input is missing/malformed, or the kind is the classifier's
@@ -350,6 +367,11 @@ def select_specialist_roles(classification: Any) -> dict[str, Any]:
     selected_roles: list[str] = []
     skipped_roles: list[str] = []
     zero_reason = ""
+    # #633 round 3: metadata uncertainty (usable classifications only — the
+    # unavailable fallback already covers unusable input).
+    uncertainty_reasons: list[str] = (
+        _metadata_uncertainty(classification) if usable else []
+    )
 
     if _is_conservative_fallback(usable, kind):
         # Both fallback shapes (unusable input, unknown kind) report the
@@ -370,78 +392,106 @@ def select_specialist_roles(classification: Any) -> dict[str, Any]:
             selected_roles.append(role)
     else:
         available = True
-        gate_reason = _trivial_zero_reason(kind, flags, files)
-        if gate_reason is not None:
-            zero_reason = gate_reason
+        if uncertainty_reasons:
+            # Conservative uncertainty fallback (#633 round 3): a failed
+            # GitHub/Linear metadata lookup may be hiding security/audit/
+            # priority signals — run all three roles rather than treat the
+            # missing metadata as absent. This defeats the trivial gates
+            # too: a docs-only PR with an unfetchable linked issue is NOT
+            # proven trivial.
+            reason = (
+                "selected: linked-issue/Linear selection metadata could not "
+                f"be fully determined ({'; '.join(uncertainty_reasons)}) — defaulting "
+                "to all roles (conservative fallback: missing signals are "
+                "not absent signals)"
+            )
             for role in SPECIALIST_ROLES_ORDER:
                 decisions.append({
                     "role": role,
-                    "selected": False,
+                    "selected": True,
                     "signals": [],
-                    "reason": f"skipped: {gate_reason}",
+                    "reason": reason,
                 })
-                skipped_roles.append(role)
+                selected_roles.append(role)
         else:
-            for role, signals in ROLE_LANES:
-                matched = _attributed_signals(kind, flags, signals)
-                if matched:
-                    decisions.append({
-                        "role": role,
-                        "selected": True,
-                        "signals": matched,
-                        "reason": (
-                            f"selected: {role}-lane signals matched: "
-                            f"{', '.join(matched)}"
-                        ),
-                    })
-                    selected_roles.append(role)
-                else:
+            gate_reason = _trivial_zero_reason(kind, flags, files)
+            if gate_reason is not None:
+                zero_reason = gate_reason
+                for role in SPECIALIST_ROLES_ORDER:
                     decisions.append({
                         "role": role,
                         "selected": False,
                         "signals": [],
-                        "reason": (
-                            f"skipped: no {role}-lane signal in classification "
-                            f"({_classification_summary(kind, flags)})"
-                        ),
+                        "reason": f"skipped: {gate_reason}",
                     })
                     skipped_roles.append(role)
-            if not selected_roles:
-                # Conservative no-match fallback: a usable classification
-                # whose kind matches no lane (a future classifier value this
-                # module has not learned) must fail toward MORE scrutiny —
-                # zero selection is only ever allowed by an explicit,
-                # documented trivial gate. Without this, an unknown future
-                # kind would silently select zero specialists.
-                no_match_reason = (
-                    f"selected: no role lane matched the classification "
-                    f"signals ({_classification_summary(kind, flags)}) — "
-                    f"defaulting to all roles (conservative fallback: zero "
-                    f"selection requires a documented trivial gate)"
-                )
-                decisions = [
-                    {
-                        "role": role,
-                        "selected": True,
-                        "signals": [],
-                        "reason": no_match_reason,
-                    }
-                    for role in SPECIALIST_ROLES_ORDER
-                ]
-                selected_roles = list(SPECIALIST_ROLES_ORDER)
-                skipped_roles = []
+            else:
+                for role, signals in ROLE_LANES:
+                    matched = _attributed_signals(kind, flags, signals)
+                    if matched:
+                        decisions.append({
+                            "role": role,
+                            "selected": True,
+                            "signals": matched,
+                            "reason": (
+                                f"selected: {role}-lane signals matched: "
+                                f"{', '.join(matched)}"
+                            ),
+                        })
+                        selected_roles.append(role)
+                    else:
+                        decisions.append({
+                            "role": role,
+                            "selected": False,
+                            "signals": [],
+                            "reason": (
+                                f"skipped: no {role}-lane signal in classification "
+                                f"({_classification_summary(kind, flags)})"
+                            ),
+                        })
+                        skipped_roles.append(role)
+                if not selected_roles:
+                    # Conservative no-match fallback: a usable classification
+                    # whose kind matches no lane (a future classifier value this
+                    # module has not learned) must fail toward MORE scrutiny —
+                    # zero selection is only ever allowed by an explicit,
+                    # documented trivial gate. Without this, an unknown future
+                    # kind would silently select zero specialists.
+                    no_match_reason = (
+                        f"selected: no role lane matched the classification "
+                        f"signals ({_classification_summary(kind, flags)}) — "
+                        f"defaulting to all roles (conservative fallback: zero "
+                        f"selection requires a documented trivial gate)"
+                    )
+                    decisions = [
+                        {
+                            "role": role,
+                            "selected": True,
+                            "signals": [],
+                            "reason": no_match_reason,
+                        }
+                        for role in SPECIALIST_ROLES_ORDER
+                    ]
+                    selected_roles = list(SPECIALIST_ROLES_ORDER)
+                    skipped_roles = []
 
-    return {
+    artifact = {
         "version": SELECTION_ARTIFACT_VERSION,
         "mode": "auto",
         "classification_available": available,
         "pr_kind": kind,
         "risk_flags": flags,
+        # #633 round 3: linked-issue/Linear metadata uncertainty — true when
+        # a selection-relevant metadata source was expected but could not be
+        # determined (the driver of the conservative all-roles fallback).
+        "metadata_uncertain": bool(uncertainty_reasons),
+        "metadata_uncertainty_reasons": uncertainty_reasons,
         "selected_roles": selected_roles,
         "skipped_roles": skipped_roles,
         "decisions": decisions,
         "zero_selection_reason": zero_reason,
     }
+    return artifact
 
 
 # ---------------------------------------------------------------------------

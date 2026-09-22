@@ -187,6 +187,17 @@ class PRClassification:
     changed_files_summary: list[str] = field(default_factory=list)
     linked_issue_labels: list[str] = field(default_factory=list)
     must_check: list[str] = field(default_factory=list)
+    # #633: linked-metadata completeness for deep_review=auto role selection.
+    # True when a selection-relevant metadata source (GitHub linked-issue
+    # labels, configured Linear priority/labels) was EXPECTED but could not
+    # be determined — missing signals must not be read as absent signals by
+    # the deterministic selector (it fails toward scrutiny). Known-disabled
+    # state (Linear fork-gated off, no linked issues, no configured
+    # identifiers) is NOT uncertainty. Unusable status input degrades to
+    # not-uncertain: the stale-review fingerprint has its own conservative
+    # failure path for undetermined inputs.
+    linked_metadata_uncertain: bool = False
+    linked_metadata_uncertainty: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -516,11 +527,57 @@ def _build_must_check(pr_kind: str, risk_flags: list[str]) -> list[str]:
     return checks
 
 
+def _linked_metadata_uncertainty(
+    metadata_status: dict | None,
+) -> tuple[bool, list[str]]:
+    """Parse the context pipeline's linked-metadata completeness artifact
+    (scripts/sections/context.sh) into an uncertainty flag + human reasons
+    for the classification contract (#633).
+
+    Uncertain = a selection-relevant metadata source was EXPECTED but could
+    not be determined: a GitHub linked-issue fetch failed, or a configured
+    Linear lookup failed (adapter failure or per-identifier failure).
+    Known-disabled state (``linear_known_disabled`` — Linear fork-gated off)
+    is deliberately not uncertainty, and a missing/unusable status artifact
+    degrades to not-uncertain (ordinary no-linked-issues reviews must stay
+    ordinary; the stale-review fingerprint carries the conservative failure
+    path for undetermined inputs). All input text is untrusted: reasons are
+    bounded, control-character-free strings."""
+    if not isinstance(metadata_status, dict):
+        return False, []
+
+    def _clean(value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        text = value.strip()
+        if not text or any("\0" <= ch < " " or ch == "\x7f" for ch in text):
+            return ""
+        return text[:200]
+
+    reasons: list[str] = []
+    failures = metadata_status.get("github_fetch_failures")
+    if isinstance(failures, list):
+        for ref in failures:
+            ref = _clean(ref)
+            if ref:
+                reasons.append(f"github linked issue {ref} fetch failed")
+    linear_failures = metadata_status.get("linear_fetch_failures")
+    if isinstance(linear_failures, list):
+        for ref in linear_failures:
+            ref = _clean(ref)
+            if ref:
+                reasons.append(f"linear {ref} lookup failed")
+    if metadata_status.get("linear_known_disabled") is True:
+        pass  # known-disabled: intentionally no Linear data, not uncertainty
+    return bool(reasons), reasons
+
+
 def classify_pr(
     pr_files: list[dict],
     diff_text: str = "",
     linked_issues: list[dict] | None = None,
     max_summary_files: int = 50,
+    metadata_status: dict | None = None,
 ) -> PRClassification:
     """Run deterministic classification on a PR.
 
@@ -541,6 +598,8 @@ def classify_pr(
     """
     if linked_issues is None:
         linked_issues = []
+
+    uncertainty = _linked_metadata_uncertainty(metadata_status)
 
     pr_kind = _classify_pr_kind(pr_files, diff_text)
     risk_flags, risk_flags_with_files = _detect_risk_flags(pr_files, diff_text, linked_issues)
@@ -569,6 +628,8 @@ def classify_pr(
         changed_files_summary=changed_files_summary,
         linked_issue_labels=linked_issue_labels,
         must_check=must_check,
+        linked_metadata_uncertain=uncertainty[0],
+        linked_metadata_uncertainty=uncertainty[1],
     )
 
 
@@ -577,6 +638,7 @@ def classify_from_files(
     diff_path: str | Path = "",
     issues_path: str | Path = "",
     output_path: str | Path = "classification.json",
+    metadata_status_path: str | Path = "",
 ) -> PRClassification:
     """Convenience wrapper that reads from files and writes JSON output.
 
@@ -594,7 +656,18 @@ def classify_from_files(
         linked_issues = json.loads(
             Path(issues_path).read_text(encoding="utf-8"))
 
-    result = classify_pr(pr_files, diff_text, linked_issues)
+    # #633: linked-metadata completeness (fail-soft — a missing or malformed
+    # artifact means not-uncertain, never an aborted classification).
+    metadata_status: dict | None = None
+    if metadata_status_path and Path(metadata_status_path).exists():
+        try:
+            metadata_status = json.loads(
+                Path(metadata_status_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            metadata_status = None
+
+    result = classify_pr(pr_files, diff_text, linked_issues,
+                         metadata_status=metadata_status)
 
     output = Path(output_path)
     output.write_text(json.dumps(result.to_dict(), indent=2) + "\n")
@@ -618,6 +691,9 @@ def main() -> None:
                         help="Path to pr.diff.truncated (optional)")
     parser.add_argument("--linked-issues", default="",
                         help="Path to linked-issues.json (optional)")
+    parser.add_argument("--metadata-status", default="",
+                        help="Path to linked-metadata-status.json (#633 "
+                             "linked-issue/Linear completeness; optional)")
     parser.add_argument("--output", default="classification.json",
                         help="Output path for classification JSON")
 
@@ -627,6 +703,7 @@ def main() -> None:
         diff_path=args.diff,
         issues_path=args.linked_issues,
         output_path=args.output,
+        metadata_status_path=args.metadata_status,
     )
 
 

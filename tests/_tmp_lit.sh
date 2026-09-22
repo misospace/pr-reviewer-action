@@ -30,7 +30,7 @@ FAIL=0
 source "$SCRIPT_DIR/_lib/assert.sh"
 
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+#
 cd "$WORKDIR"
 
 # The section's python heredoc and the classifier import pr_reviewer; run_review.sh
@@ -211,7 +211,7 @@ def fake_urlopen(request, **kwargs):
 linear_context.urlopen = fake_urlopen
 raise SystemExit(linear_context.main())
 PY
-mkdir -p "$WORKDIR/fake/scripts" "$WORKDIR/fake/pr_reviewer"
+mkdir -p "$WORKDIR/fake/pr_reviewer"
 cp "$WORKDIR/linear_fail_runner.py" "$WORKDIR/fake/pr_reviewer/linear_context.py"
 
 # A docs/meta-only PR carrying a configured Linear identifier in the title:

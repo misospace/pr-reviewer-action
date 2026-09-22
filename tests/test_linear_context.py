@@ -254,3 +254,59 @@ def test_render_markdown_keeps_issue_body_inside_json_string():
     assert markdown.count("```json") == 1
     assert markdown.count("\n```\n") == 1
     assert "\\n```\\n# injected heading" in markdown
+
+
+# ── --errors-json sidecar (#633 round 4) ───────────────────────────
+
+
+def test_errors_json_sidecar_written_on_per_identifier_failure(
+    tmp_path, monkeypatch
+):
+    """A per-identifier lookup failure is recorded in the sidecar (and the
+    exit code stays 0 so partial success still feeds the corpus)."""
+
+    def fake_urlopen(request, **_kwargs):
+        raise linear_context.LinearContextError("Linear HTTP error 503")
+
+    monkeypatch.setattr(linear_context, "urlopen", fake_urlopen)
+    monkeypatch.setenv("LINEAR_API_KEY", "lin-key")
+    pr = {"title": "OPS-42: fix the thing"}
+    pr_path = tmp_path / "pr.json"
+    pr_path.write_text(json.dumps(pr), encoding="utf-8")
+    sidecar = tmp_path / "linear-fetch-failures.json"
+    rc = linear_context.main([
+        "--pr-json", str(pr_path),
+        "--prefixes", "OPS",
+        "--output-json", str(tmp_path / "linear-issues.json"),
+        "--output-markdown", str(tmp_path / "linear-issues.md"),
+        "--errors-json", str(sidecar),
+    ])
+    assert rc == 0
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload and payload[0][0] == "OPS-42"
+
+
+def test_errors_json_sidecar_empty_when_healthy(tmp_path, monkeypatch):
+    def fake_urlopen(request, **_kwargs):
+        return _Response({
+            "data": {"issue": {
+                "identifier": "OPS-7",
+                "title": "t",
+                "labels": {"nodes": []},
+            }},
+        })
+
+    monkeypatch.setattr(linear_context, "urlopen", fake_urlopen)
+    monkeypatch.setenv("LINEAR_API_KEY", "lin-key")
+    pr_path = tmp_path / "pr.json"
+    pr_path.write_text('{"title": "OPS-7: ship"}', encoding="utf-8")
+    sidecar = tmp_path / "linear-fetch-failures.json"
+    rc = linear_context.main([
+        "--pr-json", str(pr_path),
+        "--prefixes", "OPS",
+        "--output-json", str(tmp_path / "linear-issues.json"),
+        "--output-markdown", str(tmp_path / "linear-issues.md"),
+        "--errors-json", str(sidecar),
+    ])
+    assert rc == 0
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == []

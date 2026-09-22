@@ -441,3 +441,191 @@ def test_selection_is_independent_of_risk_flag_order_dupe_and_noise():
     # Flags outside the known enum never select anything.
     artifact = selection(classification(risk_flags=["not_a_real_flag"]))
     assert artifact["selected_roles"] == ["correctness"]  # app_code lane
+
+
+# ── Linked-metadata uncertainty (#633 review fix, round 3) ─────────
+
+
+def uncertainty_classification(**overrides) -> dict:
+    """A docs/meta-only PR whose linked/Linear metadata could not be fully
+    determined."""
+    payload = classification(
+        pr_kind="app_code",
+        changed_files_summary=["README.md", "docs/usage.md"],
+        linked_metadata_uncertain=True,
+        linked_metadata_uncertainty=[
+            "github linked issue #12 fetch failed",
+            "linear OPS-42 lookup failed",
+        ],
+    )
+    payload.update(overrides)
+    return payload
+
+
+def test_metadata_uncertainty_defeats_the_docs_gate():
+    """A docs/meta-only PR with an unfetchable linked issue must NOT hit the
+    zero-specialist gate: the missing metadata could have held security,
+    audit, or priority signals — missing signals are not absent signals."""
+    artifact = selection(uncertainty_classification())
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+    assert artifact["skipped_roles"] == []
+    assert artifact["zero_selection_reason"] == ""
+    assert artifact["metadata_uncertain"] is True
+    assert artifact["metadata_uncertainty_reasons"] == [
+        "github linked issue #12 fetch failed",
+        "linear OPS-42 lookup failed",
+    ]
+    assert all("missing signals are not absent signals" in d["reason"] for d in artifact["decisions"])
+
+
+def test_metadata_uncertainty_also_defeats_the_digest_gate():
+    artifact = selection(uncertainty_classification(
+        pr_kind="renovate_digest_only",
+        changed_files_summary=["package-lock.json"],
+    ))
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+
+
+def test_metadata_uncertainty_runs_alongside_matched_signals():
+    """Uncertainty never DOWNGRADES a selection: a PR whose known signals
+    already select a subset still gets all roles (a superset)."""
+    artifact = selection(uncertainty_classification(
+        pr_kind="auth_changes",
+        risk_flags=["auth_changes"],
+        changed_files_summary=["src/auth.py"],
+    ))
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+
+
+@pytest.mark.parametrize("payload", [
+    {"linked_metadata_uncertain": False, "linked_metadata_uncertainty": ["x"]},
+    {"linked_metadata_uncertain": True, "linked_metadata_uncertainty": []},
+    {"linked_metadata_uncertain": True, "linked_metadata_uncertainty": "garbage"},
+])
+def test_uncertainty_flag_requires_both_flag_and_reasons(payload):
+    """`uncertain: true` with no usable reasons still fails conservatively
+    (generic reason), while `uncertain: false` is never uncertain."""
+    artifact = selection(classification(**payload))
+    if payload["linked_metadata_uncertain"] is True:
+        assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+        assert artifact["metadata_uncertain"] is True
+        assert artifact["metadata_uncertainty_reasons"] == [
+            "linked metadata could not be fully determined"
+        ]
+    else:
+        assert artifact["selected_roles"] == ["correctness"]
+        assert artifact["metadata_uncertain"] is False
+
+
+def test_no_metadata_keys_is_ordinary_complete_classification():
+    """Ordinary reviews (no linked issues / no configured identifiers) carry
+    no uncertainty keys and select normally — absence of the keys is not
+    uncertainty."""
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=[".github/ISSUE_TEMPLATE/bug.yml", "README.md"],
+    ))
+    assert artifact["selected_roles"] == []
+    assert artifact["metadata_uncertain"] is False
+
+
+def test_uncertainty_reasons_are_control_char_safe():
+    artifact = selection(uncertainty_classification(
+        linked_metadata_uncertainty=["bad\x01reason"],
+    ))
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+    assert artifact["metadata_uncertainty_reasons"] == [
+        "linked metadata could not be fully determined"
+    ]
+
+
+# ── Classification contract carries the uncertainty (#633 round 3) ──
+
+
+def test_classifier_propagates_metadata_status(tmp_path):
+    """The classification contract: context.sh's linked-metadata-status.json
+    flows through classifier.py into classification.json, and the selector
+    acts on it — end to end with the real classifier CLI."""
+    import json
+    import subprocess
+
+    status = {
+        "version": 1,
+        "github_fetch_failures": ["#12"],
+        "linear_fetch_failures": ["OPS-42"],
+        "linear_known_disabled": False,
+    }
+    status_path = tmp_path / "linked-metadata-status.json"
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    files_path = tmp_path / "pr-files.json"
+    files_path.write_text("[]", encoding="utf-8")
+    out_path = tmp_path / "classification.json"
+
+    subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "pr_reviewer" / "classifier.py"),
+         "--pr-files", str(files_path),
+         "--metadata-status", str(status_path),
+         "--output", str(out_path)],
+        check=True, capture_output=True,
+    )
+    result = json.loads(out_path.read_text(encoding="utf-8"))
+    assert result["linked_metadata_uncertain"] is True
+    assert result["linked_metadata_uncertainty"] == [
+        "github linked issue #12 fetch failed",
+        "linear OPS-42 lookup failed",
+    ]
+    assert "linked_security_issue" not in result["risk_flags"]
+    # …and the selector sees it: docs-only PR, all roles anyway.
+    artifact = select_specialist_roles(result)
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+
+
+def test_classifier_known_disabled_is_not_uncertain(tmp_path):
+    """Fork-gated Linear (known-disabled) must NOT mark the classification
+    uncertain — deliberately absent data is not missing data."""
+    import json
+    import subprocess
+
+    status = {
+        "version": 1,
+        "github_fetch_failures": [],
+        "linear_fetch_failures": [],
+        "linear_known_disabled": True,
+    }
+    status_path = tmp_path / "linked-metadata-status.json"
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    files_path = tmp_path / "pr-files.json"
+    files_path.write_text("[]", encoding="utf-8")
+    out_path = tmp_path / "classification.json"
+
+    subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "pr_reviewer" / "classifier.py"),
+         "--pr-files", str(files_path),
+         "--metadata-status", str(status_path),
+         "--output", str(out_path)],
+        check=True, capture_output=True,
+    )
+    result = json.loads(out_path.read_text(encoding="utf-8"))
+    assert result["linked_metadata_uncertain"] is False
+    assert result["linked_metadata_uncertainty"] == []
+
+
+def test_classifier_missing_status_file_is_not_uncertain(tmp_path):
+    """Ordinary reviews (no linked issues, no configured identifiers) write
+    the status file with empty failure lists — and a missing file (older
+    workspaces) degrades to not-uncertain, never an error."""
+    import json
+    import subprocess
+
+    files_path = tmp_path / "pr-files.json"
+    files_path.write_text("[]", encoding="utf-8")
+    out_path = tmp_path / "classification.json"
+
+    subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "pr_reviewer" / "classifier.py"),
+         "--pr-files", str(files_path),
+         "--output", str(out_path)],
+        check=True, capture_output=True,
+    )
+    result = json.loads(out_path.read_text(encoding="utf-8"))
+    assert result["linked_metadata_uncertain"] is False

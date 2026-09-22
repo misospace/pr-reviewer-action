@@ -144,6 +144,7 @@ if python3 "$SCRIPT_DIR/../pr_reviewer/classifier.py" \
     --pr-files pr-files.json \
     --diff pr.diff.truncated \
     --linked-issues linked-issues.json \
+    --metadata-status linked-metadata-status.json \
     --output classification.json 2>/dev/null; then
   log "PR classification complete: $(jq -r '.pr_kind' classification.json 2>/dev/null || echo unknown)"
 else

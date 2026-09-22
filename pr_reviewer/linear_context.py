@@ -220,6 +220,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-json", default="linear-issues.json")
     parser.add_argument("--output-markdown", default="linear-issues.md")
     parser.add_argument("--timeout", type=int, default=20)
+    parser.add_argument(
+        "--errors-json",
+        default="",
+        help=(
+            "Optional sidecar for per-identifier fetch failures (#633): a JSON "
+            "array of [identifier, message] pairs, [] when every lookup "
+            "succeeded. The pipeline folds this into the linked-metadata "
+            "completeness signal; the exit code stays 0 so partial success "
+            "still feeds the corpus."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -255,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
     Path(args.output_markdown).write_text(
         render_markdown(issues, errors), encoding="utf-8"
     )
+    if args.errors_json:
+        Path(args.errors_json).write_text(
+            json.dumps(
+                [[identifier, message] for identifier, message in errors],
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     if errors:
         print(
             f"linear_context: fetched {len(issues)} issue(s), "
