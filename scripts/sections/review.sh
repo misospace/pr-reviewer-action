@@ -305,18 +305,31 @@ PY
 )"
   [[ "$decision" == "yes" ]] || return 0
 
+  # Back up the preliminary output BEFORE building the retry prompt: the
+  # renderer loads it as a safe data block so the smart model sees the
+  # complete preliminary finding/review context, and it is the fallback
+  # restored if the smart call fails.
+  cp ai-output.json ai-output.coverage-primary.json
+
   retry_prompt="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
 from pr_reviewer import requirement_coverage, requirement_ledger
 coverage = requirement_coverage.load_coverage("requirement-coverage.json")
 ledger = requirement_ledger.load_ledger("requirement-ledger.json")
-print(requirement_coverage.render_coverage_retry_prompt(coverage, ledger), end="")
+# load_coverage is a tolerant generic JSON loader; the primary handoff must
+# remain a parsed object or the targeted retry is unsafe to run.
+primary = requirement_coverage.load_coverage("ai-output.coverage-primary.json")
+if not isinstance(primary, dict):
+    raise SystemExit(1)
+print(requirement_coverage.render_coverage_retry_prompt(coverage, ledger, primary), end="")
 PY
 )"
-  [ -n "$retry_prompt" ] || return 0
+  [ -n "$retry_prompt" ] || {
+    log "Skipping coverage escalation: preliminary review context is unreadable"
+    return 0
+  }
 
   ESCALATION_REASONS="${ESCALATION_REASONS:+${ESCALATION_REASONS},}incomplete_coverage"
   log "Escalating to smart model $SMART_MODEL (incomplete_coverage)"
-  cp ai-output.json ai-output.coverage-primary.json
   if call_model_tier smart "$retry_prompt" review-corpus.truncated.md ai-request.smart.json ai-response.smart.json; then
     smart_ok=1
   fi

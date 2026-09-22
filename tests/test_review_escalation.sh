@@ -59,6 +59,20 @@ check_contains "coverage gate uses a distinct reason" "$SRC" "incomplete_coverag
 check_contains "coverage gate preserves its preliminary output" "$SRC" "ai-output.coverage-primary.json"
 check_contains "coverage gate keeps fallback-equals-smart guard" "$SRC" "Skipping coverage escalation: the fallback model"
 check_contains "coverage gate uses the targeted retry prompt" "$SRC" 'call_model_tier smart "$retry_prompt" review-corpus.truncated.md'
+check_contains "coverage retry prompt loads the backed-up preliminary output" "$SRC" 'load_coverage("ai-output.coverage-primary.json")'
+check_contains "coverage retry prompt passes the preliminary output to the renderer" "$SRC" 'render_coverage_retry_prompt(coverage, ledger, primary)'
+# The preliminary output must be backed up BEFORE the retry prompt is built,
+# so the renderer loads the preliminary result (never a half-written smart
+# response) and the backup is ready to restore on smart-call failure.
+COV_BACKUP_LINE="$(grep -n 'cp ai-output.json ai-output.coverage-primary.json' "$RUN_REVIEW" | head -1 | cut -d: -f1)"
+COV_PROMPT_LINE="$(grep -n 'render_coverage_retry_prompt(coverage, ledger, primary)' "$RUN_REVIEW" | head -1 | cut -d: -f1)"
+if [[ -n "$COV_BACKUP_LINE" && -n "$COV_PROMPT_LINE" && "$COV_BACKUP_LINE" -lt "$COV_PROMPT_LINE" ]]; then
+  echo "  PASS: preliminary output backed up before the retry prompt is built"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: preliminary output backup ordering (backup=$COV_BACKUP_LINE prompt=$COV_PROMPT_LINE)"
+  FAIL=$((FAIL + 1))
+fi
 # Escalation must be decided before the enforcement wrapper runs.
 ESC_LINE="$(grep -n '^maybe_escalate_review$' "$RUN_REVIEW" | cut -d: -f1)"
 ENF_LINE="$(grep -n '^apply_all_enforcement_wrapper ' "$RUN_REVIEW" | cut -d: -f1)"
