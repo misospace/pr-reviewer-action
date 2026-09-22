@@ -335,6 +335,22 @@ PY
   fi
 
   if [[ "$smart_ok" -eq 1 ]]; then
+    local disposition_result
+    disposition_result="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
+from pr_reviewer import requirement_coverage
+primary = requirement_coverage.load_coverage("ai-output.coverage-primary.json")
+smart = requirement_coverage.load_coverage("ai-output.json")
+ok, reason = requirement_coverage.validate_preliminary_dispositions(primary, smart)
+print("ok" if ok else reason)
+PY
+)"
+    if [[ "$disposition_result" != "ok" ]]; then
+      smart_ok=0
+      log "Rejecting smart coverage retry: preliminary finding dispositions are incomplete (${disposition_result:-invalid})"
+    fi
+  fi
+
+  if [[ "$smart_ok" -eq 1 ]]; then
     # The smart result is a fresh model verdict, so it must pass through the
     # same enforcement and deterministic normalization as the primary result.
     apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"

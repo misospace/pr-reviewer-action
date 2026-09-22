@@ -96,6 +96,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -466,10 +467,10 @@ PRELIMINARY_CONTEXT_HEADER = (
 
 PRELIMINARY_DISPOSITION_REQUIREMENT = (
     "Disposition requirement: for EACH numbered preliminary finding above, "
-    "your review_markdown must state exactly one explicit disposition — "
-    "retain, revise, or reject — with a one-line reason. Silently dropping a "
-    "preliminary finding (neither retaining nor explicitly revising/rejecting "
-    "it in review_markdown) is a silent loss and is not permitted."
+    "your review_markdown must contain exactly one line in this machine-checked "
+    "format: `Finding N: retain|revise|reject - reason`, where N is its number. "
+    "Use retain, revise, or reject exactly once per finding. A missing, duplicate, or invalid disposition rejects this retry. Silently "
+    "dropping a preliminary finding is not permitted."
 )
 
 #: Render-time bounds for the preliminary context block (prompt side). Together
@@ -572,6 +573,57 @@ def _preliminary_finding_line(index: int, finding: Any) -> str | None:
     if location:
         prefix += location + " — "
     return prefix + _safe_inline(message)
+
+
+_DISPOSITION_LINE_RE = re.compile(
+    r"(?im)^\s*Finding\s+(\d+)\s*:\s*(retain|revise|reject)\s*-\s*(\S.*)$"
+)
+
+
+def preliminary_finding_count(primary_output: Any) -> int:
+    """Count preliminary findings that the retry prompt hands to the model."""
+    if not isinstance(primary_output, dict):
+        return 0
+    findings = primary_output.get("findings")
+    if not isinstance(findings, list):
+        return 0
+    count = 0
+    for item in findings:
+        if _preliminary_finding_line(count + 1, item) is None:
+            continue
+        count += 1
+        if count >= MAX_PRELIMINARY_FINDINGS:
+            break
+    return count
+
+
+def validate_preliminary_dispositions(primary_output: Any, smart_output: Any) -> tuple[bool, str]:
+    """Require one valid disposition per handed-off preliminary finding.
+
+    This validates only the retry boundary. It neither preserves nor unions
+    findings: once the contract is complete, the smart output remains final.
+    """
+    expected = preliminary_finding_count(primary_output)
+    if expected == 0:
+        return True, ""
+    if not isinstance(smart_output, dict):
+        return False, "smart-output-invalid"
+    markdown = smart_output.get("review_markdown")
+    if not isinstance(markdown, str):
+        return False, "disposition-markdown-missing"
+
+    seen: set[int] = set()
+    for match in _DISPOSITION_LINE_RE.finditer(markdown):
+        number = int(match.group(1))
+        if number < 1 or number > expected:
+            return False, "disposition-number-invalid"
+        if number in seen:
+            return False, "disposition-duplicate"
+        seen.add(number)
+
+    if len(seen) != expected:
+        return False, "disposition-missing"
+    return True, ""
 
 
 def render_preliminary_review_block(primary_output: Any) -> str:

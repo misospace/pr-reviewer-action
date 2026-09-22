@@ -1128,6 +1128,43 @@ def test_retry_prompt_contract_is_corpus_only():
     assert "do not claim new tool, test, or CI execution" in header
 
 
+def test_dispositions_reject_missing_primary_finding():
+    primary = {
+        "findings": [
+            {"severity": "major", "message": "first"},
+        ],
+    }
+    smart = {"review_markdown": "## Review\nNo disposition provided."}
+    assert requirement_coverage.validate_preliminary_dispositions(primary, smart) == (
+        False, "disposition-missing",
+    )
+
+
+def test_dispositions_accept_explicit_reject():
+    primary = {
+        "findings": [
+            {"severity": "major", "message": "first"},
+        ],
+    }
+    smart = {
+        "review_markdown": "## Review\nFinding 1: reject - corpus disproves it.",
+        "findings": [],
+    }
+    assert requirement_coverage.validate_preliminary_dispositions(primary, smart) == (True, "")
+
+
+def test_dispositions_reject_duplicate_and_invalid_lines():
+    primary = {"findings": [{"severity": "major", "message": "first"}]}
+    duplicate = {"review_markdown": "Finding 1: retain - yes\nFinding 1: reject - no"}
+    invalid = {"review_markdown": "Finding 2: retain - no"}
+    assert requirement_coverage.validate_preliminary_dispositions(primary, duplicate) == (
+        False, "disposition-duplicate",
+    )
+    assert requirement_coverage.validate_preliminary_dispositions(primary, invalid) == (
+        False, "disposition-number-invalid",
+    )
+
+
 def test_prompt_is_corpus_only_and_no_execution_promise():
     ledger = _ledger([_entry(0, "A one")])
     art = _artifact([_row_art("req-000000000000", "unknown")])
