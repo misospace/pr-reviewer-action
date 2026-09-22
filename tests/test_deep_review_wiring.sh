@@ -306,7 +306,7 @@ check_contains "failure warning explains the forced review" "$CHECK" 'could not 
 # hashes the same Linear state the review pipeline fetches. Bound on the
 # step only (never the shared env file); the *_API_KEY suffix keeps it out
 # of the config fingerprint.
-PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Wait for CI checks/' "$ACTION_YML")"
+PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Run AI review/' "$ACTION_YML")"
 check "precheck step binds LINEAR_API_KEY (auto fingerprint needs it)" \
   "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear_api_key }}' || true)" "1"
 check "LINEAR_API_KEY is bound exactly twice (precheck + review steps; never the shared file)" \
