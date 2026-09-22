@@ -819,8 +819,7 @@ def write_outputs(summary, markdown):
     Path(f"{stem}.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    md_content = mask_secrets(markdown)
-    Path(f"{stem}.md").write_text(md_content, encoding="utf-8")
+    Path(f"{stem}.md").write_text(mask_secrets(markdown), encoding="utf-8")
 
 
 NATIVE_LOOP_SYSTEM = (
