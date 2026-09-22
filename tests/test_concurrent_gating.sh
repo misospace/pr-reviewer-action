@@ -300,6 +300,19 @@ EOF
   export AI_FALLBACK_API_KEY="SENTINEL-AI-FALLBACK"
   export TOOL_MCP_TOKEN="SENTINEL-MCP-TOKEN"
   export LINEAR_API_KEY="SENTINEL-LINEAR-KEY"
+  export HTTP_PROXY="SENTINEL-HTTP-PROXY"
+  export HTTPS_PROXY="SENTINEL-HTTPS-PROXY"
+  export ALL_PROXY="SENTINEL-ALL-PROXY"
+  export NO_PROXY="SENTINEL-NO-PROXY"
+  export http_proxy="SENTINEL-http-proxy"
+  export https_proxy="SENTINEL-https-proxy"
+  export all_proxy="SENTINEL-all-proxy"
+  export no_proxy="SENTINEL-no-proxy"
+  export SSL_CERT_FILE="SENTINEL-SSL-CERT-FILE"
+  export SSL_CERT_DIR="SENTINEL-SSL-CERT-DIR"
+  export CURL_CA_BUNDLE="SENTINEL-CURL-CA-BUNDLE"
+  export GH_CONFIG_DIR="SENTINEL-GH-CONFIG-DIR"
+  export XDG_CONFIG_HOME="SENTINEL-XDG-CONFIG-HOME"
   export GH_TOKEN="SENTINEL-GH-TOKEN"
   export REPO="owner/repo"
   export PR_NUMBER="7"
@@ -319,6 +332,13 @@ for sentinel in \
   "SENTINEL-AI-KEY" "SENTINEL-AI-PRIMARY" "SENTINEL-AI-SMART" "SENTINEL-AI-FALLBACK" \
   "SENTINEL-MCP-TOKEN" "SENTINEL-LINEAR-KEY"; do
   check_not_contains "child env excludes $sentinel" "$CHILD_ENV" "$sentinel"
+done
+for transport in \
+  "SENTINEL-HTTP-PROXY" "SENTINEL-HTTPS-PROXY" "SENTINEL-ALL-PROXY" "SENTINEL-NO-PROXY" \
+  "SENTINEL-http-proxy" "SENTINEL-https-proxy" "SENTINEL-all-proxy" "SENTINEL-no-proxy" \
+  "SENTINEL-SSL-CERT-FILE" "SENTINEL-SSL-CERT-DIR" "SENTINEL-CURL-CA-BUNDLE" \
+  "SENTINEL-GH-CONFIG-DIR" "SENTINEL-XDG-CONFIG-HOME"; do
+  check_contains "child env preserves $transport" "$CHILD_ENV" "$transport"
 done
 for required in \
   GH_TOKEN REPO PR_NUMBER PR_HEAD_SHA PLATFORM CI_STATUS_CHECK CI_TIMEOUT_SEC \

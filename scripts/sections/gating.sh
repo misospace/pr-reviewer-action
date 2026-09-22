@@ -42,7 +42,11 @@ CI_GATE_LOG="ci-status.phase.log"
 # excluded by default.
 #
 # Categories:
-#   - process/runner basics the subprocess needs to execute at all;
+#   - process/runner basics the subprocess needs to execute at all, plus the
+#     benign network transport/runtime configuration the pre-#634 standalone
+#     step inherited from the workflow/runner (proxy and custom-CA vars in both
+#     cases, and the gh CLI config dirs) so GitHub/Forgejo connectivity is
+#     unchanged;
 #   - runner metadata: $GITHUB_OUTPUT (ci_status_* results), $GITHUB_RUN_ID +
 #     $CI_STATUS_CONTEXT (own check/status self-exclusion), and the OIDC
 #     request vars the Forgejo authorized-integration backend reads;
@@ -54,6 +58,10 @@ CI_GATE_LOG="ci-status.phase.log"
 # backend keeps its own default).
 _CI_GATE_ENV_KEYS=(
   PATH HOME
+  HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+  http_proxy https_proxy all_proxy no_proxy
+  SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE
+  GH_CONFIG_DIR XDG_CONFIG_HOME
   GITHUB_OUTPUT GITHUB_RUN_ID GITHUB_REPOSITORY
   GITHUB_SERVER_URL GITHUB_API_URL GH_HOST
   ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
