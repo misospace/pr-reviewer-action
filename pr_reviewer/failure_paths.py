@@ -1,0 +1,290 @@
+"""Deterministic, bounded failure-path contract analyzer (#625).
+
+#625 strengthens the *correctness* specialist (no new role, model, or tool
+loop) with an explicit failure-path proof obligation: for each changed
+component whose requirement, docs, tests, or sibling implementations
+promise an observable output/state, the review must enumerate the material
+terminal paths — success; validation/malformed output;
+timeout/cancellation/deadline; retry exhaustion/transport failure;
+exception/early return; disabled/no-op configuration; partial
+artifact/write failure — and check that each path preserves the promised
+observable state, not only the happy path.
+
+This module is the deterministic oracle for that obligation and the
+regression detector for the #623 dogfood class (a catastrophic exception
+fallback that dropped promised normalized/response artifacts). It takes two
+explicit inputs — the changed-code text and an explicitly stated contract
+mapping each path kind to the observables it promises — and reports a
+#607-shaped ``correctness`` lead per (path, missing observable) mismatch.
+
+Design invariants (per #625):
+
+- **Grounded, not fabricated.** Only contracts the caller states (from the
+  requirement ledger, docs, tests, or sibling implementations) are checked.
+  A path kind the contract does not name is never checked, and a promised
+  path the code does not contain is skipped.
+- **Paths are considered separately.** Each terminal-path kind gets its own
+  anchor lines and its own coverage check, so a timeout path and an
+  exception path with different behavior yield separate leads.
+- **Anchors are not findings.** A broad ``BaseException`` / catch-all
+  handler produces a lead only when it actually violates a stated contract.
+- **Bounded and advisory.** Leads are deduplicated, capped
+  (:data:`MAX_LEADS`), shaped as ``correctness`` specialist leads with
+  severity at the specialist cap — they never set a verdict; the final
+  reviewer verifies.
+- **No model/network/execution.** Pure line/regex analysis of in-memory
+  text; nothing in the inputs is executed.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+#: The material terminal paths the correctness pass audits (#625).
+TERMINAL_PATH_KINDS: tuple[str, ...] = (
+    "success",
+    "validation",
+    "timeout",
+    "transport",
+    "exception",
+    "disabled",
+    "write_failure",
+)
+
+#: Cap on raw leads per analysis (the #607 normalizer applies its own caps
+#: downstream; this keeps the raw set bounded on its own).
+MAX_LEADS = 20
+
+#: Line anchors per auditable path kind. A line anchors a kind when it
+#: matches that kind's pattern; the anchored *block* is the anchor line plus
+#: the following lines indented deeper than it.
+_PATH_ANCHORS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "timeout",
+        re.compile(
+            r"\bexcept\s*\(?\s*[\w.]*Timeout\w*"
+            r"|\bcancel\w*\s*\.\s*is_set\s*\("
+            r"|\bdeadline\s+(?:exceeded|reached|passed)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "transport",
+        re.compile(
+            r"\bexcept\s*\(?\s*[\w.]*\b(?:Connection|Transport|URLError)\w*"
+            r"|\btransport\s+(?:error|failure)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "write_failure",
+        re.compile(
+            r"\bexcept\s*\(?\s*[\w.]*\b(?:OSError|FileNotFoundError|IOError)\w*",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "exception",
+        re.compile(
+            r"\bexcept\s+BaseException\b|\bexcept\s+Exception\b|\bexcept\s*:",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "validation",
+        re.compile(
+            r"\bif\s+not\s+isinstance\s*\("
+            r"|\bmalformed\b"
+            r"|\binvalid\s+(?:json|payload|input|output)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "disabled",
+        re.compile(r"\bif\s+not\s+[\w.]*\b(?:enabled|active)\b", re.IGNORECASE),
+    ),
+)
+
+
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _anchor_blocks(lines: list[str], kind: str) -> list[tuple[int, list[int]]]:
+    """Return ``(anchor_line, block_lines)`` for every anchor of *kind*.
+
+    ``success`` is special: it is the set of lines no anchored block owns
+    (the main flow), anchored at line 0.
+    """
+    if kind == "success":
+        in_blocks: set[int] = set()
+        blocks: list[tuple[int, list[int]]] = []
+        for anchor_kind, pattern in _PATH_ANCHORS:
+            for i, line in enumerate(lines):
+                if not pattern.search(line):
+                    continue
+                depth = _indent_of(line)
+                block = [i]
+                for j in range(i + 1, len(lines)):
+                    if _indent_of(lines[j]) <= depth:
+                        break
+                    block.append(j)
+                blocks.append((i, block))
+                in_blocks.update(block)
+        if not lines:
+            return []
+        return [(0, [i for i in range(len(lines)) if i not in in_blocks])]
+
+    pattern = next(p for k, p in _PATH_ANCHORS if k == kind)
+    blocks = []
+    for i, line in enumerate(lines):
+        if not pattern.search(line):
+            continue
+        depth = _indent_of(line)
+        block = [i]
+        for j in range(i + 1, len(lines)):
+            if _indent_of(lines[j]) <= depth:
+                break
+            block.append(j)
+        blocks.append((i, block))
+    return blocks
+
+
+def _covered(names: list[str], block_lines: list[str]) -> set[str]:
+    """Observables in *names* that appear (as a write/record) in the block."""
+    text = "\n".join(block_lines)
+    return {name for name in names if name in text}
+
+
+def _lead(kind: str, anchor_line: int, name: str, file_path: str | None) -> dict[str, Any]:
+    line_no = anchor_line + 1  # 1-based for the lead contract
+    if kind == "disabled":
+        message = (
+            f"disabled/no-op path at line {line_no} emits '{name}', "
+            f"which the contract promises only for the enabled path"
+        )
+    elif kind == "success":
+        message = (
+            f"success path omits promised observable '{name}' (required by the stated contract)"
+        )
+    else:
+        message = (
+            f"terminal path '{kind}' at line {line_no} omits promised "
+            f"observable '{name}': the promised state is not preserved "
+            f"on this path"
+        )
+    return {
+        "severity": "major",
+        "category": "failure-contract",
+        "file": file_path,
+        "line": line_no,
+        "message": message,
+    }
+
+
+def load_contract(path: str | Path) -> dict[str, Any]:
+    """Load an explicitly stated failure-path contract (JSON).
+
+    Shape: ``{"paths": {<path kind>: [<observable> ...]}}``. A well-typed
+    contract with an unknown path kind raises :class:`ValueError` (semantic
+    error); a malformed shape (no ``paths`` mapping, a non-array promise)
+    raises :class:`TypeError` — a contract must be explicit and valid, and a
+    bad one is never silently shrunk (no fabricated contracts).
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    paths = data.get("paths") if isinstance(data, dict) else None
+    if not isinstance(paths, dict):
+        raise TypeError("contract must be an object with a 'paths' mapping")
+    cleaned: dict[str, Any] = {"paths": {}}
+    for kind, observables in paths.items():
+        if kind not in TERMINAL_PATH_KINDS:
+            raise ValueError(
+                f"unknown path kind {kind!r}; expected one of {list(TERMINAL_PATH_KINDS)}"
+            )
+        if not isinstance(observables, (list, tuple)):
+            raise TypeError(f"contract paths[{kind!r}] must be an array")
+        cleaned["paths"][kind] = [o for o in observables if isinstance(o, str) and o.strip()]
+    return cleaned
+
+
+def analyze_failure_paths(
+    code: str,
+    *,
+    contract: dict[str, Any] | None = None,
+    file: str | None = None,
+) -> list[dict[str, Any]]:
+    """Report terminal-path contract mismatches as #607-shaped leads.
+
+    ``contract`` is an explicitly stated mapping of path kind → promised
+    observables (see :func:`load_contract`). Grounding rules: a kind the
+    contract does not name is never checked (no fabricated contracts); a
+    promised path the code does not contain is skipped. Each anchored
+    terminal path is checked separately. The ``disabled`` kind inverts
+    when its promise is empty: the disabled/no-op path must emit none of
+    the observables promised anywhere in the contract.
+
+    Returns deduplicated leads, capped at :data:`MAX_LEADS`, each shaped
+    for the ``correctness`` specialist (``severity`` / ``category`` /
+    ``file`` / ``line`` / ``message``).
+    """
+    if not contract:
+        return []
+    paths = contract.get("paths") if isinstance(contract, dict) else None
+    if not isinstance(paths, dict):
+        return []
+
+    lines = code.splitlines()
+    if not lines:
+        return []
+
+    names_by_kind: dict[str, tuple[str, ...]] = {}
+    all_promised: set[str] = set()
+    for kind in TERMINAL_PATH_KINDS:
+        promised = paths.get(kind)
+        if not isinstance(promised, (list, tuple)):
+            continue
+        names = tuple(sorted({o for o in promised if isinstance(o, str) and o.strip()}))
+        names_by_kind[kind] = names
+        all_promised.update(names)
+
+    by_kind = {
+        kind: _anchor_blocks(lines, kind)
+        for kind in (
+            "success",
+            "validation",
+            "timeout",
+            "transport",
+            "exception",
+            "disabled",
+            "write_failure",
+        )
+    }
+
+    leads: list[dict[str, Any]] = []
+    for kind in TERMINAL_PATH_KINDS:
+        if kind not in names_by_kind:
+            continue
+        names = names_by_kind[kind]
+        invert = kind == "disabled" and not names
+        check_names = sorted(all_promised) if invert else list(names)
+        for anchor_line, block in by_kind[kind]:
+            covered = _covered(check_names, [lines[i] for i in block])
+            if invert:
+                missing = covered  # emitted despite the promise of none
+            else:
+                missing = set(names) - covered
+            for name in sorted(missing):
+                leads.append(_lead(kind, anchor_line, name, file))
+
+    seen: set[tuple[Any, ...]] = set()
+    unique: list[dict[str, Any]] = []
+    for lead in leads:
+        key = (lead["category"], lead["file"], lead["line"], lead["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(lead)
+    return unique[:MAX_LEADS]
