@@ -141,17 +141,48 @@ def test_workflows_beside_docs_block_the_gate():
 
 
 def test_inert_github_meta_is_still_trivial():
-    """Non-executable .github meta keeps the gate: issue templates and bot
-    config are not code."""
+    """Non-executable .github metadata keeps the gate: issue templates,
+    CODEOWNERS, and dependabot config are enumerated inert."""
     artifact = selection(classification(
         pr_kind="app_code",
         changed_files_summary=[
             ".github/ISSUE_TEMPLATE/bug.yml",
             ".github/dependabot.yml",
             ".github/CODEOWNERS",
+            ".github/PULL_REQUEST_TEMPLATE/feature.md",
+            ".github/FUNDING.yml",
         ],
     ))
     assert artifact["selected_roles"] == []
+
+
+# Negative controls (round 2): the blanket `^\.github/` trivial rule is gone
+# — unknown .github/** content is non-trivial.
+
+
+@pytest.mark.parametrize("path", [
+    ".github/scripts/deploy.py",
+    ".github/scripts/release.sh",
+    ".github/hooks/pre-commit",
+    ".github/some-new-config.toml",
+])
+def test_unrecognized_github_content_is_not_trivial(path):
+    """Arbitrary executable/configuration content under .github must never
+    trigger zero-selection — only the enumerated inert metadata is trivial."""
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=[path],
+    ))
+    assert artifact["selected_roles"] == ["correctness"]
+    assert artifact["zero_selection_reason"] == ""
+
+
+def test_github_script_beside_docs_blocks_the_gate():
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=["docs/usage.md", ".github/scripts/release.sh"],
+    ))
+    assert artifact["selected_roles"] == ["correctness"]
 
 
 def test_app_code_with_any_source_file_selects_correctness():
@@ -352,6 +383,33 @@ def test_unusable_classification_fails_conservatively_to_all_roles(bad):
 def test_missing_pr_key_fails_conservatively():
     artifact = selection({"risk_flags": []})
     assert artifact["classification_available"] is False
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+
+
+# Negative control (round 2): unknown FUTURE kinds must fail toward scrutiny.
+
+
+def test_synthetic_future_kind_selects_all_roles():
+    """A usable classification whose kind no lane knows (a future classifier
+    value) must NOT silently select zero roles — zero selection is only
+    allowed by a documented trivial gate."""
+    artifact = selection(classification(
+        pr_kind="new_behavioral_kind",
+        changed_files_summary=["src/thing.py"],
+    ))
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+    assert artifact["skipped_roles"] == []
+    assert artifact["classification_available"] is True
+    assert artifact["zero_selection_reason"] == ""
+    assert all(
+        "conservative fallback" in d["reason"] for d in artifact["decisions"]
+    )
+
+
+def test_future_kind_with_no_files_also_defaults_to_all_roles():
+    artifact = selection(classification(
+        pr_kind="new_behavioral_kind", changed_files_summary=[],
+    ))
     assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
 
 

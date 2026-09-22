@@ -37,7 +37,11 @@ for p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
 import pytest  # noqa: E402
 
 import build_selection_fingerprint as builder  # noqa: E402
-from pr_reviewer.precheck import _collect_config_lines, compute_config_hash  # noqa: E402
+from pr_reviewer.precheck import (  # noqa: E402
+    _collect_config_lines,
+    compute_config_hash,
+    evaluate_precheck,
+)
 
 REPO = "misospace/pr-reviewer-action"
 
@@ -112,22 +116,17 @@ def test_title_edit_changes_signature():
     assert before != after
 
 
-def test_issue_fetch_failure_records_fetch_error_and_still_signs():
-    """Fail-soft: an unfetchable linked issue records the fixed token — the
-    signature stays stable for that platform state and the caller never
-    fails the precheck."""
+def test_issue_fetch_failure_yields_no_signature():
+    """Negative control (round 2): an unfetchable linked issue means the
+    selection inputs are UNKNOWN — the builder must fail so the caller
+    forces a fresh review instead of omitting the uncertainty into a
+    diff-unchanged skip."""
     sig, err = builder.build_signature(
         REPO, "7",
         api_fn=fake_api(responses={"repos/" + REPO + "/issues/12": {"error": "boom"}}),
     )
-    assert err == ""
-    assert sig is not None
-    # Same failure again → identical signature (fetch_error is stable text).
-    sig2, _ = builder.build_signature(
-        REPO, "7",
-        api_fn=fake_api(responses={"repos/" + REPO + "/issues/12": {"error": "rate limited"}}),
-    )
-    assert sig == sig2
+    assert sig is None
+    assert "linked issue" in err and "fetch failed" in err
 
 
 def test_pr_fetch_failure_yields_no_signature():
@@ -183,3 +182,184 @@ def test_main_needs_repo_and_pr_number(monkeypatch, capsys):
     monkeypatch.delenv("PR_NUMBER", raising=False)
     assert builder.main() == 1
     assert "REPO and PR_NUMBER" in capsys.readouterr().err
+
+# ── Linear state in the signature (round 2) ────────────────────────
+
+
+def linear_issues(priorities_and_labels):
+    """Fake collect_from_pr: one issue per (priority, labels) tuple."""
+    def collect(pr, prefixes, api_key, *, timeout=20):
+        return (
+            [
+                {
+                    "identifier": f"OPS-{i + 1}",
+                    "priority": priority,
+                    "labels": [{"name": ln} for ln in labels],
+                }
+                for i, (priority, labels) in enumerate(priorities_and_labels)
+            ],
+            [],
+        )
+
+    return collect
+
+
+def with_linear(monkeypatch, prefixes="OPS", key="lin_key"):
+    monkeypatch.setenv("LINEAR_ISSUE_PREFIXES", prefixes)
+    monkeypatch.setenv("LINEAR_API_KEY", key)
+    monkeypatch.setenv("LINEAR_ISSUE_TIMEOUT_SEC", "20")
+    monkeypatch.delenv("LINEAR_ENABLE_FOR_FORKS", raising=False)
+
+
+def test_linear_priority_change_changes_signature(monkeypatch):
+    """P2→P1 and P1→P0 on a linked Linear issue change the fingerprint:
+    classifier.py maps native 1→linked_priority_p0 and 2→linked_priority_p1,
+    which change the auto-selected roles."""
+    with_linear(monkeypatch)
+    title = "OPS-42: fix the thing"
+    responses = {"repos/" + REPO + "/pulls/7": pr_object(title=title)}
+
+    p2, _ = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses),
+        linear_collect=linear_issues([(2, ["bug"])]),
+    )
+    p1, _ = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses),
+        linear_collect=linear_issues([(1, ["bug"])]),
+    )
+    p0, _ = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses),
+        linear_collect=linear_issues([(0, ["bug"])]),
+    )
+    assert p2 != p1
+    assert p1 != p0
+    assert p2 != p0
+
+
+def test_linear_label_change_changes_signature(monkeypatch):
+    with_linear(monkeypatch)
+    responses = {"repos/" + REPO + "/pulls/7": pr_object(title="OPS-42: fix")}
+    a, _ = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses),
+        linear_collect=linear_issues([(2, ["bug"])]),
+    )
+    b, _ = builder.build_signature(
+        REPO, "7", api_fn=fake_api(responses=responses),
+        linear_collect=linear_issues([(2, ["security"])]),
+    )
+    assert a != b
+
+
+def test_linear_fetch_failure_yields_no_signature(monkeypatch):
+    """A Linear lookup failure when Linear can affect classification is
+    unresolved uncertainty — the builder fails so the caller forces a
+    fresh review."""
+    with_linear(monkeypatch)
+
+    def failing_collect(pr, prefixes, api_key, *, timeout=20):
+        return [], [("OPS-42", "Linear HTTP error 503")]
+
+    sig, err = builder.build_signature(
+        REPO, "7",
+        api_fn=fake_api(responses={"repos/" + REPO + "/pulls/7": pr_object(title="OPS-42: fix")}),
+        linear_collect=failing_collect,
+    )
+    assert sig is None
+    assert "linear fetch failed" in err
+
+
+def test_linear_not_configured_contributes_nothing(monkeypatch):
+    """No Linear config → no Linear component: identical titles sign
+    identically regardless of what a Linear fetch would return."""
+    monkeypatch.delenv("LINEAR_ISSUE_PREFIXES", raising=False)
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    a, _ = builder.build_signature(REPO, "7", api_fn=fake_api(), linear_collect=linear_issues([(1, [])]))
+    b, _ = builder.build_signature(REPO, "7", api_fn=fake_api(), linear_collect=linear_issues([(2, [])]))
+    assert a == b
+
+
+def test_linear_configured_but_no_identifier_in_title(monkeypatch):
+    """With no recognized identifier the pipeline fetches no Linear issue,
+    so Linear state cannot affect classification: no component, and an
+    erroring collector is never called."""
+    with_linear(monkeypatch)
+    called = []
+
+    def collect(pr, prefixes, api_key, *, timeout=20):
+        called.append(True)
+        return [], []
+
+    sig, err = builder.build_signature(
+        REPO, "7",
+        api_fn=fake_api(responses={"repos/" + REPO + "/pulls/7": pr_object(title="no identifiers here")}),
+        linear_collect=collect,
+    )
+    assert err == "" and sig is not None
+    assert called == []
+
+
+def test_linear_invalid_prefix_config_fails_conservatively(monkeypatch):
+    with_linear(monkeypatch, prefixes="not!a@prefix")
+    sig, err = builder.build_signature(REPO, "7", api_fn=fake_api(), linear_collect=linear_issues([(1, [])]))
+    assert sig is None
+    assert "linear prefixes invalid" in err
+
+
+# ── End-to-end: the stale-skip decision (#633 round 2) ─────────────
+
+
+def _clean_env(monkeypatch):
+    for var in ("PRECHECK_SELECTION_SIGNATURE", "DEEP_REVIEW"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AI_MODEL", "m")
+    monkeypatch.setenv("AI_BASE_URL", "http://x/v1")
+
+
+DIFF = "diff --git a/x b/x\n+new\n"
+
+
+def test_unavailable_metadata_nonce_forces_review(monkeypatch):
+    """A nonce sentinel from a failed lookup can never match the stored
+    marker: the review is forced, never a stale auto-selection reuse."""
+    _clean_env(monkeypatch)
+    monkeypatch.setenv("DEEP_REVIEW", "auto")
+    stored_hash = compute_config_hash(_collect_config_lines())
+    from pr_reviewer.precheck import build_marker_fingerprint, compute_diff_fingerprint
+    stored = build_marker_fingerprint(compute_diff_fingerprint(DIFF), stored_hash)
+
+    # Next run: a lookup failure exported the per-run unique sentinel.
+    monkeypatch.setenv("PRECHECK_SELECTION_SIGNATURE", "unavailable-99-1758000000-4242")
+    result = evaluate_precheck(DIFF, [stored])
+    assert result.decision.value == "review_needed"
+
+
+def test_signature_change_forces_review_despite_unchanged_diff(monkeypatch):
+    """A healthy-looking run whose selection inputs changed (new label /
+    new Linear priority) must also re-review: the stored marker was built
+    with the OLD signature."""
+    _clean_env(monkeypatch)
+    monkeypatch.setenv("DEEP_REVIEW", "auto")
+    monkeypatch.setenv("PRECHECK_SELECTION_SIGNATURE", "sha256:old")
+    stored = build_marker_fingerprint_from_current(monkeypatch, DIFF)
+
+    monkeypatch.setenv("PRECHECK_SELECTION_SIGNATURE", "sha256:new")
+    result = evaluate_precheck(DIFF, [stored])
+    assert result.decision.value == "review_needed"
+
+
+def test_non_auto_stale_skip_behavior_unchanged(monkeypatch):
+    """deep_review=false/true never set the signature: identical diff and
+    config still skip on the stored marker, exactly as before #633."""
+    _clean_env(monkeypatch)
+    for mode in ("false", "true"):
+        monkeypatch.setenv("DEEP_REVIEW", mode)
+        stored = build_marker_fingerprint_from_current(monkeypatch, DIFF)
+        result = evaluate_precheck(DIFF, [stored])
+        assert result.decision.value == "skip_already_reviewed"
+
+
+def build_marker_fingerprint_from_current(monkeypatch, diff):
+    from pr_reviewer.precheck import build_marker_fingerprint, compute_diff_fingerprint
+    return build_marker_fingerprint(
+        compute_diff_fingerprint(diff), compute_config_hash(_collect_config_lines())
+    )

@@ -290,14 +290,17 @@ if [ -f "$BUILDER_PY" ]; then
   BUILDER_SRC="$(cat "$BUILDER_PY")"
   check_not_contains "builder writes no artifacts (pure stdout)" "$BUILDER_SRC" 'write_text'
   check_contains "builder uses the python platform seam" "$BUILDER_SRC" 'platform_mod.gh_api'
-  check_contains "builder records fetch failures as a fixed token" "$BUILDER_SRC" 'FETCH_ERROR'
+  check_contains "builder reuses the pipeline's Linear collector" "$BUILDER_SRC" 'linear_context.collect_from_pr'
+  check_contains "builder fails on undetermined inputs (conservative)" "$BUILDER_SRC" 'return None, f"linked issue'
 else
   echo "  FAIL: $BUILDER_PY missing"
   FAIL=$((FAIL + 1))
 fi
 check_contains "signature built only when deep_review=auto" "$CHECK" '== "auto" ]]'
 check_contains "signature exported for the precheck config hash" "$CHECK" 'PRECHECK_SELECTION_SIGNATURE'
-check_contains "signature build is fail-soft (warn + continue)" "$CHECK" 'could not build the selection signature'
+check_contains "build failure forces a fresh review (unique sentinel, never a stale skip)" \
+  "$CHECK" 'unavailable-$$-$(date +%s)-${RANDOM:-0}'
+check_contains "failure warning explains the forced review" "$CHECK" 'could not determine every selection input'
 check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
 

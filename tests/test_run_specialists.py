@@ -803,3 +803,30 @@ def test_auto_mode_role_artifacts_and_section_cover_selected_roles_only(
     assert "## Correctness" not in section
     assert "## Tests" not in section
     assert "no advisory leads" not in section
+
+
+def test_auto_mode_future_kind_fails_conservatively(tmp_path, monkeypatch):
+    """Negative control (#633 review round 2): a usable classification with
+    a kind no lane knows (a future classifier value) must run all three
+    roles — never silently zero."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "new_behavioral_kind",
+        "risk_flags": [],
+        "changed_files_summary": ["src/thing.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["selection"]["zero_selection_reason"] == ""
