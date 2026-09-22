@@ -49,7 +49,7 @@ echo "=== Decision and publication contracts ==="
 check_contains "decision made by pr_reviewer.escalation" "$SRC" "from pr_reviewer.escalation import should_escalate"
 check_contains "decision runs on the raw fast output (before mutation)" "$SRC" "before verdict policy / completeness"
 check_contains "primary output preserved as ai-output.primary.json" "$SRC" "cp ai-output.json ai-output.primary.json"
-check_contains "escalated prompt names the reasons" "$SRC" "ESCALATED review"
+check_contains "smart review runs independent harness" "$SRC" 'TOOL_HARNESS_TIER=smart python3'
 check_contains "smart failure restores the primary review" "$SRC" "cp ai-output.primary.json ai-output.json"
 check_contains "smart failure publishes the primary review" "$SRC" "publishing the primary review"
 check_contains "route becomes escalated on success" "$SRC" 'REVIEW_ROUTE="escalated"'

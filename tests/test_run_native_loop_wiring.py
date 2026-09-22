@@ -164,6 +164,82 @@ def test_native_loop_two_hops_writes_outputs(monkeypatch, tmp_path):
     assert "evidence_digest" not in harness
 
 
+def test_smart_tier_independent_multihop_verdict(monkeypatch, tmp_path):
+    monkeypatch.setenv("TOOL_HARNESS_TIER", "smart")
+    monkeypatch.setenv("REPO", "owner/repo")
+    monkeypatch.setenv("SMART_BASE_URL", "http://smart.local/v1")
+    monkeypatch.setenv("SMART_MODEL", "smart-model")
+    monkeypatch.setenv("SMART_API_FORMAT", "openai")
+    monkeypatch.setenv("AI_STREAM", "false")
+    monkeypatch.setenv("SMART_TOOL_MAX_REQUESTS", "3")
+    monkeypatch.setenv("SMART_TOOL_MAX_ROUNDS", "2")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "review-corpus.smart.truncated.md").write_text(
+        "# PR Diff (truncated)\n+change\n# Tool Harness Findings\nPrimary tool investigation omitted; conduct your own independent review.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "review-corpus.truncated.md").write_text("PRIMARY PRIVATE REASONING", encoding="utf-8")
+    (tmp_path / "first.txt").write_text("see second.txt", encoding="utf-8")
+    (tmp_path / "second.txt").write_text("regression: missing cleanup", encoding="utf-8")
+    calls = []
+
+    def request(base_url, api_format, payload, api_key, timeout_sec):
+        calls.append(payload)
+        assert base_url == "http://smart.local/v1"
+        assert payload["model"] == "smart-model"
+        if len(calls) == 1:
+            return _openai_call("c1", "read_file", '{"path":"first.txt"}')
+        if len(calls) == 2:
+            assert "second.txt" in json.dumps(payload["messages"])
+            return _openai_call("c2", "read_file", '{"path":"second.txt"}')
+        if len(calls) == 3:
+            assert "missing cleanup" in json.dumps(payload["messages"])
+            return _openai_text("investigation complete")
+        return _openai_text('{"verdict":"request_changes","review_markdown":"Missing cleanup","findings":[]}')
+
+    monkeypatch.setattr(rth, "run_chat_request", request)
+    assert rth.main() == 0
+    assert len(calls) == 4
+    assert "PRIMARY PRIVATE REASONING" not in json.dumps(calls)
+    assert "tools" not in calls[-1]
+    harness = json.loads((tmp_path / "tool-harness.smart.json").read_text())
+    assert harness["tier"] == "smart"
+    assert harness["rounds"] == 3
+    assert harness["planned_request_count"] == 2
+    assert harness["native_loop_verdict_produced"] is True
+    assert "missing cleanup" in (tmp_path / "tool-harness.smart.md").read_text()
+    assert not (tmp_path / "tool-harness.json").exists()
+    assert not (tmp_path / "ai-response.primary.json").exists()
+    assert "request_changes" in (tmp_path / "ai-response.smart.json").read_text()
+
+
+def test_smart_no_tools_and_transport_failure_do_not_produce_verdict(monkeypatch, tmp_path):
+    monkeypatch.setenv("TOOL_HARNESS_TIER", "smart")
+    monkeypatch.setenv("REPO", "owner/repo")
+    monkeypatch.setenv("SMART_BASE_URL", "http://smart.local/v1")
+    monkeypatch.setenv("SMART_MODEL", "smart-model")
+    monkeypatch.setenv("AI_STREAM", "false")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "review-corpus.smart.truncated.md").write_text("# Corpus\n", encoding="utf-8")
+    monkeypatch.setattr(rth, "run_chat_request", lambda *args: _openai_text("No tools needed"))
+    assert rth.main() == 0
+    result = json.loads((tmp_path / "tool-harness.smart.json").read_text())
+    assert result["native_loop_degraded"] == "no-tool-calls"
+    assert result["rounds"] == 1
+    assert result.get("native_loop_verdict_produced") is not True
+
+    def fail(*args):
+        raise RuntimeError("transport unavailable")
+
+    monkeypatch.setattr(rth, "run_chat_request", fail)
+    assert rth.main() == 0
+    result = json.loads((tmp_path / "tool-harness.smart.json").read_text())
+    assert result["stop_reason"] == "request-error"
+    assert result["native_loop_error"] == "transport unavailable"
+    assert result.get("native_loop_verdict_produced") is not True
+    assert not (tmp_path / "ai-response.smart.json").exists()
+
+
 def _make_sse_line(data):
     return f"data: {json.dumps(data)}"
 

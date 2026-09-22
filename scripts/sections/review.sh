@@ -204,6 +204,61 @@ fi
 # escalates to the fallback. The primary output is kept as ai-output.primary.json
 # for debugging. A smart-model failure keeps the primary review.
 ESCALATION_REASONS=""
+rm -f tool-harness.smart.json tool-harness.smart.md review-corpus.smart.truncated.md
+run_smart_review() {
+  local user_message="$1" status produced failure_reason
+  rm -f ai-response.smart.json
+  if ! SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
+from pathlib import Path
+import os
+import sys
+sys.path.insert(0, os.environ["SCRIPT_DIR"])
+from run_tool_harness import replace_harness_findings_section
+
+corpus = Path("review-corpus.truncated.md").read_text(encoding="utf-8")
+corpus = replace_harness_findings_section(
+    corpus, "Primary tool investigation omitted; conduct your own independent review."
+)
+Path("review-corpus.smart.truncated.md").write_text(corpus, encoding="utf-8")
+PY
+  then
+    SMART_TOOL_FALLBACK="primary"
+    return 1
+  fi
+  SMART_TOOL_FALLBACK="disabled"
+  if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop" ]]; then
+    if gate_feature_for_forks "$TOOL_ENABLE_FOR_FORKS" \
+        tool-harness.smart.md "Smart tool harness skipped for a cross-repository pull request." \
+        tool-harness.smart.json '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}'; then
+      SMART_TOOL_FALLBACK="fork-pr"
+    else
+      SMART_TOOL_FALLBACK="corpus"
+      export SMART_BASE_URL SMART_API_FORMAT SMART_MODEL SMART_API_KEY
+      if ! TOOL_HARNESS_TIER=smart python3 "$SCRIPT_DIR/run_tool_harness.py"; then
+        printf '%s\n' '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}' > tool-harness.smart.json
+      fi
+      status="$(jq -r '.stop_reason // .native_loop_degraded // empty' tool-harness.smart.json 2>/dev/null || true)"
+      produced="$(jq -r '.native_loop_verdict_produced // false' tool-harness.smart.json 2>/dev/null || true)"
+      if [[ "$status" != "request-error" && "$status" != "wall-clock-exceeded" && "$produced" == "true" && -s ai-response.smart.json ]]; then
+        if parse_and_validate ai-response.smart.json; then
+          SMART_TOOL_FALLBACK="none"
+          return 0
+        fi
+      fi
+      failure_reason="$(jq -r '.native_loop_verdict_reason // empty' tool-harness.smart.json 2>/dev/null || true)"
+      if [[ "$status" == "request-error" || "$status" == "wall-clock-exceeded" \
+        || "$failure_reason" == "tool-error" || "$failure_reason" == "deadline" ]]; then
+        SMART_TOOL_FALLBACK="primary"
+        return 1
+      fi
+    fi
+  fi
+  if call_model_tier smart "$user_message" review-corpus.smart.truncated.md ai-request.smart.json ai-response.smart.json; then
+    return 0
+  fi
+  SMART_TOOL_FALLBACK="primary"
+  return 1
+}
 maybe_escalate_review() {
   [[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0
   [[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0
@@ -242,12 +297,8 @@ print('yes ' + ','.join(reasons) if escalate else 'no')
 
   cp ai-output.json ai-output.primary.json
 
-  local escalated_user
-  escalated_user="$USER_MESSAGE
-This is an ESCALATED review: a preliminary review was judged insufficient (${ESCALATION_REASONS}). Review thoroughly and address every required check explicitly."
-
   local smart_ok=0
-  if call_model_tier smart "$escalated_user" review-corpus.truncated.md ai-request.smart.json ai-response.smart.json; then
+  if run_smart_review "$USER_MESSAGE"; then
     smart_ok=1
   fi
 
@@ -426,7 +477,7 @@ FD_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 TC_DELIM="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 {
   echo "tool_calls<<$TC_DELIM"
-  jq -c '[.tool_calls[]? | {tool, status}]' tool-harness.json 2>/dev/null || echo '[]'
+  jq -cn --slurpfile primary tool-harness.json --argjson smart "$(jq -c . tool-harness.smart.json 2>/dev/null || echo '{}')" '[$primary[0].tool_calls[]? | {tier:"primary",tool,status}] + [$smart.tool_calls[]? | {tier:"smart",tool,status}]' 2>/dev/null || echo '[]'
   echo "$TC_DELIM"
 } >> "$OUTPUT_FILE"
 
@@ -529,7 +580,10 @@ write_step_summary() {
     if [[ -n "$coverage_unresolved" ]]; then
       echo "| Requirement coverage | ${coverage_total} requirement(s)${coverage_unresolved} |"
     fi
-    echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
+    echo "| Primary tools | ${tool_call_count} executed (${tool_success_count} successful); rounds: $(jq -r '.rounds // 0' tool-harness.json 2>/dev/null || echo 0); stop: $(jq -r '.stop_reason // .skip_reason // "disabled"' tool-harness.json 2>/dev/null || echo disabled) |"
+    if [ -s tool-harness.smart.json ]; then
+      echo "| Smart tools | $(jq -r '(.tool_calls // []) | length' tool-harness.smart.json 2>/dev/null || echo 0) issued; rounds: $(jq -r '.rounds // 0' tool-harness.smart.json 2>/dev/null || echo 0); requests: $(jq -r '.usage.requests // .native_loop_usage.requests // 0' tool-harness.smart.json 2>/dev/null || echo 0); stop: $(jq -r '.stop_reason // .native_loop_degraded // .skip_reason // .error // "unknown"' tool-harness.smart.json 2>/dev/null || echo unknown); verdict: $(jq -r '.native_loop_verdict_status // "corpus"' tool-harness.smart.json 2>/dev/null || echo corpus); fallback: ${SMART_TOOL_FALLBACK:-unknown} |"
+    fi
     if [[ -n "$native_verdict_row" ]]; then
       echo "$native_verdict_row"
     fi

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Ensure the scripts directory and the project root are on sys.path so we
@@ -218,6 +219,7 @@ def produce_native_verdict(
     api_key,
     turn_timeout,
     usage_acc,
+    deadline=None,
 ):
     """Drive the verdict turn, retrying once non-streamed when unusable (#637).
 
@@ -236,9 +238,15 @@ def produce_native_verdict(
 
     def _request(payload):
         try:
+            timeout = turn_timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("smart tool-loop wall-clock budget exhausted")
+                timeout = min(turn_timeout, max(1, int(remaining)))
             return (
                 run_chat_request(
-                    base_url, api_format, payload, api_key, turn_timeout
+                    base_url, api_format, payload, api_key, timeout
                 ),
                 None,
             )
@@ -806,11 +814,13 @@ def replace_harness_findings_section(corpus, body):
 
 def write_outputs(summary, markdown):
     """Write JSON and markdown outputs from the tool harness."""
-    Path("tool-harness.json").write_text(
+    tier = os.getenv("TOOL_HARNESS_TIER", "primary")
+    stem = "tool-harness.smart" if tier == "smart" else "tool-harness"
+    Path(f"{stem}.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     md_content = mask_secrets(markdown)
-    Path("tool-harness.md").write_text(md_content, encoding="utf-8")
+    Path(f"{stem}.md").write_text(md_content, encoding="utf-8")
 
 
 NATIVE_LOOP_SYSTEM = (
@@ -928,6 +938,7 @@ def run_native_loop(
     turn_timeout,
     max_tokens_per_turn,
     result,
+    tier="primary",
 ):
     """Drive the native tool-calling loop (#203) and write harness outputs.
 
@@ -966,6 +977,14 @@ def run_native_loop(
     if search_url:
         tool_schemas.append(WEB_SEARCH_SCHEMA)
 
+    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
+    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900)
+    if tier == "smart":
+        max_rounds = env_int_bounded("SMART_TOOL_MAX_ROUNDS", max_rounds, 1, 6)
+        wall_clock = env_int_bounded("SMART_TOOL_LOOP_WALL_CLOCK_SEC", wall_clock, 10, 900)
+    budgets = adaptive_loop_budgets(max_rounds, max_requests, wall_clock)
+    deadline = time.monotonic() + wall_clock if tier == "smart" else None
+
     # Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
     # happens upstream in run_review.sh (the env is blanked on fork PRs unless
     # tool_enable_for_forks), so reaching here means MCP is permitted. A server
@@ -980,6 +999,11 @@ def run_native_loop(
             timeout=request_timeout, name_prefixes=name_prefixes,
         )
         try:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                toolset.timeout = min(request_timeout, max(1, int(remaining / 3)))
             connect_error = toolset.connect()
         except Exception as exc:  # noqa: BLE001 — never let MCP break the harness
             connect_error = str(exc)
@@ -1013,10 +1037,6 @@ def run_native_loop(
         + "\nGather the evidence needed to review this PR corpus:\n\n" + corpus_text
     )
 
-    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
-    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900)
-    budgets = adaptive_loop_budgets(max_rounds, max_requests, wall_clock)
-
     # Stream loop turns by default (mirrors AI_STREAM for the review call) so
     # long thinking-model turns don't 524 behind a short-idle proxy (#204).
     stream = os.getenv("AI_STREAM", "true").strip().lower() == "true"
@@ -1040,13 +1060,20 @@ def run_native_loop(
     }
 
     def post_fn(payload):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("smart tool-loop wall-clock budget exhausted")
+            timeout = min(turn_timeout, max(1, int(remaining)))
+        else:
+            timeout = turn_timeout
         # Per-turn fallback: a streamed turn that can't be reassembled — a
         # truncated/garbled SSE body (transport raise) or a 200 error object
         # (error key) — is retried once non-streamed before the loop gives up.
         response = None
         try:
             response = run_chat_request(
-                base_url, api_format, payload, api_key, turn_timeout
+                base_url, api_format, payload, api_key, timeout
             )
             usable = not (payload.get("stream") and response.get("error"))
         except Exception:
@@ -1060,13 +1087,21 @@ def run_native_loop(
             )
             fallback = {k: v for k, v in payload.items() if k != "stream_options"}
             fallback["stream"] = False
+            retry_timeout = timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("smart tool-loop wall-clock budget exhausted")
+                retry_timeout = min(turn_timeout, max(1, int(remaining)))
             response = run_chat_request(
-                base_url, api_format, fallback, api_key, turn_timeout
+                base_url, api_format, fallback, api_key, retry_timeout
             )
         _accumulate_usage(usage_acc, response, api_format)
         return response
 
     def execute_fn(tool_name, args):
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"tool": tool_name, "status": "error", "result": {"error": "smart tool-loop deadline exceeded"}}
         # Route mcp__server__tool to the MCP client; everything else falls
         # through to the built-in read-only executor unchanged. MCP output is
         # masked + capped exactly like built-in tool output (untrusted corpus).
@@ -1089,6 +1124,11 @@ def run_native_loop(
                       file=sys.stderr)
             toolset = mcp_routes[routed]
             _, bare_tool = split_namespaced(routed)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {"tool": tool_name, "status": "error", "result": {"error": "smart tool-loop deadline exceeded"}}
+                toolset.timeout = min(request_timeout, max(1, int(remaining)))
             res = toolset.call(bare_tool, args if isinstance(args, dict) else {})
             if res.get("error"):
                 return {"tool": tool_name, "status": "error", "result": {"error": res["error"]}}
@@ -1098,6 +1138,12 @@ def run_native_loop(
         normalized_name, normalized_args = normalize_tool_request(
             {"tool": tool_name, "args": args}
         )
+        tool_timeout = request_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"tool": tool_name, "status": "error", "result": {"error": "smart tool-loop deadline exceeded"}}
+            tool_timeout = min(request_timeout, max(1, int(remaining)))
         return execute_tool_request(
             normalized_name,
             normalized_args,
@@ -1106,7 +1152,7 @@ def run_native_loop(
             repo,
             allowed_hosts,
             max_response_bytes,
-            request_timeout,
+            tool_timeout,
             search_url,
             max_search_results,
         )
@@ -1160,6 +1206,26 @@ def run_native_loop(
         f"(stop: {outcome.stop_reason})",
         file=sys.stderr,
     )
+    if tier == "smart" and (
+        outcome.stop_reason in ("request-error", "wall-clock-exceeded")
+        or (deadline is not None and time.monotonic() >= deadline)
+    ):
+        result["mode"] = "native_loop"
+        result["rounds"] = outcome.rounds
+        result["stop_reason"] = (
+            "wall-clock-exceeded" if deadline is not None and time.monotonic() >= deadline
+            else outcome.stop_reason
+        )
+        result["planned_request_count"] = outcome.tool_calls_issued
+        result["tool_calls"] = [
+            {"tool": call.tool, "args": call.args, "status": call.result.get("status", "error")}
+            for call in outcome.executed
+        ]
+        result["tool_results"] = [call.result for call in outcome.executed]
+        result["executed_request_count"] = sum(call.result.get("status") == "ok" for call in outcome.executed)
+        result["native_loop_usage"] = _usage_with_cache_ratio(usage_acc)
+        result["native_loop_error"] = outcome.error or "smart tool-loop deadline exceeded"
+        return False
     if outcome.degraded:
         print(
             "  native_loop degraded: the model issued no tool calls"
@@ -1168,6 +1234,8 @@ def run_native_loop(
             file=sys.stderr,
         )
         result["native_loop_degraded"] = outcome.stop_reason
+        result["rounds"] = outcome.rounds
+        result["stop_reason"] = outcome.stop_reason
         if outcome.error:
             result["native_loop_error"] = outcome.error
         # Record the native attempt's token usage even though the run degrades
@@ -1184,6 +1252,12 @@ def run_native_loop(
     # placeholder. Substituting a real section there (below) is what stops the
     # review from reporting "planning pending" on a run that gathered evidence.
     harness_markdown = _summarize_loop_outcome(result, outcome)
+    if tier == "smart" and any(call.result.get("status") != "ok" for call in outcome.executed):
+        result["native_loop_verdict_status"] = "fallback"
+        result["native_loop_verdict_reason"] = "tool-error"
+        result["usage"] = _usage_with_cache_ratio(usage_acc)
+        write_outputs(result, harness_markdown)
+        return True
 
     # ── In-conversation verdict (#205, Option 1) ─────────────────────────────
     # The loop's final turn produces the review verdict itself — preserving the
@@ -1204,7 +1278,7 @@ def run_native_loop(
     # fell back to the tool-only NATIVE_LOOP_SYSTEM, which can't render a verdict).
     if api_format == "openai" and review_system:
         try:
-            corpus_file = Path("review-corpus.truncated.md")
+            corpus_file = Path("review-corpus.smart.truncated.md" if tier == "smart" else "review-corpus.truncated.md")
             verdict_corpus = (
                 corpus_file.read_text(encoding="utf-8", errors="replace")
                 if corpus_file.is_file()
@@ -1259,13 +1333,20 @@ def run_native_loop(
                     tokens_param=tokens_param,
                     cache_prefix=True,
                 )
+                verdict_timeout = turn_timeout
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("smart tool-loop wall-clock budget exhausted")
+                    verdict_timeout = min(turn_timeout, max(1, int(remaining)))
                 verdict = produce_native_verdict(
                     verdict_payload,
                     base_url=base_url,
                     api_format=api_format,
                     api_key=api_key,
-                    turn_timeout=turn_timeout,
+                    turn_timeout=verdict_timeout,
                     usage_acc=usage_acc,
+                    deadline=deadline,
                 )
                 result["native_loop_verdict_attempts"] = verdict["attempts"]
                 result["native_loop_verdict_retried"] = verdict["retried"]
@@ -1277,12 +1358,12 @@ def run_native_loop(
                 # unusable, but never claim success without a reusable body: the
                 # produced flag is set strictly from the contract check (#637).
                 if isinstance(verdict["response"], dict):
-                    Path("ai-response.primary.json").write_text(
+                    Path(f"ai-response.{tier}.json").write_text(
                         json.dumps(verdict["response"]), encoding="utf-8"
                     )
                 else:
-                    Path("ai-response.primary.json").unlink(missing_ok=True)
-                if verdict["ok"]:
+                    Path(f"ai-response.{tier}.json").unlink(missing_ok=True)
+                if verdict["ok"] and (deadline is None or time.monotonic() < deadline):
                     result["native_loop_verdict_produced"] = True
                     result["native_loop_verdict_status"] = "accepted"
                     result["native_loop_verdict_transport"] = verdict["transport"]
@@ -1297,7 +1378,10 @@ def run_native_loop(
                     )
                 else:
                     result["native_loop_verdict_status"] = "fallback"
-                    result["native_loop_verdict_reason"] = verdict["reason"]
+                    result["native_loop_verdict_reason"] = (
+                        "deadline" if deadline is not None and time.monotonic() >= deadline
+                        else verdict["reason"]
+                    )
                     result["native_loop_verdict_error"] = verdict["detail"]
                     print(
                         "  native_loop: no reusable in-conversation verdict "
@@ -1319,6 +1403,10 @@ def run_native_loop(
     # the share of prompt tokens served from the prefix cache — the empirical
     # prompt-cache-effectiveness signal (0.0 when the backend doesn't report it).
     result["usage"] = _usage_with_cache_ratio(usage_acc)
+    if tier == "smart" and deadline is not None and time.monotonic() >= deadline:
+        result.pop("native_loop_verdict_produced", None)
+        result["native_loop_verdict_status"] = "fallback"
+        result["native_loop_verdict_reason"] = "deadline"
 
     write_outputs(result, harness_markdown)
     return True
@@ -1377,6 +1465,9 @@ def _summarize_loop_outcome(result, outcome):
 
 
 def main():
+    tier = os.getenv("TOOL_HARNESS_TIER", "primary")
+    if tier not in ("primary", "smart"):
+        raise ValueError("invalid tool harness tier")
     max_response_bytes = int(os.getenv("TOOL_MAX_RESPONSE_BYTES", "12000"))
     # #540: the tool_planning_* env names (from the removed plan_execute
     # planner, #304) were renamed to describe what they actually control.
@@ -1391,6 +1482,8 @@ def main():
         or os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000")
     )
     max_requests = env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)
+    if tier == "smart":
+        max_requests = env_int_bounded("SMART_TOOL_MAX_REQUESTS", max_requests, 1, 20)
     request_timeout = env_int_bounded("TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300)
 
     allowed_hosts_raw = os.getenv("ALLOWED_SOURCE_HOSTS", "github.com,api.github.com")
@@ -1408,20 +1501,27 @@ def main():
     # The native tool-calling loop (#203) is the only tool mode as of 2.0 — the
     # plan_execute planner paths were removed in #304. run_review.sh invokes this
     # harness only when tool_mode=native_loop, and writes review-corpus.truncated.md.
-    corpus_path = Path("review-corpus.truncated.md")
+    corpus_path = Path("review-corpus.smart.truncated.md" if tier == "smart" else "review-corpus.truncated.md")
+    if tier == "smart":
+        result["tier"] = tier
     if not corpus_path.exists():
-        result["planning_error"] = "Missing review-corpus.truncated.md"
+        result["planning_error"] = f"Missing {corpus_path.name}"
+        if tier == "smart":
+            result["stop_reason"] = "request-error"
         write_outputs(result, "Tool harness skipped: no review corpus.")
         return 0
 
     repo = os.getenv("REPO", "").strip()
-    base_url = os.getenv("AI_BASE_URL", "").strip()
-    api_format = normalize_api_format(os.getenv("AI_API_FORMAT", "openai"))
-    model = os.getenv("AI_MODEL", "").strip()
-    api_key = os.getenv("AI_API_KEY", "").strip()
+    prefix = "SMART" if tier == "smart" else "AI"
+    base_url = os.getenv(f"{prefix}_BASE_URL", "").strip()
+    api_format = normalize_api_format(os.getenv(f"{prefix}_API_FORMAT", "openai"))
+    model = os.getenv(f"{prefix}_MODEL", "").strip()
+    api_key = os.getenv(f"{prefix}_API_KEY", "").strip()
 
     if not repo or not base_url or not model:
         result["error"] = "Missing REPO, AI_BASE_URL, or AI_MODEL"
+        if tier == "smart":
+            result["stop_reason"] = "request-error"
         write_outputs(result, "Tool harness could not run: missing REPO, AI_BASE_URL, or AI_MODEL.")
         return 0
 
@@ -1460,6 +1560,7 @@ def main():
             or os.getenv("TOOL_PLANNING_MAX_TOKENS", "400")
         ),
         result,
+        tier=tier,
     )
     if not handled:
         # The model issued no tool calls (or the loop errored before any). There

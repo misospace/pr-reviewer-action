@@ -13,9 +13,11 @@ assert_safe_artifact_paths() {
     repo-impact.md repo-impact.truncated.md repo-history.md repo-history.truncated.md
     evidence-providers.md evidence-providers.json classification.json
     standards-context.md standards-present.txt tool-harness.md tool-harness.json
-    review-corpus.md review-corpus.truncated.md review-corpus.fallback.truncated.md
+    tool-harness.smart.md tool-harness.smart.json
+    review-corpus.md review-corpus.truncated.md review-corpus.smart.truncated.md review-corpus.fallback.truncated.md
     ai-request.json ai-response.json ai-output.json ai-output.primary.json ai-output.coverage-primary.json
     ai-request.fallback.json ai-response.fallback.json ai-response.primary.json
+    ai-request.smart.json ai-response.smart.json
     verdict.txt analysis_engine.txt review-markdown.raw.md
     review-comment-markdown.raw.md review-comment.md review-comment-body.md
     review-body.md inline-comments.json
