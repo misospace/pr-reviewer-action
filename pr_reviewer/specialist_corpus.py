@@ -24,10 +24,19 @@ truncated or dropped first):
 5. current PR diff (``pr.diff.truncated``);
 6. repository standards, under an explicit per-section cap
    (``standards-context.capped.md``);
-7. explicit requirement ledger when present (``requirement-ledger.md``);
+7. explicit requirement ledger when present (``requirement-ledger.md``) —
+   **reserved**, not just prioritized (see below);
 8. related-code / change-anchor context (``related-code.truncated.md``);
 9. concise evidence / CI results when available (``evidence-providers.md`` and
    ``$CI_CHECKS_FILE``).
+
+The explicit requirement ledger is **reserved**: its bytes are carved out of
+the overall budget before the general fill, exactly as the final review corpus
+reserves it, so a maximum-size ledger survives intact under the default cap even
+when the changed-file list, diff, and standards are large. The ledger is
+normative, authoritative context (the #625 correctness pass treats it as a
+source of failure-path contracts), so it must not be crowded out by bulk
+material that merely happens to be larger.
 
 Deliberately **excluded** as low-signal for advisory lead generation (they
 belong to the final synthesizer): the repository map, repository history,
@@ -41,6 +50,9 @@ Guarantees:
 - **Independent hard byte cap.** ``build_specialist_corpus`` never returns a
   document whose UTF-8 byte length exceeds ``max_bytes`` (including framing and
   truncation markers).
+- **Reserved authority.** The explicit requirement ledger is reserved out of the
+  budget before the general fill; lower-authority bulk sections cannot consume
+  its reserved bytes.
 - **Deterministic priority.** Sections are processed in the fixed order above;
   each is capped per-section, then clamped to the remaining overall budget, so
   high-signal sections survive and low-priority sections are visibly omitted.
@@ -62,6 +74,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from pr_reviewer.requirement_ledger import MAX_LEDGER_MARKDOWN_BYTES
+
 #: Default hard UTF-8 byte cap on the specialist corpus. Conservative relative
 #: to the final corpus's ``MAX_CORPUS`` (220000 in ``normal`` mode): a bounded
 #: subset carrying the high-signal advisory material only. Overridable through
@@ -77,9 +91,18 @@ _SECTION_CAP_CLASSIFICATION = 6000
 _SECTION_CAP_CHANGED_FILES = 8000
 _SECTION_CAP_PR_DIFF = 16000
 _SECTION_CAP_STANDARDS = 8000
-_SECTION_CAP_REQUIREMENT_LEDGER = 8192
+_SECTION_CAP_REQUIREMENT_LEDGER = MAX_LEDGER_MARKDOWN_BYTES + 256
 _SECTION_CAP_RELATED_CODE = 6000
 _SECTION_CAP_EVIDENCE_CI = 4000
+
+#: Sections whose bytes are reserved out of the overall budget before the
+#: general fill, so lower-authority bulk material can never crowd them. The
+#: explicit requirement ledger is normative, authoritative context (the
+#: correctness specialist treats it as a source of failure-path contracts) and
+#: the final review corpus likewise reserves it. The reserved cap above is the
+#: ledger renderer's own hard Markdown cap plus room for the wrapper header and
+#: blank lines, so a maximum-size ledger is reserved intact, not clipped.
+_RESERVED_SECTIONS: frozenset[str] = frozenset({"requirement_ledger"})
 
 #: PR body is carried only as a bounded excerpt, mirroring the final corpus.
 _PR_BODY_MAX_CHARS = 4000
@@ -139,11 +162,14 @@ def _compact_json(value: Any) -> str:
 
 
 def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
-    """Truncate *text* to at most *max_bytes* UTF-8 bytes, newline-safe.
+    """Truncate *text* to at most *max_bytes* UTF-8 bytes, deterministically.
 
-    Returns ``(text, truncated)``. The cut lands on the latest newline not
-    later than the cap; a no-newline blob is cut on a codepoint boundary
-    (``errors="replace"``) so a multibyte character is never split.
+    Returns ``(text, truncated)``. The cut prefers the latest newline not later
+    than the cap — but only when that newline keeps at least half the budget, so
+    a body that is mostly one long line (compact JSON, a minified diff, a fenced
+    blob with a newline right after the fence opener) is not collapsed back to a
+    tiny prefix. Otherwise the cut lands on a codepoint boundary. Either way the
+    result is valid UTF-8 and no multibyte character is split.
     """
     if max_bytes <= 0:
         return "", True
@@ -152,11 +178,17 @@ def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
         return text, False
     clip = encoded[:max_bytes]
     newline = clip.rfind(b"\n")
-    if newline > 0:
+    if newline > 0 and newline >= max_bytes // 2:
         clip = clip[:newline]
         if clip.endswith(b"\n"):
             clip = clip[:-1]
-    return clip.decode("utf-8", errors="replace"), True
+    # Keep only complete codepoints (no partial multibyte character).
+    while clip:
+        try:
+            return clip.decode("utf-8"), True
+        except UnicodeDecodeError:
+            clip = clip[:-1]
+    return "", True
 
 
 def _build_pr_metadata(root: Path) -> str:
@@ -276,7 +308,9 @@ def _build_evidence_ci(root: Path) -> str:
 
 #: Ordered (name, header, per-section cap, builder). This tuple *is* the
 #: documented survival priority: earlier sections are emitted first and a
-#: later section is clamped/dropped first when the overall cap binds.
+#: later section is clamped/dropped first when the overall cap binds. Sections
+#: named in :data:`_RESERVED_SECTIONS` are additionally carved out of the
+#: budget before the general fill.
 _SECTIONS: tuple[tuple[str, str, int, Callable[[Path], str]], ...] = (
     ("pr_metadata", "# PR Metadata", _SECTION_CAP_PR_METADATA, _build_pr_metadata),
     ("classification", "# PR Classification", _SECTION_CAP_CLASSIFICATION, _build_classification),
@@ -299,37 +333,38 @@ _SECTIONS: tuple[tuple[str, str, int, Callable[[Path], str]], ...] = (
 )
 
 
-def _append_section(
-    pieces: list[str],
-    used_bytes: int,
+def _render_section(
     *,
     header: str,
     body: str,
     section_cap: int,
-    max_bytes: int,
-) -> tuple[int, bool, bool]:
-    """Append one section under the remaining overall budget.
+    budget: int,
+) -> tuple[str, bool, bool]:
+    """Render one section under *budget* UTF-8 bytes.
 
-    Returns ``(new_used_bytes, truncated, included)``. ``included`` is False
-    when the section had to be dropped entirely (no budget left).
+    Returns ``(text, truncated, included)``. ``included`` is False when the
+    section had to be dropped whole (no budget left, or not even the header and
+    truncation marker fit).
+
+    The *body* is truncated, never the whole section: a newline-safe cut of the
+    body keeps the header intact, and a body that is a single long line (compact
+    JSON, a minified diff) is cut on a codepoint boundary rather than collapsed
+    back to the header.
     """
-    remaining = max_bytes - used_bytes
-    if remaining <= 0:
-        return used_bytes, True, False
-    cap = min(section_cap, remaining)
-    section = f"{header}\n\n{body}\n"
-    truncated = False
-    if len(section.encode("utf-8")) > cap:
-        marker_bytes = len(_SECTION_TRUNCATED_MARKER.encode("utf-8")) + 1
-        body_cap = cap - marker_bytes
-        if body_cap <= 0:
-            return used_bytes, True, False
-        section, _ = _truncate_utf8(section, body_cap)
-        section = f"{section}\n{_SECTION_TRUNCATED_MARKER}\n"
-        truncated = True
-    pieces.append(section)
-    used = used_bytes + len(section.encode("utf-8"))
-    return used, truncated, True
+    if budget <= 0:
+        return "", True, False
+    cap = min(section_cap, budget)
+    prefix = f"{header}\n\n"
+    if len(prefix.encode("utf-8")) + len(body.encode("utf-8")) + 1 <= cap:
+        return f"{prefix}{body}\n", False, True
+    marker = f"\n{_SECTION_TRUNCATED_MARKER}\n"
+    fixed = len(prefix.encode("utf-8")) + len(marker.encode("utf-8"))
+    if fixed >= cap:
+        return "", True, False
+    clipped, _ = _truncate_utf8(body, cap - fixed)
+    if not clipped.strip():
+        return "", True, False
+    return f"{prefix}{clipped}{marker}", True, True
 
 
 def build_specialist_corpus(
@@ -343,6 +378,14 @@ def build_specialist_corpus(
     for telemetry (no corpus content): ``bytes``, ``max_bytes``, ``truncated``,
     ``included_sections``, ``omitted_sections``. Never raises; a missing
     artifact simply contributes no section.
+
+    The sections in :data:`_RESERVED_SECTIONS` (the explicit requirement
+    ledger) are **reserved**: their bytes are carved out of the overall budget
+    before the general fill, so lower-authority bulk material (changed files,
+    diff, standards, related-code, evidence) can never crowd them. This mirrors
+    the final review corpus, which reserves the requirement ledger so body
+    truncation cannot eat it — the correctness specialist treats the ledger as
+    an authoritative source of failure-path contracts.
     """
     root = Path(workspace_root)
     cap = max(1, int(max_bytes)) if max_bytes else 1
@@ -360,23 +403,61 @@ def build_specialist_corpus(
     omitted: list[str] = []
     truncated = used >= cap
 
-    for name, header, section_cap, builder in _SECTIONS:
+    # Read every section body once (fail-soft). The same bytes feed the
+    # reservation pass and the fill pass, so a section is never rendered twice.
+    bodies: dict[str, str] = {}
+    for name, _header, _section_cap, builder in _SECTIONS:
         try:
-            body = builder(root)
+            bodies[name] = builder(root)
         except Exception:  # noqa: BLE001 - fail-soft by design
-            body = ""
+            bodies[name] = ""
+
+    # ── Reserved pass: carve authoritative sections out of the budget first ──
+    reserved: dict[str, str] = {}
+    for name, header, section_cap, _builder in _SECTIONS:
+        if name not in _RESERVED_SECTIONS:
+            continue
+        body = bodies.get(name, "")
         if not body.strip():
             continue
-        used, did_truncate, was_included = _append_section(
-            pieces,
-            used,
+        text, did_truncate, was_included = _render_section(
             header=header,
             body=body,
             section_cap=section_cap,
-            max_bytes=cap,
+            budget=cap - used,
+        )
+        if was_included:
+            reserved[name] = text
+            used += len(text.encode("utf-8"))
+            truncated = truncated or did_truncate
+        else:
+            # Present but larger than the whole remaining budget: it still
+            # outranks the bulk fill, but the hard cap wins.
+            omitted.append(name)
+            truncated = True
+
+    # ── General fill: remaining sections in documented priority order ───────
+    for name, header, section_cap, _builder in _SECTIONS:
+        if name in _RESERVED_SECTIONS:
+            text = reserved.get(name)
+            if text is not None:
+                # Bytes already reserved above; just place it at its position.
+                pieces.append(text)
+                included.append(name)
+            continue
+        body = bodies.get(name, "")
+        if not body.strip():
+            continue
+        text, did_truncate, was_included = _render_section(
+            header=header,
+            body=body,
+            section_cap=section_cap,
+            budget=cap - used,
         )
         truncated = truncated or did_truncate
         if was_included:
+            pieces.append(text)
+            used += len(text.encode("utf-8"))
             included.append(name)
         else:
             omitted.append(name)

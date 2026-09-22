@@ -333,5 +333,89 @@ def test_section_dropped_when_marker_cannot_fit(tmp_path):
     assert len(text.encode("utf-8")) <= 380
 
 
+# ── 10. #632 review-fix: the requirement ledger is RESERVED ────────
+
+
+def test_near_max_requirement_ledger_survives_large_bulk(tmp_path):
+    """A maximum-size explicit requirement ledger survives intact under the
+    default 48 KB cap even beside large changed-files/diff/standards inputs.
+
+    Regression for the review feedback on #652: the ledger used to be filled
+    after the bulk sections, so a near-8 KB ledger was clipped to whatever was
+    left (~3.6 KB). It is now reserved out of the budget before the general
+    fill, mirroring the final review corpus.
+    """
+    from pr_reviewer.requirement_ledger import MAX_LEDGER_MARKDOWN_BYTES  # noqa: PLC0415
+
+    _write_minimal(tmp_path)
+    start = "LEDGER_START_MARKER\n"
+    end = "LEDGER_END_MARKER\n"
+    filler = "x" * (MAX_LEDGER_MARKDOWN_BYTES - len(start) - len(end))
+    ledger = start + filler + end
+    assert len(ledger.encode("utf-8")) == MAX_LEDGER_MARKDOWN_BYTES
+    _write(tmp_path, "requirement-ledger.md", ledger)
+
+    # Bulk material near the per-section caps, reproducing the review's
+    # worst case where the sections before the ledger consume ~42 KB.
+    _write(
+        tmp_path,
+        "pr.json",
+        json.dumps(
+            {
+                "number": 1,
+                "title": "t",
+                "author": {"login": "dev"},
+                "body": "b" * 4000,
+            }
+        ),
+    )
+    _write(
+        tmp_path,
+        "classification.json",
+        json.dumps(
+            {
+                "pr_kind": "app_code",
+                "risk_flags": [f"flag-{i}" for i in range(2000)],
+                "risk_flags_with_files": {f"flag-{i}": ["a.py"] for i in range(2000)},
+                "must_check": [f"check-{i}" for i in range(2000)],
+            }
+        ),
+    )
+    _write(
+        tmp_path,
+        "pr-files.truncated.json",
+        "[" + ",".join(
+            json.dumps({"filename": f"f{i}.py", "status": "modified"})
+            for i in range(5000)
+        ) + "]",
+    )
+    _write(tmp_path, "pr.diff.truncated", "d" * 200000)
+    _write(tmp_path, "standards-context.capped.md", "s" * 100000)
+
+    cap = specialist_corpus.DEFAULT_SPECIALIST_CORPUS_MAX_BYTES
+    text, meta = specialist_corpus.build_specialist_corpus(tmp_path, max_bytes=cap)
+
+    assert "requirement_ledger" in meta["included_sections"]
+    # Both ends present, and the exact ledger bytes survive (not just the head).
+    assert "LEDGER_START_MARKER" in text
+    assert "LEDGER_END_MARKER" in text
+    assert ledger in text
+    assert meta["truncated"] is True  # bulk sections were truncated/omitted
+    assert meta["bytes"] <= cap
+
+
+def test_requirement_ledger_reserved_cap_matches_renderer_cap():
+    # The wrapper cap must leave room for the renderer's maximum ledger body
+    # plus section framing, or a max-size ledger would be clipped by the
+    # wrapper even though it is reserved.
+    from pr_reviewer.requirement_ledger import MAX_LEDGER_MARKDOWN_BYTES  # noqa: PLC0415
+
+    header = "# Explicit Requirement Ledger\n\n"
+    assert (
+        specialist_corpus._SECTION_CAP_REQUIREMENT_LEDGER
+        >= len(header.encode("utf-8")) + MAX_LEDGER_MARKDOWN_BYTES + 1
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
