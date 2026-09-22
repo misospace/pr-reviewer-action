@@ -63,6 +63,7 @@ check_contains "coverage retry prompt loads the backed-up preliminary output" "$
 check_contains "coverage retry prompt passes the preliminary output to the renderer" "$SRC" 'render_coverage_retry_prompt(coverage, ledger, primary)'
 check_contains "coverage retry validates preliminary dispositions" "$SRC" "validate_preliminary_dispositions(primary, smart)"
 check_contains "invalid smart disposition restores preliminary output" "$SRC" "Rejecting smart coverage retry: preliminary finding dispositions are incomplete"
+check_contains "accepted retry strips preliminary_finding before publication" "$SRC" "strip_preliminary_correlation(smart)"
 # The preliminary output must be backed up BEFORE the retry prompt is built,
 # so the renderer loads the preliminary result (never a half-written smart
 # response) and the backup is ready to restore on smart-call failure.

@@ -652,12 +652,33 @@ def validate_preliminary_dispositions(primary_output: Any, smart_output: Any) ->
             return False, "disposition-finding-missing"
         if disposition == "reject" and correlated_finding is not None:
             return False, "disposition-reject-finding-present"
-        if disposition == "retain":
+        if disposition in {"retain", "revise"}:
             primary = primary_findings[number - 1]
-            for key in ("severity", "category", "file", "line", "message"):
-                if correlated_finding.get(key) != primary.get(key):
-                    return False, "disposition-retain-finding-changed"
+            values_match = all(
+                correlated_finding.get(key) == primary.get(key)
+                for key in ("severity", "category", "file", "line", "message")
+            )
+            if disposition == "retain" and not values_match:
+                return False, "disposition-retain-finding-changed"
+            if disposition == "revise" and values_match:
+                return False, "disposition-revise-finding-unchanged"
     return True, ""
+
+
+def strip_preliminary_correlation(smart_output: dict[str, Any]) -> None:
+    """Remove internal retry metadata from the final structured findings.
+
+    ``preliminary_finding`` exists only to correlate the disposition lines
+    during validation. The published finding contract is exactly
+    severity / category / file / line / message, so the key is stripped in
+    place once the retry is accepted, before enforcement or publication.
+    """
+    findings = smart_output.get("findings")
+    if not isinstance(findings, list):
+        return
+    for finding in findings:
+        if isinstance(finding, dict):
+            finding.pop("preliminary_finding", None)
 
 
 def render_preliminary_review_block(primary_output: Any) -> str:

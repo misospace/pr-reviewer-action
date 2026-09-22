@@ -1178,6 +1178,13 @@ def test_dispositions_accept_correlated_retain_and_revise_findings():
     }
     assert requirement_coverage.validate_preliminary_dispositions(primary, retain) == (True, "")
     assert requirement_coverage.validate_preliminary_dispositions(primary, revise) == (True, "")
+    unchanged_revise = {
+        "review_markdown": "Finding 1: revise - wording",
+        "findings": [{**finding, "preliminary_finding": 1}],
+    }
+    assert requirement_coverage.validate_preliminary_dispositions(primary, unchanged_revise) == (
+        False, "disposition-revise-finding-unchanged",
+    )
 
 
 def test_dispositions_reject_duplicate_and_invalid_lines():
@@ -1190,6 +1197,34 @@ def test_dispositions_reject_duplicate_and_invalid_lines():
     assert requirement_coverage.validate_preliminary_dispositions(primary, invalid) == (
         False, "disposition-number-invalid",
     )
+
+
+def test_strip_preliminary_correlation_publishes_five_key_findings():
+    # accepted retain/revise retries validate via preliminary_finding but
+    # must publish the normal five-key finding shape with no correlation
+    # metadata; reject leaves no structured finding behind.
+    finding = {"severity": "major", "category": "bug", "file": "a.py", "line": 1, "message": "first"}
+    primary = {"findings": [finding]}
+    accepted = {
+        "review_markdown": "## Review\nFinding 1: revise - severity reduced",
+        "findings": [
+            {**finding, "severity": "minor", "message": "revised", "preliminary_finding": 1},
+            {"severity": "info", "category": "docs", "file": None, "line": None,
+             "message": "new", "preliminary_finding": None},
+        ],
+    }
+    assert requirement_coverage.validate_preliminary_dispositions(primary, accepted) == (True, "")
+    requirement_coverage.strip_preliminary_correlation(accepted)
+    assert accepted["findings"] == [
+        {"severity": "minor", "category": "bug", "file": "a.py", "line": 1, "message": "revised"},
+        {"severity": "info", "category": "docs", "file": None, "line": None, "message": "new"},
+    ]
+    assert all(
+        set(f) == {"severity", "category", "file", "line", "message"}
+        for f in accepted["findings"]
+    )
+    # validation still works on the stripped shape (idempotent boundary)
+    assert requirement_coverage.validate_preliminary_dispositions(primary, accepted) != (True, "")
 
 
 def test_prompt_is_corpus_only_and_no_execution_promise():

@@ -347,6 +347,17 @@ PY
     if [[ "$disposition_result" != "ok" ]]; then
       smart_ok=0
       log "Rejecting smart coverage retry: preliminary finding dispositions are incomplete (${disposition_result:-invalid})"
+    else
+      # preliminary_finding is internal retry metadata only; the published
+      # finding contract stays severity/category/file/line/message.
+      python3 - <<'PY' 2>/dev/null || true
+import json
+from pr_reviewer import requirement_coverage
+smart = requirement_coverage.load_coverage("ai-output.json")
+requirement_coverage.strip_preliminary_correlation(smart)
+with open("ai-output.json", "w", encoding="utf-8") as fh:
+    json.dump(smart, fh)
+PY
     fi
   fi
 
