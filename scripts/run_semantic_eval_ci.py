@@ -15,7 +15,13 @@ if str(ROOT) not in sys.path:
 from pr_reviewer.semantic_eval import SemanticCorpus, evaluate_semantic_corpus, validate_semantic_corpus
 
 
-DETERMINISTIC_SCENARIOS = frozenset({623, 6231, 638, 644, 645, 6451, 8004})
+DETERMINISTIC_SCENARIOS = frozenset(
+    {
+        623, 6231, 638, 644, 645, 6451, 8004,
+        # PR #654 execution-boundary / lifecycle failure classes (#659).
+        6541, 6542, 6543, 6544, 6545, 6546, 6547, 6548, 6549, 6550,
+    }
+)
 
 
 def main() -> int:

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scenario": 6546,
+  "provenance": {
+    "historical_pr": 654,
+    "state": "fixed",
+    "source": "compact reconstruction of the PR #654 execution-boundary/lifecycle failure class"
+  },
+  "pr_json": {
+    "number": 654,
+    "title": "feat(review): overlap specialist passes with CI gating (#634)",
+    "body": "",
+    "head": {
+      "sha": "fixture-6546-head",
+      "ref": "feature/concurrent-gates"
+    },
+    "base": {
+      "sha": "fixture-6546-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 1,
+    "additions": 51,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/654"
+  },
+  "diff": "diff --git a/scripts/gating.sh b/scripts/gating.sh\nindex 9cfc28b..49868d3 100644\n--- a/scripts/gating.sh\n+++ b/scripts/gating.sh\n@@ -1,5 +1,6 @@\n _CI_GATE_ENV_KEYS=(\n   PATH HOME\n+  RUNNER_TRACKING_ID\n   HTTP_PROXY HTTPS_PROXY SSL_CERT_FILE GH_CONFIG_DIR\n   GH_TOKEN REPO PR_NUMBER\n   CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n@@ -28,3 +29,23 @@ join_ci_gate() {\n   wait \"$CI_GATE_PID\" || true\n   CI_GATE_PID=\"\"\n }\n+\n+cleanup_gate_children() {\n+  if [[ -n \"${CI_GATE_PID:-}\" ]]; then\n+    kill -TERM \"$CI_GATE_PID\" 2>/dev/null || true\n+    CI_GATE_PID=\"\"\n+  fi\n+}\n+\n+_gate_lifecycle_on_exit() {\n+  local status=$?\n+  trap - EXIT INT TERM\n+  cleanup_gate_children\n+  exit \"$status\"\n+}\n+\n+install_gate_lifecycle_trap() {\n+  trap '_gate_lifecycle_on_exit' EXIT\n+  trap '_gate_lifecycle_on_exit' INT\n+  trap '_gate_lifecycle_on_exit' TERM\n+}\n",
+  "pr_files": [
+    {
+      "filename": "scripts/gating.sh",
+      "status": "modified",
+      "additions": 45,
+      "deletions": 27,
+      "changes": 72
+    }
+  ],
+  "files": [
+    {
+      "path": "scripts/gating.sh",
+      "content": "_CI_GATE_ENV_KEYS=(\n  PATH HOME\n  RUNNER_TRACKING_ID\n  HTTP_PROXY HTTPS_PROXY SSL_CERT_FILE GH_CONFIG_DIR\n  GH_TOKEN REPO PR_NUMBER\n  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n)\n\nwait_for_ci_command() {\n  local -a env_args=()\n  local key\n  for key in \"${_CI_GATE_ENV_KEYS[@]}\"; do\n    if [ -n \"${!key+x}\" ]; then\n      env_args+=(\"${key}=${!key}\")\n    fi\n  done\n  env -i \"${env_args[@]}\" bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n}\n\nfork_ci_gate() {\n  [[ \"${CI_STATUS_CHECK:-false}\" == \"true\" ]] || return 0\n  CI_GATE_ACTIVE=\"true\"\n  wait_for_ci_command >\"$CI_GATE_LOG\" 2>&1 &\n  CI_GATE_PID=$!\n}\n\njoin_ci_gate() {\n  [[ \"${CI_GATE_ACTIVE:-false}\" == \"true\" ]] || return 0\n  wait \"$CI_GATE_PID\" || true\n  CI_GATE_PID=\"\"\n}\n\ncleanup_gate_children() {\n  if [[ -n \"${CI_GATE_PID:-}\" ]]; then\n    kill -TERM \"$CI_GATE_PID\" 2>/dev/null || true\n    CI_GATE_PID=\"\"\n  fi\n}\n\n_gate_lifecycle_on_exit() {\n  local status=$?\n  trap - EXIT INT TERM\n  cleanup_gate_children\n  exit \"$status\"\n}\n\ninstall_gate_lifecycle_trap() {\n  trap '_gate_lifecycle_on_exit' EXIT\n  trap '_gate_lifecycle_on_exit' INT\n  trap '_gate_lifecycle_on_exit' TERM\n}\n"
+    }
+  ]
+}

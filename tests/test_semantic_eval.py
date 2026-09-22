@@ -14,6 +14,11 @@ from pr_reviewer.semantic_eval import (
     CAPABILITY_RUNTIME_PROTOCOL,
     CAPABILITY_SEQUENCING,
     CAPABILITY_STALE_REVIEW_STATE,
+    CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    CAPABILITY_BACKGROUND_LIFECYCLE,
+    CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    CAPABILITY_REMEDIATION_TOPOLOGY,
+    CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
     SIGNAL_KIND_FINDING,
     SIGNAL_KIND_MENTION,
     SIGNAL_KIND_TOOL,
@@ -344,7 +349,7 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    assert payload["scenarios_evaluated"] == 7
+    assert payload["scenarios_evaluated"] == 17
     assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0
     assert payload["per_scenario_summary"]["638"]["routes"] == ["primary", "primary+escalation"]
     assert payload["per_scenario_summary"]["645"]["routes"] == ["primary", "primary+escalation"]
@@ -355,7 +360,8 @@ def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
     negative = next(item for item in corpus.scenarios if item.number == 6451)
     negative.offline_runs[0]["findings"] = [{"stage": "primary", "message": "The deleted declaration still exists in the runtime."}]
     report = evaluate_semantic_corpus(corpus)
-    assert report["summary"]["false_positive_rate"] == 0.5
+    expected = round(1 / len([item for item in corpus.scenarios if item.negative_control]), 4)
+    assert report["summary"]["false_positive_rate"] == expected
     assert report["summary"]["false_positive_rate"] == report["negative_control_summary"]["false_positive_rate"]
 
 
@@ -585,3 +591,200 @@ def test_escalation_findings_are_attributed_for_historical_scenarios(number: int
     )
     assert result.passed
     assert result.stages_hit == ["escalation"]
+
+
+# ── #659 PR #654 execution-boundary / lifecycle fixtures ───────────────────
+
+POSITIVE_654 = {
+    6541: CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    6543: CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    6545: CAPABILITY_BACKGROUND_LIFECYCLE,
+    6547: CAPABILITY_REMEDIATION_TOPOLOGY,
+    6549: CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+}
+
+# Each vulnerable fixture has a fixed negative control forbidding the same class.
+NEGATIVE_654 = {
+    6542: CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    6544: CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    6546: CAPABILITY_BACKGROUND_LIFECYCLE,
+    6548: CAPABILITY_REMEDIATION_TOPOLOGY,
+    6550: CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+}
+
+GENERIC_WARNINGS = (
+    "Consider cleanup of background processes before merge.",
+    "Check security boundaries for this execution change.",
+    "Please review the security and lifecycle implications.",
+    "Looks good; approval.",
+)
+
+
+def _run_finding_text(scenario_item, run_index: int = 0) -> str:
+    return scenario_item.offline_runs[run_index]["findings"][0]["message"]
+
+
+def test_654_capability_classes_are_registered() -> None:
+    from pr_reviewer.semantic_eval import KNOWN_CAPABILITY_CLASSES
+
+    assert set(POSITIVE_654.values()) <= KNOWN_CAPABILITY_CLASSES
+    corpus = SemanticCorpus.from_file(CORPUS)
+    numbers = {item.number for item in corpus.scenarios}
+    assert set(POSITIVE_654) <= numbers
+    assert set(NEGATIVE_654) <= numbers
+    for item in corpus.scenarios:
+        if item.number in NEGATIVE_654:
+            assert item.negative_control is True
+            assert item.forbidden_capabilities == [NEGATIVE_654[item.number]]
+            assert item.expected_capabilities == []
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_vulnerable_fixtures_classify_their_class(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        result = evaluate_semantic_capability(item, [
+            ReviewSignal(SIGNAL_KIND_FINDING, run["findings"][0]["stage"], run["findings"][0]["message"]),
+            *(tool(run["findings"][0]["stage"], call["args"]["path"]) for call in run.get("tool_calls", [])),
+        ], {"mode": run.get("mode", "standard"), "route": run.get("route", "primary"), "stage": run["stage"]})
+        assert result.passed, (number, run["stage"])
+        assert POSITIVE_654[number] in result.capability_hits
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_654))
+def test_654_fixed_negative_controls_stay_clean(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, run["findings"][0]["stage"], run["findings"][0]["message"])],
+            {"mode": run.get("mode", "standard"), "route": run.get("route", "primary"), "stage": run["stage"]},
+        )
+        assert result.passed, (number, result.forbidden_violations)
+        assert result.forbidden_violations == []
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_generic_warnings_do_not_satisfy_positive_fixtures(number: int) -> None:
+    item = scenario(number)
+    for warning in GENERIC_WARNINGS:
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, "primary", warning)],
+            {"mode": "standard", "route": "primary", "stage": "primary"},
+        )
+        assert not result.passed, (number, warning)
+        assert POSITIVE_654[number] not in result.capability_hits
+
+
+@pytest.mark.parametrize("warning", GENERIC_WARNINGS)
+def test_654_generic_warnings_match_no_capability(warning: str) -> None:
+    assert classify_signal(warning) is None
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_654))
+def test_654_negative_controls_reject_their_vulnerability(number: int) -> None:
+    item = scenario(number)
+    vulnerable = _run_finding_text(scenario(number - 1))
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", vulnerable)],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert not result.passed
+    assert NEGATIVE_654[number] in result.forbidden_violations
+
+
+@pytest.mark.parametrize(
+    ("number", "effect_only"),
+    [
+        (6541, "The CI child inherits reviewer secrets and model credentials."),
+        (6543, "The allowlist drops the proxy configuration for self-hosted deployments."),
+        (6547, "Cleanup kills only the tracked wrapper pid, leaving the workload running."),
+    ],
+)
+def test_654_effect_without_cause_fails_the_causal_chain(number: int, effect_only: str) -> None:
+    item = scenario(number)
+    result = evaluate_semantic_capability(
+        item,
+        [
+            ReviewSignal(SIGNAL_KIND_FINDING, "primary", effect_only),
+            tool("primary", item.offline_runs[0]["tool_calls"][0]["args"]["path"]),
+        ],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert POSITIVE_654[number] in result.capability_hits
+    assert not result.passed
+
+
+def test_654_lifecycle_fixture_requires_the_runner_tracking_causal_link() -> None:
+    item = scenario(6545)
+    partial = (
+        "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, "
+        "so a parent exit between fork and join leaves an orphaned CI child."
+    )
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", partial), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_BACKGROUND_LIFECYCLE in result.capability_hits
+    assert not result.passed
+    assert any(item_["id"] == "runner-tracking" and not item_["satisfied"] for item_ in result.anchor_results)
+
+
+def test_654_safe_narrowing_prose_is_not_a_boundary_vulnerability() -> None:
+    for safe in (
+        "The env -i allowlist prevents the CI child from inheriting reviewer secrets and model credentials.",
+        "The CI child does not inherit reviewer secrets under the explicit least-privilege boundary.",
+        "The allowlist excludes reviewer secrets and preserves the authority boundary.",
+    ):
+        assert classify_signal(safe) is None, safe
+
+
+def test_654_pr654_historical_miss_phrasing_does_not_satisfy() -> None:
+    """Baseline: the observed PR #654 review outputs (#659 ledger) must not score.
+
+    PR #654's MiniMax-M3 smart escalation called the change solid and claimed the
+    security boundary was preserved via the allowlist; the OpenCode control run
+    and the local models flagged only generic timing/cleanup items. None of that
+    names a causal execution-boundary or lifecycle failure, so none of it may
+    satisfy the new fixtures.
+    """
+    misses = {
+        6541: "The PR is solid and the security boundary is preserved via the explicit allowlist; no correctness bugs found.",
+        6543: "Looks good; transport and CA handling is unchanged.",
+        6545: "Consider cleanup of the background CI child on abnormal exit; otherwise looks fine.",
+        6547: "Add a trap that kills the background CI gate child on exit to fix the lifecycle issue.",
+        6549: "The cleanup uses pgrep; looks correct to me.",
+    }
+    for number, text in misses.items():
+        item = scenario(number)
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, "primary", text)],
+            {"mode": "standard", "route": "primary", "stage": "primary"},
+        )
+        assert not result.passed, (number, text)
+        assert POSITIVE_654[number] not in result.capability_hits, (number, text)
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_attribution_supports_specialist_primary_and_escalation(number: int) -> None:
+    item = scenario(number)
+    for stage, route, mode, escalated in (
+        ("specialist", "primary", "deep", False),
+        ("primary", "primary", "standard", False),
+        ("escalation", "primary+escalation", "standard", True),
+    ):
+        finding_text = item.offline_runs[0]["findings"][0]["message"]
+        result = evaluate_semantic_capability(
+            item,
+            [
+                ReviewSignal(SIGNAL_KIND_FINDING, stage, finding_text),
+                tool(stage, item.offline_runs[0]["tool_calls"][0]["args"]["path"]),
+            ],
+            {"mode": mode, "route": route, "stage": stage, "escalated": escalated},
+        )
+        assert result.passed, (number, stage)
+        assert stage in result.stages_hit
