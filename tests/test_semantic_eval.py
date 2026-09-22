@@ -76,6 +76,14 @@ def test_schema_rejects_unknown_capability() -> None:
         validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
 
 
+def test_schema_rejects_unknown_stage_attribution() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["stage_attribution"] = "unknown"
+    with pytest.raises(SemanticCorpusError, match="stage_attribution"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [("expected_metrics", {"unknown": 1}, "expected_metrics key"), ("expected_metrics", {"max_tool_calls": "2"}, "non-negative integer")],
@@ -92,8 +100,9 @@ def test_schema_rejects_duplicate_anchor_id() -> None:
     corpus = SemanticCorpus.from_file(CORPUS)
     bad = corpus.scenarios[0].to_dict()
     bad["expected_evidence_anchors"] = [
-        {"id": "same", "kind": "mention", "any_of": ["one"]},
-        {"id": "same", "kind": "mention", "any_of": ["two"]},
+        {"id": "required-finding", "kind": "finding", "any_of": ["violation"]},
+        {"id": "same", "kind": "finding", "any_of": ["one"]},
+        {"id": "same", "kind": "finding", "any_of": ["two"]},
     ]
     with pytest.raises(SemanticCorpusError, match="duplicate evidence anchor id"):
         validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
@@ -106,7 +115,7 @@ def test_schema_rejects_bad_provenance_and_anchor_shape() -> None:
     with pytest.raises(SemanticCorpusError, match="provenance"):
         validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
     bad["provenance"] = corpus.scenarios[0].provenance
-    bad["expected_evidence_anchors"] = [{"kind": "mention", "any_of": "not-a-list"}]
+    bad["expected_evidence_anchors"] = [{"kind": "finding", "any_of": "not-a-list"}]
     with pytest.raises(SemanticCorpusError, match="non-empty"):
         validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
 
@@ -122,7 +131,7 @@ def test_equivalent_sequencing_finding_requires_artifact_anchor() -> None:
     result = evaluate_semantic_capability(
         scenario(623),
         [
-            mention("primary", "The specialist phase waits for every role and is reaped before final review."),
+            ReviewSignal(SIGNAL_KIND_FINDING, "primary", "The final review starts before specialists are reaped, creating a sequencing race."),
             tool("primary", "specialists.phase.log"),
         ],
         {"mode": "deep", "route": "primary"},
@@ -155,7 +164,7 @@ def test_failure_contract_rejects_happy_path_only() -> None:
 def test_failure_contract_accepts_exceptional_parity() -> None:
     result = evaluate_semantic_capability(
         scenario(6231),
-        [mention("specialist", "On catastrophic failure the fail-soft normalized output is never written."), tool("specialist", "specialists.json")],
+        [ReviewSignal(SIGNAL_KIND_FINDING, "specialist", "On catastrophic failure, the failure path never writes normalized output."), tool("specialist", "specialists.json")],
         {"mode": "deep", "route": "primary"},
     )
     assert result.passed
@@ -165,15 +174,52 @@ def test_failure_contract_accepts_exceptional_parity() -> None:
 @pytest.mark.parametrize(
     ("number", "capability", "text"),
     [
-        (638, CAPABILITY_FULL_REVIEW_LOOP, "needs_full_review must rerun the complete full review loop."),
-        (644, CAPABILITY_RUNTIME_PROTOCOL, "The deleted runtime protocol leaves a stale default prompt."),
-        (645, CAPABILITY_STALE_REVIEW_STATE, "Carried findings leave stale previous review state."),
+        (638, CAPABILITY_FULL_REVIEW_LOOP, "needs_full_review causes a redundant full review."),
+        (644, CAPABILITY_RUNTIME_PROTOCOL, "The stale default prompt remains and references the deleted runtime protocol."),
+        (645, CAPABILITY_STALE_REVIEW_STATE, "Carried findings remain in the stale previous review state."),
     ],
 )
 def test_historical_capabilities(number: int, capability: str, text: str) -> None:
-    result = evaluate_semantic_capability(scenario(number), [mention("primary", text)], {"mode": "standard", "route": "primary"})
+    result = evaluate_semantic_capability(scenario(number), [ReviewSignal(SIGNAL_KIND_FINDING, "primary", text)], {"mode": "standard", "route": "primary"})
     assert result.passed
     assert capability in result.capability_hits
+
+
+def test_positive_schema_rejects_mention_anchor() -> None:
+    corpus = SemanticCorpus.from_file(CORPUS)
+    bad = corpus.scenarios[0].to_dict()
+    bad["expected_evidence_anchors"] = [{"kind": "mention", "any_of": ["violation"]}]
+    with pytest.raises(SemanticCorpusError, match="only finding or tool"):
+        validate_semantic_corpus(SemanticCorpus([corpus.scenarios[0].from_dict(bad)]))
+
+
+def test_mentions_do_not_classify_capabilities() -> None:
+    result = evaluate_semantic_capability(
+        scenario(638),
+        [mention("primary", "needs_full_review causes a redundant full review.")],
+        {"mode": "standard", "route": "primary"},
+    )
+    assert not result.passed
+    assert CAPABILITY_FULL_REVIEW_LOOP not in result.capability_hits
+
+
+def test_localized_negation_does_not_classify_despite_clause() -> None:
+    assert classify_signal(
+        "The review is not, despite the old flag, a redundant full review."
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The stale default prompt was removed.",
+        "No stale review state remains.",
+        "The fixed full review clears the legacy flag.",
+        "The review explains that needs_full_review reruns the full review.",
+    ],
+)
+def test_resolved_or_concept_only_findings_do_not_match(text: str) -> None:
+    assert classify_signal(text) is None
 
 
 def test_generic_finding_does_not_match() -> None:
@@ -189,7 +235,7 @@ def test_diff_polarity_positive_capability_is_not_forced_false_positive() -> Non
     item.expected_capabilities = [CAPABILITY_DIFF_POLARITY]
     item.forbidden_capabilities = []
     item.diff_polarity = None
-    result = evaluate_semantic_capability(item, [mention("primary", "The deleted declaration still exists in the runtime.")], {"mode": "standard", "route": "primary"})
+    result = evaluate_semantic_capability(item, [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "The deleted declaration still exists in the runtime.")], {"mode": "standard", "route": "primary"})
     assert result.passed
     assert result.forbidden_violations == []
 
@@ -197,7 +243,7 @@ def test_diff_polarity_positive_capability_is_not_forced_false_positive() -> Non
 def test_diff_polarity_negative_control_stays_clean() -> None:
     result = evaluate_semantic_capability(
         scenario(6451),
-        [mention("primary", "The deleted declaration is absent; no remaining declaration is present.")],
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "The deleted declaration is absent; no remaining declaration is present.")],
         {"mode": "standard", "route": "primary"},
     )
     assert result.passed
@@ -207,7 +253,7 @@ def test_diff_polarity_negative_control_stays_clean() -> None:
 def test_diff_polarity_negative_control_rejects_saffron_claim() -> None:
     result = evaluate_semantic_capability(
         scenario(6451),
-        [mention("primary", "The deleted declaration still exists in the runtime.")],
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "The deleted declaration still exists in the runtime.")],
         {"mode": "standard", "route": "primary"},
     )
     assert not result.passed
@@ -217,15 +263,15 @@ def test_diff_polarity_negative_control_rejects_saffron_claim() -> None:
 def test_stage_attribution_rejects_wrong_stage() -> None:
     item = scenario(644)
     item.stage_attribution = "primary"
-    result = evaluate_semantic_capability(item, [mention("escalation", "The deleted runtime protocol leaves a stale default prompt.")], {"mode": "standard", "route": "primary"})
+    result = evaluate_semantic_capability(item, [ReviewSignal(SIGNAL_KIND_FINDING, "escalation", "The deleted runtime protocol leaves a stale default prompt.")], {"mode": "standard", "route": "primary"})
     assert not result.passed
     assert result.stages_hit == ["escalation"]
 
 
 def test_aggregation_reports_quality_cost_and_escalation() -> None:
     item = scenario(638)
-    good = evaluate_semantic_capability(item, [mention("primary", "needs_full_review reruns the full review loop.")], {"tool_calls": 1, "latency_sec": 1.0, "route": "primary", "mode": "standard"})
-    escalated = evaluate_semantic_capability(item, [mention("primary", "needs full review reruns the complete full-review loop.")], {"latency_sec": 2.0, "route": "primary+escalation", "mode": "standard", "escalated": True})
+    good = evaluate_semantic_capability(item, [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "needs_full_review causes a redundant full review.")], {"tool_calls": 1, "latency_sec": 1.0, "route": "primary", "mode": "standard"})
+    escalated = evaluate_semantic_capability(item, [ReviewSignal(SIGNAL_KIND_FINDING, "primary", "needs_full_review causes a redundant full review.")], {"latency_sec": 2.0, "route": "primary+escalation", "mode": "standard", "escalated": True})
     summary = aggregate_semantic_runs(item, [good, escalated])
     assert summary["pass_rate"] == 1.0
     assert summary["average_latency_sec"] == 1.5
@@ -255,7 +301,7 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
 def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
     corpus = SemanticCorpus.from_file(CORPUS)
     negative = next(item for item in corpus.scenarios if item.number == 6451)
-    negative.offline_runs[0]["review_markdown"] = "The deleted declaration still exists in the runtime."
+    negative.offline_runs[0]["findings"] = [{"stage": "primary", "message": "The deleted declaration still exists in the runtime."}]
     report = evaluate_semantic_corpus(corpus)
     assert report["summary"]["false_positive_rate"] == 0.5
     assert report["summary"]["false_positive_rate"] == report["negative_control_summary"]["false_positive_rate"]
@@ -264,6 +310,7 @@ def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
 def test_evaluator_fails_when_expected_capability_is_missing() -> None:
     corpus = SemanticCorpus.from_file(CORPUS)
     corpus.scenarios[0].offline_runs[0]["review_markdown"] = "Specialists launched before final review."
+    corpus.scenarios[0].offline_runs[0]["findings"] = []
     report = evaluate_semantic_corpus(corpus)
     scenario_report = next(item for item in report["scenarios"] if item["scenario_number"] == 623)
     assert report["passed"] is False

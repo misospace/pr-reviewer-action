@@ -13,14 +13,14 @@
       "stage_attribution": "any",
       "expected_capabilities": ["control_flow_sequencing"],
       "expected_evidence_anchors": [
-        {"id": "reap-before-final", "kind": "mention", "any_of": ["reap before final", "wait for specialists", "join before final", "reaped before", "specialist phase must", "specialists must terminate", "specialists must complete"]},
+        {"id": "sequencing-violation", "kind": "finding", "any_of": ["final review starts before specialists", "final review begins before specialists", "race condition between specialists and final", "specialists are not reaped before final", "specialist phase is not complete before final"]},
         {"id": "specialist-artifact", "kind": "tool", "tool": "read_file", "any_of": ["specialists.json", "specialists.phase.log"]}
       ],
       "forbidden_capabilities": [],
       "negative_control": false,
       "description": "Launching specialists is not enough; every specialist must be terminated and reaped before the final review starts.",
       "expected_metrics": {"max_tool_calls": 2},
-      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "review_markdown": "The specialist phase must reap before final review; specialists.json is available.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
+      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The final review starts before specialists are reaped, creating a sequencing race."}], "review_markdown": "The final review starts before specialists are reaped, creating a sequencing race; specialists.json is available.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
     },
     {
       "number": 6231,
@@ -34,14 +34,14 @@
       "stage_attribution": "any",
       "expected_capabilities": ["output_completeness"],
       "expected_evidence_anchors": [
-        {"id": "failure-path", "kind": "mention", "any_of": ["on catastrophic failure", "failure path", "error path", "fail-soft", "never written", "normalized output", "normalized artifact"]},
+        {"id": "failure-contract-violation", "kind": "finding", "any_of": ["failure path never writes", "error path never writes", "catastrophic failure loses the artifact", "normalized output is not written on failure", "normalized artifact is absent on error"]},
         {"id": "aggregate-artifact", "kind": "tool", "tool": "read_file", "any_of": ["specialists.json", "specialists.phase.log"]}
       ],
       "forbidden_capabilities": [],
       "negative_control": false,
       "description": "Per-role and aggregate specialist artifacts have a deterministic fail-soft contract on catastrophic failure.",
       "expected_metrics": {"max_tool_calls": 2},
-      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "review_markdown": "On catastrophic failure, the fail-soft path still writes normalized output and specialists.json.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
+      "offline_runs": [{"mode": "deep", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "On catastrophic failure, the failure path never writes normalized output."}], "review_markdown": "On catastrophic failure, the failure path never writes normalized output; specialists.json is missing.", "tool_calls": [{"tool": "read_file", "args": {"path": "specialists.json"}, "status": "ok"}]}]
     },
     {
       "number": 638,
@@ -54,14 +54,14 @@
       "route": "primary+escalation",
       "stage_attribution": "primary",
       "expected_capabilities": ["full_review_loop"],
-      "expected_evidence_anchors": [{"id": "full-review-loop", "kind": "mention", "any_of": ["needs_full_review", "needs full review", "full-review loop", "full review loop", "rerun the full review", "run the full review"]}],
+      "expected_evidence_anchors": [{"id": "redundant-full-review", "kind": "finding", "any_of": ["needs_full_review is minted", "needs_full_review is recreated", "needs_full_review causes a redundant full review", "redundant full review", "full review repeats past once", "legacy flag is left uncleared", "legacy full review flag is left uncleared", "legacy flag repeats past once", "legacy full review flag is left uncleared and repeats past once"]}],
       "forbidden_capabilities": [],
       "negative_control": false,
-      "description": "A needs_full_review result must re-enter the complete review path rather than a partial loop.",
+      "description": "A current full review must not mint needs_full_review and trigger a redundant full review; a legacy flag may force at most one full review and then clears.",
       "expected_metrics": {"max_tool_calls": 3},
       "offline_runs": [
-        {"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "needs_full_review re-enters the full review loop and runs the full PR review.", "tool_calls": []},
-        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "review_markdown": "The primary review escalated and needs_full_review re-enters the full review loop.", "tool_calls": [], "escalated": true}
+        {"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The current full review mints needs_full_review and causes a redundant full review."}], "review_markdown": "The current full review mints needs_full_review, triggers another full review, and leaves the flag uncleared.", "tool_calls": []},
+        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "findings": [{"stage": "primary", "message": "The legacy full review flag is left uncleared and repeats past once."}], "review_markdown": "The primary review escalated; the legacy flag remains uncleared and repeats the full review past once.", "tool_calls": [], "escalated": true}
       ]
     },
     {
@@ -75,12 +75,12 @@
       "route": "primary",
       "stage_attribution": "primary",
       "expected_capabilities": ["runtime_protocol"],
-      "expected_evidence_anchors": [{"id": "deleted-protocol", "kind": "mention", "any_of": ["deleted runtime protocol", "removed runtime protocol", "stale default prompt", "prompt references deleted", "prompt and runtime disagree"]}],
+      "expected_evidence_anchors": [{"id": "stale-runtime-protocol", "kind": "finding", "any_of": ["prompt still references deleted runtime protocol", "prompt references deleted runtime protocol", "stale default prompt remains", "default prompt still names the removed protocol", "prompt and runtime disagree"]}],
       "forbidden_capabilities": [],
       "negative_control": false,
       "description": "The runtime protocol was deleted, but the bundled default prompt remained stale.",
       "expected_metrics": {"max_tool_calls": 2},
-      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "The deleted runtime protocol conflicts with the stale default prompt; prompt and runtime disagree.", "tool_calls": []}]
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The default prompt still references the deleted runtime protocol, so the prompt and runtime disagree."}], "review_markdown": "The default prompt still references the deleted runtime protocol, so the prompt and runtime disagree.", "tool_calls": []}]
     },
     {
       "number": 645,
@@ -93,14 +93,14 @@
       "route": "primary+escalation",
       "stage_attribution": "primary",
       "expected_capabilities": ["stale_review_state"],
-      "expected_evidence_anchors": [{"id": "stale-state", "kind": "mention", "any_of": ["stale previous review", "previous review state", "carried findings", "carry-forward state", "stale review metadata", "stale documentation", "docs still describe"]}],
+      "expected_evidence_anchors": [{"id": "stale-state", "kind": "finding", "any_of": ["stale previous review state remains", "carried findings remain", "carried findings survive", "stale review metadata remains", "docs still describe stale previous review", "removed state is still referenced"]}],
       "forbidden_capabilities": [],
       "negative_control": false,
       "description": "Removed carried findings and cross-run review state must not survive in code, documentation, or behavior.",
       "expected_metrics": {"max_tool_calls": 2},
       "offline_runs": [
-        {"mode": "standard", "stage": "primary", "route": "primary", "review_markdown": "The docs still describe stale previous review state and carried findings.", "tool_calls": []},
-        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "review_markdown": "Escalation confirms the docs still describe stale previous review state and carried findings.", "tool_calls": [], "escalated": true}
+        {"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The docs still describe stale previous review state, and carried findings remain."}], "review_markdown": "The docs still describe stale previous review state, and carried findings remain.", "tool_calls": []},
+        {"mode": "standard", "stage": "primary", "route": "primary+escalation", "findings": [{"stage": "primary", "message": "The docs still describe stale previous review state, and carried findings survive."}], "review_markdown": "Escalation confirms the docs still describe stale previous review state, and carried findings survive.", "tool_calls": [], "escalated": true}
       ]
     },
     {

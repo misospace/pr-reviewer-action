@@ -28,6 +28,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pr_reviewer.semantic_eval import (
+    SemanticCorpus,
+    SemanticResult,
+    SEMANTIC_EVAL_VERSION,
+    _collect_signals_from_run,
+    aggregate_semantic_runs,
+    evaluate_semantic_capability as evaluate_semantic_run,
+    validate_semantic_corpus,
+)
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -79,6 +93,10 @@ class ReviewRun:
     pr_number: int
     repo_full_name: str
     stage: str | None = None
+    route: str | None = None
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    primary_findings: list[dict[str, Any]] = field(default_factory=list)
+    specialist_leads: list[dict[str, Any]] = field(default_factory=list)
     tokens_input: int = 0
     tokens_output: int = 0
     wall_clock_sec: float = 0.0
@@ -111,6 +129,8 @@ class ReviewRun:
             d["commit_sha"] = self.commit_sha
         if self.stage is not None:
             d["stage"] = self.stage
+        if self.route is not None:
+            d["route"] = self.route
         d.update({
             "repo_full_name": self.repo_full_name,
             "tokens_input": self.tokens_input,
@@ -127,6 +147,12 @@ class ReviewRun:
             "deep_review": self.deep_review,
             "specialists": self.specialists,
         })
+        if self.artifacts:
+            d["artifacts"] = self.artifacts
+        if self.primary_findings:
+            d["primary_findings"] = self.primary_findings
+        if self.specialist_leads:
+            d["specialist_leads"] = self.specialist_leads
         return d
 
 
@@ -147,13 +173,35 @@ class BenchmarkResult:
 
 @dataclass
 class BenchmarkCorpus:
-    """The full benchmark corpus with known-good findings."""
+    """The full benchmark corpus with optional semantic scenarios."""
     prs: list[dict[str, Any]] = field(default_factory=list)
+    semantic_corpus: SemanticCorpus | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> BenchmarkCorpus:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(prs=data.get("benchmark_corpus", []))
+        semantic = None
+        if isinstance(data.get("semantic_corpus"), list):
+            semantic = SemanticCorpus.from_file(path)
+            validate_semantic_corpus(semantic)
+        prs = data.get("benchmark_corpus", [])
+        if not prs and semantic is not None:
+            seen: set[tuple[str, int]] = set()
+            prs = []
+            for scenario in semantic.scenarios:
+                pr_number = scenario.provenance.get("pr", scenario.number)
+                key = (scenario.repo_full_name, pr_number)
+                if key in seen:
+                    continue
+                seen.add(key)
+                prs.append({
+                    "number": pr_number,
+                    "repo_full_name": scenario.repo_full_name,
+                    "url": scenario.url,
+                    "title": scenario.title,
+                    "known_findings": scenario.known_findings,
+                })
+        return cls(prs=prs, semantic_corpus=semantic)
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1029,19 @@ def _normalize_harness_finding(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _load_review_artifact_findings(path: Path) -> list[dict[str, Any]]:
+    payload = _read_json_soft(path)
+    if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in payload["findings"]:
+        finding = _normalize_harness_finding(item)
+        if finding is not None:
+            finding["stage"] = "primary"
+            findings.append(finding)
+    return findings
+
+
 def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
     """Read a run's review artifacts into the ReviewRun. Never raises.
 
@@ -1013,6 +1074,7 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
             if "verdict_source" in payload:
                 vs = payload["verdict_source"]
                 run.verdict_source = vs if isinstance(vs, str) else None
+
 
         model_text = ""
         try:
@@ -1198,7 +1260,7 @@ def run_review_for_pr(
                 "ai-response.primary.json", "ai-response.fallback.json",
                 "ai-response.smart.json",
                 "analysis_engine.txt",
-                "tool-harness.json", "specialists.json",
+                "tool-harness.json", "specialists.json", "eval-harness-output.txt",
             ]
             + [
                 f"specialist-{role}.{suffix}"
@@ -1223,6 +1285,7 @@ def run_review_for_pr(
         # run's temp clone so an ambient Actions value cannot steer the
         # orchestrator at the workflow checkout.
         env["GITHUB_WORKSPACE"] = str(repo_path)
+        env["GITHUB_OUTPUT"] = str(repo_path / "eval-harness-output.txt")
         if tool_mode_arg:
             env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
@@ -1252,15 +1315,37 @@ def run_review_for_pr(
             # (the run cwd), not verdict.json.
             if result.returncode == 0:
                 populate_review_output(run, repo_path)
+                run.primary_findings = _load_review_artifact_findings(repo_path / "ai-output.primary.json")
                 if not run.review_markdown:
-                    # ai-output.json produced no review body: parse from
-                    # stdout if available.
                     run.review_markdown = result.stdout[:2000] if result.stdout else ""
 
                 populate_tool_trace(run, repo_path)
-                # Deep-review specialist telemetry (None when the run emitted
-                # no specialist artifacts at all).
-                run.specialists = load_specialist_telemetry(repo_path)
+                output_lines: dict[str, str] = {}
+                try:
+                    for line in (repo_path / "eval-harness-output.txt").read_text(encoding="utf-8").splitlines():
+                        key, separator, value = line.partition("=")
+                        if separator:
+                            output_lines[key] = value
+                except OSError:
+                    pass
+                route = output_lines.get("review_route", "").strip()
+                if route:
+                    run.route = route
+                if run.route == "escalated":
+                    run.stage = "escalation"
+                elif run.route in {"primary", "fast", "smart", "legacy"}:
+                    run.stage = "primary"
+                else:
+                    run.stage = "unknown"
+                if deep_review:
+                    run.specialists = load_specialist_telemetry(repo_path)
+                    if run.specialists:
+                        run.specialist_leads = [
+                            lead
+                            for leads in run.specialists.get("leads_by_role", {}).values()
+                            for lead in leads
+                            if isinstance(lead, dict)
+                        ]
             else:
                 run.error = f"Review failed (exit {result.returncode}): {result.stderr[:500]}"
         else:
@@ -1274,6 +1359,96 @@ def run_review_for_pr(
         run.error = f"Review error: {exc}"
 
     return run
+
+
+def _live_duplicate_count(run: ReviewRun) -> int:
+    seen: set[tuple[str, str, str, str]] = set()
+    duplicates = 0
+    for finding in run.findings:
+        if not isinstance(finding, dict):
+            continue
+        key = (
+            str(finding.get("category") or "").casefold(),
+            str(finding.get("severity") or "").casefold(),
+            str(finding.get("file") or "").casefold(),
+            str(finding.get("message") or finding.get("description") or "").casefold(),
+        )
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
+    return duplicates
+
+
+def evaluate_live_semantics(
+    corpus: SemanticCorpus | None,
+    results: list[BenchmarkResult],
+) -> dict[str, Any] | None:
+    if corpus is None:
+        return None
+    validate_semantic_corpus(corpus)
+    by_key: dict[tuple[str, int], list[ReviewRun]] = {}
+    for benchmark in results:
+        by_key[(benchmark.repo_full_name, benchmark.pr_number)] = benchmark.runs
+    scenario_reports: list[dict[str, Any]] = []
+    for scenario in corpus.scenarios:
+        pr_number = scenario.provenance.get("pr", scenario.number)
+        runs = by_key.get((scenario.repo_full_name, pr_number), [])
+        per_run: list[SemanticResult] = []
+        for run in runs:
+            signals = _collect_signals_from_run(run)
+            metadata = {
+                "mode": run.mode,
+                "route": run.route,
+                "stage": run.stage,
+                "escalated": run.route in {"escalated", "escalation"} or run.stage == "escalation",
+                "tool_call_count": len(run.tool_calls),
+                "duplicate_count": _live_duplicate_count(run),
+                "latency_sec": run.wall_clock_sec,
+            }
+            per_run.append(evaluate_semantic_run(scenario, signals, metadata))
+        aggregate = aggregate_semantic_runs(scenario, per_run)
+        aggregate["provenance"] = scenario.provenance
+        aggregate["class"] = scenario.klass
+        aggregate["negative_control"] = scenario.negative_control
+        aggregate["diff_polarity"] = scenario.diff_polarity
+        aggregate["review_mode"] = scenario.review_mode
+        aggregate["route_expected"] = scenario.route
+        aggregate["stage_attribution_expected"] = scenario.stage_attribution
+        aggregate["attribution_rates"] = {
+            stage: round(sum(stage in result.stages_hit for result in per_run) / len(per_run), 4) if per_run else 0.0
+            for stage in ("specialist", "primary", "escalation")
+        }
+        aggregate["per_run"] = [result.to_dict() for result in per_run]
+        scenario_reports.append(aggregate)
+    scored = [item for item in scenario_reports if item["runs"]]
+    negative_controls = [item for item in scenario_reports if item["negative_control"]]
+    return {
+        "evaluator_version": SEMANTIC_EVAL_VERSION,
+        "corpus_version": corpus.version,
+        "metadata": corpus.metadata,
+        "scenarios": scenario_reports,
+        "per_scenario_summary": {
+            str(item["scenario_number"]): item for item in scenario_reports
+        },
+        "summary": {
+            "scenarios": len(scenario_reports),
+            "scored_scenarios": len(scored),
+            "pass_rate": round(sum(item["pass_rate"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
+            "average_tool_calls": round(sum(item["average_tool_calls"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "average_duplicate_count": round(sum(item["average_duplicate_count"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
+        },
+        "negative_control_summary": {
+            "scenarios": len(negative_controls),
+            "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
+        },
+        "passed": bool(scored)
+        and all(item["pass_rate"] == 1.0 for item in scored)
+        and all(item["false_positive_rate"] == 0.0 for item in negative_controls),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1480,6 +1655,7 @@ def generate_report(
             else None
         )
 
+    semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
     report = {
         "metadata": {
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1491,6 +1667,8 @@ def generate_report(
         "mode_summary": {m: mode_metrics[m] for m in sorted(mode_metrics)},
         "per_pr_results": report_results,
     }
+    if semantic_report is not None:
+        report["semantic_eval"] = semantic_report
 
     return report
 

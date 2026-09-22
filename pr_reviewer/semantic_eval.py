@@ -12,6 +12,7 @@ SEMANTIC_CORPUS_VERSION = 1
 SEMANTIC_EVAL_VERSION = 1
 
 RECOGNISED_STAGES = frozenset({"specialist", "primary", "escalation", "any"})
+RECOGNISED_SIGNAL_STAGES = RECOGNISED_STAGES | {"unknown"}
 RECOGNISED_MODES = frozenset({"standard", "deep", "any"})
 RECOGNISED_ROUTES = frozenset({"primary", "escalation", "primary+escalation", "any"})
 RECOGNISED_DIFF_POLARITIES = frozenset({"deletion"})
@@ -41,53 +42,52 @@ SIGNAL_KIND_TOOL = "tool"
 SIGNAL_KINDS = frozenset({SIGNAL_KIND_FINDING, SIGNAL_KIND_MENTION, SIGNAL_KIND_TOOL})
 _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
     (CAPABILITY_SEQUENCING, (
-        "reap before final", "wait for specialists", "join before final",
-        "reaped before", "all specialists reaped", "specialist phase completes",
-        "race condition between", "launch before final", "launched before final",
-        "specialists must terminate",
-        "specialists must complete", "specialist phase ordering",
-        "specialist phase must", "specialists must reap",
+        "specialists launch before final", "specialists launched before final",
+        "final review starts before specialists", "final review begins before specialists",
+        "race condition between specialists and final", "specialists are not reaped before final",
+        "specialists are not joined before final", "specialist phase is not complete before final",
+        "specialists must reap", "specialists must terminate", "specialists must complete",
+        "reaped before final review", "waits for every role and is reaped before final review",
     )),
     (CAPABILITY_OUTPUT_COMPLETENESS, (
-        "artifact on failure", "artifacts on failure", "output on failure",
-        "on catastrophic failure", "on error", "normalized output",
-        "normalized artifact", "failure path", "error path", "fail-soft",
-        "completeness on failure", "missing on failure", "absent on error",
-        "never written",
+        "artifact is missing on failure", "artifacts are missing on failure",
+        "output is missing on error", "normalized output is not written on failure",
+        "normalized artifact is absent on error", "failure path never writes",
+        "error path never writes", "catastrophic failure loses the artifact",
+        "missing on failure", "absent on error", "never written on failure",
     )),
     (CAPABILITY_FULL_REVIEW_LOOP, (
-        "needs_full_review", "needs full review", "full-review loop",
-        "full review loop", "rerun the full review", "run the full review",
-        "full pr review", "full-pr review", "re-enter the full review",
-        "full review after", "must trigger a full review",
+        "needs_full_review is minted", "needs_full_review is emitted", "needs_full_review is recreated",
+        "needs_full_review is re-created", "needs_full_review causes a redundant full review",
+        "needs_full_review creates a redundant full review", "redundant full review",
+        "full review loops indefinitely", "full review repeats itself", "full review repeats past once",
+        "full-review loop is not cleared", "full review flag is not cleared",
+        "legacy full review flag is never cleared", "legacy full review flag is left uncleared",
+        "legacy flag is left uncleared", "legacy flag repeats past once", "full review runs twice",
     )),
     (CAPABILITY_RUNTIME_PROTOCOL, (
-        "deleted runtime protocol", "removed runtime protocol", "stale default prompt",
-        "prompt references deleted", "prompt still references", "runtime protocol is gone",
-        "protocol no longer exists", "deleted tool protocol", "unsupported runtime protocol",
-        "prompt and runtime disagree", "runtime no longer supports",
+        "prompt still references deleted runtime protocol", "prompt references deleted runtime protocol",
+        "stale default prompt remains", "default prompt still names the removed protocol",
+        "runtime protocol is gone but prompt", "prompt and runtime disagree",
+        "runtime no longer supports the protocol but prompt", "unsupported runtime protocol is used",
+        "stale default prompt",
     )),
     (CAPABILITY_STALE_REVIEW_STATE, (
-        "stale previous review", "previous review state", "carried findings",
-        "carry-forward state", "stale review metadata", "old review state",
-        "dead prior-review state", "prior review state is dead", "previous-review",
-        "previous review is stale", "stale documentation", "docs still describe",
-        "documentation still describes", "docs survive architectural deletion",
-        "state no longer exists", "removed state", "deleted state",
+        "stale previous review state remains", "carried findings remain", "carried findings survive",
+        "stale review metadata remains", "old review state survives", "dead prior-review state remains",
+        "previous review is stale but still used", "docs still describe stale previous review",
+        "documentation still describes removed review state", "removed state is still referenced",
+        "deleted state is still used", "state no longer exists but code still reads it",
+        "stale review state",
     )),
     (CAPABILITY_DIFF_POLARITY, (
         "deleted declaration still exists", "deleted declarations still exist",
         "removed declaration is still present", "deleted code is still present",
-        "treats deleted as present", "deleted-only declaration", "deleted symbol remains",
-        "asserts deleted", "deletion is treated as an addition", "diff polarity",
-        "deleted side of the diff", "removed side of the diff",
+        "treats deleted as present", "deleted-only declaration remains", "deleted symbol remains",
+        "deletion is treated as an addition", "deleted side of the diff is treated as added",
+        "removed side of the diff is treated as present",
     )),
 )
-
-
-def _words(text: str) -> set[str]:
-    return set(re.findall(r"\w+", (text or "").casefold()))
-
 
 def _truthy(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -101,23 +101,44 @@ def _sentence_for_match(value: str, position: int) -> tuple[str, int]:
     return value[start:end], start
 
 
+def _is_negated_match(value: str, match: re.Match[str], term: str) -> bool:
+    start, end = match.span()
+    sentence, sentence_start = _sentence_for_match(value, start)
+    relative_start = start - sentence_start
+    relative_end = end - sentence_start
+    prefix = sentence[:relative_start]
+    suffix = sentence[relative_end:]
+    before = prefix[-48:]
+    after = suffix[:48]
+    if re.search(
+        r"(?:^|\b)(?:no|not|never|doesn['’]?t|isn['’]?t|is not|are not|do not|must not|should not|cannot|can['’]?t)\s+[^,;:]{0,20}$",
+        before,
+    ):
+        return True
+    if re.match(
+        r"^\s*(?:absent|removed|resolved|fixed|cleared|no longer|does not remain|is not present|are not present|was removed|has been removed|has been fixed|is gone|is resolved|is fixed|is cleared|remains absent)\b",
+        after,
+    ):
+        return True
+    return bool(re.search(
+        r"\b(?:is|are|was|were)\s+not\s*,\s*despite\b[^.!?]{0,80}\b(?:a|an|the)?\s*$",
+        before,
+    ))
+
+
 def classify_signal(text: str) -> str | None:
     value = (text or "").casefold()
     for capability, vocabulary in _VOCABULARY:
         for term in vocabulary:
             match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", value)
-            if match is None:
+            if match is None or _is_negated_match(value, match, term):
                 continue
-            if capability == CAPABILITY_DIFF_POLARITY:
-                sentence, sentence_start = _sentence_for_match(value, match.start())
-                prefix = sentence[: match.start() - sentence_start]
-                if re.search(
-                    r"\b(?:not|never|without|absent|no|doesn't|isn't|is not|do not|must not|should not|cannot|can't|avoid)\b",
-                    prefix,
-                ):
-                    continue
-                if re.search(r"\b(?:assert|claim|treat|say|report|suggest)\b", prefix):
-                    continue
+            sentence, sentence_start = _sentence_for_match(value, match.start())
+            prefix = sentence[:match.start() - sentence_start]
+            if capability == CAPABILITY_DIFF_POLARITY and re.search(
+                r"\b(?:assert|claim|treat|say|report|suggest)\b", prefix,
+            ):
+                continue
             return capability
     return None
 
@@ -132,7 +153,7 @@ class ReviewSignal:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.capability is None:
+        if self.capability is None and self.kind in {SIGNAL_KIND_FINDING, SIGNAL_KIND_TOOL}:
             self.capability = classify_signal(self.text)
 
 
@@ -274,6 +295,12 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
             _require(isinstance(capability, str), f"{prefix}: capabilities must be strings")
             _require(capability in KNOWN_CAPABILITY_CLASSES, f"{prefix}: unknown capability {capability!r}")
         _require(scenario.klass in scenario.expected_capabilities or scenario.negative_control, f"{prefix}: class must be expected or negative_control")
+        if not scenario.negative_control:
+            _require(
+                scenario.expected_evidence_anchors
+                and all(anchor.get("kind") in {SIGNAL_KIND_FINDING, SIGNAL_KIND_TOOL} for anchor in scenario.expected_evidence_anchors),
+                f"{prefix}: positive scenarios need only finding or tool evidence anchors",
+            )
         if scenario.negative_control:
             _require(not scenario.expected_capabilities, f"{prefix}: negative controls cannot expect capabilities")
             _require(bool(scenario.forbidden_capabilities), f"{prefix}: negative controls need forbidden_capabilities")
@@ -377,7 +404,20 @@ def _run_mode(run: Any) -> str | None:
 
 
 def _run_stage(run: Any) -> str:
-    return _run_value(run, "stage") or _run_metadata(run).get("stage") or "primary"
+    stage = _run_value(run, "stage") or _run_metadata(run).get("stage")
+    return str(stage) if stage in RECOGNISED_SIGNAL_STAGES else "unknown"
+
+
+def _run_finding_stage(run: Any) -> str:
+    route = _run_route(run)
+    stage = _run_stage(run)
+    if stage in {"primary", "escalation"} and route in {"primary", "fast", "smart", "legacy", "escalated", "escalation"}:
+        return stage
+    return "unknown"
+
+
+def _signal_stage(value: Any, fallback: str) -> str:
+    return str(value) if value in RECOGNISED_SIGNAL_STAGES else fallback
 
 
 def _route_matches(actual: str | None, expected: str) -> bool:
@@ -387,31 +427,62 @@ def _route_matches(actual: str | None, expected: str) -> bool:
         return True
     if expected == actual:
         return True
-    return expected == "primary+escalation" and actual in {"primary", "escalation"}
+    primary_routes = {"primary", "fast", "smart", "legacy"}
+    escalation_routes = {"escalation", "escalated"}
+    if expected == "primary":
+        return actual in primary_routes
+    if expected == "escalation":
+        return actual in escalation_routes
+    return expected == "primary+escalation" and actual in primary_routes | escalation_routes
 
 
 def _collect_signals_from_run(run: Any) -> list[ReviewSignal]:
     stage = _run_stage(run)
-    if stage not in RECOGNISED_STAGES:
-        stage = "primary"
+    finding_stage = _run_finding_stage(run)
     signals: list[ReviewSignal] = []
     review = _run_value(run, "review_markdown", "") or ""
     if review:
-        signals.append(ReviewSignal(SIGNAL_KIND_MENTION, stage, review))
+        signals.append(ReviewSignal(SIGNAL_KIND_MENTION, stage, str(review)))
+    for finding in _run_value(run, "primary_findings", []) or []:
+        if not isinstance(finding, dict):
+            continue
+        text = finding.get("description") or finding.get("message") or ""
+        signals.append(ReviewSignal(SIGNAL_KIND_FINDING, "primary", str(text), meta=finding))
     for finding in _run_value(run, "findings", []) or []:
         if not isinstance(finding, dict):
             continue
-        finding_stage = finding.get("stage") or stage
-        if finding_stage not in RECOGNISED_STAGES:
-            finding_stage = stage
+        signal_stage = _signal_stage(finding.get("stage"), finding_stage)
         text = finding.get("description") or finding.get("message") or ""
-        signals.append(ReviewSignal(SIGNAL_KIND_FINDING, finding_stage, str(text), meta=finding))
+        signals.append(ReviewSignal(SIGNAL_KIND_FINDING, signal_stage, str(text), meta=finding))
+    for artifact in _run_value(run, "artifacts", []) or []:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_stage = _signal_stage(artifact.get("stage"), "unknown")
+        text = artifact.get("text") or artifact.get("content") or artifact.get("message") or ""
+        if text:
+            signals.append(ReviewSignal(SIGNAL_KIND_MENTION, artifact_stage, str(text), meta=artifact))
+    leads = _run_value(run, "specialist_leads", None)
+    if not isinstance(leads, list) or not leads:
+        leads = []
+        specialists = _run_value(run, "specialists", {})
+        if isinstance(specialists, dict):
+            leads_by_role = specialists.get("leads_by_role")
+            if isinstance(leads_by_role, dict):
+                leads = [
+                    lead
+                    for role_leads in leads_by_role.values()
+                    for lead in role_leads if isinstance(role_leads, list)
+                ]
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        text = lead.get("message") or lead.get("description") or ""
+        if text:
+            signals.append(ReviewSignal(SIGNAL_KIND_FINDING, "specialist", str(text), meta=lead))
     for call in _run_value(run, "tool_calls", []) or []:
         if not isinstance(call, dict):
             continue
-        call_stage = call.get("stage") or stage
-        if call_stage not in RECOGNISED_STAGES:
-            call_stage = stage
+        call_stage = _signal_stage(call.get("stage"), stage)
         args = call.get("args") or {}
         text = " ".join(str(value) for value in args.values() if isinstance(value, str))
         signals.append(ReviewSignal(SIGNAL_KIND_TOOL, call_stage, text, meta={"tool": call.get("tool", ""), "status": call.get("status")}))
@@ -419,7 +490,7 @@ def _collect_signals_from_run(run: Any) -> list[ReviewSignal]:
 
 
 def _anchor_matches(signal: ReviewSignal, anchor: dict[str, Any]) -> bool:
-    if signal.kind != anchor.get("kind") and not ({signal.kind, anchor.get("kind")} <= {SIGNAL_KIND_MENTION, SIGNAL_KIND_FINDING}):
+    if signal.kind != anchor.get("kind"):
         return False
     if anchor.get("kind") == SIGNAL_KIND_TOOL and anchor.get("tool") != signal.meta.get("tool"):
         return False
@@ -465,6 +536,8 @@ def evaluate_semantic_capability(
     if scenario.expected_metrics.get("max_latency_sec") is not None and result.latency_sec > scenario.expected_metrics["max_latency_sec"]:
         result.metric_violations.append("max_latency_sec")
     for signal in values:
+        if signal.kind not in {SIGNAL_KIND_FINDING, SIGNAL_KIND_TOOL}:
+            continue
         if signal.capability:
             result.capability_hits.setdefault(signal.capability, [])
             if signal.stage not in result.capability_hits[signal.capability]:
@@ -494,6 +567,7 @@ def _fixture_signals(fixture: dict[str, Any]) -> list[ReviewSignal]:
 
     run = FixtureRun()
     run.stage = fixture.get("stage", "primary")
+    run.route = fixture.get("route")
     run.review_markdown = fixture.get("review_markdown", "")
     run.findings = fixture.get("findings", [])
     run.tool_calls = fixture.get("tool_calls", [])
@@ -603,7 +677,7 @@ __all__ = [
     "CAPABILITY_DIFF_POLARITY", "CAPABILITY_FULL_REVIEW_LOOP", "CAPABILITY_NEGATIVE_CONTROL",
     "CAPABILITY_OUTPUT_COMPLETENESS", "CAPABILITY_RUNTIME_PROTOCOL", "CAPABILITY_SEQUENCING",
     "CAPABILITY_STALE_REVIEW_STATE", "KNOWN_CAPABILITY_CLASSES",
-    "RECOGNISED_DIFF_POLARITIES", "RECOGNISED_MODES", "RECOGNISED_ROUTES", "RECOGNISED_STAGES", "SEMANTIC_CORPUS_VERSION",
+    "RECOGNISED_DIFF_POLARITIES", "RECOGNISED_MODES", "RECOGNISED_ROUTES", "RECOGNISED_SIGNAL_STAGES", "RECOGNISED_STAGES", "SEMANTIC_CORPUS_VERSION",
     "SEMANTIC_EVAL_VERSION", "SIGNAL_KIND_FINDING", "SIGNAL_KIND_MENTION", "SIGNAL_KIND_TOOL",
      "ReviewSignal", "SemanticCorpus", "SemanticCorpusError", "SemanticResult", "SemanticScenario",
      "_collect_signals_from_run", "aggregate_semantic_runs", "classify_signal", "evaluate_semantic_capability",
