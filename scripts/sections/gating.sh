@@ -30,11 +30,55 @@ CI_GATE_ACTIVE="false"
 CI_GATE_PID=""
 CI_GATE_LOG="ci-status.phase.log"
 
+# Explicit least-privilege allowlist for the CI child process. Before #634 the
+# CI wait ran as its own composite-action step, so it only ever saw that step's
+# narrow env block plus the runner's own defaults. Now that it is forked from
+# inside the review step it would otherwise inherit the full review environment
+# — AI_API_KEY / AI_PRIMARY_API_KEY / AI_SMART_API_KEY / AI_FALLBACK_API_KEY,
+# TOOL_MCP_TOKEN, LINEAR_API_KEY, and every other reviewer-only input. This list
+# is the boundary: only these keys (when set) are forwarded, and adding a new
+# reviewer input can never silently widen the CI process — it has to be named
+# here on purpose. It is an allowlist, not a denylist, so a future secret is
+# excluded by default.
+#
+# Categories:
+#   - process/runner basics the subprocess needs to execute at all;
+#   - runner metadata: $GITHUB_OUTPUT (ci_status_* results), $GITHUB_RUN_ID +
+#     $CI_STATUS_CONTEXT (own check/status self-exclusion), and the OIDC
+#     request vars the Forgejo authorized-integration backend reads;
+#   - GitHub/Forgejo auth + repository identity;
+#   - the CI gate controls wait_for_ci.sh reads (timings, skip-on-timeout,
+#     the published evidence path).
+# Deliberately NOT included: model/tool/Linear/reviewer config and secrets, and
+# AI_REQUEST_TIMEOUT_SEC (the pre-#634 CI step never received it, so the Forgejo
+# backend keeps its own default).
+_CI_GATE_ENV_KEYS=(
+  PATH HOME
+  GITHUB_OUTPUT GITHUB_RUN_ID GITHUB_REPOSITORY
+  GITHUB_SERVER_URL GITHUB_API_URL GH_HOST
+  ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  REPO PR_NUMBER PR_HEAD_SHA
+  PLATFORM FORGEJO_API_URL
+  FORGEJO_TOKEN FORGEJO_AUTH_METHOD
+  FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE FORGEJO_SKIP_PERMISSION_PREFLIGHT
+  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT
+  CI_CHECKS_FILE CI_STATUS_CONTEXT
+)
+
 # Overridable branch entrypoint (tests substitute a fake-delay stub). Kept a
 # function rather than an inline command so the composition can be exercised
-# without the network/gh seam.
+# without the network/gh seam. Launches wait_for_ci.sh under `env -i` with the
+# explicit allowlist above, restoring the pre-#634 least-privilege boundary.
 wait_for_ci_command() {
-  bash "$SCRIPT_DIR/wait_for_ci.sh"
+  local -a env_args=()
+  local key
+  for key in "${_CI_GATE_ENV_KEYS[@]}"; do
+    if [ -n "${!key+x}" ]; then
+      env_args+=("${key}=${!key}")
+    fi
+  done
+  env -i "${env_args[@]}" bash "$SCRIPT_DIR/wait_for_ci.sh"
 }
 
 # Fork the CI gate when ci_status_check=true. Non-blocking: the caller keeps

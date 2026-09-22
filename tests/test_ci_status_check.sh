@@ -292,6 +292,31 @@ RESULT="$(run_wait)"
 check "exit 0 on combined success" "$(echo "$RESULT" | grep '^rc=')" "rc=0"
 check_contains "final state is success (combined)" "$RESULT" "ci_status_final=success"
 
+# ── Least-privilege wrapper (#634): the real wait_for_ci.sh must still work
+# when launched through gating.sh's `env -i` allowlist. The stub gh stays on
+# PATH; only the CI-required vars are forwarded.
+echo ""
+echo "--- Wrapper: real wait_for_ci.sh under the env -i allowlist ---"
+echo "{\"check_runs\": [$own_run, $ext_success], \"total_count\": 2}" > "$CI_TMP/check-runs.json"
+echo '{"state": "pending", "total_count": 0}' > "$CI_TMP/combined.json"
+WRAP_OUT="$CI_TMP/wrap.out"
+rm -f "$CHECKS_OUT" "$WRAP_OUT"
+(
+  SCRIPT_DIR="$SCRIPT_DIR/scripts"
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/sections/gating.sh"
+  log() { :; }
+  PATH="$CI_TMP/bin:$PATH" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=7 PR_HEAD_SHA="deadbeef" \
+  GITHUB_RUN_ID="999" CI_STATUS_CHECK=true CI_TIMEOUT_SEC=6 CI_INTERVAL_SEC=1 \
+  CI_SKIP_ON_TIMEOUT=true CI_CHECKS_FILE="$CHECKS_OUT" GITHUB_OUTPUT="$WRAP_OUT" \
+  wait_for_ci_command
+)
+WRAP_RESULT="$(cat "$WRAP_OUT" 2>/dev/null || true)"
+check_contains "wrapper path final state is success" "$WRAP_RESULT" "ci_status_final=success"
+check_contains "wrapper path wrote the checks summary" \
+  "$(cat "$CHECKS_OUT" 2>/dev/null || true)" "build"
+
 
 # ── Functional tests: Forgejo commit-status path ────────────────────────
 echo ""

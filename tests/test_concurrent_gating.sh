@@ -160,8 +160,16 @@ check "CI-off: CI branch did not run" "$([ -z "$(marker_ms start ci)" ] && echo 
 
 echo ""
 echo "=== gating.sh: real branch entrypoints are wired ==="
-GATING="$(cat "$SCRIPT_DIR/sections/gating.sh")"
+GATING_SH="$SCRIPT_DIR/sections/gating.sh"
+GATING="$(cat "$GATING_SH")"
 check_contains "CI hook invokes wait_for_ci.sh" "$GATING" 'bash "$SCRIPT_DIR/wait_for_ci.sh"'
+check_contains "CI hook runs the child under env -i (explicit allowlist)" \
+  "$GATING" 'env -i "${env_args[@]}"'
+check_contains "CI env allowlist is an explicit key list" "$GATING" '_CI_GATE_ENV_KEYS=('
+allowlist_block="$(awk '/^_CI_GATE_ENV_KEYS=\(/,/^\)/' "$GATING_SH")"
+check_not_contains "CI allowlist block omits model API keys" "$allowlist_block" 'AI_API_KEY'
+check_not_contains "CI allowlist block omits TOOL_MCP_TOKEN" "$allowlist_block" 'TOOL_MCP_TOKEN'
+check_not_contains "CI allowlist block omits LINEAR_API_KEY" "$allowlist_block" 'LINEAR_API_KEY'
 check_contains "specialist hook invokes run_specialists.py over the specialist corpus" \
   "$GATING" 'run_specialists.py" --corpus specialist-corpus.md'
 check_contains "specialist hook builds the separate #632 corpus first" \
@@ -266,6 +274,57 @@ check_contains "final corpus has the finalized CI evidence" "$FINAL_CORPUS" "CI-
 check_contains "final corpus has the usable specialist lead" "$FINAL_CORPUS" "SPECIALIST-SENTINEL"
 check_contains "final corpus keeps the CI Check Results section header" "$FINAL_CORPUS" "# CI Check Results"
 check_contains "final corpus keeps the Specialist Review Leads header" "$FINAL_CORPUS" "# Specialist Review Leads"
+
+echo ""
+echo "=== CI child runs with a least-privilege environment (#634 security) ==="
+# Launch the REAL CI-command wrapper with sentinel review-only secrets in the
+# parent environment and prove the child cannot see them, while the
+# CI-required variables still arrive. This pins the pre-#634 boundary: the CI
+# wait used to be its own step, so it must never inherit the review step's
+# model/tool/Linear secrets now that it is forked from inside the pipeline.
+LP_DIR="$TMP/lp"
+mkdir -p "$LP_DIR"
+cat > "$LP_DIR/wait_for_ci.sh" <<EOF
+#!/usr/bin/env bash
+env > "$LP_DIR/child-env.txt"
+EOF
+: > "$LP_DIR/child-env.txt"
+(
+  SCRIPT_DIR="$LP_DIR"
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/sections/gating.sh"
+  log() { :; }
+  export AI_API_KEY="SENTINEL-AI-KEY"
+  export AI_PRIMARY_API_KEY="SENTINEL-AI-PRIMARY"
+  export AI_SMART_API_KEY="SENTINEL-AI-SMART"
+  export AI_FALLBACK_API_KEY="SENTINEL-AI-FALLBACK"
+  export TOOL_MCP_TOKEN="SENTINEL-MCP-TOKEN"
+  export LINEAR_API_KEY="SENTINEL-LINEAR-KEY"
+  export GH_TOKEN="SENTINEL-GH-TOKEN"
+  export REPO="owner/repo"
+  export PR_NUMBER="7"
+  export PR_HEAD_SHA="deadbeef"
+  export PLATFORM="github"
+  export CI_STATUS_CHECK="true"
+  export CI_TIMEOUT_SEC="123"
+  export CI_INTERVAL_SEC="7"
+  export CI_SKIP_ON_TIMEOUT="false"
+  export CI_CHECKS_FILE="$LP_DIR/ci-checks.md"
+  export GITHUB_RUN_ID="999"
+  export GITHUB_OUTPUT="$LP_DIR/out.txt"
+  wait_for_ci_command
+)
+CHILD_ENV="$(cat "$LP_DIR/child-env.txt")"
+for sentinel in \
+  "SENTINEL-AI-KEY" "SENTINEL-AI-PRIMARY" "SENTINEL-AI-SMART" "SENTINEL-AI-FALLBACK" \
+  "SENTINEL-MCP-TOKEN" "SENTINEL-LINEAR-KEY"; do
+  check_not_contains "child env excludes $sentinel" "$CHILD_ENV" "$sentinel"
+done
+for required in \
+  GH_TOKEN REPO PR_NUMBER PR_HEAD_SHA PLATFORM CI_STATUS_CHECK CI_TIMEOUT_SEC \
+  CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT CI_CHECKS_FILE GITHUB_OUTPUT GITHUB_RUN_ID; do
+  check_contains "child env includes $required" "$CHILD_ENV" "$required="
+done
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
