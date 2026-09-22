@@ -749,26 +749,42 @@ runs:
         command -v git >/dev/null
         command -v python3 >/dev/null
 
-    - name: Check whether review is needed
-      id: precheck
+    - name: Export shared review environment
+      id: shared_env
+      # Single source of truth for the env vars the precheck and the review
+      # step consume with identical bindings (#641). The env block below
+      # transports the input/github-context expressions; the run body
+      # serializes them into a NUL-separated key/value file under $RUNNER_TEMP
+      # (mktemp, umask 077) and publishes only the file path via a step
+      # output. The precheck and the review step load that file explicitly
+      # (scripts/load_shared_env.sh); $GITHUB_ENV is never used, so the
+      # caller's job environment is never mutated and no shared value outlives
+      # this composite action. Wiring rules:
+      #   - an input both steps need: add it to the input definition plus this
+      #     block only — nowhere else;
+      #   - a single-step input goes in that step's own env block (still at
+      #     most two edits);
+      #   - PLATFORM / FORGEJO_API_URL stay per-step: the precheck binds the
+      #     raw inputs to resolve them (#367); downstream steps consume the
+      #     resolved steps.precheck.outputs instead;
+      #   - review-only inputs (AI_MAX_TOKENS, VERDICT_POLICY, ...) stay in
+      #     the review step's block: loading them in the precheck would widen
+      #     its environment, whose AI_* sweep feeds the config fingerprint
+      #     and would silently invalidate every stored review;
+      #   - step-output-derived vars (CI_STATUS_*, IS_FORK_PR) stay in the
+      #     step that consumes them.
+      # The key list in the run body must match this env block 1:1 —
+      # tests/test_shared_env_wiring.sh pins both directions and runs the
+      # export and load paths end-to-end.
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
         FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
         FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
         FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
         FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
         REPO: ${{ inputs.repo || github.repository }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        PUBLISH_MODE: ${{ inputs.publish_mode }}
-        SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
-        FORCE_REVIEW: ${{ inputs.force_review }}
-        REREVIEW_LABEL: ${{ inputs.rereview_label }}
-        ACTION_REF: ${{ github.action_ref }}
         AI_MODEL: ${{ inputs.ai_model }}
         AI_API_FORMAT: ${{ inputs.ai_api_format }}
         AI_TEMPERATURE: ${{ inputs.ai_temperature }}
@@ -803,7 +819,6 @@ runs:
         DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
         DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
         DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}
-        LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
         LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
@@ -840,7 +855,149 @@ runs:
         AI_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_connect_timeout_sec }}
         AI_FALLBACK_REQUEST_TIMEOUT_SEC: ${{ inputs.ai_fallback_request_timeout_sec }}
         AI_FALLBACK_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_fallback_connect_timeout_sec }}
-      run: bash "${{ github.action_path }}/scripts/check_review_needed.sh"
+      run: |
+        set -euo pipefail
+        if [ -z "${GITHUB_OUTPUT:-}" ]; then
+          echo "::error::GITHUB_OUTPUT is not set; cannot publish the shared environment path." >&2
+          exit 1
+        fi
+        # The file carries tokens (GH_TOKEN, FORGEJO_TOKEN, ...): umask 077 +
+        # mktemp keep it owner-only, outside the reviewed workspace. The
+        # runner cleans $RUNNER_TEMP up after the job, but the file must not
+        # outlive this action even then: the EXIT trap below removes it if
+        # serialization fails before the path is published, and the
+        # 'Clean up shared environment' step removes it after the last
+        # consumer runs.
+        umask 077
+        shared_env_file="$(mktemp "${RUNNER_TEMP:-/tmp}/shared-env.XXXXXXXX")"
+        trap 'rm -f -- "$shared_env_file"' EXIT
+        # Keep in lockstep with the env block above (pinned by
+        # tests/test_shared_env_wiring.sh).
+        keys=(
+          GH_TOKEN
+          FORGEJO_TOKEN
+          FORGEJO_AUTH_METHOD
+          FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE
+          FORGEJO_SKIP_PERMISSION_PREFLIGHT
+          REPO
+          PR_NUMBER
+          AI_MODEL
+          AI_API_FORMAT
+          AI_TEMPERATURE
+          AI_RESPONSE_FORMAT
+          AI_TOKENS_PARAM
+          AI_FALLBACK_MODEL
+          REVIEW_ROUTING_MODE
+          AI_PRIMARY_MODEL
+          AI_SMART_MODEL
+          ESCALATE_ON_RISK_FLAGS
+          ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS
+          ESCALATE_ON_FAST_REQUEST_CHANGES
+          ESCALATE_ON_FAST_LOW_CONFIDENCE
+          ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS
+          ESCALATE_ON_TOOL_PLANNING_FAILURE
+          ANTHROPIC_VERSION
+          SYSTEM_PROMPT
+          SYSTEM_PROMPT_FILE
+          SYSTEM_PROMPT_MODE
+          REVIEW_VERBOSITY
+          STANDARDS_FILE
+          STANDARDS_FILE_CANDIDATES
+          CONTEXT_LIMIT_MODE
+          MODEL_CONTEXT_TOKENS
+          RELATED_CODE_CONTEXT
+          RELATED_CODE_MAX_BYTES
+          REPO_MAP_CONTEXT
+          REPO_MAP_MAX_BYTES
+          PR_THREAD_CONTEXT
+          PR_THREAD_MAX_BYTES
+          DEEP_REVIEW
+          DEEP_REVIEW_TIMEOUT_SEC
+          DEEP_REVIEW_MAX_TOKENS
+          DEEP_REVIEW_CORPUS_MAX_BYTES
+          LINEAR_ISSUE_PREFIXES
+          LINEAR_ISSUE_TIMEOUT_SEC
+          LINEAR_ENABLE_FOR_FORKS
+          EVIDENCE_PROVIDERS_FILE
+          SARIF_FILES
+          SARIF_MAX_FINDINGS
+          EVIDENCE_PROVIDER_TIMEOUT_SEC
+          EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES
+          EVIDENCE_BLOCKER_ENFORCEMENT
+          EVIDENCE_ENABLE_FOR_FORKS
+          TOOL_MODE
+          TOOL_MCP_SERVERS
+          TOOL_MCP_TOKEN
+          TOOL_MCP_NAME_PREFIXES
+          TOOL_LOOP_WALL_CLOCK_SEC
+          TOOL_LOOP_SUMMARIZE
+          TOOL_LOOP_SUMMARIZE_MAX_TOKENS
+          TOOL_MAX_REQUESTS
+          TOOL_MAX_ROUNDS
+          TOOL_TURN_TIMEOUT_SEC
+          TOOL_CORPUS_MAX_BYTES
+          TOOL_MAX_TOKENS_PER_TURN
+          TOOL_MAX_RESPONSE_BYTES
+          TOOL_ALLOWED_GH_API_REPOS
+          TOOL_REQUEST_TIMEOUT_SEC
+          SEARCH_URL
+          TOOL_MAX_SEARCH_RESULTS
+          TOOL_FAILURE_ENFORCEMENT
+          TOOL_MIN_SUCCESSFUL_REQUESTS
+          TOOL_ENABLE_FOR_FORKS
+          AI_REQUEST_TIMEOUT_SEC
+          AI_CONNECT_TIMEOUT_SEC
+          AI_FALLBACK_REQUEST_TIMEOUT_SEC
+          AI_FALLBACK_CONNECT_TIMEOUT_SEC
+        )
+        # The delimiter-free NUL framing cannot be forged by a value: NUL
+        # cannot appear in an environment value, so every value (multiline,
+        # empty, quotes, '=') round-trips byte-for-byte. Nothing is echoed to
+        # the step log.
+        {
+          for key in "${keys[@]}"; do
+            if [ -z "${!key+x}" ]; then
+              echo "::error::Shared env var '${key}' is listed in the export key list but not bound in the 'Export shared review environment' env block." >&2
+              exit 1
+            fi
+            printf '%s\0%s\0' "$key" "${!key}"
+          done
+        } > "$shared_env_file"
+        # Only the path crosses the step boundary — never a value. Once the
+        # path is published the consumers own the lifecycle; drop the EXIT
+        # trap so the success path does NOT delete the file out from under
+        # them (the 'Clean up shared environment' step deletes it later).
+        echo "path=$shared_env_file" >> "$GITHUB_OUTPUT"
+        trap - EXIT
+
+    - name: Check whether review is needed
+      id: precheck
+      shell: bash
+      env:
+        # Shared input/github-context bindings are serialized once by the
+        # 'Export shared review environment' step into an action-local file
+        # under $RUNNER_TEMP and loaded below (#641) — the caller's job
+        # environment is never touched. Only the precheck-specific bindings
+        # remain here: the raw PLATFORM / FORGEJO_API_URL inputs this step
+        # resolves (#367) and the precheck-only pass-throughs.
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
+        PLATFORM: ${{ inputs.platform }}
+        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+        COMMENT_MARKER: ${{ inputs.comment_marker }}
+        PUBLISH_MODE: ${{ inputs.publish_mode }}
+        SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
+        FORCE_REVIEW: ${{ inputs.force_review }}
+        REREVIEW_LABEL: ${{ inputs.rereview_label }}
+        ACTION_REF: ${{ github.action_ref }}
+        LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
+      run: |
+        set -euo pipefail
+        # Load the shared bindings (REPO, PR_NUMBER, AI_MODEL, TOOL_* , ...)
+        # from the action-local file before the precheck runs.
+        source "${{ github.action_path }}/scripts/load_shared_env.sh"
+        load_shared_env "$SHARED_ENV_FILE"
+        bash "${{ github.action_path }}/scripts/check_review_needed.sh"
 
     - name: Wait for CI checks to complete
       id: ci_status
@@ -870,27 +1027,20 @@ runs:
       id: review
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
+        # Shared input/github-context bindings arrive from the action-local
+        # file built by 'Export shared review environment' and are loaded in
+        # the run body below (#641). What remains: the resolved-platform
+        # overrides (#367), review-only inputs (kept out of the shared file so
+        # the precheck's AI_* config-fingerprint sweep sees an unchanged
+        # environment), and the step-output-derived vars this step consumes.
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
-        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
-        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         AI_BASE_URL: ${{ inputs.ai_base_url }}
-        AI_API_FORMAT: ${{ inputs.ai_api_format }}
-        AI_MODEL: ${{ inputs.ai_model }}
         AI_API_KEY: ${{ inputs.ai_api_key }}
         AI_MAX_TOKENS: ${{ inputs.ai_max_tokens }}
-        AI_TEMPERATURE: ${{ inputs.ai_temperature }}
-        AI_RESPONSE_FORMAT: ${{ inputs.ai_response_format }}
-        AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
-        ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
         AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url || inputs.ai_base_url }}
         AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format || inputs.ai_api_format }}
-        AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
         AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key || inputs.ai_api_key }}
         AI_PRIMARY_RETRIES: ${{ inputs.ai_primary_retries }}
         AI_PRIMARY_RETRY_DELAY_SEC: ${{ inputs.ai_primary_retry_delay_sec }}
@@ -898,88 +1048,50 @@ runs:
         VERDICT_POLICY: ${{ inputs.verdict_policy }}
         VALIDATE_REQUIRED_CHECKS: ${{ inputs.validate_required_checks }}
         REQUIRED_CHECK_VALIDATION_MODE: ${{ inputs.required_check_validation_mode }}
-        REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
         AI_PRIMARY_BASE_URL: ${{ inputs.ai_primary_base_url }}
-        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model }}
         AI_PRIMARY_API_FORMAT: ${{ inputs.ai_primary_api_format }}
         AI_PRIMARY_API_KEY: ${{ inputs.ai_primary_api_key }}
         AI_SMART_BASE_URL: ${{ inputs.ai_smart_base_url }}
-        AI_SMART_MODEL: ${{ inputs.ai_smart_model }}
         AI_SMART_API_FORMAT: ${{ inputs.ai_smart_api_format }}
         AI_SMART_API_KEY: ${{ inputs.ai_smart_api_key }}
-        ESCALATE_ON_RISK_FLAGS: ${{ inputs.escalate_on_risk_flags }}
-        ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS: ${{ inputs.escalate_on_incomplete_required_checks }}
-        ESCALATE_ON_FAST_REQUEST_CHANGES: ${{ inputs.escalate_on_fast_request_changes }}
-        ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
-        ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
-        ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
         AI_STREAM: ${{ inputs.ai_stream }}
         AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
         ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
-        RELATED_CODE_CONTEXT: ${{ inputs.related_code_context }}
-        RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
         LINEAR_API_KEY: ${{ inputs.linear_api_key }}
-        LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
-        LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
-        LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
-        SYSTEM_PROMPT: ${{ inputs.system_prompt }}
-        SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
-        SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
-        REVIEW_VERBOSITY: ${{ inputs.review_verbosity }}
-        STANDARDS_FILE: ${{ inputs.standards_file }}
-        STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
-        CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
-        MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
-        REPO_MAP_CONTEXT: ${{ inputs.repo_map_context }}
-        REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
-        PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
-        PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
-        DEEP_REVIEW: ${{ inputs.deep_review }}
-        DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
-        DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
-        DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
-        EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
-        SARIF_FILES: ${{ inputs.sarif_files }}
-        SARIF_MAX_FINDINGS: ${{ inputs.sarif_max_findings }}
-        EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
-        EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
         EVIDENCE_PROVIDER_PARALLELISM: ${{ inputs.evidence_provider_parallelism }}
-        EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
-        EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
-        TOOL_MODE: ${{ inputs.tool_mode }}
-        TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
-        TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
-        TOOL_MCP_NAME_PREFIXES: ${{ inputs.tool_mcp_name_prefixes }}
-        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
-        TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
-        TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
-        TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
-        TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
-        # #540: new names take precedence; the deprecated tool_planning_* inputs
-        # still work as a fallback for one release (removed in v3.0.0).
-        TOOL_TURN_TIMEOUT_SEC: ${{ inputs.tool_turn_timeout_sec != '' && inputs.tool_turn_timeout_sec || inputs.tool_planning_timeout_sec }}
-        TOOL_CORPUS_MAX_BYTES: ${{ inputs.tool_corpus_max_bytes != '' && inputs.tool_corpus_max_bytes || inputs.tool_planning_max_context_bytes }}
-        TOOL_MAX_TOKENS_PER_TURN: ${{ inputs.tool_max_tokens_per_turn != '' && inputs.tool_max_tokens_per_turn || inputs.tool_planning_max_tokens }}
-        TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
-        TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
-        TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
-        SEARCH_URL: ${{ inputs.search_url }}
-        TOOL_MAX_SEARCH_RESULTS: ${{ inputs.tool_max_search_results }}
-        TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool_failure_enforcement }}
-        TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool_min_successful_requests }}
-        TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool_enable_for_forks }}
-        AI_REQUEST_TIMEOUT_SEC: ${{ inputs.ai_request_timeout_sec }}
-        AI_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_connect_timeout_sec }}
-        AI_FALLBACK_REQUEST_TIMEOUT_SEC: ${{ inputs.ai_fallback_request_timeout_sec }}
-        AI_FALLBACK_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_fallback_connect_timeout_sec }}
         CI_STATUS_CHECK: ${{ inputs.ci_status_check }}
         CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
         CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
-      run: bash "${{ github.action_path }}/scripts/run_review.sh"
+      run: |
+        set -euo pipefail
+        # Load the shared bindings (GH_TOKEN, REPO, AI_MODEL, TOOL_* , ...)
+        # from the action-local file before the review runs.
+        source "${{ github.action_path }}/scripts/load_shared_env.sh"
+        load_shared_env "$SHARED_ENV_FILE"
+        bash "${{ github.action_path }}/scripts/run_review.sh"
+
+    - name: Clean up shared environment
+      # Action-scoped lifecycle for the shared env file (#641): it carries
+      # tokens (GH_TOKEN, FORGEJO_TOKEN, TOOL_MCP_TOKEN, ...), so it must not
+      # outlive the composite action — not when should_review is false and
+      # this step is the only consumer left, not when the review failed, and
+      # not when an earlier internal step failed after the file was created.
+      # if: always() guarantees the deletion runs on every one of those paths;
+      # the body is fail-soft so a cleanup problem can never replace the real
+      # action result. The step receives only the file path, never a value.
+      if: always()
+      shell: bash
+      env:
+        SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
+      run: |
+        if [ -n "${SHARED_ENV_FILE:-}" ]; then
+          rm -f -- "$SHARED_ENV_FILE" 2>/dev/null || true
+        fi
+        exit 0
 
     - name: Publish review
       # Single dispatcher for all three publish modes. One superset env block

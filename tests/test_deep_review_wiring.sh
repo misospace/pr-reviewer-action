@@ -188,29 +188,45 @@ check "deep_review_max_tokens input defaults to 4096" \
 check "deep_review_corpus_max_bytes input defaults to 48000" \
   "$(awk '/^  deep_review_corpus_max_bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'48000'"
 
+# #641 moved the shared env bindings into the "Export shared review environment"
+# step (an action-local file consumed by the precheck and the review step), so
+# each binding now appears exactly once — in that step's env block — instead of
+# being duplicated across the precheck and review blocks. The assertion pins the
+# count AND the location, so a future edit that re-duplicates the binding or
+# drops it from the shared block fails here.
+shared_env_section="$(awk '/name: Export shared review environment/,/name: Check whether review is needed/' "$ACTION_YML")"
+
 deep_review_env="$(grep -n 'DEEP_REVIEW:' "$ACTION_YML" | cut -d: -f2- || true)"
-check "DEEP_REVIEW appears exactly twice among env lines" \
-  "$(printf '%s\n' "$deep_review_env" | grep -c . || true)" "2"
-deep_review_env_1="$(printf '%s\n' "$deep_review_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-deep_review_env_2="$(printf '%s\n' "$deep_review_env" | sed -n 2p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-check "DEEP_REVIEW env bindings are identical across blocks" "$deep_review_env_1" "$deep_review_env_2"
+check "DEEP_REVIEW appears exactly once among env lines (shared block only)" \
+  "$(printf '%s\n' "$deep_review_env" | grep -c . || true)" "1"
+check "DEEP_REVIEW env binding lives in the shared export block" \
+  "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW:' || true)" "1"
+check "DEEP_REVIEW env binding is unchanged" \
+  "$(printf '%s\n' "$deep_review_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+  '${{ inputs.deep_review }}'
 
 deep_review_timeout_env="$(grep -n 'DEEP_REVIEW_TIMEOUT_SEC:' "$ACTION_YML" | cut -d: -f2- || true)"
-check "DEEP_REVIEW_TIMEOUT_SEC appears exactly twice among env lines" \
-  "$(printf '%s\n' "$deep_review_timeout_env" | grep -c . || true)" "2"
-deep_review_timeout_env_1="$(printf '%s\n' "$deep_review_timeout_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-deep_review_timeout_env_2="$(printf '%s\n' "$deep_review_timeout_env" | sed -n 2p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-check "DEEP_REVIEW_TIMEOUT_SEC env bindings are identical across blocks" \
-  "$deep_review_timeout_env_1" "$deep_review_timeout_env_2"
+check "DEEP_REVIEW_TIMEOUT_SEC appears exactly once among env lines (shared block only)" \
+  "$(printf '%s\n' "$deep_review_timeout_env" | grep -c . || true)" "1"
+check "DEEP_REVIEW_TIMEOUT_SEC env binding lives in the shared export block" \
+  "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW_TIMEOUT_SEC:' || true)" "1"
+check "DEEP_REVIEW_TIMEOUT_SEC env binding is unchanged" \
+  "$(printf '%s\n' "$deep_review_timeout_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+  '${{ inputs.deep_review_timeout_sec }}'
 
 for budget_var in DEEP_REVIEW_MAX_TOKENS DEEP_REVIEW_CORPUS_MAX_BYTES; do
   budget_env="$(grep -n "${budget_var}:" "$ACTION_YML" | cut -d: -f2- || true)"
-  check "${budget_var} appears exactly twice among env lines" \
-    "$(printf '%s\n' "$budget_env" | grep -c . || true)" "2"
-  budget_env_1="$(printf '%s\n' "$budget_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  budget_env_2="$(printf '%s\n' "$budget_env" | sed -n 2p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  check "${budget_var} env bindings are identical across blocks" "$budget_env_1" "$budget_env_2"
+  check "${budget_var} appears exactly once among env lines (shared block only)" \
+    "$(printf '%s\n' "$budget_env" | grep -c . || true)" "1"
+  check "${budget_var} env binding lives in the shared export block" \
+    "$(printf '%s\n' "$shared_env_section" | grep -c "${budget_var}:" || true)" "1"
 done
+check "DEEP_REVIEW_MAX_TOKENS env binding is unchanged" \
+  "$(grep -n 'DEEP_REVIEW_MAX_TOKENS:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+  'DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}'
+check "DEEP_REVIEW_CORPUS_MAX_BYTES env binding is unchanged" \
+  "$(grep -n 'DEEP_REVIEW_CORPUS_MAX_BYTES:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+  'DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}'
 
 echo ""
 echo "=== precheck.py: deep review config fingerprinted ==="
