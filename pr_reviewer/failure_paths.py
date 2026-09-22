@@ -21,8 +21,15 @@ Design invariants (per #625):
 
 - **Grounded, not fabricated.** Only contracts the caller states (from the
   requirement ledger, docs, tests, or sibling implementations) are checked.
-  A path kind the contract does not name is never checked, and a promised
-  path the code does not contain is skipped.
+  A path kind the contract does not name is never checked. A path kind the
+  contract *does* name is always audited: if the code has no recognizable
+  implementation of that path, the obligation is reported as unverifiable
+  rather than silently passing.
+- **Evidence, not mentions.** A promised observable counts as covered only
+  when it appears as an argument to a recognized write / emit / record /
+  update call. A comment, log message, error string, or TODO that merely
+  mentions the name is not proof — false negatives are preferred to false
+  proof.
 - **Paths are considered separately.** Each terminal-path kind gets its own
   anchor lines and its own coverage check, so a timeout path and an
   exception path with different behavior yield separate leads.
@@ -109,6 +116,18 @@ _PATH_ANCHORS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+#: Operations that represent an actual write/emit/record/update of state.
+#: A promised observable is covered only when it appears in the argument
+#: list of one of these calls — a bare mention (comment, log/error string,
+#: TODO) is not proof. False negatives are preferred to false proof.
+_WRITE_OP = re.compile(
+    r"\b\w*"
+    r"(?:write|emit|record|update|dump|save|persist|append|publish|flush)"
+    r"\w*\s*\(",
+    re.IGNORECASE,
+)
+
+
 def _indent_of(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
@@ -153,10 +172,49 @@ def _anchor_blocks(lines: list[str], kind: str) -> list[tuple[int, list[int]]]:
     return blocks
 
 
+def _strip_comment(line: str) -> str:
+    """Drop a trailing ``#`` comment (conservative: a ``#`` in a string too)."""
+    idx = line.find("#")
+    return line if idx < 0 else line[:idx]
+
+
+def _write_call_arguments(text: str) -> list[str]:
+    """Return the argument text of every write/emit/record/update call.
+
+    Calls may span multiple lines, so parentheses are balanced across the
+    whole (comment-stripped) block; the observable must appear inside the
+    argument list, not merely somewhere in the block.
+    """
+    calls: list[str] = []
+    for match in _WRITE_OP.finditer(text):
+        open_paren = match.end() - 1
+        depth = 0
+        for i in range(open_paren, len(text)):
+            char = text[i]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(text[open_paren + 1 : i])
+                    break
+        else:
+            calls.append(text[open_paren + 1 :])
+    return calls
+
+
 def _covered(names: list[str], block_lines: list[str]) -> set[str]:
-    """Observables in *names* that appear (as a write/record) in the block."""
-    text = "\n".join(block_lines)
-    return {name for name in names if name in text}
+    """Observables in *names* actually written/emitted/recorded in the block.
+
+    Coverage requires the observable to appear inside the argument list of a
+    recognized write/emit/record/update call. A comment, log message, error
+    string, or TODO that merely mentions the name is not proof.
+    """
+    text = "\n".join(_strip_comment(line) for line in block_lines)
+    calls = _write_call_arguments(text)
+    if not calls:
+        return set()
+    return {name for name in names if any(name in call for call in calls)}
 
 
 def _lead(kind: str, anchor_line: int, name: str, file_path: str | None) -> dict[str, Any]:
@@ -182,6 +240,23 @@ def _lead(kind: str, anchor_line: int, name: str, file_path: str | None) -> dict
         "file": file_path,
         "line": line_no,
         "message": message,
+    }
+
+
+def _unimplemented_path_lead(
+    kind: str, names: list[str], file_path: str | None
+) -> dict[str, Any]:
+    promised = ", ".join(f"'{name}'" for name in names)
+    return {
+        "severity": "major",
+        "category": "failure-contract",
+        "file": file_path,
+        "line": None,
+        "message": (
+            f"contracted terminal path '{kind}' has no recognizable "
+            f"implementation: promised observable(s) {promised} cannot be "
+            f"verified on this path"
+        ),
     }
 
 
@@ -221,10 +296,11 @@ def analyze_failure_paths(
     ``contract`` is an explicitly stated mapping of path kind → promised
     observables (see :func:`load_contract`). Grounding rules: a kind the
     contract does not name is never checked (no fabricated contracts); a
-    promised path the code does not contain is skipped. Each anchored
-    terminal path is checked separately. The ``disabled`` kind inverts
-    when its promise is empty: the disabled/no-op path must emit none of
-    the observables promised anywhere in the contract.
+    contracted kind the code does not implement at all yields an
+    unverifiable-path lead (never a silent pass). Each anchored terminal
+    path is checked separately. The ``disabled`` kind inverts when its
+    promise is empty: the disabled/no-op path must emit none of the
+    observables promised anywhere in the contract.
 
     Returns deduplicated leads, capped at :data:`MAX_LEADS`, each shaped
     for the ``correctness`` specialist (``severity`` / ``category`` /
@@ -269,8 +345,17 @@ def analyze_failure_paths(
             continue
         names = names_by_kind[kind]
         invert = kind == "disabled" and not names
+        anchors = by_kind[kind]
+        if not anchors:
+            # A contracted path with non-empty promises and no recognizable
+            # implementation is unverifiable, not clean. The inverted
+            # (empty-promise) disabled kind is exempt: with no no-op path
+            # there is nothing to emit.
+            if names and not invert:
+                leads.append(_unimplemented_path_lead(kind, list(names), file))
+            continue
         check_names = sorted(all_promised) if invert else list(names)
-        for anchor_line, block in by_kind[kind]:
+        for anchor_line, block in anchors:
             covered = _covered(check_names, [lines[i] for i in block])
             if invert:
                 missing = covered  # emitted despite the promise of none

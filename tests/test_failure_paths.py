@@ -360,6 +360,100 @@ def test_disabled_is_not_checked_when_not_part_of_the_contract():
 
 
 # ---------------------------------------------------------------------------
+# A contracted path with no recognizable implementation is never clean
+# ---------------------------------------------------------------------------
+
+
+def test_contracted_path_with_no_recognizable_implementation_produces_a_lead():
+    code = "def f():\n    write('response.json')\n"
+    contract = _contract({"success": ["response.json"], "write_failure": ["response.json"]})
+    leads = analyze_failure_paths(code, contract=contract, file="pipeline.py")
+    assert len(leads) == 1
+    lead = leads[0]
+    assert "terminal path 'write_failure'" in lead["message"]
+    assert "no recognizable implementation" in lead["message"]
+    assert "response.json" in lead["message"]
+    assert lead["file"] == "pipeline.py"
+    assert lead["line"] is None
+    assert lead["severity"] == "major"
+    assert lead["category"] == "failure-contract"
+
+
+def test_uncontracted_missing_paths_still_produce_no_lead():
+    code = "def f():\n    write('response.json')\n"
+    # Only 'success' is contracted; the absent timeout/exception/write_failure
+    # paths are neither checked nor reported (no fabricated contracts).
+    contract = _contract({"success": ["response.json"]})
+    assert analyze_failure_paths(code, contract=contract) == []
+
+
+def test_empty_promised_disabled_path_with_no_implementation_is_exempt():
+    # The inverted (empty-promise) disabled kind has nothing to check when the
+    # code exposes no no-op path — there is no path that could emit.
+    code = "def f():\n    write('response.json')\n"
+    contract = _contract({"success": ["response.json"], "disabled": []})
+    assert analyze_failure_paths(code, contract=contract) == []
+
+
+# ---------------------------------------------------------------------------
+# Coverage requires a write/emit/record/update, not a mention
+# ---------------------------------------------------------------------------
+
+
+def test_mere_mentions_do_not_satisfy_coverage():
+    code = (
+        "def f():\n"
+        "    # TODO: write response.json\n"
+        "    log('response.json missing')\n"
+        "    raise RuntimeError('response.json missing')\n"
+        "    print('response.json')\n"
+    )
+    contract = _contract({"success": ["response.json"]})
+    leads = analyze_failure_paths(code, contract=contract, file="pipeline.py")
+    assert len(leads) == 1
+    assert "omits promised observable 'response.json'" in leads[0]["message"]
+
+
+def test_real_write_of_the_observable_satisfies_coverage():
+    for op in ("write", "emit", "record", "update", "dump", "save", "persist"):
+        code = f"def f():\n    {op}('response.json')\n"
+        assert (
+            analyze_failure_paths(code, contract=_contract({"success": ["response.json"]}))
+            == []
+        )
+
+
+def test_multiline_write_call_satisfies_coverage():
+    code = (
+        "def f():\n"
+        "    _guarded_write(\n"
+        "        f'{root}/response.json',\n"
+        "        json.dumps(data),\n"
+        "        cancel=cancel,\n"
+        "    )\n"
+    )
+    assert analyze_failure_paths(code, contract=_contract({"success": ["response.json"]})) == []
+
+
+def test_mismatched_write_does_not_cover_a_different_observable():
+    # A write of a *different* artifact is not coverage for the promised one,
+    # even though a write call is present in the same block.
+    code = (
+        "def f():\n"
+        "    try:\n"
+        "        do()\n"
+        "    except Exception as exc:\n"
+        "        write('specialist.json')\n"
+        "        log('response.json missing')\n"
+    )
+    contract = _contract({"exception": ["response.json"]})
+    leads = analyze_failure_paths(code, contract=contract, file="runner.py")
+    assert len(leads) == 1
+    assert "terminal path 'exception'" in leads[0]["message"]
+    assert "response.json" in leads[0]["message"]
+
+
+# ---------------------------------------------------------------------------
 # #623-derived fixture: the historical class is detected semantically
 # ---------------------------------------------------------------------------
 
@@ -408,8 +502,9 @@ def test_fixture_contract_is_grounded_in_623_artifact_set():
     # the catastrophic-exception path alike.
     assert paths["success"] == ["response.json", "specialists.json"]
     assert paths["exception"] == ["response.json"]
-    # Unnamed kinds are not fabricated by the loader.
-    for kind in ("validation", "transport"):
+    # Unnamed kinds are not fabricated by the loader, and the fixture does not
+    # model a write-failure path — so no such promise is asserted.
+    for kind in ("validation", "transport", "write_failure"):
         assert kind not in paths
 
 
