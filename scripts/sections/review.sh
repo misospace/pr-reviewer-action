@@ -13,7 +13,7 @@ log "Analyzing with $AI_MODEL using $AI_API_FORMAT API format..."
 # this cannot carry prompt injection from the PR.
 build_user_message() {
   local classification_file="${1:-classification.json}"
-  local base="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, not_applicable, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Use not_applicable only for a requirement demonstrably outside this change's scope, with file/diff evidence identifying that scope."
+  local base="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated."
   if [ ! -s "$classification_file" ]; then
     printf '%s' "$base"
     return
@@ -22,8 +22,8 @@ build_user_message() {
 import json, sys
 
 base = ("Analyze this pull request corpus and return STRICT JSON. "
-        "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, not_applicable, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). "
-        "Use not_applicable only for a requirement demonstrably outside this change's scope, with file/diff evidence identifying that scope.")
+        "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). "
+        "Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.")
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
     if not isinstance(data, dict):

@@ -9,13 +9,15 @@ truncation (coverage rows, evidence items, evidence characters), fail-soft
 degradation of unmatched / duplicate / malformed claims (visible
 ``dropped-`` / ``duplicate-`` / ``coverage-truncated-`` errors), the
 ``not-covered-by-reviewer`` rows for uncovered ledger requirements,
-determinism (identical JSON bytes, echoed ``ledger_sha``), the #623
-dogfood fixture, the CLI, the #626 ``not_applicable`` scope-evidence rule
-(file / diff concrete evidence required, else downgraded to ``unknown``),
-and the #626 completeness gate (uncovered-ids extraction, the
-unknown-with-zero-findings escalation decision, and the targeted, fence-
-safe retry prompt). The module never raises on malformed input, so the
-fail-soft cases are exercised directly.
+determinism (identical JSON bytes, echoed ``ledger_sha``), the CLI, the
+#626 rule that every model-emitted ``not_applicable`` downgrades to
+``unknown`` (no deterministic scope proof exists yet — concrete file /
+diff refs included), and the #626 completeness gate (uncovered-ids
+extraction, the unknown-escalation decision — an unrelated finding does
+not prevent a retry, and a ``violated`` row is not an unknown target —
+plus the corpus-only, targeted, fence-safe retry prompt that promises no
+new tool / test / CI execution). The module never raises on malformed
+input, so the fail-soft cases are exercised directly.
 """
 
 from __future__ import annotations
@@ -742,8 +744,16 @@ def test_load_coverage_fail_soft(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 9. not_applicable scope-evidence rule (#626)
+# 9. not_applicable is not self-authenticating (#626)
 # ---------------------------------------------------------------------------
+#
+# The artifact has no deterministic requirement-to-change-scope mapping, so
+# every model-emitted not_applicable downgrades to unknown — a concrete file
+# / diff ref included — with the
+# downgraded-na-without-deterministic-scope-proof note.
+
+
+NA_NOTE = "downgraded-na-without-deterministic-scope-proof"
 
 
 def _na_claim(rid, kind, ref="", detail="", verification_required=False):
@@ -755,65 +765,99 @@ def _na_claim(rid, kind, ref="", detail="", verification_required=False):
     return normalize_requirement_coverage(claims, ledger)
 
 
-def test_na_with_concrete_file_evidence_credited():
+def test_na_with_concrete_file_evidence_downgraded():
+    # even a CONCRETE file ref is model-authored, not a deterministic scope
+    # proof
     art = _na_claim("req-000000000000", "file", ref="src/app.py", detail="no change")
     row = art["coverage"][0]
-    assert row["status"] == "not_applicable"
-    assert row["credited"] is False  # not_applicable never maps to satisfied
-    assert "downgraded-na-without-scoped-evidence" not in row["notes"]
-    assert art["summary"]["not_applicable"] == 1
+    assert row["status"] == "unknown"
+    assert row["credited"] is False
+    assert NA_NOTE in row["notes"]
+    assert "status-invalid" not in row["notes"]
+    assert art["summary"]["not_applicable"] == 0
+    assert art["summary"]["unknown"] == 1
 
 
-def test_na_with_concrete_diff_evidence_credited():
+def test_na_with_concrete_diff_evidence_downgraded():
     art = _na_claim("req-000000000000", "diff", detail="diff shows no change")
-    assert art["coverage"][0]["status"] == "not_applicable"
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
+
+
+def test_na_with_concrete_file_and_diff_downgraded():
+    # concrete file AND diff refs together still do not save the claim
+    ledger = _ledger([_entry(0, "A one")])
+    claims = [
+        {"requirement_id": "req-000000000000", "status": "not_applicable",
+         "evidence": [_ev("file", ref="src/app.py", detail="untouched"),
+                      _ev("diff", detail="no change to this area")]},
+    ]
+    art = normalize_requirement_coverage(claims, ledger)
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
+    # the downgrade is about the status, not a verdict on the refs: the
+    # (concrete) evidence is preserved
+    assert len(row["evidence"]) == 2
 
 
 def test_na_with_empty_evidence_downgraded():
     art = _na_claim("req-000000000000", "file")
     row = art["coverage"][0]
     assert row["status"] == "unknown"
-    assert "downgraded-na-without-scoped-evidence" in row["notes"]
+    assert NA_NOTE in row["notes"]
 
 
 def test_na_with_only_test_evidence_downgraded():
     art = _na_claim("req-000000000000", "test", ref="tests/t.py")
     assert art["coverage"][0]["status"] == "unknown"
-    assert "downgraded-na-without-scoped-evidence" in art["coverage"][0]["notes"]
+    assert NA_NOTE in art["coverage"][0]["notes"]
 
 
 def test_na_with_only_tool_evidence_downgraded():
     art = _na_claim("req-000000000000", "tool", ref="make check")
-    assert art["coverage"][0]["status"] == "unknown"
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
 
 
 def test_na_with_only_ci_evidence_downgraded():
     art = _na_claim("req-000000000000", "ci", detail="green")
-    assert art["coverage"][0]["status"] == "unknown"
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
 
 
 def test_na_with_non_concrete_file_downgraded():
-    # kind recognised but ref / detail empty -> not concrete
+    # kind recognised but ref / detail empty — same uniform downgrade
     art = _na_claim("req-000000000000", "file")
-    assert art["coverage"][0]["status"] == "unknown"
-    assert "downgraded-na-without-scoped-evidence" in art["coverage"][0]["notes"]
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
 
 
-def test_na_with_mixed_file_plus_test_credited_when_file_concrete():
+def test_na_with_concrete_file_and_test_downgraded():
+    # concrete file PLUS concrete test evidence: still no deterministic
+    # scope proof
     ledger = _ledger([_entry(0, "A one")])
     claims = [
         {"requirement_id": "req-000000000000", "status": "not_applicable",
-         "evidence": [_ev("test", ref=""), _ev("file", ref="src/app.py")]},
+         "evidence": [_ev("test", ref="tests/t.py"), _ev("file", ref="src/app.py")]},
     ]
     art = normalize_requirement_coverage(claims, ledger)
-    assert art["coverage"][0]["status"] == "not_applicable"
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
 
 
-def test_na_on_verification_required_invariant_file_only_credited():
-    # the scope rule only needs file / diff, even for an invariant
+def test_na_on_verification_required_invariant_downgraded():
+    # the downgrade is uniform: it applies to invariants as well
     art = _na_claim("req-000000000000", "file", ref="src/app.py",
                     verification_required=True)
-    assert art["coverage"][0]["status"] == "not_applicable"
+    row = art["coverage"][0]
+    assert row["status"] == "unknown"
+    assert NA_NOTE in row["notes"]
 
 
 def test_na_status_case_insensitive():
@@ -823,7 +867,12 @@ def test_na_status_case_insensitive():
          "evidence": [_ev("file", ref="src/app.py")]},
     ]
     art = normalize_requirement_coverage(claims, ledger)
-    assert art["coverage"][0]["status"] == "not_applicable"
+    row = art["coverage"][0]
+    # the uppercase status is recognised (no status-invalid), then the
+    # uniform NA downgrade applies
+    assert row["status"] == "unknown"
+    assert "status-invalid" not in row["notes"]
+    assert NA_NOTE in row["notes"]
 
 
 def test_na_summary_counts_are_exact():
@@ -841,9 +890,10 @@ def test_na_summary_counts_are_exact():
         # req-2 / req-3 not covered -> unknown
     ]
     art = normalize_requirement_coverage(claims, ledger)
+    # the NA claim counts as unknown, not not_applicable
     assert art["summary"] == {
-        "total": 4, "satisfied": 1, "violated": 0, "not_applicable": 1,
-        "unknown": 2, "credited": 1,
+        "total": 4, "satisfied": 1, "violated": 0, "not_applicable": 0,
+        "unknown": 3, "credited": 1,
     }
 
 
@@ -936,29 +986,9 @@ def test_should_escalate_unknown_with_zero_findings(tmp_path):
     ) == (True, ["req-000000000000"])
 
 
-def test_should_escalate_null_findings_counts_zero(tmp_path):
-    ledger = _ledger([_entry(0, "A")])
-    art = _artifact([_row_art("req-000000000000", "unknown")])
-    cov = _write(tmp_path / "cov.json", art)
-    led = _write(tmp_path / "led.json", ledger)
-    out = _write(tmp_path / "out.json", {"verdict": "approve", "findings": None})
-    assert requirement_coverage.should_escalate_coverage(
-        str(cov), str(led), str(out)
-    ) == (True, ["req-000000000000"])
-
-
-def test_should_escalate_missing_findings_counts_zero(tmp_path):
-    ledger = _ledger([_entry(0, "A")])
-    art = _artifact([_row_art("req-000000000000", "unknown")])
-    cov = _write(tmp_path / "cov.json", art)
-    led = _write(tmp_path / "led.json", ledger)
-    out = _write(tmp_path / "out.json", {"verdict": "approve"})
-    assert requirement_coverage.should_escalate_coverage(
-        str(cov), str(led), str(out)
-    ) == (True, ["req-000000000000"])
-
-
-def test_should_escalate_with_findings_present_no_retry(tmp_path):
+def test_should_escalate_unknown_despite_unrelated_findings(tmp_path):
+    # an unrelated finding does not establish coverage of the unknown
+    # requirement, so the retry runs regardless of the findings payload
     ledger = _ledger([_entry(0, "A")])
     art = _artifact([_row_art("req-000000000000", "unknown")])
     cov = _write(tmp_path / "cov.json", art)
@@ -978,23 +1008,35 @@ def test_should_escalate_with_findings_present_no_retry(tmp_path):
             ],
         },
     )
-    # no retry, but the unverified ids are still reported (for logging)
     assert requirement_coverage.should_escalate_coverage(
         str(cov), str(led), str(out)
-    ) == (False, ["req-000000000000"])
+    ) == (True, ["req-000000000000"])
 
 
-def test_should_escalate_malformed_output_fail_soft(tmp_path):
-    ledger = _ledger([_entry(0, "A")])
-    art = _artifact([_row_art("req-000000000000", "unknown")])
+def test_should_escalate_violated_only_no_retry(tmp_path):
+    # a violated requirement is already on the normal finding/verdict path;
+    # it is not itself an unknown retry target
+    ledger = _ledger([_entry(0, "A"), _entry(1, "B")])
+    art = _artifact([
+        _row_art("req-000000000000", "violated"),
+        _row_art("req-000000000001", "satisfied"),
+    ])
     cov = _write(tmp_path / "cov.json", art)
     led = _write(tmp_path / "led.json", ledger)
-    bad = tmp_path / "out.json"
-    bad.write_text("{not json", encoding="utf-8")
-    # malformed parsed output -> zero findings -> escalate
+    out = _write(tmp_path / "out.json", {"verdict": "request_changes", "findings": []})
     assert requirement_coverage.should_escalate_coverage(
-        str(cov), str(led), str(bad)
-    ) == (True, ["req-000000000000"])
+        str(cov), str(led), str(out)
+    ) == (False, [])
+
+
+def test_should_escalate_malformed_coverage_fail_soft(tmp_path):
+    # a malformed coverage artifact yields no unknown ids -> no retry
+    bad = tmp_path / "cov.json"
+    bad.write_text("{not json", encoding="utf-8")
+    led = _write(tmp_path / "led.json", _ledger([_entry(0, "A")]))
+    assert requirement_coverage.should_escalate_coverage(
+        str(bad), str(led), str(tmp_path / "out.json")
+    ) == (False, [])
     # missing files -> fail-soft False
     assert requirement_coverage.should_escalate_coverage(
         str(tmp_path / "nope.json"),
@@ -1075,3 +1117,24 @@ def test_prompt_deterministic():
     a = requirement_coverage.render_coverage_retry_prompt(art, ledger)
     b = requirement_coverage.render_coverage_retry_prompt(art, ledger)
     assert a == b
+
+
+def test_retry_prompt_contract_is_corpus_only():
+    # the retry prompt must state that verification is limited to the
+    # corpus...
+    header = requirement_coverage.COVERAGE_RETRY_HEADER
+    assert "only from evidence already present in the supplied PR corpus" in header
+    # ...and must not promise tool / test / CI execution
+    assert "do not claim new tool, test, or CI execution" in header
+
+
+def test_prompt_is_corpus_only_and_no_execution_promise():
+    ledger = _ledger([_entry(0, "A one")])
+    art = _artifact([_row_art("req-000000000000", "unknown")])
+    prompt = requirement_coverage.render_coverage_retry_prompt(art, ledger)
+    assert "only from evidence already present in the supplied PR corpus" in prompt
+    assert "do not claim new tool, test, or CI execution" in prompt
+    # the old wording promised read-only checks; it must be gone
+    assert "run relevant read-only checks" not in prompt
+    # the zero-findings gate is no longer part of the prompt framing
+    assert "produced no findings" not in prompt
