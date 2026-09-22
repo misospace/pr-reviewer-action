@@ -126,6 +126,33 @@ def test_load_contract_rejects_unknown_path_kinds_and_bad_shapes():
             load_contract(dump({"paths": {"timeout": "not-a-list"}}))
 
 
+def test_load_contract_fails_closed_on_malformed_paths(tmp_path):
+    import json
+
+    # A NUL byte in the path is rejected by the OS layer (ValueError); a
+    # missing path surfaces as FileNotFoundError. Neither is swallowed, so a
+    # malformed contract path can never be read as if it were valid.
+    with pytest.raises(ValueError):
+        load_contract(str(tmp_path / "contract.json") + "\x00")
+    with pytest.raises(FileNotFoundError):
+        load_contract(str(tmp_path / "does-not-exist.json"))
+
+
+def test_load_contract_reads_through_a_symlink_and_fails_closed_when_broken(tmp_path):
+    import json
+
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"paths": {"success": ["response.json"]}}), encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert load_contract(link)["paths"]["success"] == ["response.json"]
+
+    broken = tmp_path / "broken.json"
+    broken.symlink_to(tmp_path / "missing.json")
+    with pytest.raises(FileNotFoundError):
+        load_contract(broken)
+
+
 def test_all_seven_terminal_path_kinds_are_recognized():
     assert TERMINAL_PATH_KINDS == (
         "success",
