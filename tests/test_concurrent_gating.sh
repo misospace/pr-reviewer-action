@@ -374,7 +374,11 @@ check_contains "CI ran flag retained for the corpus rebuild" "$LC_STATE" "ci_act
 check_contains "specialist ran flag retained for the step summary" "$LC_STATE" "specialist_active=<true>"
 
 echo ""
-echo "=== lifecycle: abnormal exit terminates + reaps both gate children ==="
+echo "=== lifecycle: abnormal exit terminates + reaps the gate process tree ==="
+# Mirror the real topology: the backgrounded wrapper shell and the long-lived
+# payload (wait_for_ci.sh / run_specialists.py) are DISTINCT processes, and the
+# payload owns a subprocess of its own. Killing only the tracked PID is the bug
+# this pins; cleanup must reap the whole tree.
 ABN="$TMP/abn"
 mkdir -p "$ABN"
 abn_run() {
@@ -385,12 +389,25 @@ abn_run() {
     error() { :; }
     export CI_GATE_LOG="$ABN/ci.log" SPECIALIST_GATE_LOG="$ABN/spec.log"
     export CI_CHECKS_FILE="$ABN/ci.md"
-    wait_for_ci_command() { echo "$BASHPID" > "$ABN/ci.pid"; exec sleep 30; }
-    specialist_command() { echo "$BASHPID" > "$ABN/spec.pid"; exec sleep 30; }
+    wait_for_ci_command() {
+      echo "$BASHPID" > "$ABN/ci.wrapper.pid"
+      bash -c "echo \$\$ > '$ABN/ci.payload.pid'; sleep 300 & echo \$! > '$ABN/ci.grandchild.pid'; wait"
+      :
+    }
+    specialist_command() {
+      echo "$BASHPID" > "$ABN/spec.wrapper.pid"
+      bash -c "echo \$\$ > '$ABN/spec.payload.pid'; sleep 300 & echo \$! > '$ABN/spec.grandchild.pid'; wait"
+      :
+    }
     build_specialist_corpus_command() { return 0; }
     export CI_STATUS_CHECK=true DEEP_REVIEW=true
     fork_ci_gate
     fork_specialist_gate
+    # Wait until both trees are fully up, then exit abnormally before any join.
+    for _ in $(seq 1 100); do
+      [ -s "$ABN/ci.grandchild.pid" ] && [ -s "$ABN/spec.grandchild.pid" ] && break
+      sleep 0.02
+    done
     exit 7
   )
 }
@@ -400,9 +417,20 @@ abn_run || abn_rc=$?
 abn_elapsed=$(( $(now_ms) - abn_start ))
 check "abnormal exit: original nonzero status survives cleanup" "$abn_rc" "7"
 for gate in ci spec; do
-  gate_pid="$(cat "$ABN/$gate.pid" 2>/dev/null || echo "")"
-  if [ -n "$gate_pid" ] && kill -0 "$gate_pid" 2>/dev/null; then gate_alive=yes; else gate_alive=no; fi
-  check "abnormal exit: $gate gate child is terminated + reaped" "$gate_alive" "no"
+  wrapper_pid="$(cat "$ABN/$gate.wrapper.pid" 2>/dev/null || echo "")"
+  payload_pid="$(cat "$ABN/$gate.payload.pid" 2>/dev/null || echo "")"
+  grandchild_pid="$(cat "$ABN/$gate.grandchild.pid" 2>/dev/null || echo "")"
+  check "$gate: wrapper and payload are distinct processes" \
+    "$([ -n "$wrapper_pid" ] && [ -n "$payload_pid" ] && [ "$wrapper_pid" != "$payload_pid" ] && echo yes || echo no)" "yes"
+  for label in wrapper payload grandchild; do
+    case "$label" in
+      wrapper) proc_pid="$wrapper_pid" ;;
+      payload) proc_pid="$payload_pid" ;;
+      grandchild) proc_pid="$grandchild_pid" ;;
+    esac
+    if [ -n "$proc_pid" ] && kill -0 "$proc_pid" 2>/dev/null; then proc_alive=yes; else proc_alive=no; fi
+    check "$gate $label: terminated + reaped after abnormal exit" "$proc_alive" "no"
+  done
 done
 if [ "$abn_elapsed" -lt 8000 ]; then abn_bounded=ok; else abn_bounded="slow:${abn_elapsed}ms"; fi
 check "abnormal exit: cleanup is bounded [${abn_elapsed}ms]" "$abn_bounded" "ok"

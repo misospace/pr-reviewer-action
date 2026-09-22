@@ -200,27 +200,88 @@ join_specialist_gate() {
 # running: the CI child retains GitHub/Forgejo credentials and may keep
 # polling, and the specialist child retains the full reviewer environment
 # (model credentials included). install_gate_lifecycle_trap() gives both gate
-# children deterministic ownership on abnormal exit. Cleanup is bounded: TERM,
-# a short grace poll, then KILL, then a final wait to reap the child.
+# children deterministic ownership on abnormal exit.
+#
+# The background job is a shell wrapper; the real workload
+# (wait_for_ci.sh / run_specialists.py) and its own subprocesses (gh/curl,
+# sleep, transport calls) run beneath it. Depending on the bash version the
+# wrapper may also exec the workload, so the tracked PID is sometimes the
+# wrapper and sometimes the workload — killing only that PID can leave the
+# rest of the tree alive. Cleanup therefore walks the full descendant tree
+# (pgrep -P), signals children before the leader (so they are still
+# addressable), then escalates to KILL. It is bounded: TERM, a short grace
+# poll, then KILL, then a final wait to reap the leader.
 GATE_CLEANUP_GRACE_STEPS="${GATE_CLEANUP_GRACE_STEPS:-20}"
 GATE_CLEANUP_GRACE_INTERVAL_SEC="${GATE_CLEANUP_GRACE_INTERVAL_SEC:-0.1}"
+GATE_CLEANUP_SETTLE_STEPS="${GATE_CLEANUP_SETTLE_STEPS:-5}"
+
+# Emit every descendant PID of $1, breadth-first (children before
+# grandchildren). A missing pgrep yields no descendants, which degrades to
+# killing the tracked PID alone.
+gate_descendants() {
+  local frontier="$1"
+  local next=""
+  local child p
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do
+      while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        printf '%s\n' "$child"
+        next="$next $child"
+      done < <(pgrep -P "$p" 2>/dev/null || true)
+    done
+    frontier="$next"
+  done
+}
+
+gate_any_alive() {
+  local p
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    if kill -0 "$p" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 gate_terminate_and_reap() {
   local pid="$1"
   [[ -n "$pid" ]] || return 0
-  local i=0
+  local i=0 d
+  local -a targets=()
   if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$GATE_CLEANUP_GRACE_STEPS" ]; do
-      sleep "$GATE_CLEANUP_GRACE_INTERVAL_SEC" 2>/dev/null || true
-      i=$((i + 1))
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
+    while IFS= read -r d; do
+      [ -n "$d" ] && targets+=("$d")
+    done < <(gate_descendants "$pid")
   fi
-  # Reap whatever is left (a no-op when the child already exited), so no
-  # zombie or surviving process is left for the runner to clean up.
+
+  # Children first, deepest first, with a brief pause between levels so a
+  # wrapper blocked waiting on a just-signaled payload can observe its exit
+  # before the wrapper itself is signaled. Bounded by GATE_CLEANUP_SETTLE_STEPS.
+  i=0
+  for (( d=${#targets[@]}-1; d>=0; d-- )); do
+    [ "$i" -ge "$GATE_CLEANUP_SETTLE_STEPS" ] && break
+    kill -TERM "${targets[$d]}" 2>/dev/null || true
+    sleep "$GATE_CLEANUP_GRACE_INTERVAL_SEC" 2>/dev/null || true
+    i=$((i + 1))
+  done
+
+  kill -TERM "$pid" 2>/dev/null || true
+
+  # Bounded grace on the captured tree, then escalate to KILL.
+  i=0
+  while [ "$i" -lt "$GATE_CLEANUP_GRACE_STEPS" ] && gate_any_alive "$pid" "${targets[@]}"; do
+    sleep "$GATE_CLEANUP_GRACE_INTERVAL_SEC" 2>/dev/null || true
+    i=$((i + 1))
+  done
+  for d in "${targets[@]}"; do
+    kill -KILL "$d" 2>/dev/null || true
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+
+  # Reap the leader so no zombie is left for the runner to clean up.
   wait "$pid" 2>/dev/null || true
 }
 
