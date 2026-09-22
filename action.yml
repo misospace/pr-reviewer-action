@@ -725,10 +725,10 @@ outputs:
     value: ${{ steps.precheck.outputs.diff_fingerprint }}
   ci_status_skipped:
     description: Whether CI status check was skipped (true) or completed (false)
-    value: ${{ steps.ci_status.outputs.ci_status_skipped }}
+    value: ${{ steps.review.outputs.ci_status_skipped }}
   ci_status_final:
     description: Final CI state (success/failure) when ci_status_check completed
-    value: ${{ steps.ci_status.outputs.ci_status_final }}
+    value: ${{ steps.review.outputs.ci_status_final }}
   cache_hit_ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
     value: ${{ steps.review.outputs.cache_hit_ratio }}
@@ -771,7 +771,7 @@ runs:
       #     the review step's block: loading them in the precheck would widen
       #     its environment, whose AI_* sweep feeds the config fingerprint
       #     and would silently invalidate every stored review;
-      #   - step-output-derived vars (CI_STATUS_*, IS_FORK_PR) stay in the
+      #   - step-output-derived vars (IS_FORK_PR, PR_HEAD_SHA) stay in the
       #     step that consumes them.
       # The key list in the run body must match this env block 1:1 —
       # tests/test_shared_env_wiring.sh pins both directions and runs the
@@ -999,29 +999,6 @@ runs:
         load_shared_env "$SHARED_ENV_FILE"
         bash "${{ github.action_path }}/scripts/check_review_needed.sh"
 
-    - name: Wait for CI checks to complete
-      id: ci_status
-      if: inputs.ci_status_check == 'true' && steps.precheck.outputs.should_review == 'true'
-      continue-on-error: true
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
-        FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
-        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
-        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
-        REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
-        CI_STATUS_CHECK: ${{ inputs.ci_status_check }}
-        CI_TIMEOUT_SEC: ${{ inputs.ci_timeout_sec }}
-        CI_INTERVAL_SEC: ${{ inputs.ci_interval_sec }}
-        CI_SKIP_ON_TIMEOUT: ${{ inputs.ci_skip_on_timeout }}
-        CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
-      run: bash "${{ github.action_path }}/scripts/wait_for_ci.sh"
-
     - name: Run AI review
       if: steps.precheck.outputs.should_review == 'true'
       id: review
@@ -1061,10 +1038,19 @@ runs:
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
         EVIDENCE_PROVIDER_PARALLELISM: ${{ inputs.evidence_provider_parallelism }}
+        # #634: CI gating moved into the review pipeline so it forks
+        # concurrently with the advisory specialist phase (scripts/sections/
+        # gating.sh). wait_for_ci.sh writes ci_status_final / ci_status_skipped
+        # to this step's $GITHUB_OUTPUT, so the action outputs below source
+        # them from steps.review. The historical continue-on-error semantics
+        # are preserved inside the pipeline: a CI timeout/failure never blocks
+        # the review.
         CI_STATUS_CHECK: ${{ inputs.ci_status_check }}
-        CI_STATUS_FINAL: ${{ steps.ci_status.outputs.ci_status_final }}
-        CI_STATUS_SKIPPED: ${{ steps.ci_status.outputs.ci_status_skipped }}
+        CI_TIMEOUT_SEC: ${{ inputs.ci_timeout_sec }}
+        CI_INTERVAL_SEC: ${{ inputs.ci_interval_sec }}
+        CI_SKIP_ON_TIMEOUT: ${{ inputs.ci_skip_on_timeout }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
       run: |
         set -euo pipefail

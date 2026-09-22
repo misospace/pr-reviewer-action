@@ -50,48 +50,49 @@ check_contains "checks for missing GH_TOKEN" \
 check_contains "exits 0 (not failure) when token missing" \
   "$wait_content" 'exit 0'
 
-# ── Test 4: action.yml CI step has continue-on-error (THE FIX) ──
+# ── Test 4: CI gating moved into the review pipeline (#634) ──
 echo ""
-echo "=== Test: action.yml CI wait step has continue-on-error ==="
+echo "=== Test: action.yml standalone CI wait step removed ==="
 action_content="$(cat "$ACTION_YML")"
-ci_step_section="$(awk '/Wait for CI checks to complete/,/run: bash.*wait_for_ci/' "$ACTION_YML")"
+GATING_SH="$SCRIPT_DIR/scripts/sections/gating.sh"
+gating_content="$(cat "$GATING_SH")"
 
-check_contains "CI wait step named correctly" \
-  "$ci_step_section" "Wait for CI checks to complete"
-check_contains "CI wait step has continue-on-error: true (THE FIX)" \
-  "$ci_step_section" "continue-on-error: true"
-check_contains "CI wait step id is ci_status" \
-  "$ci_step_section" "id: ci_status"
+check_not_contains "standalone CI wait step removed (fork lives in gating.sh)" \
+  "$action_content" "name: Wait for CI checks to complete"
+check_contains "gating.sh forks wait_for_ci.sh" \
+  "$gating_content" 'bash "$SCRIPT_DIR/wait_for_ci.sh"'
+check_contains "gating.sh CI join preserves the old continue-on-error fail-soft" \
+  "$gating_content" 'CI status gating exited ${status}; continuing (CI evidence is advisory)'
+check_contains "gating.sh CI join guards the wait against set -e" \
+  "$gating_content" 'wait "$CI_GATE_PID" || status=$?'
 
-# ── Test 5: action.yml passes correct env vars to wait_for_ci.sh ──
+# ── Test 5: action.yml passes correct CI env vars to the review step ──
 echo ""
-echo "=== Test: action.yml passes CI env vars ==="
-check_contains "passes GH_TOKEN" "$ci_step_section" "GH_TOKEN:"
-check_contains "passes REPO" "$ci_step_section" "REPO:"
-check_contains "passes PR_NUMBER" "$ci_step_section" "PR_NUMBER:"
-check_contains "passes CI_TIMEOUT_SEC" "$ci_step_section" "CI_TIMEOUT_SEC:"
-check_contains "passes CI_INTERVAL_SEC" "$ci_step_section" "CI_INTERVAL_SEC:"
-check_contains "passes CI_SKIP_ON_TIMEOUT" "$ci_step_section" "CI_SKIP_ON_TIMEOUT:"
-
-# ── Test 6: action.yml conditions for CI step ──
-echo ""
-echo "=== Test: CI step has correct if condition ==="
-check_contains "CI step only runs when ci_status_check=true" \
-  "$ci_step_section" "ci_status_check == 'true'"
-check_contains "CI step only runs when should_review=true" \
-  "$ci_step_section" "should_review == 'true'"
-
-# ── Test 7: action.yml passes CI status outputs as env vars to run_review ──
-echo ""
-echo "=== Test: action.yml passes CI status outputs to run_review step ==="
+echo "=== Test: action.yml passes CI env vars to run_review ==="
 review_step_section="$(awk '/Run AI review/,/run: bash.*run_review/' "$ACTION_YML")"
+check_contains "passes CI_STATUS_CHECK" "$review_step_section" "CI_STATUS_CHECK:"
+check_contains "passes CI_TIMEOUT_SEC" "$review_step_section" "CI_TIMEOUT_SEC:"
+check_contains "passes CI_INTERVAL_SEC" "$review_step_section" "CI_INTERVAL_SEC:"
+check_contains "passes CI_SKIP_ON_TIMEOUT" "$review_step_section" "CI_SKIP_ON_TIMEOUT:"
+check_contains "passes CI_CHECKS_FILE" "$review_step_section" "CI_CHECKS_FILE:"
 
-check_contains "run_review step receives CI_STATUS_FINAL" \
-  "$review_step_section" "CI_STATUS_FINAL:"
-check_contains "run_review step receives CI_STATUS_SKIPPED" \
-  "$review_step_section" "CI_STATUS_SKIPPED:"
+# ── Test 6: CI gating is still gated on the precheck skip decision ──
+echo ""
+echo "=== Test: no CI wait for a skipped review ==="
+check_contains "review step only runs when should_review=true" \
+  "$review_step_section" "should_review == 'true'"
+check_contains "gating.sh forks CI only when ci_status_check=true" \
+  "$gating_content" 'CI_STATUS_CHECK:-false'
+
+# ── Test 7: action.yml sources CI status outputs from the review step ──
+echo ""
+echo "=== Test: action.yml CI status outputs come from run_review ==="
 check_contains "run_review step receives CI_STATUS_CHECK" \
   "$review_step_section" "CI_STATUS_CHECK:"
+check_contains "ci_status_final output sourced from steps.review" \
+  "$action_content" 'value: ${{ steps.review.outputs.ci_status_final }}'
+check_contains "ci_status_skipped output sourced from steps.review" \
+  "$action_content" 'value: ${{ steps.review.outputs.ci_status_skipped }}'
 
 # ── Test 8: wait_for_ci.sh uses strict mode ──
 echo ""
@@ -124,18 +125,25 @@ check_contains "declares ci_status_skipped output" \
 check_contains "declares ci_status_final output" \
   "$action_content" "ci_status_final:"
 
-# ── Test 12: The fix is in the right location (between precheck and run_review) ──
+# ── Test 12: CI gating is inside the review step (after precheck) ──
 echo ""
-echo "=== Test: CI step ordering in action.yml ==="
+echo "=== Test: CI gating ordering in action.yml ==="
 precheck_line="$(grep -n 'Check whether review is needed' "$ACTION_YML" | cut -d: -f1)"
-ci_step_line="$(grep -n 'Wait for CI checks to complete' "$ACTION_YML" | cut -d: -f1)"
 review_line="$(grep -n 'Run AI review' "$ACTION_YML" | cut -d: -f1)"
 
-if [[ "$precheck_line" -lt "$ci_step_line" ]] && [[ "$ci_step_line" -lt "$review_line" ]]; then
-  echo "  PASS: CI step is between precheck and review (line $ci_step_line)"
+if [[ -n "$precheck_line" ]] && [[ -n "$review_line" ]] && [[ "$precheck_line" -lt "$review_line" ]]; then
+  echo "  PASS: precheck precedes the review step that now also gates CI (line $review_line)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL: CI step ordering incorrect (precheck=$precheck_line, ci=$ci_step_line, review=$review_line)"
+  echo "  FAIL: action.yml step ordering incorrect (precheck=$precheck_line, review=$review_line)"
+  FAIL=$((FAIL + 1))
+fi
+run_review_line="$(grep -n 'run_review.sh' "$ACTION_YML" | head -1 | cut -d: -f1)"
+if [[ -n "$run_review_line" ]] && [[ "$run_review_line" -gt "$review_line" ]]; then
+  echo "  PASS: CI gating is inside the run_review step body"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: run_review.sh not inside the review step (review=$review_line, run_review=$run_review_line)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -166,10 +174,10 @@ echo ""
 echo "=== Test: own workflow run excluded; step env wiring ==="
 check_contains "script excludes the action's own run via GITHUB_RUN_ID" \
   "$wait_content" 'GITHUB_RUN_ID'
-check_contains "action.yml passes CI_STATUS_CHECK to the step (script guard)" \
-  "$ci_step_section" "CI_STATUS_CHECK:"
+check_contains "action.yml passes CI_STATUS_CHECK to the review step (script guard)" \
+  "$review_step_section" "CI_STATUS_CHECK:"
 check_contains "action.yml forwards PR_HEAD_SHA to avoid a re-fetch" \
-  "$ci_step_section" "PR_HEAD_SHA:"
+  "$review_step_section" "PR_HEAD_SHA:"
 
 # ── Functional tests with a stubbed gh ──────────────────────────────────
 echo ""

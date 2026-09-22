@@ -6,6 +6,15 @@
 # Reap the advisory background phases (enrichment, image digests, evidence)
 # before their output files are read into the corpus below (#371).
 section_timer_start "advisory-phases"
+
+# ── Concurrent review gates (#634) ──────────────────────────────────────
+# Fork the CI gate first thing: it needs none of the artifacts collected here,
+# so its wait can overlap the advisory-phase harvest, the deterministic corpus
+# build, and the advisory specialist gate. It is non-blocking (gating.sh), and
+# the final corpus is assembled only AFTER both gates are reaped below, so it
+# always carries the finalized CI evidence and any usable specialist leads.
+fork_ci_gate
+
 harvest_advisory_phases
 section_timer_end
 
@@ -425,81 +434,46 @@ build_pr_thread_context
 
 log "Building related-code context from full diff..."
 build_related_code_context pr.diff pr-files.json
+
 build_review_corpus
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-# ── Deep review (#608/#609/#632): specialist leads feed the final corpus ──
+# ── Advisory specialist gate (#608/#609/#632), concurrent with CI (#634) ─
 # The three fixed specialist roles (correctness / security / tests —
 # pr_reviewer/specialists.py) run as a BACKGROUND JOB over a compact,
-# independently bounded specialist corpus (#632) built from the collected
-# artifacts, reusing the primary model settings but with an independent
-# completion budget. The three
-# roles run concurrently WITH EACH OTHER (the runner fans them out on
-# internal threads); the phase is fully reaped BEFORE anything below enters —
-# critically before the native_loop tool harness starts, so the final
-# reviewer's FIRST tool-planning turn already sees the rendered leads and can
-# spend tool calls verifying the best ones instead of discovering them after
-# the tool budget is gone. This placement replaced the older review.sh
-# launch (#609); review.sh only summarizes specialists.json in the step
-# summary now. Fail-soft: a specialist that times out or fails is recorded
-# as an error in the artifacts and the final reviewer still runs — never
-# blocked, never aborted (the wait is guarded with || status=$? against
-# set -e). Advisory only: specialist leads never touch enforcement, the
-# verdict policy, or the published body directly; the final reviewer remains
-# the sole verdict authority. When DEEP_REVIEW is false the gate is not
-# entered and the normal path is preserved untouched (no timer entries, no
-# artifacts, no corpus change — the disabled-run corpus stays byte-identical
-# to a pre-#609 build).
-DEEP_REVIEW_ACTIVE="false"
-SPECIALISTS_PID=""
-if [[ "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-  DEEP_REVIEW_ACTIVE="true"
-  section_timer_start "specialists"
-  # #632: build ONE compact deterministic specialist corpus from the artifacts
-  # already collected for the final review, then hand the same bytes to every
-  # role. It is not review-corpus.truncated.md — that corpus (and the final
-  # reviewer's budgets) stay untouched. The build is inside the deep_review
-  # gate, so a disabled run does no specialist-corpus work at all. Fail-soft:
-  # a builder failure leaves an empty corpus, which run_specialists.py records
-  # as a per-role input error and never blocks the final review.
-  if ! python3 "$SCRIPT_DIR/build_specialist_corpus.py" \
-      --workspace "${GITHUB_WORKSPACE:-$(pwd)}" \
-      --output specialist-corpus.md \
-      --max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"; then
-    error "specialist corpus build failed; specialists will record an input error"
-    : > specialist-corpus.md
-  fi
-  python3 "$SCRIPT_DIR/run_specialists.py" --corpus specialist-corpus.md >specialists.phase.log 2>&1 &
-  SPECIALISTS_PID=$!
-  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the bounded specialist corpus (pid $SPECIALISTS_PID)"
-fi
+# independently bounded pre-final specialist corpus (#632) built from the
+# artifacts collected so far, reusing the primary model settings but with an
+# independent completion budget. The roles run concurrently WITH EACH OTHER
+# (the runner fans them out on internal threads) and, since #634, concurrently
+# with the CI gate. Both gates are fully reaped before the final corpus is
+# rebuilt below — critically before the native_loop tool harness starts, so the
+# final reviewer's FIRST tool-planning turn already sees the rendered leads and
+# the finalized CI evidence. Fail-soft: a specialist that times out or fails is
+# recorded as an error in the artifacts and the final reviewer still runs —
+# never blocked, never aborted. Advisory only: specialist leads never touch
+# enforcement, the verdict policy, or the published body directly; the final
+# reviewer remains the sole verdict authority. When DEEP_REVIEW is false the
+# specialist gate is not entered; when ci_status_check is false the CI gate is
+# not entered — each normal path is preserved untouched (no artifacts, no
+# corpus change — a fully disabled run stays byte-identical to a pre-#609
+# build).
+section_timer_start "review-gates"
+fork_specialist_gate
+join_specialist_gate
+join_ci_gate
+section_timer_end
 
-# Reap the specialist phase fully before anything consumes its output (the
-# #371 harvest idiom): a nonzero phase status only logs an error — advisory
-# passes never block the final review.
-harvest_specialist_phase() {
-  [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]] || return 0
-  [[ -n "${SPECIALISTS_PID:-}" ]] || return 0
-  local status=0
-  wait "$SPECIALISTS_PID" || status=$?
-  cat specialists.phase.log 2>/dev/null || true
-  if [ "$status" -ne 0 ]; then
-    error "specialist phase exited ${status}; continuing (advisory passes never block the final review)"
-  fi
-  section_timer_end
-}
-harvest_specialist_phase
-
-# Rebuild the corpus with the reserved "# Specialist Review Leads" block
-# (build_review_corpus carves its exact bytes out of the body budget and
-# appends it last, after the ledger) whenever the rendered section is
-# non-empty; the rebuilt corpus therefore carries the leads before the final
-# review call and before native-loop planning. When deep review is disabled
-# or no usable lead survived, specialists.md is empty and NO rebuild
-# happens — disabled output stays byte-for-byte as before.
-if [ -s specialists.md ]; then
-  log "deep_review: rebuilding corpus with the reserved specialist-lead section"
+# Rebuild the corpus with both branches resolved. build_review_corpus reserves
+# the "# Specialist Review Leads" block (appended last, after the ledger) and
+# the CI Check Results section, so the rebuilt corpus carries finalized CI
+# evidence plus any usable leads before the final review call and before
+# native-loop planning. The rebuild runs whenever a gate was active — this
+# guarantees a late CI result reaches the corpus even with no specialist leads
+# — or when a rendered lead section appeared. When both gates are off, NO
+# rebuild happens and disabled output stays byte-for-byte as before.
+if [ "${CI_GATE_ACTIVE:-false}" == "true" ] || [ -s specialists.md ]; then
+  log "review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads"
   build_review_corpus
   cp review-corpus.md review-corpus.truncated.md
 fi

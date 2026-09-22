@@ -62,32 +62,38 @@ check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES invalid value degrades to 48000" "$
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES exported to the builder" "$CONFIG" 'export DEEP_REVIEW_CORPUS_MAX_BYTES'
 
 echo ""
-echo "=== corpus.sh: specialist phase launched in the background (#609 placement) ==="
+echo "=== gating.sh: specialist phase launched in the background (#609/#634) ==="
 CORPUS_SH="$ROOT_DIR/scripts/sections/corpus.sh"
 CORPUS="$(cat "$CORPUS_SH")"
-check "exactly one run_specialists.py LAUNCH in corpus.sh" \
-  "$(grep -c '^[[:space:]]*python3 "$SCRIPT_DIR/run_specialists.py"' "$CORPUS_SH" || true)" "1"
+GATING_SH="$ROOT_DIR/scripts/sections/gating.sh"
+GATING="$(cat "$GATING_SH")"
+check "exactly one run_specialists.py LAUNCH in gating.sh" \
+  "$(grep -c 'run_specialists.py" --corpus specialist-corpus.md' "$GATING_SH" || true)" "1"
 check_not_contains "review.sh no longer launches specialists (moved in #609)" \
   "$REVIEW" 'run_specialists.py'
+check_not_contains "corpus.sh no longer launches specialists directly (#634 moved them to gating.sh)" \
+  "$CORPUS" 'run_specialists.py" --corpus'
 check_contains "launch line runs as a background job with the phase log" \
-  "$CORPUS" '--corpus specialist-corpus.md >specialists.phase.log 2>&1 &'
-check_contains "launch records the pid" "$CORPUS" 'SPECIALISTS_PID=$!'
-deep_gate_line="$(grep -n 'if \[\[ "$(printf .*"\$DEEP_REVIEW" | tr' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
-launch_line="$(grep -n '^[[:space:]]*python3 "$SCRIPT_DIR/run_specialists.py"' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+  "$GATING" 'specialist_command >"$SPECIALIST_GATE_LOG" 2>&1 &'
+check_contains "launch records the pid" "$GATING" 'SPECIALIST_GATE_PID=$!'
+deep_gate_line="$(grep -n 'DEEP_REVIEW:-false' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
+launch_line="$(grep -n 'specialist_command >"\$SPECIALIST_GATE_LOG" 2>&1 &' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
 check "launch is inside the deep_review gate (gate precedes launch)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$launch_line" ] && [ "$launch_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
 # #632: the compact specialist corpus is built once, inside the gate, before launch.
-check "exactly one specialist-corpus build in corpus.sh" \
-  "$(grep -c 'build_specialist_corpus.py' "$CORPUS_SH" || true)" "1"
-build_line="$(grep -n 'build_specialist_corpus.py' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+check "exactly one specialist-corpus build in gating.sh" \
+  "$(grep -c 'build_specialist_corpus.py' "$GATING_SH" || true)" "1"
+check_not_contains "corpus.sh no longer builds the specialist corpus directly (#634)" \
+  "$CORPUS" 'build_specialist_corpus.py'
+build_line="$(grep -n 'if ! build_specialist_corpus_command;' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
 check "specialist-corpus build precedes the launch" \
   "$([ -n "$build_line" ] && [ -n "$launch_line" ] && [ "$build_line" -lt "$launch_line" ] && echo yes || echo no)" "yes"
 check "specialist-corpus build is inside the deep_review gate (gate precedes build)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$build_line" ] && [ "$build_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
-check_contains "build passes the independent corpus cap" "$CORPUS" \
+check_contains "build passes the independent corpus cap" "$GATING" \
   '--max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"'
 check_not_contains "specialists no longer read the final corpus verbatim" \
-  "$CORPUS" '--corpus review-corpus.truncated.md'
+  "$GATING" '--corpus review-corpus.truncated.md'
 
 echo ""
 echo "=== corpus.sh: launch AND reap precede the native-loop tool harness (#609) ==="
@@ -99,12 +105,13 @@ echo "=== corpus.sh: launch AND reap precede the native-loop tool harness (#609)
 # after corpus.sh by run_review.sh, so the in-file ordering here transitively
 # precedes them — which the next block pins at the source-order level.
 harness_line="$(grep -n 'run_tool_harness.py' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
-check "launch precedes the tool harness" \
-  "$([ -n "$launch_line" ] && [ -n "$harness_line" ] && [ "$launch_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
-reap_line="$(grep -n 'harvest_specialist_phase$' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+fork_sp_line="$(grep -n '^fork_specialist_gate$' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+check "fork precedes the tool harness" \
+  "$([ -n "$fork_sp_line" ] && [ -n "$harness_line" ] && [ "$fork_sp_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
+reap_line="$(grep -n '^join_specialist_gate$' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
 check "reap precedes the tool harness" \
   "$([ -n "$reap_line" ] && [ -n "$harness_line" ] && [ "$reap_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
-rebuild_line="$(grep -n 'cp review-corpus.md review-corpus.truncated.md' "$CORPUS_SH" | sed -n 2p | cut -d: -f1 || true)"
+rebuild_line="$(grep -n 'review gates resolved: rebuilding corpus' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
 check "the lead-reserved rebuild + re-copy precede the tool harness" \
   "$([ -n "$rebuild_line" ] && [ -n "$harness_line" ] && [ "$rebuild_line" -lt "$harness_line" ] && echo yes || echo no)" "yes"
 run_review_sh="$ROOT_DIR/scripts/run_review.sh"
@@ -119,18 +126,18 @@ check "the native-verdict path exists downstream (sanity: ordering premise holds
 
 echo ""
 echo "=== corpus.sh: rebuild + guidance only from the rendered section (#609) ==="
-check_contains "corpus rebuild is gated on a non-empty specialists.md" "$CORPUS" 'if [ -s specialists.md ]; then'
+check_contains "corpus rebuild is gated on the CI gate or a non-empty specialists.md" "$CORPUS" 'if [ "${CI_GATE_ACTIVE:-false}" == "true" ] || [ -s specialists.md ]; then'
 check_contains "guidance fragment applied after the reap" "$CORPUS" 'apply_specialist_leads_fragment'
 check_contains "lockstep guard clears a stale leads signal" "$CORPUS" '# Specialist Review Leads'
 check_contains "lockstep guard truncates the signal" "$CORPUS" ': > specialist-leads-present.txt'
 
 echo ""
-echo "=== corpus.sh: specialist phase reaped, fail-soft ==="
-check_contains "reap guards the wait against set -e" "$CORPUS" 'wait "$SPECIALISTS_PID" || status=$?'
+echo "=== gating.sh: specialist phase reaped, fail-soft ==="
+check_contains "reap guards the wait against set -e" "$GATING" 'wait "$SPECIALIST_GATE_PID" || status=$?'
 check "exactly one reap of the specialist phase" \
-  "$(grep -c 'wait "$SPECIALISTS_PID"' "$CORPUS_SH" || true)" "1"
+  "$(grep -c 'wait "$SPECIALIST_GATE_PID"' "$GATING_SH" || true)" "1"
 check_contains "fail-soft text on specialist failure" \
-  "$CORPUS" 'specialist phase exited ${status}; continuing (advisory passes never block the final review)'
+  "$GATING" 'specialist phase exited ${status}; continuing (advisory passes never block the final review)'
 check_not_contains "old review.sh launch placement is gone" \
   "$REVIEW" 'python3 "$SCRIPT_DIR/run_specialists.py" \'
 

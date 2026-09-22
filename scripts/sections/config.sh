@@ -97,6 +97,14 @@ DEEP_REVIEW_CORPUS_MAX_BYTES="${DEEP_REVIEW_CORPUS_MAX_BYTES:-48000}"
 # section (specialists.md). run_specialists.py reads the same name; the shell
 # side validates it so a typo cannot silently disable the cap.
 SPECIALISTS_SECTION_MAX_BYTES="${SPECIALISTS_SECTION_MAX_BYTES:-12000}"
+# #634: the CI gate is forked inside the review pipeline (scripts/sections/
+# gating.sh) so it can run concurrently with the advisory specialist phase. The
+# bindings are review-step inputs now; defaults stay in lockstep with
+# wait_for_ci.sh so a standalone run_review.sh invocation behaves the same.
+CI_STATUS_CHECK="${CI_STATUS_CHECK:-false}"
+CI_TIMEOUT_SEC="${CI_TIMEOUT_SEC:-300}"
+CI_INTERVAL_SEC="${CI_INTERVAL_SEC:-15}"
+CI_SKIP_ON_TIMEOUT="${CI_SKIP_ON_TIMEOUT:-true}"
 AI_REQUEST_TIMEOUT_SEC="${AI_REQUEST_TIMEOUT_SEC:-300}"
 AI_CONNECT_TIMEOUT_SEC="${AI_CONNECT_TIMEOUT_SEC:-30}"
 AI_FALLBACK_REQUEST_TIMEOUT_SEC="${AI_FALLBACK_REQUEST_TIMEOUT_SEC:-${AI_REQUEST_TIMEOUT_SEC}}"

@@ -90,13 +90,24 @@ render_ci_checks() {
   # Nothing external to report — leave no file so run_review omits the section.
   [[ -n "$rows" ]] || return 0
 
-  {
+  # Atomic publish (#634): the CI gate now runs concurrently with the advisory
+  # specialist phase, and a specialist corpus built during that window reads
+  # $CI_CHECKS_FILE. Write to a sibling temp file and rename it into place so a
+  # concurrent reader sees either no evidence or the complete final evidence —
+  # never a half-written document (which would let the specialist corpus claim
+  # a CI result this run had not actually finalized yet).
+  local tmp="${CI_CHECKS_FILE}.tmp.$$"
+  if {
     echo "_CI reached a terminal state before this review began (overall: ${final_state}). These results are from the CI status API for commit ${sha} and are authoritative evidence of which checks ran and how they concluded._"
     echo
     echo "| Check | State |"
     echo "| --- | --- |"
     printf '%s\n' "$rows"
-  } > "$CI_CHECKS_FILE" 2>/dev/null || true
+  } > "$tmp" 2>/dev/null; then
+    mv -f -- "$tmp" "$CI_CHECKS_FILE" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+  else
+    rm -f -- "$tmp" 2>/dev/null || true
+  fi
 }
 
 finalize() {

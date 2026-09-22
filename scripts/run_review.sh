@@ -33,6 +33,11 @@ source "${SCRIPT_DIR}/sections/context.sh"
 source "${SCRIPT_DIR}/sections/enrichment.sh"
 # shellcheck source=scripts/sections/classification.sh
 source "${SCRIPT_DIR}/sections/classification.sh"
+# Concurrent review-gate orchestration (#634): defines the CI/specialist
+# fork/join functions corpus.sh calls. Function definitions only — no
+# execution at source time.
+# shellcheck source=scripts/sections/gating.sh
+source "${SCRIPT_DIR}/sections/gating.sh"
 # shellcheck source=scripts/sections/corpus.sh
 source "${SCRIPT_DIR}/sections/corpus.sh"
 
