@@ -56,6 +56,10 @@ Guarantees:
 - **Deterministic priority.** Sections are processed in the fixed order above;
   each is capped per-section, then clamped to the remaining overall budget, so
   high-signal sections survive and low-priority sections are visibly omitted.
+- **Fence-safe truncation.** A section builder may wrap its body in a Markdown
+  code fence. When such a body is truncated, `_render_section` reserves room for
+  the closing fence and the truncation marker and re-emits both, so a clipped
+  code block never swallows the sections that follow it.
 - **UTF-8 safe.** Truncation cuts at a newline when possible and otherwise on a
   codepoint boundary; a multibyte character is never split.
 - **Deterministic.** Identical artifacts produce byte-identical output.
@@ -71,6 +75,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -126,6 +131,27 @@ SPECIALIST_CORPUS_FRAMING = (
 
 #: Visible marker appended to a section that was clamped to the budget.
 _SECTION_TRUNCATED_MARKER = "…[section truncated to fit specialist corpus budget]"
+
+#: A Markdown code-fence line: three or more backticks, optionally followed by
+#: an info string (``json`` / ``diff`` / ``text``). Used to detect a body that a
+#: section builder wrapped in a fence so truncation can restore the closing
+#: fence instead of leaving the block open over the sections that follow.
+_FENCE_LINE_RE = re.compile(r"^(`{3,})(\S*)\s*$")
+
+
+def _body_closing_fence(body: str) -> str:
+    """Return the closing fence line for a fenced *body*, else ``""``.
+
+    The section builders wrap JSON/diff bodies in a ``` fence. If such a body is
+    truncated, the original closing fence is cut off, so ``_render_section``
+    must re-emit one or the following sections render inside the code block.
+    Detection is on the body's first line only; non-fenced bodies return "".
+    """
+    first_line = body.split("\n", 1)[0].strip()
+    match = _FENCE_LINE_RE.match(first_line)
+    if not match:
+        return ""
+    return match.group(1) + "\n"
 
 
 def _read_artifact_text(root: Path, *names: str) -> str:
@@ -349,7 +375,9 @@ def _render_section(
     The *body* is truncated, never the whole section: a newline-safe cut of the
     body keeps the header intact, and a body that is a single long line (compact
     JSON, a minified diff) is cut on a codepoint boundary rather than collapsed
-    back to the header.
+    back to the header. A fenced body gets its closing fence re-emitted after
+    the cut (its bytes are reserved up front, alongside the truncation marker),
+    so a truncated code block cannot swallow the later sections.
     """
     if budget <= 0:
         return "", True, False
@@ -357,13 +385,22 @@ def _render_section(
     prefix = f"{header}\n\n"
     if len(prefix.encode("utf-8")) + len(body.encode("utf-8")) + 1 <= cap:
         return f"{prefix}{body}\n", False, True
+    closing_fence = _body_closing_fence(body)
     marker = f"\n{_SECTION_TRUNCATED_MARKER}\n"
-    fixed = len(prefix.encode("utf-8")) + len(marker.encode("utf-8"))
+    fixed = (
+        len(prefix.encode("utf-8"))
+        + len(closing_fence.encode("utf-8"))
+        + len(marker.encode("utf-8"))
+    )
     if fixed >= cap:
         return "", True, False
     clipped, _ = _truncate_utf8(body, cap - fixed)
     if not clipped.strip():
         return "", True, False
+    if closing_fence:
+        # Reserve-and-restore: the closing fence is emitted unconditionally
+        # after the cut, so the code block is always structurally closed.
+        return f"{prefix}{clipped}\n{closing_fence}{marker}", True, True
     return f"{prefix}{clipped}{marker}", True, True
 
 

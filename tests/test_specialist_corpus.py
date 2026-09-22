@@ -9,6 +9,7 @@ review corpus is never consumed by the specialist builder.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,46 @@ from pr_reviewer import specialist_corpus  # noqa: E402
 
 def _write(root: Path, name: str, text: str) -> None:
     (root / name).write_text(text, encoding="utf-8")
+
+
+_FENCE_RE = re.compile(r"^(`{3,})(.*)$")
+
+
+def _unclosed_fence(text: str) -> str | None:
+    """CommonMark-ish fence tracker: return the still-open fence, or None.
+
+    A bare backtick line (no info string) closes the open fence; an
+    info-bearing line (``​```json``) can only open one, never close.
+    """
+    opener: str | None = None
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line)
+        if not match:
+            continue
+        ticks, info = match.group(1), match.group(2).strip()
+        if opener is None:
+            opener = ticks
+        elif info == "" and len(ticks) >= len(opener):
+            opener = None
+    return opener
+
+
+def _headers_inside_fence(text: str, headers: tuple[str, ...]) -> dict[str, bool]:
+    """Whether each header line appears while a code fence is still open."""
+    opener: str | None = None
+    result = {h: False for h in headers}
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line)
+        if match:
+            ticks, info = match.group(1), match.group(2).strip()
+            if opener is None:
+                opener = ticks
+            elif info == "" and len(ticks) >= len(opener):
+                opener = None
+            continue
+        if line in result and opener is not None:
+            result[line] = True
+    return result
 
 
 def _write_minimal(root: Path) -> None:
@@ -375,9 +416,9 @@ def test_near_max_requirement_ledger_survives_large_bulk(tmp_path):
         json.dumps(
             {
                 "pr_kind": "app_code",
-                "risk_flags": [f"flag-{i}" for i in range(2000)],
-                "risk_flags_with_files": {f"flag-{i}": ["a.py"] for i in range(2000)},
-                "must_check": [f"check-{i}" for i in range(2000)],
+                "risk_flags": [f"flag-{i}" for i in range(3000)],
+                "risk_flags_with_files": {f"flag-{i}": ["a.py"] for i in range(3000)},
+                "must_check": [f"check-{i}" for i in range(3000)],
             }
         ),
     )
@@ -386,7 +427,7 @@ def test_near_max_requirement_ledger_survives_large_bulk(tmp_path):
         "pr-files.truncated.json",
         "[" + ",".join(
             json.dumps({"filename": f"f{i}.py", "status": "modified"})
-            for i in range(5000)
+            for i in range(8000)
         ) + "]",
     )
     _write(tmp_path, "pr.diff.truncated", "d" * 200000)
@@ -401,6 +442,61 @@ def test_near_max_requirement_ledger_survives_large_bulk(tmp_path):
     assert "LEDGER_END_MARKER" in text
     assert ledger in text
     assert meta["truncated"] is True  # bulk sections were truncated/omitted
+    assert meta["bytes"] <= cap
+
+    # Structure: the oversized fenced bodies (classification / changed-files /
+    # diff) were truncated, so their fences must have been restored; no code
+    # block is left open over the standards/ledger that follow.
+    for section in ("classification", "changed_files", "pr_diff"):
+        assert section in meta["included_sections"]
+    assert _unclosed_fence(text) is None
+    headers = (
+        "# Repository Standards and Conventions",
+        "# Explicit Requirement Ledger",
+    )
+    assert _headers_inside_fence(text, headers) == {h: False for h in headers}
+
+
+def test_truncated_fenced_bodies_are_structurally_closed(tmp_path):
+    """Oversized classification, changed-files, and diff bodies (no ledger):
+    every opened fence is closed and the standards header stays outside it."""
+    _write_minimal(tmp_path)
+    _write(
+        tmp_path,
+        "classification.json",
+        json.dumps(
+            {
+                "pr_kind": "app_code",
+                "risk_flags": [f"flag-{i}" for i in range(3000)],
+                "risk_flags_with_files": {f"flag-{i}": ["a.py"] for i in range(3000)},
+                "must_check": [f"check-{i}" for i in range(3000)],
+            }
+        ),
+    )
+    _write(
+        tmp_path,
+        "pr-files.truncated.json",
+        "[" + ",".join(
+            json.dumps({"filename": f"f{i}.py", "status": "modified"})
+            for i in range(8000)
+        ) + "]",
+    )
+    _write(tmp_path, "pr.diff.truncated", "d" * 200000)
+    _write(tmp_path, "standards-context.capped.md", "s" * 100000)
+
+    cap = specialist_corpus.DEFAULT_SPECIALIST_CORPUS_MAX_BYTES
+    text, meta = specialist_corpus.build_specialist_corpus(tmp_path, max_bytes=cap)
+
+    # Each fenced body that was clipped emits a closing fence before its marker.
+    assert text.count("```json") >= 3  # metadata + classification + changed
+    assert text.count("```diff") >= 1
+    assert _unclosed_fence(text) is None
+    assert (
+        _headers_inside_fence(
+            text, ("# Repository Standards and Conventions",)
+        )["# Repository Standards and Conventions"]
+        is False
+    )
     assert meta["bytes"] <= cap
 
 
