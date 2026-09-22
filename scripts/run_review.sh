@@ -35,9 +35,12 @@ source "${SCRIPT_DIR}/sections/enrichment.sh"
 source "${SCRIPT_DIR}/sections/classification.sh"
 # Concurrent review-gate orchestration (#634): defines the CI/specialist
 # fork/join functions corpus.sh calls. Function definitions only — no
-# execution at source time.
+# execution at source time. Install the abnormal-exit lifecycle trap before
+# corpus.sh forks either gate, so a set -e/TERM/INT exit between fork and join
+# still terminates and reaps the background children.
 # shellcheck source=scripts/sections/gating.sh
 source "${SCRIPT_DIR}/sections/gating.sh"
+install_gate_lifecycle_trap
 # shellcheck source=scripts/sections/corpus.sh
 source "${SCRIPT_DIR}/sections/corpus.sh"
 

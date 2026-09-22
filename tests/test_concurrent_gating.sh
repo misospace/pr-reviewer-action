@@ -313,6 +313,7 @@ EOF
   export CURL_CA_BUNDLE="SENTINEL-CURL-CA-BUNDLE"
   export GH_CONFIG_DIR="SENTINEL-GH-CONFIG-DIR"
   export XDG_CONFIG_HOME="SENTINEL-XDG-CONFIG-HOME"
+  export RUNNER_TRACKING_ID="SENTINEL-RUNNER-TRACKING-ID"
   export GH_TOKEN="SENTINEL-GH-TOKEN"
   export REPO="owner/repo"
   export PR_NUMBER="7"
@@ -337,7 +338,8 @@ for transport in \
   "SENTINEL-HTTP-PROXY" "SENTINEL-HTTPS-PROXY" "SENTINEL-ALL-PROXY" "SENTINEL-NO-PROXY" \
   "SENTINEL-http-proxy" "SENTINEL-https-proxy" "SENTINEL-all-proxy" "SENTINEL-no-proxy" \
   "SENTINEL-SSL-CERT-FILE" "SENTINEL-SSL-CERT-DIR" "SENTINEL-CURL-CA-BUNDLE" \
-  "SENTINEL-GH-CONFIG-DIR" "SENTINEL-XDG-CONFIG-HOME"; do
+  "SENTINEL-GH-CONFIG-DIR" "SENTINEL-XDG-CONFIG-HOME" \
+  "SENTINEL-RUNNER-TRACKING-ID"; do
   check_contains "child env preserves $transport" "$CHILD_ENV" "$transport"
 done
 for required in \
@@ -345,6 +347,110 @@ for required in \
   CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT CI_CHECKS_FILE GITHUB_OUTPUT GITHUB_RUN_ID; do
   check_contains "child env includes $required" "$CHILD_ENV" "$required="
 done
+
+echo ""
+echo "=== lifecycle: normal joins retire PID state (no duplicate cleanup) ==="
+LC_STATE="$(
+  source "$ROOT_DIR/scripts/sections/gating.sh"
+  install_gate_lifecycle_trap
+  log() { :; }
+  error() { :; }
+  export CI_CHECKS_FILE="$TMP/lc-ci.md"
+  export CI_GATE_LOG="$TMP/lc-ci.log" SPECIALIST_GATE_LOG="$TMP/lc-spec.log"
+  wait_for_ci_command() { return 0; }
+  specialist_command() { return 0; }
+  build_specialist_corpus_command() { return 0; }
+  export CI_STATUS_CHECK=true DEEP_REVIEW=true
+  fork_ci_gate
+  fork_specialist_gate
+  join_specialist_gate
+  join_ci_gate
+  printf 'ci_pid=<%s> specialist_pid=<%s> ci_active=<%s> specialist_active=<%s>\n' \
+    "${CI_GATE_PID}" "${SPECIALIST_GATE_PID}" "${CI_GATE_ACTIVE}" "${DEEP_REVIEW_ACTIVE}"
+)"
+check_contains "normal join retires the CI PID" "$LC_STATE" "ci_pid=<>"
+check_contains "normal join retires the specialist PID" "$LC_STATE" "specialist_pid=<>"
+check_contains "CI ran flag retained for the corpus rebuild" "$LC_STATE" "ci_active=<true>"
+check_contains "specialist ran flag retained for the step summary" "$LC_STATE" "specialist_active=<true>"
+
+echo ""
+echo "=== lifecycle: abnormal exit terminates + reaps both gate children ==="
+ABN="$TMP/abn"
+mkdir -p "$ABN"
+abn_run() {
+  (
+    source "$ROOT_DIR/scripts/sections/gating.sh"
+    install_gate_lifecycle_trap
+    log() { :; }
+    error() { :; }
+    export CI_GATE_LOG="$ABN/ci.log" SPECIALIST_GATE_LOG="$ABN/spec.log"
+    export CI_CHECKS_FILE="$ABN/ci.md"
+    wait_for_ci_command() { echo "$BASHPID" > "$ABN/ci.pid"; exec sleep 30; }
+    specialist_command() { echo "$BASHPID" > "$ABN/spec.pid"; exec sleep 30; }
+    build_specialist_corpus_command() { return 0; }
+    export CI_STATUS_CHECK=true DEEP_REVIEW=true
+    fork_ci_gate
+    fork_specialist_gate
+    exit 7
+  )
+}
+abn_start="$(now_ms)"
+abn_rc=0
+abn_run || abn_rc=$?
+abn_elapsed=$(( $(now_ms) - abn_start ))
+check "abnormal exit: original nonzero status survives cleanup" "$abn_rc" "7"
+for gate in ci spec; do
+  gate_pid="$(cat "$ABN/$gate.pid" 2>/dev/null || echo "")"
+  if [ -n "$gate_pid" ] && kill -0 "$gate_pid" 2>/dev/null; then gate_alive=yes; else gate_alive=no; fi
+  check "abnormal exit: $gate gate child is terminated + reaped" "$gate_alive" "no"
+done
+if [ "$abn_elapsed" -lt 8000 ]; then abn_bounded=ok; else abn_bounded="slow:${abn_elapsed}ms"; fi
+check "abnormal exit: cleanup is bounded [${abn_elapsed}ms]" "$abn_bounded" "ok"
+
+echo ""
+echo "=== lifecycle: interrupted atomic publication cleans its temp sibling ==="
+WAIT_SCRIPT="$ROOT_DIR/scripts/wait_for_ci.sh"
+WAIT_SRC="$(cat "$WAIT_SCRIPT")"
+check_contains "wait_for_ci.sh installs the tmp cleanup trap" "$WAIT_SRC" "trap 'cleanup_ci_checks_tmp' EXIT"
+check_contains "wait_for_ci.sh retires the tmp path after publish" "$WAIT_SRC" 'CI_CHECKS_TMP=""'
+
+CLEANUP_SRC="$(python3 - "$WAIT_SCRIPT" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^cleanup_ci_checks_tmp\(\) \{\n.*?\n\}\n", src, re.S | re.M)
+if not m:
+    sys.exit("could not extract cleanup_ci_checks_tmp")
+sys.stdout.write(m.group(0))
+PY
+)"
+PUB="$TMP/pub"
+mkdir -p "$PUB"
+PUB_TARGET="$PUB/ci-checks.md"
+PUB_TMP="${PUB_TARGET}.tmp.4242"
+printf 'COMPLETED-TARGET\n' > "$PUB_TARGET"
+printf 'PARTIAL\n' > "$PUB_TMP"
+cat > "$PUB/child.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+$CLEANUP_SRC
+CI_CHECKS_TMP="$PUB_TMP"
+trap 'cleanup_ci_checks_tmp' EXIT
+trap 'cleanup_ci_checks_tmp; exit 143' TERM
+trap 'cleanup_ci_checks_tmp; exit 130' INT
+: > "$PUB/ready"
+sleep 30
+EOF
+bash "$PUB/child.sh" &
+pub_child=$!
+for _ in $(seq 1 100); do [ -e "$PUB/ready" ] && break; sleep 0.02; done
+kill -TERM "$pub_child" 2>/dev/null || true
+pub_rc=0
+wait "$pub_child" || pub_rc=$?
+check "interrupted publication: temp sibling removed" \
+  "$([ -e "$PUB_TMP" ] && echo present || echo absent)" "absent"
+check "interrupted publication: completed target preserved" \
+  "$(cat "$PUB_TARGET")" "COMPLETED-TARGET"
+check "interrupted publication: signal exit status preserved" "$pub_rc" "143"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

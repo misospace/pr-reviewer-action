@@ -46,7 +46,9 @@ CI_GATE_LOG="ci-status.phase.log"
 #     benign network transport/runtime configuration the pre-#634 standalone
 #     step inherited from the workflow/runner (proxy and custom-CA vars in both
 #     cases, and the gh CLI config dirs) so GitHub/Forgejo connectivity is
-#     unchanged;
+#     unchanged. RUNNER_TRACKING_ID is included because it is benign runner
+#     lifecycle metadata (not reviewer authority) that GitHub Runner uses for
+#     orphan-process cleanup;
 #   - runner metadata: $GITHUB_OUTPUT (ci_status_* results), $GITHUB_RUN_ID +
 #     $CI_STATUS_CONTEXT (own check/status self-exclusion), and the OIDC
 #     request vars the Forgejo authorized-integration backend reads;
@@ -58,6 +60,7 @@ CI_GATE_LOG="ci-status.phase.log"
 # backend keeps its own default).
 _CI_GATE_ENV_KEYS=(
   PATH HOME
+  RUNNER_TRACKING_ID
   HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
   http_proxy https_proxy all_proxy no_proxy
   SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE
@@ -116,11 +119,15 @@ fork_ci_gate() {
 # corpus. Fail-soft: wait is guarded against set -e and a nonzero status only
 # logs — the standalone step's continue-on-error meant a timeout (exit 1) or
 # fatal (exit 2) never blocked the review, and that behavior is preserved.
+# Retires the PID state so the abnormal-exit cleanup can never double-wait,
+# double-kill, or target a reused PID; CI_GATE_ACTIVE stays "true" as the
+# "gate ran this review" signal corpus.sh uses for its final-corpus rebuild.
 join_ci_gate() {
   [[ "${CI_GATE_ACTIVE:-false}" == "true" ]] || return 0
   [[ -n "${CI_GATE_PID:-}" ]] || return 0
   local status=0
   wait "$CI_GATE_PID" || status=$?
+  CI_GATE_PID=""
   cat "$CI_GATE_LOG" 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
     log "CI status gating exited ${status}; continuing (CI evidence is advisory)"
@@ -171,14 +178,88 @@ fork_specialist_gate() {
 
 # Reap the specialist phase fully before its rendered leads are read. Fail-soft:
 # a nonzero phase status only logs an error — advisory passes never block the
-# final review.
+# final review. Retires the PID state so the abnormal-exit cleanup can never
+# double-wait, double-kill, or target a reused PID; DEEP_REVIEW_ACTIVE stays
+# "true" as the "phase ran" signal review.sh uses for its step-summary row.
 join_specialist_gate() {
   [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]] || return 0
   [[ -n "${SPECIALIST_GATE_PID:-}" ]] || return 0
   local status=0
   wait "$SPECIALIST_GATE_PID" || status=$?
+  SPECIALIST_GATE_PID=""
   cat "$SPECIALIST_GATE_LOG" 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
     error "specialist phase exited ${status}; continuing (advisory passes never block the final review)"
   fi
+}
+
+# ── Abnormal-exit lifecycle (#634) ──────────────────────────────────────
+# fork_* launch asynchronous children that are normally reaped by join_*. If
+# the orchestrator exits between fork and join — set -e, TERM/INT, job
+# cancellation, any unexpected failure — a surviving gate child would keep
+# running: the CI child retains GitHub/Forgejo credentials and may keep
+# polling, and the specialist child retains the full reviewer environment
+# (model credentials included). install_gate_lifecycle_trap() gives both gate
+# children deterministic ownership on abnormal exit. Cleanup is bounded: TERM,
+# a short grace poll, then KILL, then a final wait to reap the child.
+GATE_CLEANUP_GRACE_STEPS="${GATE_CLEANUP_GRACE_STEPS:-20}"
+GATE_CLEANUP_GRACE_INTERVAL_SEC="${GATE_CLEANUP_GRACE_INTERVAL_SEC:-0.1}"
+
+gate_terminate_and_reap() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  local i=0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$GATE_CLEANUP_GRACE_STEPS" ]; do
+      sleep "$GATE_CLEANUP_GRACE_INTERVAL_SEC" 2>/dev/null || true
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  # Reap whatever is left (a no-op when the child already exited), so no
+  # zombie or surviving process is left for the runner to clean up.
+  wait "$pid" 2>/dev/null || true
+}
+
+# Terminate + reap whichever gate child is still active. A join_* that already
+# reaped its child cleared the PID, so this is a no-op on the normal path and
+# cannot double-kill or wait on an unrelated reused PID.
+cleanup_gate_children() {
+  if [[ -n "${CI_GATE_PID:-}" ]]; then
+    log "abnormal exit: terminating active CI gate child (pid $CI_GATE_PID)"
+    gate_terminate_and_reap "$CI_GATE_PID"
+    CI_GATE_PID=""
+  fi
+  if [[ -n "${SPECIALIST_GATE_PID:-}" ]]; then
+    log "abnormal exit: terminating active specialist gate child (pid $SPECIALIST_GATE_PID)"
+    gate_terminate_and_reap "$SPECIALIST_GATE_PID"
+    SPECIALIST_GATE_PID=""
+  fi
+}
+
+_gate_lifecycle_on_exit() {
+  local status=$?
+  trap - EXIT INT TERM
+  cleanup_gate_children
+  exit "$status"
+}
+
+_gate_lifecycle_on_signal() {
+  local signum="$1"
+  trap - EXIT INT TERM
+  cleanup_gate_children
+  exit $((128 + signum))
+}
+
+# Installed by run_review.sh after this module is sourced and before corpus.sh
+# forks the gates. Separate from source time so tests can install it explicitly
+# in the subshell that exercises the abnormal-exit path (bash resets caught
+# traps in subshells).
+install_gate_lifecycle_trap() {
+  trap '_gate_lifecycle_on_exit' EXIT
+  trap '_gate_lifecycle_on_signal 2' INT
+  trap '_gate_lifecycle_on_signal 15' TERM
 }
