@@ -815,16 +815,14 @@ def replace_harness_findings_section(corpus, body):
 def write_outputs(summary, markdown):
     """Write JSON and markdown outputs from the tool harness."""
     tier = os.getenv("TOOL_HARNESS_TIER", "primary")
+    safe_markdown = mask_secrets(markdown)
+    safe_summary = mask_secrets(json.dumps(summary, indent=2, ensure_ascii=False)) + "\n"
     if tier == "smart":
-        Path("tool-harness.smart.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        Path("tool-harness.smart.md").write_text(mask_secrets(markdown), encoding="utf-8")
+        Path("tool-harness.smart.json").write_text(safe_summary, encoding="utf-8")
+        Path("tool-harness.smart.md").write_text(safe_markdown, encoding="utf-8")
     else:
-        Path("tool-harness.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        Path("tool-harness.md").write_text(mask_secrets(markdown), encoding="utf-8")
+        Path("tool-harness.json").write_text(safe_summary, encoding="utf-8")
+        Path("tool-harness.md").write_text(safe_markdown, encoding="utf-8")
 
 
 NATIVE_LOOP_SYSTEM = (
