@@ -513,5 +513,113 @@ def test_requirement_ledger_reserved_cap_matches_renderer_cap():
     )
 
 
+# ── 11. #652 review-fix: exact per-section byte accounting ─────────
+
+
+@pytest.mark.parametrize(
+    "header,body",
+    [
+        ("# Fenced JSON", "```json\n" + '{"a":1,"b":2}' * 4000 + "\n```"),
+        ("# Fenced diff", "```diff\n" + "d" * 40000 + "\n```"),
+        ("# Fenced text", "```text\n" + "x" * 40000 + "\n```"),
+        ("# Unfenced", "line\n" * 8000),
+    ],
+)
+def test_render_section_never_exceeds_budget(header, body):
+    """A truncated fenced section must not exceed its supplied budget.
+
+    Regression for the review feedback: the separator newline before the
+    closing fence was emitted but not budgeted, so a tightly-budgeted fenced
+    section could return ``budget + 1`` bytes and the corpus-wide final clamp
+    had to repair it (sliding later material).
+    """
+    for budget in range(1, 400):
+        text, _truncated, _included = specialist_corpus._render_section(
+            header=header,
+            body=body,
+            section_cap=10**9,
+            budget=budget,
+        )
+        assert len(text.encode("utf-8")) <= budget, (
+            f"render exceeded budget {budget}: {len(text.encode('utf-8'))}"
+        )
+
+
+def _reference_assembled_bytes(root: Path, cap: int) -> int:
+    """Mirror build's section budgeting WITHOUT the final clamp.
+
+    Used to prove the final clamp is a no-op: if ``_render_section`` overran a
+    per-section budget, this sum would exceed ``cap`` and the build's final
+    clamp would silently slice the corpus.
+    """
+    used = len(specialist_corpus.SPECIALIST_CORPUS_FRAMING.encode("utf-8"))
+    bodies = {
+        name: (builder(root) or "")
+        for name, _header, _cap, builder in specialist_corpus._SECTIONS
+    }
+    reserved: dict[str, str] = {}
+    for name, header, section_cap, _builder in specialist_corpus._SECTIONS:
+        if name not in specialist_corpus._RESERVED_SECTIONS:
+            continue
+        body = bodies[name]
+        if not body.strip():
+            continue
+        text, _truncated, included = specialist_corpus._render_section(
+            header=header, body=body, section_cap=section_cap, budget=cap - used
+        )
+        if included:
+            reserved[name] = text
+            used += len(text.encode("utf-8"))
+    for name, header, section_cap, _builder in specialist_corpus._SECTIONS:
+        if name in specialist_corpus._RESERVED_SECTIONS:
+            continue
+        body = bodies[name]
+        if not body.strip():
+            continue
+        text, _truncated, included = specialist_corpus._render_section(
+            header=header, body=body, section_cap=section_cap, budget=cap - used
+        )
+        if included:
+            used += len(text.encode("utf-8"))
+    return used
+
+
+def test_small_cap_build_needs_no_final_clamp(tmp_path):
+    """A small overall cap with truncating fenced sections needs no repair.
+
+    Proves the hard cap is met by per-section budgeting alone, not by the
+    corpus-wide final clamp slicing the assembled text.
+    """
+    _write_minimal(tmp_path)
+    _write(
+        tmp_path,
+        "classification.json",
+        json.dumps(
+            {
+                "pr_kind": "app_code",
+                "risk_flags": [f"flag-{i}" for i in range(3000)],
+                "risk_flags_with_files": {f"flag-{i}": ["a.py"] for i in range(3000)},
+                "must_check": [f"check-{i}" for i in range(3000)],
+            }
+        ),
+    )
+    _write(tmp_path, "pr-files.truncated.json", "[" + ",".join(
+        json.dumps({"filename": f"f{i}.py", "status": "modified"})
+        for i in range(8000)
+    ) + "]")
+    _write(tmp_path, "pr.diff.truncated", "d" * 200000)
+
+    for cap in (1200, 2000, 5000, 9000):
+        text, meta = specialist_corpus.build_specialist_corpus(
+            tmp_path, max_bytes=cap
+        )
+        expected = _reference_assembled_bytes(tmp_path, cap)
+        assert expected <= cap, f"per-section overrun at cap {cap}: {expected}"
+        # No final-clamp repair: the assembled bytes equal the exact sum.
+        assert meta["bytes"] == expected
+        assert len(text.encode("utf-8")) == expected
+        assert _unclosed_fence(text) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

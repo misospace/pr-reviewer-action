@@ -376,8 +376,9 @@ def _render_section(
     body keeps the header intact, and a body that is a single long line (compact
     JSON, a minified diff) is cut on a codepoint boundary rather than collapsed
     back to the header. A fenced body gets its closing fence re-emitted after
-    the cut (its bytes are reserved up front, alongside the truncation marker),
-    so a truncated code block cannot swallow the later sections.
+    the cut; the whole emitted suffix (separator newline + closing fence +
+    truncation marker) is budgeted by its exact byte length up front, so the
+    returned text can never exceed ``budget``.
     """
     if budget <= 0:
         return "", True, False
@@ -385,23 +386,18 @@ def _render_section(
     prefix = f"{header}\n\n"
     if len(prefix.encode("utf-8")) + len(body.encode("utf-8")) + 1 <= cap:
         return f"{prefix}{body}\n", False, True
+    # Build the entire emitted suffix once and budget its exact bytes — the
+    # separator newline before a closing fence is part of the suffix, not free.
     closing_fence = _body_closing_fence(body)
     marker = f"\n{_SECTION_TRUNCATED_MARKER}\n"
-    fixed = (
-        len(prefix.encode("utf-8"))
-        + len(closing_fence.encode("utf-8"))
-        + len(marker.encode("utf-8"))
-    )
+    suffix = f"\n{closing_fence}{marker}" if closing_fence else marker
+    fixed = len(prefix.encode("utf-8")) + len(suffix.encode("utf-8"))
     if fixed >= cap:
         return "", True, False
     clipped, _ = _truncate_utf8(body, cap - fixed)
     if not clipped.strip():
         return "", True, False
-    if closing_fence:
-        # Reserve-and-restore: the closing fence is emitted unconditionally
-        # after the cut, so the code block is always structurally closed.
-        return f"{prefix}{clipped}\n{closing_fence}{marker}", True, True
-    return f"{prefix}{clipped}{marker}", True, True
+    return f"{prefix}{clipped}{suffix}", True, True
 
 
 def build_specialist_corpus(
