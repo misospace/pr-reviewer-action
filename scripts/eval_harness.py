@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,21 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pr_reviewer.semantic_eval import (
+    SemanticCorpus,
+    SemanticResult,
+    _safe_relative_path,
+    SEMANTIC_EVAL_VERSION,
+    _collect_signals_from_run,
+    aggregate_semantic_runs,
+    evaluate_semantic_capability as evaluate_semantic_run,
+    validate_semantic_corpus,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +94,11 @@ class ReviewRun:
     mode: str              # "tools_off", "native_loop"
     pr_number: int
     repo_full_name: str
+    stage: str | None = None
+    route: str | None = None
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    primary_findings: list[dict[str, Any]] = field(default_factory=list)
+    specialist_leads: list[dict[str, Any]] = field(default_factory=list)
     tokens_input: int = 0
     tokens_output: int = 0
     wall_clock_sec: float = 0.0
@@ -108,6 +129,10 @@ class ReviewRun:
             # Additive, near pr_number: present only once the run
             # materialized a PR head; None runs keep the pre-existing shape.
             d["commit_sha"] = self.commit_sha
+        if self.stage is not None:
+            d["stage"] = self.stage
+        if self.route is not None:
+            d["route"] = self.route
         d.update({
             "repo_full_name": self.repo_full_name,
             "tokens_input": self.tokens_input,
@@ -124,6 +149,12 @@ class ReviewRun:
             "deep_review": self.deep_review,
             "specialists": self.specialists,
         })
+        if self.artifacts:
+            d["artifacts"] = self.artifacts
+        if self.primary_findings:
+            d["primary_findings"] = self.primary_findings
+        if self.specialist_leads:
+            d["specialist_leads"] = self.specialist_leads
         return d
 
 
@@ -144,13 +175,33 @@ class BenchmarkResult:
 
 @dataclass
 class BenchmarkCorpus:
-    """The full benchmark corpus with known-good findings."""
+    """The full benchmark corpus with optional semantic scenarios."""
     prs: list[dict[str, Any]] = field(default_factory=list)
+    semantic_corpus: SemanticCorpus | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> BenchmarkCorpus:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(prs=data.get("benchmark_corpus", []))
+        semantic = None
+        if isinstance(data.get("semantic_corpus"), list):
+            semantic = SemanticCorpus.from_file(path)
+            validate_semantic_corpus(semantic)
+        prs = data.get("benchmark_corpus", [])
+        if not prs and semantic is not None:
+            prs = []
+            for scenario in semantic.scenarios:
+                entry = {
+                    "number": scenario.number,
+                    "repo_full_name": scenario.repo_full_name,
+                    "url": scenario.url,
+                    "title": scenario.title,
+                    "known_findings": scenario.known_findings,
+                }
+                if scenario.fixture is not None:
+                    fixture_data, fixture_path = _load_semantic_fixture(semantic, scenario.fixture)
+                    entry["_semantic_fixture"] = (fixture_data, fixture_path)
+                prs.append(entry)
+        return cls(prs=prs, semantic_corpus=semantic)
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1029,19 @@ def _normalize_harness_finding(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _load_review_artifact_findings(path: Path) -> list[dict[str, Any]]:
+    payload = _read_json_soft(path)
+    if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in payload["findings"]:
+        finding = _normalize_harness_finding(item)
+        if finding is not None:
+            finding["stage"] = "primary"
+            findings.append(finding)
+    return findings
+
+
 def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
     """Read a run's review artifacts into the ReviewRun. Never raises.
 
@@ -1010,6 +1074,7 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
             if "verdict_source" in payload:
                 vs = payload["verdict_source"]
                 run.verdict_source = vs if isinstance(vs, str) else None
+
 
         model_text = ""
         try:
@@ -1051,6 +1116,59 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
             break
     except Exception:
         return
+
+
+def _load_semantic_fixture(corpus: SemanticCorpus, fixture_ref: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+    if corpus.fixture_root is None:
+        raise ValueError("semantic fixture root is unavailable")
+    fixture_name = fixture_ref.get("path")
+    fixture_hash = fixture_ref.get("sha256")
+    if not _safe_relative_path(fixture_name):
+        raise ValueError(f"semantic fixture path is unsafe: {fixture_name}")
+    if not isinstance(fixture_hash, str) or re.fullmatch(r"[0-9a-f]{64}", fixture_hash) is None:
+        raise ValueError("semantic fixture sha256 must be 64 lowercase hexadecimal characters")
+    fixture_path = (corpus.fixture_root / fixture_name).resolve()
+    if corpus.fixture_root.resolve() not in fixture_path.parents:
+        raise ValueError(f"semantic fixture escapes corpus root: {fixture_name}")
+    raw = fixture_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != fixture_hash:
+        raise ValueError(f"semantic fixture hash mismatch for {fixture_path}")
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"semantic fixture must be an object: {fixture_path}")
+    return data, fixture_path
+
+
+def _materialize_semantic_fixture(
+    repo_path: Path,
+    fixture: dict[str, Any],
+) -> str:
+    repo_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(repo_path), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "eval@test"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "semantic-eval"], check=True)
+    for entry in fixture.get("files", []):
+        relative_name = entry["path"]
+        if not _safe_relative_path(relative_name):
+            raise ValueError(f"semantic fixture path is unsafe: {relative_name}")
+        relative = Path(str(relative_name))
+        destination = repo_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(str(entry["content"]), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True)
+    api_root = repo_path / ".semantic-fixture"
+    api_root.mkdir()
+    (api_root / "pr.json").write_text(json.dumps(fixture["pr_json"]), encoding="utf-8")
+    (api_root / "diff").write_text(str(fixture["diff"]), encoding="utf-8")
+    (api_root / "files.json").write_text(json.dumps(fixture["pr_files"]), encoding="utf-8")
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
 
 
 def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None, str]:
@@ -1115,17 +1233,18 @@ def run_review_for_pr(
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
-    This is the integration point with the actual review pipeline. The run
-    materializes the corpus PR's exact head revision (refs/pull/<PR>/head,
-    fetched from the clone's origin and checked out detached) before
-    invoking the orchestrator, so filesystem context and specialist
-    artifact roots match the PR under review rather than the default
-    branch. The orchestrator's
+    This is the integration point with the actual review pipeline. Normal
+    benchmark entries materialize the corpus PR's exact head revision
+    (refs/pull/<PR>/head, fetched from the clone's origin and checked out
+    detached). Semantic fixture entries instead build a fresh local Git
+    repository from the immutable fixture and provide fixture-backed platform
+    responses, so they never fetch a live PR head. The orchestrator's
     GITHUB_WORKSPACE is pinned to the run's repo clone, because the
     production helpers resolve their workspace from it, never from cwd.
 
     Args:
         pr_entry: Corpus entry for one PR (with url, number, repo_full_name).
+          Semantic entries may carry the private `_semantic_fixture` tuple.
         mode: One of "tools_off", "native_loop".
         work_dir: Working directory for this run's artifacts.
         model_config: Model configuration (base_url, model, api_key, etc.).
@@ -1141,6 +1260,7 @@ def run_review_for_pr(
     """
     pr_number = pr_entry["number"]
     repo_full_name = pr_entry["repo_full_name"]
+    semantic_fixture = pr_entry.get("_semantic_fixture")
 
     run = ReviewRun(
         mode=run_label(mode, deep_review),
@@ -1161,18 +1281,21 @@ def run_review_for_pr(
             raise ValueError(f"Unknown mode: {mode}")
 
         # Build the review corpus and run the review
-        repo_path = work_dir / repo_full_name.replace("/", "-")
-        if not repo_path.exists():
-            # Clone or checkout the repo
-            subprocess.run(
-                ["git", "clone", f"https://github.com/{repo_full_name}.git", str(repo_path)],
-                check=False,  # may fail for private repos
-                capture_output=True,
-            )
-
-        if not repo_path.exists():
-            run.error = f"Repo {repo_full_name} not available locally"
-            return run
+        if semantic_fixture is not None:
+            repo_path = Path(tempfile.mkdtemp(prefix=f"semantic-{pr_number}-", dir=work_dir))
+            fixture_data = semantic_fixture[0]
+            run.commit_sha = _materialize_semantic_fixture(repo_path, fixture_data)
+        else:
+            repo_path = work_dir / repo_full_name.replace("/", "-")
+            if not repo_path.exists():
+                subprocess.run(
+                    ["git", "clone", f"https://github.com/{repo_full_name}.git", str(repo_path)],
+                    check=False,
+                    capture_output=True,
+                )
+            if not repo_path.exists():
+                run.error = f"Repo {repo_full_name} not available locally"
+                return run
 
         # Materialize the corpus PR's exact head revision (detached) before
         # any context is read: a cloned/reused repo_path sits on the
@@ -1180,12 +1303,13 @@ def run_review_for_pr(
         # filesystem-based context (repo map, related-code, native
         # read_file/git_grep, tree exploration, specialist verification)
         # would otherwise come from the current default-branch tree.
-        ok, sha, err = _checkout_pr_head(repo_path, pr_number)
-        if not ok:
-            run.error = f"PR head not materialized: {err}"
-            run.wall_clock_sec = time.monotonic() - start
-            return run
-        run.commit_sha = sha
+        if semantic_fixture is None:
+            ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+            if not ok:
+                run.error = f"PR head not materialized: {err}"
+                run.wall_clock_sec = time.monotonic() - start
+                return run
+            run.commit_sha = sha
 
         # Drop stale run artifacts so a reused workspace can never present a
         # prior run's verdict/tool trace/specialists as this run's.
@@ -1195,7 +1319,7 @@ def run_review_for_pr(
                 "ai-response.primary.json", "ai-response.fallback.json",
                 "ai-response.smart.json",
                 "analysis_engine.txt",
-                "tool-harness.json", "specialists.json",
+                "tool-harness.json", "specialists.json", "eval-harness-output.txt",
             ]
             + [
                 f"specialist-{role}.{suffix}"
@@ -1210,6 +1334,8 @@ def run_review_for_pr(
         # by scripts/sections/config.sh (it exits without them); AI_* are the
         # model endpoint.
         env = os.environ.copy()
+        python_dir = str(Path(sys.executable).resolve().parent)
+        env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env["GITHUB_TOKEN"] = model_config.get("github_token", "")
         env["REPO"] = pr_entry["repo_full_name"]
         env["PR_NUMBER"] = str(pr_number)
@@ -1220,6 +1346,12 @@ def run_review_for_pr(
         # run's temp clone so an ambient Actions value cannot steer the
         # orchestrator at the workflow checkout.
         env["GITHUB_WORKSPACE"] = str(repo_path)
+        env["GITHUB_OUTPUT"] = str(repo_path / "eval-harness-output.txt")
+        if semantic_fixture is not None:
+            env["SEMANTIC_FIXTURE_DIR"] = str(repo_path)
+            env["SEMANTIC_FIXTURE_MODE"] = "true"
+            env["FORCE_REVIEW"] = "true"
+            env["SKIP_IF_DIFF_UNCHANGED"] = "false"
         if tool_mode_arg:
             env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
@@ -1249,15 +1381,37 @@ def run_review_for_pr(
             # (the run cwd), not verdict.json.
             if result.returncode == 0:
                 populate_review_output(run, repo_path)
+                run.primary_findings = _load_review_artifact_findings(repo_path / "ai-output.primary.json")
                 if not run.review_markdown:
-                    # ai-output.json produced no review body: parse from
-                    # stdout if available.
                     run.review_markdown = result.stdout[:2000] if result.stdout else ""
 
                 populate_tool_trace(run, repo_path)
-                # Deep-review specialist telemetry (None when the run emitted
-                # no specialist artifacts at all).
-                run.specialists = load_specialist_telemetry(repo_path)
+                output_lines: dict[str, str] = {}
+                try:
+                    for line in (repo_path / "eval-harness-output.txt").read_text(encoding="utf-8").splitlines():
+                        key, separator, value = line.partition("=")
+                        if separator:
+                            output_lines[key] = value
+                except OSError:
+                    pass
+                route = output_lines.get("review_route", "").strip()
+                if route:
+                    run.route = route
+                if run.route == "escalated":
+                    run.stage = "escalation"
+                elif run.route in {"primary", "fast", "smart", "legacy"}:
+                    run.stage = "primary"
+                else:
+                    run.stage = "unknown"
+                if deep_review:
+                    run.specialists = load_specialist_telemetry(repo_path)
+                    if run.specialists:
+                        run.specialist_leads = [
+                            lead
+                            for leads in run.specialists.get("leads_by_role", {}).values()
+                            for lead in leads
+                            if isinstance(lead, dict)
+                        ]
             else:
                 run.error = f"Review failed (exit {result.returncode}): {result.stderr[:500]}"
         else:
@@ -1271,6 +1425,109 @@ def run_review_for_pr(
         run.error = f"Review error: {exc}"
 
     return run
+
+
+def _live_duplicate_count(run: ReviewRun) -> int:
+    seen: set[tuple[str, str, str, str]] = set()
+    duplicates = 0
+    for finding in run.findings:
+        if not isinstance(finding, dict):
+            continue
+        key = (
+            str(finding.get("category") or "").casefold(),
+            str(finding.get("severity") or "").casefold(),
+            str(finding.get("file") or "").casefold(),
+            str(finding.get("message") or finding.get("description") or "").casefold(),
+        )
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
+    return duplicates
+
+
+def evaluate_live_semantics(
+    corpus: SemanticCorpus | None,
+    results: list[BenchmarkResult],
+) -> dict[str, Any] | None:
+    if corpus is None:
+        return None
+    validate_semantic_corpus(corpus)
+    by_key: dict[tuple[str, int], list[ReviewRun]] = {}
+    for benchmark in results:
+        by_key[(benchmark.repo_full_name, benchmark.pr_number)] = benchmark.runs
+    scenario_reports: list[dict[str, Any]] = []
+    for scenario in corpus.scenarios:
+        # Semantic scenarios can share historical PR provenance but each owns a
+        # distinct reconstructed fixture and therefore its own benchmark run.
+        runs = by_key.get((scenario.repo_full_name, scenario.number), [])
+        per_run: list[SemanticResult] = []
+        for run in runs:
+            expected_mode = scenario.review_mode
+            actual_mode = "deep" if run.mode.endswith("+deep") or run.mode == "deep" else "standard"
+            if expected_mode != "any" and actual_mode != expected_mode:
+                continue
+            signals = _collect_signals_from_run(run)
+            metadata = {
+                "mode": run.mode,
+                "route": run.route,
+                "stage": run.stage,
+                "escalated": run.route in {"escalated", "escalation"} or run.stage == "escalation",
+                "tool_call_count": len(run.tool_calls),
+                "duplicate_count": _live_duplicate_count(run),
+                "latency_sec": run.wall_clock_sec,
+            }
+            per_run.append(evaluate_semantic_run(scenario, signals, metadata))
+        aggregate = aggregate_semantic_runs(scenario, per_run)
+        aggregate["evaluation_missing"] = not per_run
+        aggregate["provenance"] = scenario.provenance
+        aggregate["class"] = scenario.klass
+        aggregate["negative_control"] = scenario.negative_control
+        aggregate["diff_polarity"] = scenario.diff_polarity
+        aggregate["review_mode"] = scenario.review_mode
+        aggregate["route_expected"] = scenario.route
+        aggregate["stage_attribution_expected"] = scenario.stage_attribution
+        aggregate["attribution_rates"] = {
+            stage: round(sum(stage in result.stages_hit for result in per_run) / len(per_run), 4) if per_run else 0.0
+            for stage in ("specialist", "primary", "escalation")
+        }
+        aggregate["per_run"] = [result.to_dict() for result in per_run]
+        scenario_reports.append(aggregate)
+    scored = [item for item in scenario_reports if item["runs"]]
+    negative_controls = [item for item in scenario_reports if item["negative_control"]]
+    incomplete_scenarios = [
+        {"scenario_number": item["scenario_number"], "reason": "no applicable runs after mode filtering"}
+        for item in scenario_reports
+        if item["evaluation_missing"]
+    ]
+    return {
+        "evaluator_version": SEMANTIC_EVAL_VERSION,
+        "corpus_version": corpus.version,
+        "metadata": corpus.metadata,
+        "scenarios": scenario_reports,
+        "per_scenario_summary": {
+            str(item["scenario_number"]): item for item in scenario_reports
+        },
+        "summary": {
+            "scenarios": len(scenario_reports),
+            "scored_scenarios": len(scored),
+            "pass_rate": round(sum(item["pass_rate"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
+            "average_tool_calls": round(sum(item["average_tool_calls"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "average_duplicate_count": round(sum(item["average_duplicate_count"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
+        },
+        "incomplete_scenarios": incomplete_scenarios,
+        "negative_control_summary": {
+            "scenarios": len(negative_controls),
+            "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
+        },
+        "passed": not incomplete_scenarios
+        and bool(scored)
+        and all(item["pass_rate"] == 1.0 for item in scored)
+        and all(item["false_positive_rate"] == 0.0 for item in negative_controls),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1477,6 +1734,7 @@ def generate_report(
             else None
         )
 
+    semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
     report = {
         "metadata": {
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1488,6 +1746,8 @@ def generate_report(
         "mode_summary": {m: mode_metrics[m] for m in sorted(mode_metrics)},
         "per_pr_results": report_results,
     }
+    if semantic_report is not None:
+        report["semantic_eval"] = semantic_report
 
     return report
 

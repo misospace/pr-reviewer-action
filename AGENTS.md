@@ -270,6 +270,24 @@ The `eval-harness` workflow has two triggers:
 The JSON report is uploaded as the `eval-report` artifact on every run
 (including failed runs) so regressions can be diffed week-over-week.
 
+### Offline semantic corpus
+
+The historical semantic gate is deterministic and never contacts GitHub, a model,
+or the network. Run it locally with Python 3.12+:
+
+```bash
+python3 scripts/run_semantic_eval_ci.py \
+    --corpus evals/corpus-historical-dogfood.json \
+    --output semantic-eval-report/report.json
+```
+
+The runner requires the fixed scenarios and at least one offline fixture per
+scenario. It exits non-zero for malformed schema, missing runs, or unexpected
+scenario numbers; with `--output` it still writes a failure JSON report. The
+report records primary/escalation fixture routes and negative-control-only
+false-positive metrics. CI runs the same command and uploads
+`semantic-eval-report/report.json`.
+
 ### Interpreting the report
 
 The harness prints per-mode `pass_rate` (fraction of expected-evidence

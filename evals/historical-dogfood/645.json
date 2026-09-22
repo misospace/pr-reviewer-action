@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 645,
+  "provenance": {"historical_pr": 645, "state": "pre-fix", "source": "compact reconstruction of dead review-state inputs"},
+  "pr_json": {"number": 645, "title": "refactor(review): remove carried findings and review metadata state", "body": "", "head": {"sha": "fixture-645-head", "ref": "refactor/remove-state"}, "base": {"sha": "fixture-645-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 3, "additions": 9, "deletions": 0, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/645"},
+  "diff": "diff --git a/scripts/check_review_needed.sh b/scripts/check_review_needed.sh\nnew file mode 100644\n--- /dev/null\n+++ b/scripts/check_review_needed.sh\n@@ -0,0 +1,5 @@\n+if previous_review_state_exists; then\n+  carry_forward_findings\n+fi\n+\n+read_review_metadata\ndiff --git a/README.md b/README.md\nnew file mode 100644\n--- /dev/null\n+++ b/README.md\n@@ -0,0 +1 @@\n+Previous review state is reused between runs.\ndiff --git a/scripts/publish_helpers.sh b/scripts/publish_helpers.sh\nnew file mode 100644\n--- /dev/null\n+++ b/scripts/publish_helpers.sh\n@@ -0,0 +1,3 @@\n+read_review_metadata() {\n+  return 0\n+}\n",
+  "pr_files": [{"filename": "scripts/check_review_needed.sh", "status": "added", "additions": 5, "deletions": 0, "changes": 5}, {"filename": "README.md", "status": "added", "additions": 1, "deletions": 0, "changes": 1}, {"filename": "scripts/publish_helpers.sh", "status": "added", "additions": 3, "deletions": 0, "changes": 3}],
+  "files": [{"path": "scripts/check_review_needed.sh", "content": "if previous_review_state_exists; then\n  carry_forward_findings\nfi\n\nread_review_metadata\n"}, {"path": "README.md", "content": "Previous review state is reused between runs.\n"}, {"path": "scripts/publish_helpers.sh", "content": "read_review_metadata() {\n  return 0\n}\n"}]
+}

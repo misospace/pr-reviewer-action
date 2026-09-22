@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 6451,
+  "provenance": {"historical_pr": 645, "state": "pre-fix", "source": "compact reconstruction of deletion-only control inputs"},
+  "pr_json": {"number": 645, "title": "negative control: deleted declarations are absent", "body": "", "head": {"sha": "fixture-6451-head", "ref": "refactor/remove-state"}, "base": {"sha": "fixture-6451-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 1, "additions": 0, "deletions": 4, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/645"},
+  "diff": "diff --git a/scripts/legacy_state.sh b/scripts/legacy_state.sh\ndeleted file mode 100644\n--- a/scripts/legacy_state.sh\n+++ /dev/null\n@@ -1,4 +0,0 @@\n-carry_forward_findings\n-read_review_metadata\n-legacy_declaration=true\n-\n",
+  "pr_files": [{"filename": "scripts/legacy_state.sh", "status": "removed", "additions": 0, "deletions": 4, "changes": 4}],
+  "files": [{"path": "scripts/current.sh", "content": "run_current_review() {\n  return 0\n}\n"}]
+}

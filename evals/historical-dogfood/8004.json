@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 8004,
+  "provenance": {"historical_pr": 8004, "state": "pre-fix", "source": "compact unrelated dependency control"},
+  "pr_json": {"number": 8004, "title": "chore(deps): bump transitive runtime dependency (no surface change)", "body": "", "head": {"sha": "fixture-8004-head", "ref": "deps/bump"}, "base": {"sha": "fixture-8004-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 1, "additions": 1, "deletions": 1, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/8004"},
+  "diff": "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-dependency==1.0\n+dependency==1.1\n",
+  "pr_files": [{"filename": "requirements.txt", "status": "modified", "additions": 1, "deletions": 1, "changes": 2}],
+  "files": [{"path": "requirements.txt", "content": "dependency==1.1\n"}, {"path": "README.md", "content": "Trivial dependency bump.\n"}]
+}

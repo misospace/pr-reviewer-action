@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 6231,
+  "provenance": {"historical_pr": 623, "state": "pre-fix", "source": "compact reconstruction of the #623 failure-contract inputs"},
+  "pr_json": {"number": 623, "title": "feat(review): add deep-review specialist advisory passes (#608) - failure contract", "body": "", "head": {"sha": "fixture-6231-head", "ref": "feature/specialists"}, "base": {"sha": "fixture-6231-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 1, "additions": 7, "deletions": 0, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/623"},
+  "diff": "diff --git a/scripts/run_specialists.py b/scripts/run_specialists.py\nnew file mode 100644\n--- /dev/null\n+++ b/scripts/run_specialists.py\n@@ -0,0 +1,7 @@\n+try:\n+    result = run_role(role)\n+    write_role_artifact(result)\n+except Exception:\n+    return\n+\n+write_aggregate()\n",
+  "pr_files": [{"filename": "scripts/run_specialists.py", "status": "added", "additions": 7, "deletions": 0, "changes": 7}],
+  "files": [{"path": "scripts/run_specialists.py", "content": "try:\n    result = run_role(role)\n    write_role_artifact(result)\nexcept Exception:\n    return\n\nwrite_aggregate()\n"}, {"path": "scripts/sections/corpus.sh", "content": "run_specialists || true\n"}]
+}

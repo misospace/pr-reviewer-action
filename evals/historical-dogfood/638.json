@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scenario": 638,
+  "provenance": {"historical_pr": 638, "state": "pre-fix", "source": "compact reconstruction of the full-review state inputs"},
+  "pr_json": {"number": 638, "title": "fix(review): preserve full-review loop semantics", "body": "", "head": {"sha": "fixture-638-head", "ref": "fix/full-review"}, "base": {"sha": "fixture-638-base", "ref": "main"}, "user": {"login": "fixture"}, "changed_files": 1, "additions": 7, "deletions": 0, "html_url": "https://github.com/misospace/pr-reviewer-action/pull/638"},
+  "diff": "diff --git a/scripts/check_review_needed.sh b/scripts/check_review_needed.sh\nnew file mode 100644\n--- /dev/null\n+++ b/scripts/check_review_needed.sh\n@@ -0,0 +1,7 @@\n+if [ \"$FULL_REVIEW\" = true ]; then\n+  needs_full_review=true\n+fi\n+\n+if [ \"$needs_full_review\" = true ]; then\n+  run_full_review\n+fi\n",
+  "pr_files": [{"filename": "scripts/check_review_needed.sh", "status": "added", "additions": 7, "deletions": 0, "changes": 7}],
+  "files": [{"path": "scripts/check_review_needed.sh", "content": "if [ \"$FULL_REVIEW\" = true ]; then\n  needs_full_review=true\nfi\n\nif [ \"$needs_full_review\" = true ]; then\n  run_full_review\nfi\n"}, {"path": "README.md", "content": "A legacy full-review flag requests one full review.\n"}]
+}

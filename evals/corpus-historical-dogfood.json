@@ -1,0 +1,490 @@
+{
+  "version": 1,
+  "semantic_corpus": [
+    {
+      "number": 623,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+      "title": "feat(review): add deep-review specialist advisory passes (#608)",
+      "provenance": {
+        "pr": 623,
+        "issue": 608,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/608"
+      },
+      "class": "control_flow_sequencing",
+      "review_mode": "deep",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "control_flow_sequencing"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "sequencing-violation",
+          "kind": "finding",
+          "any_of": [
+            "final review starts before specialists",
+            "final review begins before specialists",
+            "race condition between specialists and final",
+            "specialists are not reaped before final",
+            "specialist phase is not complete before final"
+          ]
+        },
+        {
+          "id": "specialist-artifact",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "specialists.json",
+            "specialists.phase.log"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Launching specialists is not enough; every specialist must be terminated and reaped before the final review starts.",
+      "expected_metrics": {
+        "max_tool_calls": 2
+      },
+      "fixture": {
+        "path": "historical-dogfood/623.json",
+        "sha256": "e6552f38a5a9ce77e5ca60af02dcb7190dfd85b8466bd7be981644bc42e383bf"
+      },
+      "offline_runs": [
+        {
+          "mode": "deep",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The final review starts before specialists are reaped, creating a sequencing race."
+            }
+          ],
+          "review_markdown": "The final review starts before specialists are reaped, creating a sequencing race; specialists.json is available.",
+          "tool_calls": [
+            {
+              "tool": "read_file",
+              "args": {
+                "path": "specialists.json"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6231,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+      "title": "feat(review): add deep-review specialist advisory passes (#608) - failure contract",
+      "provenance": {
+        "pr": 623,
+        "issue": 608,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/623",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/608"
+      },
+      "class": "output_completeness",
+      "review_mode": "deep",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "output_completeness"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "failure-contract-violation",
+          "kind": "finding",
+          "any_of": [
+            "failure path never writes",
+            "error path never writes",
+            "catastrophic failure loses the artifact",
+            "normalized output is not written on failure",
+            "normalized artifact is absent on error"
+          ]
+        },
+        {
+          "id": "aggregate-artifact",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "specialists.json",
+            "specialists.phase.log"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Per-role and aggregate specialist artifacts have a deterministic fail-soft contract on catastrophic failure.",
+      "expected_metrics": {
+        "max_tool_calls": 2
+      },
+      "fixture": {
+        "path": "historical-dogfood/6231.json",
+        "sha256": "b2879647781bdd34da54991a6fe22a9962deeb7f9a5f7a4457a6aa876ce3ac3d"
+      },
+      "offline_runs": [
+        {
+          "mode": "deep",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "On catastrophic failure, the failure path never writes normalized output."
+            }
+          ],
+          "review_markdown": "On catastrophic failure, the failure path never writes normalized output; specialists.json is missing.",
+          "tool_calls": [
+            {
+              "tool": "read_file",
+              "args": {
+                "path": "specialists.json"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 638,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/638",
+      "title": "fix(review): preserve full-review loop semantics",
+      "provenance": {
+        "pr": 638,
+        "issue": 638,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/638",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/638"
+      },
+      "class": "full_review_loop",
+      "review_mode": "standard",
+      "route": "primary+escalation",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "full_review_loop"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "redundant-full-review",
+          "kind": "finding",
+          "any_of": [
+            "needs_full_review is minted",
+            "needs_full_review is recreated",
+            "needs_full_review causes a redundant full review",
+            "redundant full review",
+            "full review repeats past once",
+            "legacy flag is left uncleared",
+            "legacy full review flag is left uncleared",
+            "legacy flag repeats past once",
+            "legacy full review flag is left uncleared and repeats past once"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "A current full review must not mint needs_full_review and trigger a redundant full review; a legacy flag may force at most one full review and then clears.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/638.json",
+        "sha256": "02b205894402763b2c286afd8deb0a794dc7707b7cb20def1e48137677b9a82d"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The current full review mints needs_full_review and causes a redundant full review."
+            }
+          ],
+          "review_markdown": "The current full review mints needs_full_review, triggers another full review, and leaves the flag uncleared.",
+          "tool_calls": []
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary+escalation",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The legacy full review flag is left uncleared and repeats past once."
+            }
+          ],
+          "review_markdown": "The primary review escalated; the legacy flag remains uncleared and repeats the full review past once.",
+          "tool_calls": [],
+          "escalated": true
+        }
+      ]
+    },
+    {
+      "number": 644,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/644",
+      "title": "refactor(review): remove deleted runtime protocol",
+      "provenance": {
+        "pr": 644,
+        "issue": 644,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/644",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/644"
+      },
+      "class": "runtime_protocol",
+      "review_mode": "standard",
+      "route": "primary",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "runtime_protocol"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "stale-runtime-protocol",
+          "kind": "finding",
+          "any_of": [
+            "prompt still references deleted runtime protocol",
+            "prompt references deleted runtime protocol",
+            "stale default prompt remains",
+            "default prompt still names the removed protocol",
+            "prompt and runtime disagree"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "The runtime protocol was deleted, but the bundled default prompt remained stale.",
+      "expected_metrics": {
+        "max_tool_calls": 2
+      },
+      "fixture": {
+        "path": "historical-dogfood/644.json",
+        "sha256": "6fc6e3e6286cd967733ce0f930bdcaefb24dc38d8d326fb87f625d887b0e579d"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The default prompt still references the deleted runtime protocol, so the prompt and runtime disagree."
+            }
+          ],
+          "review_markdown": "The default prompt still references the deleted runtime protocol, so the prompt and runtime disagree.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 645,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+      "title": "refactor(review): remove carried findings and review metadata state",
+      "provenance": {
+        "pr": 645,
+        "issue": 645,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/645"
+      },
+      "class": "stale_review_state",
+      "review_mode": "standard",
+      "route": "primary+escalation",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "stale_review_state"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "stale-state",
+          "kind": "finding",
+          "any_of": [
+            "stale previous review state remains",
+            "carried findings remain",
+            "carried findings survive",
+            "stale review metadata remains",
+            "docs still describe stale previous review",
+            "removed state is still referenced"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Removed carried findings and cross-run review state must not survive in code, documentation, or behavior.",
+      "expected_metrics": {
+        "max_tool_calls": 2
+      },
+      "fixture": {
+        "path": "historical-dogfood/645.json",
+        "sha256": "ec17d91bc334f7392a16f5adaebffda1342f19a8753b0ee23c0e29af55f06301"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The docs still describe stale previous review state, and carried findings remain."
+            }
+          ],
+          "review_markdown": "The docs still describe stale previous review state, and carried findings remain.",
+          "tool_calls": []
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary+escalation",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The docs still describe stale previous review state, and carried findings survive."
+            }
+          ],
+          "review_markdown": "Escalation confirms the docs still describe stale previous review state, and carried findings survive.",
+          "tool_calls": [],
+          "escalated": true
+        }
+      ]
+    },
+    {
+      "number": 6451,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+      "title": "negative control: deleted declarations are absent",
+      "provenance": {
+        "pr": 645,
+        "issue": 645,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/645",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/645"
+      },
+      "class": "negative_control",
+      "review_mode": "standard",
+      "route": "primary",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "diff_polarity",
+        "stale_review_state"
+      ],
+      "negative_control": true,
+      "diff_polarity": "deletion",
+      "description": "Deleted declarations are absent; a review must not assert that removed declarations still exist.",
+      "expected_metrics": {
+        "max_tool_calls": 2
+      },
+      "fixture": {
+        "path": "historical-dogfood/6451.json",
+        "sha256": "16e1cb53b11739c25df406d6a44a2d497223851c609cfd5bc175d2a1ffe7871b"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "review_markdown": "Do not assert that deleted declarations still exist; the removed artifact is absent.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 8004,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/8004",
+      "title": "chore(deps): bump transitive runtime dependency (no surface change)",
+      "provenance": {
+        "pr": 8004,
+        "issue": 627,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/8004",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/627"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "control_flow_sequencing",
+        "output_completeness"
+      ],
+      "negative_control": true,
+      "description": "Clean negative control for #627: an unrelated dependency bump must not fabricate historical sequencing or failure-contract findings.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/8004.json",
+        "sha256": "d699d006198897c8ea8e713a9263e2867c1eb272d8f114eb64af26e724977bd2"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "review_markdown": "Trivial dependency bump. Clean change; approve.",
+          "tool_calls": []
+        },
+        {
+          "mode": "deep",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "review_markdown": "No specialist or output-completeness issue is present; approve.",
+          "tool_calls": []
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-09-21T00:00:00Z",
+    "description": "Compact reconstructed historical semantic regression corpus for issue #627. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
+    "issue_refs": [
+      608,
+      627,
+      638,
+      644,
+      645
+    ],
+    "pr_refs": [
+      623,
+      638,
+      644,
+      645,
+      8004
+    ],
+    "stages": [
+      "specialist",
+      "primary",
+      "escalation",
+      "any"
+    ],
+    "review_modes": [
+      "standard",
+      "deep",
+      "any"
+    ],
+    "routes": [
+      "primary",
+      "escalation",
+      "primary+escalation",
+      "any"
+    ],
+    "capability_classes": [
+      "control_flow_sequencing",
+      "output_completeness",
+      "full_review_loop",
+      "runtime_protocol",
+      "stale_review_state",
+      "diff_polarity",
+      "negative_control"
+    ]
+  }
+}
