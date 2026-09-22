@@ -75,8 +75,11 @@ PRIMARY_OK=0
 # native_loop in-conversation verdict (#205): when the tool loop produced its
 # own verdict (final turn, full reasoning history preserved), it wrote the
 # response to ai-response.primary.json. Parse it and skip the separate review
-# call. A parse failure (degraded/oversized/garbled verdict) falls through to
-# the standard corpus review below, so this only ever adds capability.
+# call. The harness validates that response against this same verdict contract
+# before setting native_loop_verdict_produced (#637), so the flag is only true
+# when the artifact is reusable; a parse failure here is a defensive diagnostic
+# and still falls through to the standard corpus review below, so this only
+# ever adds capability.
 #
 # VERDICT-TURN CONTRACT (#362): the two paths that build a verdict request —
 # build_model_request here (Path A) and Conversation.to_request_payload in the
@@ -86,16 +89,25 @@ PRIMARY_OK=0
 # docstring; the shared literals are pinned by
 # tests/test_verdict_contract_equivalence.py.
 NATIVE_VERDICT_USED=0
+NATIVE_VERDICT_PRODUCED="$(jq -r '.native_loop_verdict_produced // false' tool-harness.json 2>/dev/null || echo false)"
+NATIVE_VERDICT_STATUS="$(jq -r '.native_loop_verdict_status // empty' tool-harness.json 2>/dev/null || true)"
+NATIVE_VERDICT_REASON="$(jq -r '.native_loop_verdict_reason // empty' tool-harness.json 2>/dev/null || true)"
 if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop" ]] \
-  && [[ "$(jq -r '.native_loop_verdict_produced // false' tool-harness.json 2>/dev/null)" == "true" ]] \
-  && [ -s ai-response.primary.json ]; then
-  log "native_loop produced an in-conversation verdict; using it and skipping the separate review call"
-  if parse_and_validate ai-response.primary.json; then
-    PRIMARY_OK=1
-    NATIVE_VERDICT_USED=1
+  && [[ "$NATIVE_VERDICT_PRODUCED" == "true" ]]; then
+  if [ -s ai-response.primary.json ]; then
+    log "native_loop produced an in-conversation verdict; using it and skipping the separate review call"
+    if parse_and_validate ai-response.primary.json; then
+      PRIMARY_OK=1
+      NATIVE_VERDICT_USED=1
+    else
+      log "native_loop verdict did not parse (${NATIVE_VERDICT_REASON:-unknown}); falling back to the standard review call"
+    fi
   else
-    log "native_loop verdict did not parse; falling back to the standard review call"
+    log "native_loop flagged a verdict but ai-response.primary.json is missing or empty (${NATIVE_VERDICT_REASON:-unknown}); falling back to the standard review call"
   fi
+elif [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_loop" ]] \
+  && [[ "$NATIVE_VERDICT_STATUS" == "fallback" ]]; then
+  log "native_loop did not produce a reusable in-conversation verdict (${NATIVE_VERDICT_REASON:-unknown}); falling back to the standard review call"
 fi
 
 if [ "$NATIVE_VERDICT_USED" -ne 1 ]; then
@@ -483,6 +495,28 @@ write_step_summary() {
   tool_call_count="$(jq -r '.executed_request_count // 0' tool-harness.json 2>/dev/null || echo 0)"
   tool_success_count="$(jq '[.tool_calls[]? | select(.status == "ok")] | length' tool-harness.json 2>/dev/null || echo 0)"
 
+  # Native-loop verdict telemetry (#637): distinguishes the tool rounds above
+  # from the verdict attempt(s)/retry, and makes an entered fallback explicit.
+  local native_verdict_row=""
+  local native_verdict_status native_verdict_attempts native_verdict_retried
+  native_verdict_status="$(jq -r '.native_loop_verdict_status // empty' tool-harness.json 2>/dev/null || true)"
+  if [[ -n "$native_verdict_status" ]]; then
+    native_verdict_attempts="$(jq -r '.native_loop_verdict_attempts // 0' tool-harness.json 2>/dev/null || echo 0)"
+    native_verdict_retried="$(jq -r '.native_loop_verdict_retried // false' tool-harness.json 2>/dev/null || echo false)"
+    local native_verdict_reason native_verdict_transport
+    native_verdict_reason="$(jq -r '.native_loop_verdict_reason // empty' tool-harness.json 2>/dev/null || true)"
+    native_verdict_transport="$(jq -r '.native_loop_verdict_transport // empty' tool-harness.json 2>/dev/null || true)"
+    native_verdict_row="| Native verdict | ${native_verdict_status}"
+    if [[ -n "$native_verdict_transport" ]]; then
+      native_verdict_row+=" via ${native_verdict_transport}"
+    fi
+    native_verdict_row+=" (attempts: ${native_verdict_attempts}, retried: ${native_verdict_retried}"
+    if [[ -n "$native_verdict_reason" ]]; then
+      native_verdict_row+=", reason: ${native_verdict_reason}"
+    fi
+    native_verdict_row+=") |"
+  fi
+
   {
     echo "### AI PR Review"
     echo ""
@@ -496,6 +530,9 @@ write_step_summary() {
       echo "| Requirement coverage | ${coverage_total} requirement(s)${coverage_unresolved} |"
     fi
     echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
+    if [[ -n "$native_verdict_row" ]]; then
+      echo "$native_verdict_row"
+    fi
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
     if [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]]; then
       local deep_review_leads deep_review_errors

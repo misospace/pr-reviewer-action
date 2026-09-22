@@ -157,6 +157,145 @@ def _usage_with_cache_ratio(usage_acc):
     }
 
 
+# ── Native-loop verdict finalization (#637) ─────────────────────────────────
+# The in-conversation verdict (#205) only earns its latency when the returned
+# body is reusable by the downstream verdict parser. A streamed turn can
+# reassemble into a body that fails the verdict contract, and the old code
+# stamped ``native_loop_verdict_produced`` unconditionally — so review.sh
+# skipped the standard review and then fell back anyway, paying for both. These
+# helpers classify a verdict response against the SAME parser the publish path
+# uses, then drive one content-aware non-streamed retry before giving up.
+
+def evaluate_native_verdict(response):
+    """Validate a verdict response with the downstream verdict contract (#637).
+
+    Returns ``(ok, reason, detail)``:
+
+    * ``ok=True``  → the response renders a reusable verdict.
+    * ``ok=False`` → ``reason`` classifies the failure so telemetry can tell
+      transport/reassembly failure from verdict-schema/parse/validation failure:
+      ``"transport"`` (missing/error body), ``"empty"`` (no completion to
+      parse), or ``"parse"`` (body present but the verdict contract rejected
+      it). ``detail`` is a bounded human-readable explanation.
+
+    Uses ``pr_reviewer.response_parser.parse_response`` — the exact contract the
+    standard review path validates with — so the retry can never pass on a
+    weaker standard than the fallback it replaces.
+    """
+    if not isinstance(response, dict):
+        return False, "transport", "no response body"
+    error = response.get("error")
+    if error:
+        if isinstance(error, dict):
+            detail = error.get("message") or json.dumps(error)
+        else:
+            detail = str(error)
+        return False, "transport", detail
+    try:
+        from pr_reviewer.response_parser import (  # noqa: PLC0415
+            EMPTY_COMPLETION_EXIT,
+            parse_response,
+        )
+    except Exception as exc:  # noqa: BLE001 — never let an import break evidence
+        return False, "parse", f"verdict parser unavailable: {exc}"
+    try:
+        parse_response(response)
+    except SystemExit as exc:
+        detail = str(exc) or f"exit {exc.code}"
+        if exc.code == EMPTY_COMPLETION_EXIT:
+            return False, "empty", detail
+        return False, "parse", detail
+    except Exception as exc:  # noqa: BLE001 — parser must never abort the harness
+        return False, "parse", str(exc)
+    return True, "accepted", ""
+
+
+def produce_native_verdict(
+    verdict_payload,
+    *,
+    base_url,
+    api_format,
+    api_key,
+    turn_timeout,
+    usage_acc,
+):
+    """Drive the verdict turn, retrying once non-streamed when unusable (#637).
+
+    Fast path is unchanged: a streamed payload whose body satisfies the verdict
+    contract is accepted on the first attempt. When that streamed attempt is
+    unusable — transport/reassembly failure OR a body the verdict parser
+    rejects — retry once non-streamed, and consume the retry when IT is
+    reusable. Only when no attempt yields a reusable verdict does the caller
+    leave ``native_loop_verdict_produced`` unset, so review.sh runs the standard
+    final-review fallback.
+
+    Returns a telemetry-bearing dict and never raises: transport errors are
+    classified, not propagated. Every returned body is folded into ``usage_acc``
+    so attempt/retry spend stays visible.
+    """
+
+    def _request(payload):
+        try:
+            return (
+                run_chat_request(
+                    base_url, api_format, payload, api_key, turn_timeout
+                ),
+                None,
+            )
+        except Exception as exc:  # noqa: BLE001 — classified as a transport failure
+            return None, str(exc)
+
+    first = dict(verdict_payload)
+    first["stream"] = bool(verdict_payload.get("stream"))
+    attempted_stream = first["stream"]
+
+    attempts = 0
+    retried = False
+    stream_failure_kind = None
+    stream_failure_detail = ""
+
+    response, transport_error = _request(first)
+    attempts += 1
+    if response is not None:
+        _accumulate_usage(usage_acc, response, api_format)
+        ok, reason, detail = evaluate_native_verdict(response)
+    else:
+        ok, reason, detail = False, "transport", transport_error or "request failed"
+
+    if not ok and attempted_stream:
+        retried = True
+        stream_failure_kind, stream_failure_detail = reason, detail
+        retry_payload = {k: v for k, v in first.items() if k != "stream_options"}
+        retry_payload["stream"] = False
+        response, transport_error = _request(retry_payload)
+        attempts += 1
+        if response is not None:
+            _accumulate_usage(usage_acc, response, api_format)
+            ok, reason, detail = evaluate_native_verdict(response)
+        else:
+            ok, reason, detail = False, "transport", transport_error or "request failed"
+
+    if ok:
+        transport = (
+            "non-streamed"
+            if not attempted_stream
+            else ("non-streamed-retry" if retried else "streamed")
+        )
+    else:
+        transport = ""
+    return {
+        "response": response,
+        "ok": ok,
+        "attempts": attempts,
+        "retried": retried,
+        "transport": transport,
+        "reason": reason,
+        "detail": detail,
+        "stream_failure_kind": stream_failure_kind,
+        "stream_failure_detail": stream_failure_detail,
+    }
+
+
 def normalize_api_format(value):
     candidate = (value or "openai").strip().lower()
     if candidate in {"openai", "anthropic"}:
@@ -1052,11 +1191,13 @@ def run_native_loop(
     # corpus for a separate review call. The system prompt is already the unified
     # reviewer+tools prompt (set above, #263) — no swap, so the cached prefix
     # survives. We re-inject the full corpus the loop never saw (it ran on the
-    # compact planning context), drop tools, and force a strict-JSON verdict. The
-    # response is written where the standard review call writes it; run_review.sh
-    # consumes it and skips that call. If the verdict is degraded/oversized/
-    # garbled it simply fails to parse downstream and run_review.sh falls back to
-    # the standard corpus review — so this only adds capability. OpenAI only: an
+    # compact planning context), drop tools, and force a strict-JSON verdict.
+    # The response is written where the standard review call writes it; its body
+    # is validated with the downstream verdict contract BEFORE
+    # `native_loop_verdict_produced` is set (#637), so a recoverable streamed
+    # failure consumes the non-streamed retry instead of silently forcing a
+    # second full synthesis, while a truly unusable verdict leaves the flag unset
+    # and lets run_review.sh fall back to the standard corpus review. OpenAI only: an
     # Anthropic verdict turn after trailing tool_result (user-role) blocks would
     # create adjacent user turns (a 400), and native_loop runs on the OpenAI
     # primary in practice. Skipped when no reviewer prompt resolved (loop_system
@@ -1118,13 +1259,61 @@ def run_native_loop(
                     tokens_param=tokens_param,
                     cache_prefix=True,
                 )
-                verdict_response = post_fn(verdict_payload)
-                Path("ai-response.primary.json").write_text(
-                    json.dumps(verdict_response), encoding="utf-8"
+                verdict = produce_native_verdict(
+                    verdict_payload,
+                    base_url=base_url,
+                    api_format=api_format,
+                    api_key=api_key,
+                    turn_timeout=turn_timeout,
+                    usage_acc=usage_acc,
                 )
-                result["native_loop_verdict_produced"] = True
+                result["native_loop_verdict_attempts"] = verdict["attempts"]
+                result["native_loop_verdict_retried"] = verdict["retried"]
+                if verdict["retried"]:
+                    result["native_loop_verdict_stream_failure"] = verdict[
+                        "stream_failure_kind"
+                    ]
+                # Keep the raw response as a diagnostic artifact even when it is
+                # unusable, but never claim success without a reusable body: the
+                # produced flag is set strictly from the contract check (#637).
+                if isinstance(verdict["response"], dict):
+                    Path("ai-response.primary.json").write_text(
+                        json.dumps(verdict["response"]), encoding="utf-8"
+                    )
+                else:
+                    Path("ai-response.primary.json").unlink(missing_ok=True)
+                if verdict["ok"]:
+                    result["native_loop_verdict_produced"] = True
+                    result["native_loop_verdict_status"] = "accepted"
+                    result["native_loop_verdict_transport"] = verdict["transport"]
+                    print(
+                        "  native_loop: in-conversation verdict produced"
+                        + (
+                            " via non-streamed retry"
+                            if verdict["transport"] == "non-streamed-retry"
+                            else ""
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    result["native_loop_verdict_status"] = "fallback"
+                    result["native_loop_verdict_reason"] = verdict["reason"]
+                    result["native_loop_verdict_error"] = verdict["detail"]
+                    print(
+                        "  native_loop: no reusable in-conversation verdict "
+                        f"[{verdict['reason']}] {verdict['detail']} — "
+                        "the standard review call will synthesize the verdict",
+                        file=sys.stderr,
+                    )
         except Exception as exc:  # noqa: BLE001 — never let it break evidence output
             result["native_loop_verdict_error"] = str(exc)
+            result["native_loop_verdict_status"] = "fallback"
+            result["native_loop_verdict_reason"] = "error"
+            print(
+                f"  native_loop: verdict turn failed ({exc}) — "
+                "the standard review call will synthesize the verdict",
+                file=sys.stderr,
+            )
 
     # Token/cost telemetry (loop turns + the verdict turn). cache_hit_ratio is
     # the share of prompt tokens served from the prefix cache — the empirical
