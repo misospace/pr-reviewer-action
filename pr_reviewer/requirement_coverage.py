@@ -469,7 +469,9 @@ PRELIMINARY_DISPOSITION_REQUIREMENT = (
     "Disposition requirement: for EACH numbered preliminary finding above, "
     "your review_markdown must contain exactly one line in this machine-checked "
     "format: `Finding N: retain|revise|reject - reason`, where N is its number. "
-    "Use retain, revise, or reject exactly once per finding. A missing, duplicate, or invalid disposition rejects this retry. Silently "
+    "For retain or revise, include exactly one final structured finding whose "
+    "preliminary_finding is N; reject may omit it. Use retain, revise, or reject "
+    "exactly once per finding. A missing, duplicate, or invalid disposition rejects this retry. Silently "
     "dropping a preliminary finding is not permitted."
 )
 
@@ -580,21 +582,27 @@ _DISPOSITION_LINE_RE = re.compile(
 )
 
 
-def preliminary_finding_count(primary_output: Any) -> int:
-    """Count preliminary findings that the retry prompt hands to the model."""
+def _handed_off_findings(primary_output: Any) -> list[dict[str, Any]]:
+    """Normalized preliminary findings in the exact order handed to smart."""
     if not isinstance(primary_output, dict):
-        return 0
+        return []
     findings = primary_output.get("findings")
     if not isinstance(findings, list):
-        return 0
-    count = 0
+        return []
+    handed_off: list[dict[str, Any]] = []
     for item in findings:
-        if _preliminary_finding_line(count + 1, item) is None:
+        if _preliminary_finding_line(len(handed_off) + 1, item) is None:
             continue
-        count += 1
-        if count >= MAX_PRELIMINARY_FINDINGS:
+        if isinstance(item, dict):
+            handed_off.append(item)
+        if len(handed_off) >= MAX_PRELIMINARY_FINDINGS:
             break
-    return count
+    return handed_off
+
+
+def preliminary_finding_count(primary_output: Any) -> int:
+    """Count preliminary findings that the retry prompt hands to the model."""
+    return len(_handed_off_findings(primary_output))
 
 
 def validate_preliminary_dispositions(primary_output: Any, smart_output: Any) -> tuple[bool, str]:
@@ -612,17 +620,43 @@ def validate_preliminary_dispositions(primary_output: Any, smart_output: Any) ->
     if not isinstance(markdown, str):
         return False, "disposition-markdown-missing"
 
-    seen: set[int] = set()
+    dispositions: dict[int, str] = {}
     for match in _DISPOSITION_LINE_RE.finditer(markdown):
         number = int(match.group(1))
         if number < 1 or number > expected:
             return False, "disposition-number-invalid"
-        if number in seen:
+        if number in dispositions:
             return False, "disposition-duplicate"
-        seen.add(number)
+        dispositions[number] = match.group(2).lower()
 
-    if len(seen) != expected:
+    if len(dispositions) != expected:
         return False, "disposition-missing"
+
+    findings = smart_output.get("findings")
+    if not isinstance(findings, list):
+        findings = []
+    correlated: dict[int, dict[str, Any]] = {}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        number = finding.get("preliminary_finding")
+        if isinstance(number, int) and not isinstance(number, bool):
+            if number < 1 or number > expected or number in correlated:
+                return False, "disposition-finding-correlation-invalid"
+            correlated[number] = finding
+
+    primary_findings = _handed_off_findings(primary_output)
+    for number, disposition in dispositions.items():
+        correlated_finding = correlated.get(number)
+        if disposition in {"retain", "revise"} and correlated_finding is None:
+            return False, "disposition-finding-missing"
+        if disposition == "reject" and correlated_finding is not None:
+            return False, "disposition-reject-finding-present"
+        if disposition == "retain":
+            primary = primary_findings[number - 1]
+            for key in ("severity", "category", "file", "line", "message"):
+                if correlated_finding.get(key) != primary.get(key):
+                    return False, "disposition-retain-finding-changed"
     return True, ""
 
 

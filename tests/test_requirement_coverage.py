@@ -1153,6 +1153,33 @@ def test_dispositions_accept_explicit_reject():
     assert requirement_coverage.validate_preliminary_dispositions(primary, smart) == (True, "")
 
 
+def test_dispositions_reject_retain_or_revise_without_correlated_finding():
+    primary = {"findings": [{"severity": "major", "category": "bug", "file": "a.py", "line": 1, "message": "first"}]}
+    retain = {"review_markdown": "Finding 1: retain - still valid", "findings": []}
+    revise = {"review_markdown": "Finding 1: revise - wording", "findings": []}
+    assert requirement_coverage.validate_preliminary_dispositions(primary, retain) == (
+        False, "disposition-finding-missing",
+    )
+    assert requirement_coverage.validate_preliminary_dispositions(primary, revise) == (
+        False, "disposition-finding-missing",
+    )
+
+
+def test_dispositions_accept_correlated_retain_and_revise_findings():
+    finding = {"severity": "major", "category": "bug", "file": "a.py", "line": 1, "message": "first"}
+    primary = {"findings": [finding]}
+    retain = {
+        "review_markdown": "Finding 1: retain - still valid",
+        "findings": [{**finding, "preliminary_finding": 1}],
+    }
+    revise = {
+        "review_markdown": "Finding 1: revise - severity reduced",
+        "findings": [{**finding, "severity": "minor", "message": "revised", "preliminary_finding": 1}],
+    }
+    assert requirement_coverage.validate_preliminary_dispositions(primary, retain) == (True, "")
+    assert requirement_coverage.validate_preliminary_dispositions(primary, revise) == (True, "")
+
+
 def test_dispositions_reject_duplicate_and_invalid_lines():
     primary = {"findings": [{"severity": "major", "message": "first"}]}
     duplicate = {"review_markdown": "Finding 1: retain - yes\nFinding 1: reject - no"}
