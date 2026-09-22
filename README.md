@@ -59,7 +59,7 @@ jobs:
           publish_review_comment: "true"
 ```
 
-**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, and `python3`; the workflow runs on `pull_request` events (or passes explicit `repo` and `pr_number` inputs).
+**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3`, and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr_number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
 
 ## 📚 Table of contents
 

@@ -92,6 +92,18 @@ wait_for_ci_command() {
   env -i "${env_args[@]}" bash "$SCRIPT_DIR/wait_for_ci.sh"
 }
 
+# Descendant-tree cleanup requires pgrep. Rather than silently degrading to
+# wrapper-only signaling (which is the exact lifecycle bug #634 repairs), a
+# fork refuses to launch when pgrep is unavailable. action.yml validates it as
+# a runtime dependency before the pipeline starts; this re-check keeps a
+# direct run_review.sh invocation (smoke test, manual run) from losing the
+# invariant. gate_descendants is only ever reached after this returns 0.
+require_gate_tree_cleanup() {
+  command -v pgrep >/dev/null 2>&1 && return 0
+  error "pgrep is required to clean up the concurrent CI/deep-review gates; install procps (pgrep) on the runner, or disable ci_status_check and deep_review"
+  return 1
+}
+
 # Fork the CI gate when ci_status_check=true. Non-blocking: the caller keeps
 # building deterministic context / the specialist branch while wait_for_ci.sh
 # polls. A stale $CI_CHECKS_FILE from a previous run in a reused workspace is
@@ -104,6 +116,7 @@ fork_ci_gate() {
   if [[ "$(printf '%s' "${CI_STATUS_CHECK:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     return 0
   fi
+  require_gate_tree_cleanup || return 1
 
   if [[ -n "${CI_CHECKS_FILE:-}" ]]; then
     rm -f -- "$CI_CHECKS_FILE" 2>/dev/null || true
@@ -165,6 +178,7 @@ fork_specialist_gate() {
   if [[ "$(printf '%s' "${DEEP_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
     return 0
   fi
+  require_gate_tree_cleanup || return 1
 
   DEEP_REVIEW_ACTIVE="true"
   if ! build_specialist_corpus_command; then
@@ -216,8 +230,8 @@ GATE_CLEANUP_GRACE_INTERVAL_SEC="${GATE_CLEANUP_GRACE_INTERVAL_SEC:-0.1}"
 GATE_CLEANUP_SETTLE_STEPS="${GATE_CLEANUP_SETTLE_STEPS:-5}"
 
 # Emit every descendant PID of $1, breadth-first (children before
-# grandchildren). A missing pgrep yields no descendants, which degrades to
-# killing the tracked PID alone.
+# grandchildren). Only reached after require_gate_tree_cleanup confirmed pgrep
+# is available, so there is no silent wrapper-only fallback path.
 gate_descendants() {
   local frontier="$1"
   local next=""

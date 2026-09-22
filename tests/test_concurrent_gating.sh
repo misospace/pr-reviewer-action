@@ -481,5 +481,49 @@ check "interrupted publication: completed target preserved" \
 check "interrupted publication: signal exit status preserved" "$pub_rc" "143"
 
 echo ""
+echo "=== lifecycle: missing pgrep fails fast instead of wrapper-only cleanup ==="
+# Build a PATH with the tools gating.sh touches before the guard, but without
+# pgrep. The forks must refuse to launch (never enter background concurrency)
+# rather than silently degrade to wrapper-only cleanup.
+NO_PGREP_BIN="$TMP/no-pgrep-bin"
+mkdir -p "$NO_PGREP_BIN"
+for c in tr sleep date cut head awk sed cat; do
+  c_path="$(command -v "$c" 2>/dev/null || true)"
+  [ -n "$c_path" ] && ln -sf "$c_path" "$NO_PGREP_BIN/$c"
+done
+NOPGREP_STATE="$(
+  PATH="$NO_PGREP_BIN"
+  source "$ROOT_DIR/scripts/sections/gating.sh"
+  log() { :; }
+  error() { :; }
+  export CI_CHECKS_FILE="$TMP/nopgrep-ci.md"
+  wait_for_ci_command() { : > "$TMP/nopgrep-ci-ran"; }
+  specialist_command() { : > "$TMP/nopgrep-spec-ran"; }
+  build_specialist_corpus_command() { : > "$TMP/nopgrep-build-ran"; }
+  ci_rc=0
+  spec_rc=0
+  CI_STATUS_CHECK=true DEEP_REVIEW=true fork_ci_gate 2>/dev/null || ci_rc=$?
+  CI_STATUS_CHECK=true DEEP_REVIEW=true fork_specialist_gate 2>/dev/null || spec_rc=$?
+  printf 'pgrep=<%s> ci_rc=<%s> ci_pid=<%s> spec_rc=<%s> spec_pid=<%s>\n' \
+    "$(command -v pgrep 2>/dev/null || echo missing)" \
+    "$ci_rc" "$CI_GATE_PID" "$spec_rc" "$SPECIALIST_GATE_PID"
+)"
+check_contains "pgrep is absent from the test PATH" "$NOPGREP_STATE" "pgrep=<missing>"
+check_contains "CI fork refuses to launch without pgrep" "$NOPGREP_STATE" "ci_rc=<1>"
+check_contains "specialist fork refuses to launch without pgrep" "$NOPGREP_STATE" "spec_rc=<1>"
+check_contains "no CI background PID recorded" "$NOPGREP_STATE" "ci_pid=<>"
+check_contains "no specialist background PID recorded" "$NOPGREP_STATE" "spec_pid=<>"
+check "no CI workload ran in the no-pgrep mode" \
+  "$([ -e "$TMP/nopgrep-ci-ran" ] && echo ran || echo skipped)" "skipped"
+check "no specialist workload ran in the no-pgrep mode" \
+  "$([ -e "$TMP/nopgrep-spec-ran" ] && echo ran || echo skipped)" "skipped"
+check "no specialist corpus build ran in the no-pgrep mode" \
+  "$([ -e "$TMP/nopgrep-build-ran" ] && echo ran || echo skipped)" "skipped"
+check "require_gate_tree_cleanup succeeds when pgrep is present" \
+  "$(source "$ROOT_DIR/scripts/sections/gating.sh"; log() { :; }; error() { :; }; require_gate_tree_cleanup && echo available)" "available"
+check_contains "action.yml validates pgrep as a runtime dependency" \
+  "$ACTION" "command -v pgrep"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

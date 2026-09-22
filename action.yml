@@ -748,6 +748,10 @@ runs:
         command -v curl >/dev/null
         command -v git >/dev/null
         command -v python3 >/dev/null
+        # Concurrent CI/deep-review gate cleanup walks the forked process tree
+        # (scripts/sections/gating.sh); without pgrep the invariant cannot be
+        # upheld, so it is validated here rather than silently weakened.
+        command -v pgrep >/dev/null
 
     - name: Export shared review environment
       id: shared_env
