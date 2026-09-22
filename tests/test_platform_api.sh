@@ -95,9 +95,12 @@ check_contains "platform_pr_review_comments calls GitHub GraphQL" \
 check_contains "platform_pr_review_comments queries newest 100" \
   "$GH_REVIEW_COMMENTS_ARGS" \
   "comments(last: 100"
-check_contains "platform_pr_review_comments orders by creation time ascending" \
+check_contains "platform_pr_review_comments uses a supported IssueCommentOrderField" \
   "$GH_REVIEW_COMMENTS_ARGS" \
-  "orderBy: {field: CREATED_AT, direction: ASC}"
+  "orderBy: {field: UPDATED_AT, direction: ASC}"
+check_not_contains "platform_pr_review_comments sends no invalid CREATED_AT enum" \
+  "$GH_REVIEW_COMMENTS_ARGS" \
+  "CREATED_AT"
 check_contains "platform_pr_review_comments captures owner variable" \
   "$GH_REVIEW_COMMENTS_ARGS" \
   "owner=owner"
@@ -110,6 +113,12 @@ check_contains "platform_pr_review_comments captures number variable" \
 check "platform_pr_review_comments normalizes newest github comments" \
   "$GH_REVIEW_COMMENTS_RESULT" \
   '{"length":100,"oldest_excluded":true,"newest_included":true,"first":{"id":2,"user":"user-2","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":"body-2"},"null_author":{"id":50,"user":"","created_at":"2026-01-02T00:00:00Z","updated_at":"","body":"body-50"}}'
+GH_REVIEW_COMMENTS_UNORDERED_RESPONSE="$TMP/gh-review-comments-unordered.json"
+jq -cn '[{databaseId: 3, body: "c3", createdAt: "2026-01-03T00:00:00Z", updatedAt: null, author: {login: "u3"}}, {databaseId: 1, body: "c1", createdAt: "2026-01-01T00:00:00Z", updatedAt: null, author: {login: "u1"}}, {databaseId: 2, body: "c2", createdAt: "2026-01-02T00:00:00Z", updatedAt: null, author: {login: "u2"}}] | {data: {repository: {pullRequest: {comments: {nodes: .}}}}}' > "$GH_REVIEW_COMMENTS_UNORDERED_RESPONSE"
+GH_REVIEW_COMMENTS_UNORDERED_IDS="$(run_seam github "" 'gh(){ cat "'"$GH_REVIEW_COMMENTS_UNORDERED_RESPONSE"'"; }; platform_pr_review_comments owner/repo 42' | jq -c 'map(.id)')"
+check "platform_pr_review_comments sorts backend results oldest-to-newest (#631)" \
+  "$GH_REVIEW_COMMENTS_UNORDERED_IDS" \
+  "[1,2,3]"
 check "platform_compare" \
   "$(run_seam github "" 'platform_compare o/r aaa...bbb')" \
   "gh api repos/o/r/compare/aaa...bbb"
