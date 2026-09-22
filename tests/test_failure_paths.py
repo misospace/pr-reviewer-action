@@ -483,6 +483,21 @@ def test_target_argument_shape_is_credited():
         assert analyze_failure_paths(f"def f():\n{body}", contract=contract) == [], body
 
 
+def test_keyword_only_argument_does_not_satisfy_coverage():
+    # A recognized write-like call with no *positional* target credits
+    # nothing, even when a keyword argument names the observable.
+    cases = (
+        "    record(message='response.json')\n",
+        "    update(status='response.json')\n",
+        "    write(payload='response.json')\n",
+    )
+    contract = _contract({"success": ["response.json"]})
+    for body in cases:
+        leads = analyze_failure_paths(f"def f():\n{body}", contract=contract)
+        assert len(leads) == 1, body
+        assert "omits promised observable 'response.json'" in leads[0]["message"]
+
+
 def test_longer_target_does_not_satisfy_a_shorter_observable():
     # A longer/different target must not accidentally satisfy the contract's
     # shorter observable by substring.

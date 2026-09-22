@@ -190,12 +190,40 @@ def _strip_comment(line: str) -> str:
     return line if idx < 0 else line[:idx]
 
 
-def _first_positional_argument(text: str, open_paren: int, close_paren: int) -> str:
-    """The first positional argument of a call, or ``""`` for an empty call.
+def _is_keyword_argument(segment: str) -> bool:
+    """Whether *segment* is a single ``name=value`` keyword argument.
 
-    A leading ``keyword=`` is not positional but still names the operation's
-    object, so it is unwrapped; only the first target is returned — an
-    observable passed as a secondary argument is not credited.
+    Only a top-level assignment counts; ``==`` / ``!=`` / ``<=`` / ``>=`` /
+    ``:=`` and anything inside brackets or quotes do not.
+    """
+    depth = 0
+    quote: str | None = None
+    for i, char in enumerate(segment):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "=" and depth == 0:
+            previous = segment[i - 1] if i > 0 else ""
+            following = segment[i + 1] if i + 1 < len(segment) else ""
+            if previous in "=!<>:" or following == "=":
+                continue
+            return True
+    return False
+
+
+def _first_positional_argument(text: str, open_paren: int, close_paren: int) -> str:
+    """The first positional argument of a call, or ``""`` if there is none.
+
+    Only the first argument is returned (an observable passed as a secondary
+    argument is not credited). A leading keyword argument is not positional,
+    so it yields ``""`` — conservatively crediting nothing.
     """
     segment = text[open_paren + 1 : close_paren]
     depth = 0
@@ -214,8 +242,9 @@ def _first_positional_argument(text: str, open_paren: int, close_paren: int) -> 
         elif char == "," and depth == 0:
             segment = segment[:i]
             break
-    match = re.match(r"\s*[A-Za-z_]\w*\s*=\s*(.+)", segment, re.DOTALL)
-    return match.group(1) if match else segment
+    if _is_keyword_argument(segment):
+        return ""
+    return segment
 
 
 def _write_call_targets(text: str) -> list[str]:
