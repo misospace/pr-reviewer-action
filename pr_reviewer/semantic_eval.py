@@ -153,6 +153,8 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
         "pgrep is not a declared runtime dependency", "undeclared dependency on pgrep",
         "remediation depends on pgrep", "cleanup depends on pgrep", "cleanup depends on `pgrep`",
         "pgrep is unavailable", "when pgrep is unavailable", "missing pgrep", "pgrep is missing",
+        "pgrep is not part of the validated runtime contract", "pgrep is not part of the runtime contract",
+        "pgrep is required but unavailable",
         "falls back to wrapper-only", "silently falls back to wrapper-only",
         "silently falls back to the vulnerable wrapper-only",
         "degrades to wrapper-only", "pgrep not part of the runtime contract",

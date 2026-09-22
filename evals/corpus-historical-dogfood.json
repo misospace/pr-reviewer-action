@@ -949,7 +949,7 @@
       "number": 6546,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
-      "title": "PR #654 fixture #6546: Negative control for #654 lifecycle: EXIT/INT/TERM cleanup reaps the CI child on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
+      "title": "PR #654 fixture #6546: Negative control for #654 lifecycle: EXIT/INT/TERM cleanup owns and reaps the full descendant tree on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
       "provenance": {
         "pr": 654,
         "issue": 659,
@@ -966,13 +966,13 @@
         "background_process_lifecycle"
       ],
       "negative_control": true,
-      "description": "Negative control for #654 lifecycle: EXIT/INT/TERM cleanup reaps the CI child on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
+      "description": "Negative control for #654 lifecycle: EXIT/INT/TERM cleanup owns and reaps the full descendant tree on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
       "expected_metrics": {
         "max_tool_calls": 1
       },
       "fixture": {
         "path": "historical-dogfood/6546.json",
-        "sha256": "5f8d010dac523511dd18d478c804180b97b9d6b4adcf63cb272db0def117f7d7"
+        "sha256": "51aa731cf90e7951fabba7dd39f9daede90abb2d39e649ff5e832cfdf6a09cd6"
       },
       "offline_runs": [
         {
@@ -982,10 +982,10 @@
           "findings": [
             {
               "stage": "primary",
-              "message": "The EXIT/INT/TERM trap reaps the CI gate child on abnormal exit so it cannot be orphaned, and RUNNER_TRACKING_ID is forwarded to keep runner orphan cleanup intact."
+              "message": "The EXIT/INT/TERM trap owns the gate on abnormal exit and reaps the full descendant tree so no credential-bearing child can be orphaned, and RUNNER_TRACKING_ID is forwarded."
             }
           ],
-          "review_markdown": "Lifecycle ownership is covered on normal and abnormal exits; approve.",
+          "review_markdown": "Lifecycle ownership covers the whole process tree on normal and abnormal exits; approve.",
           "tool_calls": [
             {
               "stage": "primary",
@@ -1134,7 +1134,7 @@
       "number": 6548,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
-      "title": "PR #654 fixture #6548: Negative control for #654 remediation topology: tree-aware cleanup signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
+      "title": "PR #654 fixture #6548: Negative control for #654 remediation topology: tree-aware cleanup requires pgrep and signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
       "provenance": {
         "pr": 654,
         "issue": 659,
@@ -1151,13 +1151,13 @@
         "remediation_process_topology"
       ],
       "negative_control": true,
-      "description": "Negative control for #654 remediation topology: tree-aware cleanup signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
+      "description": "Negative control for #654 remediation topology: tree-aware cleanup requires pgrep and signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
       "expected_metrics": {
         "max_tool_calls": 1
       },
       "fixture": {
         "path": "historical-dogfood/6548.json",
-        "sha256": "6a9dea750b8cc534a89738cb19db231dc72402c7c882c19b2f9cfb9ac3512ff2"
+        "sha256": "6856386accf5fee839b18157c410562add1e40de91dc5cac945be14d9ddd8f82"
       },
       "offline_runs": [
         {
@@ -1167,7 +1167,7 @@
           "findings": [
             {
               "stage": "primary",
-              "message": "Cleanup walks the full descendant tree with pgrep -P and terminates the payload and its grandchild before the wrapper, so the workload cannot survive."
+              "message": "Cleanup requires pgrep, walks the full descendant tree before signaling the wrapper, and the regression test keeps the wrapper, payload, and grandchild distinct, so the workload cannot survive."
             }
           ],
           "review_markdown": "Process-tree cleanup owns the workload; approve.",
@@ -1204,18 +1204,35 @@
       ],
       "expected_evidence_anchors": [
         {
-          "id": "pgrep-fallback",
+          "id": "pgrep-required-cause",
           "kind": "finding",
           "any_of": [
             "pgrep is not a declared runtime dependency",
             "undeclared dependency on pgrep",
-            "cleanup depends on pgrep",
-            "remediation depends on pgrep",
+            "pgrep is not part of the runtime contract",
+            "pgrep is not part of the validated runtime contract",
+            "pgrep is required but unavailable",
+            "pgrep is unavailable",
             "when pgrep is unavailable",
             "missing pgrep",
+            "pgrep is missing",
+            "cleanup depends on pgrep",
+            "remediation depends on pgrep"
+          ]
+        },
+        {
+          "id": "wrapper-only-effect",
+          "kind": "finding",
+          "any_of": [
+            "falls back to wrapper-only",
             "silently falls back to wrapper-only",
             "degrades to wrapper-only",
-            "pgrep is not in the runtime contract"
+            "wrapper-only cleanup",
+            "leaves the payload tree alive",
+            "leaves the payload/descendants alive",
+            "descendant-tree cleanup is lost",
+            "descendants survive",
+            "payload tree survives"
           ]
         },
         {
@@ -1235,7 +1252,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/6549.json",
-        "sha256": "e4b75c6e07a233b7b27b6123c611ec6a67b725353d8475a7db1e26a95667825d"
+        "sha256": "ffc738f5877ec74c55fd5d865e8c5de21f28fc4e74a2928265c538f4bb9e6ba2"
       },
       "offline_runs": [
         {
@@ -1334,7 +1351,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/6550.json",
-        "sha256": "2dd35073b3575344bebc97987d2b523f7a2d51d918c6c0cb2727a491ae45152e"
+        "sha256": "ba512a6d0f1ac839c6e3b10e759f95677556d60f57656067bbb8aea8d6c2bef2"
       },
       "offline_runs": [
         {

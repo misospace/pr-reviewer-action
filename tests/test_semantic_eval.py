@@ -624,6 +624,96 @@ def _run_finding_text(scenario_item, run_index: int = 0) -> str:
     return scenario_item.offline_runs[run_index]["findings"][0]["message"]
 
 
+def _fixture_file(number: int, path: str) -> str:
+    item = scenario(number)
+    fixture_path = CORPUS.parent / item.fixture["path"]
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return next(entry["content"] for entry in data["files"] if entry["path"] == path)
+
+
+# A description of the failure each negative control forbids, plus the head
+# content that must have changed so the description is no longer true. The
+# scorer must still recognize the description (it is not being taught to
+# ignore it); the fixture side is what makes it inapplicable.
+NEGATIVE_SAFETY = {
+    6542: {
+        "failure": (
+            "Moving the CI poller into the review process makes the child inherit reviewer "
+            "secrets and model credentials."
+        ),
+        "forbidden": CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["env -i", "_CI_GATE_ENV_KEYS"],
+                ["AI_API_KEY", "AI_PRIMARY_API_KEY", "TOOL_MCP_TOKEN", "LINEAR_API_KEY"],
+            )
+        ],
+    },
+    6544: {
+        "failure": (
+            "The env -i allowlist removes required transport variables and drops the proxy "
+            "configuration for self-hosted deployments."
+        ),
+        "forbidden": CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["HTTP_PROXY", "HTTPS_PROXY", "SSL_CERT_FILE", "GH_CONFIG_DIR"],
+                ["AI_API_KEY"],
+            )
+        ],
+    },
+    6546: {
+        "failure": (
+            "There is no abnormal-exit owner; cleanup kills only the tracked wrapper pid so the "
+            "credential-bearing CI child and its descendants survive an abnormal exit."
+        ),
+        "forbidden": CAPABILITY_BACKGROUND_LIFECYCLE,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["install_gate_lifecycle_trap", "gate_descendants", "pgrep -P", "RUNNER_TRACKING_ID"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            )
+        ],
+    },
+    6548: {
+        "failure": (
+            "Cleanup kills only the tracked wrapper pid, so the production payload and "
+            "descendants survive an abnormal exit."
+        ),
+        "forbidden": CAPABILITY_REMEDIATION_TOPOLOGY,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["require_gate_tree_cleanup", "gate_descendants", "cleanup_gate_children"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            ),
+            (
+                "tests/test_concurrent_gating.sh",
+                ["ci-wrapper.pid", "ci-payload.pid", "( sleep 30 ) &"],
+                ["exec sleep 30"],
+            ),
+        ],
+    },
+    6550: {
+        "failure": (
+            "Tree-aware cleanup depends on pgrep but pgrep is not part of the validated runtime "
+            "contract, so it falls back to wrapper-only and leaves the payload tree alive."
+        ),
+        "forbidden": CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["require_gate_tree_cleanup", "pgrep -P"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            )
+        ],
+    },
+}
+
+
 def test_654_capability_classes_are_registered() -> None:
     from pr_reviewer.semantic_eval import KNOWN_CAPABILITY_CLASSES
 
@@ -693,6 +783,55 @@ def test_654_negative_controls_reject_their_vulnerability(number: int) -> None:
     )
     assert not result.passed
     assert NEGATIVE_654[number] in result.forbidden_violations
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_SAFETY))
+def test_654_negative_controls_are_genuinely_safe(number: int) -> None:
+    """A correct description of the forbidden failure must not apply to the fixture.
+
+    The scorer still recognizes the failure description (it is not taught to
+    ignore it), and the fixture head has actually changed so the description is
+    no longer true of the reviewed code.
+    """
+    spec = NEGATIVE_SAFETY[number]
+    assert classify_signal(spec["failure"]) == spec["forbidden"], (number, spec["failure"])
+    item = scenario(number)
+    detected = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", spec["failure"])],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert spec["forbidden"] in detected.forbidden_violations, number
+    for path, required, absent in spec["checks"]:
+        head = _fixture_file(number, path)
+        for needle in required:
+            assert needle in head, (number, path, needle)
+        for needle in absent:
+            assert needle not in head, (number, path, needle)
+
+
+def test_654_dependency_requires_both_cause_and_effect() -> None:
+    item = scenario(6549)
+    cause_only = "pgrep is not part of the validated runtime contract and tree-aware cleanup depends on it."
+    effect_only = "Cleanup falls back to wrapper-only, leaving the payload tree alive."
+
+    cause_result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", cause_only), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY in cause_result.capability_hits
+    assert not cause_result.passed
+    assert any(a["id"] == "wrapper-only-effect" and not a["satisfied"] for a in cause_result.anchor_results)
+
+    effect_result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", effect_only), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY in effect_result.capability_hits
+    assert not effect_result.passed
+    assert any(a["id"] == "pgrep-required-cause" and not a["satisfied"] for a in effect_result.anchor_results)
 
 
 @pytest.mark.parametrize(
