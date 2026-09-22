@@ -13,7 +13,7 @@ log "Analyzing with $AI_MODEL using $AI_API_FORMAT API format..."
 # this cannot carry prompt injection from the PR.
 build_user_message() {
   local classification_file="${1:-classification.json}"
-  local base="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail)."
+  local base="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, not_applicable, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Use not_applicable only for a requirement demonstrably outside this change's scope, with file/diff evidence identifying that scope."
   if [ ! -s "$classification_file" ]; then
     printf '%s' "$base"
     return
@@ -22,7 +22,8 @@ build_user_message() {
 import json, sys
 
 base = ("Analyze this pull request corpus and return STRICT JSON. "
-        "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail).")
+        "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, not_applicable, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). "
+        "Use not_applicable only for a requirement demonstrably outside this change's scope, with file/diff evidence identifying that scope.")
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
     if not isinstance(data, dict):
@@ -266,20 +267,80 @@ fi
 
 apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"
 
-# ── Requirement Coverage merge (#624) ────────────────────────────────
-# Fold the reviewer's requirement_coverage claims (from the parsed
-# ai-output.json) into a standalone requirement-coverage.json, merged against
-# the requirement ledger built in context.sh. Fail-soft: a merge failure — or an
-# absent ledger / a module that is not present yet — never aborts the review; the
-# published verdict is already enforced above. Reset the artifact first so a
-# reused workspace cannot present a prior run's coverage as this run's.
-: > requirement-coverage.json
-if [ -s requirement-ledger.json ]; then
-  python3 -m pr_reviewer.requirement_coverage \
-    --coverage ai-output.json \
-    --ledger requirement-ledger.json \
-    --output requirement-coverage.json 2>/dev/null || true
-fi
+# ── Requirement Coverage merge + completeness retry (#624, #626) ───
+# Fold the final reviewer's requirement_coverage claims into a standalone,
+# deterministic artifact. It remains advisory: unknown requirements never alter
+# a verdict. They can, however, cause one targeted fast-to-smart retry.
+build_requirement_coverage() {
+  : > requirement-coverage.json
+  if [ -s requirement-ledger.json ]; then
+    python3 -m pr_reviewer.requirement_coverage \
+      --coverage ai-output.json \
+      --ledger requirement-ledger.json \
+      --output requirement-coverage.json 2>/dev/null || true
+  fi
+}
+
+build_requirement_coverage
+
+maybe_escalate_coverage_review() {
+  # Preserve the existing fast-to-smart safety boundaries and never make a
+  # second smart call after any ordinary escalation.
+  [[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0
+  [[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0
+  [[ -n "$SMART_MODEL_RESOLVED" ]] || return 0
+  [[ "$SMART_BASE_URL" != "$AI_BASE_URL" || "$SMART_MODEL" != "$AI_MODEL" ]] || return 0
+  if [[ "${PRIMARY_OK:-0}" -ne 1 && "$SMART_BASE_URL" == "$AI_FALLBACK_BASE_URL" && "$SMART_MODEL" == "$AI_FALLBACK_MODEL" ]]; then
+    log "Skipping coverage escalation: the fallback model that produced this review is the smart model"
+    return 0
+  fi
+  [ -s requirement-coverage.json ] || return 0
+
+  local decision retry_prompt smart_ok=0
+  decision="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
+from pr_reviewer.requirement_coverage import should_escalate_coverage
+escalate, ids = should_escalate_coverage()
+print("yes" if escalate and ids else "no")
+PY
+)"
+  [[ "$decision" == "yes" ]] || return 0
+
+  retry_prompt="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
+from pr_reviewer import requirement_coverage, requirement_ledger
+coverage = requirement_coverage.load_coverage("requirement-coverage.json")
+ledger = requirement_ledger.load_ledger("requirement-ledger.json")
+print(requirement_coverage.render_coverage_retry_prompt(coverage, ledger), end="")
+PY
+)"
+  [ -n "$retry_prompt" ] || return 0
+
+  ESCALATION_REASONS="${ESCALATION_REASONS:+${ESCALATION_REASONS},}incomplete_coverage"
+  log "Escalating to smart model $SMART_MODEL (incomplete_coverage)"
+  cp ai-output.json ai-output.coverage-primary.json
+  if call_model_tier smart "$retry_prompt" review-corpus.truncated.md ai-request.smart.json ai-response.smart.json; then
+    smart_ok=1
+  fi
+
+  if [[ "$smart_ok" -eq 1 ]]; then
+    # The smart result is a fresh model verdict, so it must pass through the
+    # same enforcement and deterministic normalization as the primary result.
+    apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"
+    build_requirement_coverage
+    REVIEW_ROUTE="escalated"
+    ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
+    ANALYSIS_ENGINE="$(annotate_analysis_engine "$SMART_MODEL@$SMART_BASE_URL ($SMART_API_FORMAT)" escalated)"
+    log "Smart model completed the targeted coverage verification"
+  else
+    cp ai-output.coverage-primary.json ai-output.json
+    ESCALATION_REASONS="$(printf '%s' "$ESCALATION_REASONS" | python3 -c '
+import sys
+print(",".join(part for part in sys.stdin.read().strip().split(",") if part and part != "incomplete_coverage"))
+')"
+    log "Smart model failed during targeted coverage verification; publishing the primary review"
+  fi
+}
+
+maybe_escalate_coverage_review
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
@@ -371,8 +432,14 @@ write_step_summary() {
   findings_count="$(jq -r '.findings | length' ai-output.json 2>/dev/null || echo 0)"
   blockers_count="$(jq -r '[.findings[]? | select(.severity == "blocker")] | length' ai-output.json 2>/dev/null || echo 0)"
   verdict_source="$(jq -r '.verdict_source // "model"' ai-output.json 2>/dev/null || echo model)"
-  local required_checks_status
+  local required_checks_status coverage_total coverage_unknown coverage_unresolved
   required_checks_status="$(jq -r '.required_checks // "none"' ai-output.json 2>/dev/null || echo none)"
+  coverage_total="$(jq -r '.summary.total // 0' requirement-coverage.json 2>/dev/null || echo 0)"
+  coverage_unknown="$(jq -r '.summary.unknown // 0' requirement-coverage.json 2>/dev/null || echo 0)"
+  coverage_unresolved=""
+  if [[ "$coverage_total" != "0" ]]; then
+    coverage_unresolved="; unresolved: ${coverage_unknown}"
+  fi
   tool_call_count="$(jq -r '.executed_request_count // 0' tool-harness.json 2>/dev/null || echo 0)"
   tool_success_count="$(jq '[.tool_calls[]? | select(.status == "ok")] | length' tool-harness.json 2>/dev/null || echo 0)"
 
@@ -385,6 +452,9 @@ write_step_summary() {
     echo "| Verdict | ${verdict} (source: ${verdict_source}) |"
     echo "| Findings | ${findings_count} (blockers: ${blockers_count}) |"
     echo "| Required checks | ${required_checks_status} |"
+    if [[ -n "$coverage_unresolved" ]]; then
+      echo "| Requirement coverage | ${coverage_total} requirement(s)${coverage_unresolved} |"
+    fi
     echo "| Tool calls | ${tool_call_count} executed (${tool_success_count} successful) |"
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
     if [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]]; then

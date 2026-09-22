@@ -53,10 +53,24 @@ check_contains "escalated prompt names the reasons" "$SRC" "ESCALATED review"
 check_contains "smart failure restores the primary review" "$SRC" "cp ai-output.primary.json ai-output.json"
 check_contains "smart failure publishes the primary review" "$SRC" "publishing the primary review"
 check_contains "route becomes escalated on success" "$SRC" 'REVIEW_ROUTE="escalated"'
-check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' "$RUN_REVIEW")" "1"
+check_contains "coverage gate is wired" "$SRC" "maybe_escalate_coverage_review"
+check_contains "coverage gate follows deterministic normalization" "$SRC" "build_requirement_coverage"
+check_contains "coverage gate uses a distinct reason" "$SRC" "incomplete_coverage"
+check_contains "coverage gate preserves its preliminary output" "$SRC" "ai-output.coverage-primary.json"
+check_contains "coverage gate keeps fallback-equals-smart guard" "$SRC" "Skipping coverage escalation: the fallback model"
+check_contains "coverage gate uses the targeted retry prompt" "$SRC" 'call_model_tier smart "$retry_prompt" review-corpus.truncated.md'
 # Escalation must be decided before the enforcement wrapper runs.
 ESC_LINE="$(grep -n '^maybe_escalate_review$' "$RUN_REVIEW" | cut -d: -f1)"
 ENF_LINE="$(grep -n '^apply_all_enforcement_wrapper ' "$RUN_REVIEW" | cut -d: -f1)"
+COVERAGE_ESC_LINE="$(grep -n '^maybe_escalate_coverage_review$' "$RUN_REVIEW" | cut -d: -f1)"
+if [[ -n "$COVERAGE_ESC_LINE" && -n "$ENF_LINE" && "$COVERAGE_ESC_LINE" -gt "$ENF_LINE" ]]; then
+  echo "  PASS: coverage escalation runs after enforcement/normalization"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: coverage escalation ordering (coverage=$COVERAGE_ESC_LINE enforce=$ENF_LINE)"
+  FAIL=$((FAIL + 1))
+fi
+check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' "$RUN_REVIEW")" "1"
 if [[ -n "$ESC_LINE" && -n "$ENF_LINE" && "$ESC_LINE" -lt "$ENF_LINE" ]]; then
   echo "  PASS: escalation runs before enforcement/validation"
   PASS=$((PASS + 1))

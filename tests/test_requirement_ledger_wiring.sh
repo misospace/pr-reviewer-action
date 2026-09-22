@@ -23,7 +23,7 @@ set -euo pipefail
 #      byte-identical (jq -S normalized) to
 #      pr_reviewer.conversation._OPENAI_VERDICT_JSON_SCHEMA, and the shared
 #      literal requires "requirement_coverage" with the satisfied/violated/
-#      unknown status enum at the coverage-items level.
+#      not_applicable/unknown status enum at the coverage-items level.
 #   e. the coverage CLI (python3 -m pr_reviewer.requirement_coverage)
 #      end-to-end: a "satisfied" claim on a verification_required invariant
 #      evidenced only by a file item is downgraded to unknown / uncredited
@@ -205,9 +205,9 @@ fi
 check "bash and python response_format are byte-identical (jq -S normalized)" "$RF_DIFF" "same"
 check "shared schema requires requirement_coverage" \
   "$(jq '.json_schema.schema.required | contains(["requirement_coverage"])' "$WORK/py_rf.json")" "true"
-check "coverage-item status enum is satisfied/violated/unknown" \
+check "coverage-item status enum includes scoped not_applicable" \
   "$(jq -c '.json_schema.schema.properties.requirement_coverage.items.properties.status.enum' "$WORK/py_rf.json")" \
-  '["satisfied","violated","unknown"]'
+  '["satisfied","violated","not_applicable","unknown"]'
 check "coverage-item evidence kind enum matches the vocabulary" \
   "$(jq -c '.json_schema.schema.properties.requirement_coverage.items.properties.evidence.items.properties.kind.enum' "$WORK/py_rf.json")" \
   '["file","test","tool","ci","diff"]'

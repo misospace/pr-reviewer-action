@@ -533,8 +533,8 @@ def _requirement_line(entry: dict[str, Any]) -> str:
                 refs.append(source)
             else:
                 refs.append("unknown")
-    via = ", ".join(refs) if refs else "unknown"
-    return f"- ({entry_id}) {_code_span(text)} [{kind}] (via {via})"
+    via = _escape_control_chars(", ".join(refs) if refs else "unknown")
+    return f"- ({entry_id}) {_code_span(text)} [{kind}] (via {_code_span(via)})"
 
 
 def _fit_to_bytes(text: str, max_bytes: int) -> str:
