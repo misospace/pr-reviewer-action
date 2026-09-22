@@ -661,7 +661,7 @@ def test_auto_mode_zero_selection_makes_no_calls(tmp_path, monkeypatch):
     write_classification(ws, {
         "pr_kind": "app_code",
         "risk_flags": [],
-        "changed_files_summary": [".github/workflows/ci.yml", "README.md"],
+        "changed_files_summary": ["README.md", ".github/dependabot.yml"],
     })
     env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
     calls = patch_transport(monkeypatch, tmp_path)
@@ -730,21 +730,52 @@ def test_true_mode_still_runs_all_three_despite_classification(tmp_path, monkeyp
     assert all(r["status"] == "ok" for r in agg["roles"])
 
 
-def test_auto_mode_missing_classification_selects_zero(tmp_path, monkeypatch):
-    """Fail-soft: no classification.json → zero roles with an explicit
-    unavailability reason, no calls, no exception."""
+def test_auto_mode_missing_classification_fails_conservatively(tmp_path, monkeypatch):
+    """Negative control (#633 review fix): no classification.json must NOT
+    select zero roles — the conservative fallback runs all three so a
+    selection problem can only over-scrutinize, never under-scrutinize."""
     ws = ws_dir(tmp_path)
     corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
     env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
-    calls = patch_transport(monkeypatch, tmp_path)
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
 
     assert run_main(tmp_path, ws, corpus) == 0
 
-    assert calls == []
+    assert {c[0] for c in calls} == set(ROLES)
     agg = aggregate(ws)
     assert agg["selection"]["classification_available"] is False
-    assert agg["selection"]["selected_roles"] == []
-    assert "classification unavailable" in agg["selection"]["zero_selection_reason"]
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    # The fallback reason lives on the selection decisions; roles that RAN
+    # carry normal entries.
+    assert all(
+        "conservative fallback" in d["reason"]
+        for d in agg["selection"]["decisions"]
+    )
+
+
+def test_auto_mode_unknown_kind_fails_conservatively(tmp_path, monkeypatch):
+    """The classifier's failure fallback (pr_kind=unknown) is not a trivial
+    signal: all three roles run with classification marked unavailable."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {"pr_kind": "unknown", "risk_flags": []})
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["selection"]["classification_available"] is False
+    assert agg["selection"]["selected_roles"] == list(ROLES)
 
 
 def test_auto_mode_role_artifacts_and_section_cover_selected_roles_only(

@@ -137,6 +137,26 @@ fi
 # ── precheck call #1: marker-only should-review decision ──────────────
 # Runs before the PR object fetch so a diff-unchanged skip costs no
 # platform I/O beyond the diff and the comment/review lookup.
+#
+# ── #633: auto-selection inputs participate in stale-review detection ──
+# deep_review=auto selects specialist roles partly from LINKED-ISSUE-derived
+# risk flags (linked_security_issue and friends), which the diff fingerprint
+# cannot see: adding a security-labeled linked issue to the PR body — or
+# labeling one — changes the selected roles without touching the diff. When
+# auto is requested, fold a bounded signature of those inputs (PR title +
+# body + linked refs with their fetched labels) into the config-hash half of
+# the broad fingerprint, so ref/label/title/body changes invalidate a stale
+# managed comment. Skip-path cost when auto: one PR fetch plus at most
+# MAX_LINKED_ISSUES issue fetches. Fail-soft: a signature build failure
+# leaves the variable unset (the pre-#633 behavior) and logs a warning.
+if [[ "$(printf '%s' "${DEEP_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+  if SELECTION_SIGNATURE="$(REPO="$REPO" PR_NUMBER="$PR_NUMBER" python3 "$SCRIPT_DIR/build_selection_fingerprint.py" 2>/dev/null)" \
+      && [[ -n "$SELECTION_SIGNATURE" ]]; then
+    export PRECHECK_SELECTION_SIGNATURE="$SELECTION_SIGNATURE"
+  else
+    echo "warning: deep_review=auto could not build the selection signature; stale-review detection proceeds without linked-issue inputs" >&2
+  fi
+fi
 python3 -m pr_reviewer.precheck > precheck-result.json
 
 should_review_decision="$(jq -r '.should_review // false' precheck-result.json)"

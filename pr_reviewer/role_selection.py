@@ -43,24 +43,28 @@ signal wins over them):
   bump has no lane for any role.
 - **docs/meta-only**: ``pr_kind == app_code`` (i.e. no specific kind pattern
   matched) where **every** changed file is in the documented trivial-path
-  class (:data:`TRIVIAL_PATH_PATTERNS` — ``.github/``, ``docs/``, prose
-  extensions, license/contributor/bot-config files). A PR that matched a
-  specific kind pattern is by definition not in the trivial class. The gate
-  only applies when the changed-file summary holds fewer than the
+  class (:data:`TRIVIAL_PATH_PATTERNS` — ``docs/``, prose extensions,
+  license/contributor/bot-config files, and inert ``.github/`` meta).
+  Executable/behavioral ``.github`` content is NOT trivial
+  (:data:`NON_TRIVIAL_PATH_PATTERNS`: workflows and composite actions are
+  code), so a workflows-only PR keeps the correctness lane. A PR that
+  matched a specific kind pattern is by definition not in the trivial class.
+  The gate only applies when the changed-file summary holds fewer than the
   classifier's 50-entry summary cap — at the cap the summary may be
   truncated, so triviality cannot be established and the gate conservatively
   does not fire.
+
+Conservative fallback (#633 review fix): when the classification gives no
+deterministic basis to skip a role — a missing/malformed artifact, or the
+classifier's ``unknown``-kind failure placeholder — selection fails toward
+MORE scrutiny: all three roles run with ``classification_available: false``
+and an explicit per-role fallback reason. Advisory over-scrutiny is cheap;
+a silent zero selection is not.
 
 Skipped roles are **telemetry, not failures**: they never touch the verdict,
 enforcement, or the published review (the final reviewer remains the sole
 verdict authority), and a skipped role is recorded in the selection artifact
 with its deterministic reason — never as an error.
-
-Fail-soft: a missing, unreadable, or malformed classification input yields
-``classification_available: false`` and a zero selection with an explicit
-reason — never an exception (a selection problem must not abort the review).
-Classification tokens are untrusted text: reasons quote only bounded,
-control-character-free strings.
 
 Output artifact (version 1)::
 
@@ -147,10 +151,9 @@ CORRECTNESS_SIGNALS: frozenset[str] = frozenset({
 })
 
 #: The documented trivial-path class for the docs/meta-only zero-selection
-#: gate. Conservative by design: workflow/bot config, documentation trees,
-#: prose files, and contributor/meta files. Deliberately NOT matched: source
-#: code, manifests, lockfiles, IaC, or any path the classifier's kind/risk
-#: pattern sets target.
+#: gate. Conservative by design: documentation trees, prose files, and
+#: contributor/meta files. Deliberately NOT matched: source code, manifests,
+#: lockfiles, IaC, or any path the classifier's kind/risk pattern sets target.
 TRIVIAL_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\.github/"),
     re.compile(r"^(docs|doc|documentation)/", re.IGNORECASE),
@@ -169,6 +172,15 @@ TRIVIAL_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"^(renovate\.json5?|\.renovaterc(\.json)?|dependabot\.ya?ml)$",
         re.IGNORECASE,
     ),
+)
+
+#: Executable/behavioral ``.github`` content is never trivial, even though a
+#: bare ``.github/`` prefix would otherwise be repo meta: workflows and
+#: composite actions ARE code — they run CI, hold permissions, and can leak
+#: secrets — so a PR that changes them must not skip the specialists via the
+#: docs/meta gate. Checked BEFORE :data:`TRIVIAL_PATH_PATTERNS`.
+NON_TRIVIAL_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\.github/(workflows|actions)/", re.IGNORECASE),
 )
 
 #: Roles in evaluation order with their signal sets: the explicit, documented
@@ -205,10 +217,13 @@ def _clean_str_list(value: Any) -> list[str]:
 def _is_trivial_path(path: Any) -> bool:
     """True only for a usable string in the documented trivial-path class.
     Unusable entries (non-string, empty, control characters) are never
-    trivial, so they keep the docs/meta-only gate from firing."""
+    trivial, so they keep the docs/meta-only gate from firing; executable
+    ``.github`` content (workflows/actions) is explicitly non-trivial."""
     if not isinstance(path, str) or not path or path != path.strip():
         return False
     if any("\0" <= ch < " " or ch == "\x7f" for ch in path):
+        return False
+    if any(pat.search(path) for pat in NON_TRIVIAL_PATH_PATTERNS):
         return False
     return any(pat.search(path) for pat in TRIVIAL_PATH_PATTERNS)
 
@@ -263,11 +278,33 @@ def _trivial_zero_reason(
     return None
 
 
+#: The classifier's own failure fallback (scripts/sections/classification.sh
+#: writes ``pr_kind: "unknown"`` when classification fails). An unknown kind
+#: carries no lane signal, so like unusable input it gets the conservative
+#: fallback rather than a zero selection.
+UNKNOWN_PR_KIND = "unknown"
+
+
+def _is_conservative_fallback(usable: bool, kind: str) -> bool:
+    """True when the classification gives no deterministic basis to skip a
+    role: the input is missing/malformed, or the kind is the classifier's
+    ``unknown`` failure placeholder. In that state selection fails
+    CONSERVATIVELY — all three roles run, because advisory over-scrutiny is
+    cheap and a silent zero selection is not."""
+    return not usable or kind == UNKNOWN_PR_KIND
+
+
 def select_specialist_roles(classification: Any) -> dict[str, Any]:
     """Select specialist roles from classification data. Pure and
     deterministic — see the module docstring for the mapping and artifact
-    shape. Never raises: unusable input degrades to
-    ``classification_available: false`` with a zero selection."""
+    shape. Never raises.
+
+    Unusable input (missing/malformed classification, or the classifier's
+    ``unknown``-kind failure placeholder) fails CONSERVATIVELY: all three
+    roles run with ``classification_available: false`` and an explicit
+    per-role fallback reason — never a silent zero selection (a skipped
+    specialist cannot be added back by the reviewer; an extra advisory pass
+    merely costs tokens)."""
     usable = (
         isinstance(classification, dict)
         and isinstance(classification.get("pr_kind"), str)
@@ -287,20 +324,25 @@ def select_specialist_roles(classification: Any) -> dict[str, Any]:
     skipped_roles: list[str] = []
     zero_reason = ""
 
-    if not usable:
-        zero_reason = (
-            "classification unavailable — no deterministic basis for role "
-            "selection; run with deep_review=true for maximum scrutiny"
+    if _is_conservative_fallback(usable, kind):
+        # Both fallback shapes (unusable input, unknown kind) report the
+        # classification as unavailable: it gave no lane basis. The recorded
+        # pr_kind tells the two apart ("unknown" vs empty).
+        available = False
+        fallback_reason = (
+            "classification unavailable — defaulting to all roles "
+            "(conservative fallback: no deterministic basis to skip a role)"
         )
         for role in SPECIALIST_ROLES_ORDER:
             decisions.append({
                 "role": role,
-                "selected": False,
+                "selected": True,
                 "signals": [],
-                "reason": f"skipped: {zero_reason}",
+                "reason": f"selected: {fallback_reason}",
             })
-            skipped_roles.append(role)
+            selected_roles.append(role)
     else:
+        available = True
         gate_reason = _trivial_zero_reason(kind, flags, files)
         if gate_reason is not None:
             zero_reason = gate_reason
@@ -346,7 +388,7 @@ def select_specialist_roles(classification: Any) -> dict[str, Any]:
     return {
         "version": SELECTION_ARTIFACT_VERSION,
         "mode": "auto",
-        "classification_available": usable,
+        "classification_available": available,
         "pr_kind": kind,
         "risk_flags": flags,
         "selected_roles": selected_roles,

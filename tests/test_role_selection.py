@@ -97,7 +97,6 @@ def test_docs_meta_only_app_code_selects_zero_roles():
     artifact = selection(classification(
         pr_kind="app_code",
         changed_files_summary=[
-            ".github/workflows/ci.yml",
             "docs/usage.md",
             "README.md",
             "LICENSE",
@@ -107,6 +106,52 @@ def test_docs_meta_only_app_code_selects_zero_roles():
     ))
     assert artifact["selected_roles"] == []
     assert "docs/meta" in artifact["zero_selection_reason"]
+
+
+# Negative control (#633 review fix): executable/behavioral .github content
+# must not be auto-trivial.
+
+
+def test_workflow_only_pr_is_not_docs_gated():
+    """`.github/workflows` is executable: the gate must not fire and the
+    correctness lane applies."""
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=[".github/workflows/ci.yml"],
+    ))
+    assert artifact["selected_roles"] == ["correctness"]
+    assert artifact["zero_selection_reason"] == ""
+
+
+def test_composite_action_pr_is_not_docs_gated():
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=[".github/actions/setup/action.yml"],
+    ))
+    assert artifact["selected_roles"] == ["correctness"]
+
+
+def test_workflows_beside_docs_block_the_gate():
+    """One behavioral file among prose defeats the all-trivial requirement."""
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=["docs/usage.md", ".github/workflows/ci.yml"],
+    ))
+    assert artifact["selected_roles"] == ["correctness"]
+
+
+def test_inert_github_meta_is_still_trivial():
+    """Non-executable .github meta keeps the gate: issue templates and bot
+    config are not code."""
+    artifact = selection(classification(
+        pr_kind="app_code",
+        changed_files_summary=[
+            ".github/ISSUE_TEMPLATE/bug.yml",
+            ".github/dependabot.yml",
+            ".github/CODEOWNERS",
+        ],
+    ))
+    assert artifact["selected_roles"] == []
 
 
 def test_app_code_with_any_source_file_selects_correctness():
@@ -276,29 +321,38 @@ def test_all_three_roles_on_a_multi_signal_pr():
     assert artifact["selected_roles"] == ["correctness", "security", "tests"]
 
 
-# ── No-match and unavailable classification ────────────────────────
+# ── Conservative fallback: unavailable / unknown classification ────
 
 
-def test_unknown_kind_without_flags_selects_zero_via_no_match():
+def test_unknown_kind_fails_conservatively_to_all_roles():
+    """The classifier's `unknown` placeholder means classification failed:
+    auto must not read that as 'trivial' — all three roles run."""
     artifact = selection(classification(pr_kind="unknown", changed_files_summary=[]))
-    assert artifact["selected_roles"] == []
-    assert "no role lane matched" in artifact["zero_selection_reason"]
-    assert all(not d["selected"] for d in artifact["decisions"])
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+    assert artifact["skipped_roles"] == []
+    assert artifact["classification_available"] is False
+    assert "conservative fallback" in artifact["zero_selection_reason"] or all(
+        "conservative fallback" in d["reason"] for d in artifact["decisions"]
+    )
 
 
 @pytest.mark.parametrize("bad", [None, [], "garbage", 42])
-def test_unusable_classification_degrades_to_zero_selection(bad):
+def test_unusable_classification_fails_conservatively_to_all_roles(bad):
+    """Negative control (#633 review fix): an unusable classification must
+    NOT select zero roles — the conservative fallback runs everything so a
+    selection problem can only over-scrutinize, never under-scrutinize."""
     artifact = selection(bad)
     assert artifact["classification_available"] is False
-    assert artifact["selected_roles"] == []
-    assert artifact["skipped_roles"] == list(SPECIALIST_ROLES_ORDER)
-    assert "classification unavailable" in artifact["zero_selection_reason"]
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
+    assert artifact["skipped_roles"] == []
+    assert all(d["selected"] for d in artifact["decisions"])
+    assert all("conservative fallback" in d["reason"] for d in artifact["decisions"])
 
 
-def test_missing_pr_key_degrades_to_unavailable():
+def test_missing_pr_key_fails_conservatively():
     artifact = selection({"risk_flags": []})
     assert artifact["classification_available"] is False
-    assert artifact["selected_roles"] == []
+    assert artifact["selected_roles"] == list(SPECIALIST_ROLES_ORDER)
 
 
 # ── Reason hygiene and determinism ─────────────────────────────────

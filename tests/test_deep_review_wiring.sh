@@ -272,6 +272,32 @@ echo "=== precheck.py: deep review config fingerprinted ==="
 frozen_block="$(sed -n '/_EXACT_CONFIG_KEYS = frozenset/,/^))$/p' "$PRECHECK_PY" || true)"
 check_contains "DEEP_REVIEW in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW"'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_TIMEOUT_SEC"'
+check_contains "auto selection signature fingerprinted (#633)" "$frozen_block" '"PRECHECK_SELECTION_SIGNATURE"'
+
+echo ""
+echo "=== check_review_needed.sh: auto-selection inputs invalidate stale reviews (#633) ==="
+CHECK_SH="$ROOT_DIR/scripts/check_review_needed.sh"
+CHECK="$(cat "$CHECK_SH")"
+BUILDER_PY="$ROOT_DIR/scripts/build_selection_fingerprint.py"
+if [ -f "$BUILDER_PY" ]; then
+  if python3 -m py_compile "$BUILDER_PY" 2>/dev/null; then
+    echo "  PASS: py_compile clean"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: py_compile failed"
+    FAIL=$((FAIL + 1))
+  fi
+  BUILDER_SRC="$(cat "$BUILDER_PY")"
+  check_not_contains "builder writes no artifacts (pure stdout)" "$BUILDER_SRC" 'write_text'
+  check_contains "builder uses the python platform seam" "$BUILDER_SRC" 'platform_mod.gh_api'
+  check_contains "builder records fetch failures as a fixed token" "$BUILDER_SRC" 'FETCH_ERROR'
+else
+  echo "  FAIL: $BUILDER_PY missing"
+  FAIL=$((FAIL + 1))
+fi
+check_contains "signature built only when deep_review=auto" "$CHECK" '== "auto" ]]'
+check_contains "signature exported for the precheck config hash" "$CHECK" 'PRECHECK_SELECTION_SIGNATURE'
+check_contains "signature build is fail-soft (warn + continue)" "$CHECK" 'could not build the selection signature'
 check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
 

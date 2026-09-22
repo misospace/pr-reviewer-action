@@ -170,6 +170,13 @@ _EXACT_CONFIG_KEYS = frozenset((
     # review.
     "DEEP_REVIEW_MAX_TOKENS",
     "DEEP_REVIEW_CORPUS_MAX_BYTES",
+    # #633: deep_review=auto selects specialist roles partly from
+    # linked-issue-derived risk flags, which the diff fingerprint cannot
+    # see. check_review_needed.sh exports this signature (PR title/body +
+    # linked refs with their fetched labels) ONLY in auto mode, folding
+    # those inputs into the config-hash half of the broad fingerprint;
+    # unset in every other mode, so their fingerprints are unchanged.
+    "PRECHECK_SELECTION_SIGNATURE",
 ))
 
 
