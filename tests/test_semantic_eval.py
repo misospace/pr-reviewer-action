@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -631,6 +634,35 @@ def _fixture_file(number: int, path: str) -> str:
     return next(entry["content"] for entry in data["files"] if entry["path"] == path)
 
 
+def _function_body(source: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)^\}}", source)
+    assert match is not None, f"missing function: {name}"
+    return match.group(1)
+
+
+def _assert_collect_before_kill(source: str) -> None:
+    """Prove the fixture uses collect-before-kill tree cleanup, not streaming.
+
+    Streaming (killing each PID inside the loop that reads gate_descendants)
+    can reparent a just-killed child's grandchildren before the generator walks
+    them, so a payload descendant can survive. The merged safe contract instead
+    collects the complete descendant set into an array before signaling
+    anything, then terminates deepest-first, escalates to KILL, and reaps.
+    """
+    body = _function_body(source, "gate_terminate_and_reap")
+    assert "local -a targets=()" in body, "descendants must be collected into an array"
+    assert "targets+=(" in body, "descendants must be collected before signaling"
+    assert "done < <(gate_descendants" in body, "the descendant walk must feed the collection loop"
+    assert "for (( d=${#targets[@]}-1; d>=0; d-- ))" in body, "descendants must be signaled deepest-first"
+    assert 'kill -TERM "${targets[$d]}"' in body, "TERM must target the collected array, not a stream"
+    assert "kill -KILL" in body, "cleanup must escalate to KILL"
+    assert 'wait "$pid"' in body, "the leader must be reaped"
+    assert body.index("targets+=(") < body.index("kill -TERM"), "collect must happen before any signal"
+    stream = re.search(r"(?ms)while IFS= read -r d; do\n(.*?)\n\s*done < <\(gate_descendants", body)
+    assert stream is not None, "the collection loop must consume gate_descendants"
+    assert "kill" not in stream.group(1), "the descendant-read loop must not signal (streaming enumeration while killing)"
+
+
 # A description of the failure each negative control forbids, plus the head
 # content that must have changed so the description is no longer true. The
 # scorer must still recognize the description (it is not being taught to
@@ -670,6 +702,7 @@ NEGATIVE_SAFETY = {
             "credential-bearing CI child and its descendants survive an abnormal exit."
         ),
         "forbidden": CAPABILITY_BACKGROUND_LIFECYCLE,
+        "collect_before_kill": True,
         "checks": [
             (
                 "scripts/gating.sh",
@@ -684,6 +717,7 @@ NEGATIVE_SAFETY = {
             "descendants survive an abnormal exit."
         ),
         "forbidden": CAPABILITY_REMEDIATION_TOPOLOGY,
+        "collect_before_kill": True,
         "checks": [
             (
                 "scripts/gating.sh",
@@ -703,6 +737,7 @@ NEGATIVE_SAFETY = {
             "contract, so it falls back to wrapper-only and leaves the payload tree alive."
         ),
         "forbidden": CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+        "collect_before_kill": True,
         "checks": [
             (
                 "scripts/gating.sh",
@@ -802,12 +837,115 @@ def test_654_negative_controls_are_genuinely_safe(number: int) -> None:
         {"mode": "standard", "route": "primary", "stage": "primary"},
     )
     assert spec["forbidden"] in detected.forbidden_violations, number
+    if spec.get("collect_before_kill"):
+        _assert_collect_before_kill(_fixture_file(number, "scripts/gating.sh"))
     for path, required, absent in spec["checks"]:
         head = _fixture_file(number, path)
         for needle in required:
             assert needle in head, (number, path, needle)
         for needle in absent:
             assert needle not in head, (number, path, needle)
+
+
+STREAMING_ENUMERATION_WHILE_KILLING = """\
+gate_descendants() {
+  :
+}
+
+gate_terminate_and_reap() {
+  local pid="$1"
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] && kill -TERM "$d" 2>/dev/null || true
+  done < <(gate_descendants "$pid")
+  kill -TERM "$pid" 2>/dev/null || true
+}
+"""
+
+
+def test_654_safety_check_rejects_streaming_enumeration_while_killing() -> None:
+    """The structural check must reject the unsafe streaming cleanup.
+
+    This is the exact shape the fixtures previously used (and that the merged
+    gating.sh replaced): signal each descendant inside the loop that reads
+    gate_descendants, so a killed child can reparent its grandchildren before
+    the walk sees them.
+    """
+    with pytest.raises(AssertionError):
+        _assert_collect_before_kill(STREAMING_ENUMERATION_WHILE_KILLING)
+
+
+_CLEANUP_BEHAVIOR_HARNESS = r"""
+set -uo pipefail
+SCRIPT_DIR="$1"
+STATE_DIR="$2"
+CI_GATE_LOG="$STATE_DIR/ci.log"
+log() { :; }
+error() { :; }
+source "$SCRIPT_DIR/gating.sh"
+wait_for_ci_command() {
+  echo "$BASHPID" > "$STATE_DIR/wrapper.pid"
+  bash -c "echo \$\$ > '$STATE_DIR/payload.pid'; sleep 300 & echo \$! > '$STATE_DIR/grandchild.pid'; wait" &
+  local payload=$!
+  wait "$payload"
+}
+install_gate_lifecycle_trap
+export CI_STATUS_CHECK=true
+fork_ci_gate
+for _ in $(seq 1 300); do
+  [ -s "$STATE_DIR/payload.pid" ] && [ -s "$STATE_DIR/grandchild.pid" ] && break
+  sleep 0.02
+done
+exit 7
+"""
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.mark.parametrize("number", [6546, 6548, 6550])
+def test_654_negative_control_cleanup_reaps_the_payload_tree(number: int, tmp_path: Path) -> None:
+    """Behavioral proof: the fixture's abnormal-exit cleanup kills the tree.
+
+    Runs the fixture's own gating.sh with a distinct wrapper/payload/grandchild
+    topology and asserts nothing survives the abnormal exit, so a correct
+    reviewer cannot report the forbidden lifecycle/topology failure.
+    """
+    if subprocess.run(["bash", "-c", "command -v pgrep"], capture_output=True).returncode != 0:
+        pytest.skip("pgrep unavailable")
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "gating.sh").write_text(_fixture_file(number, "scripts/gating.sh"), encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    harness = tmp_path / "harness.sh"
+    harness.write_text(_CLEANUP_BEHAVIOR_HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(harness), str(source_dir), str(state)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 7, (number, result.returncode, result.stderr)
+    pids = {}
+    for name in ("wrapper", "payload", "grandchild"):
+        pid_file = state / f"{name}.pid"
+        assert pid_file.exists(), (number, name, result.stderr)
+        pids[name] = int(pid_file.read_text().strip())
+    assert pids["wrapper"] != pids["payload"] != pids["grandchild"], (number, pids)
+    for _ in range(100):
+        if not any(_process_alive(pid) for pid in pids.values()):
+            break
+        time.sleep(0.02)
+    for name, pid in pids.items():
+        assert not _process_alive(pid), (number, name, pid)
 
 
 def test_654_dependency_requires_both_cause_and_effect() -> None:
