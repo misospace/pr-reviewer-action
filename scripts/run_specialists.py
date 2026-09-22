@@ -13,16 +13,29 @@ One model call per role (correctness / security / tests — the closed set in
 ``SPECIALIST_ROLES_ORDER``) runs **concurrently** on daemon threads, reusing
 the resolved primary model settings from the environment and the shared
 transport (:func:`pr_reviewer.transport.run_chat_request`) — no second HTTP
-client. Each role receives the same bounded review corpus plus its small role
-prompt (``load_specialist_prompt``); responses are normalized through
-:func:`pr_reviewer.specialists.parse_specialist_response`, so malformed model
-output degrades to an ``errors`` entry and never an exception.
+client. Each role receives the same bounded **specialist corpus** plus its
+small role prompt (``load_specialist_prompt``); responses are normalized
+through :func:`pr_reviewer.specialists.parse_specialist_response`, so malformed
+model output degrades to an ``errors`` entry and never an exception.
+
+The specialist corpus (#632) is a compact deterministic subset of the collected
+artifacts, built once by ``scripts/build_specialist_corpus.py`` (module
+:mod:`pr_reviewer.specialist_corpus`) and handed to the runner via
+``--corpus`` (default ``specialist-corpus.md``). It is NOT the final review
+corpus — that corpus keeps its own bytes and budgets, and the final reviewer
+remains its only consumer. The specialist completion
+budget comes from ``DEEP_REVIEW_MAX_TOKENS`` (default
+:data:`pr_reviewer.specialists.DEFAULT_SPECIALIST_MAX_TOKENS`, 4096); it does
+not inherit ``AI_MAX_TOKENS``.
 
 Artifacts (all resolved under the workspace root, symlink-refused):
 ``specialist-<role>.request.json`` / ``specialist-<role>.response.json`` /
 ``specialist-<role>.json`` (the pure version-1 contract artifact) and the
 deterministic aggregate ``specialists.json`` (fixed role order, per-role
-status / error_kind / elapsed / lead counts). The #609 corpus feed adds
+status / error_kind / elapsed / lead counts, plus #632 corpus/output-budget
+and provider-usage telemetry: ``specialist_corpus_bytes``,
+``specialist_max_tokens`` and a per-role ``usage`` object when the provider
+exposed token counts). The #609 corpus feed adds
 ``specialists.md`` (the bounded "Specialist Review Leads" section rendered
 from the per-role version-1 artifacts, capped by
 ``SPECIALISTS_SECTION_MAX_BYTES``) and ``specialist-leads-present.txt``
@@ -67,6 +80,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from pr_reviewer.specialists import (  # noqa: E402
     ARTIFACT_VERSION,
+    DEFAULT_SPECIALIST_MAX_TOKENS,
     MAX_INPUT_BYTES,
     SPECIALIST_ROLES_ORDER,
     _empty_artifact,
@@ -267,6 +281,53 @@ def _extract_text(response: Any) -> str:
     return ""
 
 
+def _extract_usage(response: Any) -> Optional[dict[str, Optional[int]]]:
+    """Normalize provider token usage from a (re)assembled chat response.
+
+    Handles the OpenAI shape (``usage.prompt_tokens`` / ``completion_tokens`` /
+    ``total_tokens`` and ``usage.prompt_tokens_details.cached_tokens``) and the
+    Anthropic shape (``usage.input_tokens`` / ``output_tokens`` /
+    ``cache_read_input_tokens``). Returns ``None`` when the provider exposed no
+    usage fields, so telemetry stays fail-soft for endpoints that omit them.
+    """
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def _int(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    prompt = _int(usage.get("prompt_tokens"))
+    completion = _int(usage.get("completion_tokens"))
+    total = _int(usage.get("total_tokens"))
+    cached: Optional[int] = None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = _int(details.get("cached_tokens"))
+    if prompt is None:
+        prompt = _int(usage.get("input_tokens"))
+    if completion is None:
+        completion = _int(usage.get("output_tokens"))
+    if cached is None:
+        cached = _int(usage.get("cache_read_input_tokens"))
+    if cached is None:
+        cached = _int(usage.get("cache_creation_input_tokens"))
+    if total is None and prompt is not None and completion is not None:
+        total = prompt + completion
+    if prompt is None and completion is None and total is None and cached is None:
+        return None
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "cached_tokens": cached,
+        "total_tokens": total,
+    }
+
+
 def _status_of(result: dict[str, Any]) -> str:
     """ok / degraded for a contract artifact the model actually answered.
 
@@ -291,6 +352,7 @@ def _role_entry(
     status: str,
     error_kind: Optional[str],
     elapsed_sec: float,
+    usage: Optional[dict[str, Optional[int]]] = None,
 ) -> dict[str, Any]:
     leads = artifact.get("leads")
     errors = artifact.get("errors")
@@ -301,6 +363,7 @@ def _role_entry(
         "elapsed_sec": round(elapsed_sec, 3),
         "lead_count": len(leads) if isinstance(leads, list) else 0,
         "errors_count": len(errors) if isinstance(errors, list) else 0,
+        "usage": usage,
     }
 
 
@@ -373,12 +436,14 @@ def _run_role(
         *,
         status: str,
         error_kind: Optional[str],
+        usage: Optional[dict[str, Optional[int]]] = None,
     ) -> dict[str, Any]:
         if cancel.is_set():
             return _role_entry(
                 role, artifact, status="error",
                 error_kind=error_kind or "timeout",
                 elapsed_sec=time.monotonic() - started,
+                usage=usage,
             )
         if not _guarded_write(
             workspace_root, f"specialist-{role}.json", _json_text(artifact),
@@ -390,6 +455,7 @@ def _run_role(
                 return _role_entry(
                     role, artifact, status="error", error_kind="timeout",
                     elapsed_sec=time.monotonic() - started,
+                    usage=usage,
                 )
             guard_artifact = _empty_artifact(role)
             guard_artifact["errors"].append(
@@ -404,10 +470,12 @@ def _run_role(
             return _role_entry(
                 role, guard_artifact, status="error", error_kind="guard",
                 elapsed_sec=time.monotonic() - started,
+                usage=usage,
             )
         return _role_entry(
             role, artifact, status=status, error_kind=error_kind,
             elapsed_sec=time.monotonic() - started,
+            usage=usage,
         )
 
     try:
@@ -489,7 +557,12 @@ def _run_role(
 
             text = _extract_text(response)
             artifact = parse_specialist_response(text, role=role)
-            return finish(artifact, status=_status_of(artifact), error_kind=None)
+            return finish(
+                artifact,
+                status=_status_of(artifact),
+                error_kind=None,
+                usage=_extract_usage(response),
+            )
 
         raise last_error or _RoleFailure("transport", "no attempt completed")
 
@@ -507,18 +580,21 @@ def _run_role(
         )
 
 
-def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str]]:
-    """Read the review corpus. Returns (text, error); a missing, unreadable,
-    or over-cap corpus is a soft input error, never an exception."""
+def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str], int]:
+    """Read the review corpus. Returns (text, error, raw_bytes); a missing,
+    unreadable, or over-cap corpus is a soft input error, never an exception.
+    ``raw_bytes`` is the on-disk size (0 on failure) for corpus-size telemetry."""
     try:
         raw = Path(corpus_path).read_bytes()
     except FileNotFoundError:
-        return None, f"corpus not found: {corpus_path}"
+        return None, f"corpus not found: {corpus_path}", 0
     except OSError as exc:
-        return None, f"corpus unreadable: {mask_secrets(str(exc))}"
+        return None, f"corpus unreadable: {mask_secrets(str(exc))}", 0
     if len(raw) > MAX_INPUT_BYTES:
-        return None, f"corpus exceeds {MAX_INPUT_BYTES} byte input cap"
-    return raw.decode("utf-8", errors="replace"), None
+        return None, f"corpus exceeds {MAX_INPUT_BYTES} byte input cap", 0
+    if not raw.strip():
+        return None, f"specialist corpus is empty: {corpus_path}", 0
+    return raw.decode("utf-8", errors="replace"), None, len(raw)
 
 
 def _read_role_artifacts(
@@ -549,8 +625,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--corpus",
-        default="review-corpus.truncated.md",
-        help="Review corpus handed verbatim to every specialist role.",
+        default="specialist-corpus.md",
+        help="Bounded specialist corpus handed to every specialist role.",
     )
     parser.add_argument(
         "--workspace-root",
@@ -574,7 +650,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     api_format = _env_str("AI_API_FORMAT", "openai").strip().lower()
     model = _env_str("AI_MODEL")
     api_key = _env_str("AI_API_KEY")
-    max_tokens = _env_int("AI_MAX_TOKENS", 8192)
+    # #632: the specialist output budget is independent of the final reviewer's
+    # AI_MAX_TOKENS — a narrow advisory scout needs only a short JSON lead set.
+    max_tokens = _env_int("DEEP_REVIEW_MAX_TOKENS", DEFAULT_SPECIALIST_MAX_TOKENS)
     temperature = _env_temperature()
     response_format = _env_str("AI_RESPONSE_FORMAT", "off").strip().lower()
     tokens_param = _env_str("AI_TOKENS_PARAM", "max_tokens").strip().lower()
@@ -586,7 +664,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     deadline = phase_started + phase_timeout_sec
 
     entries: list[dict[str, Any]] = []
-    corpus, corpus_error = _read_corpus(args.corpus)
+    corpus, corpus_error, corpus_bytes = _read_corpus(args.corpus)
     if corpus is None:
         # No corpus means no calls at all: every role is recorded as a soft
         # input failure and the aggregate is still written.
@@ -683,12 +761,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             entries.append(results[role])
 
     aggregate_elapsed = time.monotonic() - phase_started
+    print(
+        f"specialist corpus: {corpus_bytes} bytes; "
+        f"specialist max_tokens: {max_tokens}"
+    )
     for entry in entries:
         suffix = f" ({entry['error_kind']})" if entry.get("error_kind") else ""
+        usage = entry.get("usage")
+        usage_note = ""
+        if isinstance(usage, dict):
+            usage_note = (
+                f", tokens in/out={usage.get('prompt_tokens')}/"
+                f"{usage.get('completion_tokens')}"
+                f" cached={usage.get('cached_tokens')}"
+            )
         print(
             f"specialist {entry['role']}: {entry['status']}{suffix} — "
             f"{entry['lead_count']} lead(s), {entry['errors_count']} error(s), "
-            f"{entry['elapsed_sec']}s"
+            f"{entry['elapsed_sec']}s{usage_note}"
         )
 
     aggregate = {
@@ -696,6 +786,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "enabled": True,
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
+        "specialist_corpus_bytes": corpus_bytes,
+        "specialist_max_tokens": max_tokens,
         "total_leads": sum(entry["lead_count"] for entry in entries),
         "any_errors": any(
             entry["status"] != "ok" or entry["errors_count"] for entry in entries

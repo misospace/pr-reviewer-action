@@ -98,6 +98,7 @@ def _run_main(monkeypatch, tmp_path, env_overrides=None, base=None,
     monkeypatch.delenv("AI_TOKENS_PARAM", raising=False)
     monkeypatch.delenv("AI_REQUEST_TIMEOUT_SEC", raising=False)
     monkeypatch.delenv("DEEP_REVIEW_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("DEEP_REVIEW_MAX_TOKENS", raising=False)
     monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
     for name, value in (env_overrides or {}).items():
         if value is None:
@@ -150,7 +151,9 @@ def test_openai_default_payload(monkeypatch, tmp_path):
     assert [m["role"] for m in payload["messages"]] == ["system", "user"]
     assert payload["messages"][0]["content"]  # role prompt fragment present
     assert payload["messages"][1]["content"].endswith("corpus line one\n")
-    assert payload["max_tokens"] == 8192
+    # #632: the specialist budget is DEEP_REVIEW_MAX_TOKENS (default 4096), not
+    # the final reviewer's AI_MAX_TOKENS (8192 here).
+    assert payload["max_tokens"] == 4096
     assert "temperature" not in payload
     assert "response_format" not in payload
     assert payload["stream_options"] == {"include_usage": True}
@@ -206,7 +209,7 @@ def test_tokens_param_max_completion_tokens(monkeypatch, tmp_path):
     rc, _, captured = _run_main(monkeypatch, tmp_path, {"AI_TOKENS_PARAM": "max_completion_tokens"})
     assert rc == 0
     for call in captured:
-        assert call["payload"]["max_completion_tokens"] == 8192
+        assert call["payload"]["max_completion_tokens"] == 4096
         assert "max_tokens" not in call["payload"]
 
 
@@ -367,3 +370,135 @@ def test_source_never_references_native_loop():
     src = (_SCRIPTS_DIR / "run_specialists.py").read_text(encoding="utf-8")
     for token in ("run_tool_harness", "from pr_reviewer.conversation", "run_native_loop"):
         assert token not in src
+
+
+# --- 14. #632 independent specialist output budget -------------------------------
+
+
+def test_deep_review_max_tokens_independent_of_ai_max_tokens(monkeypatch, tmp_path):
+    rc, _, captured = _run_main(
+        monkeypatch,
+        tmp_path,
+        {"AI_MAX_TOKENS": "20000", "DEEP_REVIEW_MAX_TOKENS": "1234"},
+    )
+    assert rc == 0
+    assert captured
+    assert all(c["payload"]["max_tokens"] == 1234 for c in captured)
+
+
+def test_deep_review_max_tokens_defaults_to_4096(monkeypatch, tmp_path):
+    rc, ws, captured = _run_main(monkeypatch, tmp_path, {"AI_MAX_TOKENS": "20000"})
+    assert rc == 0
+    assert captured
+    assert all(c["payload"]["max_tokens"] == 4096 for c in captured)
+    assert _read_json(ws, "specialists.json")["specialist_max_tokens"] == 4096
+
+
+def test_specialist_corpus_bytes_in_aggregate(monkeypatch, tmp_path):
+    rc, ws, _ = _run_main(monkeypatch, tmp_path)
+    assert rc == 0
+    assert _read_json(ws, "specialists.json")["specialist_corpus_bytes"] == len(
+        "corpus line one\n"
+    )
+
+
+# --- 15. #632 provider usage telemetry ------------------------------------------
+
+
+_USAGE_OK = {
+    "choices": [{"message": {"role": "assistant", "content": '{"leads": []}'}}],
+    "usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 22,
+        "total_tokens": 33,
+        "prompt_tokens_details": {"cached_tokens": 7},
+    },
+}
+_ANTHROPIC_USAGE_OK = {
+    "content": [{"type": "text", "text": '{"role": "tests", "leads": []}'}],
+    "usage": {
+        "input_tokens": 5,
+        "output_tokens": 6,
+        "cache_read_input_tokens": 2,
+    },
+}
+
+
+def test_usage_telemetry_captured_when_present(monkeypatch, tmp_path):
+    rc, ws, _ = _run_main(monkeypatch, tmp_path, response=_USAGE_OK)
+    assert rc == 0
+    agg = _read_json(ws, "specialists.json")
+    for entry in agg["roles"]:
+        assert entry["usage"] == {
+            "prompt_tokens": 11,
+            "completion_tokens": 22,
+            "cached_tokens": 7,
+            "total_tokens": 33,
+        }
+
+
+def test_usage_telemetry_absent_is_none(monkeypatch, tmp_path):
+    rc, ws, _ = _run_main(monkeypatch, tmp_path, response=_OPENAI_OK)
+    assert rc == 0
+    for entry in _read_json(ws, "specialists.json")["roles"]:
+        assert entry["usage"] is None
+
+
+def test_usage_telemetry_anthropic_shape(monkeypatch, tmp_path):
+    rc, ws, _ = _run_main(
+        monkeypatch, tmp_path, response=_ANTHROPIC_USAGE_OK
+    )
+    assert rc == 0
+    by_role = {e["role"]: e for e in _read_json(ws, "specialists.json")["roles"]}
+    assert by_role["tests"]["usage"] is not None
+    assert by_role["tests"]["usage"] == {
+        "prompt_tokens": 5,
+        "completion_tokens": 6,
+        "cached_tokens": 2,
+        "total_tokens": 11,
+    }
+
+
+def test_extract_usage_unit_shapes():
+    assert run_specialists._extract_usage({}) is None
+    assert run_specialists._extract_usage({"usage": "nope"}) is None
+    assert run_specialists._extract_usage({"usage": {}}) is None
+    assert run_specialists._extract_usage(
+        {"usage": {"prompt_tokens": 3, "completion_tokens": 4}}
+    ) == {
+        "prompt_tokens": 3,
+        "completion_tokens": 4,
+        "cached_tokens": None,
+        "total_tokens": 7,
+    }
+    # Booleans are not token counts.
+    assert run_specialists._extract_usage(
+        {"usage": {"prompt_tokens": True}}
+    ) is None
+
+
+# --- 16. #610 consumer stays compatible with the #632 aggregate -------------
+
+
+def test_eval_harness_telemetry_consumes_new_aggregate_fields(monkeypatch, tmp_path):
+    import eval_harness  # noqa: PLC0415 - scripts dir is on sys.path above
+
+    rc, ws, _ = _run_main(monkeypatch, tmp_path, response=_USAGE_OK)
+    assert rc == 0
+    telemetry = eval_harness.load_specialist_telemetry(ws)
+    assert telemetry is not None
+    assert telemetry["total_leads"] == 0
+    assert telemetry["any_errors"] is False
+    assert telemetry["specialist_corpus_bytes"] == len("corpus line one\n")
+    assert telemetry["specialist_max_tokens"] == 4096
+    assert [r["role"] for r in telemetry["roles"]] == list(ROLES)
+    # Provider usage flows through to the #610 telemetry consumer.
+    assert all(
+        r["usage"] == {
+            "prompt_tokens": 11,
+            "completion_tokens": 22,
+            "cached_tokens": 7,
+            "total_tokens": 33,
+        }
+        for r in telemetry["roles"]
+    )

@@ -104,6 +104,24 @@ class TestComputeConfigHash:
     def test_null_bytes_are_significant(self):
         assert compute_config_hash(["A=x\x00y"]) != compute_config_hash(["A=xy"])
 
+    def test_deep_review_specialist_budgets_change_collected_config(self, monkeypatch):
+        # #632: the specialist completion budget and compact-corpus byte cap are
+        # independent settings; changing either must move the config hash so an
+        # otherwise unchanged review is invalidated (the run's specialist
+        # request/inputs changed).
+        def _collect(max_tokens, corpus_bytes):
+            monkeypatch.delenv("DEEP_REVIEW_MAX_TOKENS", raising=False)
+            monkeypatch.delenv("DEEP_REVIEW_CORPUS_MAX_BYTES", raising=False)
+            monkeypatch.setenv("DEEP_REVIEW_MAX_TOKENS", max_tokens)
+            monkeypatch.setenv("DEEP_REVIEW_CORPUS_MAX_BYTES", corpus_bytes)
+            return _collect_config_lines()
+
+        base = _collect("4096", "48000")
+        bigger_budget = _collect("8192", "48000")
+        bigger_corpus = _collect("4096", "96000")
+        assert compute_config_hash(base) != compute_config_hash(bigger_budget)
+        assert compute_config_hash(base) != compute_config_hash(bigger_corpus)
+
 
 class TestBroadAndMarkerFingerprint:
     """Tests for helper fingerprint builders."""

@@ -87,6 +87,12 @@ PR_THREAD_CONTEXT="${PR_THREAD_CONTEXT:-true}"
 PR_THREAD_MAX_BYTES="${PR_THREAD_MAX_BYTES:-8000}"
 DEEP_REVIEW="${DEEP_REVIEW:-false}"
 DEEP_REVIEW_TIMEOUT_SEC="${DEEP_REVIEW_TIMEOUT_SEC:-600}"
+# #632: the specialist completion-token budget and the compact specialist
+# corpus byte cap are independent of the final reviewer's AI_MAX_TOKENS /
+# MAX_CORPUS. Both are fingerprinted (pr_reviewer/precheck.py) because changing
+# either changes what the specialist phase sends/produces.
+DEEP_REVIEW_MAX_TOKENS="${DEEP_REVIEW_MAX_TOKENS:-4096}"
+DEEP_REVIEW_CORPUS_MAX_BYTES="${DEEP_REVIEW_CORPUS_MAX_BYTES:-48000}"
 # #609: hard UTF-8 byte cap on the rendered "Specialist Review Leads" corpus
 # section (specialists.md). run_specialists.py reads the same name; the shell
 # side validates it so a typo cannot silently disable the cap.
@@ -329,6 +335,24 @@ if [[ ! "$SPECIALISTS_SECTION_MAX_BYTES" =~ ^[0-9]+$ || "$SPECIALISTS_SECTION_MA
   SPECIALISTS_SECTION_MAX_BYTES=12000
 fi
 export SPECIALISTS_SECTION_MAX_BYTES
+
+# #632 specialist output budget: numeric, >= 1. A non-numeric value degrades to
+# the 4096 default so a typo cannot disable the specialist call. This value is
+# deliberately separate from AI_MAX_TOKENS (the final reviewer's budget).
+if [[ ! "$DEEP_REVIEW_MAX_TOKENS" =~ ^[0-9]+$ || "$DEEP_REVIEW_MAX_TOKENS" -lt 1 ]]; then
+  error "Invalid DEEP_REVIEW_MAX_TOKENS '$DEEP_REVIEW_MAX_TOKENS'; defaulting to 4096"
+  DEEP_REVIEW_MAX_TOKENS=4096
+fi
+export DEEP_REVIEW_MAX_TOKENS
+
+# #632 specialist corpus byte cap: numeric, >= 1, <= 500000. A non-numeric or
+# out-of-range value degrades to the 48000 default; the cap is the guarantee
+# that the compact specialist corpus stays bounded regardless of PR size.
+if [[ ! "$DEEP_REVIEW_CORPUS_MAX_BYTES" =~ ^[0-9]+$ || "$DEEP_REVIEW_CORPUS_MAX_BYTES" -lt 1 || "$DEEP_REVIEW_CORPUS_MAX_BYTES" -gt 500000 ]]; then
+  error "Invalid DEEP_REVIEW_CORPUS_MAX_BYTES '$DEEP_REVIEW_CORPUS_MAX_BYTES'; defaulting to 48000"
+  DEEP_REVIEW_CORPUS_MAX_BYTES=48000
+fi
+export DEEP_REVIEW_CORPUS_MAX_BYTES
 
 case "$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" in
   warn|fail|metadata_only) REQUIRED_CHECK_VALIDATION_MODE="$(printf '%s' "$REQUIRED_CHECK_VALIDATION_MODE" | tr '[:upper:]' '[:lower:]')" ;;

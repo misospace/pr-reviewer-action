@@ -823,8 +823,10 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     Normalized shape (identical keys in both paths):
       {"enabled": bool, "aggregate_elapsed_sec": float | None,
        "total_leads": int, "any_errors": bool, "derived": bool,
+       "specialist_corpus_bytes": int | None,   # #632
+       "specialist_max_tokens": int | None,     # #632
        "roles": [{"role", "status", "error_kind", "lead_count",
-                  "elapsed_sec"} ... one per SPECIALIST_ROLES],
+                  "elapsed_sec", "usage"} ... one per SPECIALIST_ROLES],
        "leads_by_role": {"<role>": [lead, ...]}}
     """
 
@@ -889,12 +891,14 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
                     "error_kind": None,
                     "lead_count": len(leads_by_role[role]),
                     "elapsed_sec": 0.0,
+                    "usage": None,
                 })
                 continue
             lead_count = _int(entry.get("lead_count"))
             elapsed = _num(entry.get("elapsed_sec"))
             status = entry.get("status")
             error_kind = entry.get("error_kind")
+            usage = entry.get("usage")
             roles_out.append({
                 "role": role,
                 "status": status if isinstance(status, str) else "ok",
@@ -904,6 +908,7 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
                     else len(leads_by_role[role])
                 ),
                 "elapsed_sec": elapsed if elapsed is not None else 0.0,
+                "usage": usage if isinstance(usage, dict) else None,
             })
 
         enabled = aggregate.get("enabled")
@@ -931,6 +936,8 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
             ),
             "any_errors": any_errors,
             "derived": False,
+            "specialist_corpus_bytes": _int(aggregate.get("specialist_corpus_bytes")),
+            "specialist_max_tokens": _int(aggregate.get("specialist_max_tokens")),
             "roles": roles_out,
             "leads_by_role": leads_by_role,
         }
@@ -947,6 +954,7 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
                 "error_kind": None,
                 "lead_count": 0,
                 "elapsed_sec": 0.0,
+                "usage": None,
             })
             continue
         errors = data.get("errors")
@@ -959,6 +967,7 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
             "error_kind": "role_errors" if has_errors else None,
             "lead_count": len(leads_by_role[role]),
             "elapsed_sec": 0.0,
+            "usage": None,
         })
 
     return {
@@ -967,6 +976,8 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
         "total_leads": sum(len(v) for v in leads_by_role.values()),
         "any_errors": any_errors,
         "derived": True,
+        "specialist_corpus_bytes": None,
+        "specialist_max_tokens": None,
         "roles": roles_out,
         "leads_by_role": leads_by_role,
     }

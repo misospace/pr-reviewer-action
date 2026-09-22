@@ -164,6 +164,12 @@ _EXACT_CONFIG_KEYS = frozenset((
     # recorded timeouts, which changes the run.
     "DEEP_REVIEW",
     "DEEP_REVIEW_TIMEOUT_SEC",
+    # #632: the specialist completion budget and compact-corpus byte cap are
+    # independent of the final reviewer's settings; changing either changes the
+    # specialist request/inputs, so both must invalidate an otherwise unchanged
+    # review.
+    "DEEP_REVIEW_MAX_TOKENS",
+    "DEEP_REVIEW_CORPUS_MAX_BYTES",
 ))
 
 

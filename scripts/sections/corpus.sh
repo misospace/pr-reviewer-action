@@ -429,10 +429,12 @@ build_review_corpus
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
-# ── Deep review (#608/#609): specialist leads feed the final corpus ────────
+# ── Deep review (#608/#609/#632): specialist leads feed the final corpus ──
 # The three fixed specialist roles (correctness / security / tests —
-# pr_reviewer/specialists.py) run as a BACKGROUND JOB over the just-built
-# truncated review corpus, reusing the primary model settings. The three
+# pr_reviewer/specialists.py) run as a BACKGROUND JOB over a compact,
+# independently bounded specialist corpus (#632) built from the collected
+# artifacts, reusing the primary model settings but with an independent
+# completion budget. The three
 # roles run concurrently WITH EACH OTHER (the runner fans them out on
 # internal threads); the phase is fully reaped BEFORE anything below enters —
 # critically before the native_loop tool harness starts, so the final
@@ -454,9 +456,23 @@ SPECIALISTS_PID=""
 if [[ "$(printf '%s' "$DEEP_REVIEW" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
   DEEP_REVIEW_ACTIVE="true"
   section_timer_start "specialists"
-  python3 "$SCRIPT_DIR/run_specialists.py" --corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &
+  # #632: build ONE compact deterministic specialist corpus from the artifacts
+  # already collected for the final review, then hand the same bytes to every
+  # role. It is not review-corpus.truncated.md — that corpus (and the final
+  # reviewer's budgets) stay untouched. The build is inside the deep_review
+  # gate, so a disabled run does no specialist-corpus work at all. Fail-soft:
+  # a builder failure leaves an empty corpus, which run_specialists.py records
+  # as a per-role input error and never blocks the final review.
+  if ! python3 "$SCRIPT_DIR/build_specialist_corpus.py" \
+      --workspace "${GITHUB_WORKSPACE:-$(pwd)}" \
+      --output specialist-corpus.md \
+      --max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"; then
+    error "specialist corpus build failed; specialists will record an input error"
+    : > specialist-corpus.md
+  fi
+  python3 "$SCRIPT_DIR/run_specialists.py" --corpus specialist-corpus.md >specialists.phase.log 2>&1 &
   SPECIALISTS_PID=$!
-  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the review corpus (pid $SPECIALISTS_PID)"
+  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the bounded specialist corpus (pid $SPECIALISTS_PID)"
 fi
 
 # Reap the specialist phase fully before anything consumes its output (the

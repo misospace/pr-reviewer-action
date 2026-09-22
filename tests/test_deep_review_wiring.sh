@@ -51,6 +51,15 @@ check_contains "DEEP_REVIEW_TIMEOUT_SEC defaults to 600" "$CONFIG" 'DEEP_REVIEW_
 check_contains "DEEP_REVIEW_TIMEOUT_SEC must be numeric" "$CONFIG" 'DEEP_REVIEW_TIMEOUT_SEC" =~ ^[0-9]+$'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC must be >= 1" "$CONFIG" 'DEEP_REVIEW_TIMEOUT_SEC" -lt 1'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC invalid value degrades to 600" "$CONFIG" 'DEEP_REVIEW_TIMEOUT_SEC=600'
+# #632: independent specialist output/corpus budgets.
+check_contains "DEEP_REVIEW_MAX_TOKENS defaults to 4096" "$CONFIG" 'DEEP_REVIEW_MAX_TOKENS="${DEEP_REVIEW_MAX_TOKENS:-4096}"'
+check_contains "DEEP_REVIEW_MAX_TOKENS must be numeric" "$CONFIG" 'DEEP_REVIEW_MAX_TOKENS" =~ ^[0-9]+$'
+check_contains "DEEP_REVIEW_MAX_TOKENS invalid value degrades to 4096" "$CONFIG" 'DEEP_REVIEW_MAX_TOKENS=4096'
+check_contains "DEEP_REVIEW_MAX_TOKENS exported to the specialist phase" "$CONFIG" 'export DEEP_REVIEW_MAX_TOKENS'
+check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES defaults to 48000" "$CONFIG" 'DEEP_REVIEW_CORPUS_MAX_BYTES="${DEEP_REVIEW_CORPUS_MAX_BYTES:-48000}"'
+check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES must be numeric" "$CONFIG" 'DEEP_REVIEW_CORPUS_MAX_BYTES" =~ ^[0-9]+$'
+check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES invalid value degrades to 48000" "$CONFIG" 'DEEP_REVIEW_CORPUS_MAX_BYTES=48000'
+check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES exported to the builder" "$CONFIG" 'export DEEP_REVIEW_CORPUS_MAX_BYTES'
 
 echo ""
 echo "=== corpus.sh: specialist phase launched in the background (#609 placement) ==="
@@ -61,12 +70,24 @@ check "exactly one run_specialists.py LAUNCH in corpus.sh" \
 check_not_contains "review.sh no longer launches specialists (moved in #609)" \
   "$REVIEW" 'run_specialists.py'
 check_contains "launch line runs as a background job with the phase log" \
-  "$CORPUS" '--corpus review-corpus.truncated.md >specialists.phase.log 2>&1 &'
+  "$CORPUS" '--corpus specialist-corpus.md >specialists.phase.log 2>&1 &'
 check_contains "launch records the pid" "$CORPUS" 'SPECIALISTS_PID=$!'
 deep_gate_line="$(grep -n 'if \[\[ "$(printf .*"\$DEEP_REVIEW" | tr' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
 launch_line="$(grep -n '^[[:space:]]*python3 "$SCRIPT_DIR/run_specialists.py"' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
 check "launch is inside the deep_review gate (gate precedes launch)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$launch_line" ] && [ "$launch_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
+# #632: the compact specialist corpus is built once, inside the gate, before launch.
+check "exactly one specialist-corpus build in corpus.sh" \
+  "$(grep -c 'build_specialist_corpus.py' "$CORPUS_SH" || true)" "1"
+build_line="$(grep -n 'build_specialist_corpus.py' "$CORPUS_SH" | head -1 | cut -d: -f1 || true)"
+check "specialist-corpus build precedes the launch" \
+  "$([ -n "$build_line" ] && [ -n "$launch_line" ] && [ "$build_line" -lt "$launch_line" ] && echo yes || echo no)" "yes"
+check "specialist-corpus build is inside the deep_review gate (gate precedes build)" \
+  "$([ -n "$deep_gate_line" ] && [ -n "$build_line" ] && [ "$build_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
+check_contains "build passes the independent corpus cap" "$CORPUS" \
+  '--max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"'
+check_not_contains "specialists no longer read the final corpus verbatim" \
+  "$CORPUS" '--corpus review-corpus.truncated.md'
 
 echo ""
 echo "=== corpus.sh: launch AND reap precede the native-loop tool harness (#609) ==="
@@ -150,6 +171,7 @@ for name in \
   specialists.json \
   specialists.phase.log \
   specialists.md \
+  specialist-corpus.md \
   specialist-leads-present.txt; do
   check_contains "guard list includes $name" "$ARTIFACTS" "$name"
 done
@@ -161,6 +183,10 @@ check "deep_review input defaults to false" \
   "$(awk '/^  deep_review:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'false'"
 check "deep_review_timeout_sec input defaults to 600" \
   "$(awk '/^  deep_review_timeout_sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'600'"
+check "deep_review_max_tokens input defaults to 4096" \
+  "$(awk '/^  deep_review_max_tokens:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'4096'"
+check "deep_review_corpus_max_bytes input defaults to 48000" \
+  "$(awk '/^  deep_review_corpus_max_bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'48000'"
 
 deep_review_env="$(grep -n 'DEEP_REVIEW:' "$ACTION_YML" | cut -d: -f2- || true)"
 check "DEEP_REVIEW appears exactly twice among env lines" \
@@ -177,11 +203,41 @@ deep_review_timeout_env_2="$(printf '%s\n' "$deep_review_timeout_env" | sed -n 2
 check "DEEP_REVIEW_TIMEOUT_SEC env bindings are identical across blocks" \
   "$deep_review_timeout_env_1" "$deep_review_timeout_env_2"
 
+for budget_var in DEEP_REVIEW_MAX_TOKENS DEEP_REVIEW_CORPUS_MAX_BYTES; do
+  budget_env="$(grep -n "${budget_var}:" "$ACTION_YML" | cut -d: -f2- || true)"
+  check "${budget_var} appears exactly twice among env lines" \
+    "$(printf '%s\n' "$budget_env" | grep -c . || true)" "2"
+  budget_env_1="$(printf '%s\n' "$budget_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  budget_env_2="$(printf '%s\n' "$budget_env" | sed -n 2p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  check "${budget_var} env bindings are identical across blocks" "$budget_env_1" "$budget_env_2"
+done
+
 echo ""
 echo "=== precheck.py: deep review config fingerprinted ==="
 frozen_block="$(sed -n '/_EXACT_CONFIG_KEYS = frozenset/,/^))$/p' "$PRECHECK_PY" || true)"
 check_contains "DEEP_REVIEW in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW"'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_TIMEOUT_SEC"'
+check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
+check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
+
+echo ""
+echo "=== #632: final-review corpus and token budgets unaffected ==="
+MODEL_CALL_SH="$ROOT_DIR/scripts/model_call.sh"
+RUN_HARNESS_PY="$ROOT_DIR/scripts/run_tool_harness.py"
+check_not_contains "model_call.sh does not consume the specialist budget" \
+  "$(cat "$MODEL_CALL_SH")" 'DEEP_REVIEW_MAX_TOKENS'
+check_not_contains "run_tool_harness.py does not consume the specialist budget" \
+  "$(cat "$RUN_HARNESS_PY")" 'DEEP_REVIEW_MAX_TOKENS'
+check_not_contains "run_tool_harness.py does not consume the specialist corpus cap" \
+  "$(cat "$RUN_HARNESS_PY")" 'DEEP_REVIEW_CORPUS_MAX_BYTES'
+check_contains "model_call.sh still drives the final reviewer from AI_MAX_TOKENS" \
+  "$(cat "$MODEL_CALL_SH")" 'AI_MAX_TOKENS'
+check_contains "run_tool_harness.py still drives the native loop from AI_MAX_TOKENS" \
+  "$(cat "$RUN_HARNESS_PY")" 'AI_MAX_TOKENS'
+check_contains "run_specialists.py defaults to the specialist corpus" \
+  "$(cat "$SPECIALISTS_PY")" 'default="specialist-corpus.md"'
+check_not_contains "run_specialists.py never reads the final corpus" \
+  "$(cat "$SPECIALISTS_PY")" 'review-corpus.truncated.md'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

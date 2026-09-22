@@ -384,6 +384,22 @@ inputs:
     required: false
     default: '600'
 
+  # #632: independent specialist output budget. Deliberately separate from
+  # ai_max_tokens so a narrow advisory scout gets a short structured-JSON
+  # allowance instead of the final reviewer's much larger budget.
+  deep_review_max_tokens:
+    description: 'Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096.'
+    required: false
+    default: '4096'
+
+  # #632: independent specialist corpus cap. A compact deterministic corpus is
+  # built from the collected artifacts for the specialist roles only; this hard
+  # UTF-8 byte cap is independent of the final review corpus budget.
+  deep_review_corpus_max_bytes:
+    description: 'Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000.'
+    required: false
+    default: '48000'
+
   enrichment_budget_sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false
@@ -785,6 +801,8 @@ runs:
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
         DEEP_REVIEW: ${{ inputs.deep_review }}
         DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
+        DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
+        DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
         LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
         LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
@@ -918,6 +936,8 @@ runs:
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
         DEEP_REVIEW: ${{ inputs.deep_review }}
         DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
+        DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
+        DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}
         ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
         IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
         EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}

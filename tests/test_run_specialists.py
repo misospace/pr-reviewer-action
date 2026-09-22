@@ -54,6 +54,7 @@ def env_setup(tmp_path: Path, monkeypatch, **overrides):
         "AI_MAX_TOKENS",
         "AI_TEMPERATURE",
         "AI_REQUEST_TIMEOUT_SEC",
+        "DEEP_REVIEW_MAX_TOKENS",
         "GITHUB_WORKSPACE",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -418,7 +419,7 @@ def test_malformed_prose_degrades(tmp_path, monkeypatch):
 # ── 11. Missing / oversized corpus: input errors, zero calls ───────
 
 
-@pytest.mark.parametrize("case", ["missing", "oversized"])
+@pytest.mark.parametrize("case", ["missing", "oversized", "empty"])
 def test_corpus_input_error(tmp_path, monkeypatch, case):
     ws = ws_dir(tmp_path)
     env_setup(tmp_path, monkeypatch)
@@ -426,9 +427,12 @@ def test_corpus_input_error(tmp_path, monkeypatch, case):
 
     if case == "missing":
         corpus = tmp_path / "nope.md"
-    else:
+    elif case == "oversized":
         corpus = tmp_path / "corpus.md"
         corpus.write_bytes(b"x" * 1_000_001)  # one byte over MAX_INPUT_BYTES
+    else:
+        corpus = tmp_path / "corpus.md"
+        corpus.write_bytes(b"   \n")  # whitespace-only: builder failure fallback
 
     assert run_main(tmp_path, ws, corpus) == 0
 
@@ -445,8 +449,10 @@ def test_corpus_input_error(tmp_path, monkeypatch, case):
     assert len(artifact["errors"]) == 1
     if case == "missing":
         assert "corpus not found" in artifact["errors"][0]
-    else:
+    elif case == "oversized":
         assert "exceeds" in artifact["errors"][0]
+    else:
+        assert "empty" in artifact["errors"][0]
 
 
 # ── 12. Symlink guards ─────────────────────────────────────────────

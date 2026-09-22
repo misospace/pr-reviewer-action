@@ -34,6 +34,7 @@ assert_safe_artifact_paths() {
     specialists.json
     specialists.phase.log
     specialists.md specialist-leads-present.txt
+    specialist-corpus.md
     terms.txt terms.all.txt
     change-anchors.json related-code.json related-code.md related-code.truncated.md
     review-corpus.body.md repo-impact.combined.txt

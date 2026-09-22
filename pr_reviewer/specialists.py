@@ -125,6 +125,11 @@ MAX_CATEGORY_CHARS = 64
 MAX_FILE_CHARS = 512
 MAX_ERRORS = 100
 MAX_INPUT_BYTES = 1_000_000
+#: Default completion-token cap for one specialist role call (#632). A
+#: conservative allowance for the short structured advisory JSON a specialist
+#: returns, deliberately independent of the final reviewer's ``AI_MAX_TOKENS``.
+#: Configurable via ``deep_review_max_tokens`` / ``DEEP_REVIEW_MAX_TOKENS``.
+DEFAULT_SPECIALIST_MAX_TOKENS = 4096
 #: Largest markdown fence (in backticks) :func:`render_specialist_markdown`
 #: will emit; longer hostile runs are neutralized so the fence stays closed.
 _MAX_FENCE = 12
