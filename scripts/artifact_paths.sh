@@ -14,7 +14,7 @@ assert_safe_artifact_paths() {
     evidence-providers.md evidence-providers.json classification.json
     standards-context.md standards-present.txt tool-harness.md tool-harness.json
     review-corpus.md review-corpus.truncated.md review-corpus.fallback.truncated.md
-    ai-request.json ai-response.json ai-output.json ai-output.primary.json
+    ai-request.json ai-response.json ai-output.json ai-output.primary.json ai-output.coverage-primary.json
     ai-request.fallback.json ai-response.fallback.json ai-response.primary.json
     verdict.txt analysis_engine.txt review-markdown.raw.md
     review-comment-markdown.raw.md review-comment.md review-comment-body.md

@@ -469,7 +469,7 @@ APPROX_BYTES_PER_TOKEN = 4
 VERDICT_USER_INSTRUCTION = (
     "Produce the final review verdict now as a single JSON object. "
     "Do not issue any tool calls. "
-    "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail)."
+    "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated."
 )
 
 # Placeholder emitted for a corpus section dropped by dedupe_verdict_corpus.
@@ -1247,8 +1247,9 @@ _OPENAI_VERDICT_JSON_SCHEMA: dict[str, Any] = {
                             "file": {"type": ["string", "null"]},
                             "line": {"type": ["integer", "null"]},
                             "message": {"type": "string"},
+                            "preliminary_finding": {"type": ["integer", "null"]},
                         },
-                        "required": ["severity", "category", "file", "line", "message"],
+                        "required": ["severity", "category", "file", "line", "message", "preliminary_finding"],
                         "additionalProperties": False,
                     },
                 },

@@ -45,7 +45,7 @@ PY
 # shellcheck source=/dev/null
 source "$FUNCS"
 
-BASE="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail)."
+BASE="Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated."
 
 echo "=== Test: full classification is injected ==="
 cat > "$TMP/classification.json" <<'JSONEOF'

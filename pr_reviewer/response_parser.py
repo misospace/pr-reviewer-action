@@ -349,6 +349,9 @@ def _normalize_findings(value: Any) -> list[dict[str, Any]]:
             "line": line,
             "message": message,
         }
+        preliminary_finding = item.get("preliminary_finding")
+        if isinstance(preliminary_finding, int) and not isinstance(preliminary_finding, bool):
+            finding["preliminary_finding"] = preliminary_finding
 
         findings.append(finding)
         if len(findings) >= _MAX_FINDINGS:

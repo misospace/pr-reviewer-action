@@ -53,10 +53,41 @@ check_contains "escalated prompt names the reasons" "$SRC" "ESCALATED review"
 check_contains "smart failure restores the primary review" "$SRC" "cp ai-output.primary.json ai-output.json"
 check_contains "smart failure publishes the primary review" "$SRC" "publishing the primary review"
 check_contains "route becomes escalated on success" "$SRC" 'REVIEW_ROUTE="escalated"'
-check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' "$RUN_REVIEW")" "1"
+check_contains "coverage gate is wired" "$SRC" "maybe_escalate_coverage_review"
+check_contains "coverage gate follows deterministic normalization" "$SRC" "build_requirement_coverage"
+check_contains "coverage gate uses a distinct reason" "$SRC" "incomplete_coverage"
+check_contains "coverage gate preserves its preliminary output" "$SRC" "ai-output.coverage-primary.json"
+check_contains "coverage gate keeps fallback-equals-smart guard" "$SRC" "Skipping coverage escalation: the fallback model"
+check_contains "coverage gate uses the targeted retry prompt" "$SRC" 'call_model_tier smart "$retry_prompt" review-corpus.truncated.md'
+check_contains "coverage retry prompt loads the backed-up preliminary output" "$SRC" 'load_coverage("ai-output.coverage-primary.json")'
+check_contains "coverage retry prompt passes the preliminary output to the renderer" "$SRC" 'render_coverage_retry_prompt(coverage, ledger, primary)'
+check_contains "coverage retry validates preliminary dispositions" "$SRC" "validate_preliminary_dispositions(primary, smart)"
+check_contains "invalid smart disposition restores preliminary output" "$SRC" "Rejecting smart coverage retry: preliminary finding dispositions are incomplete"
+check_contains "accepted retry strips preliminary_finding before publication" "$SRC" "strip_preliminary_correlation(smart)"
+# The preliminary output must be backed up BEFORE the retry prompt is built,
+# so the renderer loads the preliminary result (never a half-written smart
+# response) and the backup is ready to restore on smart-call failure.
+COV_BACKUP_LINE="$(grep -n 'cp ai-output.json ai-output.coverage-primary.json' "$RUN_REVIEW" | head -1 | cut -d: -f1)"
+COV_PROMPT_LINE="$(grep -n 'render_coverage_retry_prompt(coverage, ledger, primary)' "$RUN_REVIEW" | head -1 | cut -d: -f1)"
+if [[ -n "$COV_BACKUP_LINE" && -n "$COV_PROMPT_LINE" && "$COV_BACKUP_LINE" -lt "$COV_PROMPT_LINE" ]]; then
+  echo "  PASS: preliminary output backed up before the retry prompt is built"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: preliminary output backup ordering (backup=$COV_BACKUP_LINE prompt=$COV_PROMPT_LINE)"
+  FAIL=$((FAIL + 1))
+fi
 # Escalation must be decided before the enforcement wrapper runs.
 ESC_LINE="$(grep -n '^maybe_escalate_review$' "$RUN_REVIEW" | cut -d: -f1)"
 ENF_LINE="$(grep -n '^apply_all_enforcement_wrapper ' "$RUN_REVIEW" | cut -d: -f1)"
+COVERAGE_ESC_LINE="$(grep -n '^maybe_escalate_coverage_review$' "$RUN_REVIEW" | cut -d: -f1)"
+if [[ -n "$COVERAGE_ESC_LINE" && -n "$ENF_LINE" && "$COVERAGE_ESC_LINE" -gt "$ENF_LINE" ]]; then
+  echo "  PASS: coverage escalation runs after enforcement/normalization"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: coverage escalation ordering (coverage=$COVERAGE_ESC_LINE enforce=$ENF_LINE)"
+  FAIL=$((FAIL + 1))
+fi
+check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' "$RUN_REVIEW")" "1"
 if [[ -n "$ESC_LINE" && -n "$ENF_LINE" && "$ESC_LINE" -lt "$ENF_LINE" ]]; then
   echo "  PASS: escalation runs before enforcement/validation"
   PASS=$((PASS + 1))
