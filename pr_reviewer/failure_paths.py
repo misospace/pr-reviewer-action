@@ -26,10 +26,11 @@ Design invariants (per #625):
   implementation of that path, the obligation is reported as unverifiable
   rather than silently passing.
 - **Evidence, not mentions.** A promised observable counts as covered only
-  when it appears as an argument to a recognized write / emit / record /
-  update call. A comment, log message, error string, or TODO that merely
-  mentions the name is not proof — false negatives are preferred to false
-  proof.
+  when it is the target (first positional argument) of a recognized write /
+  emit / record / update call, as a whole token. A comment, log message,
+  error string, TODO, a secondary argument, or a longer name such as
+  ``old-response.json`` is not proof — false negatives are preferred to
+  false proof.
 - **Paths are considered separately.** Each terminal-path kind gets its own
   anchor lines and its own coverage check, so a timeout path and an
   exception path with different behavior yield separate leads.
@@ -117,15 +118,26 @@ _PATH_ANCHORS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 #: Operations that represent an actual write/emit/record/update of state.
-#: A promised observable is covered only when it appears in the argument
-#: list of one of these calls — a bare mention (comment, log/error string,
-#: TODO) is not proof. False negatives are preferred to false proof.
+#: A promised observable is covered only when it is the operation's target
+#: (its first positional argument) — a bare mention (comment, log/error
+#: string, TODO) or a secondary argument is not proof. False negatives are
+#: preferred to false proof.
 _WRITE_OP = re.compile(
     r"\b\w*"
     r"(?:write|emit|record|update|dump|save|persist|append|publish|flush)"
     r"\w*\s*\(",
     re.IGNORECASE,
 )
+
+#: A token character that may not neighbour the observable on the left, so a
+#: longer target such as ``old-response.json`` never satisfies
+#: ``response.json``. A leading ``.`` is allowed: fixture artifact names are
+#: ``specialist-<role>.response.json``, where the observable is the segment
+#: after the dot.
+_TARGET_LEFT = re.compile(r"[A-Za-z0-9_-]")
+#: A trailing ``.`` starts a longer filename/extension (``response.json.bak``),
+#: so it is not a token boundary either.
+_TARGET_RIGHT = re.compile(r"[A-Za-z0-9_.-]")
 
 
 def _indent_of(line: str) -> int:
@@ -178,17 +190,45 @@ def _strip_comment(line: str) -> str:
     return line if idx < 0 else line[:idx]
 
 
-def _write_call_arguments(text: str) -> list[str]:
-    """Return the argument text of every write/emit/record/update call.
+def _first_positional_argument(text: str, open_paren: int, close_paren: int) -> str:
+    """The first positional argument of a call, or ``""`` for an empty call.
+
+    A leading ``keyword=`` is not positional but still names the operation's
+    object, so it is unwrapped; only the first target is returned — an
+    observable passed as a secondary argument is not credited.
+    """
+    segment = text[open_paren + 1 : close_paren]
+    depth = 0
+    quote: str | None = None
+    for i, char in enumerate(segment):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            segment = segment[:i]
+            break
+    match = re.match(r"\s*[A-Za-z_]\w*\s*=\s*(.+)", segment, re.DOTALL)
+    return match.group(1) if match else segment
+
+
+def _write_call_targets(text: str) -> list[str]:
+    """Return the target (first positional) argument of every write-like call.
 
     Calls may span multiple lines, so parentheses are balanced across the
-    whole (comment-stripped) block; the observable must appear inside the
-    argument list, not merely somewhere in the block.
+    whole (comment-stripped) block.
     """
-    calls: list[str] = []
+    targets: list[str] = []
     for match in _WRITE_OP.finditer(text):
         open_paren = match.end() - 1
         depth = 0
+        close_paren = len(text)
         for i in range(open_paren, len(text)):
             char = text[i]
             if char == "(":
@@ -196,25 +236,44 @@ def _write_call_arguments(text: str) -> list[str]:
             elif char == ")":
                 depth -= 1
                 if depth == 0:
-                    calls.append(text[open_paren + 1 : i])
+                    close_paren = i
                     break
-        else:
-            calls.append(text[open_paren + 1 :])
-    return calls
+        targets.append(_first_positional_argument(text, open_paren, close_paren))
+    return targets
+
+
+def _mentions_target(target: str, name: str) -> bool:
+    """Whether *name* appears in *target* as a whole token, not a fragment."""
+    start = 0
+    while True:
+        index = target.find(name, start)
+        if index < 0:
+            return False
+        before = target[index - 1] if index > 0 else ""
+        after_index = index + len(name)
+        after = target[after_index] if after_index < len(target) else ""
+        if not _TARGET_LEFT.match(before) and not _TARGET_RIGHT.match(after):
+            return True
+        start = index + 1
 
 
 def _covered(names: list[str], block_lines: list[str]) -> set[str]:
     """Observables in *names* actually written/emitted/recorded in the block.
 
-    Coverage requires the observable to appear inside the argument list of a
-    recognized write/emit/record/update call. A comment, log message, error
-    string, or TODO that merely mentions the name is not proof.
+    Coverage requires the observable to be the target (first positional
+    argument) of a recognized write/emit/record/update call. A comment, log
+    message, error string, TODO, or a secondary argument that merely mentions
+    the name is not proof.
     """
     text = "\n".join(_strip_comment(line) for line in block_lines)
-    calls = _write_call_arguments(text)
-    if not calls:
+    targets = _write_call_targets(text)
+    if not targets:
         return set()
-    return {name for name in names if any(name in call for call in calls)}
+    return {
+        name
+        for name in names
+        if any(_mentions_target(target, name) for target in targets)
+    }
 
 
 def _lead(kind: str, anchor_line: int, name: str, file_path: str | None) -> dict[str, Any]:

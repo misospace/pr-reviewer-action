@@ -453,6 +453,46 @@ def test_mismatched_write_does_not_cover_a_different_observable():
     assert "response.json" in leads[0]["message"]
 
 
+def test_observable_in_a_secondary_argument_does_not_satisfy_coverage():
+    # Only the operation's target (first positional argument) is credited; an
+    # observable mentioned in a message/secondary argument is not proof.
+    cases = (
+        "    write('audit.log', 'response.json missing')\n",
+        "    record('error', 'response.json')\n",
+        "    emit('note', response.json)\n",
+    )
+    contract = _contract({"success": ["response.json"]})
+    for body in cases:
+        leads = analyze_failure_paths(f"def f():\n{body}", contract=contract)
+        assert len(leads) == 1, body
+        assert "omits promised observable 'response.json'" in leads[0]["message"]
+
+
+def test_target_argument_shape_is_credited():
+    # The target being the first positional argument is what matters; the
+    # trailing payload/arguments are irrelevant.
+    cases = (
+        "    _guarded_write(f'{root}/response.json', payload)\n",
+        "    write('response.json', payload)\n",
+        "    write('response.json')\n",
+        "    emit('response.json')\n",
+        "    record('response.json', status='ok')\n",
+    )
+    contract = _contract({"success": ["response.json"]})
+    for body in cases:
+        assert analyze_failure_paths(f"def f():\n{body}", contract=contract) == [], body
+
+
+def test_longer_target_does_not_satisfy_a_shorter_observable():
+    # A longer/different target must not accidentally satisfy the contract's
+    # shorter observable by substring.
+    code = "def f():\n    write('old-response.json', payload)\n"
+    contract = _contract({"success": ["response.json"]})
+    leads = analyze_failure_paths(code, contract=contract)
+    assert len(leads) == 1
+    assert "response.json" in leads[0]["message"]
+
+
 # ---------------------------------------------------------------------------
 # #623-derived fixture: the historical class is detected semantically
 # ---------------------------------------------------------------------------
