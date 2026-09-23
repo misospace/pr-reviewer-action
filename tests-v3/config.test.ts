@@ -125,15 +125,20 @@ test("secret values are redacted and never included in validation errors", () =>
   const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "present" : String(input.default)]));
   const secrets = Object.fromEntries([...SECRET_INPUTS].map((id) => [id, `sensitive-${id}-probe`]));
   Object.assign(raw, secrets);
-  raw["ai-stream"] = "not-a-boolean";
-  assert.throws(() => loadConfig(contract, raw), (error: unknown) => {
-    assert.ok(error instanceof Error);
-    for (const [id, token] of Object.entries(secrets)) {
-      assert.equal(error.message.includes(token), false, id);
-    }
-    return true;
-  });
-  raw["ai-stream"] = "true";
+  for (const [id, invalid] of ([
+    ["ai-stream", "not-a-boolean"],
+    ["ai-max-tokens", "not-an-integer"],
+    ["ai-temperature", "not-a-float"],
+    ["ai-api-format", "not-an-enum"],
+  ] as const)) {
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: invalid }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      for (const [secretId, token] of Object.entries(secrets)) {
+        assert.equal(error.message.includes(token), false, `${id}: ${secretId}`);
+      }
+      return true;
+    });
+  }
   const config = loadConfig(contract, raw);
   for (const snapshot of [JSON.stringify(redactConfig(config)), JSON.stringify(toJSON(config)), JSON.stringify(config)]) {
     for (const [id, token] of Object.entries(secrets)) {

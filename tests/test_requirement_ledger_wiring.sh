@@ -368,7 +368,7 @@ open(sys.argv[1], "w", encoding="utf-8").write("y\n" * 20000)
 PY
 printf '%s\n' "$LEDGER_MD" > "$WORK/c3/requirement-ledger.md"
 printf 'aaaaaaaaaaaabb\n' > "$WORK/c3/requirement-ledger-present.txt"
-run_corpus "$WORK/c3" 20000
+run_corpus "$WORK/c3" 4500
 check_contains "pressure: body was truncated (marker present)" \
   "$(<"$WORK/c3/review-corpus.md")" "…[review corpus truncated to fit the model context budget]"
 check_contains "pressure: ledger section survives the truncation" \
@@ -376,8 +376,25 @@ check_contains "pressure: ledger section survives the truncation" \
 check_contains "pressure: ledger content intact under the budget" \
   "$(<"$WORK/c3/review-corpus.md")" "second reserved line"
 C3_BYTES="$(wc -c < "$WORK/c3/review-corpus.md" | tr -d ' ')"
-if [ "$C3_BYTES" -le 20000 ]; then C3_SIZE=ok; else C3_SIZE="too large: $C3_BYTES"; fi
+if [ "$C3_BYTES" -le 4500 ]; then C3_SIZE=ok; else C3_SIZE="too large: $C3_BYTES"; fi
 check "pressure: final corpus stays within MAX_CORPUS" "$C3_SIZE" "ok"
+check "pressure: ledger reservation includes header and trailing blank line" \
+  "$(python3 - "$WORK/c3" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+ledger = root.joinpath("requirement-ledger.section.md").read_bytes()
+body = root.joinpath("review-corpus.body.truncated.md").read_bytes()
+standards = root.joinpath("standards-context.capped.md").read_bytes()
+corpus = root.joinpath("review-corpus.md").read_bytes()
+framing = b"# Repository Standards and Conventions (AGENTS.md)\n"
+expected = framing + standards + b"\n" + body + ledger
+print("ok" if corpus == expected and len(corpus) <= 4500
+      and ledger.startswith(b"# Explicit Requirement Ledger\n")
+      and ledger.endswith(b"\n\n") else "mismatch")
+PY
+)" "ok"
 
 # f4. no-ledger runs keep the section out (both with and without pressure)
 setup_corpus_workdir "$WORK/c4"

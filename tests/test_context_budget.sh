@@ -93,6 +93,18 @@ check "tiny cap stays valid UTF-8 and bounded" \
   "$(python3 -c 'from pathlib import Path; d=Path("'"$TMP"'/tiny").read_bytes(); d.decode("utf-8"); print("ok" if len(d) <= 4 else "oversize")')" "ok"
 
 echo ""
+echo "=== Test: oversized marker retains a visible bounded truncation signal ==="
+printf 'source-without-a-newline' > "$TMP/no-newline"
+truncate_clean "$TMP/no-newline" "$TMP/tiny-marker" 4 '☃☃☃'
+check "oversized multibyte marker remains visible at four bytes" "$(<"$TMP/tiny-marker")" "..."
+truncate_clean "$TMP/no-newline" "$TMP/one-byte" 1 'marker-too-long'
+check "one-byte cap retains a signal" "$(<"$TMP/one-byte")" "."
+truncate_clean "$TMP/no-newline" "$TMP/zero-byte" 0 'marker-too-long'
+check "zero-byte cap emits no bytes" "$(wc -c < "$TMP/zero-byte" | tr -d ' ')" "0"
+truncate_clean "$TMP/no-newline" "$TMP/normal-marker" 12 'CUT'
+check "no-newline source still marks truncation" "$(grep -c '^CUT$' "$TMP/normal-marker")" "1"
+
+echo ""
 echo "=== Test: enrichment context trims are wired into the Python pipeline ==="
 # Enrichment rendering moved from scripts/sections/enrichment.sh into the
 # Python pipeline (#7892), and the render + skip-list logic was extracted from

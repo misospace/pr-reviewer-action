@@ -229,7 +229,8 @@ if len(data) <= max_b:
     sys.exit(0)
 suffix = ("\n" + os.environ.get("MARKER", "") + "\n").encode("utf-8")
 if len(suffix) > max_b:
-    open(dst, "wb").write(b"")
+    # A marker larger than the entire budget still needs a visible signal.
+    open(dst, "wb").write(b"." * min(max_b, 3))
     sys.exit(0)
 clip = data[:max(0, max_b - len(suffix))]
 nl = clip.rfind(b"\n")
