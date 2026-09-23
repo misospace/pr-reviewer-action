@@ -232,7 +232,6 @@ def test_always_raising_judge_records_transport_miss(corpus: dict) -> None:
 
 
 def test_retry_once_then_succeeds(corpus: dict) -> None:
-    index = _reference_index(corpus)
     good = _judge_from(corpus)
     calls = {"n": 0}
 
@@ -251,7 +250,6 @@ def test_retry_once_then_succeeds(corpus: dict) -> None:
 
 def test_malformed_output_rerolled_and_recovered(corpus: dict) -> None:
     """An unparseable verdict re-attempts (attempt>0); a clean verdict does not."""
-    index = _reference_index(corpus)
     good = _judge_from(corpus)
     attempts_seen: list[int] = []
 

@@ -43,7 +43,7 @@ VULNERABLE_ANSWER_KEY = {
     "class": "execution_boundary_authority",
     "mechanism": (
         "Relocating the CI poller into the review process lets the child inherit "
-        "reviewer-only credentials the isolated step never held."
+        + "reviewer-only credentials the isolated step never held."
     ),
     "detection_requires": [
         "the poller is relocated into the review process",
@@ -131,7 +131,7 @@ class TestBuildJudgeMessages:
         for line in (
             "ANSWER-KEY RUBRIC",
             "mechanism: Relocating the CI poller into the review process lets the child "
-            "inherit reviewer-only credentials the isolated step never held.",
+            + "inherit reviewer-only credentials the isolated step never held.",
             "class: execution_boundary_authority",
             "kind: vulnerable",
             "REQUIRED CAUSAL CHAIN COMPONENTS (all must be entailed):",
@@ -176,7 +176,7 @@ class TestRenderRubric:
         assert lines == [
             "ANSWER-KEY RUBRIC",
             "mechanism: Relocating the CI poller into the review process lets the child "
-            "inherit reviewer-only credentials the isolated step never held.",
+            + "inherit reviewer-only credentials the isolated step never held.",
             "class: execution_boundary_authority",
             "kind: vulnerable",
             "REQUIRED CAUSAL CHAIN COMPONENTS (all must be entailed):",

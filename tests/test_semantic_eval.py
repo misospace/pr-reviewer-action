@@ -33,7 +33,6 @@ from pr_reviewer.semantic_eval import (
     SIGNAL_KIND_TOOL,
     ReviewSignal,
     SemanticCorpus,
-    SemanticResult,
     SemanticScenario,
     _collect_signals_from_run,
     _run_finding_stage,
@@ -1405,7 +1404,6 @@ def test_661_negative_controls_stay_clean_under_disposition_scoring() -> None:
 
 
 def test_661_schema_rejects_unknown_disposition_and_remediation_keys() -> None:
-    corpus = SemanticCorpus.from_file(CORPUS)
     bad_disposition = scenario(6545).to_dict()
     bad_disposition["offline_runs"][0]["expected_disposition"] = "mostly-fine"
     with pytest.raises(SemanticCorpusError, match="expected_disposition"):

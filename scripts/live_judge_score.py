@@ -365,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--calibration-artifact", type=Path, required=True,
         help="judge calibration report (from scripts/run_judge_calibration.py) "
-             "that must match this run's frozen judge identity, or scoring is refused",
+             + "that must match this run's frozen judge identity, or scoring is refused",
     )
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"))
     parser.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL"))
@@ -415,7 +415,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     if calibration_errors:
         print("Calibration artifact does not match this frozen judge — "
-              "refusing to score:", *calibration_errors, sep="\n  ", file=sys.stderr)
+              + "refusing to score:", *calibration_errors, sep="\n  ", file=sys.stderr)
         return 2
     judge_call = _openai_judge_call(
         args.judge_model, args.base_url, args.api_key, args.timeout

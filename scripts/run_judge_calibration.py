@@ -294,7 +294,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     if not args.judge_model or not args.base_url:
         print("Error: --judge-model and --base-url (or JUDGE_MODEL/JUDGE_BASE_URL) "
-              "are required", file=sys.stderr)
+              + "are required", file=sys.stderr)
         return 2
 
     try:
