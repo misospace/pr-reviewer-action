@@ -55,8 +55,14 @@ export function resolveSpikeContext(env = process.env) {
   if (requested !== undefined && requested !== '' && requested !== 'github' && requested !== 'forgejo') {
     throw new Error(`Unknown SPIKE_PLATFORM '${requested}' (closed set: github, forgejo)`);
   }
+  const server = env.GITHUB_API_URL || env.GITHUB_SERVER_URL;
+  if (server !== undefined) {
+    if (/[\u0000-\u001f]/.test(server) || !/^https?:\/\/[A-Za-z0-9._:-]+(\/.*)?$/.test(server)) {
+      throw new Error(`Unusable server URL '${server}'`);
+    }
+  }
   return {
-    server: env.GITHUB_API_URL || env.GITHUB_SERVER_URL,
+    server,
     platform: requested === 'forgejo' ? 'forgejo' : 'github',
   };
 }

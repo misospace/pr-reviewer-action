@@ -14,16 +14,17 @@ if [[ "${FORGEJO_E2E:-}" != "true" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${FORGEJO_E2E_IMAGE:-codeberg.org/forgejo/forgejo:9}"
-RUNNER_IMAGE="${FORGEJO_E2E_RUNNER_IMAGE:-code.forgejo.org/forgejo/runner:6.3.1}"
-JOB_IMAGE="${FORGEJO_E2E_JOB_IMAGE:-node:22-bullseye}"
+IMAGE="${FORGEJO_E2E_IMAGE-codeberg.org/forgejo/forgejo:9}"
+RUNNER_IMAGE="${FORGEJO_E2E_RUNNER_IMAGE-code.forgejo.org/forgejo/runner:6.3.1}"
+JOB_IMAGE="${FORGEJO_E2E_JOB_IMAGE-node:22-bullseye}"
 # Host alias job containers use to reach the Forgejo service. Docker
 # Desktop/OrbStack resolve host.docker.internal by default; on a plain Linux
-# daemon set it to the bridge gateway (for example 172.17.0.1).
-HOST_ALIAS="${FORGEJO_E2E_HOST_ALIAS:-host.docker.internal}"
+# daemon set it to the bridge gateway (for example 172.17.0.1). An explicitly
+# empty value is refused below rather than silently taking the default.
+HOST_ALIAS="${FORGEJO_E2E_HOST_ALIAS-host.docker.internal}"
 NAME="pr-reviewer-forgejo-e2e-$$"
 RUNNER_NAME="$NAME-runner"
-HTTP_PORT="${FORGEJO_E2E_PORT:-31080}"
+HTTP_PORT="${FORGEJO_E2E_PORT-31080}"
 PASSWORD="forgejo-e2e-pass"
 TOKEN_NAME="pr-reviewer-e2e"
 TMPDIR="$(mktemp -d)"
@@ -48,10 +49,17 @@ safe_value() {
   esac
 }
 safe_value "FORGEJO_E2E_PORT" "$HTTP_PORT"
+case "$HTTP_PORT" in
+  ''|*[!0-9]*)
+    echo "FORGEJO_E2E_PORT must be numeric, got '$HTTP_PORT'" >&2
+    exit 1
+    ;;
+esac
 safe_value "FORGEJO_E2E_IMAGE" "$IMAGE"
 safe_value "FORGEJO_E2E_RUNNER_IMAGE" "$RUNNER_IMAGE"
 safe_value "FORGEJO_E2E_JOB_IMAGE" "$JOB_IMAGE"
 safe_value PASSWORD "$PASSWORD"
+safe_value TOKEN_NAME "$TOKEN_NAME"
 
 cleanup() {
   docker rm -f "$NAME" "$RUNNER_NAME" >/dev/null 2>&1 || true
@@ -202,6 +210,7 @@ echo "PASS: Forgejo backend E2E smoke completed against $IMAGE"
 
 RUNNER_INSTANCE_URL="http://${HOST_ALIAS}:${HTTP_PORT}"
 COMPAT_REPO="runner-compat"
+safe_value COMPAT_REPO "$COMPAT_REPO"
 api_json POST "$FORGEJO_API_URL/api/v1/user/repos" \
   "{\"name\":\"${COMPAT_REPO}\",\"auto_init\":true,\"default_branch\":\"main\",\"private\":false}" >/dev/null
 
@@ -308,7 +317,10 @@ grep -qF 'Job succeeded' "$TMPDIR/compat.log"
 grep -qF 'launcher preflight ok:' "$TMPDIR/compat.log"
 grep -qF 'compat-output=composite-passed' "$TMPDIR/compat.log"
 grep -qF 'event reviewer/runner-compat, API, git argv, timeout passed' "$TMPDIR/compat.log"
-grep -qF 'mask probe: ***' "$TMPDIR/compat.log"
+# Both composite invocations (success and deliberate-failure) must have
+# emitted the add-mask probe and had it redacted; a single occurrence would
+# mean one emission was skipped silently.
+[[ "$(grep -cF 'mask probe: ***' "$TMPDIR/compat.log")" -eq 2 ]]
 grep -qF 'intentional spike failure' "$TMPDIR/compat.log"
 [[ "$(grep -cF 'spike composite: finalizer ran' "$TMPDIR/compat.log")" -eq 2 ]]
 if grep -qF 'v3-spike-mask-probe' "$TMPDIR/compat.log"; then
