@@ -241,7 +241,7 @@ docker run -d --name "$RUNNER_NAME" --user 0:0 \
   -v "vol-$RUNNER_NAME:/data" \
   -w /data \
   "$RUNNER_IMAGE" \
-  sh -c "forgejo-runner register --no-interactive --instance '$RUNNER_INSTANCE_URL' --token '$RUNNER_TOKEN' --name compat-runner --labels 'node22:docker://$JOB_IMAGE' && exec forgejo-runner daemon" >/dev/null
+  sh -c "forgejo-runner register --no-interactive --instance '$RUNNER_INSTANCE_URL' --token '$RUNNER_TOKEN' --name compat-runner --labels 'node24:docker://$JOB_IMAGE' && exec forgejo-runner daemon" >/dev/null
 
 COMPAT_WORK="$TMPDIR/compat-work"
 git clone -q "$FORGEJO_API_URL/reviewer/${COMPAT_REPO}.git" "$COMPAT_WORK"
@@ -334,14 +334,16 @@ fi
 
 # Record the executed interpreter version in the PASS line: the launcher
 # preflight step already required >= 24, and the preflight line carries the
-# concrete node binary and version the runner actually used.
+# concrete node binary and version the runner actually used. The >= 24
+# contract is checked numerically so future majors (v30+) stay accepted.
 NODE_VERSION="$(sed -n 's/.*launcher preflight ok: [^ ]* \(v[0-9][0-9.]*\).*/\1/p' "$TMPDIR/compat.log" | head -n1)"
-case "$NODE_VERSION" in
-  v2[4-9].*) ;;
-  *)
-    echo "launcher preflight did not report a Node >= 24 version (got '${NODE_VERSION:-none}')" >&2
-    exit 1
-    ;;
+NODE_MAJOR="${NODE_VERSION#v}"; NODE_MAJOR="${NODE_MAJOR%%.*}"
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*) NODE_MAJOR=0 ;;
 esac
+if [ "$NODE_MAJOR" -lt 24 ]; then
+  echo "launcher preflight did not report a Node >= 24 version (got '${NODE_VERSION:-none}')" >&2
+  exit 1
+fi
 
 echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID, job image $JOB_IMAGE, node $NODE_VERSION): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"

@@ -2,7 +2,7 @@ name: v3 forgejo runner compat
 on: push
 jobs:
   compat:
-    runs-on: node22
+    runs-on: node24
     steps:
       - name: checkout
         run: |
