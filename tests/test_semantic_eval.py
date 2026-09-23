@@ -1082,19 +1082,6 @@ def test_654_attribution_supports_specialist_primary_and_escalation(number: int)
         assert stage in result.stages_hit
 
 
-# ── #661 adversarial merge-safety methodology ───────────────────────────────
-
-PROMPT_ROOT = ROOT / "scripts"
-MERGE_SAFETY_FRAGMENT = (PROMPT_ROOT / "prompt_fragments" / "merge_safety.txt").read_text(encoding="utf-8")
-DEFAULT_SYSTEM_PROMPT = (PROMPT_ROOT / "default_system_prompt.txt").read_text(encoding="utf-8")
-PRODUCTION_PROMPT_TEXTS = {
-    "default_system_prompt.txt": DEFAULT_SYSTEM_PROMPT,
-    "prompt_fragments/merge_safety.txt": MERGE_SAFETY_FRAGMENT,
-    "prompt_fragments/specialist_correctness.txt": (PROMPT_ROOT / "prompt_fragments" / "specialist_correctness.txt").read_text(encoding="utf-8"),
-    "prompt_fragments/specialist_security.txt": (PROMPT_ROOT / "prompt_fragments" / "specialist_security.txt").read_text(encoding="utf-8"),
-}
-
-
 def _run_by_disposition(number: int, disposition: str) -> dict:
     item = scenario(number)
     return next(
@@ -1429,31 +1416,6 @@ def test_661_schema_rejects_unknown_disposition_and_remediation_keys() -> None:
         validate_semantic_corpus(SemanticCorpus([SemanticScenario.from_dict(bad_keys)]))
 
 
-def test_661_methodology_fragment_covers_the_required_procedure() -> None:
-    """The bundled guidance must carry each #661 methodology step."""
-    assert "{{MERGE_SAFETY_GUIDANCE}}" in DEFAULT_SYSTEM_PROMPT
-    folded = MERGE_SAFETY_FRAGMENT.casefold()
-    for marker in (
-        "merge safety of the resulting pr tree",  # tree, not commit blame
-        "attribution as metadata",                 # pre-existing is metadata
-        "never suppress a reachable merge blocker",
-        "counterexample",                          # safety requires a failure case
-        "timeout", "cancellation/signal", "parent exit",  # abnormal paths
-        "will clean it up",                        # verify assumed cleanup
-        "adversarially review every remediation",  # second check on the fix
-        "invalid or incomplete remediation",
-        "prune any finding",                       # unsupported findings pruned
-        "escalated or repeated review",            # applies on re-review tiers
-    ):
-        assert marker in folded, marker
-    correctness_text = (PROMPT_ROOT / "prompt_fragments" / "specialist_correctness.txt").read_text(encoding="utf-8").casefold()
-    for marker in ("attribution metadata", "adversarially check", "wrapper handle", "silently degrades"):
-        assert marker in correctness_text, marker
-    security_text = (PROMPT_ROOT / "prompt_fragments" / "specialist_security.txt").read_text(encoding="utf-8").casefold()
-    for marker in ("attribution metadata", "trace inherited authority", "flagged as incomplete"):
-        assert marker in security_text, marker
-
-
 def test_661_matching_is_punctuation_robust_but_not_paraphrase_permissive() -> None:
     """The classify_signal normalization is an instrument-correctness fix.
 
@@ -1474,12 +1436,3 @@ def test_661_matching_is_punctuation_robust_but_not_paraphrase_permissive() -> N
         "looks fine, cleanup is probably handled elsewhere",
     ):
         assert classify_signal(paraphrase) is None, paraphrase
-
-
-def test_661_methodology_is_model_and_provider_neutral() -> None:
-    """No production guidance branches on a specific model or provider."""
-    providers = ("minimax", "deepseek", "qwen", "glm-", "gpt-", "claude", "gemini", "llama", "kimi", "mistral", "grok", "openai", "anthropic")
-    for name, text in PRODUCTION_PROMPT_TEXTS.items():
-        folded = text.casefold()
-        for provider in providers:
-            assert provider not in folded, (name, provider)

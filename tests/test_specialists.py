@@ -678,11 +678,8 @@ def test_prompt_fragments_exist_on_disk():
 
 def test_prompt_fragments_are_small_for_cache_friendliness():
     for role in sorted(SPECIALIST_ROLES):
-        # Each fragment must stay compact (well under a single screen). The
-        # budget grew from 2000 to 2800 for #661: the correctness and security
-        # lanes carry the merge-safety attribution rule and the adversarial
-        # remediation check, and the compressed additions still fit one screen.
-        assert len(load_specialist_prompt(role)) < 2800, role
+        # Each fragment must stay compact (well under a single screen).
+        assert len(load_specialist_prompt(role)) < 2000, role
 
 
 def test_prompt_fragments_contain_trust_framing():

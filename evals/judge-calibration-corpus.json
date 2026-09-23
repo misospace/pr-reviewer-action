@@ -1,0 +1,1156 @@
+{
+  "version": 1,
+  "description": "#661 semantic-judge calibration/adversarial suite: answer-key references copied verbatim from corpus-historical-dogfood.json plus paraphrase fixtures authored strictly from fixture answer-key mechanisms (never from live outputs). The judge must reach 100% disposition agreement on this suite before it is frozen for live A/B use.",
+  "source_corpus": "evals/corpus-historical-dogfood.json",
+  "scenarios": [
+    {
+      "number": 6541,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "execution_boundary_authority",
+        "mechanism": "Moving the CI poller into the privileged review process lets the child inherit reviewer-only authority (model/tool/Linear secrets) that the standalone step never saw.",
+        "detection_requires": [
+          "the change relocates CI-wait execution so it runs as (or as a child of) the privileged review process instead of an isolated CI step",
+          "the relocated child therefore gains reviewer-only credentials/authority (model endpoint credentials, tool/MCP tokens, Linear credentials) that the isolated step did not hold",
+          "the widened inherited authority across the execution boundary is itself treated as the defect"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6541-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+              }
+            ],
+            "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6541,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-6541-1",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+              }
+            ],
+            "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6541,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-6541-2",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+              }
+            ],
+            "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6541,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-6541-3",
+          "origin": "answer-key",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "The concurrent CI gate could race with later review stages and might strand background work; possibly worth a follow-up issue."
+              }
+            ],
+            "review_markdown": "The concurrent CI gate could race with later review stages and might strand background work; possibly worth a follow-up issue."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6541,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "auth-6541-correct",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the wait now executes inside the privileged review run rather than its own isolated step, so the backgrounded process inherits the review process's ambient credentials (model endpoint key and integration tokens) that the isolated step never held; the child's effective authority is wider than the code it replaced, which is the defect, not the unchanged poller logic"
+              }
+            ],
+            "review_markdown": "the wait now executes inside the privileged review run rather than its own isolated step, so the backgrounded process inherits the review process's ambient credentials (model endpoint key and integration tokens) that the isolated step never held; the child's effective authority is wider than the code it replaced, which is the defect, not the unchanged poller logic"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6541-attribution-metadata-correct",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the relocated poller gains the review process's model and integration tokens - reviewer-only authority the isolated CI step never had. Note this predates the targeted commit, but it still blocks the resulting tree, so it is flagged"
+              }
+            ],
+            "review_markdown": "the relocated poller gains the review process's model and integration tokens - reviewer-only authority the isolated CI step never had. Note this predates the targeted commit, but it still blocks the resulting tree, so it is flagged"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6541-near-miss-not_found",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the new background gate makes the stage sequencing harder to follow; consider documenting the ordering between fork and join. Approve"
+              }
+            ],
+            "review_markdown": "the new background gate makes the stage sequencing harder to follow; consider documenting the ordering between fork and join. Approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6541-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "running the wait in-process could race later review stages and might corrupt shared state; possibly worth an issue"
+              }
+            ],
+            "review_markdown": "running the wait in-process could race later review stages and might corrupt shared state; possibly worth an issue"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6541-suppressed",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "suppressed_pre_existing",
+          "response": {
+            "findings": [
+              {
+                "message": "the backgrounded CI child inherits the parent's model endpoint credentials and integration tokens. This is pre-existing on the branch and not introduced by this commit, so it is out of scope and not a merge blocker"
+              }
+            ],
+            "review_markdown": "the backgrounded CI child inherits the parent's model endpoint credentials and integration tokens. This is pre-existing on the branch and not introduced by this commit, so it is out of scope and not a merge blocker"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6542,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "execution_boundary_authority",
+        "mechanism": "No defect of this class exists: the CI child launches under env -i with an explicit least-privilege allowlist and does not inherit reviewer secrets.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6542-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The CI child launches under env -i with an explicit least-privilege allowlist and does not inherit reviewer secrets; the authority boundary is preserved."
+              }
+            ],
+            "review_markdown": "The env -i allowlist preserves the least-privilege CI boundary; approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6542,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "auth-6542-clean",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the child is started under a scrubbed environment built from an explicit variable list, so reviewer credentials are not passed down; approve"
+              }
+            ],
+            "review_markdown": "the child is started under a scrubbed environment built from an explicit variable list, so reviewer credentials are not passed down; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6542-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "the background CI process may still reach the review token through inherited state; that is a potential secret exposure worth flagging"
+              }
+            ],
+            "review_markdown": "the background CI process may still reach the review token through inherited state; that is a potential secret exposure worth flagging"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6543,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "ambient_capability_loss",
+        "mechanism": "Replacing the execution boundary with env -i also removed the benign proxy/custom-CA/gh-config environment legitimate self-hosted deployments need.",
+        "detection_requires": [
+          "the new minimal/allowlisted environment drops benign transport/config inputs (proxy settings, custom CA/certificate paths, gh CLI config) that the prior standalone step inherited",
+          "the loss regresses legitimate self-hosted deployment capability, not merely styling"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6543-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+              }
+            ],
+            "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6543,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-6543-1",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+              }
+            ],
+            "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6543,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-6543-2",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+              }
+            ],
+            "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6543,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-6543-3",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Looks good; transport and CA handling is unchanged."
+              }
+            ],
+            "review_markdown": "Looks good; transport and CA handling is unchanged."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6543,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "auth-6543-correct",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the minimal-environment switchover omits HTTP(S) proxy variables, the custom CA bundle location and the gh config directory that the previous step inherited, so self-hosted runners behind proxies or with private CAs lose transport compatibility"
+              }
+            ],
+            "review_markdown": "the minimal-environment switchover omits HTTP(S) proxy variables, the custom CA bundle location and the gh config directory that the previous step inherited, so self-hosted runners behind proxies or with private CAs lose transport compatibility"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6543-near-miss-not_found",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the allowlist covers the tokens the poller needs; approve"
+              }
+            ],
+            "review_markdown": "the allowlist covers the tokens the poller needs; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6543-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "the scrubbed boundary might still pass credentials it should not; worth checking later"
+              }
+            ],
+            "review_markdown": "the scrubbed boundary might still pass credentials it should not; worth checking later"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6544,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "ambient_capability_loss",
+        "mechanism": "No defect of this class exists: the narrowed boundary explicitly preserves benign proxy/custom-CA/gh-config variables while excluding reviewer secrets.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6544-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The env -i allowlist explicitly preserves proxy, custom-CA, and gh config variables while continuing to exclude reviewer secrets."
+              }
+            ],
+            "review_markdown": "Transport and config parity is preserved; approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6544,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "auth-6544-clean",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the preserved-variable list covers proxies, custom CA and gh config while reviewer secrets stay out; approve"
+              }
+            ],
+            "review_markdown": "the preserved-variable list covers proxies, custom CA and gh config while reviewer secrets stay out; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6544-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "the narrowed allowlist could be dropping needed configuration or keeping risky ones; may need investigation"
+              }
+            ],
+            "review_markdown": "the narrowed allowlist could be dropping needed configuration or keeping risky ones; may need investigation"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6545,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "background_process_lifecycle",
+        "mechanism": "A forked credential-bearing CI child is reaped only on the normal join path, with no EXIT/TERM owner, and the env -i boundary drops RUNNER_TRACKING_ID.",
+        "detection_requires": [
+          "the change starts a credential-bearing background child whose lifetime spans a fork-then-join window",
+          "no owner (EXIT/INT/TERM trap or equivalent) reaps it if the parent dies abnormally between fork and join, so an orphaned child survives"
+        ],
+        "secondary_components": [
+          "the env -i boundary drops RUNNER_TRACKING_ID, weakening the runner's own orphan cleanup"
+        ],
+        "remediation": {
+          "required": [
+            "abnormal-exit ownership (EXIT/INT/TERM trap or equivalent) covering the fork-to-join window",
+            "reaping the full descendant tree, not only the tracked child PID"
+          ],
+          "forbidden": [
+            "deferring cleanup to the outer runner/runtime (e.g. the runner will clean up)",
+            "claiming no cleanup is needed",
+            "any repair that signals only the tracked background/wrapper handle while descendants survive"
+          ]
+        }
+      },
+      "references": [
+        {
+          "ref_id": "key-6545-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-6545-1",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-6545-2",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-6545-3",
+          "origin": "answer-key",
+          "expected_disposition": "suppressed_pre_existing",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. This orphaned-child defect is pre-existing on this branch and not introduced by this commit, so it is out of scope for this review and not a merge blocker."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. This orphaned-child defect is pre-existing on this branch and not introduced by this commit, so it is out of scope for this review and not a merge blocker."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "key-6545-4",
+          "origin": "answer-key",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. No fix is needed because the GitHub runner will clean up orphaned processes on job exit."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. No fix is needed because the GitHub runner will clean up orphaned processes on job exit."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 4
+          }
+        },
+        {
+          "ref_id": "key-6545-5",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. Install an abnormal-exit trap that reaps the full descendant tree on EXIT/INT/TERM and forwards RUNNER_TRACKING_ID so the gate owns abnormal exits end to end."
+              }
+            ],
+            "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. Install an abnormal-exit trap that reaps the full descendant tree on EXIT/INT/TERM and forwards RUNNER_TRACKING_ID so the gate owns abnormal exits end to end."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6545,
+            "offline_run": 5
+          }
+        },
+        {
+          "ref_id": "auth-6545-correct-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the CI child is started in the background and only the normal completion path waits on it; if the parent process dies abnormally inside that window nothing is armed to stop the child, so it is orphaned while still holding its GitHub token"
+              }
+            ],
+            "review_markdown": "the CI child is started in the background and only the normal completion path waits on it; if the parent process dies abnormally inside that window nothing is armed to stop the child, so it is orphaned while still holding its GitHub token"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6545-correct-remediation-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "between starting the background gate and joining it, an untrapped parent failure leaves the token-bearing child running with no owner. Install handlers on exit/interrupt/termination that stop the child and every process below it, and pass the runner's tracking id across the environment boundary"
+              }
+            ],
+            "review_markdown": "between starting the background gate and joining it, an untrapped parent failure leaves the token-bearing child running with no owner. Install handlers on exit/interrupt/termination that stop the child and every process below it, and pass the runner's tracking id across the environment boundary"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6545-invalid-outer-runner-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "a token-bearing child started before the join can be orphaned if the parent dies abnormally in the window. No trap is needed here because the Actions environment removes leftover processes when the job finishes"
+              }
+            ],
+            "review_markdown": "a token-bearing child started before the join can be orphaned if the parent dies abnormally in the window. No trap is needed here because the Actions environment removes leftover processes when the job finishes"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6545-suppressed-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "suppressed_pre_existing",
+          "response": {
+            "findings": [
+              {
+                "message": "the background CI child has no owner during the window between starting it and waiting on it, so an abnormal parent death orphans it; this pattern predates the branch under review, so it is not raised as a blocker"
+              }
+            ],
+            "review_markdown": "the background CI child has no owner during the window between starting it and waiting on it, so an abnormal parent death orphans it; this pattern predates the branch under review, so it is not raised as a blocker"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6545-attribution-metadata-correct",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "an unowned backgrounded child whose parent can die abnormally before the join survives orphaned with its token; earlier commits already had this shape, but that is metadata and it still blocks the resulting tree"
+              }
+            ],
+            "review_markdown": "an unowned backgrounded child whose parent can die abnormally before the join survives orphaned with its token; earlier commits already had this shape, but that is metadata and it still blocks the resulting tree"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6545-near-miss-not_found",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the gate introduces background execution; process handling here deserves a careful look at some point"
+              }
+            ],
+            "review_markdown": "the gate introduces background execution; process handling here deserves a careful look at some point"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6546,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "background_process_lifecycle",
+        "mechanism": "No defect of this class exists: EXIT/INT/TERM cleanup owns and reaps the full descendant tree on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6546-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The EXIT/INT/TERM trap owns the gate on abnormal exit and reaps the full descendant tree so no credential-bearing child can be orphaned, and RUNNER_TRACKING_ID is forwarded."
+              }
+            ],
+            "review_markdown": "Lifecycle ownership covers the whole process tree on normal and abnormal exits; approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6546,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "auth-6546-clean",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the handlers registered for exit/interrupt/termination own the gate across the whole window and stop the whole process subtree; approve"
+              }
+            ],
+            "review_markdown": "the handlers registered for exit/interrupt/termination own the gate across the whole window and stop the whole process subtree; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6546-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "even with the trap in place, grandchild processes may still slip past the kill; this could leave orphans"
+              }
+            ],
+            "review_markdown": "even with the trap in place, grandchild processes may still slip past the kill; this could leave orphans"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6547,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "remediation_process_topology",
+        "mechanism": "The lifecycle repair signals only the tracked background-shell PID, and the regression test collapses wrapper and payload into one PID via exec sleep, testing away the real process topology.",
+        "detection_requires": [
+          "cleanup signals only the tracked wrapper/background-shell PID while the payload and its descendants survive the kill",
+          "the regression test collapses wrapper and payload (exec sleep) so it cannot observe the real process topology"
+        ],
+        "remediation": {
+          "required": [
+            "collecting the full descendant tree and terminating it deepest-first"
+          ],
+          "forbidden": [
+            "any repair that only signals/traps the wrapper/background handle (the wrapper-only trap shape)"
+          ]
+        }
+      },
+      "references": [
+        {
+          "ref_id": "key-6547-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+              }
+            ],
+            "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6547,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-6547-1",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+              }
+            ],
+            "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6547,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-6547-2",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+              }
+            ],
+            "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6547,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-6547-3",
+          "origin": "answer-key",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. Recommend adding a trap that kills the background wrapper child on exit to fix the lifecycle hole."
+              }
+            ],
+            "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. Recommend adding a trap that kills the background wrapper child on exit to fix the lifecycle hole."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6547,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "key-6547-4",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. The fix must collect the full descendant tree before signaling and terminate it deepest-first, not the wrapper alone."
+              }
+            ],
+            "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. The fix must collect the full descendant tree before signaling and terminate it deepest-first, not the wrapper alone."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6547,
+            "offline_run": 4
+          }
+        },
+        {
+          "ref_id": "auth-6547-correct-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the test's exec sleep merges the wrapper and the payload into one process, so it never observes the real topology where a separate payload sits under the shell; the cleanup only signals that tracked shell PID, and the actual payload below it survives"
+              }
+            ],
+            "review_markdown": "the test's exec sleep merges the wrapper and the payload into one process, so it never observes the real topology where a separate payload sits under the shell; the cleanup only signals that tracked shell PID, and the actual payload below it survives"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6547-invalid-wrapper-only-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "the payload survives because only the background shell's PID is signalled and the test hides the topology with exec sleep. Add an exit trap that signals that spawned background shell to close the hole"
+              }
+            ],
+            "review_markdown": "the payload survives because only the background shell's PID is signalled and the test hides the topology with exec sleep. Add an exit trap that signals that spawned background shell to close the hole"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6547-correct-remediation-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "the test's exec sleep hides the real process tree while cleanup only ever stops the tracked shell, leaving the payload and everything under it running. The fix must enumerate every descendant before signalling and terminate them leaves-upward, and the test must keep wrapper, payload and grandchild as distinct processes"
+              }
+            ],
+            "review_markdown": "the test's exec sleep hides the real process tree while cleanup only ever stops the tracked shell, leaving the payload and everything under it running. The fix must enumerate every descendant before signalling and terminate them leaves-upward, and the test must keep wrapper, payload and grandchild as distinct processes"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6547-near-miss-not_found",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the added lifecycle test and cleanup look present; approve"
+              }
+            ],
+            "review_markdown": "the added lifecycle test and cleanup look present; approve"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6548,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "remediation_process_topology",
+        "mechanism": "No defect of this class exists: tree-aware cleanup requires pgrep and signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6548-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Cleanup requires pgrep, walks the full descendant tree before signaling the wrapper, and the regression test keeps the wrapper, payload, and grandchild distinct, so the workload cannot survive."
+              }
+            ],
+            "review_markdown": "Process-tree cleanup owns the workload; approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6548,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "auth-6548-clean",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "cleanup requires pgrep, walks the whole descendant set before the wrapper, and the test keeps the three processes distinct; approve"
+              }
+            ],
+            "review_markdown": "cleanup requires pgrep, walks the whole descendant set before the wrapper, and the test keeps the three processes distinct; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6548-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "the cleanup might still fall back to killing just the shell under some conditions; worth a second look"
+              }
+            ],
+            "review_markdown": "the cleanup might still fall back to killing just the shell under some conditions; worth a second look"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6549,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "undeclared_capability_dependency",
+        "mechanism": "The tree-aware repair silently degrades to the vulnerable wrapper-only cleanup when pgrep is missing, and pgrep is not part of the declared runtime contract.",
+        "detection_requires": [
+          "the tree-aware cleanup depends on pgrep",
+          "pgrep is not declared/validated as part of the runtime contract",
+          "when pgrep is absent the cleanup silently degrades to the vulnerable wrapper-only behavior"
+        ],
+        "remediation": {
+          "required": [
+            "declaring pgrep a required runtime dependency",
+            "validating it before launch and refusing to launch the background gate without it (fail closed, no silent degrade)"
+          ],
+          "forbidden": [
+            "keeping the wrapper-only fallback / graceful degradation when pgrep is absent"
+          ]
+        }
+      },
+      "references": [
+        {
+          "ref_id": "key-6549-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+              }
+            ],
+            "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6549,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-6549-1",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+              }
+            ],
+            "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6549,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-6549-2",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+              }
+            ],
+            "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6549,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-6549-3",
+          "origin": "answer-key",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. Recommend keeping the wrapper-only fallback when pgrep is unavailable, since graceful degradation is acceptable here."
+              }
+            ],
+            "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. Recommend keeping the wrapper-only fallback when pgrep is unavailable, since graceful degradation is acceptable here."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6549,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "key-6549-4",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. The fix must declare pgrep as a declared runtime dependency, validate it before the fork, and refuse to launch the gate without it rather than degrade."
+              }
+            ],
+            "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. The fix must declare pgrep as a declared runtime dependency, validate it before the fork, and refuse to launch the gate without it rather than degrade."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6549,
+            "offline_run": 4
+          }
+        },
+        {
+          "ref_id": "auth-6549-correct-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "descendant discovery relies on pgrep, but nothing declares or checks pgrep as part of the runtime, so on a minimal image without it the routine returns no descendants and cleanup quietly performs only the old wrapper-only kill"
+              }
+            ],
+            "review_markdown": "descendant discovery relies on pgrep, but nothing declares or checks pgrep as part of the runtime, so on a minimal image without it the routine returns no descendants and cleanup quietly performs only the old wrapper-only kill"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6549-invalid-log-only-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "invalid_remediation",
+          "response": {
+            "findings": [
+              {
+                "message": "tree discovery needs pgrep, which is undeclared, so its absence silently reduces cleanup to signalling the top PID alone. Emitting a warning log when pgrep is missing would make the degraded path visible"
+              }
+            ],
+            "review_markdown": "tree discovery needs pgrep, which is undeclared, so its absence silently reduces cleanup to signalling the top PID alone. Emitting a warning log when pgrep is missing would make the degraded path visible"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6549-correct-remediation-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "tree discovery depends on pgrep while the runtime contract never declares it; without it cleanup silently reverts to killing just the top PID. Require pgrep, verify it before the fork, and fail the fork rather than start an unsafe gate without it"
+              }
+            ],
+            "review_markdown": "tree discovery depends on pgrep while the runtime contract never declares it; without it cleanup silently reverts to killing just the top PID. Require pgrep, verify it before the fork, and fail the fork rather than start an unsafe gate without it"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6549-suppressed-paraphrase",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "suppressed_pre_existing",
+          "response": {
+            "findings": [
+              {
+                "message": "the pgrep-dependent tree walk falls back to a wrapper-only kill when pgrep is absent, a dependency nothing declares. This predates the commit under review, so it is out of scope here"
+              }
+            ],
+            "review_markdown": "the pgrep-dependent tree walk falls back to a wrapper-only kill when pgrep is absent, a dependency nothing declares. This predates the commit under review, so it is out of scope here"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6549-near-miss-not_found",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "the dependency on pgrep in the cleanup path may deserve attention eventually"
+              }
+            ],
+            "review_markdown": "the dependency on pgrep in the cleanup path may deserve attention eventually"
+          },
+          "source": null
+        }
+      ]
+    },
+    {
+      "number": 6550,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "undeclared_capability_dependency",
+        "mechanism": "No defect of this class exists: pgrep is validated as a required runtime capability and the fork aborts before launching any background gate if it is absent.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-6550-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "gating.sh validates pgrep as an explicit runtime dependency and aborts before forking any background gate when it is absent, so cleanup can never silently degrade."
+              }
+            ],
+            "review_markdown": "The runtime dependency is explicit and validated; approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 6550,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "auth-6550-clean",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "pgrep is checked as a prerequisite and the fork is refused when it is missing, so the gate never starts with degraded cleanup; approve"
+              }
+            ],
+            "review_markdown": "pgrep is checked as a prerequisite and the fork is refused when it is missing, so the gate never starts with degraded cleanup; approve"
+          },
+          "source": null
+        },
+        {
+          "ref_id": "auth-6550-speculative",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "if pgrep were missing the fork might still proceed and cleanup could degrade; that is a possible failure mode"
+              }
+            ],
+            "review_markdown": "if pgrep were missing the fork might still proceed and cleanup could degrade; that is a possible failure mode"
+          },
+          "source": null
+        }
+      ]
+    }
+  ]
+}
