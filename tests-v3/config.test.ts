@@ -86,9 +86,9 @@ test("secret values are redacted and never included in validation errors", () =>
   assert.equal(JSON.stringify(redactConfig(config)).includes("[REDACTED]"), true);
 });
 
-test("Node baseline accepts 22+ and rejects old or malformed versions", () => {
-  assert.doesNotThrow(() => assertSupportedNode("v22.0.0"));
+test("Node baseline accepts 24+ and rejects old or malformed versions", () => {
+  assert.doesNotThrow(() => assertSupportedNode("v24.0.0"));
   assert.doesNotThrow(() => assertSupportedNode("26.9.0"));
-  assert.throws(() => assertSupportedNode("21.99.0"), /22 or newer/);
+  assert.throws(() => assertSupportedNode("23.99.0"), /24 or newer/);
   assert.throws(() => assertSupportedNode("node-latest"), /parse/);
 });
