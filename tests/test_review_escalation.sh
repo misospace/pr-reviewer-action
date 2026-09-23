@@ -160,7 +160,17 @@ run_enforcement_case() (
     printf '%s\n' '{"verdict":"approve","review_markdown":"Primary review did not cover requirement","findings":[]}' > primary-fixture.json
   fi
   printf '%s\n' '{"verdict":"approve","review_markdown":"Smart review verified the PR","findings":[]}' > smart-output-fixture.json
-  printf '%s\n' 'CORPUS' > review-corpus.truncated.md
+  if [[ "$case_name" == corpus-fallback ]]; then
+    printf '%s\n' '# PR Diff (truncated)
++change
+# Tool Harness Findings
+PRIMARY_REASONING_MUST_NOT_LEAK
+# Linked Sources
+Deterministic context
+' > review-corpus.truncated.md
+  else
+    printf '%s\n' 'CORPUS' > review-corpus.truncated.md
+  fi
   printf '%s\n' '{}' > classification.json
   printf '%s\n' '{}' > evidence-providers.json
   if [[ "$case_name" == coverage* ]]; then
@@ -175,6 +185,7 @@ print("apply_all_enforcement_wrapper() {" + text.split("apply_all_enforcement_wr
 PY
   )
   SCRIPT_DIR="$ROOT_DIR/scripts"
+  export SCRIPT_DIR
   GITHUB_OUTPUT="$work/output.txt"
   OUTPUT_FILE="$GITHUB_OUTPUT"
   AI_MODEL="primary"
@@ -221,6 +232,18 @@ PY
       cp primary-fixture.json ai-output.json
       return 0
     fi
+    if [[ "$case_name" == corpus-fallback ]]; then
+      [[ "$3" == review-corpus.smart.truncated.md ]]
+      [[ "$(command python3 - "$3" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+print("yes" if "SMART_READ_SENTINEL_657" in text and "PRIMARY_REASONING_MUST_NOT_LEAK" not in text else "no")
+PY
+)" == yes ]]
+      cp smart-output-fixture.json ai-output.json
+      return 0
+    fi
     if [[ "$smart_success" == true ]]; then
       cp smart-output-fixture.json ai-output.json
       return 0
@@ -228,6 +251,28 @@ PY
     return 1
   }
   python3() {
+    if [[ "$case_name" == corpus-fallback && "${1:-}" == "$SCRIPT_DIR/run_tool_harness.py" ]]; then
+      TOOL_HARNESS_TIER=smart command python3 - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__import__("os").environ["SCRIPT_DIR"])))
+import run_tool_harness as harness
+
+calls = []
+def request(base_url, api_format, payload, api_key, timeout):
+    calls.append(payload)
+    if len(calls) == 1:
+        return {"choices": [{"message": {"tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"smart-evidence.txt"}'}}]}}]}
+    if len(calls) == 2:
+        assert "SMART_READ_SENTINEL_657" in str(payload)
+        return {"choices": [{"message": {"content": "investigation complete"}}]}
+    return {"choices": [{"message": {"content": "not a verdict"}}]}
+
+harness.run_chat_request = request
+raise SystemExit(harness.main())
+PY
+      return $?
+    fi
     if [[ "$case_name" == coverage* && "${1:-}" == -m && "${2:-}" == pr_reviewer.requirement_coverage ]]; then
       printf '%s\n' '{"version":1,"summary":{"total":1,"unknown":1},"coverage":[{"requirement_id":"req-000000000000","status":"unknown","credited":false,"notes":["not-covered-by-reviewer"]}]}' > requirement-coverage.json
       return 0
@@ -238,6 +283,11 @@ PY
     fi
     command python3 "$@"
   }
+  if [[ "$case_name" == corpus-fallback ]]; then
+    export REPO=owner/repo SMART_MODEL SMART_BASE_URL SMART_API_FORMAT AI_STREAM
+    export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+    printf '%s\n' 'SMART_READ_SENTINEL_657' > smart-evidence.txt
+  fi
   source "$ROOT_DIR/scripts/sections/review.sh" >/dev/null
   local verdict route harness
   verdict="$(jq -r .verdict ai-output.json)"
@@ -250,8 +300,11 @@ PY
   if [[ "$case_name" == restored || "$case_name" == coverage-failed ]]; then
     jq -e '.review_markdown | contains("primary harness failed")' ai-output.json >/dev/null
   fi
-  if [[ "$case_name" == coverage ]]; then
-    jq -e '.mode == "off" and .tier == "smart"' tool-harness.smart.json >/dev/null
+  if [[ "$case_name" == coverage* ]]; then
+    test ! -e tool-harness.smart.json
+  fi
+  if [[ "$case_name" == corpus-fallback ]]; then
+    jq -e '.native_loop_verdict_reason == "parse" and .tool_results[0].status == "ok"' tool-harness.smart.json >/dev/null
     jq -e '.error == "primary harness failed"' tool-harness.json >/dev/null
   fi
   printf '%s|%s|%s' "$verdict" "$route" "$harness"
@@ -259,6 +312,7 @@ PY
 
 PRIMARY_FAILED='{"error":"primary harness failed","planned_request_count":0,"executed_request_count":0,"tool_results":[]}'
 PRIMARY_ZERO='{"planned_request_count":0,"executed_request_count":0,"tool_results":[]}'
+PRIMARY_HEALTHY='{"planned_request_count":1,"executed_request_count":1,"tool_results":[{"tool":"read_file","status":"ok","result":{"content":"primary evidence"}}]}'
 SMART_HEALTHY='{"tier":"smart","planned_request_count":1,"executed_request_count":1,"tool_results":[{"tool":"read_file","status":"ok","result":{"content":"evidence"}}]}'
 check "primary failure does not penalize surviving smart review" \
   "$(run_enforcement_case failure "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
@@ -269,12 +323,21 @@ check "smart successful requests satisfy enforcement minimum" \
 check "failed smart escalation enforces restored primary harness" \
   "$(run_enforcement_case restored "$PRIMARY_FAILED" "$SMART_HEALTHY" false 0)" \
   'request_changes|primary|tool-harness.json'
-check "coverage retry uses its own no-tool harness" \
+check "coverage retry keeps primary tool failure fail-closed" \
   "$(run_enforcement_case coverage "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
-  'approve|escalated|tool-harness.smart.json'
+  'request_changes|escalated|tool-harness.json'
+check "coverage retry keeps minimum requests fail-closed" \
+  "$(run_enforcement_case coverage-min "$PRIMARY_ZERO" "$SMART_HEALTHY" true 1)" \
+  'request_changes|escalated|tool-harness.json'
+check "healthy primary harness permits smart coverage verdict" \
+  "$(run_enforcement_case coverage-healthy "$PRIMARY_HEALTHY" "$SMART_HEALTHY" true 0)" \
+  'approve|escalated|tool-harness.json'
 check "failed coverage retry keeps primary enforcement" \
   "$(run_enforcement_case coverage-failed "$PRIMARY_FAILED" "$SMART_HEALTHY" false 0)" \
   'request_changes|primary|tool-harness.json'
+check "smart corpus fallback consumes current smart evidence" \
+  "$(run_enforcement_case corpus-fallback "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
+  'approve|escalated|tool-harness.smart.json'
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

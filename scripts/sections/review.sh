@@ -252,6 +252,24 @@ PY
         SMART_TOOL_FALLBACK="primary"
         return 1
       fi
+      if [ -s tool-harness.smart.md ]; then
+        if ! SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
+from pathlib import Path
+import os
+import sys
+sys.path.insert(0, os.environ["SCRIPT_DIR"])
+from run_tool_harness import replace_harness_findings_section
+
+path = Path("review-corpus.smart.truncated.md")
+corpus = path.read_text(encoding="utf-8")
+findings = Path("tool-harness.smart.md").read_text(encoding="utf-8")
+path.write_text(replace_harness_findings_section(corpus, findings), encoding="utf-8")
+PY
+        then
+          SMART_TOOL_FALLBACK="primary"
+          return 1
+        fi
+      fi
     fi
   fi
   if call_model_tier smart "$user_message" review-corpus.smart.truncated.md ai-request.smart.json ai-response.smart.json; then
@@ -427,10 +445,7 @@ PY
   fi
 
   if [[ "$smart_ok" -eq 1 ]]; then
-    # This targeted corpus retry runs no smart tool loop; never attribute the
-    # superseded primary harness to its verdict.
-    printf '%s\n' '{"tier":"smart","mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}' > tool-harness.smart.json
-    ENFORCEMENT_TOOL_HARNESS="tool-harness.smart.json"
+    # This targeted corpus retry does not replace the primary tool evidence.
     apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$ENFORCEMENT_TOOL_HARNESS"
     build_requirement_coverage
     REVIEW_ROUTE="escalated"
