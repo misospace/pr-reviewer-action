@@ -462,7 +462,7 @@ build_pr_thread_context
 log "Building related-code context from full diff..."
 build_related_code_context pr.diff pr-files.json
 
-build_review_corpus
+build_review_corpus primary
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
@@ -504,7 +504,7 @@ section_timer_end
 # rebuild happens and disabled output stays byte-for-byte as before.
 if [ "${CI_GATE_ACTIVE:-false}" == "true" ] || [ -s specialists.md ]; then
   log "review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads"
-  build_review_corpus
+  build_review_corpus primary
   cp review-corpus.md review-corpus.truncated.md
 fi
 
@@ -536,6 +536,6 @@ EOF
 EOF
     fi
   fi
-  build_review_corpus
+  build_review_corpus primary
   cp review-corpus.md review-corpus.truncated.md
 fi
