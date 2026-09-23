@@ -12,6 +12,26 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize(
+    "smart_context,expected",
+    [("", (220000, 220000, 220000)), ("100000", (220000, 269424, 220000))],
+)
+def test_full_config_accepts_unset_tiers_and_preserves_smart_budget(tmp_path, smart_context, expected):
+    # Source the entire config as run_review.sh does, under set -euo pipefail.
+    env = dict(os.environ, SCRIPT_DIR=str(ROOT / "scripts"), REPO="x/y", PR_NUMBER="1",
+               AI_BASE_URL="http://example.invalid", AI_MODEL="p", GH_TOKEN="test",
+               PRIMARY_MODEL_CONTEXT_TOKENS="", SMART_MODEL_CONTEXT_TOKENS=smart_context,
+               MODEL_CONTEXT_TOKENS="", CONTEXT_LIMIT_MODE="normal")
+    script = '''set -euo pipefail
+source "$SCRIPT_DIR/sections/common.sh"
+log() { :; }
+source "$SCRIPT_DIR/sections/config.sh"
+printf '%s %s %s\\n' "$PRIMARY_MAX_CORPUS" "$SMART_MAX_CORPUS" "$MAX_CORPUS"'''
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert tuple(map(int, result.stdout.strip().split())) == expected
+
+
 @pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
 def test_smart_rebuild_reads_raw_artifacts(tmp_path):
     # Source the production assembly function without executing the pipeline.
