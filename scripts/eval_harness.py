@@ -54,6 +54,21 @@ from pr_reviewer.semantic_eval import (
 # keyed by exactly these names.
 SPECIALIST_ROLES = ("correctness", "security", "tests")
 
+# Deep-review specialist execution shapes (#635 benchmark). Mirrors
+# run_specialists.py's DEEP_REVIEW_EXECUTION knob; three_call is the
+# production default and the only shape a plain `--deep-review true` run
+# exercises. Labels: `+deep` / `+deep-scout` / `+deep-prime`.
+DEEP_EXECUTIONS = ("three_call", "combined_scout", "prime_then_fanout")
+
+
+def deep_execution_label(execution: str) -> str:
+    """Label suffix for a deep run's specialist execution shape."""
+    return {
+        "three_call": "+deep",
+        "combined_scout": "+deep-scout",
+        "prime_then_fanout": "+deep-prime",
+    }.get(execution, "+deep")
+
 
 @dataclass
 class KnownFinding:
@@ -781,9 +796,15 @@ def populate_tool_trace(run: ReviewRun, repo_path: Path) -> None:
 # Review execution (stub — to be wired with actual review scripts)
 # ---------------------------------------------------------------------------
 
-def run_label(mode: str, deep: bool) -> str:
-    """Label for a run in reports: deep variants are suffixed ``+deep``."""
-    return mode if not deep else f"{mode}+deep"
+def run_label(mode: str, deep: bool, execution: str = "three_call") -> str:
+    """Label for a run in reports.
+
+    Deep variants are suffixed by their specialist execution shape (#635):
+    ``+deep`` (three_call, the production default), ``+deep-scout``
+    (combined_scout), or ``+deep-prime`` (prime_then_fanout)."""
+    if not deep:
+        return mode
+    return f"{mode}{deep_execution_label(execution)}"
 
 
 def _normalize_lead(lead: Any) -> dict[str, Any] | None:
@@ -811,6 +832,18 @@ def _normalize_lead(lead: Any) -> dict[str, Any] | None:
     }
 
 
+def _sum_role_usage(roles_out: list[dict[str, Any]], key: str) -> int:
+    """Sum one usage field across role entries; absent/malformed sums to 0."""
+    total = 0
+    for r in roles_out:
+        usage = r.get("usage")
+        if isinstance(usage, dict):
+            val = usage.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                total += val
+    return total
+
+
 def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     """Load the deep-review specialist artifacts from a run's workspace.
 
@@ -828,6 +861,12 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
 
     Normalized shape (identical keys in both paths):
       {"enabled": bool, "aggregate_elapsed_sec": float | None,
+       "execution": str | None,              # #635 execution shape
+       "specialist_tokens_input": int,       # #635 actual transport totals
+       "specialist_tokens_output": int,      #   (aggregate usage_totals when
+       "specialist_tokens_cached": int,      #   present, else role sums)
+       "request_count": int | None,          # #635 actual wire attempts
+       "request_bytes_total": int | None,    # #635 serialized payload bytes
        "total_leads": int, "any_errors": bool, "derived": bool,
        "specialist_corpus_bytes": int | None,   # #632
        "specialist_max_tokens": int | None,     # #632
@@ -948,9 +987,41 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
                     any_errors = True
                     break
 
+        # #635: ACTUAL transport totals live on the aggregate (metered per
+        # wire attempt) — NEVER in a re-sum of role entries. In
+        # combined_scout mode the three roles share ONE call, so role-entry
+        # usage/bytes would multiply it by three. Role sums remain the
+        # fallback only for legacy aggregates that predate the meter.
+        usage_totals = aggregate.get("usage_totals")
+        request_count = _int(aggregate.get("request_count"))
+        request_bytes = _int(aggregate.get("request_bytes"))
+        if isinstance(usage_totals, dict):
+            tokens_in = _int_or_zero(usage_totals.get("prompt_tokens"))
+            tokens_out = _int_or_zero(usage_totals.get("completion_tokens"))
+            tokens_cached = _int_or_zero(usage_totals.get("cached_tokens"))
+        else:
+            tokens_in = _sum_role_usage(roles_out, "prompt_tokens")
+            tokens_out = _sum_role_usage(roles_out, "completion_tokens")
+            tokens_cached = _sum_role_usage(roles_out, "cached_tokens")
+
         return {
             "enabled": enabled if isinstance(enabled, bool) else True,
             "aggregate_elapsed_sec": _num(aggregate.get("aggregate_elapsed_sec")),
+            # #635: which specialist execution shape ran (None = pre-#635
+            # aggregate without the field); token sums come from the
+            # aggregate's metered usage_totals when present (actual
+            # transport totals per request), falling back to role sums for
+            # legacy aggregates.
+            "execution": (
+                aggregate.get("execution")
+                if isinstance(aggregate.get("execution"), str)
+                else None
+            ),
+            "specialist_tokens_input": tokens_in,
+            "specialist_tokens_output": tokens_out,
+            "specialist_tokens_cached": tokens_cached,
+            "request_count": request_count,
+            "request_bytes_total": request_bytes,
             "total_leads": (
                 total_leads if total_leads is not None
                 else sum(r["lead_count"] for r in roles_out)
@@ -994,6 +1065,12 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     return {
         "enabled": True,
         "aggregate_elapsed_sec": None,
+        "execution": None,
+        "specialist_tokens_input": _sum_role_usage(roles_out, "prompt_tokens"),
+        "specialist_tokens_output": _sum_role_usage(roles_out, "completion_tokens"),
+        "specialist_tokens_cached": _sum_role_usage(roles_out, "cached_tokens"),
+        "request_count": None,
+        "request_bytes_total": None,
         "total_leads": sum(len(v) for v in leads_by_role.values()),
         "any_errors": any_errors,
         "derived": True,
@@ -1262,6 +1339,7 @@ def run_review_for_pr(
     model_config: dict[str, str],
     deep_review: bool = False,
     review_script: Path | None = None,
+    deep_execution: str = "three_call",
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
@@ -1286,6 +1364,10 @@ def run_review_for_pr(
         review_script: Orchestrator script to execute, verbatim. When None
             (default) the bundled run_review.sh next to this harness is
             resolved. Test seam for substituting a fake orchestrator.
+        deep_execution: Specialist execution shape for deep runs (#635):
+            "three_call" (production default), "combined_scout", or
+            "prime_then_fanout". Forwarded as DEEP_REVIEW_EXECUTION and
+            reflected in the run label; ignored when deep_review is False.
 
     Returns:
         ReviewRun with collected metrics.
@@ -1295,7 +1377,7 @@ def run_review_for_pr(
     semantic_fixture = pr_entry.get("_semantic_fixture")
 
     run = ReviewRun(
-        mode=run_label(mode, deep_review),
+        mode=run_label(mode, deep_review, deep_execution),
         pr_number=pr_number,
         repo_full_name=repo_full_name,
         deep_review=deep_review,
@@ -1352,6 +1434,8 @@ def run_review_for_pr(
                 "ai-response.smart.json",
                 "analysis_engine.txt",
                 "tool-harness.json", "specialists.json", "eval-harness-output.txt",
+                "specialist-scout.json", "specialist-scout.request.json",
+                "specialist-scout.response.json",
             ]
             + [
                 f"specialist-{role}.{suffix}"
@@ -1388,8 +1472,15 @@ def run_review_for_pr(
             env["TOOL_MODE"] = tool_mode_arg
         if deep_review:
             env["DEEP_REVIEW"] = "true"
+            # #635 benchmark execution shape; the default is the production
+            # architecture, so a plain deep run forwards nothing.
+            if deep_execution != "three_call":
+                env["DEEP_REVIEW_EXECUTION"] = deep_execution
+            else:
+                env.pop("DEEP_REVIEW_EXECUTION", None)
         else:
             env.pop("DEEP_REVIEW", None)
+            env.pop("DEEP_REVIEW_EXECUTION", None)
 
         # Run the review via the orchestrator script. By default that is
         # run_review.sh next to this harness (resolved relative to this
@@ -1478,6 +1569,31 @@ def _live_duplicate_count(run: ReviewRun) -> int:
     return duplicates
 
 
+def _cross_role_lead_overlap(run: ReviewRun) -> int:
+    """Lead-overlap metric between specialist roles (#635).
+
+    Counts leads whose casefolded (category, file, message) key was already
+    seen from a DIFFERENT role — i.e. duplicate work across lanes. Same-role
+    repeats do not count (the normalizer already exact-dedupes within a
+    role); a key seen in two roles counts once per extra role occurrence.
+    """
+    leads_by_role = _run_leads_by_role(run)
+    seen: dict[tuple[str, str, str], set[str]] = {}
+    overlap = 0
+    for role in SPECIALIST_ROLES:
+        for lead in leads_by_role.get(role, []):
+            key = (
+                str(lead.get("category") or "").casefold(),
+                str(lead.get("file") or "").casefold(),
+                str(lead.get("message") or "").casefold(),
+            )
+            roles_seen = seen.setdefault(key, set())
+            if roles_seen and role not in roles_seen:
+                overlap += 1
+            roles_seen.add(role)
+    return overlap
+
+
 def evaluate_live_semantics(
     corpus: SemanticCorpus | None,
     results: list[BenchmarkResult],
@@ -1496,7 +1612,13 @@ def evaluate_live_semantics(
         per_run: list[SemanticResult] = []
         for run in runs:
             expected_mode = scenario.review_mode
-            actual_mode = "deep" if run.mode.endswith("+deep") or run.mode == "deep" else "standard"
+            # Deep labels: "+deep" plus the #635 execution suffixes
+            # (+deep-scout / +deep-prime).
+            actual_mode = (
+                "deep"
+                if "+deep" in run.mode or run.mode == "deep"
+                else "standard"
+            )
             if expected_mode != "any" and actual_mode != expected_mode:
                 continue
             signals = _collect_signals_from_run(run)
@@ -1598,6 +1720,17 @@ def generate_report(
             "specialist_effectiveness_passes": 0,
             "specialist_lead_runs": 0,
             "specialist_lead_passes": 0,
+            # #635 specialist-phase telemetry, summed over successful deep
+            # runs of this mode label: role-usage token totals (cached = the
+            # provider's cached-input count where exposed) and cross-role
+            # lead overlap.
+            "deep_runs": 0,
+            "specialist_tokens_input": 0,
+            "specialist_tokens_output": 0,
+            "specialist_tokens_cached": 0,
+            "specialist_lead_overlap": 0,
+            "specialist_request_count": 0,
+            "specialist_request_bytes": 0,
         }
 
     # Per-mode aggregation. The classic modes are pre-seeded; any other run
@@ -1639,6 +1772,24 @@ def generate_report(
                 mm["total_tokens_output"] += run.tokens_output
                 mm["total_wall_clock_sec"] += run.wall_clock_sec
                 mm["findings_count"] += len(run.findings)
+                if run.deep_review and isinstance(run.specialists, dict):
+                    mm["deep_runs"] += 1
+                    mm["specialist_tokens_input"] += _int_or_zero(
+                        run.specialists.get("specialist_tokens_input")
+                    )
+                    mm["specialist_tokens_output"] += _int_or_zero(
+                        run.specialists.get("specialist_tokens_output")
+                    )
+                    mm["specialist_tokens_cached"] += _int_or_zero(
+                        run.specialists.get("specialist_tokens_cached")
+                    )
+                    mm["specialist_lead_overlap"] += _cross_role_lead_overlap(run)
+                    mm["specialist_request_count"] += _int_or_zero(
+                        run.specialists.get("request_count")
+                    )
+                    mm["specialist_request_bytes"] += _int_or_zero(
+                        run.specialists.get("request_bytes_total")
+                    )
             else:
                 mm["errors"] += 1
 
@@ -1760,11 +1911,44 @@ def generate_report(
         )
         mm["specialist_lead_pass_rate"] = (
             round(
-                mm["specialist_lead_passes"] / mm["specialist_lead_runs"], 4
+                mm["specialist_lead_passes"]
+                / mm["specialist_lead_runs"], 4
             )
             if mm["specialist_lead_runs"] > 0
             else None
         )
+        # #635 specialist-phase telemetry averages over successful deep runs
+        # of this mode label (None when the mode scored no deep run).
+        if mm["deep_runs"] > 0:
+            n_deep = mm["deep_runs"]
+            mm["avg_specialist_tokens_input"] = round(
+                mm["specialist_tokens_input"] / n_deep, 1
+            )
+            mm["avg_specialist_tokens_output"] = round(
+                mm["specialist_tokens_output"] / n_deep, 1
+            )
+            mm["avg_specialist_tokens_cached"] = round(
+                mm["specialist_tokens_cached"] / n_deep, 1
+            )
+            mm["avg_specialist_lead_overlap"] = round(
+                mm["specialist_lead_overlap"] / n_deep, 4
+            )
+            # #635: actual transport accounting per deep run — wire attempts
+            # (retries included) and serialized request bytes. For
+            # combined_scout this counts ONE request, not three.
+            mm["avg_specialist_requests"] = round(
+                mm["specialist_request_count"] / n_deep, 4
+            )
+            mm["avg_specialist_request_bytes"] = round(
+                mm["specialist_request_bytes"] / n_deep, 1
+            )
+        else:
+            mm["avg_specialist_tokens_input"] = None
+            mm["avg_specialist_tokens_output"] = None
+            mm["avg_specialist_tokens_cached"] = None
+            mm["avg_specialist_lead_overlap"] = None
+            mm["avg_specialist_requests"] = None
+            mm["avg_specialist_request_bytes"] = None
 
     semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
     report = {
@@ -1845,6 +2029,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--deep-execution",
+        choices=list(DEEP_EXECUTIONS),
+        default="three_call",
+        help=(
+            "Specialist execution shape for deep runs (#635 benchmark): "
+            "'three_call' = three concurrent role calls (production default), "
+            "'combined_scout' = one role-keyed call split into per-role "
+            "artifacts, 'prime_then_fanout' = three calls with the first "
+            "role completing before the rest launch. Ignored unless "
+            "--deep-review enables deep runs."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned runs without executing",
@@ -1895,6 +2092,7 @@ def main() -> int:
     print(f"Loaded {len(corpus.prs)} PRs from corpus, running {len(prs)}...", file=sys.stderr)
     print(f"Modes: {args.modes}", file=sys.stderr)
     print(f"Deep review: {args.deep_review}", file=sys.stderr)
+    print(f"Deep execution: {args.deep_execution}", file=sys.stderr)
     print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
 
     runs_per_mode = max(1, args.runs_per_mode)
@@ -1906,10 +2104,11 @@ def main() -> int:
         for pr in prs:
             for mode in args.modes:
                 for deep in deep_variants:
+                    label = run_label(mode, deep, args.deep_execution)
                     suffix = f" x{runs_per_mode}" if runs_per_mode > 1 else ""
                     print(
                         f"  Would run: {pr['repo_full_name']}#{pr['number']} "
-                        f"[{run_label(mode, deep)}]{suffix}"
+                        f"[{label}]{suffix}"
                     )
         return 0
 
@@ -1930,10 +2129,11 @@ def main() -> int:
                 for deep in deep_variants:
                     for rep in range(runs_per_mode):
                         run = run_review_for_pr(
-                            pr, mode, work_dir, model_config, deep_review=deep
+                            pr, mode, work_dir, model_config, deep_review=deep,
+                            deep_execution=args.deep_execution,
                         )
                         bm.runs.append(run)
-                        base = run_label(mode, deep)
+                        base = run_label(mode, deep, args.deep_execution)
                         label = (
                             base
                             if runs_per_mode == 1
