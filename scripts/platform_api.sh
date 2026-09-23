@@ -366,9 +366,14 @@ platform_collaborator_permission() {
 #     before the helper returns; empty stdout, rc 124. Callers already
 #     treat a failed/empty fetch as transient and retry around it.
 #   - the bound is CI_API_TIMEOUT_SEC (default 10, integer seconds),
-#     clamped to CI_TIMEOUT_SEC when that is set and smaller, so one
-#     attempt can never exceed the whole outer CI budget. It is
-#     deliberately independent of AI_REQUEST_TIMEOUT_SEC (model calls).
+#     clamped to CI_TIMEOUT_SEC when that is set and smaller. When the
+#     caller exports CI_DEADLINE_EPOCH (wait_for_ci.sh does), the bound is
+#     additionally clamped to the REMAINING outer budget at the moment the
+#     attempt starts — sequential calls inside one poll iteration share
+#     the deadline instead of each getting the full knob, and an already
+#     expired deadline skips the attempt entirely (rc 124, gh never
+#     invoked). Callers without deadline context keep the plain clamp. It
+#     is deliberately independent of AI_REQUEST_TIMEOUT_SEC (model calls).
 #
 # Process lifecycle: `gh` is exec'd directly (no wrapper shell), so the
 # tracked PID is the gh process itself and a signal reaches the real
@@ -388,22 +393,40 @@ _gh_api_bounded() {
   if [[ -n "$outer" ]] && (( bound > outer )); then
     bound="$outer"
   fi
+  # Remaining outer budget (#663 review): wait_for_ci.sh exports an
+  # absolute wall-clock deadline; every attempt shrinks to what is left of
+  # it at ITS start, so the second of two sequential calls cannot re-spend
+  # time the first already consumed. Sanitized: garbage falls back to the
+  # plain clamp above rather than mis-bounding the attempt.
+  local deadline="${CI_DEADLINE_EPOCH:-}"
+  case "$deadline" in ''|*[!0-9]*) deadline="" ;; esac
+  if [[ -n "$deadline" ]]; then
+    local remaining
+    remaining=$(( deadline - $(date +%s) ))
+    if (( remaining < 1 )); then
+      echo "platform_api: outer CI budget exhausted before the attempt; skipping gh (timeout)" >&2
+      return 124
+    fi
+    if (( bound > remaining )); then
+      bound="$remaining"
+    fi
+  fi
 
   local tmpdir out rc=0 pid wd
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/gh-api-bounded.XXXXXX")" || return 1
   out="$tmpdir/out"
-  # fired: touched by the watchdog immediately before it signals gh, so a
-  # timeout is detected by who killed the child, not by guessing at exit
-  # statuses gh could theoretically produce on its own.
-  : >"$tmpdir/fired"
   # stdin </dev/null: gh api reads no stdin, but an auth-related prompt
   # must never block the attempt waiting on input that will never come.
   "$@" >"$out" </dev/null &
   pid=$!
   (
     sleep "$bound" 2>/dev/null || exit 0
-    : >"$tmpdir/fired" 2>/dev/null || true
+    # fired: created only when the watchdog's signal is actually delivered
+    # (kill succeeded). Timeout classification tests for existence — never
+    # size — so a child that had already exited (kill failed, nothing
+    # signaled) is never misclassified by the marker alone.
     kill -TERM "$pid" 2>/dev/null || exit 0
+    : >"$tmpdir/fired" 2>/dev/null || true
     sleep 0.5 2>/dev/null || true
     kill -KILL "$pid" 2>/dev/null || true
   # Detach the watchdog's stdio: if the main shell KILLs it mid-`sleep`, the
@@ -428,10 +451,11 @@ _gh_api_bounded() {
     rm -rf "$tmpdir" 2>/dev/null || true
     return 0
   fi
-  if [[ "$rc" -eq 143 || "$rc" -eq 137 || -s "$tmpdir/fired" ]]; then
-    # Terminated by the watchdog (or escalated KILL). Emit nothing: a
-    # partial body is not a response, and the caller's existing
-    # empty-output handling is the transient-failure path.
+  if [[ "$rc" -eq 143 || "$rc" -eq 137 || -e "$tmpdir/fired" ]]; then
+    # Terminated by the watchdog (marker: its signal was delivered; or
+    # escalated KILL leaving rc 137). Emit nothing: a partial body is not a
+    # response, and the caller's existing empty-output handling is the
+    # transient-failure path.
     rm -rf "$tmpdir" 2>/dev/null || true
     echo "platform_api: gh attempt exceeded ${bound}s and was terminated (timeout)" >&2
     return 124

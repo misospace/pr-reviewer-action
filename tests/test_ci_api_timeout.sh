@@ -65,6 +65,16 @@ process_gone() {
   ! ps -p "$pid" >/dev/null 2>&1
 }
 
+# True when no process from $1 is running: either it was never started
+# (deadline exhausted before the attempt — no pidfile) or it is dead and
+# reaped.
+no_process() {
+  local pid
+  pid="$(cat "$1" 2>/dev/null || true)"
+  [[ -z "$pid" ]] && return 0
+  ! ps -p "$pid" >/dev/null 2>&1
+}
+
 write_hang_gh() {
   # $1 = check-runs pidfile, $2 = status pidfile; hangs on both endpoints.
   # Each invocation appends to $ATTEMPT_LOG before hanging.
@@ -179,6 +189,185 @@ SEAM_CONTENT="$(cat "$SEAM")"
 check_contains "CI_API_TIMEOUT_SEC defaults to 10 (independent of AI_REQUEST_TIMEOUT_SEC)" \
   "$SEAM_CONTENT" 'CI_API_TIMEOUT_SEC:-10'
 
+echo ""
+echo "=== _gh_api_bounded: timeout provenance is the delivered signal ==="
+# Regression: the fake handles TERM and exits with status 3 — deliberately
+# NOT 143/137. Classification must come from the watchdog's delivered-
+# signal marker; an rc-only rule would relay this as gh's own failure (3).
+TRAP_PID="$TMP/trap.pid"
+TRAP_MARK="$TMP/trapped.marker"
+rm -f "$TRAP_MARK"
+cat > "$BIN/gh" <<SHELLEOF
+#!/usr/bin/env bash
+echo \$\$ > "$TRAP_PID"
+trap 'echo got-term > "$TRAP_MARK"; exit 3' TERM
+while :; do sleep 0.2; done
+SHELLEOF
+chmod +x "$BIN/gh"
+export CI_API_TIMEOUT_SEC=1
+github_call 'platform_commit_status o/r deadbeef'
+unset CI_API_TIMEOUT_SEC
+check "watchdog-signaled gh classifies as timeout despite exit 3" "$RC" "124"
+check "watchdog-signaled gh emits no stdout" "$RESULT" ""
+check "watchdog actually delivered TERM (fake's handler ran)" \
+  "$(cat "$TRAP_MARK" 2>/dev/null || true)" "got-term"
+if process_gone "$TRAP_PID"; then
+  echo "  PASS: TERM-handling fake is dead and reaped"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: TERM-handling fake survived the timeout"
+  FAIL=$((FAIL + 1))
+fi
+# The not-delivered side: a child that exits on its own before any signal
+# is relayed with its own rc (the error-relay test below asserts rc 1) — a
+# failed kill never creates the marker, so it cannot fabricate a timeout.
+
+echo ""
+echo "=== CI_DEADLINE_EPOCH: expired budget skips the attempt entirely ==="
+rm -f "$CR_PID"
+cat > "$BIN/gh" <<SHELLEOF
+#!/usr/bin/env bash
+echo \$\$ > "$CR_PID"
+exec sleep 30
+SHELLEOF
+chmod +x "$BIN/gh"
+export CI_DEADLINE_EPOCH=$(( $(date +%s) - 1 )) CI_API_TIMEOUT_SEC=30
+T0="$(date +%s)"
+github_call 'platform_check_runs o/r deadbeef'
+T1="$(date +%s)"
+unset CI_DEADLINE_EPOCH CI_API_TIMEOUT_SEC
+DUR=$((T1 - T0))
+check "expired deadline returns the timeout rc" "$RC" "124"
+check "expired deadline emits no stdout (transient contract)" "$RESULT" ""
+check "no gh attempt started (deadline already passed)" \
+  "$(test -e "$CR_PID" && echo started || echo skipped)" "skipped"
+if [ "$DUR" -le 3 ]; then
+  echo "  PASS: skipped immediately (${DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: expired-deadline call took ${DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== CI_DEADLINE_EPOCH: bound shrinks to the remaining budget ==="
+rm -f "$CS_PID"
+cat > "$BIN/gh" <<SHELLEOF
+#!/usr/bin/env bash
+echo \$\$ > "$CS_PID"
+exec sleep 30
+SHELLEOF
+chmod +x "$BIN/gh"
+export CI_DEADLINE_EPOCH=$(( $(date +%s) + 1 )) CI_API_TIMEOUT_SEC=30
+T0="$(date +%s)"
+github_call 'platform_commit_status o/r deadbeef'
+T1="$(date +%s)"
+unset CI_DEADLINE_EPOCH CI_API_TIMEOUT_SEC
+DUR=$((T1 - T0))
+check "remaining-budget attempt still times out" "$RC" "124"
+check "remaining-budget attempt emits no stdout" "$RESULT" ""
+if [ "$DUR" -le 4 ]; then
+  echo "  PASS: knob=30 clamped to ~1s of remaining budget (${DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: remaining budget not honored — attempt took ${DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+if process_gone "$CS_PID"; then
+  echo "  PASS: fake gh reaped after remaining-budget timeout"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: fake gh survived the remaining-budget timeout"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== CI_DEADLINE_EPOCH: garbage value falls back to the plain clamp ==="
+rm -f "$CS_PID"
+export CI_DEADLINE_EPOCH=banana CI_TIMEOUT_SEC=2 CI_API_TIMEOUT_SEC=60
+T0="$(date +%s)"
+github_call 'platform_commit_status o/r deadbeef'
+T1="$(date +%s)"
+unset CI_DEADLINE_EPOCH CI_TIMEOUT_SEC CI_API_TIMEOUT_SEC
+DUR=$((T1 - T0))
+check "garbage deadline ignored; CI_TIMEOUT_SEC clamp still applies" "$RC" "124"
+if [ "$DUR" -le 5 ]; then
+  echo "  PASS: fell back to the CI_TIMEOUT_SEC clamp (${DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: garbage deadline broke bounding — took ${DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== platform_external_checks: one iteration cannot exceed the outer deadline ==="
+# Two simultaneously hanging endpoints share one deadline: the second call
+# is bounded by what the first left, so the iteration lands near the
+# deadline + tolerance instead of 2x the per-call bound.
+write_hang_gh "$CR_PID" "$CS_PID"
+rm -f "$CR_PID" "$CS_PID"
+export CI_DEADLINE_EPOCH=$(( $(date +%s) + 5 )) CI_API_TIMEOUT_SEC=10
+T0="$(date +%s)"
+github_call 'platform_external_checks o/r deadbeef'
+T1="$(date +%s)"
+unset CI_DEADLINE_EPOCH CI_API_TIMEOUT_SEC
+DUR=$((T1 - T0))
+check "deadline-capped iteration is still a transient failure" "$RC" "0"
+check "deadline-capped iteration emits the retry signal (empty stdout)" "$RESULT" ""
+if [ "$DUR" -ge 4 ] && [ "$DUR" -le 9 ]; then
+  echo "  PASS: two hanging endpoints capped by the shared deadline (${DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: iteration took ${DUR}s (expected deadline + tolerance)"
+  FAIL=$((FAIL + 1))
+fi
+if process_gone "$CR_PID" && no_process "$CS_PID"; then
+  echo "  PASS: both fake gh children reaped (or never started — budget exhausted)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: a fake gh child survived the deadline-capped iteration"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== CI_DEADLINE_EPOCH: the second call re-bounds after the first ==="
+# check-runs succeeds slowly (2s), then combined status hangs: the second
+# attempt must run on the REMAINING budget (~1s), not the full knob (10s).
+SLOW_JSON="$TMP/slow-check-runs.json"
+printf '{"check_runs":[{"name":"build","status":"completed","conclusion":"success"}],"total_count":1}\n' > "$SLOW_JSON"
+cat > "$BIN/gh" <<SHELLEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *check-runs*) sleep 2; cat "$SLOW_JSON" ;;
+  *)            echo \$\$ > "$CS_PID"; exec sleep 30 ;;
+esac
+SHELLEOF
+chmod +x "$BIN/gh"
+rm -f "$CS_PID"
+export CI_DEADLINE_EPOCH=$(( $(date +%s) + 3 )) CI_API_TIMEOUT_SEC=10
+T0="$(date +%s)"
+github_call 'platform_external_checks o/r deadbeef'
+T1="$(date +%s)"
+unset CI_DEADLINE_EPOCH CI_API_TIMEOUT_SEC
+DUR=$((T1 - T0))
+check "slow-then-hung iteration still yields the surviving signal" \
+  "$RESULT" '[{"name":"build","state":"success"}]'
+check "re-bounded iteration rc 0" "$RC" "0"
+if [ "$DUR" -ge 2 ] && [ "$DUR" -le 6 ]; then
+  echo "  PASS: second attempt ran on the remaining budget (iteration ${DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: second attempt did not re-bound (iteration took ${DUR}s)"
+  FAIL=$((FAIL + 1))
+fi
+if no_process "$CS_PID"; then
+  echo "  PASS: hung combined-status fake reaped (or skipped at exhausted budget)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: hung combined-status fake survived"
+  FAIL=$((FAIL + 1))
+fi
+
 # ── 2. Normal behavior stays byte/semantics compatible ──────────────────
 
 echo ""
@@ -290,7 +479,7 @@ run_wait() { # $1 = extra env assignments (KEY=val KEY2=val2 ...); sets WAIT_RC,
   local out_file="$TMP/wait-output.$RANDOM"
   : > "$ATTEMPT_LOG"
   rm -f "$CR_PID" "$CS_PID"
-  unset CI_TIMEOUT_SEC CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT CI_API_TIMEOUT_SEC
+  unset CI_TIMEOUT_SEC CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT CI_API_TIMEOUT_SEC CI_DEADLINE_EPOCH
   T0="$(date +%s)"
   WAIT_RC=0
   (

@@ -155,6 +155,16 @@ fi
 
 log "Polling CI checks for $sha (timeout=${CI_TIMEOUT_SEC}s, interval=${CI_INTERVAL_SEC}s, own run=${GITHUB_RUN_ID:-none})..."
 
+# Absolute outer deadline (#663 review): exported so each bounded gh attempt
+# in the platform seam clamps to the budget REMAINING at its start. The two
+# sequential API calls inside one platform_external_checks iteration share
+# the deadline — a slow first call shrinks the second's bound, and an
+# iteration can never exceed the outer policy by another full per-call
+# bound. Re-read by every attempt, so no static split. Internal: computed
+# fresh each run, never inherited.
+CI_DEADLINE_EPOCH=$(( $(date +%s) + CI_TIMEOUT_SEC ))
+export CI_DEADLINE_EPOCH
+
 elapsed=0
 while true; do
   if [[ "$elapsed" -ge "$CI_TIMEOUT_SEC" ]]; then
