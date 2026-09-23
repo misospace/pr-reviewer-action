@@ -75,6 +75,10 @@ See `scripts/strip_metadata_markers.py` for the implementation and `tests/test_s
 - Prefer argv arrays (`["python3", "scripts/check.py"]`) over shell strings (`"python3 scripts/check.py"`) for provider commands, to avoid shell injection risks from `bash -lc` execution
 - Treat additions to the named tool command catalog as security-sensitive changes; keep them read-only and avoid shells, package managers, network clients, or repo mutation
 
+## Dependency Supply Chain
+
+Dependency security alerts flow through GitHub Dependabot (`.github/dependabot.yml`, `pip` ecosystem, weekly schedule, grouped updates). Version upgrades are applied through Renovate (`.renovaterc.json5`). The two pipelines stay distinct: Dependabot surfaces CVE advisories; Renovate opens the bump PRs. The CI dependency set is treated as a security gate — notably `PyGithub`, pinned so the `@ai-reviewer dismiss` permission check in `pr_reviewer/precheck.py` does not fail open.
+
 ## Known Limitations
 
 - Secret redaction is heuristic and not guaranteed to catch all credential formats; it covers common patterns (GitHub tokens, AWS keys, bearer tokens, key=value secrets) but may miss novel or encoded credentials

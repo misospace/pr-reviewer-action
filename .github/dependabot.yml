@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      pip-dependencies:
+        applies-to: version-updates
+        update-types:
+          - "patch"
+          - "minor"
+          - "major"
+    labels:
+      - dependencies
