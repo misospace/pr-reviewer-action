@@ -52,6 +52,15 @@ from the per-role version-1 artifacts, capped by
 (byte count of the section when it is non-empty, else empty — the
 lockstep signal the system-prompt fragment gate reads).
 
+``DEEP_REVIEW_EXECUTION`` (#635, benchmark-only, default ``three_call`` =
+the production architecture above) selects the request shape:
+``combined_scout`` runs ONE model call whose role-keyed response is split
+into the regular per-role artifacts, and ``prime_then_fanout`` runs the
+standard three calls with the first role completing before the remaining
+two launch (a sequential prime for prefix-cache ordering). The aggregate
+records the shape as ``execution``; every per-role entry carries
+``request_bytes``. These modes are never enabled by any action input.
+
 Bounds: each attempt is capped by ``min(AI_REQUEST_TIMEOUT_SEC, remaining
 aggregate deadline)``; the whole phase is capped by ``DEEP_REVIEW_TIMEOUT_SEC``
 (default 600). Threads are daemons and a cancelled straggler never races the
@@ -96,7 +105,9 @@ from pr_reviewer.specialists import (  # noqa: E402
     SPECIALIST_ROLES_ORDER,
     _empty_artifact,
     _resolve_artifact_path,
+    extract_specialist_json,
     load_specialist_prompt,
+    normalize_specialist_output,
     parse_specialist_response,
     render_specialist_leads_section,
 )
@@ -111,6 +122,25 @@ RETRY_DELAY_SEC = 5.0
 #: Floor for a per-attempt curl timeout. curl --max-time 0 means *unlimited*,
 #: so a nonpositive remaining budget must never reach the transport.
 MIN_ATTEMPT_TIMEOUT_SEC = 0.1
+
+#: Specialist-phase execution shapes for the #635 benchmark. The default
+#: (``three_call``) is the production architecture and is the ONLY value the
+#: action's documented surface uses; the other two are benchmark-only,
+#: opt-in via the (deliberately unfingerprinted, untyped) ``DEEP_REVIEW_EXECUTION``
+#: environment variable, and exist so the #610 harness can measure request
+#: shapes without changing any production default:
+#:
+#: - ``three_call``       — three concurrent role calls (current behavior).
+#: - ``combined_scout``   — ONE model call returning a role-keyed lead object
+#:   ``{"correctness": {"leads": [...]}, ...}``; the response is split into the
+#:   regular per-role contract artifacts, so every downstream consumer (the
+#:   #609 corpus section, harness telemetry) is unchanged.
+#: - ``prime_then_fanout`` — the same three payloads as ``three_call`` but the
+#:   first role (fixed order) completes before the remaining two launch, a
+#:   sequential "prime once, then fan out" variant for backends whose prefix
+#:   cache needs an ordered first request.
+EXECUTION_MODES = ("three_call", "combined_scout", "prime_then_fanout")
+DEFAULT_EXECUTION_MODE = "three_call"
 
 #: Serializes every artifact write in the process. Workers race the collector
 #: at the aggregate deadline: without this, a straggler that clears its
@@ -364,6 +394,7 @@ def _role_entry(
     error_kind: Optional[str],
     elapsed_sec: float,
     usage: Optional[dict[str, Optional[int]]] = None,
+    request_bytes: Optional[int] = None,
 ) -> dict[str, Any]:
     leads = artifact.get("leads")
     errors = artifact.get("errors")
@@ -375,6 +406,9 @@ def _role_entry(
         "lead_count": len(leads) if isinstance(leads, list) else 0,
         "errors_count": len(errors) if isinstance(errors, list) else 0,
         "usage": usage,
+        # #635: serialized request-body size (bytes) for request-shape A/B
+        # telemetry. None when no request was built (input/guard failures).
+        "request_bytes": request_bytes,
     }
 
 
@@ -390,6 +424,7 @@ def _skipped_entry(role: str, reason: str) -> dict[str, Any]:
         "lead_count": 0,
         "errors_count": 0,
         "reason": reason,
+        "request_bytes": None,
     }
 
 
@@ -456,6 +491,9 @@ def _run_role(
     thread never races the main thread's deadline-timeout writes.
     """
     started = time.monotonic()
+    # Set once the wire payload exists; every entry this role publishes after
+    # that point (including deadline-timeout entries) carries the size.
+    request_bytes_cell: list[int] = []
 
     def finish(
         artifact: dict[str, Any],
@@ -464,12 +502,16 @@ def _run_role(
         error_kind: Optional[str],
         usage: Optional[dict[str, Optional[int]]] = None,
     ) -> dict[str, Any]:
+        request_bytes = (
+            request_bytes_cell[0] if request_bytes_cell else None
+        )
         if cancel.is_set():
             return _role_entry(
                 role, artifact, status="error",
                 error_kind=error_kind or "timeout",
                 elapsed_sec=time.monotonic() - started,
                 usage=usage,
+                request_bytes=request_bytes,
             )
         if not _guarded_write(
             workspace_root, f"specialist-{role}.json", _json_text(artifact),
@@ -482,6 +524,7 @@ def _run_role(
                     role, artifact, status="error", error_kind="timeout",
                     elapsed_sec=time.monotonic() - started,
                     usage=usage,
+                    request_bytes=request_bytes,
                 )
             guard_artifact = _empty_artifact(role)
             guard_artifact["errors"].append(
@@ -497,11 +540,13 @@ def _run_role(
                 role, guard_artifact, status="error", error_kind="guard",
                 elapsed_sec=time.monotonic() - started,
                 usage=usage,
+                request_bytes=request_bytes,
             )
         return _role_entry(
             role, artifact, status=status, error_kind=error_kind,
             elapsed_sec=time.monotonic() - started,
             usage=usage,
+            request_bytes=request_bytes,
         )
 
     try:
@@ -520,6 +565,9 @@ def _run_role(
             response_format=response_format,
             tokens_param=tokens_param,
             stream=stream,
+        )
+        request_bytes_cell.append(
+            len(json.dumps(payload).encode("utf-8"))
         )
         # The request artifact is the payload itself — structurally secret-
         # free (the key travels only in the transport's 0600 curl config).
@@ -606,6 +654,278 @@ def _run_role(
         )
 
 
+# ---------------------------------------------------------------------------
+# #635 combined-scout execution mode (benchmark-only; three_call stays the
+# production default)
+# ---------------------------------------------------------------------------
+
+#: Static instruction header for the combined scout pass. Static text only —
+#: no PR/secret material — so it cannot inject.
+_SCOUT_HEADER = (
+    "You are performing three specialist review passes in one combined pass "
+    "over the same PR review corpus. Apply each specialist lane below to the "
+    "corpus, then return one role-keyed JSON object."
+)
+
+#: Required response shape, reusing the #607 per-role lead contract.
+_SCOUT_SHAPE = (
+    'Return strict JSON exactly in this shape (no prose, no fences):\n'
+    '{\n'
+    '  "correctness": {"leads": [...]},\n'
+    '  "security": {"leads": [...]},\n'
+    '  "tests": {"leads": []}\n'
+    '}\n'
+    'Each lead object follows the same schema as the individual specialist '
+    'passes (severity/category/file/line/message). A role with no leads '
+    'returns an empty leads array. Never invent a role key.'
+)
+
+
+def _build_scout_system() -> str:
+    """Compose the combined-scout system prompt from the three role fragments.
+
+    Same fragments the individual roles load, plus the role-keyed output
+    shape, so the scout's instructions differ from three-call only in
+    packaging (that is the comparison the benchmark wants)."""
+    parts = [_SCOUT_HEADER]
+    for role in SPECIALIST_ROLES_ORDER:
+        parts.append(f"## {role} lane\n\n{load_specialist_prompt(role)}")
+    parts.append(_SCOUT_SHAPE)
+    return "\n\n".join(parts)
+
+
+def _parse_scout_response(
+    text: str | None,
+    roles: tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Split a scout response into per-role #607 contract artifacts.
+
+    Tolerant end to end (never raises): the role-keyed object is extracted
+    with the shared ``extract_specialist_json``; a role value that is a bare
+    lead list is accepted (wrapped as ``{"leads": [...]}``); a missing role
+    key or undecodable JSON degrades that role to an artifact with a visible
+    error and empty leads. Normalization itself goes through
+    :func:`pr_reviewer.specialists.normalize_specialist_output`, so severity
+    capping, dedupe, and byte caps apply identically to the three-call path.
+    """
+    payload = extract_specialist_json(text)
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(payload, dict):
+        for role in roles:
+            artifact = _empty_artifact(role)
+            artifact["errors"].append(
+                "malformed JSON: no decodable role-keyed lead object found"
+            )
+            out[role] = artifact
+        return out
+    for role in roles:
+        role_value = payload.get(role)
+        if isinstance(role_value, list):
+            role_value = {"leads": role_value}
+        artifact = normalize_specialist_output(role_value, role=role)
+        if role not in payload:
+            artifact["errors"].append(f"scout response omitted the {role!r} role")
+        out[role] = artifact
+    return out
+
+
+def _run_scout(
+    *,
+    workspace_root: Path,
+    user_message: str,
+    roles: tuple[str, ...],
+    base_url: str,
+    api_format: str,
+    model: str,
+    api_key: str,
+    max_tokens: int,
+    temperature: Optional[float],
+    response_format: str,
+    tokens_param: str,
+    stream: bool,
+    role_timeout_sec: int,
+    deadline: float,
+    cancel: threading.Event,
+    request_fn: Callable[..., Any],
+) -> list[dict[str, Any]]:
+    """Run the ONE combined scout call and return per-role aggregate entries.
+
+    Mirrors ``_run_role``'s fail-soft contract (transport retry-once, deadline
+    honored, guarded writes, masked errors) but for a single request whose
+    response is split into per-role artifacts. Never raises. Every role
+    entry shares the call's elapsed time, usage, and request size; per-role
+    status reflects that role's own normalization outcome.
+    """
+    started = time.monotonic()
+    try:
+        system = _build_scout_system()
+    except (OSError, ValueError) as exc:
+        message = f"input: scout prompt unavailable: {mask_secrets(str(exc))}"
+        return [
+            _scout_failure_entry(
+                workspace_root, role, message, started, request_bytes=None
+            )
+            for role in roles
+        ]
+
+    payload = _build_payload(
+        api_format=api_format,
+        model=model,
+        system=system,
+        user=user_message,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        response_format=response_format,
+        tokens_param=tokens_param,
+        stream=stream,
+    )
+    request_bytes = len(json.dumps(payload).encode("utf-8"))
+
+    # The request artifact is the payload itself — structurally secret-free
+    # (the key travels only in the transport's 0600 curl config). A refused
+    # write skips the call, mirroring _run_role's guard contract.
+    if not _guarded_write(
+        workspace_root, "specialist-scout.request.json", _json_text(payload),
+        abort=cancel,
+    ):
+        message = "guard: refused to write the scout request artifact"
+        return [
+            _scout_failure_entry(
+                workspace_root, role, message, started, request_bytes=request_bytes,
+                cancel=cancel,
+            )
+            for role in roles
+        ]
+
+    last_error: Optional[str] = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        if cancel.is_set():
+            last_error = "timeout: specialist phase deadline exceeded"
+            break
+        remaining = deadline - time.monotonic()
+        if remaining < MIN_ATTEMPT_TIMEOUT_SEC:
+            last_error = "timeout: specialist phase deadline exceeded"
+            break
+        attempt_timeout = min(float(role_timeout_sec), remaining)
+        try:
+            response = request_fn(
+                base_url, api_format, payload, api_key, attempt_timeout
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-soft by design
+            masked = str(mask_secrets(str(exc)))[:500]
+            if "timed out" in masked.lower():
+                last_error = f"timeout: {masked}"
+                break
+            last_error = f"transport: {masked}"
+            if attempt < MAX_ATTEMPTS:
+                delay = min(RETRY_DELAY_SEC, max(0.0, deadline - time.monotonic()))
+                if delay > 0:
+                    if cancel.wait(delay):
+                        last_error = "timeout: specialist phase deadline exceeded"
+                        break
+                continue
+            break
+
+        if isinstance(response, dict) and response.get("error"):
+            last_error = (
+                "transport: endpoint returned an error body: "
+                f"{mask_secrets(str(response['error']))[:500]}"
+            )
+            break
+
+        if cancel.is_set():
+            last_error = "timeout: specialist phase deadline exceeded"
+            break
+
+        if not _guarded_write(
+            workspace_root,
+            "specialist-scout.response.json",
+            _json_text(
+                response
+                if isinstance(response, (dict, list))
+                else {"raw_response": str(response)}
+            ),
+        ):
+            last_error = "guard: refused to write the scout response artifact"
+            break
+
+        artifacts = _parse_scout_response(_extract_text(response), roles)
+        elapsed = time.monotonic() - started
+        usage = _extract_usage(response)
+        entries: list[dict[str, Any]] = []
+        for role in roles:
+            artifact = artifacts[role]
+            if not _guarded_write(
+                workspace_root, f"specialist-{role}.json", _json_text(artifact),
+                abort=cancel,
+            ):
+                if cancel.is_set():
+                    entries.append(_role_entry(
+                        role, artifact, status="error", error_kind="timeout",
+                        elapsed_sec=elapsed, usage=usage,
+                        request_bytes=request_bytes,
+                    ))
+                    continue
+                artifact = _empty_artifact(role)
+                artifact["errors"].append(
+                    "refused to write the role artifact: workspace escape or symlink"
+                )
+                entries.append(_role_entry(
+                    role, artifact, status="error", error_kind="guard",
+                    elapsed_sec=elapsed, usage=usage,
+                    request_bytes=request_bytes,
+                ))
+                continue
+            entries.append(_role_entry(
+                role, artifact, status=_status_of(artifact), error_kind=None,
+                elapsed_sec=elapsed, usage=usage,
+                request_bytes=request_bytes,
+            ))
+        return entries
+
+    # Every failure path lands here: all roles share the one failure record.
+    message = last_error or "transport: no attempt completed"
+    return [
+        _scout_failure_entry(
+            workspace_root,
+            role,
+            message,
+            started,
+            request_bytes=request_bytes,
+            cancel=cancel,
+        )
+        for role in roles
+    ]
+
+
+def _scout_failure_entry(
+    workspace_root: Path,
+    role: str,
+    message: str,
+    started: float,
+    *,
+    request_bytes: Optional[int],
+    cancel: Optional[threading.Event] = None,
+) -> dict[str, Any]:
+    """Fail-soft entry + artifact pair for a role when the ONE scout call
+    failed (or the whole phase was cancelled). Mirrors
+    ``_write_role_failure_artifacts`` but returns the entry."""
+    artifact = _empty_artifact(role)
+    artifact["errors"].append(message)
+    _guarded_write(
+        workspace_root,
+        f"specialist-{role}.json",
+        _json_text(artifact),
+        abort=cancel,
+    )
+    return _role_entry(
+        role, artifact, status="error",
+        error_kind=message.split(":", 1)[0],
+        elapsed_sec=time.monotonic() - started,
+        request_bytes=request_bytes,
+    )
+
+
 def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str], int]:
     """Read the review corpus. Returns (text, error, raw_bytes); a missing,
     unreadable, or over-cap corpus is a soft input error, never an exception.
@@ -677,6 +997,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     if deep_mode not in ("true", "auto"):
         print("deep_review disabled; no specialist passes run")
         return 0
+
+    # #635 benchmark execution shape. three_call (the default) is the
+    # production architecture; the other values are benchmark-only. An
+    # invalid value falls back loudly rather than silently re-shaping a
+    # benchmark run.
+    execution = (
+        _env_str("DEEP_REVIEW_EXECUTION", DEFAULT_EXECUTION_MODE).strip().lower()
+    )
+    if execution not in EXECUTION_MODES:
+        print(
+            f"ERROR: invalid DEEP_REVIEW_EXECUTION {execution!r}; "
+            f"using {DEFAULT_EXECUTION_MODE}",
+            file=sys.stderr,
+        )
+        execution = DEFAULT_EXECUTION_MODE
 
     workspace_root = Path(
         args.workspace_root or os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
@@ -754,39 +1089,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
     else:
         user_message = f"{_USER_PREFIX}\n\n{corpus}"
-        cancels = {role: threading.Event() for role in roles_to_run}
-        results: dict[str, dict[str, Any]] = {}
-        threads: dict[str, threading.Thread] = {}
 
-        def worker(role: str) -> None:
-            # _run_role is designed never to raise, but a latent bug must
-            # still not leave the collector without an entry: catch anything
-            # that escapes and publish a fail-soft record with the full
-            # artifact set. Exception (not BaseException) so a
-            # KeyboardInterrupt / SystemExit still propagates.
-            try:
-                results[role] = _run_role_inner(role)
-            except Exception as exc:  # noqa: BLE001 - last-resort guard
-                message = (
-                    f"transport: specialist worker crashed: "
-                    f"{mask_secrets(str(exc))[:500]}"
-                )
-                artifact = _empty_artifact(role)
-                artifact["errors"].append(message)
-                _write_role_failure_artifacts(
-                    workspace_root, role, artifact, message,
-                    cancel=cancels[role],
-                )
-                results[role] = _role_entry(
-                    role, artifact, status="error", error_kind="transport",
-                    elapsed_sec=time.monotonic() - phase_started,
-                )
-
-        def _run_role_inner(role: str) -> dict[str, Any]:
-            return _run_role(
-                role,
+        if execution == "combined_scout":
+            # #635: ONE model call returns the role-keyed lead object; the
+            # response is split into the regular per-role artifacts so every
+            # downstream consumer (#609 section, harness telemetry) is
+            # unchanged. Not-selected roles keep their skip telemetry.
+            scout_results = _run_scout(
                 workspace_root=workspace_root,
                 user_message=user_message,
+                roles=tuple(roles_to_run),
                 base_url=base_url,
                 api_format=api_format,
                 model=model,
@@ -798,46 +1110,125 @@ def main(argv: Optional[list[str]] = None) -> int:
                 stream=stream,
                 role_timeout_sec=role_timeout_sec,
                 deadline=deadline,
-                cancel=cancels[role],
+                cancel=threading.Event(),
                 request_fn=run_chat_request,
             )
+            by_role = {entry["role"]: entry for entry in scout_results}
+            entries = []
+            for role in SPECIALIST_ROLES_ORDER:
+                if role in by_role:
+                    entries.append(by_role[role])
+                elif role not in roles_to_run:
+                    entries.append(_skipped_entry(role, skipped_reasons[role]))
+        else:
+            cancels = {role: threading.Event() for role in roles_to_run}
+            results: dict[str, dict[str, Any]] = {}
+            threads: dict[str, threading.Thread] = {}
 
-        for role in roles_to_run:
-            thread = threading.Thread(
-                target=worker, args=(role,), name=f"specialist-{role}", daemon=True
-            )
-            threads[role] = thread
-            thread.start()
+            def worker(role: str) -> None:
+                # _run_role is designed never to raise, but a latent bug must
+                # still not leave the collector without an entry: catch anything
+                # that escapes and publish a fail-soft record with the full
+                # artifact set. Exception (not BaseException) so a
+                # KeyboardInterrupt / SystemExit still propagates.
+                try:
+                    results[role] = _run_role_inner(role)
+                except Exception as exc:  # noqa: BLE001 - last-resort guard
+                    message = (
+                        f"transport: specialist worker crashed: "
+                        f"{mask_secrets(str(exc))[:500]}"
+                    )
+                    artifact = _empty_artifact(role)
+                    artifact["errors"].append(message)
+                    _write_role_failure_artifacts(
+                        workspace_root, role, artifact, message,
+                        cancel=cancels[role],
+                    )
+                    results[role] = _role_entry(
+                        role, artifact, status="error", error_kind="transport",
+                        elapsed_sec=time.monotonic() - phase_started,
+                    )
 
-        # Collect in fixed role order against the ONE aggregate deadline: a
-        # straggler past it is cancelled (its thread is a daemon and checks
-        # the flag before writing, so it cannot race the timeout record) and
-        # never extends the phase. Skipped roles keep their fixed-order
-        # telemetry slots without having run.
-        for role in SPECIALIST_ROLES_ORDER:
-            if role not in threads:
-                entries.append(_skipped_entry(role, skipped_reasons[role]))
-                continue
-            remaining = deadline - time.monotonic()
-            threads[role].join(timeout=max(0.0, remaining))
-            if threads[role].is_alive():
-                cancels[role].set()
-                timeout_message = (
-                    f"timeout: specialist phase exceeded {phase_timeout_sec}s"
-                )
-                artifact = _empty_artifact(role)
-                artifact["errors"].append(timeout_message)
-                _write_role_failure_artifacts(
-                    workspace_root, role, artifact, timeout_message
-                )
-                results[role] = _role_entry(
+            def _run_role_inner(role: str) -> dict[str, Any]:
+                return _run_role(
                     role,
-                    artifact,
-                    status="error",
-                    error_kind="timeout",
-                    elapsed_sec=time.monotonic() - phase_started,
+                    workspace_root=workspace_root,
+                    user_message=user_message,
+                    base_url=base_url,
+                    api_format=api_format,
+                    model=model,
+                    api_key=api_key,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    response_format=response_format,
+                    tokens_param=tokens_param,
+                    stream=stream,
+                    role_timeout_sec=role_timeout_sec,
+                    deadline=deadline,
+                    cancel=cancels[role],
+                    request_fn=run_chat_request,
                 )
-            entries.append(results[role])
+
+            threads_by_role: dict[str, threading.Thread] = {}
+            for role in roles_to_run:
+                thread = threading.Thread(
+                    target=worker, args=(role,), name=f"specialist-{role}", daemon=True
+                )
+                threads_by_role[role] = thread
+
+            if execution == "prime_then_fanout" and threads_by_role:
+                # #635: sequential "prime once, then fan out" — the first
+                # selected role (fixed order) completes before the remaining
+                # two launch, for backends whose prefix cache needs an
+                # ordered first request. Roles past the deadline after the
+                # prime are still started: each attempt checks the deadline
+                # and fails fast to a timeout record instead of being
+                # silently missing from the aggregate.
+                first = next(r for r in SPECIALIST_ROLES_ORDER if r in threads_by_role)
+                threads_by_role[first].start()
+                threads_by_role[first].join(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+                if threads_by_role[first].is_alive():
+                    cancels[first].set()
+                for role in roles_to_run:
+                    if role != first:
+                        threads_by_role[role].start()
+            else:
+                for role in roles_to_run:
+                    threads_by_role[role].start()
+            threads = threads_by_role
+
+            entries = []
+            # Collect in fixed role order against the ONE aggregate deadline: a
+            # straggler past it is cancelled (its thread is a daemon and checks
+            # the flag before writing, so it cannot race the timeout record) and
+            # never extends the phase. Skipped roles keep their fixed-order
+            # telemetry slots without having run.
+            for role in SPECIALIST_ROLES_ORDER:
+                if role not in threads:
+                    entries.append(_skipped_entry(role, skipped_reasons[role]))
+                    continue
+                remaining = deadline - time.monotonic()
+                threads[role].join(timeout=max(0.0, remaining))
+                if threads[role].is_alive():
+                    cancels[role].set()
+                    timeout_message = (
+                        f"timeout: specialist phase exceeded {phase_timeout_sec}s"
+                    )
+                    artifact = _empty_artifact(role)
+                    artifact["errors"].append(timeout_message)
+                    _write_role_failure_artifacts(
+                        workspace_root, role, artifact, timeout_message
+                    )
+                    results[role] = _role_entry(
+                        role,
+                        artifact,
+                        status="error",
+                        error_kind="timeout",
+                        elapsed_sec=time.monotonic() - phase_started,
+                    )
+                entries.append(results[role])
 
     aggregate_elapsed = time.monotonic() - phase_started
     print(
@@ -869,6 +1260,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         # fingerprint via DEEP_REVIEW, so a mode switch invalidates a stale
         # comment.
         "deep_review_mode": deep_mode,
+        # #635 benchmark telemetry: which specialist execution shape ran
+        # (three_call is the production default).
+        "execution": execution,
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
         "specialist_corpus_bytes": corpus_bytes,

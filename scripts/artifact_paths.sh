@@ -35,6 +35,7 @@ assert_safe_artifact_paths() {
     specialist-correctness.request.json specialist-security.request.json specialist-tests.request.json
     specialist-correctness.response.json specialist-security.response.json specialist-tests.response.json
     specialist-correctness.json specialist-security.json specialist-tests.json
+    specialist-scout.request.json specialist-scout.response.json
     specialists.json
     specialists.phase.log
     ci-status.phase.log
