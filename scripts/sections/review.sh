@@ -509,11 +509,17 @@ write_step_summary() {
   fi
   if [[ "${REVIEW_ROUTE:-}" != escalated && "${PRIMARY_OK:-1}" -ne 1 && -s review-corpus.fallback.truncated.md ]]; then
     final_tier="fallback"; final_corpus="review-corpus.fallback.truncated.md"
-    budget_cap=120000; shape=default
+    # Fallback re-truncates the initial corpus, so the diff bytes within the
+    # request cannot be inferred from the initial tier's diff artifact.
+    budget_cap=120000; shape=default; context_capacity="unset"; diff_cap="unknown"; final_diff=""
   fi
   corpus_bytes="$( [ -f "$final_corpus" ] && wc -c < "$final_corpus" | tr -d ' ' || echo 0 )"
   local included_diff_bytes
-  included_diff_bytes="$( [ -f "$final_diff" ] && wc -c < "$final_diff" | tr -d ' ' || echo 0 )"
+  included_diff_bytes="$( [ -n "$final_diff" ] && [ -f "$final_diff" ] && wc -c < "$final_diff" | tr -d ' ' || echo unknown )"
+  local diff_budget_display="${diff_cap}B" diff_actual_display="${included_diff_bytes}B"
+  if [[ "$final_tier" == fallback ]]; then
+    diff_budget_display="unknown"; diff_actual_display="unknown"
+  fi
 
   usage_file=""
   [ -f ai-response.primary.json ] && usage_file="ai-response.primary.json"
@@ -530,7 +536,11 @@ write_step_summary() {
   local cache_hit_ratio="${_chr:--}"
 
   local diff_trunc="no" corpus_trunc="no"
-  [ "$diff_bytes" -gt "$diff_cap" ] 2>/dev/null && diff_trunc="yes (cap ${diff_cap})"
+  if [[ "$final_tier" == fallback ]]; then
+    diff_trunc="unknown (fallback corpus re-truncated)"
+  elif [ "$diff_bytes" -gt "$diff_cap" ] 2>/dev/null; then
+    diff_trunc="yes (cap ${diff_cap})"
+  fi
   [ "$corpus_bytes" -gt "$budget_cap" ] 2>/dev/null && corpus_trunc="yes (cap ${budget_cap})"
 
   local budget_desc
@@ -617,7 +627,7 @@ write_step_summary() {
       fi
     fi
     echo "| Budget | ${budget_desc} |"
-    echo "| Final context | tier=${final_tier}; model_context_tokens=${context_capacity}; corpus_budget=${budget_cap}B; corpus_actual=${corpus_bytes}B; diff_budget=${diff_cap}B; diff_actual=${included_diff_bytes}B; request_shape=${shape} |"
+    echo "| Final context | tier=${final_tier}; model_context_tokens=${context_capacity}; corpus_budget=${budget_cap}B; corpus_actual=${corpus_bytes}B; diff_budget=${diff_budget_display}; diff_actual=${diff_actual_display}; request_shape=${shape} |"
     if [[ "${REVIEW_ROUTE:-}" == escalated ]]; then
       echo "| Primary context | corpus_budget=${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}B; corpus_actual=$(wc -c < review-corpus.truncated.md | tr -d ' ')B; diff_budget=${PRIMARY_MAX_DIFF:-$MAX_DIFF}B; request_shape=${PRIMARY_REQUEST_SHAPE:-default} |"
     fi

@@ -114,7 +114,17 @@ printf 'f%.0s' $(seq 1 40) > review-corpus.fallback.truncated.md
 : > "$GITHUB_STEP_SUMMARY"
 write_step_summary
 check "fallback uses fallback tier and corpus" \
-  "$(grep -q 'tier=fallback; .*corpus_budget=120000B; corpus_actual=40B; .*request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+  "$(grep -q 'tier=fallback; model_context_tokens=unset; corpus_budget=120000B; corpus_actual=40B; diff_budget=unknown; diff_actual=unknown; request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+check "fallback diff truncation is not inferred from smart source" \
+  "$(grep -q 'Diff bytes | 100 (truncated: unknown (fallback corpus re-truncated))' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+
+echo ""
+echo "=== Test: failed primary route reports fallback with primary diff ==="
+REVIEW_ROUTE=primary; REVIEW_CONTEXT_PROFILE=primary
+: > "$GITHUB_STEP_SUMMARY"
+write_step_summary
+check "primary-to-fallback does not claim initial diff bytes were sent" \
+  "$(grep -q 'tier=fallback; model_context_tokens=unset; corpus_budget=120000B; corpus_actual=40B; diff_budget=unknown; diff_actual=unknown; request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
