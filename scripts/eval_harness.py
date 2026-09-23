@@ -37,6 +37,7 @@ from pr_reviewer.semantic_eval import (
     SemanticCorpus,
     SemanticResult,
     _safe_relative_path,
+    MERGE_SAFETY_DISPOSITIONS_ORDER,
     SEMANTIC_EVAL_VERSION,
     _collect_signals_from_run,
     aggregate_semantic_runs,
@@ -1671,6 +1672,10 @@ def evaluate_live_semantics(
             "average_duplicate_count": round(sum(item["average_duplicate_count"] for item in scored) / len(scored), 4) if scored else 0.0,
             "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
             "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
+            "merge_safety_disposition_counts": {
+                disposition: sum(item["merge_safety_disposition_counts"].get(disposition, 0) for item in scored)
+                for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
+            },
         },
         "incomplete_scenarios": incomplete_scenarios,
         "negative_control_summary": {
@@ -1680,7 +1685,12 @@ def evaluate_live_semantics(
         "passed": not incomplete_scenarios
         and bool(scored)
         and all(item["pass_rate"] == 1.0 for item in scored)
-        and all(item["false_positive_rate"] == 0.0 for item in negative_controls),
+        and all(item["false_positive_rate"] == 0.0 for item in negative_controls)
+        and all(
+            item["disposition_calibration_rate"] == 1.0
+            for item in scored
+            if item["disposition_calibration_rate"] is not None
+        ),
     }
 
 

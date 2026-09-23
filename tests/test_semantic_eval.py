@@ -780,8 +780,15 @@ def test_654_vulnerable_fixtures_classify_their_class(number: int) -> None:
             ReviewSignal(SIGNAL_KIND_FINDING, run["findings"][0]["stage"], run["findings"][0]["message"]),
             *(tool(run["findings"][0]["stage"], call["args"]["path"]) for call in run.get("tool_calls", [])),
         ], {"mode": run.get("mode", "standard"), "route": run.get("route", "primary"), "stage": run["stage"], "expected_disposition": run.get("expected_disposition")})
-        assert result.passed, (number, run["stage"])
-        assert POSITIVE_654[number] in result.capability_hits or run.get("expected_disposition"), (number, run["stage"])
+        if run.get("expected_disposition"):
+            # Answer-key fixture: gated on scorer calibration, never on
+            # reviewer success (it is deliberately bad where the key says so).
+            assert result.calibration_run is True, (number, run["stage"])
+            assert result.disposition_calibration_pass is True, (number, run["stage"])
+            assert POSITIVE_654[number] in result.capability_hits or run["expected_disposition"] != DISPOSITION_CORRECT, (number, run["stage"])
+        else:
+            assert result.passed, (number, run["stage"])
+            assert POSITIVE_654[number] in result.capability_hits
 
 
 @pytest.mark.parametrize("number", sorted(NEGATIVE_654))
@@ -1096,7 +1103,7 @@ def _run_by_disposition(number: int, disposition: str) -> dict:
     )
 
 
-def _evaluate_corpus_run(item, run: dict, expected_override: object = "keep") -> object:
+def _evaluate_corpus_run(item, run: dict) -> object:
     """Evaluate one corpus offline run exactly the way the offline gate does."""
     stage = run["stage"]
     signals = [ReviewSignal(SIGNAL_KIND_FINDING, stage, finding["message"]) for finding in run.get("findings", []) if finding.get("message")]
@@ -1109,8 +1116,6 @@ def _evaluate_corpus_run(item, run: dict, expected_override: object = "keep") ->
         "stage": stage,
         "expected_disposition": run.get("expected_disposition"),
     }
-    if expected_override != "keep":
-        metadata["expected_disposition"] = expected_override
     return evaluate_semantic_capability(item, signals, metadata)
 
 
@@ -1121,7 +1126,8 @@ def test_661_adversarial_runs_land_in_their_disposition_category(number: int) ->
     This is the offline gate exercising the full #661 scoring taxonomy on the
     #659 corpus: not-found, suppressed-as-pre-existing, invalid remediation,
     speculative false positive, and correct detection with correct remediation
-    reasoning.
+    reasoning. Calibration is recognized, but a deliberately bad answer-key
+    output is NEVER a successful reviewer run.
     """
     item = scenario(number)
     declared = [run for run in item.offline_runs if run.get("expected_disposition")]
@@ -1129,7 +1135,13 @@ def test_661_adversarial_runs_land_in_their_disposition_category(number: int) ->
     for run in declared:
         result = _evaluate_corpus_run(item, run)
         assert result.disposition == run["expected_disposition"], (number, run["expected_disposition"], result.disposition)
-        assert result.passed, (number, run["expected_disposition"], result.disposition_violations)
+        assert result.calibration_run is True, (number, run["expected_disposition"])
+        assert result.disposition_calibration_pass is True, (number, run["expected_disposition"], result.disposition_violations)
+        if run["expected_disposition"] == DISPOSITION_CORRECT:
+            assert result.passed, (number, result.disposition_violations)
+            assert all(anchor["satisfied"] for anchor in result.anchor_results), number
+        else:
+            assert result.passed is False, (number, run["expected_disposition"])
 
 
 def test_661_all_five_disposition_categories_are_exercised() -> None:
@@ -1143,15 +1155,44 @@ def test_661_all_five_disposition_categories_are_exercised() -> None:
     assert seen == set(MERGE_SAFETY_DISPOSITIONS_ORDER)
 
 
+@pytest.mark.parametrize(
+    ("number", "disposition"),
+    [
+        (6541, DISPOSITION_SPECULATIVE_FALSE_POSITIVE),
+        (6543, DISPOSITION_NOT_FOUND),
+        (6545, DISPOSITION_SUPPRESSED_PRE_EXISTING),
+        (6545, DISPOSITION_INVALID_REMEDIATION),
+        (6547, DISPOSITION_INVALID_REMEDIATION),
+        (6549, DISPOSITION_INVALID_REMEDIATION),
+    ],
+)
+def test_661_bad_answer_key_is_recognized_but_never_a_reviewer_success(number: int, disposition: str) -> None:
+    """A deliberately bad reference output must not count as a passing review."""
+    item = scenario(number)
+    run = _run_by_disposition(number, disposition)
+    result = _evaluate_corpus_run(item, run)
+    assert result.disposition == disposition, (number, result.disposition)
+    assert result.disposition_calibration_pass is True, (number, result.disposition_violations)
+    assert result.passed is False, (number, disposition)
+
+
 def test_661_suppressed_pre_existing_is_a_merge_safety_miss() -> None:
-    """A run expected correct that suppresses as pre-existing must fail."""
+    """A reviewer output that suppresses as pre-existing fails review quality.
+
+    The same output, used as the answer-key calibration fixture, is recognized
+    by the scorer — recognition and reviewer success are independent metrics.
+    """
     item = scenario(6545)
     run = _run_by_disposition(6545, DISPOSITION_SUPPRESSED_PRE_EXISTING)
-    result = _evaluate_corpus_run(item, run, expected_override=DISPOSITION_CORRECT)
+    reviewer_run = {key: value for key, value in run.items() if key != "expected_disposition"}
+    result = _evaluate_corpus_run(item, reviewer_run)
+    assert result.calibration_run is False
     assert result.disposition == DISPOSITION_SUPPRESSED_PRE_EXISTING
     assert result.suppressed_pre_existing is True
-    assert not result.passed
-    assert result.disposition_violations
+    assert result.passed is False
+    calibrated = _evaluate_corpus_run(item, run)
+    assert calibrated.disposition_calibration_pass is True
+    assert calibrated.passed is False
 
 
 def test_661_attribution_metadata_without_suppression_stays_correct() -> None:
@@ -1183,25 +1224,32 @@ def test_661_wrapper_only_lifecycle_remediation_is_rejected() -> None:
 
     The wrapper-only repair (a trap that signals only the tracked wrapper
     child) and the assumed-outer-runner cleanup are the two lifecycle
-    remediation shapes the methodology must reject.
+    remediation shapes the methodology must reject: as reviewer outputs they
+    fail review quality, and as answer-key fixtures the scorer recognizes them.
     """
     for number in (6545, 6547):
         item = scenario(number)
         run = _run_by_disposition(number, DISPOSITION_INVALID_REMEDIATION)
-        result = _evaluate_corpus_run(item, run, expected_override=DISPOSITION_CORRECT)
+        reviewer_run = {key: value for key, value in run.items() if key != "expected_disposition"}
+        result = _evaluate_corpus_run(item, reviewer_run)
         assert result.disposition == DISPOSITION_INVALID_REMEDIATION, number
         assert result.remediation_ok is False
-        assert not result.passed, number
+        assert result.passed is False, number
+        calibrated = _evaluate_corpus_run(item, run)
+        assert calibrated.disposition_calibration_pass is True
 
 
 def test_661_undeclared_dependency_fallback_repair_is_rejected() -> None:
     """Correct detection + keep-the-fallback repair is an invalid-remediation miss."""
     item = scenario(6549)
     run = _run_by_disposition(6549, DISPOSITION_INVALID_REMEDIATION)
-    result = _evaluate_corpus_run(item, run, expected_override=DISPOSITION_CORRECT)
+    reviewer_run = {key: value for key, value in run.items() if key != "expected_disposition"}
+    result = _evaluate_corpus_run(item, reviewer_run)
     assert result.disposition == DISPOSITION_INVALID_REMEDIATION
     assert result.remediation_ok is False
-    assert not result.passed
+    assert result.passed is False
+    calibrated = _evaluate_corpus_run(item, run)
+    assert calibrated.disposition_calibration_pass is True
 
 
 def test_661_correct_remediation_reasoning_passes() -> None:
@@ -1209,10 +1257,41 @@ def test_661_correct_remediation_reasoning_passes() -> None:
     for number in (6545, 6547, 6549):
         item = scenario(number)
         run = _run_by_disposition(number, DISPOSITION_CORRECT)
-        result = _evaluate_corpus_run(item, run, expected_override=DISPOSITION_CORRECT)
+        reviewer_run = {key: value for key, value in run.items() if key != "expected_disposition"}
+        result = _evaluate_corpus_run(item, reviewer_run)
         assert result.disposition == DISPOSITION_CORRECT, (number, result.disposition)
         assert result.remediation_ok is True
         assert result.passed, (number, result.disposition_violations)
+        assert all(anchor["satisfied"] for anchor in result.anchor_results), number
+        calibrated = _evaluate_corpus_run(item, run)
+        assert calibrated.disposition_calibration_pass is True
+        assert calibrated.passed is True
+
+
+def test_661_correct_calibration_still_respects_evidence_anchors() -> None:
+    """A `correct` answer key cannot pass without the scenario's anchors.
+
+    Calibration (did the scorer say `correct`?) and review quality (did the
+    output satisfy capability AND evidence-anchor contract?) are independent:
+    this fixture satisfies the causal capability and the remediation contract
+    but drops the runner-tracking anchor, so the scorer recognizes it as
+    `correct` while review quality still fails it.
+    """
+    item = scenario(6545)
+    partial = (
+        "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, "
+        "so a parent exit between fork and join leaves an orphaned CI child. Install an abnormal-exit "
+        "trap that reaps the full descendant tree on EXIT/INT/TERM."
+    )
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", partial), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary", "expected_disposition": DISPOSITION_CORRECT},
+    )
+    assert result.disposition == DISPOSITION_CORRECT
+    assert result.disposition_calibration_pass is True
+    assert result.passed is False
+    assert any(anchor["id"] == "runner-tracking" and not anchor["satisfied"] for anchor in result.anchor_results)
 
 
 def test_661_reference_detections_without_remediation_stay_correct() -> None:
@@ -1241,25 +1320,89 @@ def test_661_disposition_contract_is_stage_neutral() -> None:
     item = scenario(6545)
     run = _run_by_disposition(6545, DISPOSITION_SUPPRESSED_PRE_EXISTING)
     for stage in ("specialist", "primary", "escalation"):
-        stage_run = dict(run)
+        stage_run = json.loads(json.dumps(run))
         stage_run["stage"] = stage
         for finding in stage_run["findings"]:
             finding["stage"] = stage
         result = _evaluate_corpus_run(item, stage_run)
         assert result.disposition == DISPOSITION_SUPPRESSED_PRE_EXISTING, stage
-        assert result.passed, (stage, result.disposition_violations)
+        assert result.disposition_calibration_pass is True, (stage, result.disposition_violations)
+        assert result.passed is False, stage
 
 
 def test_661_report_telemetry_carries_disposition_counts() -> None:
     report = evaluate_semantic_corpus(SemanticCorpus.from_file(CORPUS))
     counts = report["summary"]["merge_safety_disposition_counts"]
+    calibration_counts = report["summary"]["merge_safety_calibration_disposition_counts"]
     assert set(counts) == set(MERGE_SAFETY_DISPOSITIONS_ORDER)
-    assert counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] >= 1
-    assert counts[DISPOSITION_INVALID_REMEDIATION] >= 3
-    assert report["summary"]["merge_safety_suppressed_pre_existing_runs"] == counts[DISPOSITION_SUPPRESSED_PRE_EXISTING]
+    assert set(calibration_counts) == set(MERGE_SAFETY_DISPOSITIONS_ORDER)
+    # The headline describes observed reviewer outputs only: the deliberately
+    # bad answer-key fixtures must not appear in it.
+    assert counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 0
+    assert counts[DISPOSITION_INVALID_REMEDIATION] == 0
+    assert counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 0
+    assert counts[DISPOSITION_CORRECT] > 0
+    # The answer key itself is reported separately, fully recognized.
+    assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
+    assert calibration_counts[DISPOSITION_INVALID_REMEDIATION] == 3
+    assert calibration_counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 1
+    assert calibration_counts[DISPOSITION_NOT_FOUND] == 1
+    assert calibration_counts[DISPOSITION_CORRECT] == 3
+    assert report["summary"]["calibration_fixture_runs"] == sum(calibration_counts.values())
+    assert report["summary"]["disposition_calibration_rate"] == 1.0
+    assert report["summary"]["merge_safety_suppressed_pre_existing_runs"] == 0
     lifecycle = next(item for item in report["scenarios"] if item["scenario_number"] == 6545)
-    assert lifecycle["merge_safety_disposition_counts"][DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
+    assert lifecycle["reviewer_runs"] == 3
+    assert lifecycle["calibration_runs"] == 3
     assert lifecycle["pass_rate"] == 1.0
+    assert lifecycle["disposition_calibration_rate"] == 1.0
+    assert lifecycle["merge_safety_disposition_counts"][DISPOSITION_SUPPRESSED_PRE_EXISTING] == 0
+    assert lifecycle["merge_safety_calibration_disposition_counts"][DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
+
+
+def test_661_calibration_fixtures_do_not_inflate_pass_rate() -> None:
+    """pass_rate is computed over reviewer outputs only.
+
+    Every calibration fixture classifies correctly (calibration rate 1.0) yet
+    the scenario's pass_rate stays an honest reviewer-quality number.
+    """
+    report = evaluate_semantic_corpus(SemanticCorpus.from_file(CORPUS))
+    for item in report["scenarios"]:
+        total = item["reviewer_runs"] + item["calibration_runs"]
+        assert total == item["runs"], item["scenario_number"]
+        if item["calibration_runs"]:
+            expected_pass_rate = round(item["passes"] / item["reviewer_runs"], 4)
+            assert item["pass_rate"] == expected_pass_rate, item["scenario_number"]
+    assert report["summary"]["disposition_calibration_rate"] == 1.0
+    assert report["summary"]["pass_rate"] == 1.0
+    assert report["passed"] is True
+
+
+def test_661_genuine_miss_fails_the_gate_despite_clean_calibration() -> None:
+    """A real reviewer run that misses the defect fails the gate.
+
+    Even with every calibration fixture recognized, the semantic regression
+    gate must fail when an actual (non-answer-key) run misses the scenario —
+    the headline pass_rate can never reach 1.0 on the strength of bad
+    answer-key fixtures matching their labels.
+    """
+    corpus = SemanticCorpus.from_file(CORPUS)
+    assert evaluate_semantic_corpus(corpus)["passed"] is True
+    item = next(s for s in corpus.scenarios if s.number == 6545)
+    item.offline_runs.append({
+        "mode": "standard",
+        "stage": "primary",
+        "route": "primary",
+        "findings": [{"stage": "primary", "message": GENERIC_WARNINGS[0]}],
+        "review_markdown": GENERIC_WARNINGS[0],
+    })
+    report = evaluate_semantic_corpus(corpus)
+    assert report["passed"] is False
+    assert report["summary"]["disposition_calibration_rate"] == 1.0
+    lifecycle = next(item for item in report["scenarios"] if item["scenario_number"] == 6545)
+    assert lifecycle["reviewer_runs"] == 4
+    assert lifecycle["pass_rate"] < 1.0
+    assert lifecycle["disposition_calibration_rate"] == 1.0
 
 
 def test_661_negative_controls_stay_clean_under_disposition_scoring() -> None:

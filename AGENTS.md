@@ -295,11 +295,31 @@ The JSON report is uploaded as the `eval-report` artifact on every run
 
 ### Merge-safety disposition scoring (#661)
 
-Every semantic run also carries a merge-safety **disposition** — the category
-explaining *why* the run found or missed the defect — reported per run, per
-scenario (`merge_safety_disposition_counts`), and in the summary
-(`merge_safety_disposition_counts`, `merge_safety_suppressed_pre_existing_runs`,
-`merge_safety_invalid_remediation_runs`):
+Every semantic run carries two **independent** verdicts:
+
+- **Review quality** (`passed`, aggregated into scenario `pass_rate` over
+  *reviewer runs only*) — whether the output actually satisfies the scenario:
+  capability hits, evidence anchors, stage/route applicability, negative
+  controls, and — on vulnerable scenarios — a `correct` merge-safety
+  disposition. A found-but-suppressed or badly repaired detection is a miss,
+  never a pass.
+- **Disposition calibration** (`disposition_calibration_pass`, aggregated into
+  `disposition_calibration_rate`) — whether the scorer classified a REFERENCE
+  (answer-key) fixture into its declared `expected_disposition`. Fixtures that
+  declare the field are marked `calibration_run`, never counted as reviewer
+  successes, and excluded from `pass_rate`, evidence rates, and cost averages
+  (`reviewer_runs` / `calibration_runs` split the accounting). A misclassified
+  calibration fixture still fails the corpus gate: the overall `passed`
+  requires both `pass_rate == 1.0` (reviewer runs) and calibration rate
+  `== 1.0`, so deliberately bad answer-key outputs are exercised by CI without
+  ever inflating the headline success rate.
+
+The disposition itself — reported per run, per scenario
+(`merge_safety_disposition_counts` for reviewer outputs,
+`merge_safety_calibration_disposition_counts` for the answer key, and in the
+summary, with `merge_safety_suppressed_pre_existing_runs` /
+`merge_safety_invalid_remediation_runs` describing observed reviewer outputs
+only) — explains *why* the run found or missed the defect:
 
 - `correct` — defect found, and any recommended remediation satisfies the
   scenario's `remediation_expectations` (`required` substrings every proposal
@@ -316,13 +336,8 @@ scenario (`merge_safety_disposition_counts`), and in the summary
 - `speculative_false_positive` — a finding that asserts or hedges a defect the
   causal chain does not support.
 
-Offline runs may declare `expected_disposition`; such runs pass iff the scorer
-classifies them into that category (the adversarial corpus runs — the
-suppression miss, the wrapper-only repair, the fallback repair, the
-speculative finding, the not-found approval — are reference outputs the scorer
-must recognize, not outputs that must pass legacy detection). Runs without the
-field keep the legacy capability/anchor pass criteria. Live runs are ungated;
-their dispositions are telemetry.
+Live runs never declare `expected_disposition`, so every live run is a
+reviewer run; its disposition is telemetry.
 
 ### Offline semantic corpus
 

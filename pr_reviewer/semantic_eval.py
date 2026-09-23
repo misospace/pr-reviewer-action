@@ -712,6 +712,16 @@ class SemanticResult:
     disposition_violations: list[str] = field(default_factory=list)
     suppressed_pre_existing: bool = False
     remediation_ok: bool | None = None
+    # #661 review-blocker fix: a run that declares `expected_disposition` is a
+    # scorer-CALIBRATION fixture (an answer-key output), never an observed
+    # reviewer output. It exercises whether the scorer lands the output in its
+    # declared category (`disposition_calibration_pass`) and is excluded from
+    # the reviewer-quality `passed` / pass_rate accounting entirely — a
+    # deliberately bad reference must not inflate the headline success rate,
+    # and a deliberately correct reference must still satisfy the full
+    # capability/evidence-anchor contract through `passed`.
+    calibration_run: bool = False
+    disposition_calibration_pass: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -736,6 +746,8 @@ class SemanticResult:
             "disposition_violations": self.disposition_violations,
             "suppressed_pre_existing": self.suppressed_pre_existing,
             "remediation_ok": self.remediation_ok,
+            "calibration_run": self.calibration_run,
+            "disposition_calibration_pass": self.disposition_calibration_pass,
         }
 
 
@@ -924,12 +936,21 @@ def evaluate_semantic_capability(
         result.applicability_violations.append(f"stage_attribution={result.stages_hit!r}, expected={scenario.stage_attribution!r}")
     result.passed = capabilities_ok and anchors_ok and stage_ok and not result.forbidden_violations and not result.applicability_violations and not result.metric_violations
     # #661 merge-safety disposition: classify WHY this run found (or missed)
-    # the defect, and — when the run declares an expected_disposition — gate
-    # the run on landing in that category. Adversarial corpus runs (the
-    # suppression miss, the wrapper-only repair, the fallback repair) declare
-    # the disposition they must be scored into; a run whose declared category
-    # is `correct` fails when it suppresses or repairs badly, so the misses
-    # stay visible in telemetry instead of hiding behind a detection.
+    # the defect, and keep two independent verdicts separate.
+    #
+    # Review quality (`passed`, above): whether this output actually satisfies
+    # the scenario. Tightened so the merge-safety miss categories are never a
+    # pass on a vulnerable scenario — a found-but-suppressed or badly repaired
+    # detection does not satisfy the scenario even though the causal chain
+    # fired. Negative controls keep the legacy formula: for them "no defect
+    # found" IS the success state.
+    #
+    # Disposition calibration (`disposition_calibration_pass`): whether the
+    # scorer classified a REFERENCE (answer-key) output into its declared
+    # `expected_disposition`. Calibration runs are marked as such, gated on
+    # this metric, and excluded from reviewer-quality accounting downstream
+    # (`aggregate_semantic_runs`), so intentionally bad answer-key outputs can
+    # never inflate the reported pass_rate.
     finding_texts = [signal.text for signal in values if signal.kind in {SIGNAL_KIND_FINDING, SIGNAL_KIND_MENTION}]
     combined_text = "\n".join(finding_texts).casefold()
     detected = bool(scenario.expected_capabilities) and all(
@@ -939,6 +960,7 @@ def evaluate_semantic_capability(
     result.remediation_ok = _remediation_verdict(scenario, combined_text) if detected else None
     expected_disposition = metadata.get("expected_disposition")
     if expected_disposition is not None:
+        result.calibration_run = True
         result.disposition_expected = str(expected_disposition)
     if not detected:
         result.disposition = (
@@ -952,17 +974,16 @@ def evaluate_semantic_capability(
         result.disposition = DISPOSITION_INVALID_REMEDIATION
     else:
         result.disposition = DISPOSITION_CORRECT
-    if result.disposition_expected is not None:
+    if scenario.expected_capabilities and result.disposition != DISPOSITION_CORRECT:
+        # A vulnerable scenario is only satisfied by a clean detection with
+        # sound remediation reasoning; every other disposition is a miss.
+        result.passed = False
+    if result.calibration_run:
         if result.disposition != result.disposition_expected:
             result.disposition_violations.append(
                 f"disposition={result.disposition!r}, expected={result.disposition_expected!r}"
             )
-        result.passed = (
-            not result.forbidden_violations
-            and not result.applicability_violations
-            and not result.metric_violations
-            and not result.disposition_violations
-        )
+        result.disposition_calibration_pass = not result.disposition_violations
     return result
 
 
@@ -1015,13 +1036,23 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         scenario_reports.append(aggregate)
     scored = [item for item in scenario_reports if item["runs"]]
     negative_controls = [item for item in scenario_reports if item["negative_control"]]
+    calibration_scenarios = [item for item in scored if item["disposition_calibration_rate"] is not None]
     # #661: aggregate merge-safety dispositions across the scored (vulnerable)
     # scenarios so suppression-as-pre-existing and invalid-remediation misses
-    # are visible in the report headline, not buried per scenario.
+    # are visible in the report headline, not buried per scenario. The
+    # headline counts describe ACTUAL evaluated reviewer outputs; the answer
+    # key calibration fixtures are reported separately so deliberately bad
+    # synthetic examples can never read as observed reviewer performance.
     disposition_totals = {
         disposition: sum(item["merge_safety_disposition_counts"].get(disposition, 0) for item in scored)
         for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
     }
+    calibration_disposition_totals = {
+        disposition: sum(item["merge_safety_calibration_disposition_counts"].get(disposition, 0) for item in scored)
+        for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
+    }
+    calibration_runs_total = sum(item["calibration_runs"] for item in scored)
+    calibration_passes_total = sum(item["disposition_calibration_passes"] for item in scored)
     summary = {
         "scenarios": len(scenario_reports),
         "scored_scenarios": len(scored),
@@ -1031,9 +1062,16 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         "average_duplicate_count": round(sum(item["average_duplicate_count"] for item in scored) / len(scored), 4) if scored else 0.0,
         "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
         "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
+        # Observed reviewer-output dispositions (calibration fixtures excluded).
         "merge_safety_disposition_counts": disposition_totals,
         "merge_safety_suppressed_pre_existing_runs": disposition_totals[DISPOSITION_SUPPRESSED_PRE_EXISTING],
         "merge_safety_invalid_remediation_runs": disposition_totals[DISPOSITION_INVALID_REMEDIATION],
+        # Scorer calibration: how often the scorer landed each answer-key
+        # fixture in its declared category. Gated separately from pass_rate.
+        "calibration_fixture_runs": calibration_runs_total,
+        "disposition_calibration_passes": calibration_passes_total,
+        "disposition_calibration_rate": round(calibration_passes_total / calibration_runs_total, 4) if calibration_runs_total else None,
+        "merge_safety_calibration_disposition_counts": calibration_disposition_totals,
     }
     return {
         "evaluator_version": SEMANTIC_EVAL_VERSION,
@@ -1041,7 +1079,15 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         "metadata": corpus.metadata,
         "scenarios": scenario_reports,
         "summary": summary,
-        "passed": all(item["pass_rate"] == 1.0 for item in scored) and bool(scored) and all(item["false_positive_rate"] == 0.0 for item in negative_controls),
+        # Reviewer-quality gate (pass_rate, negative controls) and the
+        # disposition-calibration gate (every answer-key fixture must be
+        # classified into its declared category) are both mandatory: a
+        # misclassified calibration fixture fails CI, and so does any
+        # non-calibration run that misses its scenario.
+        "passed": bool(scored)
+        and all(item["pass_rate"] == 1.0 for item in scored)
+        and all(item["false_positive_rate"] == 0.0 for item in negative_controls)
+        and all(item["disposition_calibration_rate"] == 1.0 for item in calibration_scenarios),
         "scenarios_evaluated": len(scenario_reports),
         "per_scenario_summary": {str(item["scenario_number"]): item for item in scenario_reports},
         "negative_control_summary": {
@@ -1052,31 +1098,48 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
 
 
 def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[SemanticResult]) -> dict[str, Any]:
+    # #661: calibration (answer-key) fixtures are accounted separately from
+    # actual evaluated reviewer outputs. `runs` keeps counting every evaluated
+    # run so "scenario has no runs" stays detectable, but pass_rate, evidence
+    # rates, and cost averages describe REVIEWER outputs only; the calibration
+    # fixtures carry their own recognition rate and disposition counts.
     runs = len(per_run_results)
-    passes = sum(result.passed for result in per_run_results)
-    stage_union = sorted({stage for result in per_run_results for stage in result.stages_hit})
+    reviewer_results = [result for result in per_run_results if not result.calibration_run]
+    calibration_results = [result for result in per_run_results if result.calibration_run]
+    reviewer_runs = len(reviewer_results)
+    passes = sum(result.passed for result in reviewer_results)
+    calibration_passes = sum(1 for result in calibration_results if result.disposition_calibration_pass)
+    stage_union = sorted({stage for result in reviewer_results for stage in result.stages_hit})
     capability_rates = {
-        capability: round(sum(capability in result.capability_hits for result in per_run_results) / runs, 4) if runs else 0.0
+        capability: round(sum(capability in result.capability_hits for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
         for capability in scenario.expected_capabilities
     }
     anchor_rates: dict[str, float] = {}
     for index, anchor in enumerate(scenario.expected_evidence_anchors):
         anchor_id = anchor.get("id") or f"anchor-{index}"
-        anchor_rates[anchor_id] = round(sum(any(item["id"] == anchor_id and item["satisfied"] for item in result.anchor_results) for result in per_run_results) / runs, 4) if runs else 0.0
-    forbidden_rate = round(sum(bool(result.forbidden_violations) for result in per_run_results) / runs, 4) if runs else 0.0
-    tool_calls = round(sum(result.tool_call_count for result in per_run_results) / runs, 4) if runs else 0.0
-    duplicates = round(sum(result.duplicate_count for result in per_run_results) / runs, 4) if runs else 0.0
-    latency = round(sum(result.latency_sec for result in per_run_results) / runs, 4) if runs else 0.0
-    escalation_frequency = round(sum(result.escalated or "escalation" in result.stages_hit for result in per_run_results) / runs, 4) if runs else 0.0
+        anchor_rates[anchor_id] = round(sum(any(item["id"] == anchor_id and item["satisfied"] for item in result.anchor_results) for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
+    forbidden_rate = round(sum(bool(result.forbidden_violations) for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
+    tool_calls = round(sum(result.tool_call_count for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
+    duplicates = round(sum(result.duplicate_count for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
+    latency = round(sum(result.latency_sec for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
+    escalation_frequency = round(sum(result.escalated or "escalation" in result.stages_hit for result in reviewer_results) / reviewer_runs, 4) if reviewer_runs else 0.0
     disposition_counts = {
-        disposition: sum(1 for result in per_run_results if result.disposition == disposition)
+        disposition: sum(1 for result in reviewer_results if result.disposition == disposition)
+        for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
+    }
+    calibration_disposition_counts = {
+        disposition: sum(1 for result in calibration_results if result.disposition == disposition)
         for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
     }
     return {
         "scenario_number": scenario.number,
         "runs": runs,
+        "reviewer_runs": reviewer_runs,
+        "calibration_runs": len(calibration_results),
         "passes": passes,
-        "pass_rate": round(passes / runs, 4) if runs else 0.0,
+        "pass_rate": round(passes / reviewer_runs, 4) if reviewer_runs else 0.0,
+        "disposition_calibration_passes": calibration_passes,
+        "disposition_calibration_rate": round(calibration_passes / len(calibration_results), 4) if calibration_results else None,
         "stages_hit": stage_union,
         "capability_pass_rate": capability_rates,
         "anchor_pass_rate": anchor_rates,
@@ -1087,9 +1150,14 @@ def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[Se
         "average_tool_calls": tool_calls,
         "average_latency_sec": latency,
         "escalation_frequency": escalation_frequency,
-        "routes": sorted({result.route for result in per_run_results if result.route}),
-        "modes": sorted({result.mode for result in per_run_results if result.mode}),
+        "routes": sorted({result.route for result in reviewer_results if result.route}),
+        "modes": sorted({result.mode for result in reviewer_results if result.mode}),
+        # Dispositions of actual evaluated reviewer outputs — observed
+        # reviewer performance, never the synthetic answer-key examples.
         "merge_safety_disposition_counts": disposition_counts,
+        # Dispositions the scorer assigned to the calibration fixtures, with
+        # how often they matched the declared answer key.
+        "merge_safety_calibration_disposition_counts": calibration_disposition_counts,
     }
 
 
