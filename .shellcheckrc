@@ -79,10 +79,6 @@ shell=bash
 #            defensive pattern that runs in both sourced and direct contexts;
 #            only one branch fires depending on how the file is invoked.
 #
-#   SC2181 - Check exit code directly with e.g. 'if mycmd;'.
-#            Style preference only; the `$?` form in tests/test_review_scope.sh
-#            is intentional for readability.
-#
 #   SC2030/SC2031 - Modification of PLATFORM is local to subshell / was modified
 #                   in a subshell.
 #            tests/test_platform_api.sh intentionally mutates PLATFORM inside
@@ -104,4 +100,4 @@ shell=bash
 #            tests/test_platform_api.sh sources the platform seam via a
 #            variable path; a `# shellcheck source=` directive is not
 #            applicable because the path is resolved at test runtime.
-disable=SC2154,SC2034,SC1091,SC2129,SC2153,SC2016,SC1007,SC2164,SC2043,SC2206,SC2086,SC1003,SC2329,SC2317,SC2181,SC2030,SC2031,SC2015,SC2005,SC1090
+disable=SC2154,SC2034,SC1091,SC2129,SC2153,SC2016,SC1007,SC2164,SC2043,SC2206,SC2086,SC1003,SC2329,SC2317,SC2030,SC2031,SC2015,SC2005,SC1090

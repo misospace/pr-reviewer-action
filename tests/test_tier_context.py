@@ -86,6 +86,69 @@ build_review_corpus smart
     assert len(smart.encode()) <= 87000  # (40000 - 1000 - 2000) * 3
 
 
+@pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
+@pytest.mark.parametrize("tier", ["primary", "smart"])
+def test_full_corpus_keeps_current_context_without_prior_findings(tmp_path, tier):
+    corpus_script = (ROOT / "scripts/sections/corpus.sh").read_text()
+    assembly = corpus_script[
+        corpus_script.index("build_bounded_repo_map() {"):
+        corpus_script.index('\nsection_timer_start "corpus-building"')
+    ]
+    (tmp_path / "assembly.sh").write_text(assembly)
+    artifacts = {
+        "pr.json": json.dumps({"number": 1, "title": "follow-up push", "body": "current"}),
+        "classification.json": json.dumps({"pr_kind": "app_code"}),
+        "pr-files.json": '[{"filename":"src/current.py","patch":"+CURRENT_FILES_619"}]\n',
+        "pr.diff": "diff --git a/src/current.py b/src/current.py\n+CURRENT_DIFF_619\n",
+        "standards-context.md": "current standards\n",
+        "repo-map.md": "# Repository Map (v1)\nCURRENT_MAP_619\n",
+        "related-code.truncated.md": "CURRENT_RELATED_619\n",
+        "pr-thread.md": "# PR Thread Context\nCURRENT_THREAD_619\n",
+        "evidence-providers.md": "CURRENT_EVIDENCE_619\n",
+        "tool-harness.md": "CURRENT_TOOLS_619\n",
+        "requirement-ledger.md": "CURRENT_LEDGER_619\n",
+        "specialists.md": "# Specialist Review Leads\nCURRENT_SPECIALIST_619\n",
+        "manifest-context.md": "",
+        "linked-issues.md": "",
+        "version-hints.truncated.txt": "",
+        "image-digest-context.md": "",
+        "linked-sources.md": "",
+        "repo-impact.truncated.md": "",
+        "repo-history.truncated.md": "",
+    }
+    for name, content in artifacts.items():
+        (tmp_path / name).write_text(content)
+    # An old managed review may still be present in a reused workspace.
+    (tmp_path / "previous-findings.json").write_text("STALE_FINDING_619")
+    (tmp_path / "previous-evidence.json").write_text("STALE_EVIDENCE_619")
+    (tmp_path / "ci-checks.md").write_text("CURRENT_CI_619\n")
+    script = '''set -euo pipefail
+log() { :; }
+source "$SCRIPT_DIR/sections/config.sh"
+source ./assembly.sh
+truncate_clean pr.diff pr.diff.truncated "$PRIMARY_MAX_DIFF" '...[diff truncated]'
+truncate_clean pr-files.json pr-files.truncated.json "$PRIMARY_MAX_FILES" '...[files truncated]'
+build_review_corpus "$TIER" primary'''
+    env = dict(
+        os.environ, SCRIPT_DIR=str(ROOT / "scripts"), REPO="x/y", PR_NUMBER="1",
+        AI_BASE_URL="http://example.invalid", AI_MODEL="p", GH_TOKEN="test",
+        STANDARDS_FILE="AGENTS.md", CI_CHECKS_FILE=str(tmp_path / "ci-checks.md"),
+        REPO_MAP_MAX_BYTES="12000", TIER=tier,
+    )
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    corpus = (tmp_path / "review-corpus.md").read_text()
+    for marker in (
+        "CURRENT_FILES_619", "CURRENT_DIFF_619", "CURRENT_MAP_619",
+        "CURRENT_RELATED_619", "CURRENT_THREAD_619", "CURRENT_EVIDENCE_619",
+        "CURRENT_CI_619", "CURRENT_TOOLS_619", "CURRENT_LEDGER_619",
+        "CURRENT_SPECIALIST_619",
+    ):
+        assert corpus.count(marker) == 1, marker
+    assert "STALE_FINDING_619" not in corpus
+    assert "STALE_EVIDENCE_619" not in corpus
+
+
 def test_only_smart_override_keeps_primary_legacy_budget(tmp_path):
     config = (ROOT / "scripts/sections/config.sh").read_text()
     func = config[config.index("apply_context_limits() {"):config.index("# Truncate SRC")]
