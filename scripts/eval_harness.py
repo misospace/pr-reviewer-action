@@ -820,6 +820,12 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     aggregate degrades to a derivation from the role files, and a single
     bad role file simply contributes no leads.
 
+    When a parseable aggregate is present it is authoritative: a role
+    recorded with status "skipped" contributes no leads, even if a stale
+    specialist-<role>.json from a previous run in a reused workspace is
+    still on disk (#633). The legacy derivation is unchanged when the
+    aggregate is absent or malformed.
+
     Normalized shape (identical keys in both paths):
       {"enabled": bool, "aggregate_elapsed_sec": float | None,
        "total_leads": int, "any_errors": bool, "derived": bool,
@@ -874,6 +880,21 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     }
 
     if aggregate_ok:
+        # The current aggregate is authoritative (#633): a role recorded as
+        # "skipped" ran no pass in THIS run, so leads on disk for it are
+        # stale artifacts from a previous run in a reused workspace and must
+        # never leak into this run's telemetry or grading. A missing or
+        # malformed aggregate keeps the legacy derivation below untouched.
+        skipped_roles = {
+            r.get("role")
+            for r in (aggregate.get("roles") or [])
+            if isinstance(r, dict)
+            and r.get("role") in SPECIALIST_ROLES
+            and r.get("status") == "skipped"
+        }
+        for role in skipped_roles:
+            leads_by_role[role] = []
+
         roles_out: list[dict[str, Any]] = []
         for role in SPECIALIST_ROLES:
             entry = next(
