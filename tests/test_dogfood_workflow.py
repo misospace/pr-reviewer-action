@@ -109,6 +109,18 @@ def test_dogfood_workflow_exists() -> None:
     assert WORKFLOW.is_file(), f"{WORKFLOW} must exist (the dogfood self-review workflow)"
 
 
+def test_dogfood_runs_all_specialists() -> None:
+    """The self-review canary opts into all three roles, not auto selection."""
+    values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
+    assert values.get("deep_review") == "true", (
+        "dogfood deep_review must be true to exercise correctness, security, "
+        f"and tests on every review; found {values.get('deep_review')!r}"
+    )
+    assert _extract_action_defaults().get("deep_review") == "false", (
+        "the public deep_review default must remain false"
+    )
+
+
 def test_dogfood_native_loop_budget() -> None:
     """The dogfood loop must keep the #565 budget: 4 rounds / 8 requests / 600s.
 
@@ -183,6 +195,7 @@ def test_public_action_defaults_unchanged() -> None:
 
 if __name__ == "__main__":
     test_dogfood_workflow_exists()
+    test_dogfood_runs_all_specialists()
     test_dogfood_native_loop_budget()
     test_dogfood_untouched_inputs_stay_put()
     test_public_action_defaults_unchanged()

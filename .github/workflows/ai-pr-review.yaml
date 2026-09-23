@@ -76,6 +76,7 @@ jobs:
           context_limit_mode: normal
           ci_status_check: "true"
           ci_timeout_sec: "600"
+          deep_review: "true"
           tool_mode: native_loop
           tool_max_rounds: "4"
           tool_max_requests: "8"
