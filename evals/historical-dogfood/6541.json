@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "scenario": 6541,
+  "provenance": {
+    "historical_pr": 654,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #654 execution-boundary/lifecycle failure class"
+  },
+  "pr_json": {
+    "number": 654,
+    "title": "feat(review): overlap specialist passes with CI gating (#634)",
+    "body": "",
+    "head": {
+      "sha": "fixture-6541-head",
+      "ref": "feature/concurrent-gates"
+    },
+    "base": {
+      "sha": "fixture-6541-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 3,
+    "additions": 20,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/654"
+  },
+  "diff": "diff --git a/action.yml b/action.yml\nindex 08c3f0e..9b598fc 100644\n--- a/action.yml\n+++ b/action.yml\n@@ -2,6 +2,5 @@ name: review\n runs:\n   using: composite\n   steps:\n-    - name: Wait for CI\n-      continue-on-error: true\n-      run: bash \"$GITHUB_ACTION_PATH/scripts/wait_for_ci.sh\"\n+    - name: Review\n+      run: bash \"$GITHUB_ACTION_PATH/scripts/run_review.sh\"\ndiff --git a/scripts/gating.sh b/scripts/gating.sh\nnew file mode 100644\nindex 0000000..a2c2d73\n--- /dev/null\n+++ b/scripts/gating.sh\n@@ -0,0 +1,10 @@\n+fork_ci_gate() {\n+  [[ \"${CI_STATUS_CHECK:-false}\" == \"true\" ]] || return 0\n+  CI_GATE_ACTIVE=\"true\"\n+  wait_for_ci_command >\"$CI_GATE_LOG\" 2>&1 &\n+  CI_GATE_PID=$!\n+}\n+\n+wait_for_ci_command() {\n+  bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n+}\ndiff --git a/scripts/run_review.sh b/scripts/run_review.sh\nindex 105c19f..30a7fa5 100644\n--- a/scripts/run_review.sh\n+++ b/scripts/run_review.sh\n@@ -1,2 +1,4 @@\n #!/usr/bin/env bash\n+source \"$SCRIPT_DIR/sections/gating.sh\"\n+fork_ci_gate\n review_main\n",
+  "pr_files": [
+    {
+      "filename": "action.yml",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 7,
+      "changes": 13
+    },
+    {
+      "filename": "scripts/gating.sh",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9
+    },
+    {
+      "filename": "scripts/run_review.sh",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 2,
+      "changes": 6
+    }
+  ],
+  "files": [
+    {
+      "path": "action.yml",
+      "content": "name: review\nruns:\n  using: composite\n  steps:\n    - name: Review\n      run: bash \"$GITHUB_ACTION_PATH/scripts/run_review.sh\"\n"
+    },
+    {
+      "path": "scripts/run_review.sh",
+      "content": "#!/usr/bin/env bash\nsource \"$SCRIPT_DIR/sections/gating.sh\"\nfork_ci_gate\nreview_main\n"
+    },
+    {
+      "path": "scripts/gating.sh",
+      "content": "fork_ci_gate() {\n  [[ \"${CI_STATUS_CHECK:-false}\" == \"true\" ]] || return 0\n  CI_GATE_ACTIVE=\"true\"\n  wait_for_ci_command >\"$CI_GATE_LOG\" 2>&1 &\n  CI_GATE_PID=$!\n}\n\nwait_for_ci_command() {\n  bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n}\n"
+    }
+  ]
+}

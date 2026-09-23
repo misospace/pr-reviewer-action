@@ -137,6 +137,31 @@ fi
 # ── precheck call #1: marker-only should-review decision ──────────────
 # Runs before the PR object fetch so a diff-unchanged skip costs no
 # platform I/O beyond the diff and the comment/review lookup.
+#
+# ── #633: auto-selection inputs participate in stale-review detection ──
+# deep_review=auto selects specialist roles partly from inputs the diff
+# fingerprint cannot see: linked-issue labels AND Linear state (the
+# classifier maps Linear native priority 1/2 onto linked_priority_p0/p1).
+# When auto is requested, fold a bounded signature of those inputs (PR
+# title + body + linked refs with their fetched labels + configured Linear
+# identifiers with their fetched priority/labels) into the config-hash half
+# of the broad fingerprint, so ref/label/priority/title/body changes
+# invalidate a stale managed comment. Skip-path cost when auto: one PR
+# fetch plus at most MAX_LINKED_ISSUES issue fetches and Linear lookups.
+# CONSERVATIVE FAILURE: unknown selection inputs must never be omitted into
+# a diff-unchanged skip — a build failure (including ANY transient
+# linked-issue/Linear lookup failure) exports a per-run unique sentinel
+# that cannot match any stored marker, so a fresh review is forced.
+if [[ "$(printf '%s' "${DEEP_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+  if SELECTION_SIGNATURE="$(REPO="$REPO" PR_NUMBER="$PR_NUMBER" python3 "$SCRIPT_DIR/build_selection_fingerprint.py" 2>/dev/null)" \
+      && [[ -n "$SELECTION_SIGNATURE" ]]; then
+    export PRECHECK_SELECTION_SIGNATURE="$SELECTION_SIGNATURE"
+  else
+    echo "warning: deep_review=auto could not determine every selection input; forcing a fresh review (stale-skip disabled for this run)" >&2
+    SELECTION_SIGNATURE="unavailable-$$-$(date +%s)-${RANDOM:-0}"
+    export PRECHECK_SELECTION_SIGNATURE="$SELECTION_SIGNATURE"
+  fi
+fi
 python3 -m pr_reviewer.precheck > precheck-result.json
 
 should_review_decision="$(jq -r '.should_review // false' precheck-result.json)"

@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "scenario": 6542,
+  "provenance": {
+    "historical_pr": 654,
+    "state": "fixed",
+    "source": "compact reconstruction of the PR #654 execution-boundary/lifecycle failure class"
+  },
+  "pr_json": {
+    "number": 654,
+    "title": "feat(review): overlap specialist passes with CI gating (#634)",
+    "body": "",
+    "head": {
+      "sha": "fixture-6542-head",
+      "ref": "feature/concurrent-gates"
+    },
+    "base": {
+      "sha": "fixture-6542-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 20,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/654"
+  },
+  "diff": "diff --git a/scripts/gating.sh b/scripts/gating.sh\nindex a2c2d73..190f8cb 100644\n--- a/scripts/gating.sh\n+++ b/scripts/gating.sh\n@@ -1,10 +1,16 @@\n-fork_ci_gate() {\n-  [[ \"${CI_STATUS_CHECK:-false}\" == \"true\" ]] || return 0\n-  CI_GATE_ACTIVE=\"true\"\n-  wait_for_ci_command >\"$CI_GATE_LOG\" 2>&1 &\n-  CI_GATE_PID=$!\n-}\n+_CI_GATE_ENV_KEYS=(\n+  PATH HOME\n+  GH_TOKEN REPO PR_NUMBER\n+  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n+)\n \n wait_for_ci_command() {\n-  bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n+  local -a env_args=()\n+  local key\n+  for key in \"${_CI_GATE_ENV_KEYS[@]}\"; do\n+    if [ -n \"${!key+x}\" ]; then\n+      env_args+=(\"${key}=${!key}\")\n+    fi\n+  done\n+  env -i \"${env_args[@]}\" bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n }\n",
+  "pr_files": [
+    {
+      "filename": "scripts/gating.sh",
+      "status": "modified",
+      "additions": 15,
+      "deletions": 9,
+      "changes": 24
+    },
+    {
+      "filename": "scripts/run_review.sh",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 4,
+      "changes": 8
+    }
+  ],
+  "files": [
+    {
+      "path": "scripts/run_review.sh",
+      "content": "#!/usr/bin/env bash\nsource \"$SCRIPT_DIR/sections/gating.sh\"\nfork_ci_gate\nreview_main\n"
+    },
+    {
+      "path": "scripts/gating.sh",
+      "content": "_CI_GATE_ENV_KEYS=(\n  PATH HOME\n  GH_TOKEN REPO PR_NUMBER\n  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n)\n\nwait_for_ci_command() {\n  local -a env_args=()\n  local key\n  for key in \"${_CI_GATE_ENV_KEYS[@]}\"; do\n    if [ -n \"${!key+x}\" ]; then\n      env_args+=(\"${key}=${!key}\")\n    fi\n  done\n  env -i \"${env_args[@]}\" bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n}\n"
+    }
+  ]
+}

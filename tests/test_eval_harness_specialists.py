@@ -737,6 +737,62 @@ class TestLoadSpecialistTelemetry:
         assert tel["leads_by_role"]["security"][0]["message"] == "SQL injection via username"
         assert tel["leads_by_role"]["correctness"][0]["file"] == "api/pagination.py"
 
+    def test_auto_mode_aggregate_with_selection_and_skips_is_tolerated(self, tmp_path):
+        """#633 compat: an auto-mode aggregate (deep_review_mode + selection
+        telemetry, skipped entries in roles) parses without changes — skipped
+        statuses pass through, leads still load from the per-role files, and
+        no entry is invented for a role the selection skipped."""
+        self._write(tmp_path, "specialists.json", {
+            "version": 1,
+            "enabled": True,
+            "deep_review_mode": "auto",
+            "aggregate_elapsed_sec": 8.0,
+            "total_leads": 1,
+            "any_errors": False,
+            "roles": [
+                {"role": "correctness", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: no correctness-lane signal"},
+                {"role": "security", "status": "ok", "error_kind": None,
+                 "elapsed_sec": 8.0, "lead_count": 1, "errors_count": 0},
+                {"role": "tests", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: no tests-lane signal"},
+            ],
+            "selection": {
+                "version": 1,
+                "mode": "auto",
+                "classification_available": True,
+                "selected_roles": ["security"],
+                "skipped_roles": ["correctness", "tests"],
+                "decisions": [],
+                "zero_selection_reason": "",
+            },
+        })
+        self._write(tmp_path, "specialist-security.json", {
+            "role": "security",
+            "leads": [{"severity": "major", "category": "security",
+                       "file": "api/login.py", "line": 42,
+                       "message": "SQL injection via username"}],
+            "truncated": False, "errors": [],
+        })
+
+        tel = load_specialist_telemetry(tmp_path)
+        assert tel is not None
+        assert tel["derived"] is False
+        assert tel["total_leads"] == 1
+        assert tel["any_errors"] is False
+        assert [r["role"] for r in tel["roles"]] == list(SPECIALIST_ROLES)
+        by_role = {r["role"]: r for r in tel["roles"]}
+        assert by_role["security"]["status"] == "ok"
+        assert by_role["correctness"]["status"] == "skipped"
+        assert by_role["tests"]["status"] == "skipped"
+        assert [l["message"] for l in tel["leads_by_role"]["security"]] == [
+            "SQL injection via username"
+        ]
+        assert tel["leads_by_role"]["correctness"] == []
+        assert tel["leads_by_role"]["tests"] == []
+
     def test_derived_when_aggregate_missing(self, tmp_path):
         self._write(tmp_path, "specialist-correctness.json", {
             "role": "correctness",
@@ -855,6 +911,105 @@ class TestLoadSpecialistTelemetry:
         assert leads[0]["message"] == ""
         assert leads[1]["message"] == "real lead"
 
+
+    def test_stale_role_files_do_not_leak_past_skipped_roles(self, tmp_path):
+        """#633 review fix: the current aggregate is authoritative. In a
+        reused workspace, stale specialist-correctness/tests.json artifacts
+        from a previous run must not leak their leads into a fresh auto-mode
+        run whose aggregate recorded those roles as skipped — only the
+        freshly selected role's leads survive."""
+        # Stale artifacts from a previous run: obvious sentinels.
+        self._write(tmp_path, "specialist-correctness.json", {
+            "role": "correctness",
+            "leads": [{"severity": "major", "category": "correctness",
+                       "file": "STALE/correctness.py", "line": 1,
+                       "message": "STALE correctness lead from a previous run"}],
+            "truncated": False, "errors": [],
+        })
+        self._write(tmp_path, "specialist-tests.json", {
+            "role": "tests",
+            "leads": [{"severity": "minor", "category": "tests",
+                       "file": "STALE/test_x.py", "line": 2,
+                       "message": "STALE tests lead from a previous run"}],
+            "truncated": False, "errors": [],
+        })
+        # The fresh run's security artifact (security was selected).
+        self._write(tmp_path, "specialist-security.json", {
+            "role": "security",
+            "leads": [{"severity": "major", "category": "security",
+                       "file": "api/login.py", "line": 42,
+                       "message": "fresh SQL injection lead"}],
+            "truncated": False, "errors": [],
+        })
+        # Fresh auto-mode aggregate: only security selected, correctness/tests
+        # skipped (no per-role artifacts were written for them this run).
+        self._write(tmp_path, "specialists.json", {
+            "version": 1,
+            "enabled": True,
+            "deep_review_mode": "auto",
+            "aggregate_elapsed_sec": 4.2,
+            "specialist_corpus_bytes": 12000,
+            "specialist_max_tokens": 4096,
+            "total_leads": 1,
+            "any_errors": False,
+            "roles": [
+                {"role": "correctness", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: trivial class"},
+                {"role": "security", "status": "ok", "error_kind": None,
+                 "elapsed_sec": 4.2, "lead_count": 1, "errors_count": 0},
+                {"role": "tests", "status": "skipped", "error_kind": None,
+                 "elapsed_sec": 0.0, "lead_count": 0, "errors_count": 0,
+                 "reason": "skipped: no tests-lane signal"},
+            ],
+            "selection": {
+                "version": 1, "mode": "auto",
+                "selected_roles": ["security"],
+                "skipped_roles": ["correctness", "tests"],
+            },
+        })
+
+        tel = load_specialist_telemetry(tmp_path)
+        assert tel is not None
+        assert tel["derived"] is False
+        assert tel["enabled"] is True
+        # The stale leads are gone; the fresh one survives.
+        assert tel["leads_by_role"]["correctness"] == []
+        assert tel["leads_by_role"]["tests"] == []
+        assert [l["message"] for l in tel["leads_by_role"]["security"]] == [
+            "fresh SQL injection lead"
+        ]
+        # Statuses and telemetry stay exactly as the aggregate recorded them.
+        assert {r["role"]: r["status"] for r in tel["roles"]} == {
+            "correctness": "skipped", "security": "ok", "tests": "skipped",
+        }
+        assert {r["role"]: r["lead_count"] for r in tel["roles"]} == {
+            "correctness": 0, "security": 1, "tests": 0,
+        }
+        assert tel["total_leads"] == 1
+        assert tel["any_errors"] is False
+        assert tel["aggregate_elapsed_sec"] == 4.2
+        assert tel["specialist_corpus_bytes"] == 12000
+        assert tel["specialist_max_tokens"] == 4096
+
+    def test_malformed_aggregate_keeps_legacy_stale_role_files(self, tmp_path):
+        """The fix is scoped to a parseable aggregate: with a malformed one,
+        the legacy derivation (stale role files still contribute) is
+        preserved."""
+        self._write(tmp_path, "specialists.json", "{definitely not json")
+        self._write(tmp_path, "specialist-correctness.json", {
+            "role": "correctness",
+            "leads": [{"severity": "major", "category": "correctness",
+                       "file": None, "line": None, "message": "stale lead"}],
+            "truncated": False, "errors": [],
+        })
+
+        tel = load_specialist_telemetry(tmp_path)
+        assert tel is not None
+        assert tel["derived"] is True
+        assert [l["message"] for l in tel["leads_by_role"]["correctness"]] == [
+            "stale lead"
+        ]
 
 # ---------------------------------------------------------------------------
 # run_label

@@ -44,7 +44,7 @@ ACTION="$(cat "$ACTION_YML")"
 
 echo "=== config.sh: deep review defaults + validation ==="
 check_contains "DEEP_REVIEW defaults to false" "$CONFIG" 'DEEP_REVIEW="${DEEP_REVIEW:-false}"'
-check_contains "DEEP_REVIEW case accepts a lowercased true|false" "$CONFIG" 'true|false) DEEP_REVIEW='
+check_contains "DEEP_REVIEW case accepts a lowercased true|false|auto" "$CONFIG" 'true|false|auto) DEEP_REVIEW='
 check_contains "DEEP_REVIEW invalid value logs an error" "$CONFIG" 'Invalid DEEP_REVIEW'
 check_contains "DEEP_REVIEW invalid value degrades to false" "$CONFIG" 'DEEP_REVIEW=false'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC defaults to 600" "$CONFIG" 'DEEP_REVIEW_TIMEOUT_SEC="${DEEP_REVIEW_TIMEOUT_SEC:-600}"'
@@ -76,7 +76,7 @@ check_not_contains "corpus.sh no longer launches specialists directly (#634 move
 check_contains "launch line runs as a background job with the phase log" \
   "$GATING" 'specialist_command >"$SPECIALIST_GATE_LOG" 2>&1 &'
 check_contains "launch records the pid" "$GATING" 'SPECIALIST_GATE_PID=$!'
-deep_gate_line="$(grep -n 'DEEP_REVIEW:-false' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
+deep_gate_line="$(grep -n 'if \[\[ "\$_DEEP_MODE" != "true" && "\$_DEEP_MODE" != "auto" \]\]' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
 launch_line="$(grep -n 'specialist_command >"\$SPECIALIST_GATE_LOG" 2>&1 &' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
 check "launch is inside the deep_review gate (gate precedes launch)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$launch_line" ] && [ "$launch_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
@@ -144,6 +144,38 @@ check_not_contains "old review.sh launch placement is gone" \
 echo ""
 echo "=== review.sh: step summary row guarded ==="
 check_contains "Specialists row guarded by DEEP_REVIEW_ACTIVE" "$REVIEW" 'DEEP_REVIEW_ACTIVE:-false'
+check_contains "summary surfaces the auto selection counts (#633)" "$REVIEW" 'deep_review_mode'
+check_contains "summary reads selected_roles from the aggregate (#633)" "$REVIEW" '.selection.selected_roles | length'
+
+echo ""
+echo "=== role_selection.py: deterministic auto selection (#633) ==="
+ROLE_SELECTION_PY="$ROOT_DIR/pr_reviewer/role_selection.py"
+if [ -f "$ROLE_SELECTION_PY" ]; then
+  if python3 -m py_compile "$ROLE_SELECTION_PY" 2>/dev/null; then
+    echo "  PASS: py_compile clean"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: py_compile failed"
+    FAIL=$((FAIL + 1))
+  fi
+  ROLE_SEL_SRC="$(cat "$ROLE_SELECTION_PY")"
+  check_not_contains "no transport import (no model call for selection)" "$ROLE_SEL_SRC" 'run_chat_request'
+  check_not_contains "no requests/urllib import" "$ROLE_SEL_SRC" 'import requests'
+  check_not_contains "no urllib import" "$ROLE_SEL_SRC" 'import urllib'
+  check_contains "selection imports the fixed role order from the contract module" \
+    "$ROLE_SEL_SRC" 'from pr_reviewer.specialists import SPECIALIST_ROLES_ORDER'
+  check_contains "selection emits a version-1 artifact" "$ROLE_SEL_SRC" '"version": SELECTION_ARTIFACT_VERSION'
+else
+  echo "  FAIL: $ROLE_SELECTION_PY missing"
+  FAIL=$((FAIL + 1))
+fi
+PY_SRC="$(cat "$SPECIALISTS_PY")"
+check_contains "runner wires the selector (#633)" "$PY_SRC" 'from pr_reviewer.role_selection import select_specialist_roles'
+check_contains "runner records the requested mode" "$PY_SRC" '"deep_review_mode"'
+check_contains "runner embeds the selection artifact" "$PY_SRC" 'aggregate["selection"] = selection_artifact'
+check_contains "runner treats skipped roles as non-errors" "$PY_SRC" 'not in ("ok", "skipped")'
+check_contains "runner accepts auto as an enabled mode" "$PY_SRC" 'deep_mode not in ("true", "auto")'
+check_contains "runner passes skipped roles to the section renderer" "$PY_SRC" 'skipped_roles=frozenset(skipped_reasons)'
 
 echo ""
 echo "=== run_specialists.py: no native tool loop for specialists ==="
@@ -240,6 +272,47 @@ echo "=== precheck.py: deep review config fingerprinted ==="
 frozen_block="$(sed -n '/_EXACT_CONFIG_KEYS = frozenset/,/^))$/p' "$PRECHECK_PY" || true)"
 check_contains "DEEP_REVIEW in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW"'
 check_contains "DEEP_REVIEW_TIMEOUT_SEC in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_TIMEOUT_SEC"'
+check_contains "auto selection signature fingerprinted (#633)" "$frozen_block" '"PRECHECK_SELECTION_SIGNATURE"'
+
+echo ""
+echo "=== check_review_needed.sh: auto-selection inputs invalidate stale reviews (#633) ==="
+CHECK_SH="$ROOT_DIR/scripts/check_review_needed.sh"
+CHECK="$(cat "$CHECK_SH")"
+BUILDER_PY="$ROOT_DIR/scripts/build_selection_fingerprint.py"
+if [ -f "$BUILDER_PY" ]; then
+  if python3 -m py_compile "$BUILDER_PY" 2>/dev/null; then
+    echo "  PASS: py_compile clean"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: py_compile failed"
+    FAIL=$((FAIL + 1))
+  fi
+  BUILDER_SRC="$(cat "$BUILDER_PY")"
+  check_not_contains "builder writes no artifacts (pure stdout)" "$BUILDER_SRC" 'write_text'
+  check_contains "builder uses the python platform seam" "$BUILDER_SRC" 'platform_mod.gh_api'
+  check_contains "builder reuses the pipeline's Linear collector" "$BUILDER_SRC" 'linear_context.collect_from_pr'
+  check_contains "builder fails on undetermined inputs (conservative)" "$BUILDER_SRC" 'return None, f"linked issue'
+else
+  echo "  FAIL: $BUILDER_PY missing"
+  FAIL=$((FAIL + 1))
+fi
+check_contains "signature built only when deep_review=auto" "$CHECK" '== "auto" ]]'
+check_contains "signature exported for the precheck config hash" "$CHECK" 'PRECHECK_SELECTION_SIGNATURE'
+check_contains "build failure forces a fresh review (unique sentinel, never a stale skip)" \
+  "$CHECK" 'unavailable-$$-$(date +%s)-${RANDOM:-0}'
+check_contains "failure warning explains the forced review" "$CHECK" 'could not determine every selection input'
+
+# #633: the precheck step must receive the Linear credential — the builder
+# hashes the same Linear state the review pipeline fetches. Bound on the
+# step only (never the shared env file); the *_API_KEY suffix keeps it out
+# of the config fingerprint.
+PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Run AI review/' "$ACTION_YML")"
+check "precheck step binds LINEAR_API_KEY (auto fingerprint needs it)" \
+  "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear_api_key }}' || true)" "1"
+check "LINEAR_API_KEY is bound exactly twice (precheck + review steps; never the shared file)" \
+  "$(grep -c 'LINEAR_API_KEY:' "$ACTION_YML" || true)" "2"
+check "LINEAR_API_KEY stays out of the shared export block" \
+  "$(printf '%s\n' "$shared_env_section" | grep -c 'LINEAR_API_KEY' || true)" "0"
 check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
 

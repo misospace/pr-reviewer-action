@@ -593,3 +593,297 @@ def test_worker_crash_writes_full_artifact_set(tmp_path, monkeypatch):
         )
         assert set(response) == {"error"}
         assert "worker exploded" in response["error"]
+
+
+# ── 15. Auto mode: deterministic role selection (#633) ─────────────
+
+
+def write_classification(ws: Path, payload: dict) -> Path:
+    path = ws / "classification.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_auto_mode_runs_only_selected_roles(tmp_path, monkeypatch):
+    """auth_changes classification → only the security specialist runs;
+    skipped roles are telemetry (status skipped + reason), produce no
+    per-role artifacts, and never count as errors."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "auth_changes",
+        "risk_flags": ["auth_changes"],
+        "changed_files_summary": ["src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == {"security"}
+
+    # Skipped roles: no artifacts at all.
+    for role in ("correctness", "tests"):
+        assert not (ws / f"specialist-{role}.json").exists()
+        assert not (ws / f"specialist-{role}.request.json").exists()
+        assert not (ws / f"specialist-{role}.response.json").exists()
+
+    agg = aggregate(ws)
+    assert agg["enabled"] is True
+    assert agg["deep_review_mode"] == "auto"
+    assert agg["total_leads"] == 1
+    assert agg["any_errors"] is False
+    assert [r["role"] for r in agg["roles"]] == list(ROLES)
+    by_name = {r["role"]: r for r in agg["roles"]}
+    assert by_name["security"]["status"] == "ok"
+    assert by_name["security"]["lead_count"] == 1
+    for role in ("correctness", "tests"):
+        assert by_name[role]["status"] == "skipped"
+        assert by_name[role]["error_kind"] is None
+        assert by_name[role]["lead_count"] == 0
+        assert "no correctness-lane signal" in by_name[role]["reason"] or \
+               "no tests-lane signal" in by_name[role]["reason"]
+
+    # The selection artifact is embedded verbatim.
+    assert agg["selection"]["selected_roles"] == ["security"]
+    assert agg["selection"]["skipped_roles"] == ["correctness", "tests"]
+    assert agg["selection"]["classification_available"] is True
+
+
+def test_auto_mode_zero_selection_makes_no_calls(tmp_path, monkeypatch):
+    """Docs-only trivial PR: zero roles, zero transport calls, aggregate
+    still written with the gate reason, section + signal stay empty."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["README.md", ".github/dependabot.yml"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(monkeypatch, tmp_path)
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert calls == []
+    agg = aggregate(ws)
+    assert agg["deep_review_mode"] == "auto"
+    assert agg["total_leads"] == 0
+    assert agg["any_errors"] is False
+    assert all(r["status"] == "skipped" for r in agg["roles"])
+    assert agg["selection"]["zero_selection_reason"].startswith("trivial class")
+    assert (ws / "specialists.md").read_text(encoding="utf-8") == ""
+    assert (ws / "specialist-leads-present.txt").read_text(encoding="utf-8") == ""
+
+
+def test_auto_mode_can_select_all_three_roles(tmp_path, monkeypatch):
+    """A multi-signal PR (dependency kind + security + priority flags)
+    selects correctness, security, and tests — every role runs."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "dependency_upgrade",
+        "risk_flags": ["linked_priority_p0", "linked_security_issue", "auth_changes"],
+        "changed_files_summary": ["package-lock.json", "src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["selection"]["skipped_roles"] == []
+
+
+def test_true_mode_still_runs_all_three_despite_classification(tmp_path, monkeypatch):
+    """deep_review=true preserves v2.5 semantics exactly: all three roles run
+    even when auto selection would have skipped some; no selection artifact
+    is embedded."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    # Docs-only classification would select zero roles in auto mode.
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["README.md"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="true")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert "selection" not in agg
+    assert all(r["status"] == "ok" for r in agg["roles"])
+
+
+def test_auto_mode_missing_classification_fails_conservatively(tmp_path, monkeypatch):
+    """Negative control (#633 review fix): no classification.json must NOT
+    select zero roles — the conservative fallback runs all three so a
+    selection problem can only over-scrutinize, never under-scrutinize."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["selection"]["classification_available"] is False
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    # The fallback reason lives on the selection decisions; roles that RAN
+    # carry normal entries.
+    assert all(
+        "conservative fallback" in d["reason"]
+        for d in agg["selection"]["decisions"]
+    )
+
+
+def test_auto_mode_unknown_kind_fails_conservatively(tmp_path, monkeypatch):
+    """The classifier's failure fallback (pr_kind=unknown) is not a trivial
+    signal: all three roles run with classification marked unavailable."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {"pr_kind": "unknown", "risk_flags": []})
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["selection"]["classification_available"] is False
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+
+
+def test_auto_mode_role_artifacts_and_section_cover_selected_roles_only(
+    tmp_path, monkeypatch
+):
+    """The #609 corpus section renders only the roles that ran: a skipped
+    role renders no block at all, not a zero-lead note."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "auth_changes",
+        "risk_flags": ["auth_changes"],
+        "changed_files_summary": ["src/auth.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    section = (ws / "specialists.md").read_text(encoding="utf-8")
+    assert "## Security" in section
+    assert "## Correctness" not in section
+    assert "## Tests" not in section
+    assert "no advisory leads" not in section
+
+
+def test_auto_mode_future_kind_fails_conservatively(tmp_path, monkeypatch):
+    """Negative control (#633 review round 2): a usable classification with
+    a kind no lane knows (a future classifier value) must run all three
+    roles — never silently zero."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "new_behavioral_kind",
+        "risk_flags": [],
+        "changed_files_summary": ["src/thing.py"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+    assert agg["selection"]["zero_selection_reason"] == ""
+
+
+# ── 16. Metadata uncertainty runs all roles (#633 review fix, round 3) ─
+
+
+def test_auto_mode_metadata_uncertainty_runs_all_roles(tmp_path, monkeypatch):
+    """Fresh-review regression: a docs/meta-only PR whose GitHub linked-issue
+    fetch failed (classification carries linked_metadata_uncertain) must run
+    ALL roles — the zero-specialist gate must not fire on missing signals."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["README.md", "docs/usage.md"],
+        "linked_metadata_uncertain": True,
+        "linked_metadata_uncertainty": ["github linked issue #12 fetch failed"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["total_leads"] == 3
+    assert agg["any_errors"] is False
+    assert agg["selection"]["metadata_uncertain"] is True
+    assert agg["selection"]["selected_roles"] == list(ROLES)
+
+
+def test_auto_mode_linear_uncertainty_runs_all_roles(tmp_path, monkeypatch):
+    """Fresh-review regression: a configured Linear identifier whose lookup
+    failed carries the same uncertainty — all roles, never zero."""
+    ws = ws_dir(tmp_path)
+    corpus = write_corpus(tmp_path / "corpus.md", CORPUS_MARKER)
+    write_classification(ws, {
+        "pr_kind": "app_code",
+        "risk_flags": [],
+        "changed_files_summary": ["docs/readme.md"],
+        "linked_metadata_uncertain": True,
+        "linked_metadata_uncertainty": ["linear OPS-42 lookup failed"],
+    })
+    env_setup(tmp_path, monkeypatch, DEEP_REVIEW="auto")
+    calls = patch_transport(
+        monkeypatch, tmp_path,
+        behavior=lambda role, attempt: openai_response(make_leads_json(role)),
+    )
+
+    assert run_main(tmp_path, ws, corpus) == 0
+
+    assert {c[0] for c in calls} == set(ROLES)
+    agg = aggregate(ws)
+    assert agg["selection"]["metadata_uncertain"] is True

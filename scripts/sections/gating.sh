@@ -167,15 +167,21 @@ build_specialist_corpus_command() {
     --max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"
 }
 
-# Build the compact #632 pre-final specialist corpus, then fork the three fixed
-# roles (concurrent with each other inside run_specialists.py) when deep_review
-# is enabled. The build happens here, before the fork, so the corpus is fixed
-# from the artifacts collected so far — never the final review corpus, and
-# never retroactively mutated by a CI result that lands later.
+# Build the compact #632 pre-final specialist corpus, then fork the selected
+# fixed roles (concurrent with each other inside run_specialists.py) when
+# deep_review is enabled. The build happens here, before the fork, so the
+# corpus is fixed from the artifacts collected so far — never the final review
+# corpus, and never retroactively mutated by a CI result that lands later.
+# 'true' runs all three roles (v2.5 semantics); 'auto' (#633) enters the same
+# gate with run_specialists.py deterministically selecting the roles from
+# classification data (possibly zero) — skipped roles are telemetry, not
+# failures, and an empty selection leaves the corpus byte-identical to the
+# disabled run.
 fork_specialist_gate() {
   DEEP_REVIEW_ACTIVE="false"
   SPECIALIST_GATE_PID=""
-  if [[ "$(printf '%s' "${DEEP_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]]; then
+  _DEEP_MODE="$(printf '%s' "${DEEP_REVIEW:-false}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$_DEEP_MODE" != "true" && "$_DEEP_MODE" != "auto" ]]; then
     return 0
   fi
   require_gate_tree_cleanup || return 1
@@ -187,7 +193,11 @@ fork_specialist_gate() {
   fi
   specialist_command >"$SPECIALIST_GATE_LOG" 2>&1 &
   SPECIALIST_GATE_PID=$!
-  log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the bounded specialist corpus (pid $SPECIALIST_GATE_PID)"
+  if [[ "$_DEEP_MODE" == "auto" ]]; then
+    log "deep_review: auto mode (#633) — roles selected deterministically from classification (possibly zero), launched concurrently over the bounded specialist corpus (pid $SPECIALIST_GATE_PID)"
+  else
+    log "deep_review: specialist roles (correctness/security/tests) launched concurrently over the bounded specialist corpus (pid $SPECIALIST_GATE_PID)"
+  fi
 }
 
 # Reap the specialist phase fully before its rendered leads are read. Fail-soft:

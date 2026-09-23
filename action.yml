@@ -363,15 +363,19 @@ inputs:
     required: false
     default: "8000"
 
-  # Deep review: opt-in specialist leads. When enabled, the three fixed specialist
-  # roles (correctness / security / tests — pr_reviewer/specialists.py) run
-  # concurrently over the same review corpus, reusing the primary model settings.
-  # Each specialist's structured leads are parsed and normalized (severity capped
+  # Deep review: opt-in specialist leads. 'true' runs all three fixed
+  # specialist roles (correctness / security / tests — pr_reviewer/specialists.py)
+  # concurrently over the same review corpus, reusing the primary model
+  # settings. 'auto' (#633) deterministically selects the roles worth running
+  # from the classification data (pr_kind / risk_flags / changed-file classes;
+  # no model call) — possibly zero. 'false' disables the phase. Each
+  # specialist's structured leads are parsed and normalized (severity capped
   # below a blocker, bounded) and written to specialist-<role>.json +
-  # specialists.json. Advisory only in this iteration: the leads never touch the
-  # verdict, enforcement, or the published review body.
+  # specialists.json. Advisory only in this iteration: the leads never touch
+  # the verdict, enforcement, or the published review body; skipped roles are
+  # telemetry, not failures.
   deep_review:
-    description: 'Run opt-in specialist leads (correctness/security/tests) over the review corpus. Advisory only'
+    description: 'Specialist leads (correctness/security/tests) over the review corpus: false = off, true = all three roles, auto = deterministic classifier-driven selection, possibly zero (advisory only)'
     required: false
     default: 'false'
 
@@ -995,6 +999,16 @@ runs:
         REREVIEW_LABEL: ${{ inputs.rereview_label }}
         ACTION_REF: ${{ github.action_ref }}
         LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
+        # #633: with deep_review=auto, the precheck's stale-review detection
+        # hashes the same Linear state (priority/labels of configured
+        # identifiers) the review pipeline's Linear phase fetches, so a
+        # Linear priority/label change invalidates a stale managed comment.
+        # The key is bound HERE ONLY — it stays out of the shared env file
+        # and out of the config fingerprint (the *_API_KEY suffix is
+        # excluded); the builder uses it solely for the read-only issue
+        # lookup, and fork PRs never query Linear unless
+        # linear_enable_for_forks is set (the pipeline's own gate).
+        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
       run: |
         set -euo pipefail
         # Load the shared bindings (REPO, PR_NUMBER, AI_MODEL, TOOL_* , ...)

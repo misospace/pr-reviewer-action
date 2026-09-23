@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,11 @@ from pr_reviewer.semantic_eval import (
     CAPABILITY_RUNTIME_PROTOCOL,
     CAPABILITY_SEQUENCING,
     CAPABILITY_STALE_REVIEW_STATE,
+    CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    CAPABILITY_BACKGROUND_LIFECYCLE,
+    CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    CAPABILITY_REMEDIATION_TOPOLOGY,
+    CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
     SIGNAL_KIND_FINDING,
     SIGNAL_KIND_MENTION,
     SIGNAL_KIND_TOOL,
@@ -344,7 +352,7 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    assert payload["scenarios_evaluated"] == 7
+    assert payload["scenarios_evaluated"] == 17
     assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0
     assert payload["per_scenario_summary"]["638"]["routes"] == ["primary", "primary+escalation"]
     assert payload["per_scenario_summary"]["645"]["routes"] == ["primary", "primary+escalation"]
@@ -355,7 +363,8 @@ def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
     negative = next(item for item in corpus.scenarios if item.number == 6451)
     negative.offline_runs[0]["findings"] = [{"stage": "primary", "message": "The deleted declaration still exists in the runtime."}]
     report = evaluate_semantic_corpus(corpus)
-    assert report["summary"]["false_positive_rate"] == 0.5
+    expected = round(1 / len([item for item in corpus.scenarios if item.negative_control]), 4)
+    assert report["summary"]["false_positive_rate"] == expected
     assert report["summary"]["false_positive_rate"] == report["negative_control_summary"]["false_positive_rate"]
 
 
@@ -585,3 +594,474 @@ def test_escalation_findings_are_attributed_for_historical_scenarios(number: int
     )
     assert result.passed
     assert result.stages_hit == ["escalation"]
+
+
+# ── #659 PR #654 execution-boundary / lifecycle fixtures ───────────────────
+
+POSITIVE_654 = {
+    6541: CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    6543: CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    6545: CAPABILITY_BACKGROUND_LIFECYCLE,
+    6547: CAPABILITY_REMEDIATION_TOPOLOGY,
+    6549: CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+}
+
+# Each vulnerable fixture has a fixed negative control forbidding the same class.
+NEGATIVE_654 = {
+    6542: CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+    6544: CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+    6546: CAPABILITY_BACKGROUND_LIFECYCLE,
+    6548: CAPABILITY_REMEDIATION_TOPOLOGY,
+    6550: CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+}
+
+GENERIC_WARNINGS = (
+    "Consider cleanup of background processes before merge.",
+    "Check security boundaries for this execution change.",
+    "Please review the security and lifecycle implications.",
+    "Looks good; approval.",
+)
+
+
+def _run_finding_text(scenario_item, run_index: int = 0) -> str:
+    return scenario_item.offline_runs[run_index]["findings"][0]["message"]
+
+
+def _fixture_file(number: int, path: str) -> str:
+    item = scenario(number)
+    fixture_path = CORPUS.parent / item.fixture["path"]
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return next(entry["content"] for entry in data["files"] if entry["path"] == path)
+
+
+def _function_body(source: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)^\}}", source)
+    assert match is not None, f"missing function: {name}"
+    return match.group(1)
+
+
+def _assert_collect_before_kill(source: str) -> None:
+    """Prove the fixture uses collect-before-kill tree cleanup, not streaming.
+
+    Streaming (killing each PID inside the loop that reads gate_descendants)
+    can reparent a just-killed child's grandchildren before the generator walks
+    them, so a payload descendant can survive. The merged safe contract instead
+    collects the complete descendant set into an array before signaling
+    anything, then terminates deepest-first, escalates to KILL, and reaps.
+    """
+    body = _function_body(source, "gate_terminate_and_reap")
+    assert "local -a targets=()" in body, "descendants must be collected into an array"
+    assert "targets+=(" in body, "descendants must be collected before signaling"
+    assert "done < <(gate_descendants" in body, "the descendant walk must feed the collection loop"
+    assert "for (( d=${#targets[@]}-1; d>=0; d-- ))" in body, "descendants must be signaled deepest-first"
+    assert 'kill -TERM "${targets[$d]}"' in body, "TERM must target the collected array, not a stream"
+    assert "kill -KILL" in body, "cleanup must escalate to KILL"
+    assert 'wait "$pid"' in body, "the leader must be reaped"
+    assert body.index("targets+=(") < body.index("kill -TERM"), "collect must happen before any signal"
+    stream = re.search(r"(?ms)while IFS= read -r d; do\n(.*?)\n\s*done < <\(gate_descendants", body)
+    assert stream is not None, "the collection loop must consume gate_descendants"
+    assert "kill" not in stream.group(1), "the descendant-read loop must not signal (streaming enumeration while killing)"
+
+
+# A description of the failure each negative control forbids, plus the head
+# content that must have changed so the description is no longer true. The
+# scorer must still recognize the description (it is not being taught to
+# ignore it); the fixture side is what makes it inapplicable.
+NEGATIVE_SAFETY = {
+    6542: {
+        "failure": (
+            "Moving the CI poller into the review process makes the child inherit reviewer "
+            "secrets and model credentials."
+        ),
+        "forbidden": CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["env -i", "_CI_GATE_ENV_KEYS"],
+                ["AI_API_KEY", "AI_PRIMARY_API_KEY", "TOOL_MCP_TOKEN", "LINEAR_API_KEY"],
+            )
+        ],
+    },
+    6544: {
+        "failure": (
+            "The env -i allowlist removes required transport variables and drops the proxy "
+            "configuration for self-hosted deployments."
+        ),
+        "forbidden": CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["HTTP_PROXY", "HTTPS_PROXY", "SSL_CERT_FILE", "GH_CONFIG_DIR"],
+                ["AI_API_KEY"],
+            )
+        ],
+    },
+    6546: {
+        "failure": (
+            "There is no abnormal-exit owner; cleanup kills only the tracked wrapper pid so the "
+            "credential-bearing CI child and its descendants survive an abnormal exit."
+        ),
+        "forbidden": CAPABILITY_BACKGROUND_LIFECYCLE,
+        "collect_before_kill": True,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["install_gate_lifecycle_trap", "gate_descendants", "pgrep -P", "RUNNER_TRACKING_ID"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            )
+        ],
+    },
+    6548: {
+        "failure": (
+            "Cleanup kills only the tracked wrapper pid, so the production payload and "
+            "descendants survive an abnormal exit."
+        ),
+        "forbidden": CAPABILITY_REMEDIATION_TOPOLOGY,
+        "collect_before_kill": True,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["require_gate_tree_cleanup", "gate_descendants", "cleanup_gate_children"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            ),
+            (
+                "tests/test_concurrent_gating.sh",
+                ["ci-wrapper.pid", "ci-payload.pid", "( sleep 30 ) &"],
+                ["exec sleep 30"],
+            ),
+        ],
+    },
+    6550: {
+        "failure": (
+            "Tree-aware cleanup depends on pgrep but pgrep is not part of the validated runtime "
+            "contract, so it falls back to wrapper-only and leaves the payload tree alive."
+        ),
+        "forbidden": CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+        "collect_before_kill": True,
+        "checks": [
+            (
+                "scripts/gating.sh",
+                ["require_gate_tree_cleanup", "pgrep -P"],
+                ["command -v pgrep >/dev/null 2>&1 || return 0"],
+            )
+        ],
+    },
+}
+
+
+def test_654_capability_classes_are_registered() -> None:
+    from pr_reviewer.semantic_eval import KNOWN_CAPABILITY_CLASSES
+
+    assert set(POSITIVE_654.values()) <= KNOWN_CAPABILITY_CLASSES
+    corpus = SemanticCorpus.from_file(CORPUS)
+    numbers = {item.number for item in corpus.scenarios}
+    assert set(POSITIVE_654) <= numbers
+    assert set(NEGATIVE_654) <= numbers
+    for item in corpus.scenarios:
+        if item.number in NEGATIVE_654:
+            assert item.negative_control is True
+            assert item.forbidden_capabilities == [NEGATIVE_654[item.number]]
+            assert item.expected_capabilities == []
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_vulnerable_fixtures_classify_their_class(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        result = evaluate_semantic_capability(item, [
+            ReviewSignal(SIGNAL_KIND_FINDING, run["findings"][0]["stage"], run["findings"][0]["message"]),
+            *(tool(run["findings"][0]["stage"], call["args"]["path"]) for call in run.get("tool_calls", [])),
+        ], {"mode": run.get("mode", "standard"), "route": run.get("route", "primary"), "stage": run["stage"]})
+        assert result.passed, (number, run["stage"])
+        assert POSITIVE_654[number] in result.capability_hits
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_654))
+def test_654_fixed_negative_controls_stay_clean(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, run["findings"][0]["stage"], run["findings"][0]["message"])],
+            {"mode": run.get("mode", "standard"), "route": run.get("route", "primary"), "stage": run["stage"]},
+        )
+        assert result.passed, (number, result.forbidden_violations)
+        assert result.forbidden_violations == []
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_generic_warnings_do_not_satisfy_positive_fixtures(number: int) -> None:
+    item = scenario(number)
+    for warning in GENERIC_WARNINGS:
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, "primary", warning)],
+            {"mode": "standard", "route": "primary", "stage": "primary"},
+        )
+        assert not result.passed, (number, warning)
+        assert POSITIVE_654[number] not in result.capability_hits
+
+
+@pytest.mark.parametrize("warning", GENERIC_WARNINGS)
+def test_654_generic_warnings_match_no_capability(warning: str) -> None:
+    assert classify_signal(warning) is None
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_654))
+def test_654_negative_controls_reject_their_vulnerability(number: int) -> None:
+    item = scenario(number)
+    vulnerable = _run_finding_text(scenario(number - 1))
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", vulnerable)],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert not result.passed
+    assert NEGATIVE_654[number] in result.forbidden_violations
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_SAFETY))
+def test_654_negative_controls_are_genuinely_safe(number: int) -> None:
+    """A correct description of the forbidden failure must not apply to the fixture.
+
+    The scorer still recognizes the failure description (it is not taught to
+    ignore it), and the fixture head has actually changed so the description is
+    no longer true of the reviewed code.
+    """
+    spec = NEGATIVE_SAFETY[number]
+    assert classify_signal(spec["failure"]) == spec["forbidden"], (number, spec["failure"])
+    item = scenario(number)
+    detected = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", spec["failure"])],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert spec["forbidden"] in detected.forbidden_violations, number
+    if spec.get("collect_before_kill"):
+        _assert_collect_before_kill(_fixture_file(number, "scripts/gating.sh"))
+    for path, required, absent in spec["checks"]:
+        head = _fixture_file(number, path)
+        for needle in required:
+            assert needle in head, (number, path, needle)
+        for needle in absent:
+            assert needle not in head, (number, path, needle)
+
+
+STREAMING_ENUMERATION_WHILE_KILLING = """\
+gate_descendants() {
+  :
+}
+
+gate_terminate_and_reap() {
+  local pid="$1"
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] && kill -TERM "$d" 2>/dev/null || true
+  done < <(gate_descendants "$pid")
+  kill -TERM "$pid" 2>/dev/null || true
+}
+"""
+
+
+def test_654_safety_check_rejects_streaming_enumeration_while_killing() -> None:
+    """The structural check must reject the unsafe streaming cleanup.
+
+    This is the exact shape the fixtures previously used (and that the merged
+    gating.sh replaced): signal each descendant inside the loop that reads
+    gate_descendants, so a killed child can reparent its grandchildren before
+    the walk sees them.
+    """
+    with pytest.raises(AssertionError):
+        _assert_collect_before_kill(STREAMING_ENUMERATION_WHILE_KILLING)
+
+
+_CLEANUP_BEHAVIOR_HARNESS = r"""
+set -uo pipefail
+SCRIPT_DIR="$1"
+STATE_DIR="$2"
+CI_GATE_LOG="$STATE_DIR/ci.log"
+log() { :; }
+error() { :; }
+source "$SCRIPT_DIR/gating.sh"
+wait_for_ci_command() {
+  echo "$BASHPID" > "$STATE_DIR/wrapper.pid"
+  bash -c "echo \$\$ > '$STATE_DIR/payload.pid'; sleep 300 & echo \$! > '$STATE_DIR/grandchild.pid'; wait" &
+  local payload=$!
+  wait "$payload"
+}
+install_gate_lifecycle_trap
+export CI_STATUS_CHECK=true
+fork_ci_gate
+for _ in $(seq 1 300); do
+  [ -s "$STATE_DIR/payload.pid" ] && [ -s "$STATE_DIR/grandchild.pid" ] && break
+  sleep 0.02
+done
+exit 7
+"""
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.mark.parametrize("number", [6546, 6548, 6550])
+def test_654_negative_control_cleanup_reaps_the_payload_tree(number: int, tmp_path: Path) -> None:
+    """Behavioral proof: the fixture's abnormal-exit cleanup kills the tree.
+
+    Runs the fixture's own gating.sh with a distinct wrapper/payload/grandchild
+    topology and asserts nothing survives the abnormal exit, so a correct
+    reviewer cannot report the forbidden lifecycle/topology failure.
+    """
+    if subprocess.run(["bash", "-c", "command -v pgrep"], capture_output=True).returncode != 0:
+        pytest.skip("pgrep unavailable")
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "gating.sh").write_text(_fixture_file(number, "scripts/gating.sh"), encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    harness = tmp_path / "harness.sh"
+    harness.write_text(_CLEANUP_BEHAVIOR_HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(harness), str(source_dir), str(state)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 7, (number, result.returncode, result.stderr)
+    pids = {}
+    for name in ("wrapper", "payload", "grandchild"):
+        pid_file = state / f"{name}.pid"
+        assert pid_file.exists(), (number, name, result.stderr)
+        pids[name] = int(pid_file.read_text().strip())
+    assert pids["wrapper"] != pids["payload"] != pids["grandchild"], (number, pids)
+    for _ in range(100):
+        if not any(_process_alive(pid) for pid in pids.values()):
+            break
+        time.sleep(0.02)
+    for name, pid in pids.items():
+        assert not _process_alive(pid), (number, name, pid)
+
+
+def test_654_dependency_requires_both_cause_and_effect() -> None:
+    item = scenario(6549)
+    cause_only = "pgrep is not part of the validated runtime contract and tree-aware cleanup depends on it."
+    effect_only = "Cleanup falls back to wrapper-only, leaving the payload tree alive."
+
+    cause_result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", cause_only), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY in cause_result.capability_hits
+    assert not cause_result.passed
+    assert any(a["id"] == "wrapper-only-effect" and not a["satisfied"] for a in cause_result.anchor_results)
+
+    effect_result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", effect_only), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY in effect_result.capability_hits
+    assert not effect_result.passed
+    assert any(a["id"] == "pgrep-required-cause" and not a["satisfied"] for a in effect_result.anchor_results)
+
+
+@pytest.mark.parametrize(
+    ("number", "effect_only"),
+    [
+        (6541, "The CI child inherits reviewer secrets and model credentials."),
+        (6543, "The allowlist drops the proxy configuration for self-hosted deployments."),
+        (6547, "Cleanup kills only the tracked wrapper pid, leaving the workload running."),
+    ],
+)
+def test_654_effect_without_cause_fails_the_causal_chain(number: int, effect_only: str) -> None:
+    item = scenario(number)
+    result = evaluate_semantic_capability(
+        item,
+        [
+            ReviewSignal(SIGNAL_KIND_FINDING, "primary", effect_only),
+            tool("primary", item.offline_runs[0]["tool_calls"][0]["args"]["path"]),
+        ],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert POSITIVE_654[number] in result.capability_hits
+    assert not result.passed
+
+
+def test_654_lifecycle_fixture_requires_the_runner_tracking_causal_link() -> None:
+    item = scenario(6545)
+    partial = (
+        "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, "
+        "so a parent exit between fork and join leaves an orphaned CI child."
+    )
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", partial), tool("primary", "scripts/gating.sh")],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert CAPABILITY_BACKGROUND_LIFECYCLE in result.capability_hits
+    assert not result.passed
+    assert any(item_["id"] == "runner-tracking" and not item_["satisfied"] for item_ in result.anchor_results)
+
+
+def test_654_safe_narrowing_prose_is_not_a_boundary_vulnerability() -> None:
+    for safe in (
+        "The env -i allowlist prevents the CI child from inheriting reviewer secrets and model credentials.",
+        "The CI child does not inherit reviewer secrets under the explicit least-privilege boundary.",
+        "The allowlist excludes reviewer secrets and preserves the authority boundary.",
+    ):
+        assert classify_signal(safe) is None, safe
+
+
+def test_654_pr654_historical_miss_phrasing_does_not_satisfy() -> None:
+    """Baseline: the observed PR #654 review outputs (#659 ledger) must not score.
+
+    PR #654's MiniMax-M3 smart escalation called the change solid and claimed the
+    security boundary was preserved via the allowlist; the OpenCode control run
+    and the local models flagged only generic timing/cleanup items. None of that
+    names a causal execution-boundary or lifecycle failure, so none of it may
+    satisfy the new fixtures.
+    """
+    misses = {
+        6541: "The PR is solid and the security boundary is preserved via the explicit allowlist; no correctness bugs found.",
+        6543: "Looks good; transport and CA handling is unchanged.",
+        6545: "Consider cleanup of the background CI child on abnormal exit; otherwise looks fine.",
+        6547: "Add a trap that kills the background CI gate child on exit to fix the lifecycle issue.",
+        6549: "The cleanup uses pgrep; looks correct to me.",
+    }
+    for number, text in misses.items():
+        item = scenario(number)
+        result = evaluate_semantic_capability(
+            item,
+            [ReviewSignal(SIGNAL_KIND_FINDING, "primary", text)],
+            {"mode": "standard", "route": "primary", "stage": "primary"},
+        )
+        assert not result.passed, (number, text)
+        assert POSITIVE_654[number] not in result.capability_hits, (number, text)
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_654))
+def test_654_attribution_supports_specialist_primary_and_escalation(number: int) -> None:
+    item = scenario(number)
+    for stage, route, mode, escalated in (
+        ("specialist", "primary", "deep", False),
+        ("primary", "primary", "standard", False),
+        ("escalation", "primary+escalation", "standard", True),
+    ):
+        finding_text = item.offline_runs[0]["findings"][0]["message"]
+        result = evaluate_semantic_capability(
+            item,
+            [
+                ReviewSignal(SIGNAL_KIND_FINDING, stage, finding_text),
+                tool(stage, item.offline_runs[0]["tool_calls"][0]["args"]["path"]),
+            ],
+            {"mode": mode, "route": route, "stage": stage, "escalated": escalated},
+        )
+        assert result.passed, (number, stage)
+        assert stage in result.stages_hit

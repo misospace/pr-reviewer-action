@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "scenario": 6543,
+  "provenance": {
+    "historical_pr": 654,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #654 execution-boundary/lifecycle failure class"
+  },
+  "pr_json": {
+    "number": 654,
+    "title": "feat(review): overlap specialist passes with CI gating (#634)",
+    "body": "",
+    "head": {
+      "sha": "fixture-6543-head",
+      "ref": "feature/concurrent-gates"
+    },
+    "base": {
+      "sha": "fixture-6543-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 4,
+    "additions": 27,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/654"
+  },
+  "diff": "diff --git a/action.yml b/action.yml\nindex 08c3f0e..9b598fc 100644\n--- a/action.yml\n+++ b/action.yml\n@@ -2,6 +2,5 @@ name: review\n runs:\n   using: composite\n   steps:\n-    - name: Wait for CI\n-      continue-on-error: true\n-      run: bash \"$GITHUB_ACTION_PATH/scripts/wait_for_ci.sh\"\n+    - name: Review\n+      run: bash \"$GITHUB_ACTION_PATH/scripts/run_review.sh\"\ndiff --git a/docs/self-hosted.md b/docs/self-hosted.md\nnew file mode 100644\nindex 0000000..18c44a2\n--- /dev/null\n+++ b/docs/self-hosted.md\n@@ -0,0 +1 @@\n+Self-hosted runners behind a proxy set HTTP_PROXY and SSL_CERT_FILE; gh reads GH_CONFIG_DIR.\ndiff --git a/scripts/gating.sh b/scripts/gating.sh\nindex a2c2d73..190f8cb 100644\n--- a/scripts/gating.sh\n+++ b/scripts/gating.sh\n@@ -1,10 +1,16 @@\n-fork_ci_gate() {\n-  [[ \"${CI_STATUS_CHECK:-false}\" == \"true\" ]] || return 0\n-  CI_GATE_ACTIVE=\"true\"\n-  wait_for_ci_command >\"$CI_GATE_LOG\" 2>&1 &\n-  CI_GATE_PID=$!\n-}\n+_CI_GATE_ENV_KEYS=(\n+  PATH HOME\n+  GH_TOKEN REPO PR_NUMBER\n+  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n+)\n \n wait_for_ci_command() {\n-  bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n+  local -a env_args=()\n+  local key\n+  for key in \"${_CI_GATE_ENV_KEYS[@]}\"; do\n+    if [ -n \"${!key+x}\" ]; then\n+      env_args+=(\"${key}=${!key}\")\n+    fi\n+  done\n+  env -i \"${env_args[@]}\" bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n }\n",
+  "pr_files": [
+    {
+      "filename": "action.yml",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 7,
+      "changes": 13
+    },
+    {
+      "filename": "docs/self-hosted.md",
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "scripts/gating.sh",
+      "status": "modified",
+      "additions": 15,
+      "deletions": 9,
+      "changes": 24
+    },
+    {
+      "filename": "scripts/run_review.sh",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 4,
+      "changes": 8
+    }
+  ],
+  "files": [
+    {
+      "path": "action.yml",
+      "content": "name: review\nruns:\n  using: composite\n  steps:\n    - name: Review\n      run: bash \"$GITHUB_ACTION_PATH/scripts/run_review.sh\"\n"
+    },
+    {
+      "path": "scripts/run_review.sh",
+      "content": "#!/usr/bin/env bash\nsource \"$SCRIPT_DIR/sections/gating.sh\"\nfork_ci_gate\nreview_main\n"
+    },
+    {
+      "path": "scripts/gating.sh",
+      "content": "_CI_GATE_ENV_KEYS=(\n  PATH HOME\n  GH_TOKEN REPO PR_NUMBER\n  CI_STATUS_CHECK CI_TIMEOUT_SEC CI_CHECKS_FILE\n)\n\nwait_for_ci_command() {\n  local -a env_args=()\n  local key\n  for key in \"${_CI_GATE_ENV_KEYS[@]}\"; do\n    if [ -n \"${!key+x}\" ]; then\n      env_args+=(\"${key}=${!key}\")\n    fi\n  done\n  env -i \"${env_args[@]}\" bash \"$SCRIPT_DIR/wait_for_ci.sh\"\n}\n"
+    },
+    {
+      "path": "docs/self-hosted.md",
+      "content": "Self-hosted runners behind a proxy set HTTP_PROXY and SSL_CERT_FILE; gh reads GH_CONFIG_DIR.\n"
+    }
+  ]
+}

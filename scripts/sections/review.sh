@@ -611,10 +611,19 @@ write_step_summary() {
       local deep_review_leads deep_review_errors
       deep_review_leads="$(jq -r '.total_leads // 0' specialists.json 2>/dev/null || echo '?')"
       deep_review_errors="$(jq -r '.any_errors // false' specialists.json 2>/dev/null || echo '?')"
+      local deep_review_detail=""
+      # #633: in auto mode, surface the deterministic role selection so the
+      # summary explains why fewer than three specialists ran.
+      if [[ "$(jq -r '.deep_review_mode // ""' specialists.json 2>/dev/null || echo '')" == "auto" ]]; then
+        local sel_count skip_count
+        sel_count="$(jq -r '.selection.selected_roles | length' specialists.json 2>/dev/null || echo '?')"
+        skip_count="$(jq -r '.selection.skipped_roles | length' specialists.json 2>/dev/null || echo '?')"
+        deep_review_detail=" (auto: ${sel_count} role(s) selected, ${skip_count} skipped)"
+      fi
       if [[ "$deep_review_errors" == "true" ]]; then
-        echo "| Deep review | ${deep_review_leads} specialist lead(s); some roles recorded errors (advisory only) |"
+        echo "| Deep review | ${deep_review_leads} specialist lead(s)${deep_review_detail}; some roles recorded errors (advisory only) |"
       else
-        echo "| Deep review | ${deep_review_leads} specialist lead(s) (advisory only) |"
+        echo "| Deep review | ${deep_review_leads} specialist lead(s)${deep_review_detail} (advisory only) |"
       fi
     fi
     echo "| Budget | ${budget_desc} |"
