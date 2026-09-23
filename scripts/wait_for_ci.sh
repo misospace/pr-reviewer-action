@@ -84,6 +84,26 @@ error() {
   log "ERROR: $1" >&2
 }
 
+# Deadline-aware poll sleep (#663 review): sleep until the next poll but
+# never past the outer deadline — an unconditional CI_INTERVAL_SEC sleep
+# would overshoot CI_TIMEOUT_SEC by a full interval whenever little budget
+# remains. A nonpositive remainder sleeps not at all; the loop's deadline
+# check then enters the existing timeout path immediately.
+deadline_sleep() {
+  local remaining
+  remaining=$(( CI_DEADLINE_EPOCH - $(date +%s) ))
+  if (( remaining < 1 )); then
+    return 0
+  fi
+  if (( remaining < CI_INTERVAL_SEC )); then
+    sleep "$remaining"
+    elapsed=$(( elapsed + remaining ))
+  else
+    sleep "$CI_INTERVAL_SEC"
+    elapsed=$(( elapsed + CI_INTERVAL_SEC ))
+  fi
+}
+
 # Get the head SHA of the PR (may differ from event.pull_request.head.sha if
 # the action is invoked manually with a stale pr_number).
 get_head_sha() {
@@ -142,6 +162,18 @@ finalize() {
 
 # ── Main loop ───────────────────────────────────────────────────────────
 
+# Absolute outer deadline (#663 review): the WHOLE CI wait shares one
+# budget. Established BEFORE the optional head-SHA lookup below so that
+# request — itself a bounded gh attempt under #663 — draws from the same
+# deadline as the poll loop instead of leaving the loop a fresh full
+# CI_TIMEOUT_SEC. Exported for the platform seam: every bounded attempt
+# clamps to the budget remaining at its own start, so the two sequential
+# API calls inside one poll iteration share the deadline rather than each
+# re-spending it. Internal: computed fresh each run, never inherited.
+ci_started_at="$(date +%s)"
+CI_DEADLINE_EPOCH=$(( ci_started_at + CI_TIMEOUT_SEC ))
+export CI_DEADLINE_EPOCH
+
 # The precheck step already fetched the PR object; reuse its head SHA when
 # forwarded instead of re-fetching.
 sha="$PR_HEAD_SHA"
@@ -157,8 +189,10 @@ log "Polling CI checks for $sha (timeout=${CI_TIMEOUT_SEC}s, interval=${CI_INTER
 
 elapsed=0
 while true; do
-  if [[ "$elapsed" -ge "$CI_TIMEOUT_SEC" ]]; then
-    log "Timeout reached after ${elapsed}s"
+  # The absolute deadline is the wall-clock authority; elapsed (attempt
+  # durations + sleeps) remains for logging and the no-CI heuristic below.
+  if [[ "$elapsed" -ge "$CI_TIMEOUT_SEC" ]] || (( $(date +%s) >= CI_DEADLINE_EPOCH )); then
+    log "Timeout reached after $(( $(date +%s) - ci_started_at ))s"
     if [[ "$(printf '%s' "$CI_SKIP_ON_TIMEOUT" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
       log "ci_skip_on_timeout=true — proceeding without CI context"
       render_ci_checks "timeout (CI did not finish in time)"
@@ -176,12 +210,20 @@ while true; do
   # with self-exclusion (GITHUB_RUN_ID + CI_STATUS_CONTEXT) already applied.
   # Empty stdout means both underlying APIs came back empty — a transient
   # failure worth retrying; an empty JSON array means "no external CI".
+  #
+  # Each attempt is bounded per-call (platform_api.sh #663), so a hung API
+  # returns control here instead of stalling the loop. The observed attempt
+  # duration is folded into elapsed, keeping CI_TIMEOUT_SEC authoritative in
+  # wall-clock terms: without it, repeated near-bound attempts would stretch
+  # real time far past the outer policy (elapsed previously counted only the
+  # sleeps).
+  attempt_start="$(date +%s)"
   ci_checks_json="$(platform_external_checks "$REPO" "$sha" 2>/dev/null || echo "")"
+  elapsed=$(( elapsed + $(date +%s) - attempt_start ))
 
   if [[ -z "$ci_checks_json" ]]; then
-    log "API returned empty; retrying in ${CI_INTERVAL_SEC}s..."
-    sleep "$CI_INTERVAL_SEC"
-    elapsed=$((elapsed + CI_INTERVAL_SEC))
+    log "API returned empty; backing off before retrying (clamped to the outer deadline)..."
+    deadline_sleep
     continue
   fi
 
@@ -202,9 +244,8 @@ while true; do
       log "No external CI checks found after ${elapsed}s — proceeding without CI gating"
       finalize "none"
     fi
-    log "No external CI checks registered yet — waiting ${CI_INTERVAL_SEC}s..."
-    sleep "$CI_INTERVAL_SEC"
-    elapsed=$((elapsed + CI_INTERVAL_SEC))
+    log "No external CI checks registered yet — waiting (clamped to the outer deadline)..."
+    deadline_sleep
     continue
   fi
 
@@ -213,9 +254,8 @@ while true; do
     log "CI checks finalized: success (${total_checks} external check(s))"
     finalize "success"
   else
-    log "Pending: ${pending_checks}/${total_checks} external check(s) — waiting ${CI_INTERVAL_SEC}s..."
+    log "Pending: ${pending_checks}/${total_checks} external check(s) — waiting (clamped to the outer deadline)..."
   fi
 
-  sleep "$CI_INTERVAL_SEC"
-  elapsed=$((elapsed + CI_INTERVAL_SEC))
+  deadline_sleep
 done
