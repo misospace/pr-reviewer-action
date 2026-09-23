@@ -208,21 +208,8 @@ ENFORCEMENT_TOOL_HARNESS="tool-harness.json"
 rm -f tool-harness.smart.json tool-harness.smart.md review-corpus.smart.truncated.md
 run_smart_review() {
   local user_message="$1" status produced failure_reason
-  rm -f ai-response.smart.json
-  if ! SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
-from pathlib import Path
-import os
-import sys
-sys.path.insert(0, os.environ["SCRIPT_DIR"])
-from run_tool_harness import replace_harness_findings_section
-
-corpus = Path("review-corpus.truncated.md").read_text(encoding="utf-8")
-corpus = replace_harness_findings_section(
-    corpus, "Primary tool investigation omitted; conduct your own independent review."
-)
-Path("review-corpus.smart.truncated.md").write_text(corpus, encoding="utf-8")
-PY
-  then
+  rm -f ai-response.smart.json tool-harness.smart.md
+  if ! build_review_corpus smart; then
     SMART_TOOL_FALLBACK="primary"
     return 1
   fi
@@ -253,19 +240,7 @@ PY
         return 1
       fi
       if [ -s tool-harness.smart.md ]; then
-        if ! SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY'
-from pathlib import Path
-import os
-import sys
-sys.path.insert(0, os.environ["SCRIPT_DIR"])
-from run_tool_harness import replace_harness_findings_section
-
-path = Path("review-corpus.smart.truncated.md")
-corpus = path.read_text(encoding="utf-8")
-findings = Path("tool-harness.smart.md").read_text(encoding="utf-8")
-path.write_text(replace_harness_findings_section(corpus, findings), encoding="utf-8")
-PY
-        then
+        if ! build_review_corpus smart; then
           SMART_TOOL_FALLBACK="primary"
           return 1
         fi
@@ -413,7 +388,7 @@ PY
 
   ESCALATION_REASONS="${ESCALATION_REASONS:+${ESCALATION_REASONS},}incomplete_coverage"
   log "Escalating to smart model $SMART_MODEL (incomplete_coverage)"
-  if call_model_tier smart "$retry_prompt" review-corpus.truncated.md ai-request.smart.json ai-response.smart.json; then
+  if build_review_corpus smart && call_model_tier smart "$retry_prompt" review-corpus.smart.truncated.md ai-request.smart.json ai-response.smart.json; then
     smart_ok=1
   fi
 
@@ -520,10 +495,23 @@ echo "cache_hit_ratio=$_chr" >> "$OUTPUT_FILE"
 write_step_summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
 
-  local verdict diff_bytes corpus_bytes prompt_tok comp_tok usage_file
+  local verdict diff_bytes corpus_bytes prompt_tok comp_tok usage_file final_tier final_corpus final_diff budget_cap diff_cap shape context_capacity
   verdict="$(jq -r '.verdict // "unknown"' ai-output.json 2>/dev/null || echo unknown)"
   diff_bytes="$( [ -f pr.diff ] && wc -c < pr.diff | tr -d ' ' || echo 0 )"
-  corpus_bytes="$( [ -f review-corpus.md ] && wc -c < review-corpus.md | tr -d ' ' || echo 0 )"
+  final_tier="primary"; final_corpus="review-corpus.truncated.md"; final_diff="pr.diff.truncated"
+  budget_cap="${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}"; diff_cap="${PRIMARY_MAX_DIFF:-$MAX_DIFF}"
+  shape="${PRIMARY_REQUEST_SHAPE:-default}"; context_capacity="${PRIMARY_MODEL_CONTEXT_TOKENS:-${MODEL_CONTEXT_TOKENS:-unset}}"
+  if [[ "${REVIEW_ROUTE:-}" == escalated ]]; then
+    final_tier="smart"; final_corpus="review-corpus.smart.truncated.md"; final_diff="pr.diff.smart.truncated"
+    budget_cap="${SMART_MAX_CORPUS:-$MAX_CORPUS}"; diff_cap="${SMART_MAX_DIFF:-$MAX_DIFF}"
+    shape="${SMART_REQUEST_SHAPE:-default}"; context_capacity="${SMART_MODEL_CONTEXT_TOKENS:-${MODEL_CONTEXT_TOKENS:-unset}}"
+  elif [[ "${PRIMARY_OK:-1}" -ne 1 && -s review-corpus.fallback.truncated.md ]]; then
+    final_tier="fallback"; final_corpus="review-corpus.fallback.truncated.md"
+    budget_cap=120000; shape=default
+  fi
+  corpus_bytes="$( [ -f "$final_corpus" ] && wc -c < "$final_corpus" | tr -d ' ' || echo 0 )"
+  local included_diff_bytes
+  included_diff_bytes="$( [ -f "$final_diff" ] && wc -c < "$final_diff" | tr -d ' ' || echo 0 )"
 
   usage_file=""
   [ -f ai-response.primary.json ] && usage_file="ai-response.primary.json"
@@ -540,8 +528,8 @@ write_step_summary() {
   local cache_hit_ratio="${_chr:--}"
 
   local diff_trunc="no" corpus_trunc="no"
-  [ "$diff_bytes" -gt "$MAX_DIFF" ] 2>/dev/null && diff_trunc="yes (cap ${MAX_DIFF})"
-  [ "$corpus_bytes" -gt "$MAX_CORPUS" ] 2>/dev/null && corpus_trunc="yes (cap ${MAX_CORPUS})"
+  [ "$diff_bytes" -gt "$diff_cap" ] 2>/dev/null && diff_trunc="yes (cap ${diff_cap})"
+  [ "$corpus_bytes" -gt "$budget_cap" ] 2>/dev/null && corpus_trunc="yes (cap ${budget_cap})"
 
   local budget_desc
   if [[ "${MODEL_CONTEXT_TOKENS:-}" =~ ^[0-9]+$ ]]; then
@@ -627,6 +615,10 @@ write_step_summary() {
       fi
     fi
     echo "| Budget | ${budget_desc} |"
+    echo "| Final context | tier=${final_tier}; model_context_tokens=${context_capacity}; corpus_budget=${budget_cap}B; corpus_actual=${corpus_bytes}B; diff_budget=${diff_cap}B; diff_actual=${included_diff_bytes}B; request_shape=${shape} |"
+    if [[ "$final_tier" == smart ]]; then
+      echo "| Primary context | corpus_budget=${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}B; corpus_actual=$(wc -c < review-corpus.truncated.md | tr -d ' ')B; diff_budget=${PRIMARY_MAX_DIFF:-$MAX_DIFF}B; request_shape=${PRIMARY_REQUEST_SHAPE:-default} |"
+    fi
     echo "| Diff bytes | ${diff_bytes} (truncated: ${diff_trunc}) |"
     echo "| Corpus bytes | ${corpus_bytes} (truncated: ${corpus_trunc}) |"
     echo "| Prompt tokens | ${prompt_tok} |"

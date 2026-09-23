@@ -101,7 +101,7 @@ curl_model() {
   return 0
 }
 
-# build_model_request API_FORMAT MODEL SYSTEM USER CORPUS_FILE OUTPUT_FILE [STREAM]
+# build_model_request API_FORMAT MODEL SYSTEM USER CORPUS_FILE OUTPUT_FILE [STREAM] [SHAPE]
 #
 # Reads globals (with safe defaults so the historical behaviour is preserved):
 #   AI_MAX_TOKENS     completion-token cap (default 8192)
@@ -120,6 +120,7 @@ build_model_request() {
   local corpus_file="$5"
   local output_file="$6"
   local stream="${7:-false}"
+  local shape="${8:-default}"
 
   local max_tokens="${AI_MAX_TOKENS:-8192}"
 
@@ -134,11 +135,12 @@ build_model_request() {
       --arg model "$model" \
       --arg system "$system" \
       --arg user "$user" \
+      --arg shape "$shape" \
       --argjson max_tokens "$max_tokens" \
       --argjson stream "$stream" \
       --argjson temp "$temp_json" \
       --rawfile corpus "$corpus_file" \
-      '{model:$model,max_tokens:$max_tokens,stream:$stream,system:$system,messages:[{role:"user",content:($user + "\n\n" + $corpus)}]}
+      '{model:$model,max_tokens:$max_tokens,stream:$stream,system:$system,messages:[{role:"user",content:(if $shape == "trailing_task" then $corpus + "\n\n" + $user else $user + "\n\n" + $corpus end)}]}
        + (if $temp == null then {} else {temperature:$temp} end)' > "$output_file"
   else
     local tok_field="max_tokens"
@@ -167,13 +169,14 @@ build_model_request() {
       --arg model "$model" \
       --arg system "$system" \
       --arg user "$user" \
+      --arg shape "$shape" \
       --argjson max_tokens "$max_tokens" \
       --argjson stream "$stream" \
       --arg tokfield "$tok_field" \
       --argjson temp "$temp_json" \
       --argjson rf "$rf_json" \
       --rawfile corpus "$corpus_file" \
-      '{model:$model,stream:$stream,messages:[{role:"system",content:$system},{role:"user",content:($user + "\n\n" + $corpus)}]}
+      '{model:$model,stream:$stream,messages:[{role:"system",content:$system},{role:"user",content:(if $shape == "trailing_task" then $corpus + "\n\n" + $user else $user + "\n\n" + $corpus end)}]}
        + {($tokfield): $max_tokens}
        + (if $temp == null then {} else {temperature:$temp} end)
        + (if $rf == null then {} else {response_format:$rf} end)
@@ -203,7 +206,7 @@ build_model_request() {
 call_model_tier() {
   local tier="$1" user_message="$2" corpus_file="$3" request_out="$4" response_out="$5"
 
-  local base_url model api_format api_key stream label
+  local base_url model api_format api_key stream label shape="default"
   local request_timeout connect_timeout retries retry_delay corpus_for_request
   case "$tier" in
     primary)
@@ -213,6 +216,7 @@ call_model_tier() {
       request_timeout="$AI_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_CONNECT_TIMEOUT_SEC"
       retries="$AI_PRIMARY_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
       corpus_for_request="$corpus_file"
+      shape="${PRIMARY_REQUEST_SHAPE:-default}"
       ;;
     fallback)
       label="Fallback"
@@ -239,6 +243,7 @@ call_model_tier() {
       request_timeout="$AI_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_CONNECT_TIMEOUT_SEC"
       retries="$AI_SMART_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
       corpus_for_request="$corpus_file"
+      shape="${SMART_REQUEST_SHAPE:-default}"
       ;;
     *)
       echo "call_model_tier: unknown tier '$tier'" >&2
@@ -253,7 +258,7 @@ call_model_tier() {
     "$user_message" \
     "$corpus_for_request" \
     "$request_out" \
-    "$stream"
+    "$stream" "$shape"
 
   local attempt=1 parse_fails=0 delay="$retry_delay"
   local parse_fail_cap=2

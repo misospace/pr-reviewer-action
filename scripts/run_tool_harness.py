@@ -1322,7 +1322,11 @@ def run_native_loop(
                         f"({saved} bytes saved)",
                         file=sys.stderr,
                     )
-                conversation.add_user(_VERDICT_CLOSING_INSTRUCTION + deduped_corpus)
+                shape = os.getenv("SMART_REQUEST_SHAPE" if tier == "smart" else "PRIMARY_REQUEST_SHAPE", "default")
+                if shape == "trailing_task":
+                    conversation.add_user(deduped_corpus + "\n\n" + _VERDICT_CLOSING_INSTRUCTION)
+                else:
+                    conversation.add_user(_VERDICT_CLOSING_INSTRUCTION + deduped_corpus)
                 temp_raw = os.getenv("AI_TEMPERATURE", "").strip()
                 temperature = float(temp_raw) if temp_raw else None
                 rf = os.getenv("AI_RESPONSE_FORMAT", "off").strip().lower()

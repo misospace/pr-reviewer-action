@@ -953,6 +953,29 @@ def test_verdict_corpus_reports_real_harness_findings(monkeypatch, tmp_path):
     assert "+bump" in user_text
 
 
+def test_native_verdict_trailing_task_keeps_strict_contract(monkeypatch, tmp_path):
+    monkeypatch.setenv("PRIMARY_REQUEST_SHAPE", "trailing_task")
+    monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_schema")
+    (tmp_path / "review-corpus.truncated.md").write_text(_PLACEHOLDER_CORPUS, encoding="utf-8")
+    (tmp_path / "machineconfig.yaml.j2").write_text("install: example\n", encoding="utf-8")
+    verdict = '{"verdict":"approve","review_markdown":"ok","findings":[]}'
+    handled, result, payloads = _run_capturing(
+        monkeypatch, tmp_path, "openai",
+        [
+            _openai_call("c1", "read_file", '{"path":"machineconfig.yaml.j2"}'),
+            _openai_text("Evidence gathered."),
+            {"choices": [{"finish_reason": "stop", "message": {"content": verdict}}]},
+        ],
+    )
+    assert handled and result["native_loop_verdict_produced"]
+    payload = payloads[-1]
+    assert "tools" not in payload
+    assert payload["response_format"]["type"] == "json_schema"
+    assert payload["messages"][0]["role"] == "system"
+    closing = payload["messages"][-1]["content"]
+    assert closing.index("# PR Diff") < closing.rindex("produce the final review verdict")
+
+
 def test_verdict_path_still_writes_real_harness_outputs(monkeypatch, tmp_path):
     """Moving the summary ahead of the verdict turn must not lose the outputs:
     tool-harness.md/json still carry the real findings and counts afterwards."""

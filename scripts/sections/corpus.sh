@@ -210,6 +210,21 @@ PY
 }
 
 build_review_corpus() {
+  local tier="${1:-primary}"
+  local MAX_CORPUS="${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}" diff_budget="${PRIMARY_MAX_DIFF:-${MAX_DIFF:-140000}}" files_budget="${PRIMARY_MAX_FILES:-${MAX_FILES:-70000}}"
+  local output="review-corpus.md" diff_file="pr.diff.truncated" files_file="pr-files.truncated.json"
+  local harness_file="tool-harness.md"
+  if [[ "$tier" == smart ]]; then
+    MAX_CORPUS="${SMART_MAX_CORPUS:-$MAX_CORPUS}"; diff_budget="${SMART_MAX_DIFF:-${MAX_DIFF:-140000}}"; files_budget="${SMART_MAX_FILES:-${MAX_FILES:-70000}}"
+    output="review-corpus.smart.truncated.md"
+    diff_file="pr.diff.smart.truncated"; files_file="pr-files.smart.truncated.json"
+    truncate_clean pr.diff "$diff_file" "$diff_budget" '…[diff truncated to fit context budget]'
+    truncate_clean pr-files.json "$files_file" "$files_budget" '…[file list truncated]'
+    harness_file="tool-harness.smart.md"
+    if [[ ! -s "$harness_file" && -s tool-harness.md ]]; then
+      printf '%s\n' 'Primary tool investigation omitted; conduct your own independent review.' > "$harness_file"
+    fi
+  fi
   build_bounded_repo_map
 
   # Build non-standards body first (this is the portion subject to truncation)
@@ -264,7 +279,7 @@ build_review_corpus() {
     fi
     echo "# PR Files (truncated)"
     echo '```json'
-    cat pr-files.truncated.json
+    cat "$files_file"
     echo '```'
     echo
     echo "# Version Hints from Diff"
@@ -274,16 +289,16 @@ build_review_corpus() {
     echo
     echo "# PR Diff (truncated)"
     echo '```diff'
-    cat pr.diff.truncated
+    cat "$diff_file"
     echo '```'
     echo
 
     # High-value evidence comes BEFORE linked sources / repo scans so that when
     # the corpus overflows the budget, the noisy low-value sections at the tail
     # are dropped first instead of this evidence.
-    if [ -s tool-harness.md ]; then
+    if [ -s "$harness_file" ]; then
       echo "# Tool Harness Findings"
-      cat tool-harness.md
+      cat "$harness_file"
       echo
     fi
     # run_evidence_providers.py leaves evidence-providers.md empty when no
@@ -324,6 +339,10 @@ build_review_corpus() {
   # remaining budget so a large standards file, ledger, or lead section can't
   # silently blow past the model's context window.
   local std_cap=16000
+  # Leave the body floor and framing room even for a small explicit window.
+  if [[ "$std_cap" -gt $(( MAX_CORPUS - 4100 )) ]]; then
+    std_cap=$(( MAX_CORPUS - 4100 ))
+  fi
   truncate_clean standards-context.md standards-context.capped.md "$std_cap" '…[standards truncated]'
   local std_bytes ledger_bytes sp_bytes body_budget
   std_bytes="$(wc -c < standards-context.capped.md | tr -d ' ')"
@@ -352,7 +371,7 @@ build_review_corpus() {
     } > requirement-ledger.section.md
   fi
   ledger_bytes="$(wc -c < requirement-ledger.section.md | tr -d ' ')"
-  if [ "$ledger_bytes" -gt 0 ] && [ "$ledger_bytes" -ge "$MAX_CORPUS" ]; then
+  if [ "$ledger_bytes" -gt 0 ] && [ "$ledger_bytes" -ge $(( MAX_CORPUS - std_bytes - 4100 )) ]; then
     : > requirement-ledger.section.md
     ledger_bytes=0
   fi
@@ -372,7 +391,7 @@ build_review_corpus() {
   sp_bytes=0
   if [ -s specialists.md ]; then
     sp_bytes="$(wc -c < specialists.md | tr -d ' ')"
-    if [ "$sp_bytes" -ge "$MAX_CORPUS" ]; then
+    if [ "$sp_bytes" -ge $(( MAX_CORPUS - std_bytes - ledger_bytes - 4100 )) ]; then
       sp_bytes=0
     fi
   fi
@@ -398,7 +417,15 @@ build_review_corpus() {
       cat specialists.md
       echo
     fi
-  } > review-corpus.md
+  } > "$output"
+  if [[ "$tier" == smart || -n "${PRIMARY_MODEL_CONTEXT_TOKENS:-}" || -n "${MODEL_CONTEXT_TOKENS:-}" ]]; then
+    local actual_bytes
+    actual_bytes="$(wc -c < "$output" | tr -d ' ')"
+    if [[ "$actual_bytes" -gt "$MAX_CORPUS" ]]; then
+      log "ERROR: assembled $tier corpus ($actual_bytes bytes) exceeds its $MAX_CORPUS-byte context budget"
+      return 1
+    fi
+  fi
 
   # Lockstep guard: the system-prompt fragment was already substituted from
   # requirement-ledger-present.txt (apply_system_prompt_fragments in
@@ -407,8 +434,8 @@ build_review_corpus() {
   # by construction (the section's bytes were carved out of the body budget
   # above, and the shared fits-sanity keeps signal and section in step),
   # asserted defensively.
-  if [ -s requirement-ledger-present.txt ] \
-     && ! grep -qF '# Explicit Requirement Ledger' review-corpus.md; then
+  if [[ "$tier" != smart ]] && [ -s requirement-ledger-present.txt ] \
+     && ! grep -qF '# Explicit Requirement Ledger' "$output"; then
     log "WARNING: requirement-ledger-present.txt is set but the ledger section is missing from review-corpus.md; clearing the stale signal"
     : > requirement-ledger-present.txt
   fi
@@ -419,8 +446,8 @@ build_review_corpus() {
   # Leads" section in the final corpus. Unreachable by construction —
   # run_specialists.py applies the identical MAX_CORPUS fits-sanity before
   # writing both artifacts — asserted defensively.
-  if [ -s specialist-leads-present.txt ] \
-     && ! grep -qF '# Specialist Review Leads' review-corpus.md; then
+  if [[ "$tier" != smart ]] && [ -s specialist-leads-present.txt ] \
+     && ! grep -qF '# Specialist Review Leads' "$output"; then
     log "WARNING: specialist-leads-present.txt is set but the specialist section is missing from review-corpus.md; clearing the stale signal"
     : > specialist-leads-present.txt
   fi

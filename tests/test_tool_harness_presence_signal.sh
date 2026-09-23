@@ -149,7 +149,7 @@ check_contains "real harness JSON is preserved" "$OUT" '"executed_request_count"
 
 echo "=== the corpus gates the header on the file, not on TOOL_MODE ==="
 check_contains "corpus.sh gates the Tool Harness header" \
-  "$(<"$SCRIPT_DIR/sections/corpus.sh")" 'if [ -s tool-harness.md ]; then'
+  "$(<"$SCRIPT_DIR/sections/corpus.sh")" 'if [ -s "$harness_file" ]; then'
 
 echo "=== publish_helpers reads the signal it is given ==="
 check_contains "publish gates on the harness file" \

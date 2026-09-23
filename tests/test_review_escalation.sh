@@ -58,7 +58,7 @@ check_contains "coverage gate follows deterministic normalization" "$SRC" "build
 check_contains "coverage gate uses a distinct reason" "$SRC" "incomplete_coverage"
 check_contains "coverage gate preserves its preliminary output" "$SRC" "ai-output.coverage-primary.json"
 check_contains "coverage gate keeps fallback-equals-smart guard" "$SRC" "Skipping coverage escalation: the fallback model"
-check_contains "coverage gate uses the targeted retry prompt" "$SRC" 'call_model_tier smart "$retry_prompt" review-corpus.truncated.md'
+check_contains "coverage gate uses the targeted retry prompt" "$SRC" 'call_model_tier smart "$retry_prompt" review-corpus.smart.truncated.md'
 check_contains "coverage retry prompt loads the backed-up preliminary output" "$SRC" 'load_coverage("ai-output.coverage-primary.json")'
 check_contains "coverage retry prompt passes the preliminary output to the renderer" "$SRC" 'render_coverage_retry_prompt(coverage, ledger, primary)'
 check_contains "coverage retry validates preliminary dispositions" "$SRC" "validate_preliminary_dispositions(primary, smart)"
@@ -227,6 +227,17 @@ PY
   gate_feature_for_forks() { return 1; }
   log() { :; }
   error() { :; }
+  build_review_corpus() {
+    cp review-corpus.truncated.md review-corpus.smart.truncated.md
+    if [[ "$case_name" == corpus-fallback ]]; then
+      command python3 - <<'PY'
+from pathlib import Path
+path = Path('review-corpus.smart.truncated.md')
+text = path.read_text().replace('PRIMARY_REASONING_MUST_NOT_LEAK', 'Primary tool investigation omitted; conduct your own independent review.')
+path.write_text(text)
+PY
+    fi
+  }
   call_model_tier() {
     if [[ "$1" == primary ]]; then
       cp primary-fixture.json ai-output.json

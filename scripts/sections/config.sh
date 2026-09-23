@@ -56,6 +56,10 @@ REVIEW_VERBOSITY="${REVIEW_VERBOSITY:-normal}"
 STANDARDS_FILE="${STANDARDS_FILE:-}"
 STANDARDS_FILE_CANDIDATES="${STANDARDS_FILE_CANDIDATES:-AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt}"
 CONTEXT_LIMIT_MODE="${CONTEXT_LIMIT_MODE:-normal}"
+PRIMARY_MODEL_CONTEXT_TOKENS="${PRIMARY_MODEL_CONTEXT_TOKENS:-}"
+SMART_MODEL_CONTEXT_TOKENS="${SMART_MODEL_CONTEXT_TOKENS:-}"
+PRIMARY_REQUEST_SHAPE="${PRIMARY_REQUEST_SHAPE:-default}"
+SMART_REQUEST_SHAPE="${SMART_REQUEST_SHAPE:-default}"
 EVIDENCE_PROVIDERS_FILE="${EVIDENCE_PROVIDERS_FILE:-}"
 SARIF_FILES="${SARIF_FILES:-}"
 SARIF_MAX_FINDINGS="${SARIF_MAX_FINDINGS:-200}"
@@ -139,7 +143,14 @@ apply_context_limits() {
   # context window instead of the coarse named modes. This matters for local
   # models (ollama/llama.cpp/vLLM) whose windows are often 8k-32k — the named
   # 'normal' mode alone is ~55-70k tokens and silently overflows them.
-  local ctx="${MODEL_CONTEXT_TOKENS:-}"
+  local ctx="${1:-${MODEL_CONTEXT_TOKENS:-}}"
+  if [[ -n "$ctx" && ! "$ctx" =~ ^[0-9]+$ ]]; then
+    if [[ "${2:-}" == tier ]]; then
+      error "Invalid tier model context capacity: expected a positive integer"
+      return 1
+    fi
+    ctx=""
+  fi
   if [[ "$ctx" =~ ^[0-9]+$ && "$ctx" -gt 0 ]]; then
     # Reserve output tokens plus headroom for the system prompt, standards
     # section and formatting; convert the remainder to bytes conservatively
@@ -147,7 +158,13 @@ apply_context_limits() {
     local reserve=$(( AI_MAX_TOKENS + 2000 ))
     local usable=$(( ctx - reserve ))
     if [[ "$usable" -lt 2000 ]]; then
-      usable=2000
+      error "Model context $ctx cannot fit AI_MAX_TOKENS=$AI_MAX_TOKENS plus 2000 tokens of headroom and a 2000-token input budget"
+      return 1
+    fi
+    # Explicit tier overrides cannot allocate an unbounded corpus. The legacy
+    # global setting retains its historical calculation when no override is set.
+    if [[ "${2:-}" == tier && "$usable" -gt 166666 ]]; then
+      usable=166666
     fi
     local total_bytes=$(( usable * 3 ))
     MAX_CORPUS="$total_bytes"
@@ -168,7 +185,32 @@ apply_context_limits() {
       MAX_DIFF=140000; MAX_FILES=70000; MAX_CORPUS=220000 ;;
   esac
 }
-apply_context_limits
+apply_context_limits || exit 1
+
+for _tier in PRIMARY SMART; do
+  _ctx_var="${_tier}_MODEL_CONTEXT_TOKENS"
+  _shape_var="${_tier}_REQUEST_SHAPE"
+  _ctx="${!_ctx_var}"
+  _shape="${!_shape_var}"
+  if [[ -n "$_ctx" && ( ! "$_ctx" =~ ^[0-9]+$ || "$_ctx" -lt 1 ) ]]; then
+    error "Invalid $_ctx_var: expected a positive integer"
+    exit 1
+  fi
+  case "$_shape" in default|trailing_task) ;; *) error "Invalid $_shape_var: $_shape"; exit 1 ;; esac
+done
+
+# Resolve each final-review tier once; fallback retains the historical 120k cap.
+PRIMARY_MAX_CORPUS="$MAX_CORPUS"; PRIMARY_MAX_DIFF="$MAX_DIFF"; PRIMARY_MAX_FILES="$MAX_FILES"
+SMART_MAX_CORPUS="$MAX_CORPUS"; SMART_MAX_DIFF="$MAX_DIFF"; SMART_MAX_FILES="$MAX_FILES"
+if [[ -n "$PRIMARY_MODEL_CONTEXT_TOKENS" ]]; then
+  apply_context_limits "$PRIMARY_MODEL_CONTEXT_TOKENS" tier || exit 1
+  PRIMARY_MAX_CORPUS="$MAX_CORPUS"; PRIMARY_MAX_DIFF="$MAX_DIFF"; PRIMARY_MAX_FILES="$MAX_FILES"
+fi
+if [[ -n "$SMART_MODEL_CONTEXT_TOKENS" ]]; then
+  apply_context_limits "$SMART_MODEL_CONTEXT_TOKENS" tier || exit 1
+  SMART_MAX_CORPUS="$MAX_CORPUS"; SMART_MAX_DIFF="$MAX_DIFF"; SMART_MAX_FILES="$MAX_FILES"
+fi
+MAX_CORPUS="$PRIMARY_MAX_CORPUS"; MAX_DIFF="$PRIMARY_MAX_DIFF"; MAX_FILES="$PRIMARY_MAX_FILES"
 
 # Truncate SRC into DST at a UTF-8 / newline boundary (never mid-character or
 # mid-line), appending MARKER when truncation occurred. Replaces bare `head -c`,

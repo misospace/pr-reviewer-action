@@ -52,6 +52,8 @@ echo '{"executed_request_count":2,"tool_calls":[{"tool":"read_file","status":"ok
 # 100-byte diff with a small cap → should report truncation
 printf 'd%.0s' $(seq 1 100) > pr.diff
 printf 'c%.0s' $(seq 1 50) > review-corpus.md
+cp review-corpus.md review-corpus.truncated.md
+printf 'p%.0s' $(seq 1 23) > pr.diff.truncated
 MAX_DIFF=10; MAX_CORPUS=1000
 ANALYSIS_ENGINE="qwen@local (openai)"
 CONTEXT_LIMIT_MODE="normal"; MODEL_CONTEXT_TOKENS=""; AI_FALLBACK_MODEL=""
@@ -74,6 +76,24 @@ check "summary shows the budget mode" \
   "$(grep -qi 'context_limit_mode=normal' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 check "summary shows tool call counts" \
   "$(grep -qi '2 executed (1 successful)' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+check "primary telemetry uses actual sent bytes" \
+  "$(grep -q 'tier=primary; model_context_tokens=unset; corpus_budget=1000B; corpus_actual=50B; diff_budget=10B; diff_actual=23B; request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+
+echo ""
+echo "=== Test: smart verdict reports smart tier, not primary values ==="
+REVIEW_ROUTE=escalated
+PRIMARY_OK=1
+PRIMARY_MAX_CORPUS=1000; PRIMARY_MAX_DIFF=10
+SMART_MAX_CORPUS=4000; SMART_MAX_DIFF=200
+SMART_MODEL_CONTEXT_TOKENS=32000; SMART_REQUEST_SHAPE=trailing_task
+printf 's%.0s' $(seq 1 150) > review-corpus.smart.truncated.md
+printf 'x%.0s' $(seq 1 75) > pr.diff.smart.truncated
+: > "$GITHUB_STEP_SUMMARY"
+write_step_summary
+check "smart telemetry reports effective and actual bytes" \
+  "$(grep -q 'tier=smart; model_context_tokens=32000; corpus_budget=4000B; corpus_actual=150B; diff_budget=200B; diff_actual=75B; request_shape=trailing_task' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+check "primary attempt remains visible" \
+  "$(grep -q 'Primary context | corpus_budget=1000B; corpus_actual=50B; diff_budget=10B; request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

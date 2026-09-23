@@ -346,6 +346,22 @@ inputs:
       context_limit_mode.
     required: false
     default: ""
+  primary_model_context_tokens:
+    description: Primary tier context window in tokens; empty inherits model_context_tokens/context_limit_mode
+    required: false
+    default: ""
+  smart_model_context_tokens:
+    description: Smart tier context window in tokens; empty inherits model_context_tokens/context_limit_mode
+    required: false
+    default: ""
+  primary_request_shape:
+    description: Primary request layout (default or trailing_task)
+    required: false
+    default: default
+  smart_request_shape:
+    description: Smart request layout (default or trailing_task)
+    required: false
+    default: default
   repo_map_context:
     description: Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context
     required: false
@@ -817,6 +833,10 @@ runs:
         STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
         CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
         MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
+        PRIMARY_MODEL_CONTEXT_TOKENS: ${{ inputs.primary_model_context_tokens }}
+        SMART_MODEL_CONTEXT_TOKENS: ${{ inputs.smart_model_context_tokens }}
+        PRIMARY_REQUEST_SHAPE: ${{ inputs.primary_request_shape }}
+        SMART_REQUEST_SHAPE: ${{ inputs.smart_request_shape }}
         RELATED_CODE_CONTEXT: ${{ inputs.related_code_context }}
         RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
         REPO_MAP_CONTEXT: ${{ inputs.repo_map_context }}
@@ -913,6 +933,10 @@ runs:
           STANDARDS_FILE_CANDIDATES
           CONTEXT_LIMIT_MODE
           MODEL_CONTEXT_TOKENS
+          PRIMARY_MODEL_CONTEXT_TOKENS
+          SMART_MODEL_CONTEXT_TOKENS
+          PRIMARY_REQUEST_SHAPE
+          SMART_REQUEST_SHAPE
           RELATED_CODE_CONTEXT
           RELATED_CODE_MAX_BYTES
           REPO_MAP_CONTEXT

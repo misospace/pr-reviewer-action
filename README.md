@@ -320,6 +320,10 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 |-------|-------------|----------|---------|
 | `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
 | `model_context_tokens` | The model's real context window in tokens (e.g. `8192`, `32768`). When set, corpus/diff/file byte budgets are derived from it (reserving `ai_max_tokens` for output) instead of `context_limit_mode`. Recommended for local models. Empty uses `context_limit_mode` | No | `""` |
+| `primary_model_context_tokens` | Primary review context window; empty inherits `model_context_tokens` or `context_limit_mode` | No | `""` |
+| `smart_model_context_tokens` | Smart escalation context window; empty inherits `model_context_tokens` or `context_limit_mode`. Smart rebuilds from raw artifacts, up to a 499998-byte corpus ceiling | No | `""` |
+| `primary_request_shape` | Primary review request layout: `default` (task before corpus) or `trailing_task` (task after corpus) | No | `default` |
+| `smart_request_shape` | Smart review request layout, independently selectable with the same modes | No | `default` |
 | `repo_map_context` | Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context | No | `true` |
 | `repo_map_max_bytes` | Maximum UTF-8 bytes for the final trust-framed repository-map section (review corpus + planning slot). The underlying Markdown artifact is rendered slightly smaller to leave room for the framing prefix, so the framed section always fits this cap | No | `12000` |
 | `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |

@@ -15,6 +15,7 @@ assert_safe_artifact_paths() {
     standards-context.md standards-present.txt tool-harness.md tool-harness.json
     tool-harness.smart.md tool-harness.smart.json
     review-corpus.md review-corpus.truncated.md review-corpus.smart.truncated.md review-corpus.fallback.truncated.md
+    pr.diff.smart.truncated pr-files.smart.truncated.json
     ai-request.json ai-response.json ai-output.json ai-output.primary.json ai-output.coverage-primary.json
     ai-request.fallback.json ai-response.fallback.json ai-response.primary.json
     ai-request.smart.json ai-response.smart.json
