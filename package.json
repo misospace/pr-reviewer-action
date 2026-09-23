@@ -1,0 +1,20 @@
+{
+  "name": "pr-reviewer-action-v3-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "node scripts/generate-v3-contract.mjs && tsc --noEmit",
+    "test": "node scripts/generate-v3-contract.mjs && tsc -p tsconfig.test.json && node --test .test-build/tests-v3/*.test.js",
+    "build": "node scripts/generate-v3-contract.mjs && tsc -p tsconfig.build.json && node scripts/build-v3.mjs",
+    "check:bundle": "npm run build && git diff --exit-code -- dist"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "esbuild": "0.25.5",
+    "typescript": "5.8.3",
+    "yaml": "2.9.1"
+  }
+}
