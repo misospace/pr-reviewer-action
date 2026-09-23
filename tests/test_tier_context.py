@@ -40,8 +40,11 @@ error() { :; }
 source "$SCRIPT_DIR/sections/config.sh"
 source ./assembly.sh
 truncate_clean pr.diff pr.diff.truncated "$PRIMARY_MAX_DIFF" '…[diff truncated to fit context budget]'
-build_review_corpus
+build_review_corpus primary
 cp review-corpus.md review-corpus.truncated.md
+# If the smart builder ever uses the primary corpus, it would consume this
+# marker instead of the original deterministic inputs.
+printf '\nPOISONED_PRIMARY_CORPUS_658\n' >> review-corpus.truncated.md
 build_review_corpus smart
 """
     env = dict(os.environ, SCRIPT_DIR=str(ROOT / "scripts"), REPO="x/y", PR_NUMBER="1",
@@ -55,11 +58,43 @@ build_review_corpus smart
     smart = (tmp_path / "review-corpus.smart.truncated.md").read_text()
     assert "SMART_SENTINEL_658" not in primary
     assert "SMART_SENTINEL_658" in smart
+    assert "POISONED_PRIMARY_CORPUS_658" not in smart
     assert "PRIMARY_SECRET_658" not in smart
     for marker in ("STANDARDS_658", "LEDGER_658", "SPECIALISTS_658", "EVIDENCE_658"):
         assert smart.count(marker) == 1
     assert len(smart.encode()) > len(primary.encode())
     assert len(smart.encode()) <= 87000  # (40000 - 1000 - 2000) * 3
+
+
+def test_only_smart_override_keeps_primary_legacy_budget(tmp_path):
+    config = (ROOT / "scripts/sections/config.sh").read_text()
+    func = config[config.index("apply_context_limits() {"):config.index("# Truncate SRC")]
+    (tmp_path / "limits.sh").write_text(func)
+    script = '''error() { :; }; log() { :; }
+AI_MAX_TOKENS=8192; CONTEXT_LIMIT_MODE=normal
+PRIMARY_MODEL_CONTEXT_TOKENS=""; PRIMARY_REQUEST_SHAPE=default; SMART_REQUEST_SHAPE=default
+SMART_MODEL_CONTEXT_TOKENS=100000
+source ./limits.sh
+[[ "$PRIMARY_MAX_CORPUS:$PRIMARY_MAX_DIFF:$PRIMARY_MAX_FILES" == "220000:140000:70000" ]] || exit 1
+[[ "$SMART_MAX_CORPUS:$SMART_MAX_DIFF:$SMART_MAX_FILES" == "269424:161654:40413" ]] || exit 2
+[[ "$MAX_CORPUS:$MAX_DIFF:$MAX_FILES" == "220000:140000:70000" ]] || exit 3'''
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_primary_override_does_not_change_inherited_smart_budget(tmp_path):
+    config = (ROOT / "scripts/sections/config.sh").read_text()
+    func = config[config.index("apply_context_limits() {"):config.index("# Truncate SRC")]
+    (tmp_path / "limits.sh").write_text(func)
+    script = '''error() { :; }; log() { :; }
+AI_MAX_TOKENS=8192; CONTEXT_LIMIT_MODE=normal; MODEL_CONTEXT_TOKENS=""
+PRIMARY_MODEL_CONTEXT_TOKENS=20000; SMART_MODEL_CONTEXT_TOKENS=""
+PRIMARY_REQUEST_SHAPE=default; SMART_REQUEST_SHAPE=default
+source ./limits.sh
+[[ "$PRIMARY_MAX_CORPUS:$PRIMARY_MAX_DIFF:$PRIMARY_MAX_FILES" == "29424:17654:4413" ]] || exit 1
+[[ "$SMART_MAX_CORPUS:$SMART_MAX_DIFF:$SMART_MAX_FILES" == "220000:140000:70000" ]] || exit 2'''
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
@@ -82,6 +117,19 @@ build_model_request {transport} model SYSTEM_SENTINEL 'Return STRICT JSON verdic
     user = trailing["messages"][-1]["content"]
     assert user.index("CORPUS_SENTINEL") < user.index("Return STRICT JSON verdict")
     assert user.count("CORPUS_SENTINEL") == user.count("Return STRICT JSON verdict") == 1
+
+
+@pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
+def test_trailing_task_has_identical_user_content_across_transports(tmp_path):
+    (tmp_path / "corpus.md").write_text("CONTEXT\nwith unicode: caf\u00e9\n")
+    script = f'''source "{ROOT}/scripts/model_call.sh"
+build_model_request openai model system 'STRICT JSON' corpus.md openai.json false trailing_task
+build_model_request anthropic model system 'STRICT JSON' corpus.md anthropic.json false trailing_task'''
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    openai = json.loads((tmp_path / "openai.json").read_text())
+    anthropic = json.loads((tmp_path / "anthropic.json").read_text())
+    assert openai["messages"][-1]["content"].encode() == anthropic["messages"][-1]["content"].encode()
 
 
 def test_context_limits_default_and_headroom(tmp_path):
