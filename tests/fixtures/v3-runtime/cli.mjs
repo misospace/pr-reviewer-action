@@ -51,9 +51,13 @@ export function run(file, args, { cwd, env, timeoutMs = 2000 } = {}) {
 }
 
 export function resolveSpikeContext(env = process.env) {
+  const requested = env.SPIKE_PLATFORM;
+  if (requested !== undefined && requested !== '' && requested !== 'github' && requested !== 'forgejo') {
+    throw new Error(`Unknown SPIKE_PLATFORM '${requested}' (closed set: github, forgejo)`);
+  }
   return {
     server: env.GITHUB_API_URL || env.GITHUB_SERVER_URL,
-    platform: env.SPIKE_PLATFORM === 'forgejo' ? 'forgejo' : 'github',
+    platform: requested === 'forgejo' ? 'forgejo' : 'github',
   };
 }
 
