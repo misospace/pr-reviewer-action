@@ -1454,6 +1454,28 @@ def test_661_methodology_fragment_covers_the_required_procedure() -> None:
         assert marker in security_text, marker
 
 
+def test_661_matching_is_punctuation_robust_but_not_paraphrase_permissive() -> None:
+    """The classify_signal normalization is an instrument-correctness fix.
+
+    It lets a finding that markdown-emphasizes a phrase already in the
+    vocabulary match through backticks / a unicode apostrophe, but it must NOT
+    accept paraphrase or generic reassurance: the exact curated phrase is still
+    required, so the benchmark is not made easier.
+    """
+    base = "pgrep is missing"
+    assert classify_signal(base) == CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY
+    # Markdown emphasis or a unicode right single quote must not defeat the hit.
+    assert classify_signal("`pgrep` is missing") == CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY
+    assert classify_signal("don\u2019t worry, pgrep is missing") == CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY
+    # Paraphrase / vague prose must NOT be promoted to a capability hit.
+    for paraphrase in (
+        "the process tree may need attention eventually",
+        "consider tidying up background jobs",
+        "looks fine, cleanup is probably handled elsewhere",
+    ):
+        assert classify_signal(paraphrase) is None, paraphrase
+
+
 def test_661_methodology_is_model_and_provider_neutral() -> None:
     """No production guidance branches on a specific model or provider."""
     providers = ("minimax", "deepseek", "qwen", "glm-", "gpt-", "claude", "gemini", "llama", "kimi", "mistral", "grok", "openai", "anthropic")

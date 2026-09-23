@@ -305,8 +305,17 @@ def _is_negated_match(value: str, match: re.Match[str], term: str) -> bool:
     ))
 
 
+def _normalize_for_matching(text: str) -> str:
+    # Instrument-correctness fix (NOT new detection power): strip inline-code
+    # backticks and normalise the unicode right single quote so a finding that
+    # markdown-emphasizes a phrase already in the vocabulary (e.g. "`pgrep` is
+    # missing") hits the same word-boundary/substring match as plain ASCII.
+    # It accepts no paraphrase: the exact curated phrase must still be present.
+    return (text or "").casefold().replace("`", "").replace("\u2019", "'")
+
+
 def classify_signal(text: str) -> str | None:
-    value = (text or "").casefold()
+    value = _normalize_for_matching(text)
     for capability, vocabulary in _VOCABULARY:
         for term in vocabulary:
             match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", value)
