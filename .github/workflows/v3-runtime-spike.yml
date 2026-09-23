@@ -1,0 +1,46 @@
+name: v3 runtime spike
+on:
+  workflow_dispatch:
+  push:
+    branches: [spike/v3-runtime-670]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: native
+        uses: ./tests/fixtures/v3-runtime/native
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ github.token }}
+      - id: composite
+        uses: ./tests/fixtures/v3-runtime/composite
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ github.token }}
+      - name: Check outputs and summaries
+        env:
+          NATIVE: ${{ steps.native.outputs.test-kebab-output }}
+          COMPOSITE: ${{ steps.composite.outputs.test-kebab-output }}
+        run: |
+          test "$NATIVE" = native-passed
+          test "$COMPOSITE" = composite-passed
+          test -f "$RUNNER_TEMP/v3-native-success-finalized"
+          test -f "$RUNNER_TEMP/v3-composite-success-finalized"
+      - name: Deliberate failure and finalization
+        id: failure
+        continue-on-error: true
+        uses: ./tests/fixtures/v3-runtime/composite
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ github.token }}
+          fail: 'true'
+      - name: Check failure was reported and finalized
+        if: always()
+        env:
+          OUTCOME: ${{ steps.failure.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          test -f "$RUNNER_TEMP/v3-composite-failure-finalized"

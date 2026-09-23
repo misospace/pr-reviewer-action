@@ -1,0 +1,27 @@
+name: v3 composite runtime spike
+description: Isolated runner probe
+inputs:
+  test-kebab-input:
+    description: input probe
+    required: true
+  token:
+    description: API token
+    required: true
+  fail:
+    description: trigger finalizer failure
+    default: 'false'
+outputs:
+  test-kebab-output:
+    description: output probe
+    value: ${{ steps.probe.outputs.test-kebab-output }}
+runs:
+  using: composite
+  steps:
+    - id: probe
+      shell: bash
+      env:
+        SPIKE_INPUT: ${{ inputs.test-kebab-input }}
+        SPIKE_TOKEN: ${{ inputs.token }}
+        SPIKE_FAIL: ${{ inputs.fail }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      run: node "$GITHUB_ACTION_PATH/../cli-entry.mjs"
