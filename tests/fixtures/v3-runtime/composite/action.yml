@@ -11,7 +11,7 @@ inputs:
     description: trigger finalizer failure
     default: 'false'
   platform:
-    description: REST platform flavor used by the probe API request
+    description: REST platform flavor used by the probe API request. Only 'forgejo' is recognized; any other value, including the default, selects github.
     default: github
 outputs:
   test-kebab-output:

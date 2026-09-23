@@ -6,8 +6,11 @@ jobs:
     steps:
       - name: checkout
         run: |
+          set -eu
+          git config --global --add safe.directory '*'
           git clone --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
           git checkout "$GITHUB_SHA"
+          test -f v3/composite/action.yml
       - name: node launcher preflight
         run: |
           set -eu
@@ -16,10 +19,14 @@ jobs:
             exit 1
           fi
           v="$(node --version)"
-          case "$v" in
-            v2[2-9].*) : ;;
-            *) echo "node >= 22 required, found $v at $node_bin" >&2; exit 1 ;;
+          major="${v#v}"; major="${major%%.*}"
+          case "$major" in
+            ''|*[!0-9]*) major=0 ;;
           esac
+          if [ "$major" -lt 22 ]; then
+            echo "node >= 22 required, found $v at $node_bin" >&2
+            exit 1
+          fi
           echo "launcher preflight ok: $node_bin $v"
       - id: composite
         uses: ./v3/composite
@@ -31,12 +38,24 @@ jobs:
         env:
           COMPOSITE: ${{ steps.composite.outputs.test-kebab-output }}
         run: |
-          # The composite fixture already appended to and read back
-          # GITHUB_STEP_SUMMARY within its own step (same-step summary
-          # behavior). act_runner resets GITHUB_STEP_SUMMARY per step, so a
-          # later step cannot see earlier steps' summary content.
           test "$COMPOSITE" = composite-passed
           test -n "$GITHUB_STEP_SUMMARY"
+          # The composite fixture already appended to and read back
+          # GITHUB_STEP_SUMMARY within its own step (same-step summary
+          # behavior). Mark this step's contribution for the next step.
+          echo 'compat-summary-canary-683' >> "$GITHUB_STEP_SUMMARY"
+      - name: step summary is reset per step
+        run: |
+          # Recorded Forgejo difference: act_runner resets GITHUB_STEP_SUMMARY
+          # between steps (GitHub accumulates job-wide), so this step's fresh
+          # summary file must not contain the previous step's canary. If a
+          # runner ever starts accumulating, this assertion fails loudly and
+          # the ADR claim must be revisited.
+          test -f "$GITHUB_STEP_SUMMARY"
+          if grep -q 'compat-summary-canary-683' "$GITHUB_STEP_SUMMARY"; then
+            echo "GITHUB_STEP_SUMMARY carried prior-step content; update the recorded Forgejo difference" >&2
+            exit 1
+          fi
       - name: deliberate failure and finalization
         id: failure
         continue-on-error: true

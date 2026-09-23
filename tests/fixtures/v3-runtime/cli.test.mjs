@@ -31,6 +31,12 @@ test('spike context defaults to github and switches server/platform for forgejo'
     { server: undefined, platform: 'github' });
   assert.deepEqual(resolveSpikeContext({ SPIKE_PLATFORM: 'gitea' }),
     { server: undefined, platform: 'github' });
+  assert.deepEqual(resolveSpikeContext({ GITHUB_API_URL: 'https://api.test', GITHUB_SERVER_URL: 'https://forgejo.test' }),
+    { server: 'https://api.test', platform: 'github' });
+  assert.deepEqual(resolveSpikeContext({ GITHUB_API_URL: 'https://api.test', SPIKE_PLATFORM: 'forgejo' }),
+    { server: 'https://api.test', platform: 'forgejo' });
+  assert.deepEqual(resolveSpikeContext({ GITHUB_SERVER_URL: 'https://forgejo.test', SPIKE_PLATFORM: '' }),
+    { server: 'https://forgejo.test', platform: 'github' });
 });
 
 test('repository components remain literal URL path segments', () => {
