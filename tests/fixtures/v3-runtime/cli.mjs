@@ -27,18 +27,20 @@ export function run(file, args, { cwd, env, timeoutMs = 2000 } = {}) {
     });
     let stdout = '', stderr = '', timedOut = false, settled = false;
     const group = process.platform !== 'win32' ? -child.pid : child.pid;
+    let timeoutTimer;
+    let forceTimer;
     const signal = (name) => {
       try { process.kill(group, name); } catch (error) { if (error.code !== 'ESRCH') throw error; }
     };
-    const timer = setTimeout(() => { timedOut = true; signal('SIGTERM'); }, timeoutMs);
-    const force = setTimeout(() => { if (!settled) signal('SIGKILL'); }, timeoutMs + 500);
+    const cleanup = () => { clearTimeout(timeoutTimer); clearTimeout(forceTimer); };
+    timeoutTimer = setTimeout(() => { timedOut = true; signal('SIGTERM'); }, timeoutMs);
+    forceTimer = setTimeout(() => { if (!settled) signal('SIGKILL'); }, timeoutMs + 500);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => { clearTimeout(timer); clearTimeout(force); reject(error); });
+    child.on('error', (error) => { cleanup(); reject(error); });
     child.on('close', (code, exitSignal) => {
       settled = true;
-      clearTimeout(timer);
-      clearTimeout(force);
+      cleanup();
       resolve({ code, exitSignal, stdout, stderr, timedOut });
     });
   });
@@ -54,7 +56,7 @@ export async function main({ actionPath, workspace, input, outputFile, summaryFi
   const git = await run('git', ['rev-parse', '--show-toplevel'], {
     cwd: workspace, env: { PATH: process.env.PATH, HOME: process.env.HOME },
   });
-  if (git.code !== 0 || git.stdout.trim() !== workspace) throw new Error(`Workspace git failed: ${git.stderr}`);
+  if (git.code !== 0 || git.stdout.trim() !== workspace || git.stderr) throw new Error(`Workspace git failed: ${git.stderr}`);
   const repo = await getRepository({ platform: 'github', repository, server, token });
   if (repo.fullName !== repository) throw new Error('Platform response mismatch');
 
@@ -76,7 +78,8 @@ export async function main({ actionPath, workspace, input, outputFile, summaryFi
   }
   await appendFile(outputFile, `test-kebab-output=${mode}-passed\n`);
   await appendFile(summaryFile, `### v3 runtime ${mode}\nInput, event, API, git, timeout checked.\n`);
-  console.log(`spike ${mode}: input/output, action path, workspace, event ${identity}, API, git argv, timeout passed`);
+  if (!(await readFile(summaryFile, 'utf8')).includes(`### v3 runtime ${mode}`)) throw new Error('Step summary missing');
+  console.log(`spike ${mode}: node ${process.version}, input/output, action path, workspace, event ${identity}, API, git argv, timeout passed`);
 }
 
 export async function runWithFinalizer(options) {

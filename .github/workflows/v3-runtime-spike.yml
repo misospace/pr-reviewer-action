@@ -37,10 +37,21 @@ jobs:
           test-kebab-input: kebab-value
           token: ${{ github.token }}
           fail: 'true'
+      - name: Native deliberate failure and finalization
+        id: native_failure
+        continue-on-error: true
+        uses: ./tests/fixtures/v3-runtime/native
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ github.token }}
+          fail: 'true'
       - name: Check failure was reported and finalized
         if: always()
         env:
           OUTCOME: ${{ steps.failure.outcome }}
+          NATIVE_OUTCOME: ${{ steps.native_failure.outcome }}
         run: |
           test "$OUTCOME" = failure
+          test "$NATIVE_OUTCOME" = failure
           test -f "$RUNNER_TEMP/v3-composite-failure-finalized"
+          test -f "$RUNNER_TEMP/v3-native-failure-finalized"
