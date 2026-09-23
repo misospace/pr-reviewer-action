@@ -666,6 +666,7 @@ apply_all_enforcement_wrapper() {
   local verdict_policy="$4"
   local validate_checks="$5"
   local validation_mode="$6"
+  local tool_harness_path="${7:-tool-harness.json}"
   PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
 from pr_reviewer.completeness import apply_required_check_validation
 from pr_reviewer.enforcement import apply_all_enforcement, apply_verdict_policy
@@ -675,7 +676,8 @@ apply_required_check_validation('$validate_checks', '$validation_mode')
 apply_all_enforcement(
   evidence_blocker_enabled=('$evidence_blocker_enabled' == 'true'),
   tool_failure_enabled=('$tool_failure_enabled' == 'true'),
-  tool_min_successful=$tool_min_successful
+  tool_min_successful=$tool_min_successful,
+  tool_harness_path='$tool_harness_path'
 )
 "
 }

@@ -145,5 +145,136 @@ check "nested escalation metadata round-trips through parse_metadata" \
   "$PARSED" "fast_request_changes,fast_low_confidence"
 
 echo ""
+echo "=== Production enforcement after escalation ==="
+run_enforcement_case() (
+  set -euo pipefail
+  local case_name="$1" primary_harness="$2" smart_harness="$3" smart_success="$4" min_success="$5"
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  cd "$work"
+  printf '%s\n' "$primary_harness" > tool-harness.json
+  printf '%s\n' "$smart_harness" > smart-fixture.json
+  printf '%s\n' '{"verdict":"request_changes","review_markdown":"Primary review requires changes","findings":[]}' > primary-fixture.json
+  if [[ "$case_name" == coverage* ]]; then
+    printf '%s\n' '{"verdict":"approve","review_markdown":"Primary review did not cover requirement","findings":[]}' > primary-fixture.json
+  fi
+  printf '%s\n' '{"verdict":"approve","review_markdown":"Smart review verified the PR","findings":[]}' > smart-output-fixture.json
+  printf '%s\n' 'CORPUS' > review-corpus.truncated.md
+  printf '%s\n' '{}' > classification.json
+  printf '%s\n' '{}' > evidence-providers.json
+  if [[ "$case_name" == coverage* ]]; then
+    printf '%s\n' '{"version":1,"requirements":[{"id":"req-000000000000","text":"Verify a requirement","kind":"acceptance","verification_required":false,"provenance":[{"source":"standards","ref":"AGENTS.md","line":1}]}]}' > requirement-ledger.json
+  fi
+  : > output.txt
+  source <(python3 - "$ROOT_DIR/scripts/sections/config.sh" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+print("apply_all_enforcement_wrapper() {" + text.split("apply_all_enforcement_wrapper() {", 1)[1])
+PY
+  )
+  SCRIPT_DIR="$ROOT_DIR/scripts"
+  GITHUB_OUTPUT="$work/output.txt"
+  OUTPUT_FILE="$GITHUB_OUTPUT"
+  AI_MODEL="primary"
+  AI_BASE_URL="http://primary"
+  AI_API_FORMAT="openai"
+  AI_STREAM="false"
+  AI_FALLBACK_BASE_URL=""
+  AI_FALLBACK_MODEL=""
+  SMART_MODEL="smart"
+  SMART_BASE_URL="http://smart"
+  SMART_API_FORMAT="openai"
+  SMART_API_KEY=""
+  SMART_MODEL_RESOLVED=1
+  REVIEW_ROUTING_MODE=auto
+  REVIEW_ROUTE=primary
+  ROUTE_REASON=""
+  TOOL_MODE=native_loop
+  TOOL_ENABLE_FOR_FORKS=false
+  TOOL_FAILURE_ENFORCEMENT=true
+  TOOL_MIN_SUCCESSFUL_REQUESTS="$min_success"
+  EVIDENCE_BLOCKER_ENFORCEMENT=false
+  ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS=false
+  ESCALATE_ON_FAST_REQUEST_CHANGES=true
+  if [[ "$case_name" == coverage* ]]; then ESCALATE_ON_FAST_REQUEST_CHANGES=false; fi
+  ESCALATE_ON_FAST_LOW_CONFIDENCE=false
+  ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS=false
+  ESCALATE_ON_TOOL_PLANNING_FAILURE=false
+  VERDICT_POLICY=model
+  VALIDATE_REQUIRED_CHECKS=false
+  REQUIRED_CHECK_VALIDATION_MODE=warn
+  IS_FORK_PR=false
+  AI_MAX_TOKENS=8192
+  MODEL_CONTEXT_TOKENS=""
+  CONTEXT_LIMIT_MODE=normal
+  MAX_DIFF=140000
+  MAX_CORPUS=220000
+  DEEP_REVIEW_ACTIVE=false
+  parse_and_validate() { return 1; }
+  gate_feature_for_forks() { return 1; }
+  log() { :; }
+  error() { :; }
+  call_model_tier() {
+    if [[ "$1" == primary ]]; then
+      cp primary-fixture.json ai-output.json
+      return 0
+    fi
+    if [[ "$smart_success" == true ]]; then
+      cp smart-output-fixture.json ai-output.json
+      return 0
+    fi
+    return 1
+  }
+  python3() {
+    if [[ "$case_name" == coverage* && "${1:-}" == -m && "${2:-}" == pr_reviewer.requirement_coverage ]]; then
+      printf '%s\n' '{"version":1,"summary":{"total":1,"unknown":1},"coverage":[{"requirement_id":"req-000000000000","status":"unknown","credited":false,"notes":["not-covered-by-reviewer"]}]}' > requirement-coverage.json
+      return 0
+    fi
+    if [[ "${1:-}" == "$SCRIPT_DIR/run_tool_harness.py" ]]; then
+      cp smart-fixture.json tool-harness.smart.json
+      return 0
+    fi
+    command python3 "$@"
+  }
+  source "$ROOT_DIR/scripts/sections/review.sh" >/dev/null
+  local verdict route harness
+  verdict="$(jq -r .verdict ai-output.json)"
+  route="$REVIEW_ROUTE"
+  harness="$ENFORCEMENT_TOOL_HARNESS"
+  if [[ "$case_name" == failure || "$case_name" == minimum ]]; then
+    jq -e '.tool_results[0].status == "ok" and .tier == "smart"' tool-harness.smart.json >/dev/null
+    jq -e '.review_markdown == "Smart review verified the PR"' ai-output.json >/dev/null
+  fi
+  if [[ "$case_name" == restored || "$case_name" == coverage-failed ]]; then
+    jq -e '.review_markdown | contains("primary harness failed")' ai-output.json >/dev/null
+  fi
+  if [[ "$case_name" == coverage ]]; then
+    jq -e '.mode == "off" and .tier == "smart"' tool-harness.smart.json >/dev/null
+    jq -e '.error == "primary harness failed"' tool-harness.json >/dev/null
+  fi
+  printf '%s|%s|%s' "$verdict" "$route" "$harness"
+)
+
+PRIMARY_FAILED='{"error":"primary harness failed","planned_request_count":0,"executed_request_count":0,"tool_results":[]}'
+PRIMARY_ZERO='{"planned_request_count":0,"executed_request_count":0,"tool_results":[]}'
+SMART_HEALTHY='{"tier":"smart","planned_request_count":1,"executed_request_count":1,"tool_results":[{"tool":"read_file","status":"ok","result":{"content":"evidence"}}]}'
+check "primary failure does not penalize surviving smart review" \
+  "$(run_enforcement_case failure "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
+  'approve|escalated|tool-harness.smart.json'
+check "smart successful requests satisfy enforcement minimum" \
+  "$(run_enforcement_case minimum "$PRIMARY_ZERO" "$SMART_HEALTHY" true 1)" \
+  'approve|escalated|tool-harness.smart.json'
+check "failed smart escalation enforces restored primary harness" \
+  "$(run_enforcement_case restored "$PRIMARY_FAILED" "$SMART_HEALTHY" false 0)" \
+  'request_changes|primary|tool-harness.json'
+check "coverage retry uses its own no-tool harness" \
+  "$(run_enforcement_case coverage "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
+  'approve|escalated|tool-harness.smart.json'
+check "failed coverage retry keeps primary enforcement" \
+  "$(run_enforcement_case coverage-failed "$PRIMARY_FAILED" "$SMART_HEALTHY" false 0)" \
+  'request_changes|primary|tool-harness.json'
+
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

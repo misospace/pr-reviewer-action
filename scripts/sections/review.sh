@@ -204,6 +204,7 @@ fi
 # escalates to the fallback. The primary output is kept as ai-output.primary.json
 # for debugging. A smart-model failure keeps the primary review.
 ESCALATION_REASONS=""
+ENFORCEMENT_TOOL_HARNESS="tool-harness.json"
 rm -f tool-harness.smart.json tool-harness.smart.md review-corpus.smart.truncated.md
 run_smart_review() {
   local user_message="$1" status produced failure_reason
@@ -303,6 +304,7 @@ print('yes ' + ','.join(reasons) if escalate else 'no')
   fi
 
   if [[ "$smart_ok" -eq 1 ]]; then
+    ENFORCEMENT_TOOL_HARNESS="tool-harness.smart.json"
     REVIEW_ROUTE="escalated"
     ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
     ANALYSIS_ENGINE="$(annotate_analysis_engine "$SMART_MODEL@$SMART_BASE_URL ($SMART_API_FORMAT)" escalated)"
@@ -328,7 +330,7 @@ if [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" != "off" ]] && 
   TOOL_FAILURE_ENABLED="true"
 fi
 
-apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"
+apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$ENFORCEMENT_TOOL_HARNESS"
 
 # ── Requirement Coverage merge + completeness retry (#624, #626) ───
 # Fold the final reviewer's requirement_coverage claims into a standalone,
@@ -425,9 +427,11 @@ PY
   fi
 
   if [[ "$smart_ok" -eq 1 ]]; then
-    # The smart result is a fresh model verdict, so it must pass through the
-    # same enforcement and deterministic normalization as the primary result.
-    apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE"
+    # This targeted corpus retry runs no smart tool loop; never attribute the
+    # superseded primary harness to its verdict.
+    printf '%s\n' '{"tier":"smart","mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}' > tool-harness.smart.json
+    ENFORCEMENT_TOOL_HARNESS="tool-harness.smart.json"
+    apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$ENFORCEMENT_TOOL_HARNESS"
     build_requirement_coverage
     REVIEW_ROUTE="escalated"
     ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
