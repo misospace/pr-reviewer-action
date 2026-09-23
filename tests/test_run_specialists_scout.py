@@ -116,7 +116,12 @@ def patch_scout_transport(monkeypatch, response_factory=None, sleep=0.0):
         if sleep:
             time.sleep(sleep)
         calls.append(
-            {"arrival": arrival, "done": time.monotonic(), "payload": payload}
+            {
+                "arrival": arrival,
+                "done": time.monotonic(),
+                "payload": payload,
+                "payload_bytes": len(json.dumps(payload).encode("utf-8")),
+            }
         )
         if response_factory is not None:
             return response_factory(len(calls), payload)
@@ -154,6 +159,11 @@ def test_default_execution_is_three_call(tmp_path, monkeypatch):
     assert run_main(ws, corpus) == 0
     assert len(calls) == 3
     assert aggregate(ws)["execution"] == "three_call"
+    # Regression (#635): three-call mode meters THREE actual requests.
+    agg = aggregate(ws)
+    assert agg["request_count"] == 3
+    assert agg["request_bytes"] == sum(c["payload_bytes"] for c in calls)
+    assert agg["usage_totals"] is None  # factory responses expose no usage
 
 
 def test_invalid_execution_falls_back_loudly(tmp_path, monkeypatch, capsys):
@@ -198,16 +208,25 @@ def test_combined_scout_makes_one_call_and_splits_artifacts(tmp_path, monkeypatc
     assert agg["any_errors"] is False
     assert agg["total_leads"] == 2
     assert all(r["status"] == "ok" for r in agg["roles"])
-    # One shared request/usage record across the three entries.
-    assert all(r["request_bytes"] == agg["roles"][0]["request_bytes"] for r in agg["roles"])
-    assert all(r["request_bytes"] > 0 for r in agg["roles"])
+    # One ACTUAL request metered exactly once (not once per role entry).
+    assert agg["request_count"] == 1
+    assert agg["request_bytes"] == calls[0]["payload_bytes"]
+    assert agg["request_bytes"] > 0
+    # Role entries carry neither usage nor request bytes: copying the one
+    # shared call onto three entries would multiply it by three when
+    # consumers sum role entries (#635).
+    assert all(r["request_bytes"] is None for r in agg["roles"])
     assert all(r["usage"] is None for r in agg["roles"])
     # Scout request/response artifacts were written.
     assert (ws / "specialist-scout.request.json").exists()
     assert (ws / "specialist-scout.response.json").exists()
 
 
-def test_combined_scout_captures_usage_and_cache_telemetry(tmp_path, monkeypatch):
+def test_combined_scout_usage_counts_once(tmp_path, monkeypatch):
+    """Regression (#635): the ONE combined scout usage record must be
+    counted once — the aggregate's usage_totals equals the single
+    response's usage, and the harness loader reports those actual totals,
+    never a three-fold role re-sum."""
     ws = ws_dir(tmp_path)
     corpus = tmp_path / "corpus.md"
     corpus.write_text(CORPUS_MARKER, encoding="utf-8")
@@ -226,10 +245,21 @@ def test_combined_scout_captures_usage_and_cache_telemetry(tmp_path, monkeypatch
     assert run_main(ws, corpus) == 0
 
     agg = aggregate(ws)
-    for entry in agg["roles"]:
-        assert entry["usage"]["prompt_tokens"] == 1000
-        assert entry["usage"]["completion_tokens"] == 50
-        assert entry["usage"]["cached_tokens"] == 800
+    # Once, not three times.
+    assert agg["usage_totals"] == {
+        "prompt_tokens": 1000,
+        "completion_tokens": 50,
+        "cached_tokens": 800,
+        "total_tokens": 1050,
+    }
+    assert all(r["usage"] is None for r in agg["roles"])
+
+    import eval_harness  # noqa: E402
+    telemetry = eval_harness.load_specialist_telemetry(ws)
+    assert telemetry["specialist_tokens_input"] == 1000
+    assert telemetry["specialist_tokens_output"] == 50
+    assert telemetry["specialist_tokens_cached"] == 800
+    assert telemetry["request_count"] == 1
 
 
 def test_combined_scout_tolerates_bare_lists_and_missing_roles(tmp_path, monkeypatch):
@@ -277,6 +307,9 @@ def test_combined_scout_transport_failure_is_fail_soft(tmp_path, monkeypatch):
     assert agg["any_errors"] is True
     assert all(r["status"] == "error" for r in agg["roles"])
     assert all(r["error_kind"] == "transport" for r in agg["roles"])
+    # The retry is a real wire attempt and is metered as such.
+    assert agg["request_count"] == 2
+    assert agg["request_bytes"] > 0
     for role in ROLES:
         artifact = role_artifact(ws, role)
         assert artifact["leads"] == []
@@ -316,6 +349,9 @@ def test_prime_then_fanout_primes_first_role(tmp_path, monkeypatch):
     agg = aggregate(ws)
     assert agg["execution"] == "prime_then_fanout"
     assert agg["any_errors"] is False
+    # Regression (#635): the prime shape still makes THREE actual requests.
+    assert agg["request_count"] == 3
+    assert agg["request_bytes"] > 0
     assert len([e for e in agg["roles"] if e["status"] == "ok"]) == 3
 
 

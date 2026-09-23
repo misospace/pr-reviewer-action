@@ -96,6 +96,13 @@ def test_telemetry_sums_tokens_and_execution(tmp_path):
             {
                 "enabled": True,
                 "execution": "combined_scout",
+                "request_count": 1,
+                "request_bytes": 12345,
+                "usage_totals": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 50,
+                    "cached_tokens": 800,
+                },
                 "roles": [
                     {
                         "role": "correctness",
@@ -120,9 +127,48 @@ def test_telemetry_sums_tokens_and_execution(tmp_path):
     )
     telemetry = eval_harness.load_specialist_telemetry(tmp_path)
     assert telemetry["execution"] == "combined_scout"
+    # Aggregate usage_totals wins: the role entries here sum to 150/15/80 —
+    # re-summing them would corrupt the actual transport totals (#635).
+    assert telemetry["specialist_tokens_input"] == 1000
+    assert telemetry["specialist_tokens_output"] == 50
+    assert telemetry["specialist_tokens_cached"] == 800
+    assert telemetry["request_count"] == 1
+    assert telemetry["request_bytes_total"] == 12345
+
+
+def test_telemetry_without_usage_totals_falls_back_to_role_sums(tmp_path):
+    (tmp_path / "specialists.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "roles": [
+                    {
+                        "role": "correctness",
+                        "status": "ok",
+                        "lead_count": 1,
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 10,
+                            "cached_tokens": 80,
+                        },
+                    },
+                    {
+                        "role": "security",
+                        "status": "ok",
+                        "lead_count": 0,
+                        "usage": {"prompt_tokens": 50, "completion_tokens": 5},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    telemetry = eval_harness.load_specialist_telemetry(tmp_path)
     assert telemetry["specialist_tokens_input"] == 150
     assert telemetry["specialist_tokens_output"] == 15
     assert telemetry["specialist_tokens_cached"] == 80
+    assert telemetry["request_count"] is None
+    assert telemetry["request_bytes_total"] is None
 
 
 def test_telemetry_without_execution_field_is_none(tmp_path):
@@ -132,6 +178,48 @@ def test_telemetry_without_execution_field_is_none(tmp_path):
     telemetry = eval_harness.load_specialist_telemetry(tmp_path)
     assert telemetry["execution"] is None
     assert telemetry["specialist_tokens_input"] == 0
+
+
+# ── Benchmark-output visibility ─────────────────────────────────────
+
+
+def test_report_exposes_request_count_and_bytes():
+    """Regression (#635): actual request count and request bytes must be
+    visible in the benchmark report's mode summary."""
+    corpus = eval_harness.BenchmarkCorpus(
+        prs=[{"number": 1, "repo_full_name": "r/r"}]
+    )
+    run = eval_harness.ReviewRun(
+        mode="native_loop+deep-scout",
+        pr_number=1,
+        repo_full_name="r/r",
+        deep_review=True,
+        specialists={
+            "enabled": True,
+            "execution": "combined_scout",
+            "specialist_tokens_input": 1000,
+            "specialist_tokens_output": 50,
+            "specialist_tokens_cached": 800,
+            "request_count": 1,
+            "request_bytes_total": 12345,
+            "total_leads": 0,
+            "any_errors": False,
+            "roles": [],
+            "leads_by_role": {"correctness": [], "security": [], "tests": []},
+        },
+    )
+    report = eval_harness.generate_report(
+        [eval_harness.BenchmarkResult(pr_number=1, repo_full_name="r/r", runs=[run])],
+        corpus,
+    )
+    summary = report["mode_summary"]["native_loop+deep-scout"]
+    assert summary["specialist_request_count"] == 1
+    assert summary["specialist_request_bytes"] == 12345
+    assert summary["avg_specialist_requests"] == 1.0
+    assert summary["avg_specialist_request_bytes"] == 12345.0
+    # Tokens counted once: the duplicated-role-entry trap would show 3x.
+    assert summary["avg_specialist_tokens_input"] == 1000.0
+    assert summary["avg_specialist_tokens_cached"] == 800.0
 
 
 # ── Env forwarding through the review-script seam ───────────────────

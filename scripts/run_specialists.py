@@ -58,8 +58,13 @@ the production architecture above) selects the request shape:
 into the regular per-role artifacts, and ``prime_then_fanout`` runs the
 standard three calls with the first role completing before the remaining
 two launch (a sequential prime for prefix-cache ordering). The aggregate
-records the shape as ``execution``; every per-role entry carries
-``request_bytes``. These modes are never enabled by any action input.
+records the shape as ``execution`` plus ACTUAL transport totals metered
+per wire attempt (``request_count``, ``request_bytes``,
+``usage_totals`` — retries included, never re-summed from role entries:
+the scout's single call is shared by three roles). Role entries carry
+``request_bytes``/``usage`` only for their own request in the three-call
+shapes; combined_scout role entries carry neither. These modes are never
+enabled by any action input.
 
 Bounds: each attempt is capped by ``min(AI_REQUEST_TIMEOUT_SEC, remaining
 aggregate deadline)``; the whole phase is capped by ``DEEP_REVIEW_TIMEOUT_SEC``
@@ -367,6 +372,53 @@ def _extract_usage(response: Any) -> Optional[dict[str, Optional[int]]]:
         "cached_tokens": cached,
         "total_tokens": total,
     }
+
+
+class _RequestMeter:
+    """Counts ACTUAL transport behavior for the aggregate (#635).
+
+    Wraps the transport's ``request_fn`` so every real wire attempt is
+    metered exactly once regardless of execution shape: attempts (including
+    retries), serialized request-payload bytes, and provider usage merged
+    across responses. Thread-safe (three_call fans out concurrently). The
+    aggregate's ``request_count`` / ``request_bytes`` / ``usage_totals``
+    come from here — never from summing role entries, which in
+    ``combined_scout`` mode would multiply the one shared call by three.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.count = 0
+        self.bytes = 0
+        self.usage: Optional[dict[str, Optional[int]]] = None
+
+    def wrap(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapped(base_url, api_format, payload, api_key, timeout_sec):
+            payload_bytes = len(json.dumps(payload).encode("utf-8"))
+            with self._lock:
+                self.count += 1
+                self.bytes += payload_bytes
+            response = fn(base_url, api_format, payload, api_key, timeout_sec)
+            usage = _extract_usage(response)
+            if usage is not None:
+                with self._lock:
+                    self._merge_usage(usage)
+            return response
+
+        return wrapped
+
+    def _merge_usage(self, usage: dict[str, Optional[int]]) -> None:
+        if self.usage is None:
+            self.usage = dict(usage)
+            return
+        for key, value in usage.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            current = self.usage.get(key)
+            if isinstance(current, bool) or not isinstance(current, int):
+                self.usage[key] = value
+            else:
+                self.usage[key] = current + value
 
 
 def _status_of(result: dict[str, Any]) -> str:
@@ -762,9 +814,7 @@ def _run_scout(
     except (OSError, ValueError) as exc:
         message = f"input: scout prompt unavailable: {mask_secrets(str(exc))}"
         return [
-            _scout_failure_entry(
-                workspace_root, role, message, started, request_bytes=None
-            )
+            _scout_failure_entry(workspace_root, role, message, started)
             for role in roles
         ]
 
@@ -779,7 +829,6 @@ def _run_scout(
         tokens_param=tokens_param,
         stream=stream,
     )
-    request_bytes = len(json.dumps(payload).encode("utf-8"))
 
     # The request artifact is the payload itself — structurally secret-free
     # (the key travels only in the transport's 0600 curl config). A refused
@@ -791,8 +840,7 @@ def _run_scout(
         message = "guard: refused to write the scout request artifact"
         return [
             _scout_failure_entry(
-                workspace_root, role, message, started, request_bytes=request_bytes,
-                cancel=cancel,
+                workspace_root, role, message, started, cancel=cancel,
             )
             for role in roles
         ]
@@ -851,10 +899,13 @@ def _run_scout(
 
         artifacts = _parse_scout_response(_extract_text(response), roles)
         elapsed = time.monotonic() - started
-        usage = _extract_usage(response)
         entries: list[dict[str, Any]] = []
         for role in roles:
             artifact = artifacts[role]
+            # Role entries carry NO usage/request_bytes: the one shared call
+            # belongs to no single role, and copying it would multiply it by
+            # three when consumers sum role entries (#635). The aggregate's
+            # request meter owns the transport accounting.
             if not _guarded_write(
                 workspace_root, f"specialist-{role}.json", _json_text(artifact),
                 abort=cancel,
@@ -862,8 +913,7 @@ def _run_scout(
                 if cancel.is_set():
                     entries.append(_role_entry(
                         role, artifact, status="error", error_kind="timeout",
-                        elapsed_sec=elapsed, usage=usage,
-                        request_bytes=request_bytes,
+                        elapsed_sec=elapsed,
                     ))
                     continue
                 artifact = _empty_artifact(role)
@@ -872,14 +922,12 @@ def _run_scout(
                 )
                 entries.append(_role_entry(
                     role, artifact, status="error", error_kind="guard",
-                    elapsed_sec=elapsed, usage=usage,
-                    request_bytes=request_bytes,
+                    elapsed_sec=elapsed,
                 ))
                 continue
             entries.append(_role_entry(
                 role, artifact, status=_status_of(artifact), error_kind=None,
-                elapsed_sec=elapsed, usage=usage,
-                request_bytes=request_bytes,
+                elapsed_sec=elapsed,
             ))
         return entries
 
@@ -891,7 +939,6 @@ def _run_scout(
             role,
             message,
             started,
-            request_bytes=request_bytes,
             cancel=cancel,
         )
         for role in roles
@@ -904,7 +951,6 @@ def _scout_failure_entry(
     message: str,
     started: float,
     *,
-    request_bytes: Optional[int],
     cancel: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
     """Fail-soft entry + artifact pair for a role when the ONE scout call
@@ -922,7 +968,6 @@ def _scout_failure_entry(
         role, artifact, status="error",
         error_kind=message.split(":", 1)[0],
         elapsed_sec=time.monotonic() - started,
-        request_bytes=request_bytes,
     )
 
 
@@ -1069,6 +1114,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     phase_started = time.monotonic()
     deadline = phase_started + phase_timeout_sec
 
+    # #635: meter every ACTUAL transport attempt (any execution shape,
+    # retries included) once for the aggregate; role entries keep their own
+    # per-role telemetry and the combined-scout entries carry none, so
+    # aggregate totals can never double-count a shared call.
+    meter = _RequestMeter()
+    metered_request_fn = meter.wrap(run_chat_request)
+
     entries: list[dict[str, Any]] = []
     corpus, corpus_error, corpus_bytes = _read_corpus(args.corpus)
     if corpus is None:
@@ -1111,7 +1163,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 role_timeout_sec=role_timeout_sec,
                 deadline=deadline,
                 cancel=threading.Event(),
-                request_fn=run_chat_request,
+                request_fn=metered_request_fn,
             )
             by_role = {entry["role"]: entry for entry in scout_results}
             entries = []
@@ -1166,7 +1218,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     role_timeout_sec=role_timeout_sec,
                     deadline=deadline,
                     cancel=cancels[role],
-                    request_fn=run_chat_request,
+                    request_fn=metered_request_fn,
                 )
 
             threads_by_role: dict[str, threading.Thread] = {}
@@ -1263,6 +1315,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         # #635 benchmark telemetry: which specialist execution shape ran
         # (three_call is the production default).
         "execution": execution,
+        # ACTUAL transport totals metered per wire attempt (retries
+        # included): never derived from role entries — combined_scout shares
+        # one call across three roles, and summing role entries would
+        # multiply it by three. usage_totals merges the provider usage of
+        # every response (None when no provider exposed token counts).
+        "request_count": meter.count,
+        "request_bytes": meter.bytes,
+        "usage_totals": meter.usage,
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
         "specialist_corpus_bytes": corpus_bytes,

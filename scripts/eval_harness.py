@@ -862,9 +862,11 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
     Normalized shape (identical keys in both paths):
       {"enabled": bool, "aggregate_elapsed_sec": float | None,
        "execution": str | None,              # #635 execution shape
-       "specialist_tokens_input": int,       # #635 summed role usage
-       "specialist_tokens_output": int,
-       "specialist_tokens_cached": int,
+       "specialist_tokens_input": int,       # #635 actual transport totals
+       "specialist_tokens_output": int,      #   (aggregate usage_totals when
+       "specialist_tokens_cached": int,      #   present, else role sums)
+       "request_count": int | None,          # #635 actual wire attempts
+       "request_bytes_total": int | None,    # #635 serialized payload bytes
        "total_leads": int, "any_errors": bool, "derived": bool,
        "specialist_corpus_bytes": int | None,   # #632
        "specialist_max_tokens": int | None,     # #632
@@ -985,20 +987,41 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
                     any_errors = True
                     break
 
+        # #635: ACTUAL transport totals live on the aggregate (metered per
+        # wire attempt) — NEVER in a re-sum of role entries. In
+        # combined_scout mode the three roles share ONE call, so role-entry
+        # usage/bytes would multiply it by three. Role sums remain the
+        # fallback only for legacy aggregates that predate the meter.
+        usage_totals = aggregate.get("usage_totals")
+        request_count = _int(aggregate.get("request_count"))
+        request_bytes = _int(aggregate.get("request_bytes"))
+        if isinstance(usage_totals, dict):
+            tokens_in = _int_or_zero(usage_totals.get("prompt_tokens"))
+            tokens_out = _int_or_zero(usage_totals.get("completion_tokens"))
+            tokens_cached = _int_or_zero(usage_totals.get("cached_tokens"))
+        else:
+            tokens_in = _sum_role_usage(roles_out, "prompt_tokens")
+            tokens_out = _sum_role_usage(roles_out, "completion_tokens")
+            tokens_cached = _sum_role_usage(roles_out, "cached_tokens")
+
         return {
             "enabled": enabled if isinstance(enabled, bool) else True,
             "aggregate_elapsed_sec": _num(aggregate.get("aggregate_elapsed_sec")),
             # #635: which specialist execution shape ran (None = pre-#635
-            # aggregate without the field); token sums include cached-input
-            # counts where the provider exposed them.
+            # aggregate without the field); token sums come from the
+            # aggregate's metered usage_totals when present (actual
+            # transport totals per request), falling back to role sums for
+            # legacy aggregates.
             "execution": (
                 aggregate.get("execution")
                 if isinstance(aggregate.get("execution"), str)
                 else None
             ),
-            "specialist_tokens_input": _sum_role_usage(roles_out, "prompt_tokens"),
-            "specialist_tokens_output": _sum_role_usage(roles_out, "completion_tokens"),
-            "specialist_tokens_cached": _sum_role_usage(roles_out, "cached_tokens"),
+            "specialist_tokens_input": tokens_in,
+            "specialist_tokens_output": tokens_out,
+            "specialist_tokens_cached": tokens_cached,
+            "request_count": request_count,
+            "request_bytes_total": request_bytes,
             "total_leads": (
                 total_leads if total_leads is not None
                 else sum(r["lead_count"] for r in roles_out)
@@ -1046,6 +1069,8 @@ def load_specialist_telemetry(workdir: Path) -> dict[str, Any] | None:
         "specialist_tokens_input": _sum_role_usage(roles_out, "prompt_tokens"),
         "specialist_tokens_output": _sum_role_usage(roles_out, "completion_tokens"),
         "specialist_tokens_cached": _sum_role_usage(roles_out, "cached_tokens"),
+        "request_count": None,
+        "request_bytes_total": None,
         "total_leads": sum(len(v) for v in leads_by_role.values()),
         "any_errors": any_errors,
         "derived": True,
@@ -1704,6 +1729,8 @@ def generate_report(
             "specialist_tokens_output": 0,
             "specialist_tokens_cached": 0,
             "specialist_lead_overlap": 0,
+            "specialist_request_count": 0,
+            "specialist_request_bytes": 0,
         }
 
     # Per-mode aggregation. The classic modes are pre-seeded; any other run
@@ -1757,6 +1784,12 @@ def generate_report(
                         run.specialists.get("specialist_tokens_cached")
                     )
                     mm["specialist_lead_overlap"] += _cross_role_lead_overlap(run)
+                    mm["specialist_request_count"] += _int_or_zero(
+                        run.specialists.get("request_count")
+                    )
+                    mm["specialist_request_bytes"] += _int_or_zero(
+                        run.specialists.get("request_bytes_total")
+                    )
             else:
                 mm["errors"] += 1
 
@@ -1900,11 +1933,22 @@ def generate_report(
             mm["avg_specialist_lead_overlap"] = round(
                 mm["specialist_lead_overlap"] / n_deep, 4
             )
+            # #635: actual transport accounting per deep run — wire attempts
+            # (retries included) and serialized request bytes. For
+            # combined_scout this counts ONE request, not three.
+            mm["avg_specialist_requests"] = round(
+                mm["specialist_request_count"] / n_deep, 4
+            )
+            mm["avg_specialist_request_bytes"] = round(
+                mm["specialist_request_bytes"] / n_deep, 1
+            )
         else:
             mm["avg_specialist_tokens_input"] = None
             mm["avg_specialist_tokens_output"] = None
             mm["avg_specialist_tokens_cached"] = None
             mm["avg_specialist_lead_overlap"] = None
+            mm["avg_specialist_requests"] = None
+            mm["avg_specialist_request_bytes"] = None
 
     semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
     report = {
