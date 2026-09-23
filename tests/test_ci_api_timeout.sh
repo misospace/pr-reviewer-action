@@ -485,7 +485,8 @@ run_wait() { # $1 = extra env assignments (KEY=val KEY2=val2 ...); sets WAIT_RC,
   (
     eval "export $1"
     export PATH="$BIN:$PATH"
-    GH_TOKEN=test REPO="test/repo" PR_NUMBER=7 PR_HEAD_SHA="deadbeef" \
+    GH_TOKEN=test REPO="test/repo" PR_NUMBER=7 \
+      PR_HEAD_SHA="${WAIT_PR_HEAD_SHA:-deadbeef}" \
       GITHUB_RUN_ID="999" CI_STATUS_CONTEXT="pr-reviewer-action" \
       CI_STATUS_CHECK=true CI_CHECKS_FILE="$TMP/ci-checks.md" \
       GITHUB_OUTPUT="$out_file" \
@@ -519,7 +520,7 @@ check "hung API: exit 1 with skip=true" "$WAIT_RC" "1"
 check_contains "hung API: skipped output written" "$WAIT_OUT" "ci_status_skipped=true"
 ATTEMPTS="$(wc -l < "$ATTEMPT_LOG" | tr -d ' ')"
 check "hung API: one bounded attempt per endpoint (both APIs tried once)" "$ATTEMPTS" "2"
-if [ "$WAIT_DUR" -le 10 ]; then
+if [ "$WAIT_DUR" -le 6 ]; then
   echo "  PASS: poller returned in ${WAIT_DUR}s despite two hung endpoints"
   PASS=$((PASS + 1))
 else
@@ -558,7 +559,7 @@ else
   echo "  FAIL: expected multiple attempts after bounded timeouts, got ${ATTEMPTS}"
   FAIL=$((FAIL + 1))
 fi
-if [ "$WAIT_DUR" -le 12 ]; then
+if [ "$WAIT_DUR" -le 7 ]; then
   echo "  PASS: retry loop honored the outer policy (${WAIT_DUR}s)"
   PASS=$((PASS + 1))
 else
@@ -570,6 +571,128 @@ if process_gone "$CR_PID"; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL: hung fake gh survived the retry loop"
+  FAIL=$((FAIL + 1))
+fi
+
+# ── 5. Deadline-aware sleeps and one shared budget (#663 review) ────────
+
+# Pending external check fixture. Fakes below are single-quoted heredocs
+# that cat this file — interpolating the JSON itself into an unquoted
+# heredoc would let bash strip its double quotes and produce invalid JSON.
+PENDING_FIXTURE="$TMP/pending-checks.json"
+printf '%s\n' '{"check_runs":[{"name":"lint","status":"in_progress","conclusion":null}],"total_count":1}' > "$PENDING_FIXTURE"
+export ATTEMPT_LOG PENDING_FIXTURE
+
+echo ""
+echo "=== wait_for_ci.sh: poll sleeps cannot oversleep the deadline ==="
+# Pending check with CI_INTERVAL_SEC=15 against a 4s budget: an
+# unconditional interval sleep would notice the timeout only after ~15s.
+# The clamped sleep hands control back at the deadline (~4s).
+cat > "$BIN/gh" <<'SHELLEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *check-runs*) echo attempt >> "$ATTEMPT_LOG"; cat "$PENDING_FIXTURE" ;;
+  *)            printf '{"state":"pending","total_count":0}\n' ;;
+esac
+SHELLEOF
+chmod +x "$BIN/gh"
+run_wait "CI_TIMEOUT_SEC=4 CI_INTERVAL_SEC=15 CI_SKIP_ON_TIMEOUT=true"
+check "oversleep guard: exit 1 with skip=true" "$WAIT_RC" "1"
+check_contains "oversleep guard: skipped output written" "$WAIT_OUT" "ci_status_skipped=true"
+if [ "$WAIT_DUR" -ge 3 ] && [ "$WAIT_DUR" -le 7 ]; then
+  echo "  PASS: pending sleep clamped to the deadline (${WAIT_DUR}s, interval would be 15s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: pending sleep overslept the deadline — took ${WAIT_DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== wait_for_ci.sh: transient-retry sleep is deadline-clamped ==="
+# Both endpoints answer empty (the transient contract) instantly; the
+# retry sleep is the only thing that can oversleep. With instant attempts
+# the one clamped sleep consumes the whole remaining budget, so exactly
+# one poll iteration is correct — a broken sleep (busy-loop) would show
+# attempts ≫ 1; an unconditional interval sleep would oversleep the wall.
+cat > "$BIN/gh" <<'SHELLEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *check-runs*) echo attempt >> "$ATTEMPT_LOG"; exit 0 ;;
+  *)            exit 0 ;;
+esac
+SHELLEOF
+chmod +x "$BIN/gh"
+run_wait "CI_TIMEOUT_SEC=4 CI_INTERVAL_SEC=15 CI_SKIP_ON_TIMEOUT=true"
+check "empty-retry: exit 1 with skip=true" "$WAIT_RC" "1"
+check_contains "empty-retry: skipped output written" "$WAIT_OUT" "ci_status_skipped=true"
+ATTEMPTS="$(wc -l < "$ATTEMPT_LOG" | tr -d ' ')"
+check "empty-retry: exactly one poll, then the clamped sleep ends the budget" "$ATTEMPTS" "1"
+if [ "$WAIT_DUR" -le 7 ]; then
+  echo "  PASS: empty-retry sleep clamped to the deadline (${WAIT_DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: empty-retry sleep overslept — took ${WAIT_DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== wait_for_ci.sh: head-SHA lookup and polling share one deadline ==="
+# PR_HEAD_SHA absent: the pulls (head-SHA) request consumes 3s of a 5s
+# budget, then polling gets only the remaining ~2s. With per-phase budgets
+# the loop would start a fresh CI_TIMEOUT_SEC after the lookup (3s + 5s+).
+cat > "$BIN/gh" <<'SHELLEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *pulls*)      sleep 3; echo deadbeef ;;
+  *check-runs*) echo attempt >> "$ATTEMPT_LOG"; cat "$PENDING_FIXTURE" ;;
+  *)            printf '{"state":"pending","total_count":0}\n' ;;
+esac
+SHELLEOF
+chmod +x "$BIN/gh"
+run_wait "CI_TIMEOUT_SEC=5 CI_INTERVAL_SEC=15 CI_SKIP_ON_TIMEOUT=true WAIT_PR_HEAD_SHA="
+check "shared budget: head-SHA fetch succeeded inside the budget" "$WAIT_RC" "1"
+check_contains "shared budget: skipped output written" "$WAIT_OUT" "ci_status_skipped=true"
+if [ "$WAIT_DUR" -ge 3 ] && [ "$WAIT_DUR" -le 7 ]; then
+  echo "  PASS: lookup + polling shared the 5s budget (${WAIT_DUR}s; split budgets would need 8s+)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: deadline not shared with the head-SHA lookup — took ${WAIT_DUR}s"
+  FAIL=$((FAIL + 1))
+fi
+ATTEMPTS="$(wc -l < "$ATTEMPT_LOG" | tr -d ' ')"
+if [ "$ATTEMPTS" -ge 1 ]; then
+  echo "  PASS: polling still ran after the shared-budget lookup (${ATTEMPTS} attempt(s))"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: no poll attempt after the head-SHA lookup"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== wait_for_ci.sh: normal cadence unchanged with ample budget ==="
+cat > "$BIN/gh" <<'SHELLEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *check-runs*) echo attempt >> "$ATTEMPT_LOG"; cat "$PENDING_FIXTURE" ;;
+  *)            printf '{"state":"pending","total_count":0}\n' ;;
+esac
+SHELLEOF
+chmod +x "$BIN/gh"
+run_wait "CI_TIMEOUT_SEC=4 CI_INTERVAL_SEC=1 CI_SKIP_ON_TIMEOUT=true"
+check "cadence: exit 1 with skip=true" "$WAIT_RC" "1"
+ATTEMPTS="$(wc -l < "$ATTEMPT_LOG" | tr -d ' ')"
+if [ "$ATTEMPTS" -ge 3 ]; then
+  echo "  PASS: polled every interval (${ATTEMPTS} attempts over ${WAIT_DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: expected full-interval cadence, got ${ATTEMPTS} attempts"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$WAIT_DUR" -ge 3 ] && [ "$WAIT_DUR" -le 8 ]; then
+  echo "  PASS: sleeps still run at full interval when budget allows (${WAIT_DUR}s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: cadence disturbed — ${ATTEMPTS} attempts in ${WAIT_DUR}s"
   FAIL=$((FAIL + 1))
 fi
 
