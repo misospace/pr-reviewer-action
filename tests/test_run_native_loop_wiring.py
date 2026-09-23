@@ -953,8 +953,11 @@ def test_verdict_corpus_reports_real_harness_findings(monkeypatch, tmp_path):
     assert "+bump" in user_text
 
 
-def test_native_verdict_trailing_task_keeps_strict_contract(monkeypatch, tmp_path):
-    monkeypatch.setenv("PRIMARY_REQUEST_SHAPE", "trailing_task")
+@pytest.mark.parametrize("profile", ["primary", "smart"])
+def test_native_verdict_trailing_task_keeps_strict_contract(monkeypatch, tmp_path, profile):
+    monkeypatch.setenv("REVIEW_CONTEXT_PROFILE", profile)
+    monkeypatch.setenv("PRIMARY_REQUEST_SHAPE", "trailing_task" if profile == "primary" else "default")
+    monkeypatch.setenv("SMART_REQUEST_SHAPE", "trailing_task" if profile == "smart" else "default")
     monkeypatch.setenv("AI_RESPONSE_FORMAT", "json_schema")
     (tmp_path / "review-corpus.truncated.md").write_text(_PLACEHOLDER_CORPUS, encoding="utf-8")
     (tmp_path / "machineconfig.yaml.j2").write_text("install: example\n", encoding="utf-8")

@@ -216,7 +216,11 @@ call_model_tier() {
       request_timeout="$AI_REQUEST_TIMEOUT_SEC"; connect_timeout="$AI_CONNECT_TIMEOUT_SEC"
       retries="$AI_PRIMARY_RETRIES"; retry_delay="$AI_PRIMARY_RETRY_DELAY_SEC"
       corpus_for_request="$corpus_file"
-      shape="${PRIMARY_REQUEST_SHAPE:-default}"
+      if [[ "${REVIEW_CONTEXT_PROFILE:-primary}" == smart ]]; then
+        shape="${SMART_REQUEST_SHAPE:-default}"
+      else
+        shape="${PRIMARY_REQUEST_SHAPE:-default}"
+      fi
       ;;
     fallback)
       label="Fallback"

@@ -111,8 +111,8 @@ elif [[ "$(printf '%s' "$TOOL_MODE" | tr '[:upper:]' '[:lower:]')" == "native_lo
 fi
 
 if [ "$NATIVE_VERDICT_USED" -ne 1 ]; then
-  # Standard corpus review on the primary tier. call_model_tier owns the retry
-  # loop, streaming and truncation shared by all three tiers (#368).
+  # Initial corpus review (primary artifact slot, possibly smart-routed).
+  # call_model_tier owns the retry loop and streaming shared by all slots.
   PRIMARY_OK=0
   if call_model_tier primary "$USER_MESSAGE" review-corpus.truncated.md ai-request.primary.json ai-response.primary.json; then
     PRIMARY_OK=1
@@ -498,14 +498,16 @@ write_step_summary() {
   local verdict diff_bytes corpus_bytes prompt_tok comp_tok usage_file final_tier final_corpus final_diff budget_cap diff_cap shape context_capacity
   verdict="$(jq -r '.verdict // "unknown"' ai-output.json 2>/dev/null || echo unknown)"
   diff_bytes="$( [ -f pr.diff ] && wc -c < pr.diff | tr -d ' ' || echo 0 )"
-  final_tier="primary"; final_corpus="review-corpus.truncated.md"; final_diff="pr.diff.truncated"
+  final_tier="${REVIEW_CONTEXT_PROFILE:-primary}"; final_corpus="review-corpus.truncated.md"; final_diff="pr.diff.truncated"
   budget_cap="${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}"; diff_cap="${PRIMARY_MAX_DIFF:-$MAX_DIFF}"
   shape="${PRIMARY_REQUEST_SHAPE:-default}"; context_capacity="${PRIMARY_MODEL_CONTEXT_TOKENS:-${MODEL_CONTEXT_TOKENS:-unset}}"
-  if [[ "${REVIEW_ROUTE:-}" == escalated ]]; then
-    final_tier="smart"; final_corpus="review-corpus.smart.truncated.md"; final_diff="pr.diff.smart.truncated"
+  if [[ "${REVIEW_ROUTE:-}" == escalated || "$final_tier" == smart ]]; then
+    final_tier="smart"; final_diff="pr.diff.smart.truncated"
+    [[ "${REVIEW_ROUTE:-}" == escalated ]] && final_corpus="review-corpus.smart.truncated.md"
     budget_cap="${SMART_MAX_CORPUS:-$MAX_CORPUS}"; diff_cap="${SMART_MAX_DIFF:-$MAX_DIFF}"
     shape="${SMART_REQUEST_SHAPE:-default}"; context_capacity="${SMART_MODEL_CONTEXT_TOKENS:-${MODEL_CONTEXT_TOKENS:-unset}}"
-  elif [[ "${PRIMARY_OK:-1}" -ne 1 && -s review-corpus.fallback.truncated.md ]]; then
+  fi
+  if [[ "${REVIEW_ROUTE:-}" != escalated && "${PRIMARY_OK:-1}" -ne 1 && -s review-corpus.fallback.truncated.md ]]; then
     final_tier="fallback"; final_corpus="review-corpus.fallback.truncated.md"
     budget_cap=120000; shape=default
   fi
@@ -616,7 +618,7 @@ write_step_summary() {
     fi
     echo "| Budget | ${budget_desc} |"
     echo "| Final context | tier=${final_tier}; model_context_tokens=${context_capacity}; corpus_budget=${budget_cap}B; corpus_actual=${corpus_bytes}B; diff_budget=${diff_cap}B; diff_actual=${included_diff_bytes}B; request_shape=${shape} |"
-    if [[ "$final_tier" == smart ]]; then
+    if [[ "${REVIEW_ROUTE:-}" == escalated ]]; then
       echo "| Primary context | corpus_budget=${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}B; corpus_actual=$(wc -c < review-corpus.truncated.md | tr -d ' ')B; diff_budget=${PRIMARY_MAX_DIFF:-$MAX_DIFF}B; request_shape=${PRIMARY_REQUEST_SHAPE:-default} |"
     fi
     echo "| Diff bytes | ${diff_bytes} (truncated: ${diff_trunc}) |"

@@ -158,8 +158,11 @@ apply_context_limits() {
     local reserve=$(( AI_MAX_TOKENS + 2000 ))
     local usable=$(( ctx - reserve ))
     if [[ "$usable" -lt 2000 ]]; then
-      error "Model context $ctx cannot fit AI_MAX_TOKENS=$AI_MAX_TOKENS plus 2000 tokens of headroom and a 2000-token input budget"
-      return 1
+      if [[ "${2:-}" == tier ]]; then
+        error "Model context $ctx cannot fit AI_MAX_TOKENS=$AI_MAX_TOKENS plus 2000 tokens of headroom and a 2000-token input budget"
+        return 1
+      fi
+      usable=2000
     fi
     # Explicit tier overrides cannot allocate an unbounded corpus. The legacy
     # global setting retains its historical calculation when no override is set.

@@ -97,6 +97,80 @@ source ./limits.sh
     assert result.returncode == 0, result.stderr
 
 
+def test_legacy_small_context_floor_and_explicit_override_failure(tmp_path):
+    config = (ROOT / "scripts/sections/config.sh").read_text()
+    func = config[config.index("apply_context_limits() {"):config.index("# Truncate SRC")]
+    (tmp_path / "limits.sh").write_text(func)
+    script = '''error() { :; }; log() { :; }
+AI_MAX_TOKENS=8192; CONTEXT_LIMIT_MODE=normal; MODEL_CONTEXT_TOKENS=8192
+PRIMARY_MODEL_CONTEXT_TOKENS=""; SMART_MODEL_CONTEXT_TOKENS=""
+PRIMARY_REQUEST_SHAPE=default; SMART_REQUEST_SHAPE=default
+source ./limits.sh
+[[ "$MAX_CORPUS:$MAX_DIFF:$MAX_FILES" == "6000:3600:1000" ]] || exit 1
+[[ "$PRIMARY_MAX_CORPUS:$SMART_MAX_CORPUS" == "6000:6000" ]] || exit 2
+apply_context_limits 8192 tier && exit 3
+apply_context_limits 8192 || exit 4
+[[ "$MAX_CORPUS:$MAX_DIFF:$MAX_FILES" == "6000:3600:1000" ]] || exit 5'''
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
+@pytest.mark.parametrize("route,profile,expected_shape,expected_sentinel", [
+    ("smart", "smart", "trailing_task", True),
+    ("primary", "primary", "default", False),
+])
+def test_initial_route_corpus_and_request_use_effective_profile(
+    tmp_path, route, profile, expected_shape, expected_sentinel
+):
+    corpus_script = (ROOT / "scripts/sections/corpus.sh").read_text()
+    assembly = corpus_script[corpus_script.index("build_bounded_repo_map() {"):corpus_script.index('\nsection_timer_start "corpus-building"')]
+    (tmp_path / "assembly.sh").write_text(assembly)
+    routing_script = (ROOT / "scripts/sections/classification.sh").read_text()
+    routing = routing_script[routing_script.index("resolve_review_route() {"):routing_script.index("# Tailor the default system prompt")]
+    (tmp_path / "routing.sh").write_text(routing)
+    for name, content in {
+        "pr.json": '{"number":1,"title":"test"}',
+        "classification.json": json.dumps({"pr_kind": "app_code", "route_signals": ["security"] if route == "smart" else []}),
+        "pr-files.json": "[]", "pr-files.truncated.json": "[]", "corpus.md": "",
+    }.items():
+        (tmp_path / name).write_text(content)
+    (tmp_path / "pr.diff").write_text("filler\n" * 3000 + "DIRECT_SMART_SENTINEL_658\n")
+    script = '''log() { :; }; error() { :; }
+source "$SCRIPT_DIR/sections/config.sh"
+source ./assembly.sh
+source ./routing.sh
+truncate_clean pr.diff pr.diff.truncated "$PRIMARY_MAX_DIFF"
+build_review_corpus "$REVIEW_CONTEXT_PROFILE" primary
+cp review-corpus.md review-corpus.truncated.md
+SYSTEM_PROMPT=sys; STREAM_BOOL=false
+AI_REQUEST_TIMEOUT_SEC=1; AI_CONNECT_TIMEOUT_SEC=1
+AI_PRIMARY_RETRIES=1; AI_PRIMARY_RETRY_DELAY_SEC=1
+curl_model() { printf '{"choices":[{"message":{"content":"ok"}}]}' > "$5"; }
+parse_and_validate() { return 0; }
+call_model_tier primary task review-corpus.truncated.md ai-request.primary.json ai-response.primary.json
+[[ "$REVIEW_ROUTE" == "$EXPECTED_ROUTE" && "$REVIEW_CONTEXT_PROFILE" == "$EXPECTED_PROFILE" ]]'''
+    env = dict(os.environ, SCRIPT_DIR=str(ROOT / "scripts"), REPO="x/y", PR_NUMBER="1",
+               AI_BASE_URL="http://example.invalid", AI_MODEL="p", GH_TOKEN="test",
+               AI_API_FORMAT="openai", AI_API_KEY="", AI_PRIMARY_MODEL="p", AI_SMART_MODEL="s",
+               REVIEW_ROUTING_MODE="auto", ESCALATE_ON_RISK_FLAGS="security",
+               EXPECTED_ROUTE=route, EXPECTED_PROFILE=profile,
+               PRIMARY_MODEL_CONTEXT_TOKENS="11000", SMART_MODEL_CONTEXT_TOKENS="40000",
+               PRIMARY_REQUEST_SHAPE="default", SMART_REQUEST_SHAPE="trailing_task",
+               AI_MAX_TOKENS="1000", STANDARDS_FILE="AGENTS.md", CI_CHECKS_FILE="")
+    # The call site keeps the initial-review artifact slot, even for smart routing.
+    script = f'source "{ROOT}/scripts/model_call.sh"\n' + script
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    corpus = (tmp_path / "review-corpus.truncated.md").read_text()
+    assert ("DIRECT_SMART_SENTINEL_658" in corpus) is expected_sentinel
+    assert (tmp_path / "review-corpus.smart.truncated.md").exists() is False
+    payload = json.loads((tmp_path / "ai-request.primary.json").read_text())
+    assert payload["model"] == ("s" if route == "smart" else "p")
+    user = payload["messages"][-1]["content"]
+    assert (user.index("task") > user.index("# PR Diff")) is (expected_shape == "trailing_task")
+
+
 @pytest.mark.skipif(not shutil.which("jq"), reason="jq required")
 @pytest.mark.parametrize("transport", ["openai", "anthropic"])
 def test_trailing_task_preserves_request_contract(tmp_path, transport):

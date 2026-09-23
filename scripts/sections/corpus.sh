@@ -211,18 +211,25 @@ PY
 
 build_review_corpus() {
   local tier="${1:-primary}"
+  local slot="${2:-$tier}"
+  # The initial review always owns the primary artifact slot; a directly
+  # routed smart model only changes the context profile, not artifact names.
   local MAX_CORPUS="${PRIMARY_MAX_CORPUS:-$MAX_CORPUS}" diff_budget="${PRIMARY_MAX_DIFF:-${MAX_DIFF:-140000}}" files_budget="${PRIMARY_MAX_FILES:-${MAX_FILES:-70000}}"
   local output="review-corpus.md" diff_file="pr.diff.truncated" files_file="pr-files.truncated.json"
   local harness_file="tool-harness.md"
   if [[ "$tier" == smart ]]; then
     MAX_CORPUS="${SMART_MAX_CORPUS:-$MAX_CORPUS}"; diff_budget="${SMART_MAX_DIFF:-${MAX_DIFF:-140000}}"; files_budget="${SMART_MAX_FILES:-${MAX_FILES:-70000}}"
-    output="review-corpus.smart.truncated.md"
+    if [[ "$slot" == smart ]]; then
+      output="review-corpus.smart.truncated.md"
+    fi
     diff_file="pr.diff.smart.truncated"; files_file="pr-files.smart.truncated.json"
     truncate_clean pr.diff "$diff_file" "$diff_budget" '…[diff truncated to fit context budget]'
     truncate_clean pr-files.json "$files_file" "$files_budget" '…[file list truncated]'
-    harness_file="tool-harness.smart.md"
-    if [[ ! -s "$harness_file" && -s tool-harness.md ]]; then
-      printf '%s\n' 'Primary tool investigation omitted; conduct your own independent review.' > "$harness_file"
+    if [[ "$slot" == smart ]]; then
+      harness_file="tool-harness.smart.md"
+      if [[ ! -s "$harness_file" && -s tool-harness.md ]]; then
+        printf '%s\n' 'Primary tool investigation omitted; conduct your own independent review.' > "$harness_file"
+      fi
     fi
   fi
   build_bounded_repo_map
@@ -434,7 +441,7 @@ build_review_corpus() {
   # by construction (the section's bytes were carved out of the body budget
   # above, and the shared fits-sanity keeps signal and section in step),
   # asserted defensively.
-  if [[ "$tier" != smart ]] && [ -s requirement-ledger-present.txt ] \
+  if [[ "$slot" != smart ]] && [ -s requirement-ledger-present.txt ] \
      && ! grep -qF '# Explicit Requirement Ledger' "$output"; then
     log "WARNING: requirement-ledger-present.txt is set but the ledger section is missing from review-corpus.md; clearing the stale signal"
     : > requirement-ledger-present.txt
@@ -446,7 +453,7 @@ build_review_corpus() {
   # Leads" section in the final corpus. Unreachable by construction —
   # run_specialists.py applies the identical MAX_CORPUS fits-sanity before
   # writing both artifacts — asserted defensively.
-  if [[ "$tier" != smart ]] && [ -s specialist-leads-present.txt ] \
+  if [[ "$slot" != smart ]] && [ -s specialist-leads-present.txt ] \
      && ! grep -qF '# Specialist Review Leads' "$output"; then
     log "WARNING: specialist-leads-present.txt is set but the specialist section is missing from review-corpus.md; clearing the stale signal"
     : > specialist-leads-present.txt
@@ -462,7 +469,7 @@ build_pr_thread_context
 log "Building related-code context from full diff..."
 build_related_code_context pr.diff pr-files.json
 
-build_review_corpus primary
+build_review_corpus "${REVIEW_CONTEXT_PROFILE:-primary}" primary
 cp review-corpus.md review-corpus.truncated.md
 section_timer_end
 
@@ -504,7 +511,7 @@ section_timer_end
 # rebuild happens and disabled output stays byte-for-byte as before.
 if [ "${CI_GATE_ACTIVE:-false}" == "true" ] || [ -s specialists.md ]; then
   log "review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads"
-  build_review_corpus primary
+  build_review_corpus "${REVIEW_CONTEXT_PROFILE:-primary}" primary
   cp review-corpus.md review-corpus.truncated.md
 fi
 
@@ -536,6 +543,6 @@ EOF
 EOF
     fi
   fi
-  build_review_corpus primary
+  build_review_corpus "${REVIEW_CONTEXT_PROFILE:-primary}" primary
   cp review-corpus.md review-corpus.truncated.md
 fi

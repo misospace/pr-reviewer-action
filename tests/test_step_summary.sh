@@ -96,5 +96,26 @@ check "primary attempt remains visible" \
   "$(grep -q 'Primary context | corpus_budget=1000B; corpus_actual=50B; diff_budget=10B; request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
 
 echo ""
+echo "=== Test: direct smart route uses initial artifacts with smart profile ==="
+REVIEW_ROUTE=smart; REVIEW_CONTEXT_PROFILE=smart
+printf 'd%.0s' $(seq 1 85) > review-corpus.truncated.md
+printf 'q%.0s' $(seq 1 45) > pr.diff.smart.truncated
+: > "$GITHUB_STEP_SUMMARY"
+write_step_summary
+check "direct smart reports smart cap and initial corpus bytes" \
+  "$(grep -q 'tier=smart; model_context_tokens=32000; corpus_budget=4000B; corpus_actual=85B; diff_budget=200B; diff_actual=45B; request_shape=trailing_task' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+check "direct smart does not report an earlier primary attempt" \
+  "$(grep -c 'Primary context' "$GITHUB_STEP_SUMMARY" || true)" "0"
+
+echo ""
+echo "=== Test: failed initial smart route still reports fallback ==="
+PRIMARY_OK=0
+printf 'f%.0s' $(seq 1 40) > review-corpus.fallback.truncated.md
+: > "$GITHUB_STEP_SUMMARY"
+write_step_summary
+check "fallback uses fallback tier and corpus" \
+  "$(grep -q 'tier=fallback; .*corpus_budget=120000B; corpus_actual=40B; .*request_shape=default' "$GITHUB_STEP_SUMMARY" && echo yes || echo no)" "yes"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

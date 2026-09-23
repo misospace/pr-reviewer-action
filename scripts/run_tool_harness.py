@@ -1322,7 +1322,9 @@ def run_native_loop(
                         f"({saved} bytes saved)",
                         file=sys.stderr,
                     )
-                shape = os.getenv("SMART_REQUEST_SHAPE" if tier == "smart" else "PRIMARY_REQUEST_SHAPE", "default")
+                # The initial artifact slot can contain a directly routed smart model.
+                profile = "smart" if tier == "smart" else os.getenv("REVIEW_CONTEXT_PROFILE", "primary")
+                shape = os.getenv("SMART_REQUEST_SHAPE" if profile == "smart" else "PRIMARY_REQUEST_SHAPE", "default")
                 if shape == "trailing_task":
                     conversation.add_user(deduped_corpus + "\n\n" + _VERDICT_CLOSING_INSTRUCTION)
                 else:

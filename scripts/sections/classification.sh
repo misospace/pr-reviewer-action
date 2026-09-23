@@ -224,6 +224,9 @@ if [[ -n "$SMART_MODEL" ]]; then
 fi
 
 resolve_review_route
+REVIEW_CONTEXT_PROFILE=primary
+[[ "$REVIEW_ROUTE" == smart ]] && REVIEW_CONTEXT_PROFILE=smart
+export REVIEW_CONTEXT_PROFILE
 # Exported for the native-loop harness; the loop budget is the same on every
 # route (the route selects the model, not the tool budget — see adaptive_loop_budgets).
 export REVIEW_ROUTE
