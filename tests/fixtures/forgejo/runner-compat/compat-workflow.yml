@@ -1,0 +1,56 @@
+name: v3 forgejo runner compat
+on: push
+jobs:
+  compat:
+    runs-on: node22
+    steps:
+      - name: checkout
+        run: |
+          git clone --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" .
+          git checkout "$GITHUB_SHA"
+      - name: node launcher preflight
+        run: |
+          set -eu
+          if ! node_bin="$(command -v node)"; then
+            echo "node is not on PATH; the v3 composite wrapper requires it" >&2
+            exit 1
+          fi
+          v="$(node --version)"
+          case "$v" in
+            v2[2-9].*) : ;;
+            *) echo "node >= 22 required, found $v at $node_bin" >&2; exit 1 ;;
+          esac
+          echo "launcher preflight ok: $node_bin $v"
+      - id: composite
+        uses: ./v3/composite
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ secrets.GITHUB_TOKEN }}
+          platform: forgejo
+      - name: outputs and summary
+        env:
+          COMPOSITE: ${{ steps.composite.outputs.test-kebab-output }}
+        run: |
+          # The composite fixture already appended to and read back
+          # GITHUB_STEP_SUMMARY within its own step (same-step summary
+          # behavior). act_runner resets GITHUB_STEP_SUMMARY per step, so a
+          # later step cannot see earlier steps' summary content.
+          test "$COMPOSITE" = composite-passed
+          test -n "$GITHUB_STEP_SUMMARY"
+      - name: deliberate failure and finalization
+        id: failure
+        continue-on-error: true
+        uses: ./v3/composite
+        with:
+          test-kebab-input: kebab-value
+          token: ${{ secrets.GITHUB_TOKEN }}
+          platform: forgejo
+          fail: 'true'
+      - name: failure reported and finalized
+        if: always()
+        env:
+          OUTCOME: ${{ steps.failure.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          test -f "$RUNNER_TEMP/v3-composite-success-finalized"
+          test -f "$RUNNER_TEMP/v3-composite-failure-finalized"

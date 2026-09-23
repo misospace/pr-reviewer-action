@@ -50,7 +50,7 @@ export function run(file, args, { cwd, env, timeoutMs = 2000 } = {}) {
   });
 }
 
-export async function main({ actionPath, workspace, input, outputFile, summaryFile, eventPath, repository, server, token, mode }) {
+export async function main({ actionPath, workspace, input, outputFile, summaryFile, eventPath, repository, server, token, mode, platform }) {
   if (input !== 'kebab-value') throw new Error('Kebab input mismatch');
   const marker = (await readFile(join(actionPath, 'marker.txt'), 'utf8')).trim();
   if (marker !== 'bundled-action-file') throw new Error('Action path mismatch');
@@ -61,7 +61,7 @@ export async function main({ actionPath, workspace, input, outputFile, summaryFi
     cwd: workspace, env: { PATH: process.env.PATH, HOME: process.env.HOME },
   });
   if (git.code !== 0 || git.stdout.trim() !== workspace || git.stderr) throw new Error(`Workspace git failed: ${git.stderr}`);
-  const repo = await getRepository({ platform: 'github', repository, server, token });
+  const repo = await getRepository({ platform: platform ?? 'github', repository, server, token });
   if (repo.fullName !== repository) throw new Error('Platform response mismatch');
 
   // A group-scoped TERM reaches both the shell and its grandchild.
