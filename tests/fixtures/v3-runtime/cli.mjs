@@ -57,7 +57,19 @@ export function resolveSpikeContext(env = process.env) {
   }
   const server = env.GITHUB_API_URL || env.GITHUB_SERVER_URL;
   if (server !== undefined) {
-    if (/[\u0000-\u001f]/.test(server) || !/^https?:\/\/[A-Za-z0-9._:-]+(\/.*)?$/.test(server)) {
+    if (/[\u0000-\u001f]/.test(server)) {
+      throw new Error(`Unusable server URL '${server}'`);
+    }
+    let parsed;
+    try {
+      parsed = new URL(server);
+    } catch {
+      throw new Error(`Unusable server URL '${server}'`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Unusable server URL '${server}'`);
+    }
+    if (parsed.username || parsed.password) {
       throw new Error(`Unusable server URL '${server}'`);
     }
   }

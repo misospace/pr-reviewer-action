@@ -38,7 +38,10 @@ test('spike context defaults to github and switches server/platform for forgejo'
   for (const unknown of ['gitea', 'forgejo-ee', 'GitHub']) {
     assert.throws(() => resolveSpikeContext({ SPIKE_PLATFORM: unknown }), /Unknown SPIKE_PLATFORM/, unknown);
   }
-  for (const badServer of ['not-a-url', 'ftp://example.test', 'http://host:31095/api\nEVIL', 'http://host\u0000/']) {
+  for (const badServer of [
+    'not-a-url', 'ftp://example.test', 'http://host:31095/api\nEVIL', 'http://host\u0000/',
+    'http://attacker@host', 'http://user:pass@host', 'file:///etc/passwd',
+  ]) {
     assert.throws(() => resolveSpikeContext({ GITHUB_API_URL: badServer }), /Unusable server URL/, badServer);
   }
   for (const okServer of ['http://host.docker.internal:31095', 'https://api.github.com', 'http://host:31095/']) {
