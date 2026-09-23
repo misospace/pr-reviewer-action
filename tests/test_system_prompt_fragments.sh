@@ -186,6 +186,17 @@ OUT_PT_OFF="$(assemble k8s_manifest true false)"
 check_not_contains "off: PR-thread guidance dropped" "$OUT_PT_OFF" "$PT_CONTENT"
 check_not_contains "off: no PR-thread placeholder remains" "$OUT_PT_OFF" "{{PR_THREAD_GUIDANCE}}"
 
+echo "=== merge-safety methodology is unconditional (#661) ==="
+# The adversarial merge-safety pass is final-review guidance for every PR —
+# not gated on classification, related-code, PR-thread, or ledger signals —
+# so it must survive on an app_code review and leave no placeholder behind.
+OUT_MS="$(assemble app_code)"
+check_contains "app_code includes the merge-safety methodology" "$OUT_MS" "merge safety of the resulting PR tree"
+check_contains "methodology demands a concrete counterexample" "$OUT_MS" "counterexample"
+check_contains "methodology keeps pre-existing as attribution metadata" "$OUT_MS" "attribution as metadata"
+check_contains "methodology requires adversarial remediation review" "$OUT_MS" "Adversarially review every remediation"
+check_not_contains "no placeholder remains after methodology substitution" "$OUT_MS" "{{"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
@@ -195,7 +206,9 @@ RC="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
 PT="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
 RL="$(<"$SCRIPT_DIR/prompt_fragments/requirement_ledger.txt") "
 SL="$(<"$SCRIPT_DIR/prompt_fragments/specialist_leads.txt")"
+MS="$(<"$SCRIPT_DIR/prompt_fragments/merge_safety.txt") "
 [[ -n "$SL" ]] || { echo "FAIL: specialist_leads.txt fragment is empty"; FAIL=$((FAIL+1)); }
+[[ -n "$MS" ]] || { echo "FAIL: merge_safety.txt fragment is empty"; FAIL=$((FAIL+1)); }
 RECON="${BASE/\{\{RELATED_CODE_GUIDANCE\}\}/$RC}"
 RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
@@ -204,8 +217,10 @@ RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 RECON="${RECON/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$RL}"
 RECON="${RECON/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/$SL}"
+RECON="${RECON/\{\{MERGE_SAFETY_GUIDANCE\}\}/$MS}"
 check_contains "reconstructed prompt has requirement-ledger block" "$RECON" "requirement_coverage"
 check_contains "reconstructed prompt has specialist-leads block" "$RECON" "Specialist Review Leads"
+check_contains "reconstructed prompt has merge-safety block" "$RECON" "merge safety of the resulting PR tree"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"
 check_contains "reconstructed prompt has digest block" "$RECON" "digest-only image"
 check_contains "reconstructed prompt has release-notes block" "$RECON" "upstream release notes"

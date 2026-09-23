@@ -579,6 +579,14 @@ apply_system_prompt_fragments() {
     # model on any path), and apply_specialist_leads_fragment below appends
     # the guidance once — and only once — the signal actually exists.
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/}"
+    # #661: the adversarial merge-safety methodology is final-review guidance
+    # for every PR, so it is substituted unconditionally for the bundled
+    # default (a replace-mode override never carries the placeholder). The
+    # same SYSTEM_PROMPT serves the primary and the smart-escalation call, so
+    # the methodology applies on both tiers without adding a model call.
+    local ms
+    ms="$(<"$SCRIPT_DIR/prompt_fragments/merge_safety.txt") "
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{MERGE_SAFETY_GUIDANCE\}\}/$ms}"
     # Lowercased here rather than relying on the top-level normalization below:
     # that runs at source time, before classification.sh calls this function, but
     # a caller reaching the function by another route (a test harness, a future

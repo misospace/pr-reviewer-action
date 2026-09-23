@@ -37,6 +37,79 @@ CAPABILITY_AMBIENT_CAPABILITY_LOSS = "ambient_capability_loss"
 CAPABILITY_BACKGROUND_LIFECYCLE = "background_process_lifecycle"
 CAPABILITY_REMEDIATION_TOPOLOGY = "remediation_process_topology"
 CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY = "undeclared_capability_dependency"
+# #661 merge-safety review dispositions: the per-run quality categories the
+# semantic report records so a miss is attributable to its failure mode — the
+# defect was never found, it was found but suppressed as pre-existing to the
+# targeted commit (a merge-safety miss, not a pass), it was found but the
+# recommended remediation is invalid or incomplete, or it was found with sound
+# remediation reasoning. A fifth category marks findings that assert a defect
+# the evidence cannot support (speculative/unsupported false positives).
+DISPOSITION_NOT_FOUND = "not_found"
+DISPOSITION_SUPPRESSED_PRE_EXISTING = "suppressed_pre_existing"
+DISPOSITION_INVALID_REMEDIATION = "invalid_remediation"
+DISPOSITION_CORRECT = "correct"
+DISPOSITION_SPECULATIVE_FALSE_POSITIVE = "speculative_false_positive"
+MERGE_SAFETY_DISPOSITIONS = frozenset(
+    {
+        DISPOSITION_NOT_FOUND,
+        DISPOSITION_SUPPRESSED_PRE_EXISTING,
+        DISPOSITION_INVALID_REMEDIATION,
+        DISPOSITION_CORRECT,
+        DISPOSITION_SPECULATIVE_FALSE_POSITIVE,
+    }
+)
+# Stable report ordering (counts render in this order).
+MERGE_SAFETY_DISPOSITIONS_ORDER = (
+    DISPOSITION_CORRECT,
+    DISPOSITION_NOT_FOUND,
+    DISPOSITION_SUPPRESSED_PRE_EXISTING,
+    DISPOSITION_INVALID_REMEDIATION,
+    DISPOSITION_SPECULATIVE_FALSE_POSITIVE,
+)
+# "pre-existing to this commit" is attribution metadata; it only becomes a
+# suppression when the same sentence also declines to flag it. Explicitly
+# re-asserting the blocker ("still blocks the resulting tree") overrides the
+# suppression reading — that is exactly the attribution-vs-severity rule #661
+# teaches, so the scorer must encode it too.
+ATTRIBUTION_TERMS = (
+    "pre-existing", "preexisting", "pre-existed", "predates this commit",
+    "pre-dates this commit", "predates the commit", "introduced by an earlier commit",
+    "introduced before this commit", "exists on main", "already on main",
+    "already existed before", "not new to this pr",
+)
+SUPPRESSION_TERMS = (
+    "not a merge blocker", "not a blocker", "non-blocking", "out of scope",
+    "not in scope", "outside the scope", "does not block", "no need to fix",
+    "not required to fix", "won't block", "will not block", "can be deferred",
+    "defer to a follow-up", "file a follow-up", "leave for a follow-up",
+    "follow-up issue", "not flagging", "not reporting it", "downgrad",
+    "suppress", "not introduced by this commit", "not introduced in this commit",
+    "not introduced here", "not caused by this change", "unrelated to this change",
+)
+BLOCKER_ASSERTION_TERMS = (
+    "still blocks", "still a blocker", "remains a blocker", "remains a merge blocker",
+    "must still be fixed", "still reachable", "still ships", "blocks the resulting tree",
+    "blocker for the resulting tree", "reaches the resulting tree",
+)
+# A finding that never satisfied the causal chain but asserts a defect anyway,
+# or hedges on one — the unsupported/speculative false-positive class.
+SPECULATIVE_CUES = (
+    "might ", "could ", "may ", "possibly", "likely", "potential", "hypothetical",
+    "future misuse", "speculative", "appears to", "seems to", "unverified",
+    "no evidence", "not verified", "unclear whether", "not sure whether",
+    "consider ", "may want", "worth considering",
+)
+DEFECT_ASSERTION_CUES = (
+    "bug", "breaks", "broken", "will fail", "must fix", "incorrect", "missing",
+    "fails to", "vulnerab", "leak", "unsafe",
+)
+# Remediation evaluation engages only when the run proposes a fix (or proposes
+# keeping a broken fallback), so a detection-only finding is not penalized.
+REMEDIATION_PROPOSAL_CUES = (
+    "recommend", "should ", "must ", "fix by", "fix:", "to fix", "instead",
+    "replace", "propose", "suggested", "remediation", "mitigat", "install ",
+    "add a ", "keep the", "no fix is needed", "not needed because", "refuse to",
+)
 KNOWN_CAPABILITY_CLASSES = frozenset(
     {
         CAPABILITY_SEQUENCING,
@@ -249,6 +322,57 @@ def classify_signal(text: str) -> str | None:
     return None
 
 
+def _sentences(text: str) -> list[str]:
+    return [part for part in re.split(r"(?:[.!?]\s+|\n+)", text) if part.strip()]
+
+
+def _is_suppressed_pre_existing(text: str) -> bool:
+    """True when a finding is waved off as pre-existing to the commit.
+
+    Sentence-local: attribution language plus an explicit decline to flag it in
+    the same sentence. Re-asserting the merge blocker in that sentence
+    ("pre-existing, but still blocks the resulting tree") reads as attribution
+    metadata and is NOT suppression — the #661 rule the reviewer is taught.
+    """
+    value = text.casefold()
+    for sentence in _sentences(value):
+        if not any(term in sentence for term in ATTRIBUTION_TERMS):
+            continue
+        if not any(term in sentence for term in SUPPRESSION_TERMS):
+            continue
+        if any(term in sentence for term in BLOCKER_ASSERTION_TERMS):
+            continue
+        return True
+    return False
+
+
+def _is_speculative_finding(text: str) -> bool:
+    value = text.casefold()
+    if any(cue in value for cue in SPECULATIVE_CUES):
+        return True
+    return any(cue in value for cue in DEFECT_ASSERTION_CUES)
+
+
+def _remediation_verdict(scenario: SemanticScenario, combined_text: str) -> bool:
+    """Validate the run's recommended remediation against the scenario contract.
+
+    `combined_text` is the casefolded join of the run's finding and review
+    texts. Forbidden remediation (the wrapper-only repair, the silent-fallback
+    repair) always fails. A run that proposes a fix must cover every required
+    remediation element; a detection-only run is not penalized.
+    """
+    expectations = scenario.remediation_expectations
+    required = [str(item).casefold() for item in expectations.get("required", [])]
+    forbidden = [str(item).casefold() for item in expectations.get("forbidden", [])]
+    if not required and not forbidden:
+        return True
+    if any(item in combined_text for item in forbidden):
+        return False
+    if not any(cue in combined_text for cue in REMEDIATION_PROPOSAL_CUES):
+        return True
+    return all(item in combined_text for item in required)
+
+
 @dataclass
 class ReviewSignal:
     kind: str
@@ -282,6 +406,10 @@ class SemanticScenario:
     known_findings: list[dict[str, Any]] = field(default_factory=list)
     expected_metrics: dict[str, Any] = field(default_factory=dict)
     diff_polarity: str | None = None
+    # #661: per-scenario remediation contract — substrings a recommended fix
+    # must cover ("required") and remediation shapes that must be rejected
+    # ("forbidden", e.g. the wrapper-only repair or the silent fallback).
+    remediation_expectations: dict[str, Any] = field(default_factory=dict)
     fixture: dict[str, Any] | None = None
     offline_runs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -310,6 +438,7 @@ class SemanticScenario:
             known_findings=entry.get("known_findings", []),
             expected_metrics=entry.get("expected_metrics", {}),
             diff_polarity=entry.get("diff_polarity"),
+            remediation_expectations=entry.get("remediation_expectations") or {},
             fixture=entry.get("fixture"),
             offline_runs=entry.get("offline_runs", []),
         )
@@ -333,6 +462,7 @@ class SemanticScenario:
             "known_findings": self.known_findings,
             "expected_metrics": self.expected_metrics,
             "diff_polarity": self.diff_polarity,
+            "remediation_expectations": self.remediation_expectations,
             "fixture": self.fixture,
             "offline_runs": self.offline_runs,
         }
@@ -515,6 +645,14 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
                 _require(isinstance(value, int) and not isinstance(value, bool) and value >= 0, f"{prefix}: expected_metrics.{key} must be a non-negative integer")
             else:
                 _require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0, f"{prefix}: expected_metrics.{key} must be a finite non-negative number")
+        _require(isinstance(scenario.remediation_expectations, dict), f"{prefix}: remediation_expectations must be an object")
+        for key in scenario.remediation_expectations:
+            _require(key in {"required", "forbidden"}, f"{prefix}: remediation_expectations key {key!r} is not recognised")
+        for key in ("required", "forbidden"):
+            items = scenario.remediation_expectations.get(key, [])
+            _require(isinstance(items, list), f"{prefix}: remediation_expectations.{key} must be a list")
+            for item in items:
+                _require(isinstance(item, str) and item.strip(), f"{prefix}: remediation_expectations.{key} entries must be non-empty strings")
         _require(isinstance(scenario.offline_runs, list), f"{prefix}: offline_runs must be a list")
         for fixture in scenario.offline_runs:
             _require(isinstance(fixture, dict), f"{prefix}: offline_runs entries must be objects")
@@ -522,6 +660,11 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
                 _require(fixture["mode"] in RECOGNISED_MODES - {"any"}, f"{prefix}: offline run mode is not recognised")
             if "route" in fixture:
                 _require(fixture["route"] in RECOGNISED_ROUTES, f"{prefix}: offline run route is not recognised")
+            if "expected_disposition" in fixture:
+                _require(
+                    fixture["expected_disposition"] in MERGE_SAFETY_DISPOSITIONS,
+                    f"{prefix}: offline run expected_disposition {fixture['expected_disposition']!r} is not recognised",
+                )
             findings = fixture.get("findings", [])
             _require(isinstance(findings, list), f"{prefix}: offline run findings must be a list")
             for finding in findings:
@@ -563,6 +706,12 @@ class SemanticResult:
     mode: str | None = None
     applicability_violations: list[str] = field(default_factory=list)
     metric_violations: list[str] = field(default_factory=list)
+    # #661 merge-safety disposition telemetry (see MERGE_SAFETY_DISPOSITIONS).
+    disposition: str | None = None
+    disposition_expected: str | None = None
+    disposition_violations: list[str] = field(default_factory=list)
+    suppressed_pre_existing: bool = False
+    remediation_ok: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -582,6 +731,11 @@ class SemanticResult:
             "mode": self.mode,
             "applicability_violations": self.applicability_violations,
             "metric_violations": self.metric_violations,
+            "disposition": self.disposition,
+            "disposition_expected": self.disposition_expected,
+            "disposition_violations": self.disposition_violations,
+            "suppressed_pre_existing": self.suppressed_pre_existing,
+            "remediation_ok": self.remediation_ok,
         }
 
 
@@ -769,6 +923,46 @@ def evaluate_semantic_capability(
     if scenario.stage_attribution != "any" and scenario.stage_attribution not in result.stages_hit:
         result.applicability_violations.append(f"stage_attribution={result.stages_hit!r}, expected={scenario.stage_attribution!r}")
     result.passed = capabilities_ok and anchors_ok and stage_ok and not result.forbidden_violations and not result.applicability_violations and not result.metric_violations
+    # #661 merge-safety disposition: classify WHY this run found (or missed)
+    # the defect, and — when the run declares an expected_disposition — gate
+    # the run on landing in that category. Adversarial corpus runs (the
+    # suppression miss, the wrapper-only repair, the fallback repair) declare
+    # the disposition they must be scored into; a run whose declared category
+    # is `correct` fails when it suppresses or repairs badly, so the misses
+    # stay visible in telemetry instead of hiding behind a detection.
+    finding_texts = [signal.text for signal in values if signal.kind in {SIGNAL_KIND_FINDING, SIGNAL_KIND_MENTION}]
+    combined_text = "\n".join(finding_texts).casefold()
+    detected = bool(scenario.expected_capabilities) and all(
+        capability in result.capability_hits for capability in scenario.expected_capabilities
+    )
+    result.suppressed_pre_existing = detected and _is_suppressed_pre_existing(combined_text)
+    result.remediation_ok = _remediation_verdict(scenario, combined_text) if detected else None
+    expected_disposition = metadata.get("expected_disposition")
+    if expected_disposition is not None:
+        result.disposition_expected = str(expected_disposition)
+    if not detected:
+        result.disposition = (
+            DISPOSITION_SPECULATIVE_FALSE_POSITIVE
+            if any(_is_speculative_finding(text.casefold()) for text in finding_texts)
+            else DISPOSITION_NOT_FOUND
+        )
+    elif result.suppressed_pre_existing:
+        result.disposition = DISPOSITION_SUPPRESSED_PRE_EXISTING
+    elif result.remediation_ok is False:
+        result.disposition = DISPOSITION_INVALID_REMEDIATION
+    else:
+        result.disposition = DISPOSITION_CORRECT
+    if result.disposition_expected is not None:
+        if result.disposition != result.disposition_expected:
+            result.disposition_violations.append(
+                f"disposition={result.disposition!r}, expected={result.disposition_expected!r}"
+            )
+        result.passed = (
+            not result.forbidden_violations
+            and not result.applicability_violations
+            and not result.metric_violations
+            and not result.disposition_violations
+        )
     return result
 
 
@@ -792,7 +986,7 @@ def evaluate_offline_scenario(scenario: SemanticScenario) -> list[SemanticResult
             continue
         signals = _fixture_signals(fixture)
         metadata = dict(fixture.get("metadata", {}))
-        for key in ("mode", "route", "escalated", "duplicate_count", "latency_sec", "tool_calls", "tool_call_count"):
+        for key in ("mode", "route", "escalated", "duplicate_count", "latency_sec", "tool_calls", "tool_call_count", "expected_disposition"):
             if key in fixture:
                 metadata[key] = fixture[key]
         result = evaluate_semantic_capability(scenario, signals, metadata)
@@ -821,6 +1015,13 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         scenario_reports.append(aggregate)
     scored = [item for item in scenario_reports if item["runs"]]
     negative_controls = [item for item in scenario_reports if item["negative_control"]]
+    # #661: aggregate merge-safety dispositions across the scored (vulnerable)
+    # scenarios so suppression-as-pre-existing and invalid-remediation misses
+    # are visible in the report headline, not buried per scenario.
+    disposition_totals = {
+        disposition: sum(item["merge_safety_disposition_counts"].get(disposition, 0) for item in scored)
+        for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
+    }
     summary = {
         "scenarios": len(scenario_reports),
         "scored_scenarios": len(scored),
@@ -830,6 +1031,9 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         "average_duplicate_count": round(sum(item["average_duplicate_count"] for item in scored) / len(scored), 4) if scored else 0.0,
         "average_latency_sec": round(sum(item["average_latency_sec"] for item in scored) / len(scored), 4) if scored else 0.0,
         "escalation_frequency": round(sum(item["escalation_frequency"] for item in scored) / len(scored), 4) if scored else 0.0,
+        "merge_safety_disposition_counts": disposition_totals,
+        "merge_safety_suppressed_pre_existing_runs": disposition_totals[DISPOSITION_SUPPRESSED_PRE_EXISTING],
+        "merge_safety_invalid_remediation_runs": disposition_totals[DISPOSITION_INVALID_REMEDIATION],
     }
     return {
         "evaluator_version": SEMANTIC_EVAL_VERSION,
@@ -864,6 +1068,10 @@ def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[Se
     duplicates = round(sum(result.duplicate_count for result in per_run_results) / runs, 4) if runs else 0.0
     latency = round(sum(result.latency_sec for result in per_run_results) / runs, 4) if runs else 0.0
     escalation_frequency = round(sum(result.escalated or "escalation" in result.stages_hit for result in per_run_results) / runs, 4) if runs else 0.0
+    disposition_counts = {
+        disposition: sum(1 for result in per_run_results if result.disposition == disposition)
+        for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
+    }
     return {
         "scenario_number": scenario.number,
         "runs": runs,
@@ -881,6 +1089,7 @@ def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[Se
         "escalation_frequency": escalation_frequency,
         "routes": sorted({result.route for result in per_run_results if result.route}),
         "modes": sorted({result.mode for result in per_run_results if result.mode}),
+        "merge_safety_disposition_counts": disposition_counts,
     }
 
 
@@ -891,11 +1100,14 @@ __all__ = [
     "CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY", "CAPABILITY_AMBIENT_CAPABILITY_LOSS",
     "CAPABILITY_BACKGROUND_LIFECYCLE", "CAPABILITY_REMEDIATION_TOPOLOGY",
     "CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY",
+    "DISPOSITION_CORRECT", "DISPOSITION_INVALID_REMEDIATION", "DISPOSITION_NOT_FOUND",
+    "DISPOSITION_SPECULATIVE_FALSE_POSITIVE", "DISPOSITION_SUPPRESSED_PRE_EXISTING",
+    "MERGE_SAFETY_DISPOSITIONS", "MERGE_SAFETY_DISPOSITIONS_ORDER",
     "RECOGNISED_DIFF_POLARITIES", "RECOGNISED_MODES", "RECOGNISED_ROUTES", "RECOGNISED_SIGNAL_STAGES", "RECOGNISED_STAGES", "SEMANTIC_CORPUS_VERSION",
     "SEMANTIC_EVAL_VERSION", "SIGNAL_KIND_FINDING", "SIGNAL_KIND_MENTION", "SIGNAL_KIND_TOOL",
      "ReviewSignal", "SemanticCorpus", "SemanticCorpusError", "SemanticResult", "SemanticScenario",
      "_collect_signals_from_run", "aggregate_semantic_runs", "classify_signal", "evaluate_semantic_capability",
-      "evaluate_semantic_corpus", "validate_semantic_corpus", "validate_semantic_fixture_integrity",
+       "evaluate_semantic_corpus", "validate_semantic_corpus", "validate_semantic_fixture_integrity",
 
 
 

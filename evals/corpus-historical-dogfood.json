@@ -570,6 +570,29 @@
               "status": "ok"
             }
           ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "speculative_false_positive",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The concurrent CI gate could race with later review stages and might strand background work; possibly worth a follow-up issue."
+            }
+          ],
+          "review_markdown": "The concurrent CI gate could race with later review stages and might strand background work; possibly worth a follow-up issue.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
         }
       ]
     },
@@ -748,6 +771,29 @@
           "tool_calls": [
             {
               "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "not_found",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Looks good; transport and CA handling is unchanged."
+            }
+          ],
+          "review_markdown": "Looks good; transport and CA handling is unchanged.",
+          "tool_calls": [
+            {
+              "stage": "primary",
               "tool": "read_file",
               "args": {
                 "path": "scripts/gating.sh"
@@ -942,8 +988,89 @@
               "status": "ok"
             }
           ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "suppressed_pre_existing",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. This orphaned-child defect is pre-existing on this branch and not introduced by this commit, so it is out of scope for this review and not a merge blocker."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. This orphaned-child defect is pre-existing on this branch and not introduced by this commit, so it is out of scope for this review and not a merge blocker.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "invalid_remediation",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. No fix is needed because the GitHub runner will clean up orphaned processes on job exit."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. No fix is needed because the GitHub runner will clean up orphaned processes on job exit.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "correct",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. Install an abnormal-exit trap that reaps the full descendant tree on EXIT/INT/TERM and forwards RUNNER_TRACKING_ID so the gate owns abnormal exits end to end."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID. Install an abnormal-exit trap that reaps the full descendant tree on EXIT/INT/TERM and forwards RUNNER_TRACKING_ID so the gate owns abnormal exits end to end.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
         }
-      ]
+      ],
+      "remediation_expectations": {
+        "required": [
+          "abnormal-exit trap",
+          "the full descendant tree"
+        ],
+        "forbidden": [
+          "runner will clean",
+          "assume the runner",
+          "outer runtime will handle",
+          "no cleanup is needed"
+        ]
+      }
     },
     {
       "number": 6546,
@@ -1127,8 +1254,65 @@
               "status": "ok"
             }
           ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "invalid_remediation",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. Recommend adding a trap that kills the background wrapper child on exit to fix the lifecycle hole."
+            }
+          ],
+          "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. Recommend adding a trap that kills the background wrapper child on exit to fix the lifecycle hole.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "correct",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. The fix must collect the full descendant tree before signaling and terminate it deepest-first, not the wrapper alone."
+            }
+          ],
+          "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid and the payload and descendants survive the kill. The fix must collect the full descendant tree before signaling and terminate it deepest-first, not the wrapper alone.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
         }
-      ]
+      ],
+      "remediation_expectations": {
+        "required": [
+          "full descendant tree",
+          "deepest-first"
+        ],
+        "forbidden": [
+          "trap that kills the background",
+          "kill the wrapper pid on exit",
+          "wrapper-only trap"
+        ]
+      }
     },
     {
       "number": 6548,
@@ -1321,8 +1505,66 @@
               "status": "ok"
             }
           ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "invalid_remediation",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. Recommend keeping the wrapper-only fallback when pgrep is unavailable, since graceful degradation is acceptable here."
+            }
+          ],
+          "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. Recommend keeping the wrapper-only fallback when pgrep is unavailable, since graceful degradation is acceptable here.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "expected_disposition": "correct",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. The fix must declare pgrep as a declared runtime dependency, validate it before the fork, and refuse to launch the gate without it rather than degrade."
+            }
+          ],
+          "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior. The fix must declare pgrep as a declared runtime dependency, validate it before the fork, and refuse to launch the gate without it rather than degrade.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
         }
-      ]
+      ],
+      "remediation_expectations": {
+        "required": [
+          "declared runtime dependency",
+          "refuse to launch"
+        ],
+        "forbidden": [
+          "keep the wrapper-only fallback",
+          "keeping the wrapper-only fallback",
+          "acceptable to fall back",
+          "graceful degradation to wrapper-only"
+        ]
+      }
     },
     {
       "number": 6550,
