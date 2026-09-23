@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { validateContract } from "../src/config/contract.js";
 import { loadConfig, toCamelCase } from "../src/config/load-config.js";
-import { redactConfig, toJSON } from "../src/config/types.js";
+import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
+import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
 import { assertSupportedNode } from "../src/runtime/node-version.js";
 
 const source = readFileSync("contracts/action-v3.yml", "utf8");
@@ -20,6 +21,59 @@ test("current canonical contract validates and maps every input once", () => {
   }
   assert.equal(contract.inputs.length, 123);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
+});
+
+test("contract defaults and typed parsing agree for every input", () => {
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  const config = loadConfig(contract, required);
+  const empty = loadConfig(contract, {
+    ...required,
+    "ai-fallback-base-url": "",
+    "ai-primary-model": "",
+  });
+  assert.equal(empty.aiFallbackBaseUrl, empty.aiBaseUrl);
+  assert.equal(empty.aiPrimaryModel, empty.aiModel);
+  const inherited: Readonly<Record<string, keyof typeof config>> = {
+    "ai-fallback-base-url": "aiBaseUrl",
+    "ai-fallback-api-format": "aiApiFormat",
+    "ai-fallback-api-key": "aiApiKey",
+    "ai-fallback-request-timeout-sec": "aiRequestTimeoutSec",
+    "ai-fallback-connect-timeout-sec": "aiConnectTimeoutSec",
+    "ai-fallback-stream": "aiStream",
+    "ai-primary-model": "aiModel",
+    "ai-primary-base-url": "aiBaseUrl",
+    "ai-primary-api-format": "aiApiFormat",
+    "ai-primary-api-key": "aiApiKey",
+    "ai-smart-base-url": "aiBaseUrl",
+    "ai-smart-api-format": "aiApiFormat",
+    "ai-smart-api-key": "aiApiKey",
+    "primary-model-context-tokens": "modelContextTokens",
+    "smart-model-context-tokens": "modelContextTokens",
+  };
+  for (const input of contract.inputs) {
+    const key = toCamelCase(input.id) as keyof typeof config;
+    const text = input.required ? required[input.id]! : input.default === undefined ? "" : String(input.default);
+    const expected = BOOLEAN_INPUTS.has(input.id) && text !== "" ? text === "true"
+      : (INTEGER_INPUTS.has(input.id) || FLOAT_INPUTS.has(input.id)) && text !== "" ? Number(text) : text;
+    const inheritedKey = inherited[input.id];
+    if (SECRET_INPUTS.has(input.id)) {
+      assert.ok(isSecretValue(config[key]), input.id);
+      assert.equal(config[key].present, inheritedKey ? isSecretValue(config[inheritedKey]) && config[inheritedKey].present : text !== "", input.id);
+    } else if (inheritedKey && text === "") {
+      assert.equal(config[key], config[inheritedKey], input.id);
+    } else {
+      assert.equal(config[key], expected, input.id);
+    }
+  }
+  for (const id of [...BOOLEAN_INPUTS, ...INTEGER_INPUTS, ...FLOAT_INPUTS, ...Object.keys(ENUM_INPUTS), ...SECRET_INPUTS]) {
+    assert.ok(contract.inputs.some((input) => input.id === id), `schema entry ${id} is in the contract`);
+  }
+  for (const input of contract.inputs.filter((entry) => entry.required)) {
+    const missing = { ...required };
+    delete missing[input.id];
+    assert.throws(() => loadConfig(contract, missing), new RegExp(`Required input '${input.id}' is missing`));
+    assert.throws(() => loadConfig(contract, { ...required, [input.id]: "" }), new RegExp(`Required input '${input.id}' is missing`));
+  }
 });
 
 test("contract validation rejects malformed schema and collisions", () => {
@@ -68,22 +122,25 @@ test("defaults are contract sourced and parsing is explicit", () => {
 });
 
 test("secret values are redacted and never included in validation errors", () => {
-  const token = "highly-sensitive-test-token";
   const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "present" : String(input.default)]));
-  raw["github-token"] = token;
+  const secrets = Object.fromEntries([...SECRET_INPUTS].map((id) => [id, `sensitive-${id}-probe`]));
+  Object.assign(raw, secrets);
   raw["ai-stream"] = "not-a-boolean";
   assert.throws(() => loadConfig(contract, raw), (error: unknown) => {
     assert.ok(error instanceof Error);
-    assert.equal(error.message.includes(token), false);
+    for (const [id, token] of Object.entries(secrets)) {
+      assert.equal(error.message.includes(token), false, id);
+    }
     return true;
   });
   raw["ai-stream"] = "true";
   const config = loadConfig(contract, raw);
-  assert.equal(JSON.stringify(redactConfig(config)).includes(token), false);
-  assert.equal(JSON.stringify(toJSON(config)).includes(token), false);
-  assert.equal(JSON.stringify(config).includes(token), false);
-  assert.equal(JSON.stringify(config).includes("[REDACTED]"), true);
-  assert.equal(JSON.stringify(redactConfig(config)).includes("[REDACTED]"), true);
+  for (const snapshot of [JSON.stringify(redactConfig(config)), JSON.stringify(toJSON(config)), JSON.stringify(config)]) {
+    for (const [id, token] of Object.entries(secrets)) {
+      assert.equal(snapshot.includes(token), false, id);
+      assert.equal(JSON.parse(snapshot)[toCamelCase(id)], "[REDACTED]", id);
+    }
+  }
 });
 
 test("Node baseline accepts 24+ and rejects old or malformed versions", () => {
