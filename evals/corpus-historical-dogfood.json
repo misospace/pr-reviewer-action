@@ -441,23 +441,962 @@
           "tool_calls": []
         }
       ]
+    },
+    {
+      "number": 6541,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6541: Moving the CI poller into the privileged review process lets the child inherit reviewer-only authority (model/tool/Linear secrets) that the standalone step never saw.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "execution_boundary_authority",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "execution_boundary_authority"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "authority-widening",
+          "kind": "finding",
+          "any_of": [
+            "inherit reviewer secrets",
+            "inherits reviewer secrets",
+            "inherit model credentials",
+            "inherits model and tool secrets",
+            "child of the fully privileged review process",
+            "authority is widened across the execution boundary",
+            "gained the review process's inherited authority"
+          ]
+        },
+        {
+          "id": "boundary-move",
+          "kind": "finding",
+          "any_of": [
+            "out of its standalone step",
+            "into the review process",
+            "across the execution boundary",
+            "no longer isolated by the standalone step"
+          ]
+        },
+        {
+          "id": "gating-boundary",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "scripts/gating.sh"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Moving the CI poller into the privileged review process lets the child inherit reviewer-only authority (model/tool/Linear secrets) that the standalone step never saw.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/6541.json",
+        "sha256": "71672c1efe4f7aefe38d22ad0d21051f24a3fd6aa1f69d3f85d2e7fe4a53501a"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+            }
+          ],
+          "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "deep",
+          "stage": "specialist",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "specialist",
+              "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+            }
+          ],
+          "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged.",
+          "tool_calls": [
+            {
+              "stage": "specialist",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged."
+            }
+          ],
+          "review_markdown": "Moving the CI wait out of its standalone step and into the review process makes the CI child inherit reviewer secrets and model credentials; authority is widened across the execution boundary even though the poller logic is unchanged.",
+          "tool_calls": [
+            {
+              "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6542,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6542: Negative control for #654 authority widening: the CI child launches under env -i with an explicit least-privilege allowlist and does not inherit reviewer secrets.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "execution_boundary_authority"
+      ],
+      "negative_control": true,
+      "description": "Negative control for #654 authority widening: the CI child launches under env -i with an explicit least-privilege allowlist and does not inherit reviewer secrets.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/6542.json",
+        "sha256": "4d89a3e7de7b03a44154c1cbc23e67543f8de523652bf74a3e2e36c56d04847d"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The CI child launches under env -i with an explicit least-privilege allowlist and does not inherit reviewer secrets; the authority boundary is preserved."
+            }
+          ],
+          "review_markdown": "The env -i allowlist preserves the least-privilege CI boundary; approve.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6543,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6543: Replacing the execution boundary with env -i also removed the benign proxy/custom-CA/gh-config environment legitimate self-hosted deployments need.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "ambient_capability_loss",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "ambient_capability_loss"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "ambient-loss",
+          "kind": "finding",
+          "any_of": [
+            "removes required transport variables",
+            "removed required transport variables",
+            "drops the proxy configuration",
+            "lost the ambient transport configuration",
+            "lost required ambient configuration",
+            "broke proxy/custom-ca compatibility",
+            "lost the gh cli config"
+          ]
+        },
+        {
+          "id": "env-i-narrowing",
+          "kind": "finding",
+          "any_of": [
+            "env -i",
+            "narrowed the boundary",
+            "narrowing the boundary",
+            "the narrowed boundary"
+          ]
+        },
+        {
+          "id": "gating-boundary",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "scripts/gating.sh"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Replacing the execution boundary with env -i also removed the benign proxy/custom-CA/gh-config environment legitimate self-hosted deployments need.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/6543.json",
+        "sha256": "92b7239328a80efebf7bbb2224bdd475c3ac029d1765024d10e9891b85ef7253"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+            }
+          ],
+          "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "deep",
+          "stage": "specialist",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "specialist",
+              "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+            }
+          ],
+          "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments.",
+          "tool_calls": [
+            {
+              "stage": "specialist",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments."
+            }
+          ],
+          "review_markdown": "The env -i CI allowlist removes required transport variables and drops the proxy configuration, losing the custom-CA and gh CLI config the standalone step inherited; this broke proxy/custom-CA compatibility for self-hosted deployments.",
+          "tool_calls": [
+            {
+              "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6544,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6544: Negative control for #654 ambient loss: the narrowed boundary explicitly preserves benign proxy/custom-CA/gh-config variables while excluding reviewer secrets.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "ambient_capability_loss"
+      ],
+      "negative_control": true,
+      "description": "Negative control for #654 ambient loss: the narrowed boundary explicitly preserves benign proxy/custom-CA/gh-config variables while excluding reviewer secrets.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/6544.json",
+        "sha256": "1c7f74eb19118e330d852db0b74d51532d6f1cf7e2fae7a76045b9fb4363381e"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The env -i allowlist explicitly preserves proxy, custom-CA, and gh config variables while continuing to exclude reviewer secrets."
+            }
+          ],
+          "review_markdown": "Transport and config parity is preserved; approve.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6545,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6545: A forked credential-bearing CI child is reaped only on the normal join path, with no EXIT/TERM owner, and the env -i boundary drops RUNNER_TRACKING_ID.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "background_process_lifecycle",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "background_process_lifecycle"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "orphan-lifecycle",
+          "kind": "finding",
+          "any_of": [
+            "no abnormal-exit cleanup",
+            "orphaned ci child",
+            "no abnormal-exit owner",
+            "parent exit between fork and join",
+            "leaves an orphaned ci child",
+            "child survives parent exit",
+            "only joined on the normal path"
+          ]
+        },
+        {
+          "id": "runner-tracking",
+          "kind": "finding",
+          "any_of": [
+            "drops runner_tracking_id",
+            "removed runner_tracking_id",
+            "runner_tracking_id is not forwarded",
+            "weakened runner orphan-process cleanup",
+            "weakens github runner orphan cleanup",
+            "evades runner orphan tracking"
+          ]
+        },
+        {
+          "id": "gating-boundary",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "scripts/gating.sh"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "A forked credential-bearing CI child is reaped only on the normal join path, with no EXIT/TERM owner, and the env -i boundary drops RUNNER_TRACKING_ID.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/6545.json",
+        "sha256": "7f855e73b89acd005357aa0cbb28927db0477569eaf2de56ade82ab50e12e466"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "deep",
+          "stage": "specialist",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "specialist",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup.",
+          "tool_calls": [
+            {
+              "stage": "specialist",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup."
+            }
+          ],
+          "review_markdown": "fork_ci_gate launches a credential-bearing CI child but there is no abnormal-exit cleanup, so a parent exit between fork and join leaves an orphaned CI child; the env -i allowlist also drops RUNNER_TRACKING_ID and weakens GitHub runner orphan-process cleanup.",
+          "tool_calls": [
+            {
+              "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6546,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6546: Negative control for #654 lifecycle: EXIT/INT/TERM cleanup owns and reaps the full descendant tree on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "background_process_lifecycle"
+      ],
+      "negative_control": true,
+      "description": "Negative control for #654 lifecycle: EXIT/INT/TERM cleanup owns and reaps the full descendant tree on abnormal exit and RUNNER_TRACKING_ID is forwarded.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/6546.json",
+        "sha256": "41c9a5756acaf129459cae2738512936436bf5f243a22f72b186467d94340a6b"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The EXIT/INT/TERM trap owns the gate on abnormal exit and reaps the full descendant tree so no credential-bearing child can be orphaned, and RUNNER_TRACKING_ID is forwarded."
+            }
+          ],
+          "review_markdown": "Lifecycle ownership covers the whole process tree on normal and abnormal exits; approve.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6547: The lifecycle repair signals only the tracked background-shell PID, and the regression test collapses wrapper and payload into one PID via exec sleep, testing away the real process topology.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "remediation_process_topology",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "remediation_process_topology"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "topology-effect",
+          "kind": "finding",
+          "any_of": [
+            "kills only the tracked wrapper pid",
+            "kill only the tracked pid",
+            "killing only the tracked pid",
+            "only the background wrapper is killed",
+            "payload and descendants survive",
+            "descendants survive the kill"
+          ]
+        },
+        {
+          "id": "topology-cause",
+          "kind": "finding",
+          "any_of": [
+            "test collapses the wrapper and payload",
+            "collapses the wrapper and payload",
+            "exec sleep collapses the process topology",
+            "simplifies away the process topology",
+            "tracked wrapper pid is not the workload"
+          ]
+        },
+        {
+          "id": "topology-test",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "tests/test_concurrent_gating.sh"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "The lifecycle repair signals only the tracked background-shell PID, and the regression test collapses wrapper and payload into one PID via exec sleep, testing away the real process topology.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/6547.json",
+        "sha256": "c50aa57704206770361cd0a01b9a0a23ba8c229a3fbbe161c8b98bbd022db6b7"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+            }
+          ],
+          "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "deep",
+          "stage": "specialist",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "specialist",
+              "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+            }
+          ],
+          "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill.",
+          "tool_calls": [
+            {
+              "stage": "specialist",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill."
+            }
+          ],
+          "review_markdown": "The regression fixture collapses the wrapper and payload with exec sleep, so cleanup kills only the tracked wrapper pid because the tracked wrapper pid is not the workload; the production payload and descendants survive the kill.",
+          "tool_calls": [
+            {
+              "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6548,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6548: Negative control for #654 remediation topology: tree-aware cleanup requires pgrep and signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "remediation_process_topology"
+      ],
+      "negative_control": true,
+      "description": "Negative control for #654 remediation topology: tree-aware cleanup requires pgrep and signals the payload descendants before the wrapper, and the regression test preserves the distinct wrapper/payload/grandchild topology.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/6548.json",
+        "sha256": "df46dbf7d598f6910c39f1e761b7d3f4d64ef8940c25b3e3c176168b88987571"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Cleanup requires pgrep, walks the full descendant tree before signaling the wrapper, and the regression test keeps the wrapper, payload, and grandchild distinct, so the workload cannot survive."
+            }
+          ],
+          "review_markdown": "Process-tree cleanup owns the workload; approve.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "tests/test_concurrent_gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6549,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6549: The tree-aware repair silently degrades to the vulnerable wrapper-only cleanup when pgrep is missing, and pgrep is not part of the declared runtime contract.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "undeclared_capability_dependency",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "undeclared_capability_dependency"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "pgrep-required-cause",
+          "kind": "finding",
+          "any_of": [
+            "pgrep is not a declared runtime dependency",
+            "undeclared dependency on pgrep",
+            "pgrep is not part of the runtime contract",
+            "pgrep is not part of the validated runtime contract",
+            "pgrep is required but unavailable",
+            "pgrep is unavailable",
+            "when pgrep is unavailable",
+            "missing pgrep",
+            "pgrep is missing",
+            "cleanup depends on pgrep",
+            "remediation depends on pgrep"
+          ]
+        },
+        {
+          "id": "wrapper-only-effect",
+          "kind": "finding",
+          "any_of": [
+            "falls back to wrapper-only",
+            "silently falls back to wrapper-only",
+            "degrades to wrapper-only",
+            "wrapper-only cleanup",
+            "leaves the payload tree alive",
+            "leaves the payload/descendants alive",
+            "descendant-tree cleanup is lost",
+            "descendants survive",
+            "payload tree survives"
+          ]
+        },
+        {
+          "id": "gating-boundary",
+          "kind": "tool",
+          "tool": "read_file",
+          "any_of": [
+            "scripts/gating.sh"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "The tree-aware repair silently degrades to the vulnerable wrapper-only cleanup when pgrep is missing, and pgrep is not part of the declared runtime contract.",
+      "expected_metrics": {
+        "max_tool_calls": 3
+      },
+      "fixture": {
+        "path": "historical-dogfood/6549.json",
+        "sha256": "896cb8327132f6467c85610149637d310d02568019d06cd5d2672ece2bcc5cb8"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+            }
+          ],
+          "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "deep",
+          "stage": "specialist",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "specialist",
+              "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+            }
+          ],
+          "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior.",
+          "tool_calls": [
+            {
+              "stage": "specialist",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior."
+            }
+          ],
+          "review_markdown": "Tree-aware cleanup depends on pgrep, but pgrep is not a declared runtime dependency, so when pgrep is unavailable it silently falls back to wrapper-only cleanup and restores the vulnerable wrapper-only behavior.",
+          "tool_calls": [
+            {
+              "stage": "escalation",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 6550,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+      "title": "PR #654 fixture #6550: Negative control for #654 dependency: pgrep is validated as a required runtime capability and the fork aborts before launching any background gate if it is absent.",
+      "provenance": {
+        "pr": 654,
+        "issue": 659,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/654",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/659"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "undeclared_capability_dependency"
+      ],
+      "negative_control": true,
+      "description": "Negative control for #654 dependency: pgrep is validated as a required runtime capability and the fork aborts before launching any background gate if it is absent.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/6550.json",
+        "sha256": "f19017a23b01730706980e1b9e07fb4e6c74d5deaed2a2ae672a63de33d77367"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "gating.sh validates pgrep as an explicit runtime dependency and aborts before forking any background gate when it is absent, so cleanup can never silently degrade."
+            }
+          ],
+          "review_markdown": "The runtime dependency is explicit and validated; approve.",
+          "tool_calls": [
+            {
+              "stage": "primary",
+              "tool": "read_file",
+              "args": {
+                "path": "scripts/gating.sh"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
     }
   ],
   "metadata": {
     "created_at": "2026-09-21T00:00:00Z",
-    "description": "Compact reconstructed historical semantic regression corpus for issue #627. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
+    "description": "Compact reconstructed historical semantic regression corpus for issues #627 and #659. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
     "issue_refs": [
       608,
       627,
       638,
       644,
-      645
+      645,
+      654,
+      659
     ],
     "pr_refs": [
       623,
       638,
       644,
       645,
+      654,
       8004
     ],
     "stages": [
@@ -478,13 +1417,18 @@
       "any"
     ],
     "capability_classes": [
+      "ambient_capability_loss",
+      "background_process_lifecycle",
       "control_flow_sequencing",
-      "output_completeness",
+      "diff_polarity",
+      "execution_boundary_authority",
       "full_review_loop",
+      "negative_control",
+      "output_completeness",
+      "remediation_process_topology",
       "runtime_protocol",
       "stale_review_state",
-      "diff_polarity",
-      "negative_control"
+      "undeclared_capability_dependency"
     ]
   }
 }

@@ -26,6 +26,17 @@ CAPABILITY_RUNTIME_PROTOCOL = "runtime_protocol"
 CAPABILITY_STALE_REVIEW_STATE = "stale_review_state"
 CAPABILITY_DIFF_POLARITY = "diff_polarity"
 CAPABILITY_NEGATIVE_CONTROL = "negative_control"
+# Execution-boundary / lifecycle capabilities from the PR #654 failure classes
+# (#659): widening authority by moving work across a process boundary, losing
+# required ambient capability when narrowing that boundary, leaving forked
+# background work with no abnormal-exit owner, repairing only the tracked
+# wrapper PID while the payload/descendants survive, and silently degrading a
+# tree-aware repair when its new runtime capability (pgrep) is absent.
+CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY = "execution_boundary_authority"
+CAPABILITY_AMBIENT_CAPABILITY_LOSS = "ambient_capability_loss"
+CAPABILITY_BACKGROUND_LIFECYCLE = "background_process_lifecycle"
+CAPABILITY_REMEDIATION_TOPOLOGY = "remediation_process_topology"
+CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY = "undeclared_capability_dependency"
 KNOWN_CAPABILITY_CLASSES = frozenset(
     {
         CAPABILITY_SEQUENCING,
@@ -35,6 +46,11 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_STALE_REVIEW_STATE,
         CAPABILITY_DIFF_POLARITY,
         CAPABILITY_NEGATIVE_CONTROL,
+        CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
+        CAPABILITY_AMBIENT_CAPABILITY_LOSS,
+        CAPABILITY_BACKGROUND_LIFECYCLE,
+        CAPABILITY_REMEDIATION_TOPOLOGY,
+        CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
     }
 )
 
@@ -89,6 +105,71 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
         "deletion is treated as an addition", "deleted side of the diff is treated as added",
         "removed side of the diff is treated as present",
     )),
+    # The #659 vocabulary is deliberately causal: a generic warning
+    # ("check security boundaries", "consider cleanup") matches none of these,
+    # so only a finding that names the boundary/lifecycle mechanism counts.
+    # Terms are ordered so the more specific capability wins when a phrase
+    # could plausibly belong to two classes (the pgrep/fallback dependency is
+    # checked before the tracked-PID topology it degrades to).
+    (CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY, (
+        "inherits reviewer secrets", "inherits reviewer-only secrets",
+        "inherit reviewer secrets", "inherit reviewer-only secrets",
+        "inherits the review environment", "inherits the privileged review environment",
+        "inherit the review environment", "inherit the privileged review environment",
+        "inherits model credentials", "inherits model and tool secrets",
+        "inherit model credentials", "inherit model and tool secrets",
+        "inherits the review process environment", "inherits the review step secrets",
+        "inherit the review process environment", "inherit the review step secrets",
+        "child of the fully privileged review process", "child of the privileged review process",
+        "no longer isolated by the standalone step", "moved into the review process and can inherit",
+        "authority widened across the execution boundary", "authority is widened across the execution boundary",
+        "widened across the execution boundary", "execution boundary widens authority",
+        "gained the review process's inherited authority", "lost its least-privilege boundary",
+    )),
+    (CAPABILITY_AMBIENT_CAPABILITY_LOSS, (
+        "dropped the proxy configuration", "drops the proxy configuration", "drop the proxy configuration",
+        "dropped proxy and custom-ca configuration", "lost required ambient configuration",
+        "lost the ambient transport configuration", "removed required transport variables",
+        "removes required transport variables", "remove required transport variables",
+        "env -i strips the proxy", "env -i removes the proxy", "env -i stripped proxy",
+        "broke proxy/custom-ca compatibility", "breaks proxy/custom-ca compatibility",
+        "custom ca configuration was lost", "custom-ca configuration is lost",
+        "lost the gh cli config", "lost required benign transport variables",
+    )),
+    (CAPABILITY_BACKGROUND_LIFECYCLE, (
+        "no abnormal-exit cleanup", "no exit/term cleanup", "no exit or term cleanup",
+        "orphaned ci child", "leaves an orphaned ci child", "leave an orphaned ci child",
+        "orphan the ci child", "orphaned credential-bearing child",
+        "credential-bearing child survives parent exit", "child survives parent exit",
+        "only joined on the normal path", "joined only on the normal path",
+        "no abnormal-exit owner", "background child has no owner",
+        "parent exit between fork and join", "parent dies between fork and join",
+        "drops runner_tracking_id", "removed runner_tracking_id", "removes runner_tracking_id",
+        "runner_tracking_id is not forwarded", "weakened runner orphan-process cleanup",
+        "weakens github runner orphan cleanup", "weakens runner orphan-process cleanup",
+        "evades runner orphan tracking",
+    )),
+    (CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY, (
+        "pgrep is not a declared runtime dependency", "undeclared dependency on pgrep",
+        "remediation depends on pgrep", "cleanup depends on pgrep", "cleanup depends on `pgrep`",
+        "pgrep is unavailable", "when pgrep is unavailable", "missing pgrep", "pgrep is missing",
+        "pgrep is not part of the validated runtime contract", "pgrep is not part of the runtime contract",
+        "pgrep is required but unavailable",
+        "falls back to wrapper-only", "silently falls back to wrapper-only",
+        "silently falls back to the vulnerable wrapper-only",
+        "degrades to wrapper-only", "pgrep not part of the runtime contract",
+        "pgrep is not in the runtime contract",
+    )),
+    (CAPABILITY_REMEDIATION_TOPOLOGY, (
+        "kills only the tracked pid", "kill only the tracked pid", "killing only the tracked pid",
+        "killing only the tracked wrapper pid", "kills only the tracked wrapper",
+        "tracked wrapper pid is not the workload",
+        "payload and descendants survive", "payload/descendants survive",
+        "descendants survive the kill", "only the background wrapper is killed",
+        "wrapper pid alone does not own the workload", "test collapses the wrapper and payload",
+        "exec sleep collapses the process topology", "collapses the wrapper and payload",
+        "simplifies away the process topology", "process-topology risk",
+    )),
 )
 
 def _truthy(value: object) -> bool:
@@ -127,6 +208,16 @@ def _is_negated_match(value: str, match: re.Match[str], term: str) -> bool:
     after = suffix[:48]
     if re.search(
         r"(?:^|\b)(?:no|not|never|doesn['’]?t|isn['’]?t|is not|are not|do not|must not|should not|cannot|can['’]?t)\s+[^,;:]{0,20}$",
+        before,
+    ):
+        return True
+    # Safe-narrowing prose ("the allowlist prevents the child from inheriting
+    # secrets", "the child runs without reviewer credentials") must not be
+    # scored as the vulnerability it reassures against (#659 negative
+    # controls). Keep these as bounded clause-local connectors so they cannot
+    # suppress a finding elsewhere in the sentence.
+    if re.search(
+        r"(?:^|\b)(?:prevents?|excludes?|avoids?|blocks?|without|strips?|removes?|eliminates?)\s+[^,;:]{0,20}$",
         before,
     ):
         return True
@@ -797,6 +888,9 @@ __all__ = [
     "CAPABILITY_DIFF_POLARITY", "CAPABILITY_FULL_REVIEW_LOOP", "CAPABILITY_NEGATIVE_CONTROL",
     "CAPABILITY_OUTPUT_COMPLETENESS", "CAPABILITY_RUNTIME_PROTOCOL", "CAPABILITY_SEQUENCING",
     "CAPABILITY_STALE_REVIEW_STATE", "KNOWN_CAPABILITY_CLASSES",
+    "CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY", "CAPABILITY_AMBIENT_CAPABILITY_LOSS",
+    "CAPABILITY_BACKGROUND_LIFECYCLE", "CAPABILITY_REMEDIATION_TOPOLOGY",
+    "CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY",
     "RECOGNISED_DIFF_POLARITIES", "RECOGNISED_MODES", "RECOGNISED_ROUTES", "RECOGNISED_SIGNAL_STAGES", "RECOGNISED_STAGES", "SEMANTIC_CORPUS_VERSION",
     "SEMANTIC_EVAL_VERSION", "SIGNAL_KIND_FINDING", "SIGNAL_KIND_MENTION", "SIGNAL_KIND_TOOL",
      "ReviewSignal", "SemanticCorpus", "SemanticCorpusError", "SemanticResult", "SemanticScenario",
