@@ -40,7 +40,7 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-          git diff --exit-code -- dist
+          git diff --exit-code HEAD -- dist
 
       - name: Install test dependencies
         run: pip install -r requirements.txt

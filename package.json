@@ -9,7 +9,7 @@
     "typecheck": "node scripts/generate-v3-contract.mjs && tsc --noEmit",
     "test": "node scripts/generate-v3-contract.mjs && tsc -p tsconfig.test.json && node --test .test-build/tests-v3/*.test.js",
     "build": "node scripts/generate-v3-contract.mjs && node scripts/build-v3.mjs",
-    "check:bundle": "npm run build && git diff --exit-code -- dist"
+    "check:bundle": "npm run build && git diff --exit-code HEAD -- dist"
   },
   "devDependencies": {
     "@types/node": "22.15.30",
