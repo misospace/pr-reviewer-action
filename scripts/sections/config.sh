@@ -227,12 +227,16 @@ data = open(src, "rb").read() if os.path.exists(src) else b""
 if len(data) <= max_b:
     open(dst, "wb").write(data)
     sys.exit(0)
-clip = data[:max_b]
+suffix = ("\n" + os.environ.get("MARKER", "") + "\n").encode("utf-8")
+if len(suffix) > max_b:
+    open(dst, "wb").write(b"")
+    sys.exit(0)
+clip = data[:max(0, max_b - len(suffix))]
 nl = clip.rfind(b"\n")
 if nl > 0:
     clip = clip[:nl]
 text = clip.decode("utf-8", errors="ignore")
-open(dst, "w", encoding="utf-8").write(text + "\n" + os.environ.get("MARKER", "") + "\n")
+open(dst, "wb").write(text.encode("utf-8") + suffix)
 PY
 }
 

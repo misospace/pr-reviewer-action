@@ -364,7 +364,7 @@ check_not_contains "no incremental delta heading in the single corpus shape" \
 setup_corpus_workdir "$WORK/c3"
 python3 - "$WORK/c3/linked-sources.md" <<'PY'
 import sys
-open(sys.argv[1], "w", encoding="utf-8").write("y" * 40000 + "\n")
+open(sys.argv[1], "w", encoding="utf-8").write("y\n" * 20000)
 PY
 printf '%s\n' "$LEDGER_MD" > "$WORK/c3/requirement-ledger.md"
 printf 'aaaaaaaaaaaabb\n' > "$WORK/c3/requirement-ledger-present.txt"
@@ -376,8 +376,8 @@ check_contains "pressure: ledger section survives the truncation" \
 check_contains "pressure: ledger content intact under the budget" \
   "$(<"$WORK/c3/review-corpus.md")" "second reserved line"
 C3_BYTES="$(wc -c < "$WORK/c3/review-corpus.md" | tr -d ' ')"
-if [ "$C3_BYTES" -le 20100 ]; then C3_SIZE=ok; else C3_SIZE="too large: $C3_BYTES"; fi
-check "pressure: final corpus stays within MAX_CORPUS + standards-header slack" "$C3_SIZE" "ok"
+if [ "$C3_BYTES" -le 20000 ]; then C3_SIZE=ok; else C3_SIZE="too large: $C3_BYTES"; fi
+check "pressure: final corpus stays within MAX_CORPUS" "$C3_SIZE" "ok"
 
 # f4. no-ledger runs keep the section out (both with and without pressure)
 setup_corpus_workdir "$WORK/c4"
