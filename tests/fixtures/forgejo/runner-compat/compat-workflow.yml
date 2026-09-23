@@ -23,8 +23,10 @@ jobs:
           case "$major" in
             ''|*[!0-9]*) major=0 ;;
           esac
-          if [ "$major" -lt 22 ]; then
-            echo "node >= 22 required, found $v at $node_bin" >&2
+          # #672 sets the v3 bundled CLI baseline to Node 24 LTS; the launcher
+          # preflight must refuse older interpreters, not merely warn.
+          if [ "$major" -lt 24 ]; then
+            echo "node >= 24 required, found $v at $node_bin" >&2
             exit 1
           fi
           echo "launcher preflight ok: $node_bin $v"

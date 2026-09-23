@@ -16,7 +16,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${FORGEJO_E2E_IMAGE-codeberg.org/forgejo/forgejo:9}"
 RUNNER_IMAGE="${FORGEJO_E2E_RUNNER_IMAGE-code.forgejo.org/forgejo/runner:6.3.1}"
-JOB_IMAGE="${FORGEJO_E2E_JOB_IMAGE-node:22-bullseye}"
+JOB_IMAGE="${FORGEJO_E2E_JOB_IMAGE-node:24-bullseye}"
 # Host alias job containers use to reach the Forgejo service. Docker
 # Desktop/OrbStack resolve host.docker.internal by default; on a plain Linux
 # daemon set it to the bridge gateway (for example 172.17.0.1). An explicitly
@@ -332,4 +332,16 @@ if [[ -n "${FORGEJO_TOKEN:-}" ]] && grep -qF "$FORGEJO_TOKEN" "$TMPDIR/compat.lo
   exit 1
 fi
 
-echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID, job image $JOB_IMAGE): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"
+# Record the executed interpreter version in the PASS line: the launcher
+# preflight step already required >= 24, and the preflight line carries the
+# concrete node binary and version the runner actually used.
+NODE_VERSION="$(sed -n 's/.*launcher preflight ok: [^ ]* \(v[0-9][0-9.]*\).*/\1/p' "$TMPDIR/compat.log" | head -n1)"
+case "$NODE_VERSION" in
+  v2[4-9].*) ;;
+  *)
+    echo "launcher preflight did not report a Node >= 24 version (got '${NODE_VERSION:-none}')" >&2
+    exit 1
+    ;;
+esac
+
+echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID, job image $JOB_IMAGE, node $NODE_VERSION): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"
