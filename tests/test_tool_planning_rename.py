@@ -72,6 +72,9 @@ _ALLOWED_LEGACY_ENV = {
 _ALLOWED_LEGACY_INPUT = {
     "action.yml": 3,  # declaration + two fallback expressions
     "README.md": 1,  # deprecation row
+    "contracts/action-v3.yml": 3,  # each removed v2 input is listed once
+    "docs/v3-migration.md": 3,  # each removed v2 input is listed once
+    "tests/test_action_v3_contract.py": 6,  # removed-field contract assertions
 }
 
 
