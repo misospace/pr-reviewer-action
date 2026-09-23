@@ -1,25 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# End-to-end Forgejo smoke harness for the platform backend. It is opt-in
-# because it starts a disposable Forgejo container and needs Docker.
-# It exercises the real Forgejo REST seam that the composite action uses:
-# precheck PR metadata/diff, CI commit-status polling, and sticky comments.
+# End-to-end Forgejo smoke harness for the platform backend and the v3
+# runner-facing contract (#683). It is opt-in because it starts disposable
+# Forgejo + act_runner containers and needs Docker. It exercises the real
+# Forgejo REST seam that the composite action uses: precheck PR metadata/diff,
+# CI commit-status polling, and sticky comments — then registers an ephemeral
+# Forgejo Actions runner and executes the retained v3 runtime compatibility
+# fixture (#682) as a real workflow job.
 if [[ "${FORGEJO_E2E:-}" != "true" ]]; then
   echo "SKIP: set FORGEJO_E2E=true to run the Docker-backed Forgejo smoke test"
   exit 0
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${FORGEJO_E2E_IMAGE:-codeberg.org/forgejo/forgejo:1.21}"
+IMAGE="${FORGEJO_E2E_IMAGE-codeberg.org/forgejo/forgejo:9}"
+RUNNER_IMAGE="${FORGEJO_E2E_RUNNER_IMAGE-code.forgejo.org/forgejo/runner:6.3.1}"
+JOB_IMAGE="${FORGEJO_E2E_JOB_IMAGE-node:24-bullseye}"
+# Host alias job containers use to reach the Forgejo service. Docker
+# Desktop/OrbStack resolve host.docker.internal by default; on a plain Linux
+# daemon set it to the bridge gateway (for example 172.17.0.1). An explicitly
+# empty value is refused below rather than silently taking the default.
+HOST_ALIAS="${FORGEJO_E2E_HOST_ALIAS-host.docker.internal}"
 NAME="pr-reviewer-forgejo-e2e-$$"
-HTTP_PORT="${FORGEJO_E2E_PORT:-31080}"
+RUNNER_NAME="$NAME-runner"
+HTTP_PORT="${FORGEJO_E2E_PORT-31080}"
 PASSWORD="forgejo-e2e-pass"
 TOKEN_NAME="pr-reviewer-e2e"
 TMPDIR="$(mktemp -d)"
 
+# HOST_ALIAS is interpolated into ROOT_URL and the runner registration URL;
+# keep it to hostname characters so it cannot alter the URL structure.
+case "$HOST_ALIAS" in
+  ''|*[!A-Za-z0-9._-]*)
+    echo "FORGEJO_E2E_HOST_ALIAS must match [A-Za-z0-9._-]+, got '$HOST_ALIAS'" >&2
+    exit 1
+    ;;
+esac
+
+# Every value interpolated into URLs or the runner's sh -c command must stay
+# inside a conservative character class so it cannot alter quoting or structure.
+safe_value() {
+  case "$2" in
+    ''|*[!A-Za-z0-9._:/@-]*)
+      echo "refusing unsafe $1" >&2
+      exit 1
+      ;;
+  esac
+}
+safe_value "FORGEJO_E2E_PORT" "$HTTP_PORT"
+case "$HTTP_PORT" in
+  ''|*[!0-9]*)
+    echo "FORGEJO_E2E_PORT must be numeric, got '$HTTP_PORT'" >&2
+    exit 1
+    ;;
+esac
+safe_value "FORGEJO_E2E_IMAGE" "$IMAGE"
+safe_value "FORGEJO_E2E_RUNNER_IMAGE" "$RUNNER_IMAGE"
+safe_value "FORGEJO_E2E_JOB_IMAGE" "$JOB_IMAGE"
+safe_value PASSWORD "$PASSWORD"
+safe_value TOKEN_NAME "$TOKEN_NAME"
+
 cleanup() {
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "$RUNNER_NAME" >/dev/null 2>&1 || true
+  docker volume rm "vol-$RUNNER_NAME" >/dev/null 2>&1 || true
   rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -60,10 +104,10 @@ docker run -d --name "$NAME" \
   -e USER_UID=1000 \
   -e USER_GID=1000 \
   -e FORGEJO__security__INSTALL_LOCK=true \
-  -e FORGEJO__server__ROOT_URL="http://127.0.0.1:${HTTP_PORT}/" \
+  -e FORGEJO__server__ROOT_URL="http://${HOST_ALIAS}:${HTTP_PORT}/" \
   -e FORGEJO__service__DISABLE_REGISTRATION=true \
   -e FORGEJO__repository__DEFAULT_BRANCH=main \
-  -e FORGEJO__actions__ENABLED=false \
+  -e FORGEJO__actions__ENABLED=true \
   "$IMAGE" >/dev/null
 
 wait_http "http://127.0.0.1:${HTTP_PORT}/api/healthz"
@@ -78,7 +122,7 @@ container_forgejo admin user create \
 TOKEN_JSON="$(curl -fsS \
   -u "reviewer:${PASSWORD}" \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"${TOKEN_NAME}\",\"scopes\":[\"write:repository\",\"write:issue\",\"read:user\"]}" \
+  -d "{\"name\":\"${TOKEN_NAME}\",\"scopes\":[\"write:repository\",\"write:issue\",\"read:user\",\"write:user\"]}" \
   "http://127.0.0.1:${HTTP_PORT}/api/v1/users/reviewer/tokens")"
 FORGEJO_TOKEN="$(printf '%s' "$TOKEN_JSON" | jq -r '.sha1')"
 export PLATFORM=forgejo
@@ -119,6 +163,7 @@ PR_JSON="$(api_json POST "$FORGEJO_API_URL/api/v1/repos/reviewer/sample/pulls" \
   '{"base":"main","head":"feature","title":"Update fixture","body":"E2E smoke PR"}')"
 PR_NUMBER="$(printf '%s' "$PR_JSON" | jq -r '.number')"
 HEAD_SHA="$(printf '%s' "$PR_JSON" | jq -r '.head.sha')"
+export HEAD_SHA
 
 api_json POST "$FORGEJO_API_URL/api/v1/repos/reviewer/sample/statuses/${HEAD_SHA}" \
   '{"state":"success","context":"build","description":"E2E build passed"}' >/dev/null
@@ -158,3 +203,147 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
 )
 
 echo "PASS: Forgejo backend E2E smoke completed against $IMAGE"
+
+### Runner compatibility phase (#683): register an ephemeral act_runner and
+### execute the retained v3 runtime compatibility fixture (#682) as a real
+### Forgejo Actions workflow job on this disposable Forgejo instance.
+
+RUNNER_INSTANCE_URL="http://${HOST_ALIAS}:${HTTP_PORT}"
+COMPAT_REPO="runner-compat"
+safe_value COMPAT_REPO "$COMPAT_REPO"
+api_json POST "$FORGEJO_API_URL/api/v1/user/repos" \
+  "{\"name\":\"${COMPAT_REPO}\",\"auto_init\":true,\"default_branch\":\"main\",\"private\":false}" >/dev/null
+
+# Forgejo 9 has no REST endpoint for runner registration tokens; the server
+# CLI generates one.
+RUNNER_TOKEN="$(container_forgejo actions generate-runner-token | tail -n1 | tr -d '[:space:]')"
+case "$RUNNER_TOKEN" in
+  ''|*[!A-Za-z0-9]*)
+    echo "refusing unexpected runner registration token shape" >&2
+    exit 1
+    ;;
+esac
+
+# The job image is pulled on the host daemon up front so the runner uses the
+# pinned, already-present image instead of racing a registry pull.
+docker pull -q "$JOB_IMAGE" >/dev/null
+
+# The runner launches job containers through the host Docker daemon, so it
+# needs the Docker socket (root-owned there) and its registration state is
+# kept in a named volume to avoid host bind-mount permission differences.
+# The registration token is generated by this same disposable container and
+# dies with it; it is never exported or reused beyond this registration.
+# Operator warning: the runner runs as root with the host Docker socket
+# mounted — required to spawn job containers, and it trusts every image the
+# workflow pulls. Run this only against the disposable stack it provisions.
+docker run -d --name "$RUNNER_NAME" --user 0:0 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "vol-$RUNNER_NAME:/data" \
+  -w /data \
+  "$RUNNER_IMAGE" \
+  sh -c "forgejo-runner register --no-interactive --instance '$RUNNER_INSTANCE_URL' --token '$RUNNER_TOKEN' --name compat-runner --labels 'node24:docker://$JOB_IMAGE' && exec forgejo-runner daemon" >/dev/null
+
+COMPAT_WORK="$TMPDIR/compat-work"
+git clone -q "$FORGEJO_API_URL/reviewer/${COMPAT_REPO}.git" "$COMPAT_WORK"
+mkdir -p "$COMPAT_WORK/.forgejo/workflows" "$COMPAT_WORK/v3/composite"
+cp "$ROOT_DIR/tests/fixtures/v3-runtime/cli-entry.mjs" \
+  "$ROOT_DIR/tests/fixtures/v3-runtime/cli.mjs" \
+  "$ROOT_DIR/tests/fixtures/v3-runtime/marker.txt" \
+  "$COMPAT_WORK/v3/"
+cp "$ROOT_DIR/tests/fixtures/v3-runtime/composite/action.yml" "$COMPAT_WORK/v3/composite/"
+cp "$ROOT_DIR/tests/fixtures/forgejo/runner-compat/compat-workflow.yml" \
+  "$COMPAT_WORK/.forgejo/workflows/compat.yml"
+(
+  cd "$COMPAT_WORK"
+  git add -A
+  git -c user.email=runner-compat@example.test -c user.name=runner-compat commit -qm "compatibility probe"
+  git push -q "http://reviewer:${PASSWORD}@127.0.0.1:${HTTP_PORT}/reviewer/${COMPAT_REPO}.git" main
+)
+
+# Wait for the workflow task triggered by the push and require success.
+TASK_STATUS=""
+TASK_ID=""
+for _ in {1..60}; do
+  TASK_LINE="$(api "$FORGEJO_API_URL/api/v1/repos/reviewer/${COMPAT_REPO}/actions/tasks" |
+    jq -r '[.workflow_runs[] | select(.workflow_id == "compat.yml")] | sort_by(.id) | last | "\(.id // "") \(.status // "")" // empty')"
+  TASK_ID="${TASK_LINE%% *}"
+  TASK_STATUS="${TASK_LINE#* }"
+  case "$TASK_STATUS" in
+    success | failure | cancelled) break ;;
+  esac
+  sleep 5
+done
+
+if [[ "$TASK_STATUS" != "success" ]]; then
+  echo "compat workflow task ${TASK_ID:-?} ended with status '${TASK_STATUS:-unknown}'" >&2
+  exit 1
+fi
+
+# Job logs are stored zstd-compressed inside the Forgejo container and are
+# not exposed over REST; decompress with a host zstd when available.
+case "$TASK_ID" in
+  ''|*[!0-9]*)
+    echo "unexpected task id '$TASK_ID'" >&2
+    exit 1
+    ;;
+esac
+LOG_ZST="$(docker exec "$NAME" find /data/gitea/actions_log -name "${TASK_ID}.log.zst" | head -n1)"
+case "$LOG_ZST" in
+  /data/gitea/actions_log/*/*.log.zst) ;;
+  *)
+    echo "unexpected job log path '$LOG_ZST'" >&2
+    exit 1
+    ;;
+esac
+docker exec "$NAME" cat "$LOG_ZST" > "$TMPDIR/compat.log.zst"
+if command -v zstd >/dev/null 2>&1; then
+  zstd -d -f -o "$TMPDIR/compat.log" "$TMPDIR/compat.log.zst"
+elif command -v unzstd >/dev/null 2>&1; then
+  unzstd -f -o "$TMPDIR/compat.log" "$TMPDIR/compat.log.zst"
+else
+  docker run --rm -i alpine:3.20 sh -c 'apk add -q zstd >/dev/null 2>&1; zstd -d -c' \
+    < "$TMPDIR/compat.log.zst" > "$TMPDIR/compat.log"
+fi
+
+# The workflow itself asserted execution, kebab inputs, GITHUB_ACTION_PATH,
+# outputs, event/repository aliases, GITHUB_OUTPUT, the in-step step summary,
+# the per-step summary reset, and failure/finalization semantics; reaching
+# success means all held. The log pins the individual claims: the launcher
+# preflight line, the propagated output value, and the fixture's summary line
+# (which is only printed after the kebab input, action path, workspace,
+# event/repository identity, Forgejo REST adapter call, git argv check, and
+# timeout reaping all passed inside the CLI).
+grep -qF 'Job succeeded' "$TMPDIR/compat.log"
+grep -qF 'launcher preflight ok:' "$TMPDIR/compat.log"
+grep -qF 'compat-output=composite-passed' "$TMPDIR/compat.log"
+grep -qF 'event reviewer/runner-compat, API, git argv, timeout passed' "$TMPDIR/compat.log"
+# Both composite invocations (success and deliberate-failure) must have
+# emitted the add-mask probe and had it redacted; a single occurrence would
+# mean one emission was skipped silently.
+[[ "$(grep -cF 'mask probe: ***' "$TMPDIR/compat.log")" -eq 2 ]]
+grep -qF 'intentional spike failure' "$TMPDIR/compat.log"
+[[ "$(grep -cF 'spike composite: finalizer ran' "$TMPDIR/compat.log")" -eq 2 ]]
+if grep -qF 'v3-spike-mask-probe' "$TMPDIR/compat.log"; then
+  echo "mask probe leaked unredacted into the job log" >&2
+  exit 1
+fi
+if [[ -n "${FORGEJO_TOKEN:-}" ]] && grep -qF "$FORGEJO_TOKEN" "$TMPDIR/compat.log"; then
+  echo "Forgejo token leaked unredacted into the job log" >&2
+  exit 1
+fi
+
+# Record the executed interpreter version in the PASS line: the launcher
+# preflight step already required >= 24, and the preflight line carries the
+# concrete node binary and version the runner actually used. The >= 24
+# contract is checked numerically so future majors (v30+) stay accepted.
+NODE_VERSION="$(sed -n 's/.*launcher preflight ok: [^ ]* \(v[0-9][0-9.]*\).*/\1/p' "$TMPDIR/compat.log" | head -n1)"
+NODE_MAJOR="${NODE_VERSION#v}"; NODE_MAJOR="${NODE_MAJOR%%.*}"
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*) NODE_MAJOR=0 ;;
+esac
+if [ "$NODE_MAJOR" -lt 24 ]; then
+  echo "launcher preflight did not report a Node >= 24 version (got '${NODE_VERSION:-none}')" >&2
+  exit 1
+fi
+
+echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID, job image $JOB_IMAGE, node $NODE_VERSION): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"

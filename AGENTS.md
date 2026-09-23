@@ -69,6 +69,7 @@ The action collects rich PR context (diff, files, linked issues, version hints, 
 ### Tests
 
 - **`tests/smoke_test.sh`** — Local smoke test against a real PR with a mock OpenAI/Anthropic server
+- **`tests/forgejo_e2e_smoke.sh`** — Opt-in (`FORGEJO_E2E=true`, needs Docker) disposable Forgejo E2E: REST backend smoke (#254) plus the #683 runner-compat phase, which registers an ephemeral act_runner and executes the #682 v3 composite fixture as a real Forgejo Actions workflow job. Notes: the token needs the `write:user` scope on Forgejo 9 (repo creation), runner registration uses the server CLI (no REST endpoint), and `FORGEJO_E2E_HOST_ALIAS` must match `[A-Za-z0-9._-]+`
 - **`tests/mock_openai_server.py`** — Mock API server used by the smoke test
 - **`tests/test_*.py`** — pytest suite (run in CI via `pytest tests/`)
 - **`tests/test_*.sh`** — shell-based behavior tests for action scripts

@@ -10,6 +10,9 @@ inputs:
   fail:
     description: trigger finalizer failure
     default: 'false'
+  platform:
+    description: REST platform flavor used by the probe API request. Only 'forgejo' is recognized; any other value, including the default, selects github.
+    default: github
 outputs:
   test-kebab-output:
     description: output probe
@@ -23,5 +26,6 @@ runs:
         SPIKE_INPUT: ${{ inputs.test-kebab-input }}
         SPIKE_TOKEN: ${{ inputs.token }}
         SPIKE_FAIL: ${{ inputs.fail }}
+        SPIKE_PLATFORM: ${{ inputs.platform }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
       run: node "$GITHUB_ACTION_PATH/../cli-entry.mjs"
