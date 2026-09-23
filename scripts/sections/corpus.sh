@@ -351,7 +351,7 @@ build_review_corpus() {
     std_cap=$(( MAX_CORPUS - 4100 ))
   fi
   truncate_clean standards-context.md standards-context.capped.md "$std_cap" '…[standards truncated]'
-  local std_bytes ledger_bytes sp_bytes body_budget
+  local std_bytes ledger_bytes sp_bytes body_budget framing_bytes
   std_bytes="$(wc -c < standards-context.capped.md | tr -d ' ')"
 
   # ── Explicit Requirement Ledger (#624) — reserved, like standards ─────
@@ -403,8 +403,11 @@ build_review_corpus() {
     fi
   fi
 
-  body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes - sp_bytes ))
-  [ "$body_budget" -lt 4000 ] && body_budget=4000
+  # The header and separators are outside the truncated body; reserve their
+  # exact bytes, including the newline after an appended specialist section.
+  framing_bytes="$( { printf '# Repository Standards and Conventions (%s)\n\n' "$STANDARDS_FILE"; if [ "$sp_bytes" -gt 0 ]; then printf '\n'; fi; } | wc -c | tr -d ' ')"
+  body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes - sp_bytes - framing_bytes ))
+  [ "$body_budget" -lt 0 ] && body_budget=0
   truncate_clean review-corpus.body.md review-corpus.body.truncated.md "$body_budget" \
     '```
  …[review corpus truncated to fit the model context budget]'

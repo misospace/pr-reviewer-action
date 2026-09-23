@@ -4,6 +4,9 @@ __pycache__/
 .coverage
 *.egg-info/
 dist/
+!/dist/
+/dist/*
+!/dist/index.js
 build/
 *.egg
 .venv/
@@ -12,6 +15,8 @@ venv/
 # Node.js (if used for testing)
 node_modules/
 npm-debug.log*
+/.test-build/
+/.v3-generated/
 
 # IDE
 .vscode/

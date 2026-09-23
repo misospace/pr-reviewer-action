@@ -155,7 +155,7 @@ d="$WORK/b"
 setup_corpus_workdir "$d"
 python3 - "$d/linked-sources.md" <<'PY'
 import sys
-open(sys.argv[1], "w", encoding="utf-8").write("y" * 40000 + "\n")
+open(sys.argv[1], "w", encoding="utf-8").write("y\n" * 20000)
 PY
 printf '%s\n' "$LEDGER_MD" > "$d/requirement-ledger.md"
 printf 'aaaaaaaaaaaa\n' > "$d/requirement-ledger-present.txt"
@@ -171,8 +171,8 @@ check_contains "pressure: ledger content intact" "$CORPUS_CONTENT" "reserved led
 check_contains "pressure: specialist block survives" "$CORPUS_CONTENT" "# Specialist Review Leads"
 check_contains "pressure: lead lines intact" "$CORPUS_CONTENT" "ledger wiring test lead security"
 BYTES="$(wc -c < "$d/review-corpus.md" | tr -d ' ')"
-if [ "$BYTES" -le 20200 ]; then SIZE=ok; else SIZE="too-large:$BYTES"; fi
-check "pressure: corpus within MAX_CORPUS + framing slack" "$SIZE" "ok"
+if [ "$BYTES" -le 20000 ]; then SIZE=ok; else SIZE="too-large:$BYTES"; fi
+check "pressure: corpus within MAX_CORPUS" "$SIZE" "ok"
 sp_lockstep "$d" "pressure"
 
 # ── c. absent/empty: no section, disabled-shaped corpus, no regression ────

@@ -27,6 +27,21 @@ jobs:
           # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
           python-version: '3.14'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Validate v3 TypeScript runtime
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          git diff --exit-code HEAD -- dist
+
       - name: Install test dependencies
         run: pip install -r requirements.txt
 
@@ -46,6 +61,7 @@ jobs:
         run: |
           yamllint -d "{rules: {key-duplicates: enable}}" \
             action.yml \
+            contracts/action-v3.yml \
             .github/workflows/*.yaml \
             examples/*.yml
 

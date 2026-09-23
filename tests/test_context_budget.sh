@@ -70,10 +70,11 @@ echo ""
 echo "=== Test: truncate_clean cuts at a newline boundary, adds marker ==="
 TMP="$(mktemp -d)"; trap 'rm -f "$FUNCS"; rm -rf "$TMP"' EXIT
 printf 'line1\nline2\nline3\nline4\n' > "$TMP/src"
-truncate_clean "$TMP/src" "$TMP/dst" 9 'CUT'   # 9 bytes lands inside 'line2'
+truncate_clean "$TMP/src" "$TMP/dst" 12 'CUT'   # after reserving the marker, clips inside line2
 check "no partial line kept" "$(grep -c '^line2$' "$TMP/dst")" "0"
 check "whole prior line kept" "$(grep -c '^line1$' "$TMP/dst")" "1"
 check "marker appended" "$(grep -c '^CUT$' "$TMP/dst")" "1"
+check "truncated output stays inside byte cap" "$(test "$(wc -c < "$TMP/dst")" -le 12 && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== Test: truncate_clean copies through when under budget ==="
@@ -87,6 +88,21 @@ printf 'héllo wörld ☃ end\n' > "$TMP/utf"   # multibyte at known offsets
 truncate_clean "$TMP/utf" "$TMP/utfdst" 8 'X'
 check "output is valid UTF-8" \
   "$(python3 -c 'open("'"$TMP"'/utfdst",encoding="utf-8").read(); print("ok")')" "ok"
+truncate_clean "$TMP/utf" "$TMP/tiny" 4 '☃'
+check "tiny cap stays valid UTF-8 and bounded" \
+  "$(python3 -c 'from pathlib import Path; d=Path("'"$TMP"'/tiny").read_bytes(); d.decode("utf-8"); print("ok" if len(d) <= 4 else "oversize")')" "ok"
+
+echo ""
+echo "=== Test: oversized marker retains a visible bounded truncation signal ==="
+printf 'source-without-a-newline' > "$TMP/no-newline"
+truncate_clean "$TMP/no-newline" "$TMP/tiny-marker" 4 '☃☃☃'
+check "oversized multibyte marker remains visible at four bytes" "$(<"$TMP/tiny-marker")" "..."
+truncate_clean "$TMP/no-newline" "$TMP/one-byte" 1 'marker-too-long'
+check "one-byte cap retains a signal" "$(<"$TMP/one-byte")" "."
+truncate_clean "$TMP/no-newline" "$TMP/zero-byte" 0 'marker-too-long'
+check "zero-byte cap emits no bytes" "$(wc -c < "$TMP/zero-byte" | tr -d ' ')" "0"
+truncate_clean "$TMP/no-newline" "$TMP/normal-marker" 12 'CUT'
+check "no-newline source still marks truncation" "$(grep -c '^CUT$' "$TMP/normal-marker")" "1"
 
 echo ""
 echo "=== Test: enrichment context trims are wired into the Python pipeline ==="
