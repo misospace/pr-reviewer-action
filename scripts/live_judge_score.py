@@ -46,16 +46,7 @@ DEFAULT_CORPUS = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
 _MAX_ATTEMPTS = 3
 # Transport retries back off on transient cluster-DNS/gateway blips.
 _ATTEMPT_BACKOFF_SEC = (2.0, 5.0)
-# glm-5.3-flash is a reasoning model: reasoning tokens count against the
-# completion budget, and long live inputs previously exhausted a 1024-token
-# budget with finish_reason=length before any verdict text was emitted.
-_MAX_JUDGE_TOKENS = 16384
-
 JudgeCall = Callable[[list[dict], int], str]
-# First attempt at temperature 0.0; re-attempts (transport fault, unparseable
-# output, or citation-adherence failure only — never a well-formed verdict that
-# simply disagrees) re-roll the sample.
-_RETRY_TEMPERATURE = 0.7
 
 _VULNERABLE = "vulnerable"
 _CONTROL = "negative_control"
@@ -203,8 +194,12 @@ def _openai_judge_call(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": _MAX_JUDGE_TOKENS,
-            "temperature": 0.0 if attempt == 0 else _RETRY_TEMPERATURE,
+            "max_tokens": semantic_judge.JUDGE_MAX_TOKENS,
+            "temperature": (
+                semantic_judge.JUDGE_FIRST_TEMPERATURE
+                if attempt == 0
+                else semantic_judge.JUDGE_RETRY_TEMPERATURE
+            ),
             "response_format": {"type": "json_object"},
         }
         return _extract_text(run_chat_request(base_url, "openai", payload, api_key, timeout_sec))
@@ -257,6 +252,109 @@ def compare(arms: list[dict]) -> dict:
     return {"arms": by_arm, "delta_treatment_minus_baseline": delta}
 
 
+def validate_arms(baseline: dict, treatment: dict) -> list[str]:
+    """Fail-closed structural comparability check for a live A/B.
+
+    An incomplete or asymmetric arm must be REJECTED, never scored: the two arms
+    have to describe the same experiment (identical scenario set, identical
+    rep ids/counts per scenario) or the delta is meaningless. Also rejects
+    duplicate scenario ids and duplicate rep ids within a scenario, and requires
+    each payload to declare its arm role.
+    """
+    errors: list[str] = []
+    if not isinstance(baseline, dict) or baseline.get("arm") != "baseline":
+        errors.append("--baseline payload must declare arm: baseline")
+    if not isinstance(treatment, dict) or treatment.get("arm") != "treatment":
+        errors.append("--treatment payload must declare arm: treatment")
+    if not isinstance(baseline, dict) or not isinstance(treatment, dict):
+        return errors
+
+    def scenario_map(payload: dict, label: str) -> dict[int, dict]:
+        scenarios = payload.get("scenarios")
+        if not isinstance(scenarios, list) or not scenarios:
+            errors.append(f"{label} has no scenarios")
+            return {}
+        index: dict[int, dict] = {}
+        for position, entry in enumerate(scenarios):
+            if not isinstance(entry, dict) or not isinstance(entry.get("scenario"), int):
+                errors.append(f"{label} scenario {position} has no integer scenario id")
+                continue
+            number = entry["scenario"]
+            if number in index:
+                errors.append(f"{label} has duplicate scenario {number}")
+            index[number] = entry
+        return index
+
+    base_map = scenario_map(baseline, "baseline")
+    treat_map = scenario_map(treatment, "treatment")
+    if not base_map or not treat_map:
+        return errors
+    if set(base_map) != set(treat_map):
+        errors.append(
+            "arms cover different scenario sets: "
+            f"baseline-only={sorted(set(base_map) - set(treat_map))}, "
+            f"treatment-only={sorted(set(treat_map) - set(base_map))}"
+        )
+
+    def rep_ids(entry: dict, label: str, number: int) -> list[int]:
+        runs = entry.get("runs")
+        if not isinstance(runs, list) or not runs:
+            errors.append(f"{label} scenario {number} has no runs")
+            return []
+        ids: list[int] = []
+        for position, run in enumerate(runs):
+            if not isinstance(run, dict) or not isinstance(run.get("rep"), int):
+                errors.append(
+                    f"{label} scenario {number} run {position} has no integer rep"
+                )
+                continue
+            if not isinstance(run.get("response"), dict):
+                errors.append(
+                    f"{label} scenario {number} run rep {run['rep']} has no response object"
+                )
+            ids.append(run["rep"])
+        if len(set(ids)) != len(ids):
+            errors.append(f"{label} scenario {number} has duplicate rep ids")
+        return ids
+
+    for number in sorted(set(base_map) & set(treat_map)):
+        base_reps = rep_ids(base_map[number], "baseline", number)
+        treat_reps = rep_ids(treat_map[number], "treatment", number)
+        if set(base_reps) != set(treat_reps) or len(base_reps) != len(treat_reps):
+            errors.append(
+                f"scenario {number}: arms have different rep ids/counts "
+                f"(baseline={sorted(base_reps)}, treatment={sorted(treat_reps)})"
+            )
+    return errors
+
+
+def _load_verified_calibration(
+    artifact_path: Path, judge_model: str, corpus_path: Path
+) -> tuple[Optional[dict], list[str]]:
+    """Load the calibration artifact and prove it is the SAME frozen instrument
+    this live run is about to use. A different prompt version, judge model,
+    judge setting, or calibration corpus fails closed."""
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"cannot read calibration artifact {artifact_path}: {exc}"]
+    errors: list[str] = []
+    if not isinstance(artifact, dict):
+        return None, [f"calibration artifact {artifact_path} is not a JSON object"]
+    total = artifact.get("total")
+    if not isinstance(total, int) or total <= 0:
+        errors.append("calibration artifact records no scored references")
+    if artifact.get("agreement_rate") != 1.0 or artifact.get("passed") != total:
+        errors.append(
+            "calibration artifact did not record 100% agreement "
+            f"(passed={artifact.get('passed')!r}, total={total!r}, "
+            f"agreement_rate={artifact.get('agreement_rate')!r})"
+        )
+    expected = semantic_judge.judge_config_identity(judge_model, corpus_path)
+    errors.extend(semantic_judge.verify_judge_config(artifact.get("judge_config"), expected))
+    return artifact, errors
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Score blinded #661 live A/B outputs with the frozen semantic judge.",
@@ -264,6 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--treatment", type=Path, required=True)
+    parser.add_argument(
+        "--calibration-artifact", type=Path, required=True,
+        help="judge calibration report (from scripts/run_judge_calibration.py) "
+             "that must match this run's frozen judge identity, or scoring is refused",
+    )
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"))
     parser.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL"))
     parser.add_argument("--api-key", default=os.environ.get("JUDGE_API_KEY", ""))
@@ -274,7 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    for path in (args.corpus, args.baseline, args.treatment):
+    for path in (args.corpus, args.baseline, args.treatment, args.calibration_artifact):
         if not path.exists():
             print(f"Error: file not found: {path}", file=sys.stderr)
             return 2
@@ -286,9 +389,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     if errors:
         print("Corpus invalid:", *errors, sep="\n  ", file=sys.stderr)
         return 2
-    answer_keys = _answer_key_index(corpus)
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
     treatment = json.loads(args.treatment.read_text(encoding="utf-8"))
+    arm_errors = validate_arms(baseline, treatment)
+    if arm_errors:
+        print("Arms are not comparable — refusing to score:",
+              *arm_errors, sep="\n  ", file=sys.stderr)
+        return 2
+    answer_keys = _answer_key_index(corpus)
+    arm_numbers = {
+        entry["scenario"]
+        for payload in (baseline, treatment)
+        for entry in payload.get("scenarios", [])
+        if isinstance(entry, dict) and isinstance(entry.get("scenario"), int)
+    }
+    unknown = sorted(arm_numbers - set(answer_keys))
+    if unknown:
+        print(
+            f"Arms reference scenarios absent from the frozen corpus: {unknown} — "
+            "refusing to score", file=sys.stderr,
+        )
+        return 2
+    artifact, calibration_errors = _load_verified_calibration(
+        args.calibration_artifact, args.judge_model, args.corpus
+    )
+    if calibration_errors:
+        print("Calibration artifact does not match this frozen judge — "
+              "refusing to score:", *calibration_errors, sep="\n  ", file=sys.stderr)
+        return 2
     judge_call = _openai_judge_call(
         args.judge_model, args.base_url, args.api_key, args.timeout
     )
@@ -296,6 +424,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         score_arm(baseline, answer_keys, judge_call),
         score_arm(treatment, answer_keys, judge_call),
     ])
+    if artifact is not None:
+        report["calibration_artifact"] = {
+            "judge_config": artifact.get("judge_config"),
+            "agreement_rate": artifact.get("agreement_rate"),
+            "total": artifact.get("total"),
+        }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

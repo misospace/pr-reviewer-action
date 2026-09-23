@@ -438,6 +438,40 @@ class TestValidateCalibrationCorpus:
         errors = validate_calibration_corpus(base_corpus)
         assert any("duplicate ref_id" in error for error in errors)
 
+    def test_mutate_duplicate_scenario_number(self, base_corpus):
+        # A duplicate scenario number must be rejected, not silently overwritten
+        # by any number-keyed index built downstream.
+        base_corpus["scenarios"][1]["number"] = base_corpus["scenarios"][0]["number"]
+        errors = validate_calibration_corpus(base_corpus)
+        assert any("duplicate scenario number" in error for error in errors)
+
+    def test_duplicate_scenario_number_would_drop_a_scenario(self):
+        # Guard the reason the check exists: a number-keyed index over duplicate
+        # numbers loses a scenario, so validation must refuse the corpus first.
+        corpus = {
+            "version": 1,
+            "scenarios": [
+                {"number": 1, "answer_key": {"kind": "negative_control", "class": "c",
+                                             "mechanism": "m", "detection_requires": [],
+                                             "remediation": None},
+                 "references": [{"ref_id": "a", "origin": "answer-key",
+                                 "expected_disposition": "not_found",
+                                 "response": {"findings": [{"message": "x"}],
+                                              "review_markdown": "x"}}]},
+                {"number": 1, "answer_key": {"kind": "negative_control", "class": "c",
+                                             "mechanism": "m", "detection_requires": [],
+                                             "remediation": None},
+                 "references": [{"ref_id": "b", "origin": "answer-key",
+                                 "expected_disposition": "not_found",
+                                 "response": {"findings": [{"message": "y"}],
+                                              "review_markdown": "y"}}]},
+            ],
+        }
+        errors = validate_calibration_corpus(corpus)
+        assert any("duplicate scenario number" in error for error in errors)
+        keys = {s["number"]: s for s in corpus["scenarios"]}
+        assert len(keys) == 1  # the collision the guardian prevents
+
     def test_mutate_bad_expected_disposition(self, base_corpus):
         base_corpus["scenarios"][0]["references"][0]["expected_disposition"] = "blocker"
         errors = validate_calibration_corpus(base_corpus)

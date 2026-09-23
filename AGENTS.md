@@ -378,8 +378,14 @@ CI and never affects a review verdict.
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
   "runs": [{"rep", "response"}]}]}`) with the same frozen judge and reports, per
   arm, the vulnerable-fixture detection rate, the disposition breakdown, and the
-  negative-control false-positive rate. An unusable judge verdict is
-  fail-closed and counted as a miss, never a pass.
+  negative-control false-positive rate. Two fail-closed guards: it refuses to
+  score unless the arms are structurally comparable (each declares its
+  `arm` role; identical scenario set; no duplicate scenario or rep ids; identical
+  rep ids/counts per scenario), and it requires a `--calibration-artifact`
+  (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
+  judge identity — prompt version, model, settings, and calibration corpus
+  content hash — as this run. An unusable judge verdict is fail-closed and
+  counted as a miss, never a pass.
 
 Model/endpoint caveats found while validating: reasoning judges need a generous
 completion budget (reasoning tokens count against it — a 1024-token budget

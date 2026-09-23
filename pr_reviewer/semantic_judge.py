@@ -9,6 +9,7 @@ before rendering, and it is never executed, fetched, or otherwise acted on.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -24,6 +25,14 @@ from pr_reviewer.semantic_eval import (
 )
 
 JUDGE_PROMPT_VERSION = "661-j3"
+
+# The judge's runtime settings. They live here, next to the frozen prompt, so a
+# calibration run and a live scoring run cannot silently disagree about them:
+# the calibration artifact records this identity and the live scorer refuses to
+# score unless the artifact matches its own settings.
+JUDGE_MAX_TOKENS = 16384
+JUDGE_FIRST_TEMPERATURE = 0.0
+JUDGE_RETRY_TEMPERATURE = 0.7
 
 JUDGE_SYSTEM_PROMPT = '''You are a strict semantic adjudicator of merge-safety review quality. You receive (1) an answer-key rubric that states the exact causal defect this scenario's review must identify, the components that chain requires, any secondary components, and for remediable scenarios the required remediation elements and forbidden repair shapes; and (2) one blinded reviewer response (findings and review body). Classify the response into exactly one disposition.
 
@@ -386,6 +395,45 @@ def _validate_scenario(scenario: Any, index: int, seen_ref_ids: set[str]) -> lis
     return errors
 
 
+def calibration_corpus_sha256(path: str | Path) -> str:
+    """Content identity of a calibration corpus file (hex sha256)."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def judge_config_identity(judge_model: str, corpus_path: str | Path) -> dict:
+    """The identity a calibration run must record and a live scoring run must
+    match: prompt version, judge model, judge settings, and the calibration
+    corpus content hash. Deliberately excludes the corpus *path* (machine
+    dependent) — content is what must be identical."""
+    return {
+        "judge_prompt_version": JUDGE_PROMPT_VERSION,
+        "judge_model": judge_model,
+        "max_tokens": JUDGE_MAX_TOKENS,
+        "first_temperature": JUDGE_FIRST_TEMPERATURE,
+        "retry_temperature": JUDGE_RETRY_TEMPERATURE,
+        "calibration_corpus_sha256": calibration_corpus_sha256(corpus_path),
+    }
+
+
+def verify_judge_config(artifact_config: Any, expected: dict) -> list[str]:
+    """Compare a calibration artifact's recorded judge identity against the
+    expected one. Fail-closed: a missing/extra/mismatched field is an error."""
+    if not isinstance(artifact_config, dict):
+        return ["calibration artifact is missing its judge_config identity"]
+    errors: list[str] = []
+    for key, expected_value in expected.items():
+        if key not in artifact_config:
+            errors.append(f"calibration artifact is missing judge_config.{key}")
+        elif artifact_config[key] != expected_value:
+            errors.append(
+                f"calibration judge_config.{key} mismatch: "
+                f"artifact={artifact_config[key]!r}, live={expected_value!r}"
+            )
+    for key in sorted(set(artifact_config) - set(expected)):
+        errors.append(f"calibration judge_config has unexpected key {key!r}")
+    return errors
+
+
 def validate_calibration_corpus(corpus: dict) -> list[str]:
     if not isinstance(corpus, dict):
         return ["corpus must be a JSON object"]
@@ -398,8 +446,17 @@ def validate_calibration_corpus(corpus: dict) -> list[str]:
         errors.append("scenarios must be a non-empty list")
         return errors
     seen_ref_ids: set[str] = set()
+    seen_numbers: set[int] = set()
     for index, scenario in enumerate(scenarios):
         errors.extend(_validate_scenario(scenario, index, seen_ref_ids))
+        number = scenario.get("number") if isinstance(scenario, dict) else None
+        if isinstance(number, int) and not isinstance(number, bool):
+            if number in seen_numbers:
+                errors.append(
+                    f"scenario {index}: duplicate scenario number {number!r} "
+                    "(scenario numbers must be unique)"
+                )
+            seen_numbers.add(number)
     return errors
 
 

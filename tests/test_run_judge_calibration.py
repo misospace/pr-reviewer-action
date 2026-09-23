@@ -123,6 +123,28 @@ def test_report_shape(corpus: dict) -> None:
         assert 0 <= bucket["passed"] <= bucket["total"]
 
 
+def test_report_carries_judge_config_identity(corpus: dict) -> None:
+    """With a corpus path the report records the frozen judge identity a live
+    run must match (prompt version, model, settings, corpus content hash)."""
+    from pr_reviewer import semantic_judge
+
+    report = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake", "http://x",
+        sleep=_NO_SLEEP, corpus_path=CORPUS_PATH,
+    )
+    config = report["judge_config"]
+    assert config["judge_prompt_version"] == semantic_judge.JUDGE_PROMPT_VERSION
+    assert config["judge_model"] == "fake"
+    assert config["max_tokens"] == semantic_judge.JUDGE_MAX_TOKENS
+    assert config["retry_temperature"] == semantic_judge.JUDGE_RETRY_TEMPERATURE
+    assert config["calibration_corpus_sha256"] == semantic_judge.calibration_corpus_sha256(CORPUS_PATH)
+    assert config == semantic_judge.judge_config_identity("fake", CORPUS_PATH)
+    # Without a path the identity is simply absent (unit-test convenience).
+    assert "judge_config" not in runner.run_calibration(
+        corpus, _judge_from(corpus), "fake", "http://x", sleep=_NO_SLEEP
+    )
+
+
 def test_fabricated_citation_fails(corpus: dict) -> None:
     index = _reference_index(corpus)
 

@@ -180,5 +180,174 @@ def test_unjudged_control_is_not_counted_as_false_positive(answer_keys: dict) ->
     assert arm["control_false_positive_rate"] == 0.0
 
 
-def test_main_requires_args(tmp_path: Path) -> None:
-    assert ljs.main(["--baseline", str(CORPUS_PATH), "--treatment", str(CORPUS_PATH)]) == 2
+def test_main_requires_calibration_artifact() -> None:
+    # --calibration-artifact is mandatory: refusing to run without a proven
+    # calibration is fail-closed, enforced by argparse.
+    with pytest.raises(SystemExit) as excinfo:
+        ljs.main(["--baseline", str(CORPUS_PATH), "--treatment", str(CORPUS_PATH)])
+    assert excinfo.value.code == 2
+
+
+# ── arm comparability (fail-closed) ─────────────────────────────────────────
+
+def _arm_doc(name: str, entries: list[dict]) -> dict:
+    return {"arm": name, "reps": 1, "scenarios": entries}
+
+
+def _run(rep: int, message: str = "m") -> dict:
+    return {"rep": rep, "response": _finding_response(message)}
+
+
+def test_validate_arms_accepts_comparable_arms() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1), _run(2)]}])
+    treat = _arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1), _run(2)]}])
+    assert ljs.validate_arms(base, treat) == []
+
+
+def test_validate_arms_rejects_wrong_arm_labels() -> None:
+    base = _arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])
+    treat = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])
+    errors = ljs.validate_arms(base, treat)
+    assert any("arm: baseline" in e for e in errors)
+    assert any("arm: treatment" in e for e in errors)
+
+
+def test_validate_arms_rejects_duplicate_scenario_ids() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]},
+                                {"scenario": 6545, "runs": [_run(2)]}])
+    treat = _arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])
+    assert any("duplicate scenario 6545" in e for e in ljs.validate_arms(base, treat))
+
+
+def test_validate_arms_rejects_asymmetric_scenario_sets() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])
+    treat = _arm_doc("treatment", [{"scenario": 6547, "runs": [_run(1)]}])
+    errors = ljs.validate_arms(base, treat)
+    assert any("different scenario sets" in e for e in errors)
+
+
+def test_validate_arms_rejects_rep_mismatch() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1), _run(2)]}])
+    treat = _arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])
+    errors = ljs.validate_arms(base, treat)
+    assert any("different rep ids/counts" in e for e in errors)
+
+
+def test_validate_arms_rejects_duplicate_rep_ids() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1), _run(1)]}])
+    treat = _arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])
+    errors = ljs.validate_arms(base, treat)
+    assert any("duplicate rep ids" in e for e in errors)
+
+
+def test_validate_arms_rejects_missing_response() -> None:
+    base = _arm_doc("baseline", [{"scenario": 6545, "runs": [{"rep": 1}]}])
+    treat = _arm_doc("treatment", [{"scenario": 6545, "runs": [{"rep": 1}]}])
+    errors = ljs.validate_arms(base, treat)
+    assert any("no response object" in e for e in errors)
+
+
+def test_main_refuses_incomparable_arms(tmp_path: Path) -> None:
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])))
+    treat.write_text(json.dumps(_arm_doc("treatment", [{"scenario": 6547, "runs": [_run(1)]}])))
+    artifact = _write_artifact(tmp_path / "calib.json")
+    assert ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(artifact),
+        "--judge-model", "m", "--base-url", "http://x",
+    ]) == 2
+
+
+# ── calibration-artifact binding (fail-closed) ──────────────────────────────
+
+def _write_artifact(path: Path, *, model: str = "m",
+                    config: dict | None = None, agreement: float = 1.0,
+                    total: int = 62, passed: int | None = None) -> Path:
+    payload = {
+        "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
+        "judge_model": model,
+        "total": total,
+        "passed": total if passed is None else passed,
+        "agreement_rate": agreement,
+    }
+    if config is None:
+        payload["judge_config"] = semantic_judge.judge_config_identity(model, CORPUS_PATH)
+    else:
+        payload["judge_config"] = config
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_verified_calibration_accepts_matching_artifact(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="m")
+    artifact, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert errors == []
+    assert artifact["judge_config"]["judge_model"] == "m"
+
+
+def test_verified_calibration_rejects_wrong_model(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="other")
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("judge_model" in e for e in errors)
+
+
+def test_verified_calibration_rejects_wrong_prompt_version(tmp_path: Path) -> None:
+    cfg = semantic_judge.judge_config_identity("m", CORPUS_PATH)
+    cfg["judge_prompt_version"] = "661-j0"
+    art = _write_artifact(tmp_path / "c.json", model="m", config=cfg)
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("judge_prompt_version" in e for e in errors)
+
+
+def test_verified_calibration_rejects_wrong_setting(tmp_path: Path) -> None:
+    cfg = semantic_judge.judge_config_identity("m", CORPUS_PATH)
+    cfg["max_tokens"] = 1024
+    art = _write_artifact(tmp_path / "c.json", model="m", config=cfg)
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("max_tokens" in e for e in errors)
+
+
+def test_verified_calibration_rejects_wrong_corpus_hash(tmp_path: Path) -> None:
+    cfg = semantic_judge.judge_config_identity("m", CORPUS_PATH)
+    cfg["calibration_corpus_sha256"] = "0" * 64
+    art = _write_artifact(tmp_path / "c.json", model="m", config=cfg)
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("calibration_corpus_sha256" in e for e in errors)
+
+
+def test_verified_calibration_rejects_missing_identity(tmp_path: Path) -> None:
+    payload = {"total": 62, "passed": 62, "agreement_rate": 1.0}
+    art = tmp_path / "c.json"
+    art.write_text(json.dumps(payload))
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("missing its judge_config" in e for e in errors)
+
+
+def test_verified_calibration_rejects_imperfect_calibration(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="m", agreement=0.9, passed=56)
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH)
+    assert any("100% agreement" in e for e in errors)
+
+
+def test_verified_calibration_rejects_unreadable_artifact(tmp_path: Path) -> None:
+    bad = tmp_path / "c.json"
+    bad.write_text("{not json")
+    _, errors = ljs._load_verified_calibration(bad, "m", CORPUS_PATH)
+    assert errors
+
+
+def test_main_refuses_mismatched_calibration(tmp_path: Path) -> None:
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    entry = [{"scenario": 6545, "runs": [_run(1)]}]
+    base.write_text(json.dumps(_arm_doc("baseline", entry)))
+    treat.write_text(json.dumps(_arm_doc("treatment", entry)))
+    art = _write_artifact(tmp_path / "c.json", model="some-other-model")
+    assert ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m", "--base-url", "http://x",
+    ]) == 2
+

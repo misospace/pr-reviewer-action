@@ -47,20 +47,16 @@ JudgeCall = Callable[[list[dict], int], str]
 # instrument against transient model output glitches (a dropped JSON head)
 # without letting it fish for a favourable answer.
 _MAX_ATTEMPTS = 3
-# glm-5.3-flash is a reasoning model: reasoning tokens count against the
-# completion budget, and long live inputs previously exhausted a 1024-token
-# budget with finish_reason=length before any verdict text was emitted.
-_MAX_JUDGE_TOKENS = 16384
-# The first judge attempt runs at temperature 0.0; a reformat re-attempt (only
-# ever on an unusable output: transport fault, unparseable JSON, or citations
-# that do not appear verbatim — never on a well-formed verdict that simply
-# disagrees) re-rolls the sample, because at temperature 0 an output-adherence
-# glitch (e.g. a dropped string quote) reproduces identically forever.
-_RETRY_TEMPERATURE = 0.7
 
 
 def _attempt_temperature(attempt: int) -> float:
-    return 0.0 if attempt == 0 else _RETRY_TEMPERATURE
+    # Judge settings are owned by the frozen instrument module so a calibration
+    # run and a live scoring run cannot disagree about them.
+    return (
+        semantic_judge.JUDGE_FIRST_TEMPERATURE
+        if attempt == 0
+        else semantic_judge.JUDGE_RETRY_TEMPERATURE
+    )
 
 # Transport retries back off: transient cluster-DNS/gateway blips under load
 # resolve within seconds, and immediate re-hits reproduce the failure window.
@@ -153,6 +149,7 @@ def run_calibration(
     judge_model: str,
     base_url: str,
     sleep: Callable[[float], None] = time.sleep,
+    corpus_path: Optional[str | Path] = None,
 ) -> dict:
     """Grade every reference across every scenario. Fail-closed; never raises for
     a judge/transport fault (only for malformed corpus, which callers gate
@@ -190,7 +187,7 @@ def run_calibration(
         else:
             failures.append(row)
 
-    return {
+    report = {
         "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
         "judge_model": judge_model,
         "base_url": base_url,
@@ -203,6 +200,13 @@ def run_calibration(
         "by_disposition": {k: dict(v) for k, v in sorted(by_disposition.items())},
         "failures": failures,
     }
+    # Bind this calibration run to the frozen instrument identity so a live
+    # scoring run can prove it is using the same prompt/model/settings/corpus.
+    if corpus_path is not None:
+        report["judge_config"] = semantic_judge.judge_config_identity(
+            judge_model, corpus_path
+        )
+    return report
 
 
 def _row_is_transport(corpus: dict, row: dict) -> bool:
@@ -232,7 +236,7 @@ def _openai_judge_call(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": _MAX_JUDGE_TOKENS,
+            "max_tokens": semantic_judge.JUDGE_MAX_TOKENS,
             "temperature": _attempt_temperature(attempt),
             "response_format": {"type": "json_object"},
         }
@@ -308,7 +312,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     judge_call = _openai_judge_call(
         args.judge_model, args.base_url, args.api_key, args.timeout
     )
-    report = run_calibration(corpus, judge_call, args.judge_model, args.base_url)
+    report = run_calibration(
+        corpus, judge_call, args.judge_model, args.base_url,
+        corpus_path=args.corpus,
+    )
 
     for row in report["failures"]:
         print(
