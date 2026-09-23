@@ -3,7 +3,11 @@ import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export function apiPath(platform, repository) {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.split('/').includes('..')) throw new Error('Invalid repository');
+  const segments = typeof repository === 'string' ? repository.split('/') : [];
+  if (segments.length !== 2 || segments.some((segment) =>
+    !/^[A-Za-z0-9_.-]+$/.test(segment) || segment === '.' || segment === '..')) {
+    throw new Error('Invalid repository');
+  }
   if (platform === 'github') return `/repos/${repository}`;
   if (platform === 'forgejo') return `/api/v1/repos/${repository}`;
   throw new Error('Unknown platform');
@@ -82,9 +86,9 @@ export async function main({ actionPath, workspace, input, outputFile, summaryFi
   console.log(`spike ${mode}: node ${process.version}, input/output, action path, workspace, event ${identity}, API, git argv, timeout passed`);
 }
 
-export async function runWithFinalizer(options) {
+export async function runWithFinalizer(options, execute = main) {
   try {
-    await main(options);
+    await execute(options);
     if (options.fail) throw new Error('intentional spike failure');
   } finally {
     await writeFile(join(process.env.RUNNER_TEMP, `v3-${options.mode}-${options.fail ? 'failure' : 'success'}-finalized`), 'finalized\n');

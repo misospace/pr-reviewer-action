@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { apiPath, getRepository, run } from './cli.mjs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { apiPath, getRepository, run, runWithFinalizer } from './cli.mjs';
 
 test('platform routing and authentication stay in the adapter', async () => {
   for (const [platform, path, auth] of [
@@ -17,7 +20,20 @@ test('platform routing and authentication stay in the adapter', async () => {
     assert.equal(repo.fullName, 'owner/repo');
   }
   assert.throws(() => apiPath('other', 'owner/repo'));
-  assert.throws(() => apiPath('forgejo', '../oops'));
+});
+
+test('repository components remain literal URL path segments', () => {
+  for (const repository of ['owner/repo', '.owner/repo', 'owner/.github']) {
+    const path = apiPath('github', repository);
+    assert.equal(new URL(path, 'https://example.test').pathname, path);
+  }
+  for (const repository of [
+    './repo', 'owner/.', '../repo', 'owner/..', 'owner/../repo',
+    '/repo', 'owner/', 'owner/repo/extra',
+    'owner/%2e%2e', 'owner/%2F', 'owner/repo\0', 'owner/repo\n',
+  ]) {
+    assert.throws(() => apiPath('github', repository), /Invalid repository/, repository);
+  }
 });
 
 test('argv execution captures stderr and timeout reaps the leader', async () => {
@@ -28,4 +44,40 @@ test('argv execution captures stderr and timeout reaps the leader', async () => 
   const hung = await run(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 100 });
   assert.equal(hung.timedOut, true);
   assert.notEqual(hung.code, 0);
+});
+
+test('a timed-out POSIX child and grandchild are terminated', { skip: process.platform === 'win32' }, async () => {
+  const hung = await run('sh', ['-c', 'sleep 90 & echo "grandchild=$!"; wait'], {
+    env: { PATH: process.env.PATH }, timeoutMs: 300,
+  });
+  const grandchild = Number(hung.stdout.match(/grandchild=(\d+)/)?.[1]);
+  assert.ok(grandchild, `missing grandchild PID: ${hung.stdout}`);
+  assert.equal(hung.timedOut, true);
+  assert.notEqual(hung.code, 0);
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const status = await run('ps', ['-o', 'stat=', '-p', String(grandchild)], {
+      env: { PATH: process.env.PATH },
+    });
+    if (status.code !== 0 || status.stdout.trim().startsWith('Z')) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`grandchild ${grandchild} still running after group timeout`);
+});
+
+test('an intentional failure still runs the finalizer', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'v3-runtime-finalizer-'));
+  const originalTemp = process.env.RUNNER_TEMP;
+  process.env.RUNNER_TEMP = temp;
+  try {
+    await assert.rejects(
+      runWithFinalizer({ mode: 'unit', fail: true }, async () => {}),
+      /intentional spike failure/,
+    );
+    assert.equal(await readFile(join(temp, 'v3-unit-failure-finalized'), 'utf8'), 'finalized\n');
+  } finally {
+    if (originalTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = originalTemp;
+    await rm(temp, { recursive: true, force: true });
+  }
 });
