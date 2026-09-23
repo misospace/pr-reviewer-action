@@ -17,7 +17,7 @@ from pr_reviewer.semantic_eval import SemanticCorpus, evaluate_semantic_corpus, 
 
 DETERMINISTIC_SCENARIOS = frozenset(
     {
-        623, 6231, 638, 644, 645, 6451, 8004,
+        623, 6231, 638, 644, 645, 6451, 6621, 6622, 6623, 6624, 6891, 6892, 8004,
         # PR #654 execution-boundary / lifecycle failure classes (#659).
         6541, 6542, 6543, 6544, 6545, 6546, 6547, 6548, 6549, 6550,
     }

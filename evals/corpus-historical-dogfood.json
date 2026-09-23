@@ -1377,11 +1377,310 @@
           ]
         }
       ]
+    },
+    {
+      "number": 6621,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/issues/662",
+      "title": "PR #655 fixture #6621: linked issue labels fail to reach canonical classification input",
+      "provenance": {
+        "pr": 655,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "production_dataflow",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "production_dataflow"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "canonical-artifact-mismatch",
+          "kind": "finding",
+          "any_of": [
+            "labels stop before the canonical classifier input",
+            "linked issue labels never reach classification"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Fetched GitHub issue labels must be persisted into the canonical artifact consumed by classification and role selection.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6621.json",
+        "sha256": "ff8948cbe73656d3728e3faa31f53fc2f1da4c22085c1fb3dfdde559c577fe1e"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Fetched labels stop before the canonical classifier input; linked issue labels never reach classification."
+            }
+          ],
+          "review_markdown": "Fetched issue labels are rendered but the classifier artifact still contains bare refs.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 6622,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/issues/662",
+      "title": "PR #655 fixture #6622: canonical linked issue labels reach classification",
+      "provenance": {
+        "pr": 655,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "production_dataflow"
+      ],
+      "negative_control": true,
+      "description": "Fixed control: canonical linked-issues.json carries fetched labels to classification and role selection.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6622.json",
+        "sha256": "31b3637415e5edec238c5787e2222b473306ec9795d92b7c7db0b2d214ad3443"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Labels are persisted into the canonical classifier artifact, so the production dataflow is intact."
+            }
+          ],
+          "review_markdown": "The canonical issue artifact carries labels through classification and auto role selection.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 6623,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/issues/662",
+      "title": "PR #655 fixture #6623: Linear selection fingerprint is unreachable from production precheck",
+      "provenance": {
+        "pr": 655,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "production_dataflow",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "production_dataflow"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "production-precheck-capability",
+          "kind": "finding",
+          "any_of": [
+            "precheck cannot fetch linear state",
+            "linear metadata is unreachable from the production precheck"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "The real precheck environment must have the minimum authorized Linear capability in auto mode; unavailable metadata must force review.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6623.json",
+        "sha256": "b0cbcec3ae83f03556f4583fd8c84dbd1c3a46a126d702d9ea47a7453b6d017c"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Linear metadata is unreachable from the production precheck; the helper works in isolation but production reads a different environment capability."
+            }
+          ],
+          "review_markdown": "The unit helper sees Linear state, but the action precheck cannot fetch it and the stale-review fingerprint ignores priority changes.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 6624,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/issues/662",
+      "title": "PR #655 fixture #6624: production Linear precheck receives scoped capability",
+      "provenance": {
+        "pr": 655,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "production_dataflow"
+      ],
+      "negative_control": true,
+      "description": "Fixed control: action wiring provides the minimum Linear lookup capability only where auto selection needs it, preserving fork gates.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6624.json",
+        "sha256": "b59408be3cf7b8def068a9582ce9a0355de082ef9be8619cda2b8d279f8aa7cc"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "The production precheck receives the scoped Linear key in auto mode, and fork-disabled and non-auto paths make no Linear lookup."
+            }
+          ],
+          "review_markdown": "Priority/label changes alter the production selection fingerprint; failed lookups force a fresh review.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 6891,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+      "title": "PR #689 fixture #6891: omitted corpus evidence is treated as a missing implementation",
+      "provenance": {
+        "pr": 689,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "evidence_provenance",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [
+        "evidence_provenance"
+      ],
+      "expected_evidence_anchors": [
+        {
+          "id": "absence-promoted-to-blocker",
+          "kind": "finding",
+          "any_of": [
+            "cannot verify because the corpus truncates",
+            "not independently verified in the review corpus"
+          ]
+        }
+      ],
+      "forbidden_capabilities": [],
+      "negative_control": false,
+      "description": "Exact-head CI and tests verify behavior, but a reviewer elevates evidence omitted from its corpus into a blocking implementation claim.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6891.json",
+        "sha256": "2953711d11c986f21b240cdede6da1d326eda1e83ea7c0adeef669af7016e763"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "escalation",
+          "route": "primary+escalation",
+          "escalated": true,
+          "findings": [
+            {
+              "stage": "escalation",
+              "message": "Cannot verify because the corpus truncates before the Node 24 workflow and tests; the behavior is therefore missing."
+            }
+          ],
+          "review_markdown": "The exact-head CI may have passed, but Node 24 is not independently verified in the review corpus and should block approval.",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "number": 6892,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+      "title": "PR #689 fixture #6892: omitted evidence stays distinct from a reproduced counterexample",
+      "provenance": {
+        "pr": 689,
+        "issue": 662,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/662"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "evidence_provenance",
+        "marker_truncation"
+      ],
+      "negative_control": true,
+      "description": "Fixed control: absent corpus evidence is not proof of a defect, while the reproduced truncate_clean oversized-marker bug remains actionable.",
+      "expected_metrics": {
+        "max_tool_calls": 0
+      },
+      "fixture": {
+        "path": "historical-dogfood/6892.json",
+        "sha256": "5c0f31f14ea3554f6487886b6b8a6f1167289efc4a1198719718f58369d36e1b"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "findings": [
+            {
+              "stage": "primary",
+              "message": "Evidence is not present in this truncated corpus, so I cannot determine the behavior; exact-head CI and test artifacts are reported separately."
+            }
+          ],
+          "review_markdown": "The exact-head workflow reports Node 24 provisioning and passing checks. The prior truncate_clean oversized-marker edge case was a concrete counterexample: a one-byte cap lost its visible truncation signal, and was correctly fixed.",
+          "tool_calls": []
+        }
+      ]
     }
   ],
   "metadata": {
     "created_at": "2026-09-21T00:00:00Z",
-    "description": "Compact reconstructed historical semantic regression corpus for issues #627 and #659. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
+    "description": "Compact reconstructed historical semantic regression corpus for issues #627, #659, and #662. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
     "issue_refs": [
       608,
       627,
@@ -1389,7 +1688,8 @@
       644,
       645,
       654,
-      659
+      659,
+      662
     ],
     "pr_refs": [
       623,
@@ -1397,7 +1697,9 @@
       644,
       645,
       654,
-      8004
+      8004,
+      655,
+      689
     ],
     "stages": [
       "specialist",
@@ -1421,10 +1723,13 @@
       "background_process_lifecycle",
       "control_flow_sequencing",
       "diff_polarity",
+      "evidence_provenance",
       "execution_boundary_authority",
       "full_review_loop",
+      "marker_truncation",
       "negative_control",
       "output_completeness",
+      "production_dataflow",
       "remediation_process_topology",
       "runtime_protocol",
       "stale_review_state",

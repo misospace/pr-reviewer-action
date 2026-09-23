@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "scenario": 6892,
+  "provenance": {"historical_pr": 689, "state": "fixed-control", "source": "#662 contrast: distinguish omitted evidence from reproduced truncate_clean defect"},
+  "diff": "diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+omission is distinct from reproduced marker truncation\n",
+  "files": [{"path": "fixture.txt", "content": "omission is distinct from reproduced marker truncation\n"}]
+}

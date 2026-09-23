@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "scenario": 6891,
+  "provenance": {"historical_pr": 689, "state": "observed-miss", "source": "#662 regression from PR #689 reviewer feedback: corpus omission promoted into blocker"},
+  "diff": "diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+review evidence was omitted by corpus truncation\n",
+  "files": [{"path": "fixture.txt", "content": "review evidence was omitted by corpus truncation\n"}]
+}

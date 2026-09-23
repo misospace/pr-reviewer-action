@@ -22,6 +22,9 @@ from pr_reviewer.semantic_eval import (
     CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY,
     CAPABILITY_REMEDIATION_TOPOLOGY,
     CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+    CAPABILITY_PRODUCTION_DATAFLOW,
+    CAPABILITY_EVIDENCE_PROVENANCE,
+    CAPABILITY_MARKER_TRUNCATION,
     SIGNAL_KIND_FINDING,
     SIGNAL_KIND_MENTION,
     SIGNAL_KIND_TOOL,
@@ -68,7 +71,7 @@ def test_review_run_stage_is_additive_when_present() -> None:
 def test_corpus_is_valid_and_provenance_is_present() -> None:
     corpus = SemanticCorpus.from_file(CORPUS)
     validate_semantic_corpus(corpus)
-    assert {item.number for item in corpus.scenarios} >= {623, 6231, 638, 644, 645, 6451, 8004}
+    assert {item.number for item in corpus.scenarios} >= {623, 6231, 638, 644, 645, 6451, 6621, 6622, 6623, 6624, 6891, 6892, 8004}
     assert all(item.provenance["pr_url"] for item in corpus.scenarios)
 
 
@@ -352,7 +355,7 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    assert payload["scenarios_evaluated"] == 17
+    assert payload["scenarios_evaluated"] == 23
     assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0
     assert payload["per_scenario_summary"]["638"]["routes"] == ["primary", "primary+escalation"]
     assert payload["per_scenario_summary"]["645"]["routes"] == ["primary", "primary+escalation"]
@@ -1044,6 +1047,57 @@ def test_654_pr654_historical_miss_phrasing_does_not_satisfy() -> None:
         )
         assert not result.passed, (number, text)
         assert POSITIVE_654[number] not in result.capability_hits, (number, text)
+
+
+@pytest.mark.parametrize(("number", "capability"), [(6621, CAPABILITY_PRODUCTION_DATAFLOW), (6623, CAPABILITY_PRODUCTION_DATAFLOW), (6891, CAPABILITY_EVIDENCE_PROVENANCE)])
+def test_662_production_dataflow_and_evidence_miss_fixtures_score(number: int, capability: str) -> None:
+    item = scenario(number)
+    run = item.offline_runs[0]
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, run["stage"], run["findings"][0]["message"])],
+        {"mode": run["mode"], "route": run["route"], "stage": run["stage"], "escalated": run.get("escalated", False)},
+    )
+    assert result.passed
+    assert capability in result.capability_hits
+
+
+@pytest.mark.parametrize(("number", "forbidden"), [(6622, CAPABILITY_PRODUCTION_DATAFLOW), (6624, CAPABILITY_PRODUCTION_DATAFLOW), (6892, CAPABILITY_EVIDENCE_PROVENANCE)])
+def test_662_fixed_dataflow_and_evidence_controls_stay_clean(number: int, forbidden: str) -> None:
+    item = scenario(number)
+    run = item.offline_runs[0]
+    signals = [ReviewSignal(SIGNAL_KIND_FINDING, run["stage"], run["findings"][0]["message"])]
+    result = evaluate_semantic_capability(
+        item, signals, {"mode": run["mode"], "route": run["route"], "stage": run["stage"]},
+    )
+    assert result.passed
+    assert forbidden not in result.capability_hits
+    assert result.forbidden_violations == []
+
+
+def test_689_omitted_evidence_control_preserves_real_marker_counterexample() -> None:
+    item = scenario(6892)
+    counterexample = "truncate_clean silently drops the oversized marker at a one-byte cap."
+    assert classify_signal(counterexample) == CAPABILITY_MARKER_TRUNCATION
+    result = evaluate_semantic_capability(
+        item,
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", counterexample)],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert not result.passed
+    assert CAPABILITY_MARKER_TRUNCATION in result.forbidden_violations
+
+
+@pytest.mark.parametrize("script", ["test_linked_issue_classification.sh", "test_precheck_linear_fingerprint.sh"])
+def test_662_live_production_wiring_harnesses_are_green(script: str) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "tests" / script)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("number", sorted(POSITIVE_654))

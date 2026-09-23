@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "scenario": 6621,
+  "provenance": {"historical_pr": 655, "state": "pre-fix", "source": "reconstruction of the linked-issue label propagation miss from #662"},
+  "diff": "diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+pre-fix linked labels were detached from classifier input\n",
+  "files": [{"path": "fixture.txt", "content": "pre-fix linked labels were detached from classifier input\n"}]
+}

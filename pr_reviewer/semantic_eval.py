@@ -37,6 +37,9 @@ CAPABILITY_AMBIENT_CAPABILITY_LOSS = "ambient_capability_loss"
 CAPABILITY_BACKGROUND_LIFECYCLE = "background_process_lifecycle"
 CAPABILITY_REMEDIATION_TOPOLOGY = "remediation_process_topology"
 CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY = "undeclared_capability_dependency"
+CAPABILITY_PRODUCTION_DATAFLOW = "production_dataflow"
+CAPABILITY_EVIDENCE_PROVENANCE = "evidence_provenance"
+CAPABILITY_MARKER_TRUNCATION = "marker_truncation"
 KNOWN_CAPABILITY_CLASSES = frozenset(
     {
         CAPABILITY_SEQUENCING,
@@ -51,6 +54,9 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_BACKGROUND_LIFECYCLE,
         CAPABILITY_REMEDIATION_TOPOLOGY,
         CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+        CAPABILITY_PRODUCTION_DATAFLOW,
+        CAPABILITY_EVIDENCE_PROVENANCE,
+        CAPABILITY_MARKER_TRUNCATION,
     }
 )
 
@@ -169,6 +175,24 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
         "wrapper pid alone does not own the workload", "test collapses the wrapper and payload",
         "exec sleep collapses the process topology", "collapses the wrapper and payload",
         "simplifies away the process topology", "process-topology risk",
+    )),
+    (CAPABILITY_PRODUCTION_DATAFLOW, (
+        "labels stop before the canonical classifier input", "canonical classifier input still contains bare refs",
+        "linked issue labels never reach classification", "fetched issue labels are not persisted to the classifier artifact",
+        "precheck cannot fetch linear state", "precheck step lacks linear api key",
+        "linear selection fingerprint ignores priority changes", "linear metadata is unreachable from the production precheck",
+        "helper works in isolation but production reads a different artifact",
+    )),
+    (CAPABILITY_EVIDENCE_PROVENANCE, (
+        "cannot verify because the corpus truncates", "cannot verify from the assembled corpus",
+        "cannot verify node 24 support because the corpus truncates",
+        "not independently verified in the review corpus", "evidence is absent from the corpus, therefore the implementation is unverified",
+        "the corpus does not show the test, so the behavior is missing",
+    )),
+    (CAPABILITY_MARKER_TRUNCATION, (
+        "truncate_clean drops the oversized marker", "oversized marker is silently dropped",
+        "truncate_clean silently drops the oversized marker",
+        "small positive cap loses the visible truncation marker",
     )),
 )
 

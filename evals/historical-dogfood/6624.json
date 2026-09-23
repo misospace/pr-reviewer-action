@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "scenario": 6624,
+  "provenance": {"historical_pr": 655, "state": "fixed", "source": "fixed Linear precheck capability wiring from #662"},
+  "diff": "diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+fixed Linear capability is scoped to auto precheck\n",
+  "files": [{"path": "fixture.txt", "content": "fixed Linear capability is scoped to auto precheck\n"}]
+}
