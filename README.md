@@ -1160,13 +1160,9 @@ To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-
 
 ### 🚚 v3 breaking changes
 
-v3 removes the review-scope selection seam. If your workflow sets any of these, delete the line — there is no replacement to swap in:
+If you used `review_scope: auto|incremental|full` in v2, remove the input in v3. There is no replacement: every changed review uses the full current PR. Keep `skip_if_diff_unchanged` for the zero-token unchanged-review skip; it retains the prior overall verdict. The `ai-review` label or `force_review: "true"` still forces a fresh full review.
 
-- input `review_scope`
-- input `escalate_on_dirty_baseline` (dirty-baseline escalation is fully removed — no replacement)
-- outputs `effective_review_scope`, `previous_head_sha`, `baseline_clean`
-
-Every review is now a full review of the current PR. Unchanged diffs (diff + config fingerprint matching the last managed review) still skip with zero model calls and carry the prior verdict forward, and a forced re-review — the `ai-review` label or `force_review: "true"` — still runs a fresh full review. Workflows that set none of these are unaffected.
+Stop reading the removed incremental outputs (`effective_review_scope`, `previous_head_sha`, `previous_base_sha`, `baseline_clean`) and remove `escalate_on_dirty_baseline` if configured. Previous findings and evidence are not carried into a new review. No replacement scope or dirty-baseline setting is needed.
 
 ## 🔐 Security
 

@@ -80,8 +80,8 @@ shell=bash
 #            only one branch fires depending on how the file is invoked.
 #
 #   SC2181 - Check exit code directly with e.g. 'if mycmd;'.
-#            Style preference only; the `$?` form in tests/test_review_scope.sh
-#            is intentional for readability.
+#            tests/test_shared_env_wiring.sh inspects the Python probe's
+#            exit status after its heredoc completes.
 #
 #   SC2030/SC2031 - Modification of PLATFORM is local to subshell / was modified
 #                   in a subshell.

@@ -92,6 +92,25 @@ def test_action_inputs_in_readme():
     )
 
 
+def test_removed_incremental_contract_is_migration_only():
+    action = (_REPO_ROOT / "action.yml").read_text()
+    readme = (_REPO_ROOT / "README.md").read_text()
+    migration = readme.split("### 🚚 v3 breaking changes", 1)[1].split("\n## ", 1)[0]
+    current_docs = readme.replace(migration, "")
+    removed = (
+        "review_scope", "effective_review_scope", "previous_head_sha",
+        "previous_base_sha", "baseline_clean", "escalate_on_dirty_baseline",
+    )
+    for name in removed:
+        assert not re.search(rf"^  {name}:\s*$", action, re.M), name
+        assert not re.search(rf"^\|\s*`{name}`\s*\|", current_docs, re.M), name
+        for example in (_REPO_ROOT / "examples").glob("*.yml"):
+            assert not re.search(rf"^\s*{name}:\s*", example.read_text(), re.M), example
+    assert "review_scope: auto|incremental|full" in migration
+    assert "skip_if_diff_unchanged" in migration
+    assert "Stop reading the removed incremental outputs" in migration
+
+
 def find_duplicate_block_keys(content: str):
     """Find duplicate keys within any ``env:``/``with:`` block in action.yml.
 
