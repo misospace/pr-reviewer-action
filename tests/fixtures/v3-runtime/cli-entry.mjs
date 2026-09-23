@@ -1,4 +1,4 @@
-import { runWithFinalizer } from './cli.mjs';
+import { resolveSpikeContext, runWithFinalizer } from './cli.mjs';
 import { fileURLToPath } from 'node:url';
 
 const token = process.env.SPIKE_TOKEN;
@@ -13,9 +13,8 @@ await runWithFinalizer({
   summaryFile: process.env.GITHUB_STEP_SUMMARY,
   eventPath: process.env.GITHUB_EVENT_PATH,
   repository: process.env.GITHUB_REPOSITORY,
-  server: process.env.GITHUB_API_URL || process.env.GITHUB_SERVER_URL,
   token,
-  platform: process.env.SPIKE_PLATFORM === 'forgejo' ? 'forgejo' : 'github',
   mode: 'composite',
   fail: process.env.SPIKE_FAIL === 'true',
+  ...resolveSpikeContext(process.env),
 });

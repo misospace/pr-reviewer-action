@@ -50,6 +50,13 @@ export function run(file, args, { cwd, env, timeoutMs = 2000 } = {}) {
   });
 }
 
+export function resolveSpikeContext(env = process.env) {
+  return {
+    server: env.GITHUB_API_URL || env.GITHUB_SERVER_URL,
+    platform: env.SPIKE_PLATFORM === 'forgejo' ? 'forgejo' : 'github',
+  };
+}
+
 export async function main({ actionPath, workspace, input, outputFile, summaryFile, eventPath, repository, server, token, mode, platform }) {
   if (input !== 'kebab-value') throw new Error('Kebab input mismatch');
   const marker = (await readFile(join(actionPath, 'marker.txt'), 'utf8')).trim();

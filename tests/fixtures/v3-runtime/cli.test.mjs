@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apiPath, getRepository, run, runWithFinalizer } from './cli.mjs';
+import { apiPath, getRepository, resolveSpikeContext, run, runWithFinalizer } from './cli.mjs';
 
 test('platform routing and authentication stay in the adapter', async () => {
   for (const [platform, path, auth] of [
@@ -20,6 +20,17 @@ test('platform routing and authentication stay in the adapter', async () => {
     assert.equal(repo.fullName, 'owner/repo');
   }
   assert.throws(() => apiPath('other', 'owner/repo'));
+});
+
+test('spike context defaults to github and switches server/platform for forgejo', () => {
+  assert.deepEqual(resolveSpikeContext({ GITHUB_API_URL: 'https://api.test' }),
+    { server: 'https://api.test', platform: 'github' });
+  assert.deepEqual(resolveSpikeContext({ GITHUB_SERVER_URL: 'https://forgejo.test', SPIKE_PLATFORM: 'forgejo' }),
+    { server: 'https://forgejo.test', platform: 'forgejo' });
+  assert.deepEqual(resolveSpikeContext({ SPIKE_PLATFORM: 'github' }),
+    { server: undefined, platform: 'github' });
+  assert.deepEqual(resolveSpikeContext({ SPIKE_PLATFORM: 'gitea' }),
+    { server: undefined, platform: 'github' });
 });
 
 test('repository components remain literal URL path segments', () => {

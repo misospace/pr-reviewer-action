@@ -265,4 +265,4 @@ if [[ -n "${FORGEJO_TOKEN:-}" ]] && grep -qF "$FORGEJO_TOKEN" "$TMPDIR/compat.lo
   exit 1
 fi
 
-echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"
+echo "PASS: Forgejo runner compat qualified against $IMAGE with $RUNNER_IMAGE (task $TASK_ID, job image $JOB_IMAGE): composite local action, node launcher preflight, GITHUB_ACTION_PATH, kebab inputs, output propagation, event/repository aliases, GITHUB_OUTPUT, in-step step summary, secret masking, failure/finalization, Forgejo REST adapter"
