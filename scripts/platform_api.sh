@@ -156,12 +156,15 @@ platform_pr_get() {
 
 platform_pr_head_sha() {
   # $1=repo $2=pr_number → head sha on stdout
+  # Bounded on GitHub (#663): wait_for_ci.sh resolves the head SHA here
+  # before its poll loop, so a hung call would stall ahead of the loop's
+  # own timeout accounting. verify_pr_head.sh already `|| true`s a failure.
   if _platform_fixture_enabled; then
     git -C "${SEMANTIC_FIXTURE_DIR}" rev-parse HEAD
   elif _platform_is_forgejo; then
     _forgejo_py get-pr-metadata "$1" "$2" | jq -r '.head.sha // empty'
   else
-    gh api "repos/$1/pulls/$2" --jq '.head.sha'
+    _gh_api_bounded gh api "repos/$1/pulls/$2" --jq '.head.sha'
   fi
 }
 
@@ -345,6 +348,101 @@ platform_collaborator_permission() {
 
 # ── CI status (wait_for_ci.sh) ──────────────────────────────────────────
 
+# ── Bounded gh attempts (issue #663) ────────────────────────────────────
+# A single `gh api` call can hang indefinitely on a blackholed network or
+# proxy, a stuck socket, or gh's interactive auth path — inside the CI
+# polling loop that would stall past CI_TIMEOUT_SEC with no chance to
+# retry. Every gh attempt on the CI polling path therefore runs under this
+# wall-clock bound.
+#
+# Contract:
+#   - success → gh's stdout bytes relayed unchanged, rc 0 (byte-identical
+#     to the unbounded call; the exact-argv assertions in
+#     tests/test_platform_api.sh stay authoritative).
+#   - gh's own failure → stdout relayed unchanged (the #190 error-body-on-
+#     stdout contract) and gh's rc relayed — never laundered into a
+#     success-shaped result, never converted into a fabricated CI state.
+#   - bound exceeded → TERM, a short grace, KILL, and the child is reaped
+#     before the helper returns; empty stdout, rc 124. Callers already
+#     treat a failed/empty fetch as transient and retry around it.
+#   - the bound is CI_API_TIMEOUT_SEC (default 10, integer seconds),
+#     clamped to CI_TIMEOUT_SEC when that is set and smaller, so one
+#     attempt can never exceed the whole outer CI budget. It is
+#     deliberately independent of AI_REQUEST_TIMEOUT_SEC (model calls).
+#
+# Process lifecycle: `gh` is exec'd directly (no wrapper shell), so the
+# tracked PID is the gh process itself and a signal reaches the real
+# workload, not a wrapper. The watchdog subshell TERMs it at the bound and
+# escalates to KILL 0.5s later in case gh ignores TERM; the main shell
+# always `wait`s the child before returning, so nothing survives and no
+# zombie is left. Killing the watchdog on the success path can orphan its
+# inner `sleep`, which exits inertly at the deadline — it holds no state
+# and can kill nothing, because the kill instructions die with the
+# subshell. Tree-walking cleanup (#634) is unnecessary here: gh spawns no
+# children, and there is no wrapper whose death could orphan it.
+_gh_api_bounded() {
+  local bound="${CI_API_TIMEOUT_SEC:-10}"
+  case "$bound" in ''|*[!0-9]*) bound=10 ;; esac
+  local outer="${CI_TIMEOUT_SEC:-}"
+  case "$outer" in ''|*[!0-9]*) outer="" ;; esac
+  if [[ -n "$outer" ]] && (( bound > outer )); then
+    bound="$outer"
+  fi
+
+  local tmpdir out rc=0 pid wd
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/gh-api-bounded.XXXXXX")" || return 1
+  out="$tmpdir/out"
+  # fired: touched by the watchdog immediately before it signals gh, so a
+  # timeout is detected by who killed the child, not by guessing at exit
+  # statuses gh could theoretically produce on its own.
+  : >"$tmpdir/fired"
+  # stdin </dev/null: gh api reads no stdin, but an auth-related prompt
+  # must never block the attempt waiting on input that will never come.
+  "$@" >"$out" </dev/null &
+  pid=$!
+  (
+    sleep "$bound" 2>/dev/null || exit 0
+    : >"$tmpdir/fired" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || exit 0
+    sleep 0.5 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  # Detach the watchdog's stdio: if the main shell KILLs it mid-`sleep`, the
+  # orphaned sleep survives until the bound — inheriting the caller's stdout/
+  # stderr here would hold any command substitution around this helper open
+  # until the pipe's last writer exits, i.e. up to the full bound on every
+  # successful call.
+  ) >/dev/null 2>&1 </dev/null &
+  wd=$!
+  wait "$pid" || rc=$?
+  # KILL (not TERM) the watchdog: a non-interactive bash subshell DEFERS a
+  # pending TERM until its foreground `sleep` child exits, so TERM would
+  # block the success path for the rest of the bound. KILL takes effect
+  # immediately; the watchdog's inner sleep is orphaned but inert — the
+  # kill instructions die with the subshell, so it can never fire late at
+  # a stale PID.
+  kill -KILL "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+
+  if [[ "$rc" -eq 0 ]]; then
+    cat "$out" 2>/dev/null || true
+    rm -rf "$tmpdir" 2>/dev/null || true
+    return 0
+  fi
+  if [[ "$rc" -eq 143 || "$rc" -eq 137 || -s "$tmpdir/fired" ]]; then
+    # Terminated by the watchdog (or escalated KILL). Emit nothing: a
+    # partial body is not a response, and the caller's existing
+    # empty-output handling is the transient-failure path.
+    rm -rf "$tmpdir" 2>/dev/null || true
+    echo "platform_api: gh attempt exceeded ${bound}s and was terminated (timeout)" >&2
+    return 124
+  fi
+  # gh's own failure: relay stdout bytes and rc exactly as the unbounded
+  # call would have (HTTP error bodies arrive on gh's stdout, #190).
+  cat "$out" 2>/dev/null || true
+  rm -rf "$tmpdir" 2>/dev/null || true
+  return "$rc"
+}
+
 platform_check_runs() {
   # $1=repo $2=sha → check-runs JSON
   if _platform_fixture_enabled; then
@@ -355,7 +453,7 @@ platform_check_runs() {
     # statuses path (platform_commit_status) carries the CI signal.
     printf '{"check_runs":[],"total_count":0}'
   else
-    gh api "repos/$1/commits/$2/check-runs?per_page=100"
+    _gh_api_bounded gh api "repos/$1/commits/$2/check-runs?per_page=100"
   fi
 }
 
@@ -366,7 +464,7 @@ platform_commit_status() {
   elif _platform_is_forgejo; then
     _forgejo_py commit-status "$1" "$2"
   else
-    gh api "repos/$1/commits/$2/status"
+    _gh_api_bounded gh api "repos/$1/commits/$2/status"
   fi
 }
 

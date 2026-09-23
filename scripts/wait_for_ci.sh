@@ -176,7 +176,16 @@ while true; do
   # with self-exclusion (GITHUB_RUN_ID + CI_STATUS_CONTEXT) already applied.
   # Empty stdout means both underlying APIs came back empty — a transient
   # failure worth retrying; an empty JSON array means "no external CI".
+  #
+  # Each attempt is bounded per-call (platform_api.sh #663), so a hung API
+  # returns control here instead of stalling the loop. The observed attempt
+  # duration is folded into elapsed, keeping CI_TIMEOUT_SEC authoritative in
+  # wall-clock terms: without it, repeated near-bound attempts would stretch
+  # real time far past the outer policy (elapsed previously counted only the
+  # sleeps).
+  attempt_start="$(date +%s)"
   ci_checks_json="$(platform_external_checks "$REPO" "$sha" 2>/dev/null || echo "")"
+  elapsed=$(( elapsed + $(date +%s) - attempt_start ))
 
   if [[ -z "$ci_checks_json" ]]; then
     log "API returned empty; retrying in ${CI_INTERVAL_SEC}s..."
