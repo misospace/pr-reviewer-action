@@ -1,0 +1,201 @@
+{
+  "metadata": {
+    "completed_runs": 21,
+    "corpus_source": "evals/corpus-agentic.json",
+    "errored_runs": 0,
+    "generated_at": "2026-09-21T06:00:00.000000+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "native_loop",
+      "tools_off"
+    ],
+    "total_prs": 2,
+    "total_runs": 21
+  },
+  "mode_summary": {
+    "native_loop": {
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_request_bytes": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_tokens_input": 5200.0,
+      "avg_tokens_output": 890.0,
+      "avg_wall_clock_sec": 41.3,
+      "capability_pass_rate": 0.7,
+      "capability_passes": 7,
+      "capability_runs": 10,
+      "deep_runs": 0,
+      "errors": 0,
+      "f1": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "runs": 10,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_effectiveness_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_lead_pass_rate": null,
+      "specialist_lead_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_request_bytes": 0,
+      "specialist_request_count": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "successful_runs": 10,
+      "total_tokens_input": 52000,
+      "total_tokens_output": 8900,
+      "total_wall_clock_sec": 413.00000000000006
+    },
+    "tools_off": {
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_request_bytes": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_tokens_input": 5100.0,
+      "avg_tokens_output": 867.3,
+      "avg_wall_clock_sec": 40.627,
+      "capability_pass_rate": 0.0,
+      "capability_passes": 0,
+      "capability_runs": 10,
+      "deep_runs": 0,
+      "errors": 0,
+      "f1": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "runs": 11,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_effectiveness_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_lead_pass_rate": null,
+      "specialist_lead_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_request_bytes": 0,
+      "specialist_request_count": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "successful_runs": 11,
+      "total_tokens_input": 56100,
+      "total_tokens_output": 9540,
+      "total_wall_clock_sec": 446.90000000000003
+    }
+  },
+  "per_pr_results": [
+    {
+      "capability_pass_rate": {
+        "native_loop": 0.7,
+        "tools_off": 0.0
+      },
+      "native_loop": {
+        "capability": {
+          "checks": [
+            {
+              "id": "read_machineconfig",
+              "passed": false,
+              "type": "tool_call"
+            },
+            {
+              "id": "fetched_support_matrix",
+              "passed": false,
+              "type": "tool_call"
+            },
+            {
+              "id": "cited_matrix_in_review",
+              "passed": false,
+              "type": "review_mentions"
+            }
+          ],
+          "description": "chain to the support matrix and cite it",
+          "passed": false
+        },
+        "deep_review": false,
+        "error": null,
+        "findings": [],
+        "findings_count": 0,
+        "mode": "native_loop",
+        "model_used": "",
+        "pr_number": 7462,
+        "repo_full_name": "joryirving/home-ops",
+        "specialists": null,
+        "tokens_input": 5200,
+        "tokens_output": 890,
+        "tool_calls": [],
+        "tool_stop_reason": "model-stopped",
+        "verdict": null,
+        "verdict_source": null,
+        "wall_clock_sec": 41.3
+      },
+      "pr_number": 7462,
+      "repo_full_name": "joryirving/home-ops",
+      "tools_off": {
+        "capability": {
+          "checks": [
+            {
+              "id": "read_machineconfig",
+              "passed": false,
+              "type": "tool_call"
+            },
+            {
+              "id": "fetched_support_matrix",
+              "passed": false,
+              "type": "tool_call"
+            },
+            {
+              "id": "cited_matrix_in_review",
+              "passed": false,
+              "type": "review_mentions"
+            }
+          ],
+          "description": "chain to the support matrix and cite it",
+          "passed": false
+        },
+        "deep_review": false,
+        "error": null,
+        "findings": [],
+        "findings_count": 0,
+        "mode": "tools_off",
+        "model_used": "",
+        "pr_number": 7462,
+        "repo_full_name": "joryirving/home-ops",
+        "specialists": null,
+        "tokens_input": 5200,
+        "tokens_output": 890,
+        "tool_calls": [],
+        "tool_stop_reason": "model-stopped",
+        "verdict": null,
+        "verdict_source": null,
+        "wall_clock_sec": 41.3
+      }
+    },
+    {
+      "pr_number": 110,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off": {
+        "deep_review": false,
+        "error": null,
+        "findings": [],
+        "findings_count": 0,
+        "mode": "tools_off",
+        "model_used": "",
+        "pr_number": 110,
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "specialists": null,
+        "tokens_input": 4100,
+        "tokens_output": 640,
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "verdict": null,
+        "verdict_source": null,
+        "wall_clock_sec": 33.9
+      }
+    }
+  ]
+}

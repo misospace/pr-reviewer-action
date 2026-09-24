@@ -121,106 +121,22 @@ jobs:
       - name: Summarize weekly run
         # '!cancelled()' (not always()) so the summary still writes its step
         # summary and #472 tracking comment — then fails via the
-        # completed_runs guard below — when the harness step exited nonzero
-        # on an all-errored sweep (issue #711). Cancelled runs skip it, and
-        # the schedule gate keeps manual dispatch runs summary-free.
+        # all-runs-errored guard in scripts/eval_weekly_summary.py — when the
+        # harness step exited nonzero on an all-errored sweep (issue #711).
+        # Cancelled runs skip it, and the schedule gate keeps manual dispatch
+        # runs summary-free.
         if: ${{ !cancelled() && github.event_name == 'schedule' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: eval-report/eval-report.json
         run: |
           set -euo pipefail
-          python - <<'PYEOF'
-          import json, os, sys, datetime
-          from pathlib import Path
-
-          report_path = Path(os.environ["REPORT_PATH"])
-          token = os.environ["GITHUB_TOKEN"]
-
-          if not report_path.exists():
-              print(f"No report at {report_path}; skipping summary.")
-              sys.exit(0)
-
-          report = json.loads(report_path.read_text())
-          modes = report.get("metadata", {}).get("modes_tested", [])
-          summary_lines = ["## Weekly eval-harness regression summary", ""]
-          summary_lines.append(f"_Run: {datetime.datetime.utcnow().isoformat(timespec='seconds')}Z_")
-          summary_lines.append("")
-          summary_lines.append(f"- **Modes tested:** {', '.join(modes) if modes else '_none reported_'}")
-          summary_lines.append(f"- **PRs evaluated:** {report.get('metadata', {}).get('pr_count', 'n/a')}")
-
-          # Zero completed runs means every pass rate is undefined — the job
-          # must fail rather than publish a success summary (issue #711).
-          # Prefers metadata.completed_runs; falls back to summing
-          # mode_summary successful_runs for pre-#711 reports (mirrors
-          # count_completed_runs in scripts/eval_harness.py).
-          completed_runs = report.get("metadata", {}).get("completed_runs")
-          if not isinstance(completed_runs, int) or isinstance(completed_runs, bool):
-              completed_runs = sum(
-                  block.get("successful_runs", 0)
-                  for block in report.get("mode_summary", {}).values()
-                  if isinstance(block, dict)
-              )
-          total_runs = report.get("metadata", {}).get("total_runs")
-          if isinstance(total_runs, int) and not isinstance(total_runs, bool):
-              summary_lines.append(f"- **Runs completed:** {completed_runs}/{total_runs}")
-
-          any_regression = False
-          for mode in modes:
-              block = report.get("modes", {}).get(mode, {})
-              pass_rate = block.get("pass_rate")
-              regressions = block.get("regressions", [])
-              emoji = "✅" if pass_rate is not None and pass_rate >= 0.95 else ("⚠️" if pass_rate is not None else "❓")
-              summary_lines.append(f"- {emoji} **{mode}** pass_rate={pass_rate}")
-              if regressions:
-                  any_regression = True
-                  summary_lines.append(f"  - regressions: {', '.join(regressions)}")
-
-          if any_regression:
-              summary_lines.append("")
-              summary_lines.append("> ⚠️ One or more modes show regressions vs. last weekly baseline.")
-
-          all_errored = completed_runs == 0
-          if all_errored:
-              summary_lines.append("")
-              summary_lines.append(
-                  "> ❌ Every harness run errored; no pass rates exist. Failing the job (issue #711)."
-              )
-
-          body = "\n".join(summary_lines)
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
-              fh.write(body + "\n")
-
-          # Also post the summary as a comment on the tracking issue (issue
-          # #472) so the weekly run is discoverable from the issue tracker.
-          from urllib.request import Request, urlopen
-
-          gh_repo = os.environ["GITHUB_REPOSITORY"]
-          summary_url = (
-              f"https://api.github.com/repos/{gh_repo}/issues/472/comments"
-          )
-          payload = json.dumps({"body": body}).encode("utf-8")
-          req = Request(
-              summary_url,
-              data=payload,
-              method="POST",
-              headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-                  "Content-Type": "application/json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-          try:
-              urlopen(req, timeout=15).read()
-              print(f"Posted regression summary to {summary_url}.")
-          except Exception as exc:
-              # Posting the summary is best-effort; don't fail the whole job
-              # just because the issue tracker was unavailable.
-              print(f"Failed to post summary to {summary_url}: {exc}", file=sys.stderr)
-
-          # Fail after the summary and tracking-issue comment are written, so
-          # the evidence is still visible on a red run (issue #711).
-          if all_errored:
-              sys.exit(1)
-          PYEOF
+          # The renderer reads per-mode pass rates from the canonical
+          # report["mode_summary"] shape the harness emits (#715), appends
+          # the summary to GITHUB_STEP_SUMMARY, posts the #472 tracking
+          # comment best-effort, and exits 1 after both are written when
+          # every harness run errored (issue #711). A missing report file
+          # is a skip, not a failure.
+          python scripts/eval_weekly_summary.py \
+            --report "$REPORT_PATH" \
+            --post-issue 472

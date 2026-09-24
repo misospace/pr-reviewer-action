@@ -444,12 +444,18 @@ evidence from a reproduced defect.
 
 ### Interpreting the report
 
-The harness prints per-mode `pass_rate` (fraction of expected-evidence
-checks that fired) and a `regressions` list naming checks that newly
-failed vs. the previous baseline. A pass rate below `0.95` or any
-non-empty `regressions` list should block the release; inspect the
-artifact, reproduce locally with the command above, then fix the prompt or
-routing regression in the action before re-running.
+Per-mode results live under `mode_summary` in the generated report. The
+headline per-mode number is `capability_pass_rate` (fraction of
+expected-evidence-scoring runs that closed the evidence chain; `None` when
+no scenario in the corpus declared `expected_evidence` for the mode). The
+weekly scheduled sweep renders these rates via
+`scripts/eval_weekly_summary.py` (#715), which reads the canonical
+`report["mode_summary"][mode]` blocks — never a parallel structure — and
+degrades explicitly (loud missing-block / unreadable-rate lines) when a
+report predates a field. A per-mode pass rate below `0.95` should block
+the release; inspect the artifact, reproduce locally with the command
+above, then fix the prompt or routing regression in the action before
+re-running.
 
 ### Specialist corpus & deep A/B
 

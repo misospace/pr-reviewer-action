@@ -129,34 +129,59 @@ def test_run_eval_harness_step_passes_shellcheck() -> None:
     )
 
 
-def test_summary_step_fails_on_zero_completed_runs() -> None:
-    """The weekly summary must fail the job when every harness run errored.
+def test_summary_step_invokes_renderer_script() -> None:
+    """The scheduled summary must render via scripts/eval_weekly_summary.py.
 
-    Issue #711: a scheduled sweep where every run errored (run_review.sh had
-    lost its executable bit) still published a green success summary with no
-    pass rates. The summary step must derive ``completed_runs`` from the
-    report and ``sys.exit(1)`` when it is zero — after writing the step
-    summary and tracking-issue comment, so the evidence stays visible.
+    Issue #715: the summary read per-mode pass rates from
+    ``report["modes"][mode]["pass_rate"]`` — a structure the producer never
+    emitted — inside an untestable inline heredoc. The rendering now lives
+    in ``scripts/eval_weekly_summary.py``, which reads the canonical
+    ``report["mode_summary"]`` shape and is pinned by
+    ``tests/test_eval_weekly_summary.py`` against real generated-report
+    fixtures.
     """
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
     run_block = _extract_run_block("Summarize weekly run", workflow_text)
 
-    assert "completed_runs" in run_block, (
-        "the summary step must compute `completed_runs` from the report"
+    assert "scripts/eval_weekly_summary.py" in run_block, (
+        "the summary step must invoke scripts/eval_weekly_summary.py"
     )
-    assert "all_errored" in run_block and "sys.exit(1)" in run_block, (
-        "the summary step must exit nonzero when every harness run errored "
-        "(issue #711)"
+    assert "--report" in run_block and "--post-issue 472" in run_block, (
+        "the summary step must point the renderer at the report and the "
+        "#472 tracking issue"
+    )
+
+
+def test_renderer_fails_after_summary_on_all_errored() -> None:
+    """The renderer keeps the #711 all-runs-error behavior.
+
+    The script must derive the completed-run count from the report and exit
+    nonzero when it is zero — after writing the step summary and posting
+    the tracking-issue comment, so the evidence stays visible.
+    """
+    script_text = (ROOT / "scripts" / "eval_weekly_summary.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "count_completed_runs" in script_text, (
+        "the renderer must compute completed runs from the report"
+    )
+    assert "all_runs_errored" in script_text, (
+        "the renderer must gate its failure on the all-errored decision"
+    )
+    assert "sys.exit(main())" in script_text, (
+        "the renderer must propagate its exit code to the job"
+    )
+    assert "\n        return 1\n" in script_text and "\n    return 0\n" in script_text, (
+        "missing-report and healthy sweeps must keep success exits"
     )
     # The failure decision must come after the summary is written, so a red
     # run still publishes its evidence.
-    assert run_block.index("GITHUB_STEP_SUMMARY") < run_block.index("sys.exit(1)"), (
-        "the zero-completed-runs failure must be decided after the step "
-        "summary is written"
-    )
-    assert "sys.exit(0)" in run_block, (
-        "partial failures must stay non-fatal: the summary step keeps its "
-        "success exits"
+    assert script_text.index("GITHUB_STEP_SUMMARY") < script_text.rindex(
+        "all_runs_errored(report)"
+    ), (
+        "the all-errored decision must be reachable after the step summary "
+        "is written"
     )
 
 
