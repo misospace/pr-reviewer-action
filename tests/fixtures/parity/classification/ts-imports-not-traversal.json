@@ -1,0 +1,83 @@
+{
+  "fixture": "ts-imports-not-traversal",
+  "description": "#679 review false positive, pinned: cross-directory ESM imports (`from \"../x.js\"`) are module resolution, not filesystem traversal, and documentation prose mentioning sanitizing paths is not a code signal — a typed process-lifecycle PR must classify app_code with no path_handling flag.",
+  "pr_files": [
+    {
+      "filename": "AGENTS.md",
+      "status": "modified",
+      "additions": 3
+    },
+    {
+      "filename": "src/evidence/index.ts",
+      "status": "added",
+      "additions": 2
+    },
+    {
+      "filename": "src/evidence/providers.ts",
+      "status": "added",
+      "additions": 40
+    },
+    {
+      "filename": "src/gates/env.ts",
+      "status": "added",
+      "additions": 30
+    },
+    {
+      "filename": "src/gates/gates.ts",
+      "status": "added",
+      "additions": 90
+    },
+    {
+      "filename": "src/gates/index.ts",
+      "status": "added",
+      "additions": 2
+    },
+    {
+      "filename": "src/runtime/env.ts",
+      "status": "added",
+      "additions": 20
+    },
+    {
+      "filename": "src/runtime/index.ts",
+      "status": "added",
+      "additions": 2
+    },
+    {
+      "filename": "src/runtime/platform.ts",
+      "status": "added",
+      "additions": 10
+    },
+    {
+      "filename": "src/runtime/process-tree.ts",
+      "status": "added",
+      "additions": 120
+    },
+    {
+      "filename": "src/runtime/signals.ts",
+      "status": "added",
+      "additions": 40
+    },
+    {
+      "filename": "src/runtime/subprocess.ts",
+      "status": "added",
+      "additions": 200
+    },
+    {
+      "filename": "tests-v3/evidence.test.ts",
+      "status": "added",
+      "additions": 100
+    },
+    {
+      "filename": "tests-v3/gates.test.ts",
+      "status": "added",
+      "additions": 120
+    },
+    {
+      "filename": "tests-v3/runtime.test.ts",
+      "status": "added",
+      "additions": 200
+    }
+  ],
+  "diff": "+import { runProcess } from \"../runtime/subprocess.js\";\n+import { buildChildEnv } from \"../runtime/env.js\";\n+} from \"../gates/gates.js\";\n+const child = spawn(options.file, options.args ?? [], { detached: true });\n+- **`src/runtime/`** — The typed process-lifecycle layer (#679): the module pins the POSIX-only contract and documents that the provider seam never lets PR-controlled content choose the command, and that operators must sanitize any configured paths before they reach a child process.\n context line without a marker\n",
+  "linked_issues": []
+}

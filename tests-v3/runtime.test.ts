@@ -98,6 +98,35 @@ test("child ignoring SIGTERM still dies via bounded SIGKILL escalation", async (
   assert.equal(result.termination?.survived.length ?? 0, 0);
 });
 
+test("a TERM-ignoring descendant needs the snapshot KILL escalation (killedAfterGrace)", async () => {
+  const dir = workspace();
+  const pidFile = join(dir, "stubborn.pid");
+  const handle = runProcess({
+    file: "bash",
+    args: [
+      "-c",
+      `bash -c "trap '' TERM; echo \\$\\$ > ${pidFile}; sleep 60" & echo ready; sleep 60`,
+    ],
+    env: buildChildEnv(["PATH", "HOME"]),
+    timeoutMs: 300,
+    terminateGraceMs: 1200,
+  });
+  const result = await handle.result;
+  assert.equal(result.status, "timeout");
+  await waitForFile(pidFile);
+  const stubbornPid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+  const termination = result.termination;
+  assert.ok(termination !== null);
+  assert.ok(
+    termination.snapshot.includes(stubbornPid),
+    "the stubborn descendant is in the pre-signal snapshot",
+  );
+  assert.ok(
+    termination.killedAfterGrace.includes(stubbornPid),
+    "a descendant that ignores TERM must be individually KILLed after the grace",
+  );
+});
+
 test("descendant that escapes the process group is swept by the snapshot", async () => {
   const dir = workspace();
   const escapedPidFile = join(dir, "escaped.pid");
@@ -240,6 +269,25 @@ test("output over the per-stream cap is truncated, drain never blocks", async ()
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdoutTruncated, true);
   assert.ok(result.stdout.length <= cap, `captured ${result.stdout.length} > cap ${cap}`);
+});
+
+test("a grandchild holding the stdout pipe cannot hang the result (drain guard)", async () => {
+  // The leader exits immediately; an orphaned grandchild keeps the inherited
+  // stdout open for 60s. The close-after-exit drain guard must cut the
+  // streams instead of waiting for the descriptor.
+  const startedAt = Date.now();
+  const handle = runProcess({
+    file: "bash",
+    args: ["-c", "( sleep 60; echo too-late ) & echo started"],
+    env: buildChildEnv(["PATH", "HOME"]),
+    timeoutMs: 15_000,
+  });
+  const result = await handle.result;
+  const elapsed = Date.now() - startedAt;
+  assert.equal(result.status, "exited");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.toString("utf8"), "started\n");
+  assert.ok(elapsed < 10_000, `drain guard must not wait for the 60s holder (took ${elapsed}ms)`);
 });
 
 test("structured exit/stderr capture for a failing workload", async () => {

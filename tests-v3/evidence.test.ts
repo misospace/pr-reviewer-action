@@ -79,6 +79,38 @@ test("argv provider: exact stdout preserved, status ok", async () => {
   assert.equal(entry.command, "printf 'héllo→bytes'", "conservative quoting wraps non-ASCII args");
 });
 
+test("argv recording escapes embedded single quotes (display-only, never executed)", async () => {
+  const entry = await runEvidenceProvider(
+    { id: "p1q", command: ["printf", "it's here"] },
+    { ambientEnv: ambientBase },
+  );
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.stdout, "it's here");
+  // POSIX single-quote escape: close the quote, insert an escaped one,
+  // reopen. The recorded command is display-only.
+  assert.equal(entry.command, "printf 'it'\\''s here'");
+});
+
+test("hostile finding messages are stored opaquely (no fence or control reinterpretation)", () => {
+  const hostile = {
+    severity: "major",
+    findings: [
+      { message: "```\nnot a fence\n```", severity: "blocker" },
+      { message: "bad\u0007bell\u001bescape", source: "a\tpy" },
+      { message: "trailing backticks ```` `` `", severity: "warning" },
+    ],
+  };
+  const findings = parseProviderFindings(hostile).findings;
+  assert.equal(findings.length, 3);
+  // Findings are opaque data at this layer: control characters and backtick
+  // runs pass through verbatim; fence safety is the downstream corpus
+  // renderer's contract.
+  assert.equal(findings[0]?.message, "```\nnot a fence\n```");
+  assert.equal(findings[1]?.message, "bad\u0007bell\u001bescape");
+  assert.equal(findings[1]?.source, "a\tpy");
+  assert.equal(findings[2]?.message, "trailing backticks ```` `` `");
+});
+
 test("JSON provider output parses into normalized findings", async () => {
   const payload = JSON.stringify({
     severity: "major",

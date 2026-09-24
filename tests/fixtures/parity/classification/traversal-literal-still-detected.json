@@ -1,0 +1,13 @@
+{
+  "fixture": "traversal-literal-still-detected",
+  "description": "The tuned heuristic must keep detecting real traversal literals in module-specifier-free lines: an open() of a ../.. path still classifies path_handling_changes with the flag, file attribution, and the path must_check items.",
+  "pr_files": [
+    {
+      "filename": "src/app.py",
+      "status": "modified",
+      "additions": 2
+    }
+  ],
+  "diff": "+def load_config(name):\n+    with open('../../etc/passwd') as fh:\n+        return fh.read()\n context line\n",
+  "linked_issues": []
+}

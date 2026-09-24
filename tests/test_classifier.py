@@ -218,6 +218,25 @@ class TestPRKindPathHandlingChanges:
         kind = _classify_pr_kind(files, pattern)
         assert kind == "path_handling_changes"
 
+    def test_esm_import_specifiers_are_not_traversal(self):
+        # #679 review false positive: a cross-directory TypeScript import is
+        # module resolution, not filesystem traversal.
+        diff = "\n".join([
+            '+import { runProcess } from "../runtime/subprocess.js";',
+            '+} from "../gates/gates.js";',
+            '+const mod = require("../lib/util.js");',
+            '+await import("../lib/lazy.js");',
+        ])
+        assert _classify_pr_kind([_make_file("src/runtime/subprocess.ts")], diff) == "app_code"
+
+    def test_doc_prose_is_not_a_path_signal(self):
+        diff = "+The helper sanitizes all user-provided paths before use.\n"
+        assert _classify_pr_kind([_make_file("README.md")], diff) == "app_code"
+
+    def test_identifier_shaped_path_code_still_fires(self):
+        diff = "+def sanitize_path(p):\n+    return resolvePath(p)\n"
+        assert _classify_pr_kind([_make_file("src/x.py")], diff) == "path_handling_changes"
+
 
 class TestPRKindSecretHandlingChanges:
     @pytest.mark.parametrize("fname", [

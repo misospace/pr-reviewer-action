@@ -173,6 +173,56 @@ test("uncertainty reasons reject control characters and cap length", () => {
   assert.deepEqual(result.linkedMetadataUncertainty, [`github linked issue ${"x".repeat(200)} fetch failed`]);
 });
 
+test("cross-directory ESM imports and doc prose are not path handling (#679 false positive)", () => {
+  const prFiles = [
+    canonicalChangedFile({ filename: "src/runtime/subprocess.ts" }),
+    canonicalChangedFile({ filename: "src/gates/gates.ts" }),
+    canonicalChangedFile({ filename: "AGENTS.md" }),
+  ];
+  const importDiff = [
+    "+import { runProcess } from \"../runtime/subprocess.js\";",
+    "+} from \"../gates/gates.js\";",
+    "+const child = spawn(options.file, options.args ?? [], { detached: true });",
+    "+- **`src/runtime/`** — operators must sanitize any configured paths before they reach a child process.",
+  ].join("\n");
+  const result = classifyPr({ prFiles, diffText: importDiff, linkedIssues: normalizeLinkedIssues([]) });
+  assert.equal(result.prKind, "app_code");
+  assert.deepEqual(result.riskFlags, []);
+
+  // A bare `from "..."` continuation line and dynamic/require specifiers are
+  // module resolution too.
+  const specifiers = [
+    '+const mod = require("../lib/util.js");',
+    '+await import("../lib/lazy.js");',
+  ].join("\n");
+  assert.equal(classifyPr({ prFiles, diffText: specifiers, linkedIssues: [] }).prKind, "app_code");
+});
+
+test("traversal literals outside module specifiers still classify path handling", () => {
+  const result = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "src/app.py" })],
+    diffText: "+with open('../../etc/passwd') as fh:\n+    print(fh.read())\n",
+    linkedIssues: normalizeLinkedIssues([]),
+  });
+  assert.equal(result.prKind, "path_handling_changes");
+  assert.ok(result.riskFlags.includes("path_handling_changes"));
+  assert.ok(result.mustCheck.includes("test with edge-case paths (null bytes, symlinks)"));
+
+  // Identifier-shaped code still fires; prose with spaces does not.
+  const code = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "src/x.py" })],
+    diffText: "+def sanitize_path(p):\n",
+    linkedIssues: [],
+  });
+  assert.equal(code.prKind, "path_handling_changes");
+  const prose = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "README.md" })],
+    diffText: "+The helper sanitizes all user-provided paths before use.\n",
+    linkedIssues: [],
+  });
+  assert.equal(prose.prKind, "app_code");
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {

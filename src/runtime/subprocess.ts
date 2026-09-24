@@ -194,6 +194,22 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
         child.stdout?.destroy();
         child.stderr?.destroy();
         settleTerminate();
+      } else if (child !== null) {
+        // The spawn succeeded but the leader pid was never assigned (Node
+        // documents this as possible). Nothing can be tree-terminated, and
+        // a silent no-op report would hide the hole in the cleanup
+        // guarantee — surface it explicitly.
+        terminationReport = {
+          swept: false,
+          snapshot: [],
+          killedAfterGrace: [],
+          survived: [],
+          issues: ["leader pid was never assigned; tree termination could not run"],
+        };
+        await sleep(Math.min(graceMs, EXIT_STREAM_DRAIN_MS));
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settleTerminate();
       }
       // child === null: the cancel landed inside the preflight window; the
       // launch's post-probe check settles the structured spawn_error.

@@ -139,15 +139,62 @@ FILE_SERVING_PATTERNS = [
     re.compile(r"staticfiles?/"),
 ]
 
-# Path handling changes — match in filenames AND diff content
+# Path handling changes — identifier-shaped patterns over filenames and diff
+# content, plus the traversal-literal pattern (see PATH_TRAVERSAL_PATTERN)
+# which is scanned over module-specifier-filtered diff text.
 PATH_HANDLING_PATTERNS = [
-    re.compile(r"pathlib", re.IGNORECASE),
-    re.compile(r"os\.path", re.IGNORECASE),
+    re.compile(r"\bpathlib\b", re.IGNORECASE),
+    re.compile(r"\bos\.path\b", re.IGNORECASE),
     re.compile(r"filepath|pathname", re.IGNORECASE),
-    re.compile(r"\.\./|\.\.\\", re.IGNORECASE),  # path traversal
-    re.compile(r"sanitize.*path|clean.*path", re.IGNORECASE),
-    re.compile(r"path_join|joinpath|resolve.*path", re.IGNORECASE),
+    # Identifier-shaped joins only (sanitize_path, cleanPath, resolvePath):
+    # a prose line like "sanitizes ... paths" in documentation must not read
+    # as a code signal.
+    re.compile(r"sanitize[\w]*path|path[\w]*sanitize|clean[\w]*path", re.IGNORECASE),
+    re.compile(r"path_join|joinpath|resolve[\w]*path|path[\w]*resolve", re.IGNORECASE),
 ]
+
+# Path traversal literals: "../" or "..\". Scanned ONLY over diff text with
+# module-specifier lines removed: an ESM import like
+# `from "../runtime/subprocess.js"` is module resolution, not filesystem
+# traversal, and every cross-directory TypeScript change would otherwise
+# classify as path handling (the #679 review false positive).
+PATH_TRAVERSAL_PATTERN = re.compile(r"\.\./|\.\.\\", re.IGNORECASE)
+
+# A diff line that adds/removes an ESM/CJS module specifier is module
+# resolution, not filesystem path handling. Two shapes: statements anchored at
+# the line start (`import ...`, `export ...`, `} from "..."`, a bare
+# `from "..."` continuation) and call forms anywhere in the line
+# (`require("...")`, `await import("...")`).
+_MODULE_SPECIFIER_ANCHORED = re.compile(
+    r"""^\s*[+-]?\s*(?:(?:import|export)\b|\}?\s*from\s*['"`]|from\s*['"`])"""
+)
+_MODULE_SPECIFIER_CALL = re.compile(
+    r"""\b(?:await\s+)?(?:require|import)\s*\(\s*['"`]"""
+)
+
+
+def _is_module_specifier_line(line: str) -> bool:
+    return bool(_MODULE_SPECIFIER_ANCHORED.match(line) or _MODULE_SPECIFIER_CALL.search(line))
+
+
+def _diff_without_module_specifiers(diff_text: str) -> str:
+    """Diff text with module-specifier lines removed, for the
+    path-traversal heuristic only."""
+    return "\n".join(
+        line for line in diff_text.splitlines()
+        if not _is_module_specifier_line(line)
+    )
+
+
+def _is_path_handling(filenames: list[str], diff_text: str) -> bool:
+    """Path-handling kind rule: identifier-shaped patterns over filenames and
+    the raw diff, plus the traversal-literal pattern over module-specifier-
+    filtered diff text."""
+    if any(pat.search(f) for pat in PATH_HANDLING_PATTERNS for f in filenames):
+        return True
+    if any(pat.search(diff_text) for pat in PATH_HANDLING_PATTERNS):
+        return True
+    return PATH_TRAVERSAL_PATTERN.search(_diff_without_module_specifiers(diff_text)) is not None
 
 # Secret handling changes
 SECRET_HANDLING_PATTERNS = [
@@ -309,7 +356,7 @@ KIND_RULES: list[KindRule] = [
     KindRule("auth_changes", _filename_matches(AUTH_PATTERNS)),
     KindRule("public_route_changes", _filename_matches(PUBLIC_ROUTE_PATTERNS)),
     KindRule("file_serving_changes", _filename_or_diff_matches(FILE_SERVING_PATTERNS)),
-    KindRule("path_handling_changes", _filename_or_diff_matches(PATH_HANDLING_PATTERNS)),
+    KindRule("path_handling_changes", _is_path_handling),
 ]
 
 # Fallback kind when no rule matches.
@@ -406,7 +453,18 @@ def _detect_risk_flags(
             f for f in filenames
             if any(pat.search(f) for pat in pat_set)
         ]
-        matches_in_diff = any(pat.search(diff_text) for pat in pat_set)
+        # The path-traversal heuristic scans module-specifier-filtered text
+        # (an ESM `from "../x.js"` import is module resolution, not
+        # filesystem traversal), so the path_handling flag gets the filtered
+        # text plus the dedicated traversal pattern.
+        scan_text = diff_text
+        matches_in_diff = any(pat.search(scan_text) for pat in pat_set)
+        if pat_set is PATH_HANDLING_PATTERNS:
+            scan_text = _diff_without_module_specifiers(diff_text)
+            matches_in_diff = (
+                matches_in_diff
+                or PATH_TRAVERSAL_PATTERN.search(scan_text) is not None
+            )
         if triggering_files or matches_in_diff:
             if flag not in flags:
                 flags.append(flag)

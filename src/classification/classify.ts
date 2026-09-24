@@ -106,15 +106,55 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
   /staticfiles?\//,
 ];
 
-/** Path handling changes — filenames AND diff content. */
+/** Path handling changes — identifier-shaped patterns over filenames and
+ * diff content, plus the traversal-literal pattern (see PATH_TRAVERSAL_PATTERN)
+ * which is scanned over module-specifier-filtered diff text. */
 const PATH_HANDLING_PATTERNS: readonly RegExp[] = [
-  /pathlib/i,
-  /os\.path/i,
+  /\bpathlib\b/i,
+  /\bos\.path\b/i,
   /filepath|pathname/i,
-  /\.\.\/|\.\.\\/i,
-  /sanitize.*path|clean.*path/i,
-  /path_join|joinpath|resolve.*path/i,
+  // Identifier-shaped joins only (sanitize_path, cleanPath, resolvePath):
+  // a prose line like "sanitizes ... paths" in documentation must not read
+  // as a code signal.
+  /sanitize[\w]*path|path[\w]*sanitize|clean[\w]*path/i,
+  /path_join|joinpath|resolve[\w]*path|path[\w]*resolve/i,
 ];
+
+/** Path traversal literals: "../" or "..\". Scanned ONLY over diff text with
+ * module-specifier lines removed: an ESM import like
+ * `from "../runtime/subprocess.js"` is module resolution, not filesystem
+ * traversal, and every cross-directory TypeScript change would otherwise
+ * classify as path handling (the #679 review false positive). */
+const PATH_TRAVERSAL_PATTERN = /\.\.\/|\.\.\\/i;
+
+/** A diff line that adds/removes an ESM/CJS module specifier is module
+ * resolution, not filesystem path handling. Two shapes: statements anchored
+ * at the line start (`import ...`, `export ...`, `} from "..."`, a bare
+ * `from "..."` continuation) and call forms anywhere in the line
+ * (`require("...")`, `await import("...")`). */
+const MODULE_SPECIFIER_ANCHORED =
+  /^\s*[+-]?\s*(?:(?:import|export)\b|\}?\s*from\s*['"`]|from\s*['"`])/;
+const MODULE_SPECIFIER_CALL = /\b(?:await\s+)?(?:require|import)\s*\(\s*['"`]/;
+
+function isModuleSpecifierLine(line: string): boolean {
+  return MODULE_SPECIFIER_ANCHORED.test(line) || MODULE_SPECIFIER_CALL.test(line);
+}
+
+function diffWithoutModuleSpecifiers(diffText: string): string {
+  return diffText
+    .split("\n")
+    .filter((line) => !isModuleSpecifierLine(line))
+    .join("\n");
+}
+
+/** Path-handling kind rule: identifier-shaped patterns over filenames and
+ * the raw diff, plus the traversal-literal pattern over module-specifier-
+ * filtered diff text. */
+function isPathHandling(filenames: readonly string[], diffText: string): boolean {
+  if (filenames.some((name) => matchesAny(name, PATH_HANDLING_PATTERNS))) return true;
+  if (matchesAny(diffText, PATH_HANDLING_PATTERNS)) return true;
+  return PATH_TRAVERSAL_PATTERN.test(diffWithoutModuleSpecifiers(diffText));
+}
 
 /** Secret handling changes. */
 const SECRET_HANDLING_PATTERNS: readonly RegExp[] = [
@@ -203,7 +243,7 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "auth_changes", matches: filenameMatches(AUTH_PATTERNS) },
   { kind: "public_route_changes", matches: filenameMatches(PUBLIC_ROUTE_PATTERNS) },
   { kind: "file_serving_changes", matches: filenameOrDiffMatches(FILE_SERVING_PATTERNS) },
-  { kind: "path_handling_changes", matches: filenameOrDiffMatches(PATH_HANDLING_PATTERNS) },
+  { kind: "path_handling_changes", matches: isPathHandling },
 ];
 
 /** Fallback kind when no rule matches. */
@@ -313,7 +353,15 @@ function detectRiskFlags(
   // File-based risk flags (derived from classification patterns).
   for (const { patterns, flag } of FILE_RISK_RULES) {
     const triggeringFiles = filenames.filter((name) => matchesAny(name, patterns));
-    const matchesInDiff = matchesAny(diffText, patterns);
+    let matchesInDiff = matchesAny(diffText, patterns);
+    // The path-traversal heuristic scans module-specifier-filtered text (an
+    // ESM `from "../x.js"` import is module resolution, not filesystem
+    // traversal), so the path_handling flag gets the filtered text plus the
+    // dedicated traversal pattern.
+    if (patterns === PATH_HANDLING_PATTERNS) {
+      const scanText = diffWithoutModuleSpecifiers(diffText);
+      matchesInDiff = matchesInDiff || PATH_TRAVERSAL_PATTERN.test(scanText);
+    }
     if (triggeringFiles.length > 0 || matchesInDiff) {
       if (!flags.includes(flag)) flags.push(flag);
       // File attribution (empty list when only diff content matched).
