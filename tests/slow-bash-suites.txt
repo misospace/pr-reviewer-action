@@ -1,0 +1,4 @@
+# job-id suite — one assignment per line; slow jobs select their suite
+# by $GITHUB_JOB, validate-bash excludes every suite listed here.
+validate-bash-timeout tests/test_ci_api_timeout.sh
+validate-bash-gating tests/test_concurrent_gating.sh

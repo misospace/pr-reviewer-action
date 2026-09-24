@@ -87,6 +87,16 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements.txt
 
+      - name: Set up Node.js
+        # Node 24 must be on PATH for the parity harness (tests/test_parity_harness.py
+        # runs `node dist/index.js`, and package.json engines requires node >=24).
+        # On the pre-split serial job this came from the shared setup-node step;
+        # dropping it here made shutil.which("node") resolve the runner image's
+        # older default node and fail every v3 parity fixture.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
       - name: Check Python scripts
         run: find scripts pr_reviewer tests -name '*.py' -print0 | xargs -0 python3 -m py_compile
 
@@ -187,11 +197,11 @@ jobs:
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
-  # The two longest bash suites (CI API timeout ~66s, concurrent gating ~47s)
-  # each get their own runner instead of queueing the other one (or every
-  # other suite) behind it. Each job reads its suite list from its own file
-  # under tests/slow-bash-suites-*.txt, which are also the single source of
-  # truth for validate-bash's exclusion below.
+  # The two longest bash suites each get their own runner instead of queueing
+  # the other one (or every other suite) behind it. Each job selects its
+  # suite from the shared tests/slow-bash-suites.txt map by its own $GITHUB_JOB
+  # — the file is the single source of truth for both the slow runners and
+  # validate-bash's exclusion below.
   validate-bash-timeout:
     runs-on: ubuntu-latest
     steps:
@@ -211,19 +221,23 @@ jobs:
         # pinned install the old serial job provided.
         run: pip install -r requirements.txt
 
-      - name: Run CI API timeout suite
+      - name: Run assigned slow bash suite
         run: |
           set -euo pipefail
+          mapfile -t suites < <(awk -v job="$GITHUB_JOB" '$1 !~ /^#/ && $1 == job {print $2}' tests/slow-bash-suites.txt)
+          if (( ${#suites[@]} == 0 )); then
+            echo "::error::no slow suite assigned to job '$GITHUB_JOB' in tests/slow-bash-suites.txt"
+            exit 1
+          fi
           failed=0
-          while IFS= read -r t; do
-            [[ -z "$t" ]] && continue
+          for t in "${suites[@]}"; do
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"
               failed=1
             fi
             echo "::endgroup::"
-          done < tests/slow-bash-suites-ci-timeout.txt
+          done
           exit "$failed"
 
   validate-bash-gating:
@@ -243,19 +257,23 @@ jobs:
         # See the note in validate-bash-timeout: suites import PyYAML transitively.
         run: pip install -r requirements.txt
 
-      - name: Run concurrent gating suite
+      - name: Run assigned slow bash suite
         run: |
           set -euo pipefail
+          mapfile -t suites < <(awk -v job="$GITHUB_JOB" '$1 !~ /^#/ && $1 == job {print $2}' tests/slow-bash-suites.txt)
+          if (( ${#suites[@]} == 0 )); then
+            echo "::error::no slow suite assigned to job '$GITHUB_JOB' in tests/slow-bash-suites.txt"
+            exit 1
+          fi
           failed=0
-          while IFS= read -r t; do
-            [[ -z "$t" ]] && continue
+          for t in "${suites[@]}"; do
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"
               failed=1
             fi
             echo "::endgroup::"
-          done < tests/slow-bash-suites-gating.txt
+          done
           exit "$failed"
 
   validate-bash:
@@ -278,16 +296,29 @@ jobs:
       - name: Run smoke test
         run: tests/smoke_test.sh
 
-      # Auto-discover every bash suite except the slow ones listed in the
-      # tests/slow-bash-suites-*.txt files (run by validate-bash-timeout and
-      # validate-bash-gating) so a new (or previously unlisted) suite cannot
-      # silently stay out of CI.
+      # Auto-discover every bash suite except the slow ones assigned in
+      # tests/slow-bash-suites.txt (run by their validate-bash-* jobs) so a
+      # new (or previously unlisted) suite cannot silently stay out of CI.
       - name: Run bash test suites (auto-discover)
         run: |
           set -euo pipefail
           failed=0
+          # Guard the slow-suite map: an assignment whose job id is missing
+          # from this workflow (or whose suite file does not exist) would be
+          # excluded here and run nowhere — fail loudly instead.
+          while read -r slow_job suite; do
+            [[ -z "$slow_job" || "$slow_job" == \#* ]] && continue
+            if [[ ! -f "$suite" ]]; then
+              echo "::error::slow suite '$suite' (job $slow_job) does not exist"
+              failed=1
+            fi
+            if ! grep -qE "^  ${slow_job}:" .github/workflows/ci.yaml; then
+              echo "::error::slow suite '$suite' assigned to job '$slow_job' which is not defined in ci.yaml — it would never run"
+              failed=1
+            fi
+          done < tests/slow-bash-suites.txt
           for t in tests/test_*.sh; do
-            if grep -Fxq "$t" tests/slow-bash-suites-*.txt; then
+            if grep -Fxq "$t" <(awk '$1 !~ /^#/ {print $2}' tests/slow-bash-suites.txt); then
               continue
             fi
             echo "::group::$t"
