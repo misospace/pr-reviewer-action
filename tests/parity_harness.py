@@ -420,8 +420,8 @@ def secret_raw_values(fixture: dict[str, Any]) -> list[str]:
     return [str(raw[v2_id]) for v2_id in surface.secret_v2_ids if v2_id in raw]
 
 
-def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[str, str] | None = None) -> SideResult:
-    proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(ROOT), env=env)
+def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[str, str] | None = None, stdin_text: str | None = None) -> SideResult:
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(ROOT), env=env, input=stdin_text)
     if proc.returncode != 0:
         raise RuntimeError(f"runner failed ({proc.returncode}): {proc.stderr.strip()[-400:]}")
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -967,10 +967,14 @@ REPO_MAP_BOUNDARY = Boundary(
 
 
 def run_v2_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    # Fixture via stdin: these runners' fixtures carry credential-shaped
+    # inert dummies, and the v2 secret-detector treats a read of such a file
+    # as a clear-text-logging source (see the runner docstrings).
     return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_pr_thread.py"), str(_fixture_path(fixture))],
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_pr_thread.py")],
         workdir,
         timeout=120,
+        stdin_text=json.dumps(fixture),
     )
 
 
@@ -1002,9 +1006,10 @@ PR_THREAD_BOUNDARY = Boundary(
 def run_v2_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
     repo = prepare_repo(workdir / "repo-v2", fixture)
     return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_related_code.py"), str(_fixture_path(fixture)), str(repo)],
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_related_code.py"), str(repo)],
         workdir,
         timeout=120,
+        stdin_text=json.dumps(fixture),
     )
 
 

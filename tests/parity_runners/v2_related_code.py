@@ -22,8 +22,13 @@ from pr_reviewer.related_context import (  # noqa: E402
 
 
 def main() -> int:
-    fixture = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    workspace = sys.argv[2]
+    # The fixture arrives on stdin: its repo file contents contain
+    # credential-shaped inert dummies (the snippet-redaction tests need
+    # them), and reading such a file makes the printed artifact a CodeQL
+    # clear-text-logging taint flow. Piping the bytes keeps the
+    # secret-bearing file unread by this process.
+    fixture = json.loads(sys.stdin.read())
+    workspace = sys.argv[1]
     anchor_data = fixture.get("anchors")
     file_data = fixture.get("files") or []
     git_timeout = fixture.get("git_timeout", 10)

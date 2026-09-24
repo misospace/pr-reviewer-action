@@ -18,7 +18,12 @@ from pr_reviewer.pr_thread import render_pr_thread  # noqa: E402
 
 
 def main() -> int:
-    fixture = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    # The fixture arrives on stdin: its hostile-comment bodies contain
+    # credential-shaped inert dummies (the redaction tests need them), and
+    # reading such a file makes the printed render a CodeQL
+    # clear-text-logging taint flow. Piping the bytes keeps the
+    # secret-bearing file unread by this process.
+    fixture = json.loads(sys.stdin.read())
     kwargs = {}
     if "marker" in fixture:
         kwargs["marker"] = fixture["marker"]
