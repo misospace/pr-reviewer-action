@@ -142,6 +142,14 @@ export async function runConcurrentGates(
   const ambient = options.ambientEnv ?? process.env;
   const log = options.onLog ?? (() => {});
 
+  // Disabled-gates no-op fast path (v2 parity): no branches, no delay, and
+  // no pgrep preflight — a runner without procps must still be able to run
+  // with ci_status_check=false and deep_review=false, exactly like v2 where
+  // the disabled forks never reached require_gate_tree_cleanup.
+  if (options.ci === undefined && options.specialists === undefined) {
+    return { ci: notLaunched("ci"), specialists: notLaunched("specialists") };
+  }
+
   // Fail-closed preflight (the typed require_gate_tree_cleanup): refuse to
   // enter background concurrency when descendant cleanup cannot be guaranteed.
   try {

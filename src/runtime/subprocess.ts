@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { assertPosixProcessTree } from "./platform.js";
-import { terminateProcessTree, type TerminationReport } from "./process-tree.js";
+import { pgrepAvailable, terminateProcessTree, type TerminationReport } from "./process-tree.js";
 
 /**
  * Bounded, typed subprocess ownership (#679). Replaces the Bash background
@@ -21,9 +21,13 @@ import { terminateProcessTree, type TerminationReport } from "./process-tree.js"
  * - the result is a structured `{status, exitCode, signal, stdout, stderr,
  *   durationMs, termination}` — never a thrown error for workload failures.
  *
- * Fail-closed refusals (non-POSIX platform, pre-aborted signal) resolve to a
- * `spawn_error` result without launching anything; there is no degraded
- * leader-only mode.
+ * Fail-closed refusals (non-POSIX platform, missing pgrep, pre-aborted
+ * signal) resolve to a `spawn_error` result without launching anything;
+ * there is no degraded leader-only mode. The pgrep preflight lives here —
+ * the shared boundary every tree-owning child goes through — so callers
+ * without their own gate preflight (evidence providers) still cannot launch
+ * a workload whose timeout cleanup could silently degrade to group-only
+ * termination.
  */
 
 export type ProcessStatus = "exited" | "signalled" | "timeout" | "cancelled" | "spawn_error";
@@ -97,7 +101,6 @@ const stdoutCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
 const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
 
   let child: ChildProcess | null = null;
-  let pid: number | null = null;
   let settled = false;
   let terminateReason: "timeout" | "cancelled" | null = null;
   let terminationReport: TerminationReport | null = null;
@@ -175,7 +178,7 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
     }
     terminateReason = reason;
     aborting = (async () => {
-      if (child !== null && pid !== null) {
+      if (child !== null && state.pid !== null) {
         terminationReport = await terminateProcessTree(child, { graceMs });
         // A PGID escapee holding an inherited stdio pipe can keep `close`
         // from firing; never let the result hang on a stray descriptor.
@@ -184,6 +187,8 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
         child.stderr?.destroy();
         settleTerminate();
       }
+      // child === null: the cancel landed inside the preflight window; the
+      // launch's post-probe check settles the structured spawn_error.
     })();
     await aborting;
   };
@@ -201,70 +206,106 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
     return refusedHandle(refusal, spawnErrorResult(refusal));
   }
 
-  child = spawn(options.file, options.args ?? [], {
-    detached: true,
-    cwd: options.cwd,
-    env: options.env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  pid = child.pid ?? null;
+  const state: { pid: number | null; launchRefusal: string | null } = {
+    pid: null,
+    launchRefusal: null,
+  };
 
-  child.stdout?.on("data", (chunk: Buffer) => {
-    collectChunk(stdoutCapture, chunk);
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    collectChunk(stderrCapture, chunk);
-  });
-
-  child.on("error", (error: Error) => {
-    settle(() => spawnErrorResult(`${options.file}: ${error.message}`));
-  });
-
-  child.on("close", (code, signalTerm) => {
-    if (terminateReason !== null) {
-      // A termination is in flight; the structured result must carry its
-      // report, so settle only once the tree cleanup has completed.
-      void (async () => {
-        await (aborting ?? Promise.resolve());
-        settleTerminate();
-      })();
+  // The launch is async because the pgrep preflight is: every tree-owning
+  // child refuses to start when descendant cleanup cannot be guaranteed.
+  // This is the shared boundary — the evidence-provider path reaches
+  // runProcess directly (no gate preflight ahead of it), so the invariant
+  // must live here, not at each call site.
+  const launch = async (): Promise<void> => {
+    if (!(await pgrepAvailable())) {
+      const refusal =
+        "pgrep is required to guarantee descendant cleanup for tree-owning children; install procps (pgrep) on the runner";
+      state.launchRefusal = refusal;
+      settle(() => spawnErrorResult(`${options.file}: ${refusal}`));
       return;
     }
-    settle(() => ({
-      status: signalTerm !== null ? "signalled" : "exited",
-      exitCode: signalTerm !== null ? null : code ?? null,
-      signal: signalTerm,
-      stdout: Buffer.concat(stdoutCapture.chunks),
-      stderr: Buffer.concat(stderrCapture.chunks),
-      stdoutTruncated: stdoutCapture.truncated,
-      stderrTruncated: stderrCapture.truncated,
-      durationMs: Date.now() - startedAt,
-      termination: null,
-    }));
-  });
+    // A cancel that arrived while the probe ran must never spawn the
+    // workload: check-then-spawn is one synchronous block.
+    if (terminateReason !== null) {
+      const refusal = `${options.file}: cancelled before launch (${terminateReason})`;
+      state.launchRefusal = refusal;
+      settle(() => spawnErrorResult(refusal));
+      return;
+    }
 
-  // A normal leader exit can still leave an inherited stdio pipe open in a
-  // detached descendant; cut the streams after a short drain instead of
-  // hanging on `close`.
-  child.on("exit", () => {
-    if (settled || terminateReason !== null) return;
-    const drainTimer = setTimeout(() => {
-      child?.stdout?.destroy();
-      child?.stderr?.destroy();
-    }, EXIT_STREAM_DRAIN_MS);
-    drainTimer.unref?.();
-  });
+    child = spawn(options.file, options.args ?? [], {
+      detached: true,
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    state.pid = child.pid ?? null;
 
-  if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
-    timeoutTimer = setTimeout(() => {
-      void terminateTree("timeout");
-    }, options.timeoutMs);
-  }
+    child.stdout?.on("data", (chunk: Buffer) => {
+      collectChunk(stdoutCapture, chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      collectChunk(stderrCapture, chunk);
+    });
+
+    child.on("error", (error: Error) => {
+      settle(() => spawnErrorResult(`${options.file}: ${error.message}`));
+    });
+
+    child.on("close", (code, signalTerm) => {
+      if (terminateReason !== null) {
+        // A termination is in flight; the structured result must carry its
+        // report, so settle only once the tree cleanup has completed.
+        void (async () => {
+          await (aborting ?? Promise.resolve());
+          settleTerminate();
+        })();
+        return;
+      }
+      settle(() => ({
+        status: signalTerm !== null ? "signalled" : "exited",
+        exitCode: signalTerm !== null ? null : code ?? null,
+        signal: signalTerm,
+        stdout: Buffer.concat(stdoutCapture.chunks),
+        stderr: Buffer.concat(stderrCapture.chunks),
+        stdoutTruncated: stdoutCapture.truncated,
+        stderrTruncated: stderrCapture.truncated,
+        durationMs: Date.now() - startedAt,
+        termination: null,
+      }));
+    });
+
+    // A normal leader exit can still leave an inherited stdio pipe open in a
+    // detached descendant; cut the streams after a short drain instead of
+    // hanging on `close`.
+    child.on("exit", () => {
+      if (settled || terminateReason !== null) return;
+      const drainTimer = setTimeout(() => {
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+      }, EXIT_STREAM_DRAIN_MS);
+      drainTimer.unref?.();
+    });
+
+    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        void terminateTree("timeout");
+      }, options.timeoutMs);
+    }
+  };
+
+  void launch().catch((error: unknown) => {
+    settle(() => spawnErrorResult(`${options.file}: ${error instanceof Error ? error.message : String(error)}`));
+  });
 
   const handle: ProcessHandle = {
-    pid,
-    launchRefusal: null,
+    get pid(): number | null {
+      return state.pid;
+    },
+    get launchRefusal(): string | null {
+      return state.launchRefusal;
+    },
     result: resultPromise,
     abort: () => terminateTree("cancelled"),
   };

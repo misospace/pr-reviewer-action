@@ -62,11 +62,11 @@ test("timeout terminates the child AND its grandchild (spawn-then-hang fixture)"
     timeoutMs: 300,
     terminateGraceMs: 2000,
   });
-  assert.ok(handle.pid !== null);
   const result = await handle.result;
 
   assert.equal(result.status, "timeout");
   assert.equal(result.exitCode, null);
+  assert.ok(handle.pid !== null, "leader pid must be recorded once launched");
   assert.ok(result.durationMs >= 250 && result.durationMs < 10_000, `duration ${result.durationMs}`);
 
   await waitForFile(tree.pidFiles.child);
@@ -141,6 +141,13 @@ test("external cancellation (parent action cancelled) terminates both trees", as
     env: buildChildEnv(["PATH", "HOME"]),
     signal: scope.signal,
   });
+  // Wait for both workloads to actually be up, so this exercises the
+  // mid-flight cancellation path, not the pre-launch refusal.
+  while (first.pid === null || second.pid === null) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+  }
 
   scope.abort("job-cancelled");
   const [firstResult, secondResult] = await Promise.all([first.result, second.result]);
@@ -148,6 +155,58 @@ test("external cancellation (parent action cancelled) terminates both trees", as
   assert.equal(firstResult.status, "cancelled");
   assert.equal(secondResult.status, "cancelled");
   assert.equal(firstResult.exitCode, null);
+});
+
+test("cancel arriving inside the pgrep preflight window never spawns the workload", async () => {
+  // Child probe: a slow fake pgrep keeps the preflight probe in flight while
+  // the abort lands; the post-probe check must refuse to launch instead of
+  // racing the cancellation. (The probe resolves via the probe process's own
+  // PATH, so the fake pgrep only works from a child with a controlled PATH.)
+  const dir = workspace();
+  const fakePgrep = join(dir, "pgrep");
+  // Absolute /bin/sleep: the fake pgrep's own PATH is dir-only, so it cannot
+  // resolve `sleep` by name. /bin/sleep exists on macOS and Linux (usrmerge).
+  writeFileSync(fakePgrep, "#!/bin/sh\n/bin/sleep 1\nexit 0\n", { mode: 0o755 });
+  const scriptPath = join(dir, "probe.cjs");
+  const buildDir = join(process.cwd(), ".test-build", "src", "runtime");
+  writeFileSync(
+    scriptPath,
+    `
+    const path = require('path');
+    const { runProcess } = require(path.join(${JSON.stringify(buildDir)}, 'subprocess.js'));
+    const { createCancellationScope } = require(path.join(${JSON.stringify(buildDir)}, 'signals.js'));
+    const scope = createCancellationScope();
+    const handle = runProcess({
+      file: 'bash',
+      args: ['-c', 'sleep 60'],
+      env: { PATH: ${JSON.stringify(dir)} + ':/usr/bin:/bin' },
+      signal: scope.signal,
+    });
+    setTimeout(() => scope.abort('cancelled-midflight'), 100);
+    handle.result.then((r) => {
+      process.stdout.write(JSON.stringify({ status: r.status, launchError: r.launchError ?? null, pid: handle.pid }), () => process.exit(0));
+    });
+  `,
+  );
+  const handle = runProcess({
+    file: execPath,
+    args: [scriptPath],
+    // The probe child's own PATH must be dir-only so its pgrep probe hits
+    // the slow fake (the runtime's probe resolves via the probing process's
+    // PATH, not the workload env).
+    env: { PATH: dir, HOME: process.env.HOME ?? "" },
+    timeoutMs: 20_000,
+  });
+  const probeResult = await handle.result;
+  assert.equal(probeResult.status, "exited");
+  const probe = JSON.parse(probeResult.stdout.toString("utf8")) as {
+    status: string;
+    launchError: string | null;
+    pid: number | null;
+  };
+  assert.equal(probe.pid, null, "no workload may exist after a pre-launch cancel");
+  assert.equal(probe.status, "spawn_error");
+  assert.match(probe.launchError ?? "", /cancelled before launch/);
 });
 
 test("normal success preserves output bytes exactly (multibyte, no trailing newline)", async () => {
@@ -260,8 +319,8 @@ test("terminateProcessTree is a safe no-op on an already-dead child", async () =
     { pid: handle.pid } as Parameters<typeof terminateProcessTree>[0],
     { graceMs: 100 },
   );
-  assert.ok(result.exitCode === 0);
   assert.equal(report.survived.length, 0);
+  assert.ok(result.exitCode === 0);
 });
 
 test("pre-aborted signal refuses to launch (fail-closed, never half-owned)", async () => {
@@ -318,10 +377,10 @@ test("parent SIGTERM during concurrent work: bounded finalize + tree cleanup (en
     args: [scriptPath],
     env: buildChildEnv(["PATH", "HOME"]),
   });
-  assert.ok(child.pid !== null);
-  // Wait for the workload tree to be up, then simulate the runner cancelling
-  // the parent (SIGTERM).
+  // Wait for the workload tree to be up (also proves the child launched),
+  // then simulate the runner cancelling the parent (SIGTERM).
   await waitForFile(tree.pidFiles.grandchild);
+  assert.ok(child.pid !== null);
   process.kill(child.pid, "SIGTERM");
   const childResult = await child.result;
 

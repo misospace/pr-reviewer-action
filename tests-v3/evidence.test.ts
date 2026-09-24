@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execPath } from "node:process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   severityRank,
   type ProviderSpec,
 } from "../src/evidence/index.js";
+import { runProcess } from "../src/runtime/index.js";
 
 const ambientBase: NodeJS.ProcessEnv = {
   PATH: process.env.PATH ?? "",
@@ -221,6 +222,47 @@ test("per-provider timeout/max_output overrides parse from config shapes", async
     { ambientEnv: ambientBase, timeoutSec: 5, maxOutputBytes: 4096 },
   );
   assert.equal(entry.status, "ok");
+});
+
+test("provider launch fail-closes when pgrep is unavailable (no silent group-only cleanup)", async () => {
+  // Child probe with a PATH that has no pgrep: the evidence path reaches
+  // runProcess directly (no gate preflight ahead of it), so the shared
+  // boundary in runProcess must refuse the launch.
+  const dir = mkdtempSync(join(tmpdir(), "v3-ev-nopgrep-"));
+  mkdirSync(dir, { recursive: true });
+  const scriptPath = join(dir, "probe.cjs");
+  const buildDir = join(process.cwd(), ".test-build", "src", "evidence");
+  writeFileSync(
+    scriptPath,
+    `
+    const path = require('path');
+    const { runEvidenceProvider } = require(path.join(${JSON.stringify(buildDir)}, 'providers.js'));
+    runEvidenceProvider(
+      { id: 'probe', command: ['printf', 'should-never-run'] },
+      { ambientEnv: { PATH: ${JSON.stringify(dir)}, HOME: '' } },
+    ).then((entry) => {
+      process.stdout.write(JSON.stringify(entry), () => process.exit(0));
+    });
+  `,
+  );
+  const handle = runProcess({
+    file: execPath,
+    args: [scriptPath],
+    env: { PATH: dir, HOME: ambientBase.HOME ?? "" },
+    timeoutMs: 20_000,
+  });
+  const probeResult = await handle.result;
+  assert.equal(probeResult.status, "exited");
+  const entry = JSON.parse(probeResult.stdout.toString("utf8")) as {
+    status: string;
+    stderr: string;
+    stdout: string;
+    exit_code: number | null;
+  };
+  assert.equal(entry.status, "error", "launch must be refused, not degraded to group-only cleanup");
+  assert.match(entry.stderr, /pgrep is required/);
+  assert.equal(entry.stdout, "", "the provider workload must never run");
+  assert.equal(entry.exit_code, null);
 });
 
 function readPidFile(path: string): string | null {
