@@ -22,7 +22,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 from sanitize_review_markdown import sanitize_markdown  # noqa: E402
 
 
@@ -118,7 +118,7 @@ def finding_to_body(finding: dict) -> str:
     link_mode = os.environ.get("UPSTREAM_LINK_MODE", "inert")
     if link_mode not in ("inert", "togithub"):
         link_mode = "inert"
-    return sanitize_markdown(mask_secrets(body), link_mode=link_mode)
+    return sanitize_markdown(redact_text(body), link_mode=link_mode)
 
 
 def build_comments(findings, diff_text: str, max_comments: int = 20):

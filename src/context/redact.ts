@@ -1,5 +1,5 @@
 /** Shared secret-redaction for v3 context producers (#675): a verbatim
- * TypeScript port of `scripts/redact.py`'s `mask_secrets`. The pr-thread and
+ * TypeScript port of `scripts/redact.py`'s `redact_text`. The pr-thread and
  * related-code builders feed untrusted bodies and grep snippets through this
  * before anything reaches the corpus, exactly like their v2 counterparts.
  * The patterns, their application order, and the `[REDACTED]` marker are
@@ -29,7 +29,7 @@ const MASKERS: readonly RegExp[] = [
 
 /** Return *text* with credential-like values replaced by `[REDACTED]`.
  * Best-effort heuristic redaction, exactly like the Python original. */
-export function maskSecrets(text: string | null | undefined): string {
+export function redactText(text: string | null | undefined): string {
   if (!text) return "";
   let redacted = text;
   for (const pattern of MASKERS) {

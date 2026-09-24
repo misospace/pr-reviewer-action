@@ -17,12 +17,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# mask_secrets lives in scripts/redact.py; ensure scripts/ is importable.
+# redact_text lives in scripts/redact.py; ensure scripts/ is importable.
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_and_truncate, mask_secrets  # noqa: E402
+from redact import mask_and_truncate, redact_text  # noqa: E402
 
 # The gh_api allowlist + denied path segments live on the platform seam (single
 # source of truth); _resolve_workspace_path reuses GH_DENY_SUBSTRINGS to block
@@ -757,8 +757,8 @@ def run_command(command, workspace_root, request_timeout=30):
             timeout=request_timeout,
         )
         return {
-            "stdout": mask_secrets((result.stdout or "").strip()),
-            "stderr": mask_secrets((result.stderr or "").strip()),
+            "stdout": redact_text((result.stdout or "").strip()),
+            "stderr": redact_text((result.stderr or "").strip()),
             "exit_code": result.returncode,
             "command": command_name,
         }
@@ -771,8 +771,8 @@ def run_command(command, workspace_root, request_timeout=30):
             stderr = stderr.decode("utf-8", errors="replace")
         return {
             "error": f"Command timed out after {request_timeout}s",
-            "stdout": mask_secrets(stdout),
-            "stderr": mask_secrets(stderr),
+            "stdout": redact_text(stdout),
+            "stderr": redact_text(stderr),
             "command": command_name,
         }
 
@@ -805,7 +805,7 @@ def execute_tool_request(
             )
             if res.get("error"):
                 raise ValueError(res["error"])
-            text = mask_secrets(res.get("content", ""))
+            text = redact_text(res.get("content", ""))
             text, _ = mask_and_truncate(text, max_response_bytes)
             result_payload = {"content": text}
             if res.get("range"):
@@ -1025,7 +1025,7 @@ def execute_tool_request(
         tool_result["status"] = "ok"
     except Exception as exc:
         # Error messages from raised ValueError (from res["error"] checks
-        # above) are masked by mask_secrets() in write_outputs(), which
+        # above) are masked by redact_text() in write_outputs(), which
         # processes the markdown output. This is consistent with how
         # run_command error messages are redacted.
         tool_result["result"] = {"error": str(exc)}

@@ -16,7 +16,7 @@ shared identically by every tool_mode — see the allowlist-review note on #206)
 
 1. Read a secret file and surface it           → read_file SENSITIVE_PATH_RE
 2. Escape the workspace to read host files      → read_file workspace containment
-3. Leak a secret that lives in an allowed file  → mask_secrets on every output
+3. Leak a secret that lives in an allowed file  → redact_text on every output
 4. Exfiltrate data to an attacker host          → web_fetch host allowlist
    (incl. ``user@host`` URL-confusion)
 5. Smuggle a host into web_search               → query is URL-encoded into a

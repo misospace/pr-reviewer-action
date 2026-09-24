@@ -8,7 +8,7 @@
  * the #675 parity harness, so the rendering must stay in lockstep with the
  * Python original. */
 
-import { maskSecrets } from "./redact.js";
+import { redactText } from "./redact.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_COMMENTS_DEFAULT = 50;
@@ -142,7 +142,7 @@ function cleanBody(body: string): string {
   let cleaned = body.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   cleaned = cleaned.replace(MARKER_LINE_RE, "");
   cleaned = cleaned.replace(CONTROL_RE, "");
-  return maskSecrets(cleaned).trim();
+  return redactText(cleaned).trim();
 }
 
 function truncateBody(body: string): string {

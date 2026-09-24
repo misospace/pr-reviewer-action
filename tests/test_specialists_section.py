@@ -18,7 +18,7 @@ Covers the behaviour contract of
   carrying `````markdown``, a forged ``# heading``, and a raw bell char
   cannot forge a line-leading heading or leave an unbalanced fence;
 - secret redaction: a ``ghp_``-shaped token in a message is masked by the
-  shared :func:`redact.mask_secrets` helper (original substring absent);
+  shared :func:`redact.redact_text` helper (original substring absent);
 - a cap smaller than the framing paragraph drops the whole section;
 - determinism: identical input → byte-identical output, on every call.
 

@@ -13,13 +13,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-# mask_secrets lives in scripts/redact.py; ensure scripts/ is importable when
+# redact_text lives in scripts/redact.py; ensure scripts/ is importable when
 # this package module is loaded on its own.
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 
 def safe_run(args, timeout_sec):
@@ -107,7 +107,7 @@ def run_chat_request(base_url, api_format, payload, api_key, timeout_sec):
     if isinstance(completed, dict) and completed.get("timeout"):
         raise RuntimeError("planner model request timed out")
     if completed.returncode != 0:
-        stderr = mask_secrets((completed.stderr or "").strip())
+        stderr = redact_text((completed.stderr or "").strip())
         if len(stderr) > 500:
             stderr = stderr[:500] + "...[truncated]"
         raise RuntimeError(

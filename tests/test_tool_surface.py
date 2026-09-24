@@ -490,7 +490,7 @@ def test_git_grep_newline_named_sensitive_file_is_path_redacted(tmp_path):
     """A sensitive path ending in a newline must not lose its path boundary.
 
     The marker is deliberately not a credential/key-value shape, so this
-    proves the sensitive-path guard — not mask_secrets() — blocks the content.
+    proves the sensitive-path guard — not redact_text() — blocks the content.
     """
     marker = "unstructured-marker"
     repo = _grep_secret_repo(tmp_path, {".env\n": f"{marker}\n"})

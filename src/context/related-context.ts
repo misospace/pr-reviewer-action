@@ -11,7 +11,7 @@
  * cap) and Markdown renderers are byte-exact ports. */
 
 import { spawn } from "node:child_process";
-import { maskSecrets } from "./redact.js";
+import { redactText } from "./redact.js";
 import { pyJsonDump } from "./py-json.js";
 
 export const ARTIFACT_VERSION = 1;
@@ -45,7 +45,7 @@ function escapeControls(value: string): string {
 }
 
 function boundedText(value: unknown, limit: number = MAX_ERROR_CHARS): string {
-  let text = maskSecrets(String(value ?? "")).replace("\u0000", "\\u0000");
+  let text = redactText(String(value ?? "")).replace("\u0000", "\\u0000");
   text = escapeControls(text);
   if (text.length > limit) return text.slice(0, Math.max(0, limit - 3)) + "...";
   return text;
@@ -177,7 +177,7 @@ interface GrepRow {
 }
 
 function snippetOf(value: string): string {
-  let text = maskSecrets(value);
+  let text = redactText(value);
   text = escapeControls(text);
   if (text.length > MAX_SNIPPET_CHARS) return text.slice(0, MAX_SNIPPET_CHARS - 3) + "...";
   return text;
@@ -831,7 +831,7 @@ function renderLines(artifact: Record<string, unknown>): string[] {
             const refPath = codeSpan(display(toPath(reference.path ?? "")));
             let line = reference.line;
             if (typeof line !== "number" || !Number.isInteger(line) || line < 0) line = 0;
-            const snippet = codeSpan(display(maskSecrets(String(reference.snippet ?? ""))));
+            const snippet = codeSpan(display(redactText(String(reference.snippet ?? ""))));
             lines.push(`  - ${refPath}:${line} — ${snippet}`);
           }
         }

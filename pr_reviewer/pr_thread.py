@@ -70,7 +70,7 @@ def _header_field(value: Any) -> str:
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 
 def _parse_timestamp(value: str) -> tuple[int, str]:
@@ -152,7 +152,7 @@ def _clean_body(body: str) -> str:
     body = body.replace("\r\n", "\n").replace("\r", "\n")
     body = _MARKER_LINE_RE.sub("", body)
     body = _CONTROL_RE.sub("", body)
-    return mask_secrets(body).strip()
+    return redact_text(body).strip()
 
 
 def _truncate_body(body: str) -> str:

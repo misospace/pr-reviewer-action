@@ -117,7 +117,7 @@ from pr_reviewer.specialists import (  # noqa: E402
     render_specialist_leads_section,
 )
 from pr_reviewer.transport import run_chat_request  # noqa: E402
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 #: Total attempts per role (1 initial + 1 retry) on a transport failure.
 #: Timeouts and contract (parse) outcomes are never retried.
@@ -605,7 +605,7 @@ def _run_role(
         try:
             system = load_specialist_prompt(role)
         except (OSError, ValueError) as exc:
-            raise _RoleFailure("input", f"role prompt fragment unavailable: {mask_secrets(str(exc))}")
+            raise _RoleFailure("input", f"role prompt fragment unavailable: {redact_text(str(exc))}")
 
         payload = _build_payload(
             api_format=api_format,
@@ -642,7 +642,7 @@ def _run_role(
                     base_url, api_format, payload, api_key, attempt_timeout
                 )
             except Exception as exc:  # noqa: BLE001 - fail-soft by design
-                masked = str(mask_secrets(str(exc)))[:500]
+                masked = str(redact_text(str(exc)))[:500]
                 if "timed out" in masked.lower():
                     raise _RoleFailure("timeout", masked)
                 last_error = _RoleFailure("transport", masked)
@@ -661,7 +661,7 @@ def _run_role(
             if isinstance(response, dict) and response.get("error"):
                 raise _RoleFailure(
                     "transport",
-                    f"endpoint returned an error body: {mask_secrets(str(response['error']))[:500]}",
+                    f"endpoint returned an error body: {redact_text(str(response['error']))[:500]}",
                 )
 
             # Reaped stragglers never write artifacts past the deadline: the
@@ -812,7 +812,7 @@ def _run_scout(
     try:
         system = _build_scout_system()
     except (OSError, ValueError) as exc:
-        message = f"input: scout prompt unavailable: {mask_secrets(str(exc))}"
+        message = f"input: scout prompt unavailable: {redact_text(str(exc))}"
         return [
             _scout_failure_entry(workspace_root, role, message, started)
             for role in roles
@@ -860,7 +860,7 @@ def _run_scout(
                 base_url, api_format, payload, api_key, attempt_timeout
             )
         except Exception as exc:  # noqa: BLE001 - fail-soft by design
-            masked = str(mask_secrets(str(exc)))[:500]
+            masked = str(redact_text(str(exc)))[:500]
             if "timed out" in masked.lower():
                 last_error = f"timeout: {masked}"
                 break
@@ -877,7 +877,7 @@ def _run_scout(
         if isinstance(response, dict) and response.get("error"):
             last_error = (
                 "transport: endpoint returned an error body: "
-                f"{mask_secrets(str(response['error']))[:500]}"
+                f"{redact_text(str(response['error']))[:500]}"
             )
             break
 
@@ -980,7 +980,7 @@ def _read_corpus(corpus_path: str) -> tuple[Optional[str], Optional[str], int]:
     except FileNotFoundError:
         return None, f"corpus not found: {corpus_path}", 0
     except OSError as exc:
-        return None, f"corpus unreadable: {mask_secrets(str(exc))}", 0
+        return None, f"corpus unreadable: {redact_text(str(exc))}", 0
     if len(raw) > MAX_INPUT_BYTES:
         return None, f"corpus exceeds {MAX_INPUT_BYTES} byte input cap", 0
     if not raw.strip():
@@ -1188,7 +1188,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 except Exception as exc:  # noqa: BLE001 - last-resort guard
                     message = (
                         f"transport: specialist worker crashed: "
-                        f"{mask_secrets(str(exc))[:500]}"
+                        f"{redact_text(str(exc))[:500]}"
                     )
                     artifact = _empty_artifact(role)
                     artifact["errors"].append(message)

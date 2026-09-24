@@ -20,7 +20,7 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 # Transport + read-only executors were split into dedicated modules (#304).
 # Re-imported here so call sites and tests that reference these names via
@@ -797,7 +797,7 @@ def verdict_harness_findings_body(outcome):
             args = args[:300] + "…"
         lines.append(f"{index}. `{executed.tool}` ({status}) — {args}")
     lines.append("")
-    return mask_secrets("\n".join(lines))
+    return redact_text("\n".join(lines))
 
 
 def replace_harness_findings_section(corpus, body):
@@ -965,9 +965,9 @@ def write_outputs(summary, markdown):
     tier = os.getenv("TOOL_HARNESS_TIER", "primary")
     stem = "tool-harness.smart" if tier == "smart" else "tool-harness"
     _write_private_artifact(
-        f"{stem}.json", mask_secrets(json.dumps(summary, indent=2, ensure_ascii=False)) + "\n"
+        f"{stem}.json", redact_text(json.dumps(summary, indent=2, ensure_ascii=False)) + "\n"
     )
-    _write_private_artifact(f"{stem}.md", mask_secrets(markdown))
+    _write_private_artifact(f"{stem}.md", redact_text(markdown))
 
 
 NATIVE_LOOP_SYSTEM = (

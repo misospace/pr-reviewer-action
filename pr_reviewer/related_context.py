@@ -35,7 +35,7 @@ MAX_ERROR_CHARS = 300
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
@@ -54,7 +54,7 @@ _MANIFEST_BASE_RE = re.compile(
 
 
 def _bounded_text(value: Any, limit: int = MAX_ERROR_CHARS) -> str:
-    text = mask_secrets(str(value or "")).replace("\x00", "\\u0000")
+    text = redact_text(str(value or "")).replace("\x00", "\\u0000")
     text = _escape_controls(text)
     if len(text) > limit:
         return text[: max(0, limit - 3)] + "..."
@@ -182,7 +182,7 @@ def _parse_grep_output(stdout: str) -> list[dict[str, Any]]:
 
 
 def _snippet(value: str) -> str:
-    text = mask_secrets(value)
+    text = redact_text(value)
     text = _escape_controls(text)
     if len(text) > MAX_SNIPPET_CHARS:
         return text[: MAX_SNIPPET_CHARS - 3] + "..."
@@ -692,7 +692,7 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
                         if not isinstance(line, int) or line < 0:
                             line = 0
                         snippet = _code_span(
-                            _display(mask_secrets(str(reference.get("snippet", ""))))
+                            _display(redact_text(str(reference.get("snippet", ""))))
                         )
                         lines.append(f"  - {ref_path}:{line} — {snippet}")
         else:

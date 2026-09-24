@@ -43,7 +43,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 # Top-level import is safe: platform.py imports forgejo_backend only lazily
 # (inside _gh_api_forgejo), so there is no import cycle in this direction.
@@ -390,7 +390,7 @@ def _report_http_error(operation: str, status_code: int, body_text: str) -> None
     data = _json_decode(body_text)
     message = data.get("message") if isinstance(data, dict) else None
     if isinstance(message, str):
-        message = mask_secrets(re.sub(r"[\x00-\x1f\x7f]", " ", message).strip())[:300]
+        message = redact_text(re.sub(r"[\x00-\x1f\x7f]", " ", message).strip())[:300]
     detail = f": {message}" if message else ""
     print(f"Forgejo {operation} failed (HTTP {status_code}){detail}", file=sys.stderr)
 

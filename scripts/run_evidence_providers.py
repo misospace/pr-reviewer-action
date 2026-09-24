@@ -28,7 +28,7 @@ from pr_reviewer.sarif import (
     MAX_INPUT_BYTES as SARIF_MAX_INPUT_BYTES,
     normalize_sarif,
 )  # noqa: E402
-from redact import mask_and_truncate, mask_secrets  # noqa: E402
+from redact import mask_and_truncate, redact_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +236,7 @@ def run_provider(
 
     # Also redact the stored stdout before JSON-parse attempt so that
     # any secrets leaking into the parsed output are already gone.
-    entry["stdout"] = mask_secrets(entry["stdout"])
+    entry["stdout"] = redact_text(entry["stdout"])
 
     parsed = None
     if entry["stdout"].strip():
@@ -310,7 +310,7 @@ def _sarif_provider(
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
-        "source": mask_secrets(path_text),
+        "source": redact_text(path_text),
         "output_format": "sarif-2.1.0",
     }
     path = _workspace_path(path_text, workspace_root)
@@ -320,7 +320,7 @@ def _sarif_provider(
         return entry
     if not path.is_file():
         entry["provider_severity"] = "major"
-        entry["stderr"] = mask_secrets(f"SARIF file not found or not a regular file: {path_text}")
+        entry["stderr"] = redact_text(f"SARIF file not found or not a regular file: {path_text}")
         return entry
 
     # Bounded read (#574 contract): never load more than the byte limit into
@@ -334,27 +334,27 @@ def _sarif_provider(
         payload = json.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         entry["provider_severity"] = "major"
-        entry["stderr"] = mask_secrets(f"Unable to parse SARIF file {path_text}: {exc}")
+        entry["stderr"] = redact_text(f"Unable to parse SARIF file {path_text}: {exc}")
         return entry
 
     normalized = normalize_sarif(payload, max_findings=max_findings)
     entry["findings"] = [
         {
             "severity": item["severity"],
-            "message": mask_secrets(_sarif_finding_message(item)),
-            "source": mask_secrets(_sarif_finding_source(item, path_text)),
-            "tool_name": mask_secrets(item["tool_name"]),
-            "tool_version": mask_secrets(item["tool_version"]),
-            "rule_id": mask_secrets(item["rule_id"]),
-            "title": mask_secrets(item["title"]),
-            "file": mask_secrets(item["file"]),
+            "message": redact_text(_sarif_finding_message(item)),
+            "source": redact_text(_sarif_finding_source(item, path_text)),
+            "tool_name": redact_text(item["tool_name"]),
+            "tool_version": redact_text(item["tool_version"]),
+            "rule_id": redact_text(item["rule_id"]),
+            "title": redact_text(item["title"]),
+            "file": redact_text(item["file"]),
             "line": item["line"],
-            "help_uri": mask_secrets(item["help_uri"]),
+            "help_uri": redact_text(item["help_uri"]),
         }
         for item in normalized["findings"]
     ]
     if normalized["errors"]:
-        entry["stderr"] = mask_secrets("; ".join(normalized["errors"]))
+        entry["stderr"] = redact_text("; ".join(normalized["errors"]))
     if normalized.get("truncated"):
         # Covers both a per-file finding cap and an exhausted collective cap
         # (max_findings=0), so an empty-looking entry is distinguishable
@@ -561,7 +561,7 @@ def main() -> int:
 
     # Join md_lines into the markdown string, then redact it.
     markdown = "\n".join(md_lines)
-    markdown = mask_secrets(markdown)
+    markdown = redact_text(markdown)
     write_outputs(summary, markdown)
     return 0
 

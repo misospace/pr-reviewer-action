@@ -499,7 +499,7 @@ class TestSarifEvidence:
 
     def test_sarif_secrets_redacted_in_json_and_markdown(self, tmp_path: Path):
         """Credential-shaped content in a SARIF finding must be redacted by
-        the shared mask_secrets() logic before it reaches evidence-providers.json
+        the shared redact_text() logic before it reaches evidence-providers.json
         — not only the final Markdown (#605 review)."""
         secret = "ghp_" + "a" * 36  # matches the GitHub-PAT redaction pattern
         report = tmp_path / "leaky.sarif"

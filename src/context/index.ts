@@ -89,5 +89,5 @@ export {
   type DigestChange,
   type DigestMeta,
 } from "./image-provenance.js";
-export { maskSecrets } from "./redact.js";
+export { redactText } from "./redact.js";
 export { pyJsonDump } from "./py-json.js";

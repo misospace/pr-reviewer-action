@@ -74,7 +74,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from redact import mask_secrets  # noqa: E402
+from redact import redact_text  # noqa: E402
 
 ARTIFACT_VERSION = 1
 
@@ -659,7 +659,7 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
     """Defensively redact and control-escape one lead for section rendering.
 
     Lead messages already pass through the ``normalize_specialist_output``
-    sanitization; this re-applies the shared :func:`mask_secrets`
+    sanitization; this re-applies the shared :func:`redact_text`
     secret-redaction (the same helper ``scripts/run_specialists.py`` runs on
     every role outcome) plus control-character escaping, so an un-normalized
     artifact cannot leak a raw secret or a raw control byte into the final
@@ -671,7 +671,7 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
     message = lead.get("message")
     if not isinstance(message, str) or not message.strip():
         return None
-    message = _escape_control_chars(mask_secrets(message))
+    message = _escape_control_chars(redact_text(message))
     if not message.strip():
         return None
     file_path = lead.get("file")
@@ -686,9 +686,9 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
     # the delimiter-length logic in _lead_line), so the existing hygiene is
     # preserved, not duplicated.
     if isinstance(file_path, str) and file_path:
-        file_path = mask_secrets(file_path)
+        file_path = redact_text(file_path)
     if isinstance(category, str):
-        category = mask_secrets(category)
+        category = redact_text(category)
     return {
         "severity": lead.get("severity") or "info",
         "category": category if isinstance(category, str) else "",

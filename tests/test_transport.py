@@ -20,8 +20,8 @@ from pr_reviewer import transport
 
 
 def test_module_exposes_expected_symbols() -> None:
-    """Module exposes safe_run, run_chat_request, and mask_secrets."""
-    for name in ("safe_run", "run_chat_request", "mask_secrets"):
+    """Module exposes safe_run, run_chat_request, and redact_text."""
+    for name in ("safe_run", "run_chat_request", "redact_text"):
         assert hasattr(transport, name), f"missing symbol: {name}"
 
 
@@ -133,33 +133,33 @@ def test_run_chat_request_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # ---------------------------------------------------------------------------
-# mask_secrets
+# redact_text
 # ---------------------------------------------------------------------------
 
 
-def test_mask_secrets_replaces_bearer_tokens() -> None:
-    """mask_secrets must replace bearer-style authorization headers."""
+def test_redact_text_replaces_bearer_tokens() -> None:
+    """redact_text must replace bearer-style authorization headers."""
     text = "Authorization: Bearer abcdef-token-xyz-1234567890"
-    out = transport.mask_secrets(text)
+    out = transport.redact_text(text)
     assert "[REDACTED]" in out
     assert "abcdef-token-xyz-1234567890" not in out
 
 
-def test_mask_secrets_handles_empty_text() -> None:
-    """mask_secrets must be a no-op for empty/None text."""
-    assert transport.mask_secrets("") == ""
-    assert transport.mask_secrets(None) == ""
+def test_redact_text_handles_empty_text() -> None:
+    """redact_text must be a no-op for empty/None text."""
+    assert transport.redact_text("") == ""
+    assert transport.redact_text(None) == ""
 
 
-def test_mask_secrets_handles_plain_text() -> None:
+def test_redact_text_handles_plain_text() -> None:
     """Plain text with no credential-like patterns should pass through."""
     text = "hello world, this is a normal log line"
-    assert transport.mask_secrets(text) == text
+    assert transport.redact_text(text) == text
 
 
-def test_mask_secrets_replaces_github_pat() -> None:
+def test_redact_text_replaces_github_pat() -> None:
     """GitHub personal access tokens (ghp_/ghs_) should be redacted."""
     text = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890"
-    out = transport.mask_secrets(text)
+    out = transport.redact_text(text)
     assert "[REDACTED]" in out
     assert "ghp_abcdefghijklmnopqrstuvwxyz1234567890" not in out
