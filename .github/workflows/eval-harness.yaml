@@ -119,7 +119,12 @@ jobs:
           if-no-files-found: warn
 
       - name: Summarize weekly run
-        if: github.event_name == 'schedule'
+        # '!cancelled()' (not always()) so the summary still writes its step
+        # summary and #472 tracking comment — then fails via the
+        # completed_runs guard below — when the harness step exited nonzero
+        # on an all-errored sweep (issue #711). Cancelled runs skip it, and
+        # the schedule gate keeps manual dispatch runs summary-free.
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: eval-report/eval-report.json
