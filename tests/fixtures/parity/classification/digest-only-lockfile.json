@@ -1,0 +1,10 @@
+{
+  "fixture": "digest-only-lockfile",
+  "description": "Renovate digest-only lockfile PR: renovate_digest_only kind and the digest-only zero-selection gate.",
+  "pr_files": [
+    { "filename": "package-lock.json", "status": "modified" },
+    { "filename": "yarn.lock", "status": "modified" }
+  ],
+  "diff": "diff --git a/package-lock.json b/package-lock.json\n@@ -1 +1 @@\n- \"resolved\": \"https://registry.example/lodash/-/lodash-4.17.20.tgz#68f3a9a1c9bd0f1a2b3c4d5e6f708192a3b4c5d6\"\n+ \"resolved\": \"https://registry.example/lodash/-/lodash-4.17.21.tgz#9b384dce5f417d5a5a5a5a5a5a5a5a5a5a5a5a5a\"\n",
+  "linked_issues": []
+}

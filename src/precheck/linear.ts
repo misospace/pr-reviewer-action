@@ -1,8 +1,15 @@
 import { requestJson } from "../platform/http.js";
 import type { FetchLike } from "../platform/http.js";
+import { LINEAR_PRIORITY_LABELS, type LinkedIssue } from "../context/types.js";
 
 /** Optional deterministic Linear adapter (#674) — TS port of the subset of
- * `pr_reviewer/linear_context.py` the selection signature reads. */
+ * `pr_reviewer/linear_context.py` the selection signature reads.
+ *
+ * The adapter's output IS the canonical `LinkedIssue` (#675): there is no
+ * parallel Linear-only issue shape. The selection-signature path and any
+ * other consumer derive from the same canonical representation, with the
+ * persisted/parity byte forms reached through explicit converters (see
+ * `selection.ts`). */
 
 export const LINEAR_API_URL = "https://api.linear.app/graphql";
 export const MAX_LINEAR_ISSUES = 8;
@@ -10,13 +17,7 @@ const MAX_DESCRIPTION_CHARS = 12_000;
 
 const PREFIX_RE = /^[A-Za-z][A-Za-z0-9]{0,15}$/;
 
-export const LINEAR_PRIORITY_LABELS: Readonly<Record<number, string>> = {
-  0: "No priority",
-  1: "Urgent",
-  2: "High",
-  3: "Medium",
-  4: "Low",
-};
+export { LINEAR_PRIORITY_LABELS };
 
 const ISSUE_QUERY = `query PrReviewerIssue($id: String!) {
   issue(id: $id) {
@@ -62,29 +63,23 @@ export function extractIssueIdentifiers(title: string, prefixes: string[], maxIs
   return identifiers;
 }
 
-export interface LinearIssue {
-  source: "linear";
-  ref: string;
-  identifier: string;
-  title: string;
-  body: string;
-  url: string;
-  state: string;
-  priority: number | null;
-  priority_label: string;
-  labels: { name: string }[];
-}
-
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-/** Fetch one Linear issue by human-readable identifier. */
+function refNumber(ref: string): number {
+  const match = /#(\d+)$/.exec(ref);
+  const parsed = match === null ? Number.NaN : Number.parseInt(match[1] ?? "", 10);
+  return Number.isInteger(parsed) ? parsed : 0;
+}
+
+/** Fetch one Linear issue by human-readable identifier. Returns the issue in
+ * the canonical `LinkedIssue` representation. */
 export async function fetchIssue(
   identifier: string,
   apiKey: string,
   options: { apiUrl?: string | undefined; timeout?: number | undefined; fetchImpl?: FetchLike | undefined } = {},
-): Promise<LinearIssue> {
+): Promise<LinkedIssue> {
   const apiUrl = options.apiUrl ?? LINEAR_API_URL;
   const timeout = options.timeout ?? 20;
   const body = JSON.stringify({ query: ISSUE_QUERY, variables: { id: identifier } });
@@ -110,7 +105,7 @@ export async function fetchIssue(
   return normalizeLinearIssue(payload, identifier);
 }
 
-function normalizeLinearIssue(payload: unknown, identifier: string): LinearIssue {
+function normalizeLinearIssue(payload: unknown, identifier: string): LinkedIssue {
   const outer = asObject(payload);
   if (Array.isArray(outer.errors) && outer.errors.length > 0) {
     const messages = outer.errors
@@ -124,6 +119,7 @@ function normalizeLinearIssue(payload: unknown, identifier: string): LinearIssue
   }
   const resolvedIdentifier = String(issue.identifier || identifier).toUpperCase();
   const rawPriority = issue.priority;
+  // Python: `type(raw_priority) is int and raw_priority in _LINEAR_PRIORITY_LABELS`.
   const priority = typeof rawPriority === "number" && Number.isInteger(rawPriority) && rawPriority in LINEAR_PRIORITY_LABELS
     ? rawPriority
     : null;
@@ -131,13 +127,14 @@ function normalizeLinearIssue(payload: unknown, identifier: string): LinearIssue
   return {
     source: "linear",
     ref: resolvedIdentifier,
-    identifier: resolvedIdentifier,
+    repo: "",
+    number: refNumber(resolvedIdentifier),
     title: String(issue.title ?? ""),
     body: String(issue.description ?? "").slice(0, MAX_DESCRIPTION_CHARS),
     url: String(issue.url ?? ""),
     state: String(asObject(issue.state).name ?? ""),
     priority,
-    priority_label: priority !== null ? LINEAR_PRIORITY_LABELS[priority] ?? "" : "",
+    priorityLabel: priority !== null ? LINEAR_PRIORITY_LABELS[priority] ?? "" : "",
     labels: labelNodes
       .filter((label) => typeof label === "object" && label !== null && (label as Record<string, unknown>).name)
       .map((label) => ({ name: String((label as Record<string, unknown>).name) })),
@@ -145,7 +142,7 @@ function normalizeLinearIssue(payload: unknown, identifier: string): LinearIssue
 }
 
 export interface CollectResult {
-  issues: LinearIssue[];
+  issues: LinkedIssue[];
   errors: [string, string][];
 }
 
@@ -156,7 +153,7 @@ export async function collectFromPr(
   apiKey: string,
   options: { apiUrl?: string | undefined; timeout?: number | undefined; fetchImpl?: FetchLike | undefined } = {},
 ): Promise<CollectResult> {
-  const issues: LinearIssue[] = [];
+  const issues: LinkedIssue[] = [];
   const errors: [string, string][] = [];
   for (const identifier of extractIssueIdentifiers(title ?? "", prefixes)) {
     try {

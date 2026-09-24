@@ -1,0 +1,924 @@
+{
+  "metadata": {
+    "generated_at": "2026-09-24T13:06:56.236556+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "tools_off+deep"
+    ],
+    "total_prs": 5,
+    "corpus_source": "/Users/joryirving/git/pr-reviewer-action-review/evals/corpus-specialists.json"
+  },
+  "mode_summary": {
+    "native_loop": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off+deep": {
+      "runs": 5,
+      "successful_runs": 4,
+      "total_tokens_input": 70712,
+      "total_tokens_output": 25835,
+      "total_wall_clock_sec": 633.7376008760184,
+      "findings_count": 16,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 1,
+      "capability_runs": 1,
+      "capability_passes": 1,
+      "specialist_effectiveness_runs": 5,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 4,
+      "specialist_lead_passes": 0,
+      "deep_runs": 4,
+      "specialist_tokens_input": 56289,
+      "specialist_tokens_output": 56140,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 12,
+      "specialist_request_bytes": 233307,
+      "avg_tokens_input": 17678.0,
+      "avg_tokens_output": 6458.8,
+      "avg_wall_clock_sec": 158.434,
+      "capability_pass_rate": 1.0,
+      "specialist_effectiveness_pass_rate": 0.0,
+      "specialist_lead_pass_rate": 0.0,
+      "avg_specialist_tokens_input": 14072.2,
+      "avg_specialist_tokens_output": 14035.0,
+      "avg_specialist_tokens_cached": 0.0,
+      "avg_specialist_lead_overlap": 0.0,
+      "avg_specialist_requests": 3.0,
+      "avg_specialist_request_bytes": 58326.8
+    }
+  },
+  "per_pr_results": [
+    {
+      "pr_number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 547,
+        "commit_sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 15966,
+        "tokens_output": 2881,
+        "wall_clock_sec": 113.442,
+        "verdict": "approve",
+        "verdict_source": "model",
+        "findings_count": 2,
+        "findings": [
+          {
+            "severity": "info",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 79,
+            "message": "Uses threading.RLock() instead of the threading.Lock() specified by the issue, but this is correct: _get_jwt holds the lock across _fetch_authorized_integration_jwt which re-acquires it, so a plain Lock would deadlock. Documented inline."
+          },
+          {
+            "severity": "info",
+            "category": "style",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1823,
+            "message": "test_serial_cache_hit_no_fetch covers three scenarios (hit/miss/TTL-expiry) but is named after the first only; the docstring correctly enumerates all three and assertions are sound — naming is slightly misleading but not a defect."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 60.728,
+          "execution": "three_call",
+          "specialist_tokens_input": 13149,
+          "specialist_tokens_output": 9558,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 54471,
+          "total_leads": 0,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 15856,
+          "specialist_max_tokens": 16383,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 60.727,
+              "usage": {
+                "prompt_tokens": 4471,
+                "completion_tokens": 5317,
+                "cached_tokens": null,
+                "total_tokens": 9788
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 9.575,
+              "usage": {
+                "prompt_tokens": 4339,
+                "completion_tokens": 1075,
+                "cached_tokens": null,
+                "total_tokens": 5414
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 49.904,
+              "usage": {
+                "prompt_tokens": 4339,
+                "completion_tokens": 3166,
+                "cached_tokens": null,
+                "total_tokens": 7505
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": []
+          }
+        },
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "security_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            },
+            {
+              "id": "no_hallucinated_secret_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": true,
+              "detail": "0 matching finding(s); min=0, max=0"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    },
+    {
+      "pr_number": 551,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 551,
+        "commit_sha": "13f016d933823771606da74f5ec59c13d253a51e",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 17006,
+        "tokens_output": 8192,
+        "wall_clock_sec": 108.594,
+        "verdict": "approve",
+        "verdict_source": "model",
+        "findings_count": 4,
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "Concurrency tests rely on a hard-coded time.sleep(0.05) inside the mocked urlopen to widen the race window; on heavily loaded CI this may not deterministically reproduce the race."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test exercises _get_jwt() raising under concurrent access; the RLock's exception-propagation behavior across waiting threads is not verified."
+          },
+          {
+            "severity": "info",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "Concurrency tests use 10 threads; the motivating scenario (linked_sources prewarm ThreadPoolExecutor) may produce higher contention and is not covered."
+          },
+          {
+            "severity": "info",
+            "category": "other",
+            "file": null,
+            "line": null,
+            "message": "The visible diff shows forgejo_backend.py changes (PR #547 / JWT cache thread-safety) pulled in via merge from main; these are unrelated to the PR's stated purpose (#544 / needs_full_review propagation). The carry-forward changes that comprise the PR's actual content are not in the truncated diff section."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 67.083,
+          "execution": "three_call",
+          "specialist_tokens_input": 14136,
+          "specialist_tokens_output": 14656,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 58893,
+          "total_leads": 3,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 17188,
+          "specialist_max_tokens": 16383,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 46.658,
+              "usage": {
+                "prompt_tokens": 4800,
+                "completion_tokens": 6702,
+                "cached_tokens": null,
+                "total_tokens": 11502
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 4.995,
+              "usage": {
+                "prompt_tokens": 4668,
+                "completion_tokens": 834,
+                "cached_tokens": null,
+                "total_tokens": 5502
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 3,
+              "elapsed_sec": 67.082,
+              "usage": {
+                "prompt_tokens": 4668,
+                "completion_tokens": 7120,
+                "cached_tokens": null,
+                "total_tokens": 11788
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": [
+              {
+                "severity": "minor",
+                "category": "flaky-timing",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "The concurrency tests rely on a hard-coded `time.sleep(0.05)` in the mocked `urlopen` to widen the race window; on extremely slow or heavily loaded systems this may not be sufficient to deterministically reproduce the race, making the tests potentially flaky."
+              },
+              {
+                "severity": "minor",
+                "category": "missing-coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No test exercises the case where `_get_jwt()` raises an exception (e.g., token-exchange failure) under concurrent access; the lock's behavior on exception propagation to other waiting threads is not verified."
+              },
+              {
+                "severity": "info",
+                "category": "missing-coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "The concurrency tests use only 10 threads, but the motivating scenario (`linked_sources` prewarm ThreadPoolExecutor) may produce higher contention; a higher-thread-count variant is not covered."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "minor",
+            "category": "flaky-timing",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "The concurrency tests rely on a hard-coded `time.sleep(0.05)` in the mocked `urlopen` to widen the race window; on extremely slow or heavily loaded systems this may not be sufficient to deterministically reproduce the race, making the tests potentially flaky."
+          },
+          {
+            "severity": "minor",
+            "category": "missing-coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test exercises the case where `_get_jwt()` raises an exception (e.g., token-exchange failure) under concurrent access; the lock's behavior on exception propagation to other waiting threads is not verified."
+          },
+          {
+            "severity": "info",
+            "category": "missing-coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "The concurrency tests use only 10 threads, but the motivating scenario (`linked_sources` prewarm ThreadPoolExecutor) may produce higher contention; a higher-thread-count variant is not covered."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap in carry_forward and the final reviewer should verify it against the diff with a finding grounded in that file and adopt it.",
+          "checks": [
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "correctness_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    },
+    {
+      "pr_number": 612,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 612,
+        "commit_sha": "59e7cf7b3ebc9dd0b0bf66280e7f290849e8c7a8",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 109.078,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): Expected JSON object but got list (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704518ba05f8e5c3904a8069192bfbe\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully. The PR claims to add a bounded specialist advisory-contract",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization in the specialists module, and the final reviewer should adopt that as a coverage finding grounded in that file.",
+          "checks": [
+            {
+              "id": "tests_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got list (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704518ba05f8e5c3904a8069192bfbe\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully. The PR claims to add a bounded specialist advisory-contract"
+            },
+            {
+              "id": "tests_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got list (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704518ba05f8e5c3904a8069192bfbe\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully. The PR claims to add a bounded specialist advisory-contract"
+            },
+            {
+              "id": "expected_coverage_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got list (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704518ba05f8e5c3904a8069192bfbe\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully. The PR claims to add a bounded specialist advisory-contract"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    },
+    {
+      "pr_number": 622,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 622,
+        "commit_sha": "3119b975fd3a503170426e8bcf0730650f6ccb7c",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 19841,
+        "tokens_output": 7494,
+        "wall_clock_sec": 134.361,
+        "verdict": "request_changes",
+        "verdict_source": "model",
+        "findings_count": 3,
+        "findings": [
+          {
+            "severity": "blocker",
+            "category": "bug",
+            "file": null,
+            "line": null,
+            "message": "Corpus inconsistency: PR Files metadata declares a single added file `.github/workflows/codeql.yml` (64+/0-), but the supplied diff modifies `pr_reviewer/forgejo_backend.py` and `tests/test_forgejo_backend.py` instead — the audit-finding review cannot proceed without the actual codeql.yml diff."
+          },
+          {
+            "severity": "major",
+            "category": "docs",
+            "file": ".github/workflows/codeql.yml",
+            "line": null,
+            "message": "Several acceptance criteria from #621 (trigger events, explicit query-pack name, analyzed paths, checkout SHA, Python interpreter version, job-level permissions block) cannot be verified from the corpus and need direct diff inspection before the audit-finding check can be answered."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": null,
+            "message": "If the threading.RLock JWT-cache concurrency changes really belong to this PR, they are scope creep unrelated to #621 (the JWT-cache thread-safety work already landed as #547 per git history); the PR body itself justifies rejecting ride-alongs, so these would belong in a separate reviewed change."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 61.001,
+          "execution": "three_call",
+          "specialist_tokens_input": 15825,
+          "specialist_tokens_output": 15470,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 65313,
+          "total_leads": 0,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 19392,
+          "specialist_max_tokens": 16383,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 54.308,
+              "usage": {
+                "prompt_tokens": 5363,
+                "completion_tokens": 8810,
+                "cached_tokens": null,
+                "total_tokens": 14173
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 51.108,
+              "usage": {
+                "prompt_tokens": 5231,
+                "completion_tokens": 2231,
+                "cached_tokens": null,
+                "total_tokens": 7462
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 61.001,
+              "usage": {
+                "prompt_tokens": 5231,
+                "completion_tokens": 4429,
+                "cached_tokens": null,
+                "total_tokens": 9660
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": []
+          }
+        },
+        "capability": {
+          "description": "Grader-only evidence for the negative control; not a reviewer recipe. A simple CI workflow addition must keep the tool loop lean, with no more than four tool calls.",
+          "checks": [
+            {
+              "id": "limits_tool_calls",
+              "type": "max_tool_calls",
+              "passed": true
+            }
+          ],
+          "passed": true
+        },
+        "specialist_capability": {
+          "description": "Grader-only rationale for the negative control; not a reviewer recipe. Deep review must not invent findings on a simple CI workflow addition, and no specialist lead is expected on this change.",
+          "checks": [
+            {
+              "id": "no_final_findings",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "3 matching finding(s); min=0, max=0"
+            },
+            {
+              "id": "no_duplicated_findings",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "3 matching finding(s); min=0, max=0 (dedupe)"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": null
+        }
+      },
+      "capability_pass_rate": {
+        "tools_off+deep": 1.0
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    },
+    {
+      "pr_number": 597,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 597,
+        "commit_sha": "778beb7e43d1a9d9b5ba6d969da392a3e9530e5d",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 17899,
+        "tokens_output": 7268,
+        "wall_clock_sec": 277.34,
+        "verdict": "request_changes",
+        "verdict_source": "model",
+        "findings_count": 7,
+        "findings": [
+          {
+            "severity": "blocker",
+            "category": "other",
+            "file": "pr_reviewer/precheck.py",
+            "line": null,
+            "message": "Diff does not contain any hunks for pr_reviewer/precheck.py even though the PR title, body, and changedFiles list claim this is the primary file modified for the #581 fail-closed fix; the supplied diff instead shows unrelated forgejo_backend.py changes."
+          },
+          {
+            "severity": "blocker",
+            "category": "security",
+            "file": "requirements.txt",
+            "line": null,
+            "message": "PR body and issue #581 acceptance criteria require pinning PyGithub (or replacing the import); no requirements.txt diff is present in the corpus, so the dependency upgrade cannot be verified and the production ImportError branch cannot be confirmed closed."
+          },
+          {
+            "severity": "blocker",
+            "category": "docs",
+            "file": "tests/test_precheck.py",
+            "line": null,
+            "message": "PR claims tests pinning the fail-closed behavior of _resolve_maintainers; the diff instead adds TestJwtCacheConcurrency to tests/test_forgejo_backend.py, so the issue #581 acceptance criterion (\"A test pins the fail-closed behavior\") is not demonstrable from the supplied diff."
+          },
+          {
+            "severity": "major",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": null,
+            "message": "Diff/PR mismatch: PR is classified dependency_upgrade and titled as a precheck.py fail-closed fix, but the actual code change is a thread-safety refactor of the Forgejo JWT cache; the title/body/classification/linked-issue must be reconciled before merge."
+          },
+          {
+            "severity": "major",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency never exercises the urlopen-raises path; the suite asserts nothing about exception propagation or cache state when the underlying fetch fails, leaving the PR's own \"fail closed on errors\" theme untested for the JWT cache."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "_run_concurrent_get_jwt widens the race window with a hardcoded time.sleep(0.05); on a heavily loaded CI runner the window can collapse and the assertion can pass for the wrong reason."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "After the concurrent burst the tests assert only the returned tokens and urlopen.call_count, never verifying fb._JWT_CACHE / fb._JWT_CACHE_TIME were correctly populated by the single surviving fetch."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 153.007,
+          "execution": "three_call",
+          "specialist_tokens_input": 13179,
+          "specialist_tokens_output": 16456,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 54630,
+          "total_leads": 5,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 15896,
+          "specialist_max_tokens": 16383,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 1,
+              "elapsed_sec": 153.007,
+              "usage": {
+                "prompt_tokens": 4481,
+                "completion_tokens": 12982,
+                "cached_tokens": null,
+                "total_tokens": 17463
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 24.701,
+              "usage": {
+                "prompt_tokens": 4349,
+                "completion_tokens": 1420,
+                "cached_tokens": null,
+                "total_tokens": 5769
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 4,
+              "elapsed_sec": 16.606,
+              "usage": {
+                "prompt_tokens": 4349,
+                "completion_tokens": 2054,
+                "cached_tokens": null,
+                "total_tokens": 6403
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [
+              {
+                "severity": "info",
+                "category": "requirements-mismatch",
+                "file": "pr_reviewer/forgejo_backend.py",
+                "line": null,
+                "message": "PR title/body reference a precheck.py fail-closed permission-check fix (issue #581) and the metadata lists precheck.py/requirements.txt as changed files, but the diff only adds thread-safety (RLock) for the JWT cache in forgejo_backend.py and a TestJwtCacheConcurrency class; either the diff is truncated or the title/body/classification is mislabeled — flag for the main reviewer to confirm scope before merge."
+              }
+            ],
+            "security": [],
+            "tests": [
+              {
+                "severity": "major",
+                "category": "missing_failure_path",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "TestJwtCacheConcurrency never exercises the concurrent-fetch-error path: when urlopen raises, no assertion covers whether the exception propagates to all threads and whether _JWT_CACHE/_JWT_CACHE_TIME remain unset (the fail-closed behavior that the PR's stated theme — fail closed on errors — would actually require testing)."
+              },
+              {
+                "severity": "minor",
+                "category": "flaky_timing",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "_run_concurrent_get_jwt relies on a hard-coded time.sleep(0.05) inside the mocked urlopen to widen the race window; under a heavily loaded CI runner the 10-thread burst could still collapse the window and skip the gap the test exists to catch, making the assertion mock_urlopen.call_count == 1 timing-sensitive."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_cache_state_assertion",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "After the concurrent burst the tests only assert returned values and call_count; they never verify fb._JWT_CACHE and fb._JWT_CACHE_TIME are the value/timestamp from the single fetch, so a bug that returned the right token but left the cache stale/empty would go undetected."
+              },
+              {
+                "severity": "info",
+                "category": "diff_metadata_mismatch",
+                "file": null,
+                "line": null,
+                "message": "PR metadata names pr_reviewer/precheck.py and tests/test_precheck.py as the changed files and describes pinning PyGithub / empty-set fail-closed for issue #581, but the diff shown modifies pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py for JWT-cache concurrency (#538); the review corpus cannot be matched to test coverage for the described change."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "info",
+            "category": "requirements-mismatch",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": null,
+            "message": "PR title/body reference a precheck.py fail-closed permission-check fix (issue #581) and the metadata lists precheck.py/requirements.txt as changed files, but the diff only adds thread-safety (RLock) for the JWT cache in forgejo_backend.py and a TestJwtCacheConcurrency class; either the diff is truncated or the title/body/classification is mislabeled — flag for the main reviewer to confirm scope before merge."
+          },
+          {
+            "severity": "major",
+            "category": "missing_failure_path",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency never exercises the concurrent-fetch-error path: when urlopen raises, no assertion covers whether the exception propagates to all threads and whether _JWT_CACHE/_JWT_CACHE_TIME remain unset (the fail-closed behavior that the PR's stated theme — fail closed on errors — would actually require testing)."
+          },
+          {
+            "severity": "minor",
+            "category": "flaky_timing",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "_run_concurrent_get_jwt relies on a hard-coded time.sleep(0.05) inside the mocked urlopen to widen the race window; under a heavily loaded CI runner the 10-thread burst could still collapse the window and skip the gap the test exists to catch, making the assertion mock_urlopen.call_count == 1 timing-sensitive."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_cache_state_assertion",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "After the concurrent burst the tests only assert returned values and call_count; they never verify fb._JWT_CACHE and fb._JWT_CACHE_TIME are the value/timestamp from the single fetch, so a bug that returned the right token but left the cache stale/empty would go undetected."
+          },
+          {
+            "severity": "info",
+            "category": "diff_metadata_mismatch",
+            "file": null,
+            "line": null,
+            "message": "PR metadata names pr_reviewer/precheck.py and tests/test_precheck.py as the changed files and describes pinning PyGithub / empty-set fail-closed for issue #581, but the diff shown modifies pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py for JWT-cache concurrency (#538); the review corpus cannot be matched to test coverage for the described change."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap in the precheck, the two overlapping leads must collapse into one final finding grounded in that file, and the final reviewer should verify and adopt it.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "precheck_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            },
+            {
+              "id": "overlapping_leads_deduped",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": true,
+              "detail": "0 matching finding(s); min=0, max=1 (dedupe)"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    }
+  ]
+}

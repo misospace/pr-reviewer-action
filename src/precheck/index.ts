@@ -30,7 +30,6 @@ export {
   LinearContextError,
   LINEAR_API_URL,
   parsePrefixes,
-  type LinearIssue,
 } from "./linear.js";
 export { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "./metadata.js";
 export { buildSelectionSignature, type SelectionSignatureResult } from "./selection.js";

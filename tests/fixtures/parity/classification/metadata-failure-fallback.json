@@ -1,0 +1,15 @@
+{
+  "fixture": "metadata-failure-fallback",
+  "description": "Failed GitHub linked-issue and Linear lookups (#633 round 3): classification records linked-metadata uncertainty and the role selector fails conservatively to all three roles.",
+  "pr_files": [
+    { "filename": "README.md", "status": "modified" }
+  ],
+  "diff": "diff --git a/README.md b/README.md\n@@ -1 +1 @@\n-Old\n+New\n",
+  "linked_issues": [],
+  "metadata_status": {
+    "version": 1,
+    "github_fetch_failures": ["owner/repo#12"],
+    "linear_fetch_failures": ["TEAM-3"],
+    "linear_known_disabled": false
+  }
+}

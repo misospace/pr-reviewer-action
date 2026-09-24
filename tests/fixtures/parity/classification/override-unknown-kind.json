@@ -1,0 +1,12 @@
+{
+  "fixture": "override-unknown-kind",
+  "description": "The classifier's own failure placeholder (pr_kind=unknown) fed straight to the role selector: conservative all-roles fallback with classification_available=false.",
+  "pr_files": [],
+  "diff": "",
+  "linked_issues": [],
+  "role_selection_input": {
+    "pr_kind": "unknown",
+    "risk_flags": [],
+    "changed_files_summary": []
+  }
+}

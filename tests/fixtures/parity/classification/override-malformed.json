@@ -1,0 +1,8 @@
+{
+  "fixture": "override-malformed",
+  "description": "A malformed classification artifact (a bare string) fed to the role selector: conservative all-roles fallback with classification_available=false and empty recorded kind.",
+  "pr_files": [],
+  "diff": "",
+  "linked_issues": [],
+  "role_selection_input": "not-a-classification"
+}

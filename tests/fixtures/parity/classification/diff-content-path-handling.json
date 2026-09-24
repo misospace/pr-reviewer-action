@@ -1,0 +1,9 @@
+{
+  "fixture": "diff-content-path-handling",
+  "description": "Path-handling patterns matched in diff content only: the kind and risk flag fire, but route signals exclude the content-only match (#159) and the flag attribution carries an empty file list.",
+  "pr_files": [
+    { "filename": "src/app/store.py", "status": "modified" }
+  ],
+  "diff": "diff --git a/src/app/store.py b/src/app/store.py\n+++ b/src/app/store.py\n@@ -20,6 +20,8 @@\n+    target = os.path.join(base, request.args.get('p'))\n+    if not target.startswith(base):\n+        raise ValueError('traversal: ../ denied')\n",
+  "linked_issues": []
+}

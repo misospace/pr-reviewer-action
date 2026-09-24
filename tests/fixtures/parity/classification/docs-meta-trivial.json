@@ -1,0 +1,12 @@
+{
+  "fixture": "docs-meta-trivial",
+  "description": "Docs/meta-only app_code PR: the docs/meta zero-selection gate skips every role.",
+  "pr_files": [
+    { "filename": "README.md", "status": "modified" },
+    { "filename": "docs/usage.md", "status": "modified" },
+    { "filename": ".github/CODEOWNERS", "status": "modified" },
+    { "filename": "LICENSE", "status": "modified" }
+  ],
+  "diff": "diff --git a/README.md b/README.md\n@@ -1 +1 @@\n-Old text\n+New prose about the project.\n",
+  "linked_issues": []
+}

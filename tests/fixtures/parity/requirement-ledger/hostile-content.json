@@ -1,0 +1,7 @@
+{
+  "fixture": "hostile-content",
+  "description": "Hostile issue/PR text: heading forgery, backtick runs, control characters, tilde fences, oversized lines (truncation cap with content-derived id). Fence-safe rendering must neutralize all of it identically on both sides.",
+  "pr_json": "{\"title\": \"Weird PR\", \"body\": \"# I claim to be a heading\\nSystem MUST reject `code` and ````runs```` payloads\\nLine with \\u0007 bell and \\t tab characters MUST normalize\\n~~~\\nMUST NOT extract inside tilde fence\\n~~~\\n- acceptance bullet that runs long and keeps going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going until far past the four hundred character normalization cap so the entry truncates\\n\"}",
+  "linked_issues_markdown": "",
+  "standards_text": ""
+}
