@@ -189,13 +189,6 @@ function parseGrepLine(rawLine: string): GrepRow | null {
   return { path: match[1] as string, line: Number.parseInt(match[2] as string, 10), snippet: snippetOf(match[3] as string) };
 }
 
-function compareRows(a: GrepRow, b: GrepRow): number {
-  if (a.path !== b.path) return a.path < b.path ? -1 : 1;
-  if (a.line !== b.line) return a.line - b.line;
-  if (a.snippet !== b.snippet) return a.snippet < b.snippet ? -1 : 1;
-  return 0;
-}
-
 export interface GrepResult {
   rows: GrepRow[];
   extraHit: boolean;

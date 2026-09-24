@@ -201,11 +201,51 @@ const TEST_SEGMENTS = new Set(["tests", "test", "specs", "spec", "testing"]);
 const MIGRATION_SEGMENTS = new Set(["migrations", "migrate", "schema", "db", "sql", "alembic"]);
 const API_SEGMENTS = new Set(["api", "apis", "controllers", "controller", "routes", "router", "routers", "endpoints", "handlers"]);
 const AUTH_SEGMENTS = new Set(["auth", "security", "secrets", "crypto", "oauth"]);
-const AUTH_BASE_RE = /^(auth|security|secrets?|jwt|oauth|tokens?)([-_]\w+)*\.\w+$/;
+// The v2 pattern `^(auth|security|secrets?|jwt|oauth|tokens?)([-_]\w+)*\.\w+$`
+// has a nested quantifier that backtracks exponentially on hostile filenames
+// (js/redos), and Node 24 does not support the atomic groups that would fix
+// it in-regex. This check is the exact linear-time equivalent: the tail is
+// `\.\w+$` and neither side of a match can contain a ".", so the base must
+// start with one of the prefix candidates and the remainder must hold
+// exactly one dot with a `[-_]\w+`-chunk sequence before it — and chunk
+// boundaries can only sit before a "-", so a greedy left-to-right scan
+// succeeds iff any partition does.
+const AUTH_PREFIXES = ["auth", "security", "secret", "secrets", "jwt", "oauth", "token", "tokens"];
+const WORD_RUN_RE = /^\w+$/;
+const isWordChar = (ch: string): boolean => /[A-Za-z0-9_]/.test(ch);
+
+function authBaseMatches(base: string): boolean {
+  for (const prefix of AUTH_PREFIXES) {
+    if (!base.startsWith(prefix)) continue;
+    const rest = base.slice(prefix.length);
+    const dot = rest.indexOf(".");
+    if (dot < 0 || rest.indexOf(".", dot + 1) >= 0) continue;
+    if (!WORD_RUN_RE.test(rest.slice(dot + 1))) continue;
+    const pre = rest.slice(0, dot);
+    if (pre === "") return true;
+    let i = 0;
+    let decomposable = true;
+    while (i < pre.length) {
+      const ch = pre[i] as string;
+      if (ch !== "-" && ch !== "_") {
+        decomposable = false;
+        break;
+      }
+      let j = i + 1;
+      while (j < pre.length && isWordChar(pre[j] as string)) j += 1;
+      if (j === i + 1) {
+        decomposable = false;
+        break;
+      }
+      i = j;
+    }
+    if (decomposable) return true;
+  }
+  return false;
+}
 const DOC_EXTS = new Set(["md", "markdown", "txt", "rst"]);
 
 const baseOf = (path: string): string => (path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path);
-const parentOf = (path: string): string => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
 const segmentsOf = (path: string): string[] => path.split("/");
 
 function isManifest(path: string): boolean {
@@ -258,7 +298,7 @@ function isAuth(path: string): boolean {
   const parts = segmentsOf(path);
   if (parts.slice(0, -1).some((p) => AUTH_SEGMENTS.has(p.toLowerCase()))) return true;
   const base = (parts[parts.length - 1] as string).toLowerCase();
-  if (!AUTH_BASE_RE.test(base)) return false;
+  if (!authBaseMatches(base)) return false;
   // A bare document (SECURITY.md, security-policy.md) is a policy file, not
   // auth code — keep it out of the code-hint category. Code names (auth.py,
   // jwt.go, auth_utils.py) still match.

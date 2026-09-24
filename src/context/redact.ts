@@ -30,7 +30,7 @@ const MASKERS: readonly RegExp[] = [
 /** Return *text* with credential-like values replaced by `[REDACTED]`.
  * Best-effort heuristic redaction, exactly like the Python original. */
 export function maskSecrets(text: string | null | undefined): string {
-  if (!text) return text ?? "";
+  if (!text) return "";
   let redacted = text;
   for (const pattern of MASKERS) {
     redacted = redacted.replace(pattern, REDACTED);

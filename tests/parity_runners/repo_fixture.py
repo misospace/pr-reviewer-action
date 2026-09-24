@@ -31,8 +31,15 @@ def prepare_repo(root: Path, fixture: dict, *, init_git: bool | None = None) -> 
     if isinstance(files, list):
         for path in files:
             entries.setdefault(str(path), "")
+    root_resolved = root.resolve()
     for path, content in entries.items():
-        target = root / path
+        target = (root / path).resolve()
+        # Fixture paths are trusted test data, but stay defensive: an
+        # absolute path or '..' component must never escape the temporary
+        # worktree (deterministically skipped on both sides, so parity is
+        # unaffected).
+        if target != root_resolved and root_resolved not in target.parents:
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8", newline="")
     if init_git:

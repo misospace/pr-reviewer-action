@@ -152,7 +152,7 @@ test("the rendered document matches the v2 bullet structure", async () => {
         "org.opencontainers.image.source": "https://github.com/o/app",
       } } };
     }
-    if (url.includes("api.github.com")) {
+    if (url.startsWith("https://api.github.com/repos/")) {
       return { status: "ahead", ahead_by: 1, behind_by: 0, total_commits: 1, html_url: "https://compare", commits: [], files: [] };
     }
     return { token: "t" };

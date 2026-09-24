@@ -106,6 +106,60 @@ test("trust framing replaces only the header line and the overhead matches v2", 
   );
 });
 
+test("auth base matching is the exact linear equivalent of the v2 regex", () => {
+  // The v2 pattern `^(auth|security|secrets?|jwt|oauth|tokens?)([-_]\w+)*\.\w+$`
+  // backtracks exponentially; the v3 structural check must agree on every
+  // input. These expectations were derived from the v2 regex itself, including
+  // the shapes that blow up the nested quantifier.
+  const cases: Array<[string, boolean]> = [
+    ["auth.py", true],
+    ["auth-utils.js", true],
+    ["auth_utils.py", true],
+    ["jwt.go", true],
+    ["jwt_secret_v2.py", true],
+    ["oauth2_client.ts", false],
+    ["secrets.py", true],
+    ["secretx.py", false],
+    ["security.md", false],  // bare doc → policy file, not auth code
+    ["token.py", true],
+    ["tokens_util.py", true],
+    ["tokenx.py", false],
+    ["auth-.x.py", false],
+    ["auth-.py", false],
+    ["auth_.py", false],
+    ["auth.a.b", false],
+    ["auth.b", true],
+    ["auth.", false],
+    ["jwt__x.py", true],
+    ["jwt-0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0x.py", true],
+    ["auth_0_.a", true],
+    ["auth-_a.py", true],
+    ["autha.py", false],
+    ["secretxy.py", false],
+    ["oauth.json", true],
+    ["oauth-.json", false],
+    ["tokens.py", true],
+    ["token_.py", false],
+    ["security-policy.md", false],  // bare doc → policy file, not auth code
+    ["security_policy.py", true],
+    ["auth_x_.py", true],
+    ["auth_x_y_z.go", true],
+    ["auth--x.py", false],
+    ["auth-_.py", true],
+    ["authx_.py", false],
+    ["_auth.py", false],
+    ["xauth.py", false],
+  ];
+  for (const [base, expected] of cases) {
+    const map = buildRepoMap([base]);
+    assert.equal((map.categories.auth ?? []).includes(base), expected, `base ${base}`);
+  }
+  // A parent `auth/`-class segment categorizes regardless of the base name.
+  const bySegment = buildRepoMap(["security/not-auth-code.md", "auth/anything.txt"]);
+  assert.ok((bySegment.categories.auth ?? []).includes("security/not-auth-code.md"));
+  assert.ok((bySegment.categories.auth ?? []).includes("auth/anything.txt"));
+});
+
 test("artifact serializer emits the v2 snake_case schema in v2 key order", () => {
   const map = buildRepoMap(["src/a.py"]);
   const artifact = repoMapToArtifact(map);
