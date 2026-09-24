@@ -629,7 +629,7 @@ outputs:
     description: "Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')"
   - id: escalation-reason
     v2_id: escalation_reason
-    description: "reviewer_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise"
+    description: "primary_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise"
   - id: findings
     v2_id: findings
     description: "Normalized structured findings as a JSON array (empty array when the model produced none)"

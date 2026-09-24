@@ -263,6 +263,11 @@ run_smart_review() {
 maybe_escalate_review() {
   [[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0
   [[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0
+  # #721: only a review actually produced by the primary model may escalate.
+  # When the primary failed and the fallback produced this review, its output
+  # must never trigger a quality escalation — the fallback is an availability
+  # recovery, not a reviewer whose judgment we second-guess.
+  [[ "${PRIMARY_OK:-0}" -eq 1 ]] || return 0
   [[ -n "$SMART_MODEL_RESOLVED" ]] || return 0
   if [[ "$SMART_BASE_URL" == "$AI_BASE_URL" && "$SMART_MODEL" == "$AI_MODEL" ]]; then
     return 0  # nothing distinct to escalate to
@@ -306,8 +311,8 @@ print(json.dumps({'requested': requested, 'reason': reason, 'telemetry': telemet
     return 0
   fi
   reason="$(printf '%s' "$decision" | jq -r '.reason // empty' 2>/dev/null || true)"
-  ESCALATION_REASONS="reviewer_requested"
-  log "Escalating to smart model $SMART_MODEL (reviewer_requested${reason:+: $reason})"
+  ESCALATION_REASONS="primary_requested"
+  log "Escalating to smart model $SMART_MODEL (primary_requested${reason:+: $reason})"
 
   cp ai-output.json ai-output.primary.json
 

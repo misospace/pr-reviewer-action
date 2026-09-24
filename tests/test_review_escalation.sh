@@ -50,9 +50,10 @@ echo ""
 echo "=== Decision and publication contracts (#721) ==="
 check_contains "decision made by pr_reviewer.escalation reviewer_requested_escalation" "$SRC" "from pr_reviewer.escalation import reviewer_requested_escalation"
 check_contains "decision runs on the raw primary output (before mutation)" "$SRC" "RAW primary output before verdict policy"
+check_contains "only a primary-produced review may escalate (fallback never does)" "$SRC" '[[ "${PRIMARY_OK:-0}" -eq 1 ]] || return 0'
 check_contains "heuristic triggers are telemetry only" "$SRC" "Telemetry only (#721)"
 check_contains "telemetry computes every historical signal" "$SRC" "on_planning_failure=True"
-check_contains "escalation reason is the reviewer_requested token" "$SRC" 'ESCALATION_REASONS="reviewer_requested"'
+check_contains "escalation reason is the primary_requested token" "$SRC" 'ESCALATION_REASONS="primary_requested"'
 check_contains "primary output preserved as ai-output.primary.json" "$SRC" "cp ai-output.json ai-output.primary.json"
 check_contains "smart review runs independent harness" "$SRC" 'TOOL_HARNESS_TIER=smart python3'
 check_contains "smart failure restores the primary review" "$SRC" "cp ai-output.primary.json ai-output.json"
@@ -92,16 +93,29 @@ check "publish step receives ESCALATION_REASON" \
   "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"
 # config.sh keeps the knobs accepted (no silent behavior change) and warns.
 check_contains "config.sh keeps the deprecated knobs accepted" "$SRC" "accepted for backward compatibility"
+# Each notice must compare against ITS OWN input's documented default, so a
+# user keeping the documented defaults is never warned spuriously:
+#   incomplete_required_checks=false, fast_request_changes=true,
+#   fast_low_confidence=true, tool_or_evidence_blockers=true,
+#   tool_planning_failure=false.
+for pair in \
+  'ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS" != "false' \
+  'ESCALATE_ON_FAST_REQUEST_CHANGES" != "true' \
+  'ESCALATE_ON_FAST_LOW_CONFIDENCE" != "true' \
+  'ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS" != "true' \
+  'ESCALATE_ON_TOOL_PLANNING_FAILURE" != "false'; do
+  check_contains "deprecation notice keys off ${pair%%\" !=*}'s own default" "$SRC" "[[ \"\$${pair}\" ]]"
+done
 
 echo ""
 echo "=== Marker carries escalation metadata ==="
 # shellcheck source=/dev/null
 source "$ROOT_DIR/scripts/publish_helpers.sh"
 MARKER="$(HEAD_SHA=h REVIEW_RESULT=issues REQUIRED_CHECKS=incomplete \
-  REVIEW_ROUTE=escalated ESCALATION_REASON="reviewer_requested" \
+  REVIEW_ROUTE=escalated ESCALATION_REASON="primary_requested" \
   build_metadata_marker "b" "")"
 check_contains "marker carries review_route=escalated" "$MARKER" '"review_route":"escalated"'
-check_contains "marker carries escalation_reason array" "$MARKER" '"escalation_reason":["reviewer_requested"]'
+check_contains "marker carries escalation_reason array" "$MARKER" '"escalation_reason":["primary_requested"]'
 PARSED="$(printf '%s' "$MARKER" | PYTHONPATH="$ROOT_DIR" python3 -c "
 import sys
 from pr_reviewer.metadata import parse_metadata
@@ -109,7 +123,7 @@ data = parse_metadata(sys.stdin.read())
 print('unparseable' if data is None else ','.join(data.get('escalation_reason', [])))
 ")"
 check "nested escalation metadata round-trips through parse_metadata" \
-  "$PARSED" "reviewer_requested"
+  "$PARSED" "primary_requested"
 
 echo ""
 echo "=== #721 test matrix (end to end against the review section) ==="
@@ -151,8 +165,9 @@ PY
   AI_BASE_URL="http://primary"
   AI_API_FORMAT="openai"
   AI_STREAM="false"
-  AI_FALLBACK_BASE_URL=""
-  AI_FALLBACK_MODEL=""
+  AI_FALLBACK_BASE_URL="http://fallback"
+  AI_FALLBACK_MODEL="fallback"
+  AI_FALLBACK_API_FORMAT="openai"
   SMART_MODEL="smart"
   SMART_BASE_URL="http://smart"
   SMART_API_FORMAT="openai"
@@ -194,8 +209,16 @@ Path('ai-output.json').write_text(json.dumps(result, ensure_ascii=False) + '\n',
   }
   call_model_tier() {
     if [[ "$1" == primary ]]; then
+      if [[ "$case_name" == fallback-requested ]]; then
+        return 1
+      fi
       cp primary-response.json ai-response.primary.json
       parse_and_validate ai-response.primary.json
+      return 0
+    fi
+    if [[ "$1" == fallback ]]; then
+      cp fallback-response.json ai-response.fallback.json
+      parse_and_validate ai-response.fallback.json
       return 0
     fi
     if [[ "$smart_success" == true ]]; then
@@ -206,6 +229,11 @@ Path('ai-output.json').write_text(json.dumps(result, ensure_ascii=False) + '\n',
     return 1
   }
   case "$case_name" in
+    fallback-requested)
+      # The primary failed; the FALLBACK produced the review and its verdict
+      # carries the escalation request. A fallback-produced review must never
+      # trigger a quality escalation (#721).
+      printf '%s\n' '{"choices":[{"message":{"content":"{\"verdict\":\"approve\",\"review_markdown\":\"Fallback review of the PR.\",\"findings\":[],\"smart_review_requested\":true,\"smart_review_reason\":\"fallback wants a second pass\"}"}}]}' > fallback-response.json ;;
     requested)
       printf '%s\n' '{"choices":[{"message":{"content":"{\"verdict\":\"approve\",\"review_markdown\":\"Confident primary review.\",\"findings\":[],\"smart_review_requested\":true,\"smart_review_reason\":\"cannot disposition the auth path\"}"}}]}' > primary-response.json ;;
     requested-no-reason)
@@ -263,10 +291,10 @@ check "incomplete requirement coverage + no request -> no smart call" \
   'approve|primary|'
 check "explicit primary request -> one smart call, published" \
   "$(run_review_case requested "$PRIMARY_ZERO" "$SMART_HEALTHY" true 0)" \
-  'approve|escalated|reviewer_requested'
+  'approve|escalated|primary_requested'
 check "explicit request without reason still escalates" \
   "$(run_review_case requested-no-reason "$PRIMARY_ZERO" "$SMART_HEALTHY" true 0)" \
-  'approve|escalated|reviewer_requested'
+  'approve|escalated|primary_requested'
 check "explicit request + smart failure -> primary restored" \
   "$(run_review_case requested-smart-fail "$PRIMARY_ZERO" "$SMART_HEALTHY" false 0)" \
   'approve|primary|'
@@ -278,7 +306,10 @@ check "prose cannot forge the request" \
   'approve|primary|'
 check "unknown coverage + explicit request -> one smart call" \
   "$(run_review_case coverage-unknown-requested "$PRIMARY_ZERO" "$SMART_HEALTHY" true 0)" \
-  'approve|escalated|reviewer_requested'
+  'approve|escalated|primary_requested'
+check "fallback-produced review with a request -> no escalation" \
+  "$(run_review_case fallback-requested "$PRIMARY_FAILED" "$SMART_HEALTHY" true 0)" \
+  'approve|primary|'
 
 # Structural no-recursion check: after a successful escalation the published
 # smart verdict carries no live request, and only ONE smart call can ever run

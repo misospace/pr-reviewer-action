@@ -452,7 +452,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
-| `escalation_reason` | `reviewer_requested` when the primary reviewer's structured `smart_review_requested` field triggered the escalated re-review (`review_route` is `escalated`); empty otherwise |
+| `escalation_reason` | `primary_requested` when the primary reviewer's structured `smart_review_requested` field triggered the escalated re-review (`review_route` is `escalated`); empty otherwise |
 | `findings` | Normalized structured findings as a JSON array (`[]` when the model produced none) |
 | `review_markdown` | Full markdown review body |
 | `analysis_engine` | Model and endpoint that produced the final result, annotated with how it was chosen: `— fast route`, `— routed smart (risk match: …)`, `— escalated (…)`, or `— fallback (primary failed)`. Unannotated when routing is off |
@@ -976,7 +976,7 @@ The former heuristic triggers are **deprecated and inert** (telemetry only; a st
 
 Unchanged: deterministic direct smart routing **before** the primary runs (`escalate_on_risk_flags`), primary failure → fallback as availability recovery, the fallback never being an escalation target, and deterministic enforcement independent of escalation.
 
-Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` carries `reviewer_requested`; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
+Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` carries `primary_requested`; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
 ## 💾 Token-saving with the unchanged-diff skip
 
