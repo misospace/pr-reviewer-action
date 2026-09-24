@@ -1619,11 +1619,81 @@
           ]
         }
       ]
+    },
+    {
+      "number": 6551,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+      "title": "Linked GitHub labels render in Markdown but do not reach the canonical classifier artifact",
+      "provenance": {"pr": 655, "issue": 662, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655"},
+      "class": "canonical_artifact_propagation",
+      "expected_capabilities": ["canonical_artifact_propagation"],
+      "expected_evidence_anchors": [{"kind": "finding", "any_of": ["canonical linked-issues.json contains bare refs"]}, {"kind": "tool", "tool": "read_file", "any_of": ["scripts/sections/context.sh"]}],
+      "negative_control": false,
+      "description": "Trace issue labels through linked-issues.json, classification risk flags, auto roles, and stale signature.",
+      "fixture": {"path": "historical-dogfood/6551.json", "sha256": "4a636606af4f5cb2694070dcfc9471e822c16215985b657ff7add9b9b7b8d3d1"},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The canonical linked-issues.json contains bare refs: fetched security and priority labels only land in Markdown; classifier and auto role selection miss their risk flags."}], "tool_calls": [{"stage": "primary", "tool": "read_file", "args": {"path": "scripts/sections/context.sh"}}]}]
+    },
+    {
+      "number": 6552,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+      "title": "Linear helper works but the composite precheck lacks its credential",
+      "provenance": {"pr": 655, "issue": 662, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655"},
+      "class": "precheck_capability_wiring",
+      "expected_capabilities": ["precheck_capability_wiring"],
+      "expected_evidence_anchors": [{"kind": "finding", "any_of": ["precheck lacks the Linear API key"]}, {"kind": "tool", "tool": "read_file", "any_of": ["action.yml"]}],
+      "negative_control": false,
+      "description": "Trace Linear priority/labels through the actual composite precheck credential and fork gate to stale-skip.",
+      "fixture": {"path": "historical-dogfood/6552.json", "sha256": "496e033cce70979c9ce23cbecaab9a29b32c8760f86bf76ac219eae5227adc45"},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The precheck lacks the Linear API key: the helper works when injected in a unit test, but the action step cannot fetch current priority/labels for the selection signature."}], "tool_calls": [{"stage": "primary", "tool": "read_file", "args": {"path": "action.yml"}}]}]
+    },
+    {
+      "number": 6553,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/655",
+      "title": "Negative control: a correct producer helper writes an artifact the consumer never reads",
+      "provenance": {"pr": 655, "issue": 662, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/655"},
+      "class": "broken_dataflow_arrow",
+      "expected_capabilities": ["broken_dataflow_arrow"],
+      "expected_evidence_anchors": [{"kind": "finding", "any_of": ["consumer reads a different artifact"]}, {"kind": "tool", "tool": "read_file", "any_of": ["scripts/sections/classification.sh"]}],
+      "negative_control": false,
+      "description": "A helper-only passing test cannot qualify a broken producer-to-consumer path.",
+      "fixture": {"path": "historical-dogfood/6553.json", "sha256": "767b3b746c41d5e59e52aa3ea05058b1be745b44d12a5e711b951aeec0eef06e"},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "The consumer reads a different artifact: the correct helper enriches linked-issues.enriched.json, but classification.sh still passes linked-issues.json to classifier.py."}], "tool_calls": [{"stage": "primary", "tool": "read_file", "args": {"path": "scripts/sections/classification.sh"}}]}]
+    },
+    {
+      "number": 6891,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+      "title": "Exact-head Node 24 and tests are green but their evidence is truncated from the review corpus",
+      "provenance": {"pr": 689, "issue": 662, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/689"},
+      "class": "review_corpus_evidence_transport",
+      "expected_capabilities": ["review_corpus_evidence_transport"],
+      "expected_evidence_anchors": [{"kind": "finding", "any_of": ["verified exact-head evidence is omitted from the review corpus"]}, {"kind": "tool", "tool": "read_file", "any_of": ["scripts/sections/corpus.sh"]}],
+      "negative_control": false,
+      "description": "A corpus-budget omission is not proof that exact-head CI/tests failed; do not promote an absent tail into a blocker.",
+      "fixture": {"path": "historical-dogfood/6891.json", "sha256": "2e0c6059c726086427e73bcfbd50f40ab4d17ddac6defc632b51e4c983e94344"},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "Verified exact-head evidence is omitted from the review corpus: Node 24 CI, negative node/secret tests and the full 4500-byte ledger framing passed at this head. A truncated view alone cannot justify a blocker."}], "tool_calls": [{"stage": "primary", "tool": "read_file", "args": {"path": "scripts/sections/corpus.sh"}}]}]
+    },
+    {
+      "number": 6892,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/689",
+      "title": "Positive control: a reproducible truncate_clean oversized-marker counterexample",
+      "provenance": {"pr": 689, "issue": 662, "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/689"},
+      "class": "truncation_counterexample",
+      "expected_capabilities": ["truncation_counterexample"],
+      "expected_evidence_anchors": [{"kind": "finding", "any_of": ["truncate_clean writes an oversized marker beyond MAX_CORPUS"]}, {"kind": "tool", "tool": "read_file", "any_of": ["scripts/sections/config.sh"]}],
+      "negative_control": false,
+      "description": "A measured oversized marker is a real blocking counterexample, unlike missing corpus evidence.",
+      "fixture": {"path": "historical-dogfood/6892.json", "sha256": "01165e6bec448a4cea3259a513be8c652736355af96920a6fe09cb8d2ff26930"},
+      "offline_runs": [{"mode": "standard", "stage": "primary", "route": "primary", "findings": [{"stage": "primary", "message": "truncate_clean writes an oversized marker beyond MAX_CORPUS in the reproduced pre-fix run. This measured violation must be fixed."}], "tool_calls": [{"stage": "primary", "tool": "read_file", "args": {"path": "scripts/sections/config.sh"}}]}]
     }
   ],
   "metadata": {
     "created_at": "2026-09-21T00:00:00Z",
-    "description": "Compact reconstructed historical semantic regression corpus for issues #627 and #659. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
+    "description": "Compact reconstructed historical semantic regression corpus for issues #627, #659 and #662. Fixtures are immutable synthetic reproductions with provenance, not live model prompts.",
     "issue_refs": [
       608,
       627,
@@ -1631,7 +1701,9 @@
       644,
       645,
       654,
-      659
+      659,
+      662,
+      672
     ],
     "pr_refs": [
       623,
@@ -1639,6 +1711,8 @@
       644,
       645,
       654,
+      655,
+      689,
       8004
     ],
     "stages": [

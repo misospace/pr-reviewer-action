@@ -133,6 +133,35 @@ python3 -m pr_reviewer.role_selection --classification classification.json --out
 check "security + p0 flags select the security and correctness roles" \
   "$(jq -r -c '.selected_roles' role-selection.json)" '["correctness","security"]'
 
+# The classifier can be right while the action's route consumes another
+# artifact. Execute the actual route function against this exact artifact.
+python3 - "$ROOT_DIR/scripts/sections/classification.sh" route.sh <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('resolve_review_route() {')
+end = text.index('\n# The primary route', start)
+open(sys.argv[2], 'w', encoding="utf-8").write(text[start:end] + '\n')
+PY
+REVIEW_ROUTING_MODE=auto
+ESCALATE_ON_RISK_FLAGS=linked_security_issue,linked_priority_p0,linked_priority_p1
+SMART_MODEL_RESOLVED=1
+# shellcheck source=/dev/null
+source route.sh
+resolve_review_route
+check "linked labels reach the production smart route" "$REVIEW_ROUTE" "smart"
+
+# A valid helper result cannot compensate for a stale/bare canonical artifact.
+cp classification.json classification.expected.json
+jq 'map(del(.labels))' linked-issues.json > linked-issues.bare.json
+python3 "$ROOT_DIR/pr_reviewer/classifier.py" --pr-files pr-files.json \
+  --diff pr.diff.truncated --linked-issues linked-issues.bare.json \
+  --output classification.json
+resolve_review_route
+check "broken artifact arrow leaves the route primary" "$REVIEW_ROUTE" "primary"
+mv classification.expected.json classification.json
+resolve_review_route
+check "restoring the consumer artifact restores smart routing" "$REVIEW_ROUTE" "smart"
+
 echo ""
 echo "=== Linear merging still composes with the enriched labels ==="
 # The section's Linear merge is `jq -s '.[0] + .[1]'` (untouched); prove the
