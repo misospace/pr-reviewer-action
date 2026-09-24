@@ -3,6 +3,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import {
   MAX_LEDGER_MARKDOWN_BYTES,
   extractRequirementLedger,
+  ledgerToArtifact,
   renderRequirementLedgerMarkdown,
   type RequirementLedger,
 } from "./ledger.js";
@@ -38,9 +39,10 @@ export function runRequirementLedgerFixture(fixturePath: string): { ok: boolean;
   return {
     ok: true,
     values: {
-      // Canonical Python-JSON serialization (sort_keys, default separators),
-      // byte-compatible with the v2 runner's `json.dumps`.
-      ledger: pythonJsonStringify(ledger),
+      // The explicit camelCase → snake_case artifact serialization (then
+      // canonical Python-JSON, sort_keys), byte-compatible with the v2
+      // runner's `json.dumps`.
+      ledger: pythonJsonStringify(ledgerToArtifact(ledger)),
       markdown: rendered,
     },
   };

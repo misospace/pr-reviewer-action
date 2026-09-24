@@ -49,12 +49,15 @@ export interface LedgerProvenance {
   line: number;
 }
 
-/** The typed canonical requirement-ledger entry (#675). */
+/** The typed canonical requirement-ledger entry (#675). Internal fields are
+ * camelCase (#669); the persisted artifact shape is produced only by
+ * `entryToArtifact` — which is load-bearing for the sha, since v2 computes
+ * it over the snake_case canonical JSON of the entries. */
 export interface RequirementLedgerEntry {
   id: string;
   text: string;
   kind: "acceptance" | "normative" | "invariant";
-  verification_required: boolean;
+  verificationRequired: boolean;
   truncated: boolean;
   provenance: LedgerProvenance[];
 }
@@ -65,8 +68,39 @@ export interface RequirementLedger {
   requirements: RequirementLedgerEntry[];
   truncation: {
     truncated: boolean;
-    omitted_requirements: number;
-    omitted_sources: number;
+    omittedRequirements: number;
+    omittedSources: number;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// camelCase → persisted snake_case artifact boundary (#669)
+// ---------------------------------------------------------------------------
+
+/** Serialize one entry to the persisted v2-identical snake_case form. */
+export function entryToArtifact(entry: RequirementLedgerEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    text: entry.text,
+    kind: entry.kind,
+    verification_required: entry.verificationRequired,
+    truncated: entry.truncated,
+    provenance: entry.provenance,
+  };
+}
+
+/** Serialize the internal ledger to the persisted v2-identical snake_case
+ * artifact (`requirement-ledger.json`): same keys, same values, same sha. */
+export function ledgerToArtifact(ledger: RequirementLedger): Record<string, unknown> {
+  return {
+    version: ledger.version,
+    sha: ledger.sha,
+    requirements: ledger.requirements.map(entryToArtifact),
+    truncation: {
+      truncated: ledger.truncation.truncated,
+      omitted_requirements: ledger.truncation.omittedRequirements,
+      omitted_sources: ledger.truncation.omittedSources,
+    },
   };
 }
 
@@ -140,9 +174,12 @@ function requirementId(text: string): string {
   return "req-" + createHash("sha256").update(Buffer.from(text.toLowerCase(), "utf8")).digest("hex").slice(0, 12);
 }
 
-/** First 16 hex of sha256 over the canonical JSON of the entries array. */
+/** First 16 hex of sha256 over the canonical JSON of the entries array.
+ * Hashes the PERSISTED snake_case artifact form (v2 hashes the identical
+ * serialization), so the sha bytes are unchanged by the internal camelCase
+ * representation. */
 function computeSha(entries: RequirementLedgerEntry[]): string {
-  const canonical = pythonJsonStringify(entries, ",", ":");
+  const canonical = pythonJsonStringify(entries.map(entryToArtifact), ",", ":");
   return createHash("sha256").update(Buffer.from(canonical, "utf8")).digest("hex").slice(0, 16);
 }
 
@@ -151,7 +188,7 @@ export function emptyLedger(): RequirementLedger {
     version: ARTIFACT_VERSION,
     sha: computeSha([]),
     requirements: [],
-    truncation: { truncated: false, omitted_requirements: 0, omitted_sources: 0 },
+    truncation: { truncated: false, omittedRequirements: 0, omittedSources: 0 },
   };
 }
 
@@ -347,7 +384,7 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
           id: requirementId(found.normalized),
           text: found.normalized,
           kind: found.kind,
-          verification_required: found.kind === "invariant",
+          verificationRequired: found.kind === "invariant",
           truncated: found.truncated,
           provenance: [{ source: doc.source, ref: doc.ref, line: found.line }],
         });
@@ -369,8 +406,8 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
       // Source-capacity drops are truncation too: the omitted linked-issue
       // docs never become entries, and that omission must be visible.
       truncated: omitted > 0 || omittedSources > 0,
-      omitted_requirements: omitted,
-      omitted_sources: omittedSources,
+      omittedRequirements: omitted,
+      omittedSources,
     },
   };
 }
@@ -383,7 +420,8 @@ function isValidId(value: unknown): value is string {
   return typeof value === "string" && ID_RE.test(value);
 }
 
-/** Rebuild one entry from untrusted data, or null when unusable. */
+/** Rebuild one entry from untrusted persisted-artifact data (v2 snake_case
+ * schema — the deserialization boundary), or null when unusable. */
 function tolerantEntry(item: unknown): RequirementLedgerEntry | null {
   if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
   const rec = item as Record<string, unknown>;
@@ -412,7 +450,7 @@ function tolerantEntry(item: unknown): RequirementLedgerEntry | null {
     text,
     kind: kind as RequirementLedgerEntry["kind"],
     // Python `bool(item.get(...))` truthiness — any truthy value counts.
-    verification_required: Boolean(rec.verification_required),
+    verificationRequired: Boolean(rec.verification_required),
     truncated: Boolean(rec.truncated),
     provenance,
   };
@@ -449,7 +487,7 @@ export function loadLedgerFromValue(data: unknown): RequirementLedger {
     version: ARTIFACT_VERSION,
     sha: computeSha(requirements),
     requirements,
-    truncation: { truncated, omitted_requirements: omitted, omitted_sources: omittedSources },
+    truncation: { truncated, omittedRequirements: omitted, omittedSources },
   };
 }
 

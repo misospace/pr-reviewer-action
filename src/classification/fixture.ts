@@ -1,18 +1,20 @@
 import { readFileSync } from "node:fs";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
-import { classifyPr } from "./classify.js";
-import { selectSpecialistRoles } from "./role-selection.js";
+import { classificationToArtifact, classifyPr } from "./classify.js";
+import { classificationFromArtifact, selectSpecialistRoles, selectionToArtifact } from "./role-selection.js";
 
 /** Fixture-driven classification CLI for the #675 parity harness and
  * tests-v3: `node dist/index.js classification-fixture <fixture.json>` prints
- * a single JSON line `{ok, values}` where `values` carries the canonical
- * classification and the specialist role selection, serialized with the same
- * canonical Python-JSON form the v2 runner emits. The fixture mirrors the v2
- * runner's inputs exactly: the raw changed-file list, the truncated diff,
- * the linked-issue list, the linked-metadata status artifact, and an
- * optional direct `role_selection_input` override (used to drive the role
- * selector's conservative fallbacks in parity). */
+ * a single JSON line `{ok, values}` where `values` carries the classification
+ * and specialist role selection, serialized through the explicit
+ * camelCase → snake_case artifact serializers (then canonical Python-JSON)
+ * so the bytes match the v2 runner. The fixture mirrors the v2 runner's
+ * inputs exactly: the raw changed-file list, the truncated diff, the
+ * linked-issue list, the linked-metadata status artifact, and an
+ * optional direct `role_selection_input` override — a persisted
+ * classification artifact (deserialized via `classificationFromArtifact`)
+ * used to drive the role selector's conservative fallbacks in parity. */
 
 export interface ClassificationFixture {
   fixture?: string;
@@ -21,8 +23,9 @@ export interface ClassificationFixture {
   diff?: string;
   linked_issues?: unknown[];
   metadata_status?: unknown;
-  /** When present, the role selector runs on this raw value instead of the
-   * classification output (malformed artifact / unknown-kind fallbacks). */
+  /** When present, the role selector runs on this persisted classification
+   * artifact instead of the classification output (malformed artifact /
+   * unknown-kind fallbacks). */
   role_selection_input?: unknown;
 }
 
@@ -37,13 +40,14 @@ export function runClassificationFixture(fixturePath: string): { ok: boolean; va
     linkedIssues,
     metadataStatus,
   });
-  const selectionInput = Object.hasOwn(fixture, "role_selection_input") ? fixture.role_selection_input : classification;
-  const selection = selectSpecialistRoles(selectionInput);
+  const selection = Object.hasOwn(fixture, "role_selection_input")
+    ? selectSpecialistRoles(classificationFromArtifact(fixture.role_selection_input))
+    : selectSpecialistRoles(classification);
   return {
     ok: true,
     values: {
-      classification: pythonJsonStringify(classification),
-      role_selection: pythonJsonStringify(selection),
+      classification: pythonJsonStringify(classificationToArtifact(classification)),
+      role_selection: pythonJsonStringify(selectionToArtifact(selection)),
     },
   };
 }

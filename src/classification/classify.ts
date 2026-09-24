@@ -7,8 +7,9 @@
  * generation, and the specialist role selector.
  *
  * The pattern sets, rule tables, and their precedence are copied verbatim
- * from the Python module; the output object carries the same keys in the
- * same order as the v2 artifact. */
+ * from the Python module. The internal result is camelCase (#669 naming
+ * contract); `classificationToArtifact` is the explicit serializer to the
+ * persisted v2-identical snake_case `classification.json` schema. */
 
 import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 
@@ -144,25 +145,45 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
 
 /** The typed canonical classification (#675). Consumers (routing, role
  * selection, corpus) receive this object — never a re-read of
- * `classification.json` with a subtly different schema. */
+ * `classification.json` with a subtly different schema. Internal fields are
+ * camelCase (#669); the persisted artifact shape is produced only by
+ * `classificationToArtifact`. */
 export interface PRClassification {
-  pr_kind: string;
-  risk_flags: string[];
-  risk_flags_with_files: Record<string, string[]>;
-  /** Subset of (pr_kind + risk_flags) safe to drive smart-model routing:
+  prKind: string;
+  riskFlags: string[];
+  riskFlagsWithFiles: Record<string, string[]>;
+  /** Subset of (prKind + riskFlags) safe to drive smart-model routing:
    * linked-issue flags and any file-based signal backed by an actual changed
    * filename. Content-only pattern matches are excluded (#159). */
-  route_signals: string[];
-  changed_files_summary: string[];
-  linked_issue_labels: string[];
-  must_check: string[];
+  routeSignals: string[];
+  changedFilesSummary: string[];
+  linkedIssueLabels: string[];
+  mustCheck: string[];
   /** #633: true when a selection-relevant metadata source (GitHub
    * linked-issue labels, configured Linear priority/labels) was EXPECTED but
    * could not be determined — missing signals must not be read as absent
    * signals by the deterministic selector. Known-disabled state is NOT
    * uncertainty; unusable status input degrades to not-uncertain. */
-  linked_metadata_uncertain: boolean;
-  linked_metadata_uncertainty: string[];
+  linkedMetadataUncertain: boolean;
+  linkedMetadataUncertainty: string[];
+}
+
+/** Serialize the internal classification to the persisted v2-identical
+ * snake_case artifact (`classification.json`). Key order mirrors the v2
+ * dataclass; the parity harness compares `sort_keys` canonical JSON, so the
+ * artifact bytes are v2-identical regardless. */
+export function classificationToArtifact(classification: PRClassification): Record<string, unknown> {
+  return {
+    pr_kind: classification.prKind,
+    risk_flags: classification.riskFlags,
+    risk_flags_with_files: classification.riskFlagsWithFiles,
+    route_signals: classification.routeSignals,
+    changed_files_summary: classification.changedFilesSummary,
+    linked_issue_labels: classification.linkedIssueLabels,
+    must_check: classification.mustCheck,
+    linked_metadata_uncertain: classification.linkedMetadataUncertain,
+    linked_metadata_uncertainty: classification.linkedMetadataUncertainty,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -490,14 +511,14 @@ export function classifyPr(input: ClassifyInput): PRClassification {
   }
 
   return {
-    pr_kind: prKind,
-    risk_flags: flags,
-    risk_flags_with_files: flagsWithFiles,
-    route_signals: routeSignalsList,
-    changed_files_summary: changedFilesSummary,
-    linked_issue_labels: linkedIssueLabels,
-    must_check: mustCheck,
-    linked_metadata_uncertain: uncertainty.uncertain,
-    linked_metadata_uncertainty: uncertainty.reasons,
+    prKind,
+    riskFlags: flags,
+    riskFlagsWithFiles: flagsWithFiles,
+    routeSignals: routeSignalsList,
+    changedFilesSummary,
+    linkedIssueLabels,
+    mustCheck,
+    linkedMetadataUncertain: uncertainty.uncertain,
+    linkedMetadataUncertainty: uncertainty.reasons,
   };
 }

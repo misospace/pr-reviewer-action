@@ -14,6 +14,8 @@
  * roles run with explicit reasons. Zero selection is only ever allowed by an
  * explicit, documented trivial gate. */
 
+import type { PRClassification } from "./classify.js";
+
 /** Version of the selection artifact. Bump on any shape change. */
 export const SELECTION_ARTIFACT_VERSION = 1;
 
@@ -104,20 +106,93 @@ export interface RoleDecision {
   reason: string;
 }
 
-/** The typed version-1 selection artifact (#675): consumers receive this
- * canonical object, never a re-read scratch file. */
+/** The typed version-1 specialist selection (#675): consumers receive this
+ * canonical object, never a re-read scratch file. Internal fields are
+ * camelCase (#669); the persisted artifact shape is produced only by
+ * `selectionToArtifact`. */
 export interface SpecialistSelection {
   version: number;
   mode: "auto";
-  classification_available: boolean;
-  pr_kind: string;
-  risk_flags: string[];
-  metadata_uncertain: boolean;
-  metadata_uncertainty_reasons: string[];
-  selected_roles: string[];
-  skipped_roles: string[];
+  classificationAvailable: boolean;
+  prKind: string;
+  riskFlags: string[];
+  metadataUncertain: boolean;
+  metadataUncertaintyReasons: string[];
+  selectedRoles: string[];
+  skippedRoles: string[];
   decisions: RoleDecision[];
-  zero_selection_reason: string;
+  zeroSelectionReason: string;
+}
+
+/** Serialize the internal selection to the persisted v2-identical snake_case
+ * artifact (`role-selection.json`). Key order mirrors the v2 artifact; the
+ * parity harness compares `sort_keys` canonical JSON, so the bytes are
+ * v2-identical regardless. */
+export function selectionToArtifact(selection: SpecialistSelection): Record<string, unknown> {
+  return {
+    version: selection.version,
+    mode: selection.mode,
+    classification_available: selection.classificationAvailable,
+    pr_kind: selection.prKind,
+    risk_flags: selection.riskFlags,
+    metadata_uncertain: selection.metadataUncertain,
+    metadata_uncertainty_reasons: selection.metadataUncertaintyReasons,
+    selected_roles: selection.selectedRoles,
+    skipped_roles: selection.skippedRoles,
+    decisions: selection.decisions,
+    zero_selection_reason: selection.zeroSelectionReason,
+  };
+}
+
+/** The uncertainty sentinel for a `linked_metadata_uncertain` artifact whose
+ * reason list is missing or entirely unusable. */
+const UNDETERMINED_METADATA = "linked metadata could not be fully determined";
+
+/** Deserialization boundary: rebuild the internal classification from the
+ * persisted v2 snake_case artifact (`classification.json`), or return null
+ * when the artifact is unusable — which the selector maps onto its
+ * conservative all-roles fallback (`classification_available: false`),
+ * exactly like v2 reading the same file. The usability rule is verbatim:
+ * `pr_kind` must be a string whose trim is non-empty; `pr_kind` text that
+ * fails the control-character check still counts as usable (with an empty
+ * kind), matching v2's clean/usable split. Changed-file entries are kept
+ * verbatim (a tampered artifact may carry non-strings) and cast here only
+ * because the selector consumes them opaquely — an unusable entry is never
+ * scored as trivial. */
+export function classificationFromArtifact(raw: unknown): PRClassification | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const rec = raw as Record<string, unknown>;
+  if (typeof rec.pr_kind !== "string" || rec.pr_kind.trim() === "") return null;
+  let uncertainty: string[] = [];
+  if (rec.linked_metadata_uncertain === true) {
+    const rawReasons = rec.linked_metadata_uncertainty;
+    if (!Array.isArray(rawReasons)) {
+      uncertainty = [UNDETERMINED_METADATA];
+    } else {
+      const reasons = cleanStrList(rawReasons);
+      uncertainty = reasons.length > 0 ? reasons : [UNDETERMINED_METADATA];
+    }
+  }
+  const rawFlagsWithFiles = rec.risk_flags_with_files;
+  const riskFlagsWithFiles: Record<string, string[]> = {};
+  if (rawFlagsWithFiles !== null && typeof rawFlagsWithFiles === "object" && !Array.isArray(rawFlagsWithFiles)) {
+    for (const [flag, files] of Object.entries(rawFlagsWithFiles as Record<string, unknown>)) {
+      const cleaned = cleanStrList(files);
+      if (cleaned.length > 0) riskFlagsWithFiles[flag] = cleaned;
+      else if (Array.isArray(files)) riskFlagsWithFiles[flag] = [];
+    }
+  }
+  return {
+    prKind: cleanStr(rec.pr_kind),
+    riskFlags: cleanStrList(rec.risk_flags),
+    riskFlagsWithFiles,
+    routeSignals: cleanStrList(rec.route_signals),
+    changedFilesSummary: Array.isArray(rec.changed_files_summary) ? (rec.changed_files_summary as string[]) : [],
+    linkedIssueLabels: cleanStrList(rec.linked_issue_labels),
+    mustCheck: cleanStrList(rec.must_check),
+    linkedMetadataUncertain: rec.linked_metadata_uncertain === true,
+    linkedMetadataUncertainty: uncertainty,
+  };
 }
 
 /** Bounded, control-character-free string for reason text; empty when
@@ -199,20 +274,6 @@ function trivialZeroReason(kind: string, flags: readonly string[], files: readon
   return null;
 }
 
-/** Linked-issue/Linear selection-input uncertainty carried by the
- * classification contract (#633 review fix, round 3). */
-function metadataUncertainty(classification: unknown): string[] {
-  if (classification === null || typeof classification !== "object" || Array.isArray(classification)) {
-    return [];
-  }
-  const rec = classification as Record<string, unknown>;
-  if (rec.linked_metadata_uncertain !== true) return [];
-  const raw = rec.linked_metadata_uncertainty;
-  if (!Array.isArray(raw)) return ["linked metadata could not be fully determined"];
-  const reasons = cleanStrList(raw);
-  return reasons.length > 0 ? reasons : ["linked metadata could not be fully determined"];
-}
-
 function conservativeFallback(usable: boolean, kind: string): boolean {
   /** True when the classification gives no deterministic basis to skip a
    * role: unusable input, or the `unknown` failure placeholder. */
@@ -220,22 +281,17 @@ function conservativeFallback(usable: boolean, kind: string): boolean {
 }
 
 /** Select specialist roles from classification data. Pure and deterministic.
- * Never throws — unusable input fails conservatively to all roles with
- * `classification_available: false`. */
-export function selectSpecialistRoles(classification: unknown): SpecialistSelection {
-  const usable =
-    classification !== null &&
-    typeof classification === "object" &&
-    !Array.isArray(classification) &&
-    typeof (classification as Record<string, unknown>).pr_kind === "string" &&
-    ((classification as Record<string, unknown>).pr_kind as string).trim() !== "";
-  const rec = usable ? (classification as Record<string, unknown>) : null;
-  const kind = rec !== null ? cleanStr(rec.pr_kind) : "";
-  const flags = rec !== null ? cleanStrList(rec.risk_flags) : [];
+ * Takes the canonical internal classification — `null` (or a classification
+ * rebuilt from an unusable artifact via `classificationFromArtifact`) fails
+ * conservatively to all roles with `classificationAvailable: false`. Never
+ * throws. */
+export function selectSpecialistRoles(classification: PRClassification | null): SpecialistSelection {
+  const usable = classification !== null;
+  const kind = usable ? cleanStr(classification.prKind) : "";
+  const flags = usable ? classification.riskFlags : [];
   // Files stay RAW for the trivial gate (an unusable entry must never be
   // scored as trivial); only their count feeds the cap check.
-  const rawFiles = rec !== null ? rec.changed_files_summary : null;
-  const files: readonly unknown[] = Array.isArray(rawFiles) ? rawFiles : [];
+  const files: readonly unknown[] = usable ? classification.changedFilesSummary : [];
 
   const decisions: RoleDecision[] = [];
   const selectedRoles: string[] = [];
@@ -243,7 +299,7 @@ export function selectSpecialistRoles(classification: unknown): SpecialistSelect
   let zeroReason = "";
   // Metadata uncertainty (usable classifications only — the unavailable
   // fallback already covers unusable input).
-  const uncertaintyReasons = rec !== null ? metadataUncertainty(rec) : [];
+  const uncertaintyReasons = usable ? classification.linkedMetadataUncertainty : [];
 
   if (conservativeFallback(usable, kind)) {
     // Both fallback shapes report the classification as unavailable.
@@ -327,15 +383,15 @@ export function selectSpecialistRoles(classification: unknown): SpecialistSelect
     return {
       version: SELECTION_ARTIFACT_VERSION,
       mode: "auto",
-      classification_available: available,
-      pr_kind: kind,
-      risk_flags: flags,
-      metadata_uncertain: uncertaintyReasons.length > 0,
-      metadata_uncertainty_reasons: uncertaintyReasons,
-      selected_roles: selectedRoles,
-      skipped_roles: skippedRoles,
+      classificationAvailable: available,
+      prKind: kind,
+      riskFlags: flags,
+      metadataUncertain: uncertaintyReasons.length > 0,
+      metadataUncertaintyReasons: uncertaintyReasons,
+      selectedRoles: selectedRoles,
+      skippedRoles: skippedRoles,
       decisions,
-      zero_selection_reason: zeroReason,
+      zeroSelectionReason: zeroReason,
     };
   }
 }

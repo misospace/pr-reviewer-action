@@ -5,6 +5,7 @@ import {
   MAX_REQUIREMENTS,
   emptyLedger,
   extractRequirementLedger,
+  ledgerToArtifact,
   loadLedgerFromValue,
   pySplitLines,
   renderRequirementLedgerMarkdown,
@@ -34,7 +35,7 @@ test("sequencing tokens promote entries to invariants requiring verification", (
   const ledger = extractRequirementLedger({ standardsText: "- MUST flush before close\n" });
   const entry = ledger.requirements[0];
   assert.equal(entry?.kind, "invariant");
-  assert.equal(entry?.verification_required, true);
+  assert.equal(entry?.verificationRequired, true);
 });
 
 test("fenced code is never extracted (backtick and tilde fences)", () => {
@@ -94,7 +95,7 @@ test("source capacity is reserved for standards and PR docs; overflow is visible
     md += `## o/r#${i}\n\n\`\`\`json\n{"ref": "o/r#${i}", "body": "MUST report readiness ${i}\\n"}\n\`\`\`\n`;
   }
   const ledger = extractRequirementLedger({ linkedIssuesMarkdown: md, standardsText: "MUST a\n", prJson: PR_JSON });
-  assert.equal(ledger.truncation.omitted_sources, 10);
+  assert.equal(ledger.truncation.omittedSources, 10);
   assert.equal(ledger.truncation.truncated, true);
 });
 
@@ -103,7 +104,7 @@ test("the ledger caps at MAX_REQUIREMENTS with a visible count", () => {
   for (let i = 0; i < MAX_REQUIREMENTS + 5; i += 1) doc += `- requirement ${i}\n`;
   const ledger = extractRequirementLedger({ standardsText: doc });
   assert.equal(ledger.requirements.length, MAX_REQUIREMENTS);
-  assert.equal(ledger.truncation.omitted_requirements, 5);
+  assert.equal(ledger.truncation.omittedRequirements, 5);
 });
 
 test("malformed inputs never raise", () => {
@@ -190,12 +191,14 @@ test("tolerant loading recomputes the sha and repairs forged ids and kinds", () 
     truncation: { truncated: "yes", omitted_requirements: 3, omitted_sources: -1 },
   });
   assert.notEqual(forged.sha, "0".repeat(16));
-  // The recomputed sha is deterministic for the surviving entries.
-  assert.equal(forged.sha, loadLedgerFromValue({ requirements: forged.requirements }).sha);
+  // The recomputed sha is deterministic for the surviving entries — the
+  // round trip goes through the persisted-artifact boundary, since
+  // `loadLedgerFromValue` deserializes the v2 snake_case schema.
+  assert.equal(forged.sha, loadLedgerFromValue(ledgerToArtifact(forged)).sha);
   assert.equal(forged.requirements[0]?.id, legit.requirements[0]?.id);
   assert.equal(forged.requirements[1]?.kind, "normative");
-  assert.equal(forged.requirements[1]?.verification_required, true);
+  assert.equal(forged.requirements[1]?.verificationRequired, true);
   assert.equal(forged.truncation.truncated, true);
-  assert.equal(forged.truncation.omitted_requirements, 3);
-  assert.equal(forged.truncation.omitted_sources, 0);
+  assert.equal(forged.truncation.omittedRequirements, 3);
+  assert.equal(forged.truncation.omittedSources, 0);
 });
