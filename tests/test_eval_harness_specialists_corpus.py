@@ -9,6 +9,11 @@ telemetry carrying leads_by_role over the closed role set.
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -23,10 +28,12 @@ from eval_harness import (
     BenchmarkResult,
     ReviewRun,
     SPECIALIST_ROLES,
+    _materialize_semantic_fixture,
     evaluate_capability,
     evaluate_specialist_expectations,
     generate_report,
 )
+from pr_reviewer.semantic_eval import validate_semantic_fixture_integrity
 
 
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "evals" / "corpus-specialists.json"
@@ -480,6 +487,105 @@ def test_generate_report_specialist_tallies_per_label() -> None:
     assert per_547["native_loop+deep"]["specialist_capability"]["lead_passed"] is True
     assert per_547["native_loop+deep"]["specialist_capability"]["effectiveness_passed"] is True
     assert per_622["native_loop+deep"]["specialist_capability"]["lead_passed"] is None
+
+
+# ---------------------------------------------------------------------------
+# Retained-diff fixtures (#712): the corpus PRs are long merged, so a live
+# `gh pr diff` degrades against the moved base. Every entry pins the exact
+# authored diff (path + sha256, materialized via the semantic-fixture seam)
+# so the graded diff still contains the changes the expectations grade.
+# ---------------------------------------------------------------------------
+
+# (graded file, needle that must appear among the diff's added lines for it)
+RETAINED_DIFF_NEEDLES = {
+    547: ("pr_reviewer/forgejo_backend.py", "threading.RLock"),
+    551: ("pr_reviewer/carry_forward.py", "needs_full_review"),
+    612: ("pr_reviewer/specialists.py", "def normalize_specialist_output"),
+    622: (".github/workflows/codeql.yml", "codeql"),
+    597: ("pr_reviewer/precheck.py", "dismiss"),
+}
+
+
+def fixture_data(number: int) -> dict:
+    pinned = scenario(number).get("_semantic_fixture")
+    assert pinned is not None, f"PR {number}: entry fixture not attached at load"
+    return pinned[0]
+
+
+def test_every_entry_pins_a_retained_fixture() -> None:
+    loaded = corpus()
+    for pr in loaded.prs:
+        ref = pr["fixture"]
+        assert ref["path"] == f"specialists/{pr['number']}.json"
+        assert re.fullmatch(r"[0-9a-f]{64}", ref["sha256"])
+        fixture_data(pr["number"])
+
+
+def test_retained_fixture_hash_matches_disk() -> None:
+    for pr in corpus().prs:
+        raw = (CORPUS_PATH.parent / pr["fixture"]["path"]).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == pr["fixture"]["sha256"]
+
+
+@pytest.mark.parametrize("number", EXPECTED_NUMBERS)
+def test_retained_diff_contains_the_graded_change(number: int) -> None:
+    graded_file, needle = RETAINED_DIFF_NEEDLES[number]
+    diff = fixture_data(number)["diff"]
+    assert f"diff --git a/{graded_file} b/{graded_file}" in diff
+    added = [line[1:] for line in diff.splitlines() if line.startswith("+")]
+    assert any(needle in line for line in added), (
+        f"PR {number}: {needle!r} missing from added lines of {graded_file}"
+    )
+    # Every known finding must grade against a file the diff actually touches.
+    for finding in scenario(number)["known_findings"]:
+        assert f"a/{finding['file_path']}" in diff, (
+            f"PR {number}: known-finding file {finding['file_path']} not in diff"
+        )
+
+
+@pytest.mark.parametrize("number", EXPECTED_NUMBERS)
+def test_retained_fixture_passes_integrity_validation(number: int) -> None:
+    validate_semantic_fixture_integrity(fixture_data(number))
+
+
+def test_fixtures_record_merge_provenance() -> None:
+    for pr in corpus().prs:
+        prov = fixture_data(pr["number"])["provenance"]
+        assert prov["historical_pr"] == pr["number"]
+        assert prov["state"] == "merged"
+        assert re.fullmatch(r"[0-9a-f]{40}", prov["merge_commit"])
+
+
+def test_materialized_fixture_serves_the_retained_diff(tmp_path) -> None:
+    """The semantic-fixture seam serves the authored diff verbatim."""
+    data = fixture_data(622)
+    repo_path = tmp_path / "repo"
+    _materialize_semantic_fixture(repo_path, data)
+    served = repo_path / ".semantic-fixture"
+    assert (served / "diff").read_text(encoding="utf-8") == data["diff"]
+    pr_json = json.loads((served / "pr.json").read_text(encoding="utf-8"))
+    assert pr_json["number"] == 622
+    files = json.loads((served / "files.json").read_text(encoding="utf-8"))
+    assert [entry["filename"] for entry in files] == [
+        entry["filename"] for entry in data["pr_files"]
+    ]
+
+
+def test_corrupt_fixture_ref_fails_corpus_load(tmp_path) -> None:
+    """A tampered fixture ref must fail at load, not mid-benchmark."""
+    root = tmp_path / "corpus"
+    (root / "specialists").mkdir(parents=True)
+    shutil.copyfile(
+        CORPUS_PATH.parent / "specialists" / "622.json",
+        root / "specialists" / "622.json",
+    )
+    entries = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))["benchmark_corpus"]
+    pinned = copy.deepcopy(next(e for e in entries if e["number"] == 622))
+    pinned["fixture"]["sha256"] = "0" * 64
+    corpus_path = root / "corpus.json"
+    corpus_path.write_text(json.dumps({"benchmark_corpus": [pinned]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        BenchmarkCorpus.from_file(corpus_path)
 
 
 if __name__ == "__main__":

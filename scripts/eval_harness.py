@@ -191,7 +191,16 @@ class BenchmarkResult:
 
 @dataclass
 class BenchmarkCorpus:
-    """The full benchmark corpus with optional semantic scenarios."""
+    """The full benchmark corpus with optional semantic scenarios.
+
+    Benchmark entries may also pin a retained fixture (#712) via an
+    entry-level ``fixture`` ref (``path`` + ``sha256``, resolved under the
+    corpus directory): the corpus PRs are long merged, so a live
+    ``gh pr diff`` degrades against the moved base. A pinned fixture
+    materializes the exact authored diff through the semantic-fixture path
+    instead (see :func:`run_review_for_pr`).
+    """
+
     prs: list[dict[str, Any]] = field(default_factory=list)
     semantic_corpus: SemanticCorpus | None = None
 
@@ -203,6 +212,15 @@ class BenchmarkCorpus:
             semantic = SemanticCorpus.from_file(path)
             validate_semantic_corpus(semantic)
         prs = data.get("benchmark_corpus", [])
+        # Entry-level retained fixtures (#712): load eagerly so a corrupt
+        # ref fails at corpus load, not mid-benchmark.
+        pinned = [e for e in prs if isinstance(e, dict) and "fixture" in e]
+        if pinned:
+            fixture_root = SemanticCorpus(fixture_root=path.parent)
+            for entry in pinned:
+                entry["_semantic_fixture"] = _load_semantic_fixture(
+                    fixture_root, entry["fixture"]
+                )
         if not prs and semantic is not None:
             prs = []
             for scenario in semantic.scenarios:
