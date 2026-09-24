@@ -42,7 +42,11 @@ def test_full_parity_run_passes_with_migration_gates():
     assert report["summary"]["drifted"] == 0
     assert report["summary"]["runner_errors"] == 0
     boundary_ids = {boundary["id"] for boundary in report["boundaries"]}
-    assert {"config-default-resolution", "dataflow-662-corpus-truncation"} <= boundary_ids
+    assert {
+        "config-default-resolution",
+        "dataflow-662-corpus-truncation",
+        "tool-request-budget",
+    } <= boundary_ids
 
 
 def test_broken_arrow_vulnerable_fixture_fails_parity_with_declared_signature():

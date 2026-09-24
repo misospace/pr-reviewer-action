@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { buildModelRequest } from "../model/request.js";
 import { parseVerdictResponse } from "../model/verdict.js";
+import { resolveToolMaxRequests } from "../tools/budget.js";
 import type { ModelRequestConfig, RequestShape, ResponseFormatMode, TokensParam, ApiFormat } from "../model/types.js";
 
 /**
@@ -88,6 +89,55 @@ export function runVerdictParserMode(responsePath: string): void {
     if (verdict.requirementCoverage !== undefined) parsed.requirement_coverage = verdict.requirementCoverage;
     for (const [key, value] of Object.entries(verdict.extra)) parsed[key] = value;
     payload = { ok: true, values: { parsed: canonical(parsed) } };
+  } catch (error) {
+    payload = { ok: false, stderr: error instanceof Error ? error.message : String(error) };
+  }
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * #701 tool-request-budget parity mode: evaluate every fixture case through
+ * the v3 tier-aware resolver and check it against the case's expected
+ * (route, budget). Like the v2 runner, an expectation mismatch fails closed
+ * (ok:false) so the absolute tier defaults are pinned, not just v2↔v3
+ * agreement.
+ */
+interface BudgetCase {
+  name: string;
+  tier: string;
+  env: Record<string, string>;
+  expected: { route: string; budget: number };
+}
+
+interface BudgetFixture {
+  contract?: string;
+  cases: BudgetCase[];
+}
+
+export function runToolBudgetMode(fixturePath: string): void {
+  let payload: Record<string, unknown>;
+  try {
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as BudgetFixture;
+    if (fixture.contract !== "tool-request-budget/v1") {
+      throw new Error("fixture is not tool-request-budget/v1");
+    }
+    if (!Array.isArray(fixture.cases) || fixture.cases.length === 0) {
+      throw new Error("fixture has no cases");
+    }
+    const values: Record<string, string> = {};
+    const failures: string[] = [];
+    for (const testCase of fixture.cases) {
+      const resolved = resolveToolMaxRequests(testCase.tier, testCase.env);
+      values[testCase.name] = `${resolved.route}/${resolved.budget}`;
+      if (resolved.route !== testCase.expected.route || resolved.budget !== testCase.expected.budget) {
+        failures.push(
+          `${testCase.name}: expected ${testCase.expected.route}/${testCase.expected.budget}, got ${resolved.route}/${resolved.budget}`,
+        );
+      }
+    }
+    payload = failures.length > 0
+      ? { ok: false, stderr: failures.join("; ") }
+      : { ok: true, values };
   } catch (error) {
     payload = { ok: false, stderr: error instanceof Error ? error.message : String(error) };
   }

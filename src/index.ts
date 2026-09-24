@@ -2,7 +2,7 @@ import { validateContract } from "./config/contract.js";
 import { loadConfig } from "./config/load-config.js";
 import { toJSON } from "./config/types.js";
 import { assertSupportedNode } from "./runtime/node-version.js";
-import { runRequestBuilderMode, runVerdictParserMode } from "./modes/parity.js";
+import { runRequestBuilderMode, runToolBudgetMode, runVerdictParserMode } from "./modes/parity.js";
 import { runPrecheckFixture } from "./precheck/index.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 
@@ -38,6 +38,8 @@ if (require.main === module) {
     runRequestBuilderMode(firstArg);
   } else if (mode === "v3-verdict-parser" && firstArg) {
     runVerdictParserMode(firstArg);
+  } else if (mode === "tool-budget" && firstArg) {
+    runToolBudgetMode(firstArg);
   } else if (mode !== "") {
     process.stderr.write(`v3 runtime: unknown parity mode '${mode}'\n`);
     process.exitCode = 1;

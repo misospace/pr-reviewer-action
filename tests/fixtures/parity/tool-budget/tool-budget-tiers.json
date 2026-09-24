@@ -1,0 +1,107 @@
+{
+  "fixture": "tool-budget-tiers",
+  "contract": "tool-request-budget/v1",
+  "description": "#701 tier-aware native tool-loop request budget: the effective budget follows the review route (primary 8, smart 16, escalated 20), explicit values are bounded to 1..20, and SMART_TOOL_MAX_REQUESTS outranks TOOL_MAX_REQUESTS on smart/escalated runs. Each case carries the env the production harness subprocess would see and the expected (route, budget) both the v2 harness resolver and the v3 port must produce.",
+  "cases": [
+    {
+      "name": "primary-default",
+      "tier": "primary",
+      "env": {},
+      "expected": { "route": "primary", "budget": 8 }
+    },
+    {
+      "name": "routed-smart-profile",
+      "tier": "primary",
+      "env": { "REVIEW_CONTEXT_PROFILE": "smart" },
+      "expected": { "route": "smart", "budget": 16 }
+    },
+    {
+      "name": "smart-tier-default",
+      "tier": "smart",
+      "env": {},
+      "expected": { "route": "smart", "budget": 16 }
+    },
+    {
+      "name": "escalated-default",
+      "tier": "smart",
+      "env": { "TOOL_ESCALATION": "true" },
+      "expected": { "route": "escalated", "budget": 20 }
+    },
+    {
+      "name": "escalation-wins-over-profile",
+      "tier": "smart",
+      "env": { "REVIEW_CONTEXT_PROFILE": "smart", "TOOL_ESCALATION": "true" },
+      "expected": { "route": "escalated", "budget": 20 }
+    },
+    {
+      "name": "explicit-overrides-primary",
+      "tier": "primary",
+      "env": { "TOOL_MAX_REQUESTS": "5" },
+      "expected": { "route": "primary", "budget": 5 }
+    },
+    {
+      "name": "explicit-overrides-smart",
+      "tier": "smart",
+      "env": { "TOOL_MAX_REQUESTS": "5" },
+      "expected": { "route": "smart", "budget": 5 }
+    },
+    {
+      "name": "explicit-overrides-escalated",
+      "tier": "smart",
+      "env": { "TOOL_MAX_REQUESTS": "5", "TOOL_ESCALATION": "true" },
+      "expected": { "route": "escalated", "budget": 5 }
+    },
+    {
+      "name": "hard-ceiling-clamps-high",
+      "tier": "primary",
+      "env": { "TOOL_MAX_REQUESTS": "99" },
+      "expected": { "route": "primary", "budget": 20 }
+    },
+    {
+      "name": "floor-clamps-zero",
+      "tier": "primary",
+      "env": { "TOOL_MAX_REQUESTS": "0" },
+      "expected": { "route": "primary", "budget": 1 }
+    },
+    {
+      "name": "smart-override-precedence",
+      "tier": "smart",
+      "env": { "SMART_TOOL_MAX_REQUESTS": "10", "TOOL_MAX_REQUESTS": "3" },
+      "expected": { "route": "smart", "budget": 10 }
+    },
+    {
+      "name": "escalated-override-precedence",
+      "tier": "smart",
+      "env": {
+        "SMART_TOOL_MAX_REQUESTS": "10",
+        "TOOL_MAX_REQUESTS": "3",
+        "TOOL_ESCALATION": "true"
+      },
+      "expected": { "route": "escalated", "budget": 10 }
+    },
+    {
+      "name": "smart-override-ignored-on-primary",
+      "tier": "primary",
+      "env": { "SMART_TOOL_MAX_REQUESTS": "10" },
+      "expected": { "route": "primary", "budget": 8 }
+    },
+    {
+      "name": "invalid-explicit-falls-to-tier-default",
+      "tier": "smart",
+      "env": { "TOOL_MAX_REQUESTS": "abc" },
+      "expected": { "route": "smart", "budget": 16 }
+    },
+    {
+      "name": "invalid-smart-override-falls-to-explicit",
+      "tier": "smart",
+      "env": { "SMART_TOOL_MAX_REQUESTS": "abc", "TOOL_MAX_REQUESTS": "7" },
+      "expected": { "route": "smart", "budget": 7 }
+    },
+    {
+      "name": "invalid-both-fall-to-tier-default",
+      "tier": "smart",
+      "env": { "SMART_TOOL_MAX_REQUESTS": "abc", "TOOL_MAX_REQUESTS": "abc" },
+      "expected": { "route": "smart", "budget": 16 }
+    }
+  ]
+}

@@ -139,13 +139,22 @@ that cutover.
 `tool_max_requests` defaults to **empty** on both sides. The empty value is
 resolved at tool-harness time into a tier-aware budget — primary ~8, smart
 route ~16, escalated (deep) up to 20, hard ceiling 20 — instead of one
-undifferentiated ceiling. Explicit values override every tier (clamped to
-1..20); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs. The v3
-native tool loop must reproduce this resolution and the exhaustion-aware
-behavior (remaining-budget notes on later loop turns, low-budget pivot to
-blocker hypotheses, `tool-call-budget-exhausted` kept as a distinct stop
-reason); the contract description for `tool-max-requests` carries the same
-semantics.
+undifferentiated ceiling. Explicit values override every tier (bounded to
+1..20); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs.
+Precedence: `SMART_TOOL_MAX_REQUESTS` (smart/escalated) > `tool_max_requests`
+> tier default. The v3 native tool loop must reproduce this resolution and
+the exhaustion-aware behavior (remaining-budget notes on later loop turns,
+low-budget pivot to blocker hypotheses, `tool-call-budget-exhausted` kept as
+a distinct stop reason); the contract description for `tool-max-requests`
+carries the same semantics.
+
+The behavior is pinned by the `tool-request-budget` parity boundary
+(#673): `tests/fixtures/parity/tool-budget/tool-budget-tiers.json` carries
+the expected (route, budget) per case, `tests/parity_runners/v2_tool_budget.py`
+runs the real v2 harness resolver, and `src/tools/budget.ts` is the v3 port
+(`PR_REVIEWER_V3_MODE=tool-budget`). Both sides fail closed on any
+expectation mismatch, so #678 cannot regress to a single undifferentiated
+request ceiling.
 
 ## Retained outputs
 

@@ -740,7 +740,53 @@ VERDICT_BOUNDARY = Boundary(
 )
 
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY)
+# ---------------------------------------------------------------------------
+# Boundary: tier-aware tool request budget (#701)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_tool_budget.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=300,
+    )
+
+
+def run_v3_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    return run_json_runner(
+        [node, "dist/index.js", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "PR_REVIEWER_V3_MODE": "tool-budget",
+        },
+    )
+
+
+TOOL_BUDGET_BOUNDARY = Boundary(
+    id="tool-request-budget",
+    description=(
+        "#701 tier-aware native tool-loop request budget: the v2 production "
+        "harness resolver (run through the real run_tool_harness.py "
+        "missing-corpus path) versus the v3 port, over tier defaults "
+        "(primary 8, smart 16, escalated 20), explicit overrides, "
+        "SMART_TOOL_MAX_REQUESTS precedence, and the 1..20 hard ceiling. "
+        "Both sides enforce the fixture's expected (route, budget), so the "
+        "absolute values are pinned, not just cross-side agreement — the "
+        "#678 migration cannot regress to a single undifferentiated ceiling."
+    ),
+    fixtures_dir="tool-budget",
+    run=lambda fixture, workdir: (run_v2_tool_budget(fixture, workdir), run_v3_tool_budget(fixture, workdir)),
+)
+
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)
