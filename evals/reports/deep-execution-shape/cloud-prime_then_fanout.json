@@ -1,0 +1,1083 @@
+{
+  "metadata": {
+    "generated_at": "2026-09-24T13:29:42.060305+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "tools_off+deep-prime"
+    ],
+    "total_prs": 5,
+    "corpus_source": "/Users/joryirving/git/pr-reviewer-action-review/evals/corpus-specialists.json"
+  },
+  "mode_summary": {
+    "native_loop": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off+deep-prime": {
+      "runs": 5,
+      "successful_runs": 4,
+      "total_tokens_input": 72478,
+      "total_tokens_output": 16660,
+      "total_wall_clock_sec": 591.34428612591,
+      "findings_count": 12,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 1,
+      "capability_runs": 1,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 5,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 4,
+      "specialist_lead_passes": 0,
+      "deep_runs": 4,
+      "specialist_tokens_input": 58686,
+      "specialist_tokens_output": 51843,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 12,
+      "specialist_request_bytes": 242526,
+      "avg_tokens_input": 18119.5,
+      "avg_tokens_output": 4165.0,
+      "avg_wall_clock_sec": 147.836,
+      "capability_pass_rate": 0.0,
+      "specialist_effectiveness_pass_rate": 0.0,
+      "specialist_lead_pass_rate": 0.0,
+      "avg_specialist_tokens_input": 14671.5,
+      "avg_specialist_tokens_output": 12960.8,
+      "avg_specialist_tokens_cached": 0.0,
+      "avg_specialist_lead_overlap": 0.0,
+      "avg_specialist_requests": 3.0,
+      "avg_specialist_request_bytes": 60631.5
+    }
+  },
+  "per_pr_results": [
+    {
+      "pr_number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-prime": {
+        "mode": "tools_off+deep-prime",
+        "pr_number": 547,
+        "commit_sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 16389,
+        "tokens_output": 3105,
+        "wall_clock_sec": 136.531,
+        "verdict": "approve",
+        "verdict_source": "model",
+        "findings_count": 1,
+        "findings": [
+          {
+            "severity": "info",
+            "category": "style",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 81,
+            "message": "PR uses threading.RLock instead of the threading.Lock specified in the issue; the choice is well-documented inline (reentrance from _get_jwt holding the lock across _fetch_authorized_integration_jwt) and is a strict superset, so no acceptance criterion is weakened."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 97.68,
+          "execution": "prime_then_fanout",
+          "specialist_tokens_input": 13149,
+          "specialist_tokens_output": 9062,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 54471,
+          "total_leads": 4,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 15856,
+          "specialist_max_tokens": 16386,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 22.459,
+              "usage": {
+                "prompt_tokens": 4471,
+                "completion_tokens": 3207,
+                "cached_tokens": null,
+                "total_tokens": 7678
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 26.754,
+              "usage": {
+                "prompt_tokens": 4339,
+                "completion_tokens": 1297,
+                "cached_tokens": null,
+                "total_tokens": 5636
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 4,
+              "elapsed_sec": 75.22,
+              "usage": {
+                "prompt_tokens": 4339,
+                "completion_tokens": 4558,
+                "cached_tokens": null,
+                "total_tokens": 8897
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": [
+              {
+                "severity": "minor",
+                "category": "missing-assertion",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "Concurrent-fetch tests assert urlopen.call_count == 1 but never verify that _JWT_CACHE holds the expected token afterward, leaving cache state under-tested for the changed code path."
+              },
+              {
+                "severity": "minor",
+                "category": "missing-coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No test exercises _fetch_authorized_integration_jwt raising while the lock is held, so exception propagation, lock release, and cache-not-written-on-error behavior of the new lock wrapper are untested."
+              },
+              {
+                "severity": "minor",
+                "category": "missing-coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "The RLock choice (vs. Lock) is justified by reentrance from _get_jwt holding the lock across _fetch_authorized_integration_jwt, but no test would specifically fail if _JWT_LOCK were downgraded to a non-reentrant Lock with the inner 'with _JWT_LOCK' removed."
+              },
+              {
+                "severity": "info",
+                "category": "timing-dependence",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "Race-window widening relies on a fixed 50 ms sleep in the mocked urlopen; on extremely contended CI the widening may be too short to deterministically expose a missing lock."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "minor",
+            "category": "missing-assertion",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "Concurrent-fetch tests assert urlopen.call_count == 1 but never verify that _JWT_CACHE holds the expected token afterward, leaving cache state under-tested for the changed code path."
+          },
+          {
+            "severity": "minor",
+            "category": "missing-coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test exercises _fetch_authorized_integration_jwt raising while the lock is held, so exception propagation, lock release, and cache-not-written-on-error behavior of the new lock wrapper are untested."
+          },
+          {
+            "severity": "minor",
+            "category": "missing-coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "The RLock choice (vs. Lock) is justified by reentrance from _get_jwt holding the lock across _fetch_authorized_integration_jwt, but no test would specifically fail if _JWT_LOCK were downgraded to a non-reentrant Lock with the inner 'with _JWT_LOCK' removed."
+          },
+          {
+            "severity": "info",
+            "category": "timing-dependence",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "Race-window widening relies on a fixed 50 ms sleep in the mocked urlopen; on extremely contended CI the widening may be too short to deterministically expose a missing lock."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "security_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            },
+            {
+              "id": "no_hallucinated_secret_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": true,
+              "detail": "0 matching finding(s); min=0, max=0"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      }
+    },
+    {
+      "pr_number": 551,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-prime": {
+        "mode": "tools_off+deep-prime",
+        "pr_number": 551,
+        "commit_sha": "13f016d933823771606da74f5ec59c13d253a51e",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 17221,
+        "tokens_output": 6304,
+        "wall_clock_sec": 228.377,
+        "verdict": "approve",
+        "verdict_source": "model",
+        "findings_count": 1,
+        "findings": [
+          {
+            "severity": "info",
+            "category": "other",
+            "file": null,
+            "line": null,
+            "message": "The supplied PR Diff block contains only pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py — neither is in the changed_files_summary. The diff content matches PR #547 (Forgejo JWT cache thread-safety) per repository history, suggesting a corpus-side substitution rather than a PR defect. Carry-forward diff bodies are not present in the corpus, so the carry-forward changes were assessed via impact-scan evidence rather than line-by-line diff review."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 121.044,
+          "execution": "prime_then_fanout",
+          "specialist_tokens_input": 14136,
+          "specialist_tokens_output": 18568,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 58893,
+          "total_leads": 6,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 17188,
+          "specialist_max_tokens": 16386,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 95.507,
+              "usage": {
+                "prompt_tokens": 4800,
+                "completion_tokens": 14405,
+                "cached_tokens": null,
+                "total_tokens": 19205
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 6.416,
+              "usage": {
+                "prompt_tokens": 4668,
+                "completion_tokens": 1382,
+                "cached_tokens": null,
+                "total_tokens": 6050
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 6,
+              "elapsed_sec": 25.537,
+              "usage": {
+                "prompt_tokens": 4668,
+                "completion_tokens": 2781,
+                "cached_tokens": null,
+                "total_tokens": 7449
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": [
+              {
+                "severity": "info",
+                "category": "unverified_promise",
+                "file": "tests/test_forgejo_backend.py",
+                "line": 1792,
+                "message": "The comment claims the test 'deterministically fails if the lock is removed', but no assertion-only-no-lock variant is kept in the suite to prove that claim holds for this race-condition test design."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": 1864,
+                "message": "No test exercises the error path where _fetch_authorized_integration_jwt raises while holding the lock; cache and lock state should remain consistent (not asserted)."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": 1864,
+                "message": "The _JWT_LOCK is an RLock specifically so _fetch_authorized_integration_jwt can re-acquire it from inside _get_jwt; the suite has no nested-acquisition test that would catch a regression to a non-reentrant Lock (which would deadlock here)."
+              },
+              {
+                "severity": "minor",
+                "category": "flaky_dependency",
+                "file": "tests/test_forgejo_backend.py",
+                "line": 1779,
+                "message": "Concurrency tests widen the race with time.sleep(0.05) inside the mocked urlopen; on heavily loaded CI the 10 threads may not actually overlap inside _fetch_authorized_integration_jwt, which could let a buggy implementation occasionally pass single-fetch assertions."
+              },
+              {
+                "severity": "info",
+                "category": "test_granularity",
+                "file": "tests/test_forgejo_backend.py",
+                "line": 1837,
+                "message": "test_serial_cache_hit_no_fetch bundles three sub-scenarios (hit/miss/expiry) into a single test method; failures will not pinpoint which sub-scenario regressed."
+              },
+              {
+                "severity": "info",
+                "category": "coverage_corpus_gap",
+                "file": "tests/test_carry_forward.py",
+                "line": null,
+                "message": "The carry_forward/needs_full_review behavior change described in the PR title is not reflected in the supplied diff; tests/test_carry_forward.py is listed as +85/-1 but no diff body is available to verify the new tests actually assert the propagated signal triggers a full review on the next run."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "info",
+            "category": "unverified_promise",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1792,
+            "message": "The comment claims the test 'deterministically fails if the lock is removed', but no assertion-only-no-lock variant is kept in the suite to prove that claim holds for this race-condition test design."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1864,
+            "message": "No test exercises the error path where _fetch_authorized_integration_jwt raises while holding the lock; cache and lock state should remain consistent (not asserted)."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1864,
+            "message": "The _JWT_LOCK is an RLock specifically so _fetch_authorized_integration_jwt can re-acquire it from inside _get_jwt; the suite has no nested-acquisition test that would catch a regression to a non-reentrant Lock (which would deadlock here)."
+          },
+          {
+            "severity": "minor",
+            "category": "flaky_dependency",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1779,
+            "message": "Concurrency tests widen the race with time.sleep(0.05) inside the mocked urlopen; on heavily loaded CI the 10 threads may not actually overlap inside _fetch_authorized_integration_jwt, which could let a buggy implementation occasionally pass single-fetch assertions."
+          },
+          {
+            "severity": "info",
+            "category": "test_granularity",
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1837,
+            "message": "test_serial_cache_hit_no_fetch bundles three sub-scenarios (hit/miss/expiry) into a single test method; failures will not pinpoint which sub-scenario regressed."
+          },
+          {
+            "severity": "info",
+            "category": "coverage_corpus_gap",
+            "file": "tests/test_carry_forward.py",
+            "line": null,
+            "message": "The carry_forward/needs_full_review behavior change described in the PR title is not reflected in the supplied diff; tests/test_carry_forward.py is listed as +85/-1 but no diff body is available to verify the new tests actually assert the propagated signal triggers a full review on the next run."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap in carry_forward and the final reviewer should verify it against the diff with a finding grounded in that file and adopt it.",
+          "checks": [
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "correctness_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      }
+    },
+    {
+      "pr_number": 612,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-prime": {
+        "mode": "tools_off+deep-prime",
+        "pr_number": 612,
+        "commit_sha": "59e7cf7b3ebc9dd0b0bf66280e7f290849e8c7a8",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 20972,
+        "tokens_output": 3926,
+        "wall_clock_sec": 95.576,
+        "verdict": "request_changes",
+        "verdict_source": "model",
+        "findings_count": 5,
+        "findings": [
+          {
+            "severity": "blocker",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": null,
+            "message": "Scope mismatch: PR title/body/metadata describe adding pr_reviewer/specialists.py + prompt fragments + tests/test_specialists.py + AGENTS.md bullet for issue #607, but the supplied diff only modifies pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py; none of the #607 expected files appear in the diff."
+          },
+          {
+            "severity": "blocker",
+            "category": "docs",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": null,
+            "message": "Linked issue #607 acceptance criteria are entirely unmet by this diff: no specialists module, no role prompt fragments, no specialists tests, no AGENTS.md note; the forgejo_backend JWT-lock change is unrelated to #607."
+          },
+          {
+            "severity": "minor",
+            "category": "bug",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency._run_concurrent_get_jwt joins threads with a 30s timeout but never asserts the threads are alive==False; a deadlock (e.g., RLock regressed to Lock) could leave zombies and still report call_count==1."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test exercises _fetch_authorized_integration_jwt raising under _JWT_LOCK; cache invariants on the failure path (no partial write, no leaked stale token) are untested."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "test_serial_cache_hit_no_fetch mutates module globals fb._JWT_CACHE / fb._JWT_CACHE_TIME across three sequential with-blocks without a per-block reset, so an exception in an earlier block leaks state into a later one."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 48.195,
+          "execution": "prime_then_fanout",
+          "specialist_tokens_input": 18222,
+          "specialist_tokens_output": 13456,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 74532,
+          "total_leads": 6,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 22344,
+          "specialist_max_tokens": 16386,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 26.547,
+              "usage": {
+                "prompt_tokens": 6162,
+                "completion_tokens": 7218,
+                "cached_tokens": null,
+                "total_tokens": 13380
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 21.648,
+              "usage": {
+                "prompt_tokens": 6030,
+                "completion_tokens": 2384,
+                "cached_tokens": null,
+                "total_tokens": 8414
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 6,
+              "elapsed_sec": 14.405,
+              "usage": {
+                "prompt_tokens": 6030,
+                "completion_tokens": 3854,
+                "cached_tokens": null,
+                "total_tokens": 9884
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": [
+              {
+                "severity": "major",
+                "category": "scope_mismatch",
+                "file": null,
+                "line": null,
+                "message": "PR description and changed_files list add pr_reviewer/specialists.py and tests/test_specialists.py (claimed 79 cases), but the supplied diff only modifies pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py; specialist-contract test coverage is therefore not verifiable from this corpus."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_assertion",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "TestJwtCacheConcurrency._run_concurrent_get_jwt calls t.join(timeout=30) but never asserts the threads completed; a deadlock from replacing RLock with a non-reentrant Lock would leave zombies and the test could still pass."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No test exercises the failure path of _fetch_authorized_integration_jwt; if the token-exchange raises while _JWT_LOCK is held, lock release and cache invariants (no partial write, no leaked stale token) are untested."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No test specifically asserts the RLock re-entrancy property: _get_jwt holds _JWT_LOCK and calls _fetch_authorized_integration_jwt which re-acquires _JWT_LOCK; a regression to threading.Lock would deadlock but is only indirectly covered."
+              },
+              {
+                "severity": "minor",
+                "category": "flaky",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "Race-window widening relies on a fixed time.sleep(0.05) inside slow_urlopen; no assertion verifies that the 10 threads actually overlapped at the cache-check point, so a regression that re-introduces the race could still appear to pass on a fast or slow runner."
+              },
+              {
+                "severity": "minor",
+                "category": "state_leak",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "test_serial_cache_hit_no_fetch mutates module globals fb._JWT_CACHE and fb._JWT_CACHE_TIME across three sequential with-blocks without resetting between blocks; an exception in the cache-hit phase leaves stale-token state for the TTL-expiry assertion."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "major",
+            "category": "scope_mismatch",
+            "file": null,
+            "line": null,
+            "message": "PR description and changed_files list add pr_reviewer/specialists.py and tests/test_specialists.py (claimed 79 cases), but the supplied diff only modifies pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py; specialist-contract test coverage is therefore not verifiable from this corpus."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_assertion",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency._run_concurrent_get_jwt calls t.join(timeout=30) but never asserts the threads completed; a deadlock from replacing RLock with a non-reentrant Lock would leave zombies and the test could still pass."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test exercises the failure path of _fetch_authorized_integration_jwt; if the token-exchange raises while _JWT_LOCK is held, lock release and cache invariants (no partial write, no leaked stale token) are untested."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test specifically asserts the RLock re-entrancy property: _get_jwt holds _JWT_LOCK and calls _fetch_authorized_integration_jwt which re-acquires _JWT_LOCK; a regression to threading.Lock would deadlock but is only indirectly covered."
+          },
+          {
+            "severity": "minor",
+            "category": "flaky",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "Race-window widening relies on a fixed time.sleep(0.05) inside slow_urlopen; no assertion verifies that the 10 threads actually overlapped at the cache-check point, so a regression that re-introduces the race could still appear to pass on a fast or slow runner."
+          },
+          {
+            "severity": "minor",
+            "category": "state_leak",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "test_serial_cache_hit_no_fetch mutates module globals fb._JWT_CACHE and fb._JWT_CACHE_TIME across three sequential with-blocks without resetting between blocks; an exception in the cache-hit phase leaves stale-token state for the TTL-expiry assertion."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization in the specialists module, and the final reviewer should adopt that as a coverage finding grounded in that file.",
+          "checks": [
+            {
+              "id": "tests_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "tests_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_coverage_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      }
+    },
+    {
+      "pr_number": 622,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-prime": {
+        "mode": "tools_off+deep-prime",
+        "pr_number": 622,
+        "commit_sha": "3119b975fd3a503170426e8bcf0730650f6ccb7c",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 185.435,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): Parsed JSON missing required key 'verdict' (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704580e825244c81340bcbfb7990906\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully.\\n\\nThe PR is #622 titled \\\"ci(codeql): add CodeQL ",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "capability": {
+          "description": "Grader-only evidence for the negative control; not a reviewer recipe. A simple CI workflow addition must keep the tool loop lean, with no more than four tool calls.",
+          "checks": [
+            {
+              "id": "limits_tool_calls",
+              "type": "max_tool_calls",
+              "passed": false
+            }
+          ],
+          "passed": false
+        },
+        "specialist_capability": {
+          "description": "Grader-only rationale for the negative control; not a reviewer recipe. Deep review must not invent findings on a simple CI workflow addition, and no specialist lead is expected on this change.",
+          "checks": [
+            {
+              "id": "no_final_findings",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Parsed JSON missing required key 'verdict' (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704580e825244c81340bcbfb7990906\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully.\\n\\nThe PR is #622 titled \\\"ci(codeql): add CodeQL "
+            },
+            {
+              "id": "no_duplicated_findings",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Parsed JSON missing required key 'verdict' (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"0704580e825244c81340bcbfb7990906\", \"object\": \"chat.completion\", \"model\": \"MiniMax-M3-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"<think>\\nLet me analyze this PR carefully.\\n\\nThe PR is #622 titled \\\"ci(codeql): add CodeQL "
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": null
+        }
+      },
+      "capability_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      }
+    },
+    {
+      "pr_number": 597,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-prime": {
+        "mode": "tools_off+deep-prime",
+        "pr_number": 597,
+        "commit_sha": "778beb7e43d1a9d9b5ba6d969da392a3e9530e5d",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 17896,
+        "tokens_output": 3325,
+        "wall_clock_sec": 130.861,
+        "verdict": "request_changes",
+        "verdict_source": "model",
+        "findings_count": 5,
+        "findings": [
+          {
+            "severity": "blocker",
+            "category": "bug",
+            "file": "pr_reviewer/precheck.py",
+            "line": null,
+            "message": "Diff scope mismatch: PR title, body, linked issue #581, and changed-files summary describe a fail-closed fix to pr_reviewer/precheck._resolve_maintainers plus a PyGithub pin, but the supplied diff contains no precheck.py or requirements.txt hunks — only unrelated forgejo_backend.py thread-safety changes."
+          },
+          {
+            "severity": "blocker",
+            "category": "security",
+            "file": "requirements.txt",
+            "line": null,
+            "message": "Linked P1 audit issue #581 acceptance criterion (pin PyGithub in requirements.txt so the production precheck step's github import resolves instead of hitting the fail-open ImportError branch) is not demonstrated in the supplied diff; the production failure mode described in the issue remains unmitigated."
+          },
+          {
+            "severity": "blocker",
+            "category": "docs",
+            "file": "tests/test_precheck.py",
+            "line": null,
+            "message": "changed_files_summary lists tests/test_precheck.py with +240 lines, but no test_precheck.py hunk is present in the supplied diff, so the fail-closed test contract (ImportError → set(), every-user-raises → set(), local-dev no-token → candidates) cannot be verified from the corpus."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency relies on a hardcoded time.sleep(0.05) in slow_urlopen to widen the race window; under variable CI scheduling the threads may serialize before the first fetch starts, deflating coverage of the contended path. Consider asserting the lock object identity/type or using a barrier that holds inside the mock."
+          },
+          {
+            "severity": "minor",
+            "category": "other",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test asserts the RLock re-entrant contract (RLock → non-reentrant Lock regression would deadlock under _get_jwt→_fetch_authorized_integration_jwt) and no test covers the failure path where urlopen raises during the fetch (lock/cache invariants after a partial fetch are unverified)."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "MiniMax-M3-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 74.646,
+          "execution": "prime_then_fanout",
+          "specialist_tokens_input": 13179,
+          "specialist_tokens_output": 10757,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 54630,
+          "total_leads": 5,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 15896,
+          "specialist_max_tokens": 16386,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 48.218,
+              "usage": {
+                "prompt_tokens": 4481,
+                "completion_tokens": 5736,
+                "cached_tokens": null,
+                "total_tokens": 10217
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 13.066,
+              "usage": {
+                "prompt_tokens": 4349,
+                "completion_tokens": 1244,
+                "cached_tokens": null,
+                "total_tokens": 5593
+              }
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 5,
+              "elapsed_sec": 26.427,
+              "usage": {
+                "prompt_tokens": 4349,
+                "completion_tokens": 3777,
+                "cached_tokens": null,
+                "total_tokens": 8126
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [],
+            "tests": [
+              {
+                "severity": "major",
+                "category": "scope_mismatch",
+                "file": "tests/test_precheck.py",
+                "line": null,
+                "message": "PR title/body describe a fail-closed fix in precheck.py around the @ai-reviewer dismiss permission check, but the diff shows concurrency changes in forgejo_backend.py with tests in test_forgejo_backend.py; no test in the diff covers the stated precheck fail-closed contract (e.g., returning an empty maintainer set on permission-check errors vs. raising/skipping)."
+              },
+              {
+                "severity": "minor",
+                "category": "flaky_timing",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "TestJwtCacheConcurrency._run_concurrent_get_jwt relies on a hardcoded time.sleep(0.05) in slow_urlopen to widen the race window; this timing-dependent widen-the-race strategy can be flaky under variable CI scheduling (threads may serialize before the first fetch starts, deflating coverage of the actual contention)."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No explicit test asserts the RLock re-entrant contract: _fetch_authorized_integration_jwt acquires _JWT_LOCK to publish the cache while _get_jwt already holds it across the fetch; the new tests exercise this only implicitly, and a regression to a non-reentrant Lock would not be caught by an isolated re-entrancy assertion."
+              },
+              {
+                "severity": "minor",
+                "category": "missing_coverage",
+                "file": "tests/test_forgejo_backend.py",
+                "line": null,
+                "message": "No test covers the failure path in the token exchange (e.g., urlopen raising URLError or HTTPError); lock/cache invariants after a partial fetch are not asserted, so a regression that leaves _JWT_CACHE populated with a bad value or the lock held on exception would go undetected."
+              },
+              {
+                "severity": "major",
+                "category": "scope_mismatch",
+                "file": "requirements.txt",
+                "line": null,
+                "message": "changed_files_summary reports changes to pr_reviewer/precheck.py, requirements.txt, and tests/test_precheck.py, but the diff in this corpus touches pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py; the main reviewer should reconcile the discrepancy before signing off, and tests/test_precheck.py + requirements.txt changes (if real) need separate test-coverage review."
+              }
+            ]
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "major",
+            "category": "scope_mismatch",
+            "file": "tests/test_precheck.py",
+            "line": null,
+            "message": "PR title/body describe a fail-closed fix in precheck.py around the @ai-reviewer dismiss permission check, but the diff shows concurrency changes in forgejo_backend.py with tests in test_forgejo_backend.py; no test in the diff covers the stated precheck fail-closed contract (e.g., returning an empty maintainer set on permission-check errors vs. raising/skipping)."
+          },
+          {
+            "severity": "minor",
+            "category": "flaky_timing",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "TestJwtCacheConcurrency._run_concurrent_get_jwt relies on a hardcoded time.sleep(0.05) in slow_urlopen to widen the race window; this timing-dependent widen-the-race strategy can be flaky under variable CI scheduling (threads may serialize before the first fetch starts, deflating coverage of the actual contention)."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No explicit test asserts the RLock re-entrant contract: _fetch_authorized_integration_jwt acquires _JWT_LOCK to publish the cache while _get_jwt already holds it across the fetch; the new tests exercise this only implicitly, and a regression to a non-reentrant Lock would not be caught by an isolated re-entrancy assertion."
+          },
+          {
+            "severity": "minor",
+            "category": "missing_coverage",
+            "file": "tests/test_forgejo_backend.py",
+            "line": null,
+            "message": "No test covers the failure path in the token exchange (e.g., urlopen raising URLError or HTTPError); lock/cache invariants after a partial fetch are not asserted, so a regression that leaves _JWT_CACHE populated with a bad value or the lock held on exception would go undetected."
+          },
+          {
+            "severity": "major",
+            "category": "scope_mismatch",
+            "file": "requirements.txt",
+            "line": null,
+            "message": "changed_files_summary reports changes to pr_reviewer/precheck.py, requirements.txt, and tests/test_precheck.py, but the diff in this corpus touches pr_reviewer/forgejo_backend.py and tests/test_forgejo_backend.py; the main reviewer should reconcile the discrepancy before signing off, and tests/test_precheck.py + requirements.txt changes (if real) need separate test-coverage review."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap in the precheck, the two overlapping leads must collapse into one final finding grounded in that file, and the final reviewer should verify and adopt it.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "precheck_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            },
+            {
+              "id": "overlapping_leads_deduped",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": true,
+              "detail": "0 matching finding(s); min=0, max=1 (dedupe)"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-prime": 0.0
+      }
+    }
+  ]
+}

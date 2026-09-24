@@ -1,0 +1,285 @@
+{
+  "metadata": {
+    "generated_at": "2026-09-24T07:11:52.661070+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "tools_off+deep"
+    ],
+    "total_prs": 1,
+    "corpus_source": "/Users/joryirving/git/pr-reviewer-action-review/evals/corpus-specialists.json"
+  },
+  "mode_summary": {
+    "native_loop": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off+deep": {
+      "runs": 1,
+      "successful_runs": 1,
+      "total_tokens_input": 17339,
+      "total_tokens_output": 8026,
+      "total_wall_clock_sec": 284.1729066669941,
+      "findings_count": 2,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 1,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 1,
+      "specialist_lead_passes": 0,
+      "deep_runs": 1,
+      "specialist_tokens_input": 13383,
+      "specialist_tokens_output": 10328,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 3,
+      "specialist_request_bytes": 54456,
+      "avg_tokens_input": 17339.0,
+      "avg_tokens_output": 8026.0,
+      "avg_wall_clock_sec": 284.173,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": 0.0,
+      "specialist_lead_pass_rate": 0.0,
+      "avg_specialist_tokens_input": 13383.0,
+      "avg_specialist_tokens_output": 10328.0,
+      "avg_specialist_tokens_cached": 0.0,
+      "avg_specialist_lead_overlap": 0.0,
+      "avg_specialist_requests": 3.0,
+      "avg_specialist_request_bytes": 54456.0
+    }
+  },
+  "per_pr_results": [
+    {
+      "pr_number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep": {
+        "mode": "tools_off+deep",
+        "pr_number": 547,
+        "commit_sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 17339,
+        "tokens_output": 8026,
+        "wall_clock_sec": 284.173,
+        "verdict": "approve",
+        "verdict_source": "model",
+        "findings_count": 2,
+        "findings": [
+          {
+            "severity": "info",
+            "category": "performance",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 204,
+            "message": "The RLock is held across the network token-exchange (the fetch is invoked inside _get_jwt's lock scope), so a slow or unresponsive OIDC endpoint blocks all concurrent _get_jwt() callers for the fetch duration; this is the availability cost of the check+fetch serialization the issue mandated, noted for awareness."
+          },
+          {
+            "severity": "info",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 81,
+            "message": "threading.RLock() is used where the issue text literally says threading.Lock(); this is a correct, documented deviation because _get_jwt re-enters the lock via _fetch_authorized_integration_jwt and a plain Lock would deadlock."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "qwen3.8-27b@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 142.1,
+          "execution": "three_call",
+          "specialist_tokens_input": 13383,
+          "specialist_tokens_output": 10328,
+          "specialist_tokens_cached": 0,
+          "request_count": 3,
+          "request_bytes_total": 54456,
+          "total_leads": 1,
+          "any_errors": true,
+          "derived": false,
+          "specialist_corpus_bytes": 15856,
+          "specialist_max_tokens": 4096,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "degraded",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 142.099,
+              "usage": {
+                "prompt_tokens": 4550,
+                "completion_tokens": 4096,
+                "cached_tokens": null,
+                "total_tokens": 8646
+              }
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 1,
+              "elapsed_sec": 87.507,
+              "usage": {
+                "prompt_tokens": 4416,
+                "completion_tokens": 2136,
+                "cached_tokens": null,
+                "total_tokens": 6552
+              }
+            },
+            {
+              "role": "tests",
+              "status": "degraded",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 58.206,
+              "usage": {
+                "prompt_tokens": 4417,
+                "completion_tokens": 4096,
+                "cached_tokens": null,
+                "total_tokens": 8513
+              }
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [],
+            "security": [
+              {
+                "severity": "info",
+                "category": "availability",
+                "file": "pr_reviewer/forgejo_backend.py",
+                "line": 199,
+                "message": "The RLock is held across the network token-exchange call inside _fetch_authorized_integration_jwt (invoked from within _get_jwt's lock scope), so a slow or unresponsive Forgejo endpoint would block every concurrent _get_jwt() caller for the duration of the fetch; consider narrowing the critical section to the cache read/write only and doing the fetch outside the lock, re-checking the cache under the lock before returning."
+              }
+            ],
+            "tests": []
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "info",
+            "category": "availability",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 199,
+            "message": "The RLock is held across the network token-exchange call inside _fetch_authorized_integration_jwt (invoked from within _get_jwt's lock scope), so a slow or unresponsive Forgejo endpoint would block every concurrent _get_jwt() caller for the duration of the fetch; consider narrowing the critical section to the cache read/write only and doing the fetch outside the lock, re-checking the cache under the lock before returning."
+          }
+        ],
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s); min=1, max=None"
+            },
+            {
+              "id": "security_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "0 matching lead(s), 0 matching grounded finding(s); computed=unused, expected=verified"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "0 matching finding(s); min=1, max=None"
+            },
+            {
+              "id": "no_hallucinated_secret_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": true,
+              "detail": "0 matching finding(s); min=0, max=0"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep": 0.0
+      }
+    }
+  ]
+}
