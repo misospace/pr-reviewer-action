@@ -60,6 +60,23 @@ test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () 
   assert.equal(docker.tokenUrl, "https://auth.docker.io/token?service=registry.docker.io&scope=repository:o/app:pull");
   assert.equal(registryTargets("o/app").baseUrl, "https://registry-1.docker.io");
   assert.throws(() => registryTargets("quay.io/o/app"), /unsupported registry/);
+  for (const [image, path, guess] of [
+    ["nginx", "library/nginx", "library/nginx"],
+    ["docker.io/nginx", "library/nginx", "library/nginx"],
+    ["owner/app", "owner/app", "owner/app"],
+    ["docker.io/owner/app", "owner/app", "owner/app"],
+    ["ghcr.io/owner/app", "owner/app", "owner/app"],
+  ] as const) {
+    const target = registryTargets(image);
+    assert.equal(target.repoPath, path);
+    assert.ok(target.tokenUrl.includes(`repository:${path}:pull`));
+    assert.equal(target.baseUrl, image.startsWith("ghcr.io/") ? "https://ghcr.io" : "https://registry-1.docker.io");
+    assert.equal(guessRepoFromImage(image), guess);
+  }
+  for (const explicitUnknown of ["evil.io/app", "localhost/app", "host:5000/app"]) {
+    assert.throws(() => registryTargets(explicitUnknown), /unsupported registry/);
+    assert.equal(guessRepoFromImage(explicitUnknown), null);
+  }
   for (const hostile of [
     "evil-docker.io/o/app", "evil-ghcr.io/o/app", "docker.io.evil/o/app",
     "ghcr.io@evil.example/o/app", "ghcr.io/o%2fother/app", "ghcr.io/o/../app",
@@ -102,6 +119,19 @@ test("fetch shapes registry payloads into label provenance and surfaces errors",
   assert.ok(urls.some((url) => url.endsWith(`/manifests/${D1}`)));
   assert.ok(urls.some((url) => url.endsWith(`/blobs/sha256:${CFG}`)));
 
+  for (const image of ["nginx", "docker.io/nginx", "owner/app", "docker.io/owner/app"]) {
+    const seen: string[] = [];
+    const routed = await fetchDigestMetadata(image, D1, async (url) => {
+      seen.push(url);
+      if (url.includes("/token?")) return { token: "t" };
+      if (url.includes("/manifests/")) return { config: { digest: `sha256:${CFG}` } };
+      return {};
+    });
+    assert.equal(routed.error, null);
+    const expectedPath = image.includes("nginx") ? "library/nginx" : "owner/app";
+    assert.ok(seen.some((url) => url.includes(`repository:${expectedPath}:pull`)));
+    assert.ok(seen.some((url) => url.includes(`/v2/${expectedPath}/manifests/`)));
+  }
   const failed = await fetchDigestMetadata("ghcr.io/o/img", D1, async () => {
     throw new Error("HTTP request failed: 502");
   });

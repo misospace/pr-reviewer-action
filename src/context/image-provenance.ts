@@ -61,17 +61,21 @@ function validRepositoryPath(path: string): boolean {
 }
 
 function registryAndPath(repo: string): { registry: string; path: string } {
+  if (typeof repo !== "string" || repo.length === 0) throw new Error("unsupported registry for repo");
   const parts = repo.split("/");
-  const explicitRegistry = parts.length > 1 ? parts[0] as string : "";
-  if (explicitRegistry === "docker.io" || explicitRegistry === "ghcr.io") {
-    const path = parts.slice(1).join("/");
-    if (!validRepositoryPath(path)) throw new Error(`invalid repository path for ${explicitRegistry}`);
-    return { registry: explicitRegistry, path };
+  const first = parts[0] as string;
+  // Docker references identify a registry by punctuation in the first component.
+  const explicitRegistry = parts.length > 1 && (first.includes(".") || first.includes(":") || first === "localhost");
+  if (explicitRegistry) {
+    if (first !== "docker.io" && first !== "ghcr.io") throw new Error(`unsupported registry for repo ${repo}`);
+    let path = parts.slice(1).join("/");
+    if (!validRepositoryPath(path)) throw new Error(`invalid repository path for ${first}`);
+    if (first === "docker.io" && !path.includes("/")) path = `library/${path}`;
+    return { registry: first, path };
   }
-  if (["quay.io", "gcr.io", "registry.k8s.io"].includes(explicitRegistry)) {
-    throw new Error(`unsupported registry for repo ${repo}`);
-  }
-  if (parts.length === 2 && validRepositoryPath(repo)) return { registry: "docker.io", path: repo };
+  if (!validRepositoryPath(repo)) throw new Error("invalid repository path for docker.io");
+  if (parts.length === 1) return { registry: "docker.io", path: `library/${repo}` };
+  if (parts.length === 2) return { registry: "docker.io", path: repo };
   throw new Error(`unsupported registry for repo ${repo}`);
 }
 
@@ -200,7 +204,6 @@ export function guessRepoFromImage(imageRepo: string): string | null {
     return null;
   }
   const parts = parsed.path.split("/");
-  if (parsed.registry === "docker.io" && parts.length === 1) return `library/${parts[0]}`;
   if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
   return null;
 }

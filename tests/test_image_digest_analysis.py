@@ -216,8 +216,50 @@ class TestResolveCompareRepo:
             result = ida.fetch_digest_metadata(repo, DIGEST_A)
         assert "invalid repository path" in result["error"]
 
-    def test_docker_hub_single_name_uses_library_namespace(self):
-        assert ida.guess_repo_from_image("docker.io/nginx") == "library/nginx"
+    @pytest.mark.parametrize(
+        ("image", "path", "guess"),
+        [
+            ("nginx", "library/nginx", "library/nginx"),
+            ("docker.io/nginx", "library/nginx", "library/nginx"),
+            ("owner/app", "owner/app", "owner/app"),
+            ("docker.io/owner/app", "owner/app", "owner/app"),
+            ("ghcr.io/owner/app", "owner/app", "owner/app"),
+        ],
+    )
+    def test_registry_canonical_paths_and_compare_guesses(self, image, path, guess):
+        repo_path, token_url, base_url = ida.registry_targets(image)
+        assert repo_path == path
+        assert base_url == ("https://ghcr.io" if image.startswith("ghcr.io/") else "https://registry-1.docker.io")
+        from urllib.parse import parse_qs, urlsplit
+        assert parse_qs(urlsplit(token_url).query)["scope"] == [f"repository:{path}:pull"]
+        assert ida.guess_repo_from_image(image) == guess
+
+    def test_fetch_uses_canonical_docker_hub_urls(self, monkeypatch):
+        ida._TOKEN_CACHE.clear()
+        urls = []
+
+        def fake_http_json(url, headers=None):
+            urls.append(url)
+            if "/token?" in url:
+                return {"token": "t"}
+            if "/manifests/" in url:
+                return {"config": {"digest": "sha256:config"}}
+            return {}
+
+        monkeypatch.setattr(ida, "http_json", fake_http_json)
+        for image in ("nginx", "docker.io/nginx", "owner/app", "docker.io/owner/app"):
+            result = ida.fetch_digest_metadata(image, DIGEST_A)
+            assert result["error"] is None
+        assert any("scope=repository:library%2Fnginx:pull" in url for url in urls)
+        assert any("/v2/library/nginx/manifests/" in url for url in urls)
+        assert any("scope=repository:owner%2Fapp:pull" in url for url in urls)
+        assert any("/v2/owner/app/manifests/" in url for url in urls)
+
+    @pytest.mark.parametrize("image", ["evil.io/app", "localhost/app", "host:5000/app"])
+    def test_explicit_unknown_registries_never_fall_back_to_docker_hub(self, image):
+        with pytest.raises(ValueError, match="unsupported registry"):
+            ida.registry_targets(image)
+        assert ida.guess_repo_from_image(image) is None
 
     def test_matching_labels(self):
         old = {"source": "https://github.com/acme/app"}

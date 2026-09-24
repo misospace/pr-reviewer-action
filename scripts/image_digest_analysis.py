@@ -60,16 +60,29 @@ def _valid_repository_path(path: str) -> bool:
 
 
 def _registry_and_path(repo: str):
+    if not isinstance(repo, str) or not repo:
+        raise ValueError("unsupported registry for repo")
     parts = repo.split("/")
-    explicit_registry = parts[0] if len(parts) > 1 else ""
-    if explicit_registry in {"docker.io", "ghcr.io"}:
+    first = parts[0]
+    # Docker image references distinguish a registry by punctuation in the
+    # first component, not merely by its position in an allowlist.
+    explicit_registry = len(parts) > 1 and (
+        "." in first or ":" in first or first == "localhost"
+    )
+    if explicit_registry:
+        if first not in {"docker.io", "ghcr.io"}:
+            raise ValueError(f"unsupported registry for repo {repo}")
         path = "/".join(parts[1:])
         if not _valid_repository_path(path):
-            raise ValueError(f"invalid repository path for {explicit_registry}")
-        return explicit_registry, path
-    if explicit_registry in {"quay.io", "gcr.io", "registry.k8s.io"}:
-        raise ValueError(f"unsupported registry for repo {repo}")
-    if len(parts) == 2 and _valid_repository_path(repo):
+            raise ValueError(f"invalid repository path for {first}")
+        if first == "docker.io" and "/" not in path:
+            path = f"library/{path}"
+        return first, path
+    if not _valid_repository_path(repo):
+        raise ValueError(f"invalid repository path for docker.io")
+    if len(parts) == 1:
+        return "docker.io", f"library/{repo}"
+    if len(parts) == 2:
         return "docker.io", repo
     raise ValueError(f"unsupported registry for repo {repo}")
 
@@ -199,9 +212,6 @@ def guess_repo_from_image(image_repo: str):
     except (AttributeError, ValueError):
         return None
     parts = tail.split("/")
-    if registry == "docker.io" and len(parts) == 1:
-        # Docker Hub's single-component names belong to the library namespace.
-        return f"library/{parts[0]}"
     if len(parts) >= 2:
         return f"{parts[0]}/{parts[1]}"
     return None
