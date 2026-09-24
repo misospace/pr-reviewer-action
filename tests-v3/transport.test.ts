@@ -145,6 +145,38 @@ test("HTTP error bodies are preserved on typed failures", async () => {
   }
 });
 
+test("3xx redirects are typed http_status failures and are never followed", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 302;
+    res.setHeader("Location", `${_req.headers.origin ?? "http://elsewhere.invalid"}/redirected`);
+    res.end("Moved: see the Location header");
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 302);
+    assert.equal(outcome.failure.body, "Moved: see the Location header");
+    assert.equal(outcome.failure.message, "model endpoint returned HTTP 302");
+    // Deterministic proof the redirect was not followed: exactly one request
+    // hit the wire; the Location target was never requested.
+    assert.equal(requests, 1);
+  } finally {
+    await server.close();
+  }
+});
+
 test("connection refused is a typed network failure", async () => {
   const outcome = await runChatRequest({
     baseUrl: "http://127.0.0.1:1",

@@ -14,11 +14,11 @@ import type { ApiFormat } from "../model/types.js";
  *   --connect-timeout).
  * - `requestTimeoutSec` bounds the whole request (curl --max-time).
  *
- * Divergences from v2 curl, deliberate and documented: redirects are not
- * followed (a 3xx is a typed http_status failure with the body preserved —
- * model endpoints do not redirect in practice), and status >= 400 keeps the
- * error body exactly like v2's `curl` exit-22 path so "context length
- * exceeded" bodies survive.
+ * Divergences from v2 curl, deliberate and documented: redirects are never
+ * followed — any terminal status outside 2xx (including a 3xx redirect, and
+ * 4xx/5xx errors) is a typed http_status failure with the body preserved,
+ * exactly like v2's `curl` exit-22 path, so a "context length exceeded"
+ * body survives.
  */
 
 export type TransportFailureKind = "connect_timeout" | "request_timeout" | "network" | "http_status";
@@ -126,7 +126,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         response.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
           const status = response.statusCode ?? 0;
-          if (status >= 400) {
+          if (status < 200 || status >= 300) {
             settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, { status, body })));
             return;
           }
