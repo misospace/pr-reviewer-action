@@ -1,0 +1,12 @@
+{
+  "fixture": "override-future-kind",
+  "description": "A usable classification whose kind matches no lane (a future classifier value): zero selection is never silent — conservative all-roles fallback with classification_available=true.",
+  "pr_files": [],
+  "diff": "",
+  "linked_issues": [],
+  "role_selection_input": {
+    "pr_kind": "widget_refactor",
+    "risk_flags": [],
+    "changed_files_summary": ["src/widget.ts"]
+  }
+}

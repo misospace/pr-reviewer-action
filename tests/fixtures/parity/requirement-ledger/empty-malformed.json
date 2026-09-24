@@ -1,0 +1,7 @@
+{
+  "fixture": "empty-malformed",
+  "description": "Fail-soft degradation: malformed PR JSON, malformed and empty linked-issue fence blocks, empty standards text — empty ledger, empty markdown, sha of the empty array.",
+  "pr_json": "{not json at all",
+  "linked_issues_markdown": "## owner/repo#7\n\n```json\n{broken json block\n```\n\n## owner/repo#8\n\n```json\n{\"ref\": \"owner/repo#8\", \"body\": \"   \"}\n```\n",
+  "standards_text": ""
+}

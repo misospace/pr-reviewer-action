@@ -1,0 +1,13 @@
+{
+  "fixture": "mixed-kinds-precedence",
+  "description": "Kind precedence table: k8s manifest beats dependency_upgrade; secret handling beats auth; secondary flags still pull their checklists into must_check.",
+  "pr_files": [
+    { "filename": "k8s/deployment.yaml", "status": "modified" },
+    { "filename": "helm/values.yaml", "status": "modified" },
+    { "filename": "requirements.txt", "status": "modified" },
+    { "filename": "secrets.yaml", "status": "modified" },
+    { "filename": "src/auth/service.py", "status": "modified" }
+  ],
+  "diff": "diff --git a/k8s/deployment.yaml b/k8s/deployment.yaml\n+++ b/k8s/deployment.yaml\n@@ -30,6 +30,7 @@\n+        image: registry.example/app:1.2.3\n",
+  "linked_issues": []
+}

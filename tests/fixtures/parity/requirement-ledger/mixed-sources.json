@@ -1,0 +1,8 @@
+{
+  "fixture": "mixed-sources",
+  "description": "Standards, linked-issue, and PR-body sources together: acceptance/normative/invariant rules, fenced-block skipping, cross-source casefolded dedup with merged provenance (first occurrence wins), and source-priority ordering.",
+  "pr_json": "{\"title\": \"Add metrics exporter\", \"body\": \"The exporter MUST NOT crash on malformed input.\\n\\n- flush metrics before shutdown\\n- ordinary bullet without normative words\\n\"}",
+  "linked_issues_markdown": "## owner/repo#41\n\n```json\n{\"ref\": \"owner/repo#41\", \"body\": \"## Acceptance Criteria\\n- The exporter reports every gauge\\n- Must survive restarts\\n\\n```fenced```\\nMUST NOT be extracted from a code fence\\n```\n\"}\n```\n\n## owner/repo#42\n\n```json\n{\"ref\": \"owner/repo#42\", \"body\": \"Requirements:\\n* results SHALL be deterministic\\n- every change ships with tests\\n\"}\n```\n",
+  "standards_text": "# Team Standards\n\n## Acceptance criteria\n\n- every change ships with tests\n- handlers MUST validate input\n\n## Style\n\nProse lowercase must is deliberately not extracted.\n- list item with lowercase shall is normative\n",
+  "standards_ref": "AGENTS.md"
+}

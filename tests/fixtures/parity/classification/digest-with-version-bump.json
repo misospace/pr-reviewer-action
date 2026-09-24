@@ -1,0 +1,10 @@
+{
+  "fixture": "digest-with-version-bump",
+  "description": "Lockfiles only but the diff carries a version bump: digest-only rule defeated, dependency_upgrade kind selects the tests lane.",
+  "pr_files": [
+    { "filename": "package-lock.json", "status": "modified" },
+    { "filename": "pnpm-lock.yaml", "status": "modified" }
+  ],
+  "diff": "diff --git a/package-lock.json b/package-lock.json\n@@ -210,7 +210,7 @@\n-      \"version\": \"4.17.20\",\n+      \"version\": \"4.18.0\",\n",
+  "linked_issues": []
+}
