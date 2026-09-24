@@ -98,15 +98,15 @@ export function runVerdictParserMode(responsePath: string): void {
 /**
  * #701 tool-request-budget parity mode: evaluate every fixture case through
  * the v3 tier-aware resolver and check it against the case's expected
- * (route, budget). Like the v2 runner, an expectation mismatch fails closed
- * (ok:false) so the absolute tier defaults are pinned, not just v2↔v3
- * agreement.
+ * (route, budget, source — #702 provenance). Like the v2 runner, an
+ * expectation mismatch fails closed (ok:false) so the absolute tier
+ * defaults are pinned, not just v2↔v3 agreement.
  */
 interface BudgetCase {
   name: string;
   tier: string;
   env: Record<string, string>;
-  expected: { route: string; budget: number };
+  expected: { route: string; budget: number; source: string };
 }
 
 interface BudgetFixture {
@@ -128,10 +128,14 @@ export function runToolBudgetMode(fixturePath: string): void {
     const failures: string[] = [];
     for (const testCase of fixture.cases) {
       const resolved = resolveToolMaxRequests(testCase.tier, testCase.env);
-      values[testCase.name] = `${resolved.route}/${resolved.budget}`;
-      if (resolved.route !== testCase.expected.route || resolved.budget !== testCase.expected.budget) {
+      values[testCase.name] = `${resolved.route}/${resolved.budget}/${resolved.source}`;
+      if (
+        resolved.route !== testCase.expected.route ||
+        resolved.budget !== testCase.expected.budget ||
+        resolved.source !== testCase.expected.source
+      ) {
         failures.push(
-          `${testCase.name}: expected ${testCase.expected.route}/${testCase.expected.budget}, got ${resolved.route}/${resolved.budget}`,
+          `${testCase.name}: expected ${testCase.expected.route}/${testCase.expected.budget}/${testCase.expected.source}, got ${resolved.route}/${resolved.budget}/${resolved.source}`,
         );
       }
     }

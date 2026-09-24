@@ -5,18 +5,19 @@ Runs the REAL production resolver boundary for one fixture: for every case,
 launches `scripts/run_tool_harness.py` as a subprocess with an `env -i`-style
 environment (PATH/HOME + the case's env) and a temp cwd, and reads the
 budget telemetry it writes on the missing-corpus path (`tool_budget_tier` /
-`tool_request_budget`). That path is deterministic and offline — no corpus,
-no model, no network — so the fixture pins what production actually resolves,
-not a reimplementation.
+`tool_request_budget` / `tool_budget_source`). That path is deterministic
+and offline — no corpus, no model, no network — so the fixture pins what
+production actually resolves, not a reimplementation.
 
-The fixture's `expected` (route, budget) is enforced HERE as well as by the
-v3 side: both runners fail closed on any expectation mismatch, so the
-absolute tier defaults (primary 8, smart 16, escalated 20) and the hard
-ceiling are pinned, not just v2↔v3 agreement.
+The fixture's `expected` (route, budget, source) is enforced HERE as well
+as by the v3 side: both runners fail closed on any expectation mismatch, so
+the absolute tier defaults (primary 8, smart 16, escalated 20), the hard
+ceiling, and the #702 budget provenance are pinned, not just v2↔v3
+agreement.
 
 Usage: v2_tool_budget.py <fixture.json>
 Emits exactly one JSON object on stdout:
-  {"ok": true, "values": {"<case>": "<route>/<budget>", ...}}
+  {"ok": true, "values": {"<case>": "<route>/<budget>/<source>", ...}}
   {"ok": false, "stderr": "..."}
 Only infrastructure problems (unreadable fixture, harness crash) exit
 nonzero; an expectation mismatch is a *result* (ok:false).
@@ -62,7 +63,7 @@ def run_case(case: dict, workdir: Path) -> dict:
     if not artifact.is_file():
         raise RuntimeError(f"harness wrote no {artifact.name}")
     telemetry = json.loads(artifact.read_text(encoding="utf-8"))
-    for key in ("tool_budget_tier", "tool_request_budget"):
+    for key in ("tool_budget_tier", "tool_request_budget", "tool_budget_source"):
         if key not in telemetry:
             raise RuntimeError(f"missing telemetry key {key}")
     return telemetry
@@ -86,13 +87,18 @@ def main() -> int:
             telemetry = run_case(case, case_dir)
             route = telemetry["tool_budget_tier"]
             budget = telemetry["tool_request_budget"]
-            values[name] = f"{route}/{budget}"
+            source = telemetry["tool_budget_source"]
+            values[name] = f"{route}/{budget}/{source}"
             expected = case.get("expected") or {}
-            if route != expected.get("route") or budget != expected.get("budget"):
+            if (
+                route != expected.get("route")
+                or budget != expected.get("budget")
+                or source != expected.get("source")
+            ):
                 failures.append(
                     f"{name}: expected "
-                    f"{expected.get('route')}/{expected.get('budget')}, "
-                    f"got {route}/{budget}"
+                    f"{expected.get('route')}/{expected.get('budget')}/"
+                    f"{expected.get('source')}, got {route}/{budget}/{source}"
                 )
 
     if failures:

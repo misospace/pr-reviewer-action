@@ -777,10 +777,11 @@ TOOL_BUDGET_BOUNDARY = Boundary(
         "harness resolver (run through the real run_tool_harness.py "
         "missing-corpus path) versus the v3 port, over tier defaults "
         "(primary 8, smart 16, escalated 20), explicit overrides, "
-        "SMART_TOOL_MAX_REQUESTS precedence, and the 1..20 hard ceiling. "
-        "Both sides enforce the fixture's expected (route, budget), so the "
-        "absolute values are pinned, not just cross-side agreement — the "
-        "#678 migration cannot regress to a single undifferentiated ceiling."
+        "SMART_TOOL_MAX_REQUESTS precedence, the 1..20 hard ceiling, and the "
+        "#702 budget provenance (source). Both sides enforce the fixture's "
+        "expected (route, budget, source), so the absolute values are "
+        "pinned, not just cross-side agreement — the #678 migration cannot "
+        "regress to a single undifferentiated ceiling."
     ),
     fixtures_dir="tool-budget",
     run=lambda fixture, workdir: (run_v2_tool_budget(fixture, workdir), run_v3_tool_budget(fixture, workdir)),

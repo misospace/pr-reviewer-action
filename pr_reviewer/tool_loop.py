@@ -147,6 +147,18 @@ class LoopOutcome:
     # to a corpus-only review (the plan_execute planner fallback was removed in #304).
     degraded: bool = False
     error: str = ""
+    # #702 budget telemetry, filled by drive_tool_loop on every exit path:
+    # how much request budget was left when the loop stopped, how long the
+    # loop ran, the effective ceilings it was given, and whether/ how often
+    # context compaction fired. Counts and sizes only — never tool content.
+    requests_remaining: int = 0
+    elapsed_sec: float = 0.0
+    max_tool_calls: int = 0
+    max_rounds: int = 0
+    wall_clock_sec: float = 0.0
+    tool_result_bytes: int = 0
+    compaction_summarize: int = 0
+    compaction_truncate: int = 0
 
 
 def extract_tool_calls(
@@ -260,6 +272,11 @@ def drive_tool_loop(
     """
     budgets = budgets or LoopBudgets()
     outcome = LoopOutcome()
+    # #702: echo the effective ceilings so the outcome is self-describing for
+    # telemetry even when the loop exits on the first turn.
+    outcome.max_tool_calls = budgets.max_tool_calls
+    outcome.max_rounds = budgets.max_rounds
+    outcome.wall_clock_sec = budgets.wall_clock_sec
     started = time_fn()
     calls_executed = 0
     seen_keys: set[str] = set()
@@ -283,10 +300,13 @@ def drive_tool_loop(
                     )
                 except Exception:  # noqa: BLE001 — summarization is best-effort
                     summarized = 0
+            if summarized:
+                outcome.compaction_summarize += 1
             if (
                 not summarized
                 or conversation.approx_tokens() > budgets.max_conversation_tokens
             ):
+                outcome.compaction_truncate += 1
                 conversation.truncate_oldest_tool_results(
                     budgets.truncated_result_bytes
                 )
@@ -407,6 +427,16 @@ def drive_tool_loop(
             outcome.executed.append(
                 ExecutedCall(tool=name, args=args, result=result)
             )
+            try:
+                outcome.tool_result_bytes += len(
+                    json.dumps(
+                        result.get("result", {}),
+                        ensure_ascii=False,
+                        default=str,
+                    ).encode("utf-8")
+                )
+            except (TypeError, ValueError):  # never let telemetry break the loop
+                pass
             conversation.add_tool_result(
                 call_id,
                 result.get("result", {}),
@@ -420,4 +450,8 @@ def drive_tool_loop(
         outcome.stop_reason = STOP_MAX_ROUNDS
 
     outcome.degraded = outcome.tool_calls_issued == 0
+    # #702: close out the telemetry on every exit path (break, while-else,
+    # or fall-through) — the single return makes this one spot enough.
+    outcome.requests_remaining = max(0, budgets.max_tool_calls - calls_executed)
+    outcome.elapsed_sec = time_fn() - started
     return outcome

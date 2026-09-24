@@ -614,6 +614,23 @@ write_step_summary() {
       echo "$native_verdict_row"
     fi
     echo "| Route | ${REVIEW_ROUTE:-legacy} (${ROUTE_REASON:-}) |"
+    # #702: budget headroom/exhaustion at a glance, straight from the
+    # structured telemetry each harness run emits.
+    local tb_row=""
+    for tb_artifact in tool-harness.json tool-harness.smart.json; do
+      local tb_route tb_used tb_budget tb_source tb_stop tb_left
+      tb_route="$(jq -r '.tool_loop_telemetry.route // empty' "$tb_artifact" 2>/dev/null || true)"
+      [[ -n "$tb_route" ]] || continue
+      tb_used="$(jq -r '.tool_loop_telemetry.usage.tool_calls_executed // 0' "$tb_artifact" 2>/dev/null || echo 0)"
+      tb_budget="$(jq -r '.tool_loop_telemetry.budget.effective_max_requests // "?"' "$tb_artifact" 2>/dev/null || echo '?')"
+      tb_source="$(jq -r '.tool_loop_telemetry.budget.source // "?"' "$tb_artifact" 2>/dev/null || echo '?')"
+      tb_stop="$(jq -r '.tool_loop_telemetry.stop_reason // "?"' "$tb_artifact" 2>/dev/null || echo '?')"
+      tb_left="$(jq -r '.tool_loop_telemetry.usage.requests_remaining_at_stop // "?"' "$tb_artifact" 2>/dev/null || echo '?')"
+      tb_row+="${tb_route}: ${tb_used}/${tb_budget} requests (${tb_source}), stop: ${tb_stop}, left ${tb_left}; "
+    done
+    if [[ -n "$tb_row" ]]; then
+      echo "| Tool budget | ${tb_row%; } |"
+    fi
     if [[ "${DEEP_REVIEW_ACTIVE:-false}" == "true" ]]; then
       local deep_review_leads deep_review_errors
       deep_review_leads="$(jq -r '.total_leads // 0' specialists.json 2>/dev/null || echo '?')"

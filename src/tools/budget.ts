@@ -22,6 +22,14 @@
 
 export type ToolBudgetTier = "primary" | "smart" | "escalated";
 
+/**
+ * Where the effective ceiling came from (#702 budget provenance). Part of
+ * the telemetry contract the parity fixture pins: smart-override >
+ * explicit > tier-default, matching resolve_tool_budget in
+ * scripts/run_tool_harness.py.
+ */
+export type ToolBudgetSource = "smart-override" | "explicit" | "tier-default";
+
 export const TOOL_REQUEST_HARD_MAX = 20;
 
 export const TOOL_REQUEST_TIER_DEFAULTS: Readonly<
@@ -67,18 +75,30 @@ export function toolBudgetRoute(tier: string, env: EnvLike): ToolBudgetTier {
 /**
  * Resolve the effective native-loop request budget for one harness run.
  * Precedence: SMART_TOOL_MAX_REQUESTS (smart/escalated only) >
- * TOOL_MAX_REQUESTS > the route's tier default.
+ * TOOL_MAX_REQUESTS > the route's tier default. The `source` reports which
+ * input won and `configured` echoes the winning explicit integer (null for
+ * the tier default) — the #702 provenance fields the loop telemetry
+ * carries, kept in lockstep with resolve_tool_budget.
  */
 export function resolveToolMaxRequests(
   tier: string,
   env: EnvLike,
-): { route: ToolBudgetTier; budget: number } {
+): { route: ToolBudgetTier; budget: number; source: ToolBudgetSource; configured: number | null } {
   const route = toolBudgetRoute(tier, env);
   if (route !== "primary") {
     const tierOverride = clampedPositive(env.SMART_TOOL_MAX_REQUESTS);
-    if (tierOverride !== null) return { route, budget: tierOverride };
+    if (tierOverride !== null) {
+      return { route, budget: tierOverride, source: "smart-override", configured: tierOverride };
+    }
   }
   const explicit = clampedPositive(env.TOOL_MAX_REQUESTS);
-  if (explicit !== null) return { route, budget: explicit };
-  return { route, budget: TOOL_REQUEST_TIER_DEFAULTS[route] };
+  if (explicit !== null) {
+    return { route, budget: explicit, source: "explicit", configured: explicit };
+  }
+  return {
+    route,
+    budget: TOOL_REQUEST_TIER_DEFAULTS[route],
+    source: "tier-default",
+    configured: null,
+  };
 }
