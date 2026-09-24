@@ -217,19 +217,19 @@ class TestResolveCompareRepo:
         assert "invalid repository path" in result["error"]
 
     @pytest.mark.parametrize(
-        ("image", "path", "guess"),
+        ("image", "path", "expected_base", "guess"),
         [
-            ("nginx", "library/nginx", "library/nginx"),
-            ("docker.io/nginx", "library/nginx", "library/nginx"),
-            ("owner/app", "owner/app", "owner/app"),
-            ("docker.io/owner/app", "owner/app", "owner/app"),
-            ("ghcr.io/owner/app", "owner/app", "owner/app"),
+            ("nginx", "library/nginx", "https://registry-1.docker.io", "library/nginx"),
+            ("docker.io/nginx", "library/nginx", "https://registry-1.docker.io", "library/nginx"),
+            ("owner/app", "owner/app", "https://registry-1.docker.io", "owner/app"),
+            ("docker.io/owner/app", "owner/app", "https://registry-1.docker.io", "owner/app"),
+            ("ghcr.io/owner/app", "owner/app", "https://ghcr.io", "owner/app"),
         ],
     )
-    def test_registry_canonical_paths_and_compare_guesses(self, image, path, guess):
+    def test_registry_canonical_paths_and_compare_guesses(self, image, path, expected_base, guess):
         repo_path, token_url, base_url = ida.registry_targets(image)
         assert repo_path == path
-        assert base_url == ("https://ghcr.io" if image.startswith("ghcr.io/") else "https://registry-1.docker.io")
+        assert base_url == expected_base
         from urllib.parse import parse_qs, urlsplit
         assert parse_qs(urlsplit(token_url).query)["scope"] == [f"repository:{path}:pull"]
         assert ida.guess_repo_from_image(image) == guess
