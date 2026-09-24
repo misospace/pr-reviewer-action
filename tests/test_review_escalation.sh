@@ -43,7 +43,12 @@ check_contains "escalation requires a smart model" "$SRC" '[[ -n "$SMART_MODEL_R
 check_contains "smart resolves ONLY from ai_smart_model (fallback is not the smart tier)" "$SRC" 'SMART_MODEL="${AI_SMART_MODEL}"'
 check_contains "smart gating keys off the smart model alone" "$SRC" 'if [[ -n "$SMART_MODEL" ]]; then'
 check_contains "no-op when smart equals the active fast config" "$SRC" 'nothing distinct to escalate to'
-check_contains "no-op when the fallback already produced the review on the smart config" "$SRC" 'the fallback model that produced this review is the smart model'
+# The former defensive fallback-equals-smart duplicate-call guard is dead code
+# since the PRIMARY_OK guard above it: it could only fire when the fallback had
+# produced the review, which can no longer reach the decision. The invariant is
+# covered behaviorally by the fallback-requested matrix case below.
+check "fallback-equals-smart dead branch removed" \
+  "$(grep -c 'the fallback model that produced this review is the smart model' "$RUN_REVIEW" || true)" "0"
 check_contains "step summary reads smart-response usage when escalated" "$SRC" 'usage_file="ai-response.smart.json"'
 
 echo ""

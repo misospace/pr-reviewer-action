@@ -266,18 +266,14 @@ maybe_escalate_review() {
   # #721: only a review actually produced by the primary model may escalate.
   # When the primary failed and the fallback produced this review, its output
   # must never trigger a quality escalation — the fallback is an availability
-  # recovery, not a reviewer whose judgment we second-guess.
+  # recovery, not a reviewer whose judgment we second-guess. This guard also
+  # makes the former fallback-equals-smart duplicate-call guard dead code:
+  # that branch (removed with #721's cleanup) could only fire when the
+  # fallback had produced the review, which can no longer reach the decision.
   [[ "${PRIMARY_OK:-0}" -eq 1 ]] || return 0
   [[ -n "$SMART_MODEL_RESOLVED" ]] || return 0
   if [[ "$SMART_BASE_URL" == "$AI_BASE_URL" && "$SMART_MODEL" == "$AI_MODEL" ]]; then
     return 0  # nothing distinct to escalate to
-  fi
-  # Defensive: if the primary failed and the fallback produced this review, and
-  # the operator explicitly set ai_smart_model to that same fallback, escalating
-  # would just re-call the model that already reviewed this corpus.
-  if [[ "${PRIMARY_OK:-0}" -ne 1 && "$SMART_BASE_URL" == "$AI_FALLBACK_BASE_URL" && "$SMART_MODEL" == "$AI_FALLBACK_MODEL" ]]; then
-    log "Skipping escalation: the fallback model that produced this review is the smart model"
-    return 0
   fi
 
   # #721: the escalation decision is the parsed primary verdict's structured
