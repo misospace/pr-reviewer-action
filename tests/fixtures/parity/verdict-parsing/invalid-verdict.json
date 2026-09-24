@@ -1,0 +1,16 @@
+{
+  "fixture": "invalid-verdict",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"maybe\", \"review_markdown\": \"## x\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

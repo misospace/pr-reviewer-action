@@ -1,0 +1,16 @@
+{
+  "fixture": "findings-normalization",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"Request Changes\", \"review_markdown\": \"## Findings\\n\\nBody.\", \"findings\": [{\"severity\": \"CRITICAL\", \"category\": \"security\", \"file\": \"./src/a.py\", \"line\": \"12\", \"message\": \"boom\", \"preliminary_finding\": 3}, {\"severity\": \"high\", \"category\": \"weird\", \"file\": \"src/b.py\", \"line\": 7, \"message\": \"hi\"}, {\"severity\": 5, \"category\": \"bug\", \"file\": \"c.py\", \"line\": true, \"message\": \"bool-line\"}, {\"severity\": \"minor\", \"category\": \"style\", \"file\": \"d.py\", \"line\": 7.5, \"message\": \"half-line\"}, {\"message\": \"\"}, \"junk\", {\"severity\": \"warning\", \"path\": \"e.py\", \"line\": 0, \"message\": \"path-key\"}, {\"summary\": \"summary-key message\"}], \"confidence\": 0.8}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

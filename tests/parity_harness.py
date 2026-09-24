@@ -420,8 +420,8 @@ def secret_raw_values(fixture: dict[str, Any]) -> list[str]:
     return [str(raw[v2_id]) for v2_id in surface.secret_v2_ids if v2_id in raw]
 
 
-def run_json_runner(command: list[str], workdir: Path, timeout: int) -> SideResult:
-    proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(ROOT))
+def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[str, str] | None = None) -> SideResult:
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(ROOT), env=env)
     if proc.returncode != 0:
         raise RuntimeError(f"runner failed ({proc.returncode}): {proc.stderr.strip()[-400:]}")
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -562,8 +562,109 @@ TRUNCATION_BOUNDARY = Boundary(
     ),
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY)
 
+
+# ---------------------------------------------------------------------------
+# Boundary: model request construction (#677)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_request(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        ["bash", str(ROOT / "tests" / "parity_runners" / "v2_request.sh"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def _v3_parity_env() -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "PR_REVIEWER_V3_MODE": "v3-request-builder",
+    }
+
+
+def run_v3_request(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    return run_json_runner(
+        [node, "dist/index.js", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env=_v3_parity_env(),
+    )
+
+
+MODEL_REQUEST_BOUNDARY = Boundary(
+    id="model-request-construction",
+    description=(
+        "#677 request construction parity: the v2 build_model_request jq "
+        "assembly versus the v3 typed builder, for both api formats across "
+        "shape, temperature omission, token-param selection, structured "
+        "output modes, and streaming options."
+    ),
+    fixtures_dir="model-request",
+    run=lambda fixture, workdir: (run_v2_request(fixture, workdir), run_v3_request(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: verdict parsing (#677)
+# ---------------------------------------------------------------------------
+
+VERDICT_CATEGORIES = (
+    (re.compile(r"Model returned an empty completion"), "empty-completion"),
+    (re.compile(r"Model endpoint returned an error"), "endpoint-error"),
+    (re.compile(r"Expected verdict to be"), "invalid-verdict"),
+    (re.compile(r"missing required key"), "missing-key"),
+    (re.compile(r"Expected JSON object"), "not-object"),
+    (re.compile(r"empty or missing 'review_markdown'"), "empty-markdown"),
+    (re.compile(r"appears flattened"), "flattened"),
+)
+
+
+def run_v2_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_verdict.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "PR_REVIEWER_V3_MODE": "v3-verdict-parser",
+    }
+    return run_json_runner(
+        [node, "dist/index.js", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env=env,
+    )
+
+
+VERDICT_BOUNDARY = Boundary(
+    id="verdict-parsing",
+    description=(
+        "#677 verdict parsing parity: the v2 tolerant response parser versus "
+        "the v3 port, over strict/fenced/prose JSON extraction, findings "
+        "normalization, and the typed failure vocabulary (empty completion, "
+        "invalid verdict, flattened markdown, endpoint errors)."
+    ),
+    fixtures_dir="verdict-parsing",
+    run=lambda fixture, workdir: (run_v2_verdict(fixture, workdir), run_v3_verdict(fixture, workdir)),
+    error_categories=VERDICT_CATEGORIES,
+)
+
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

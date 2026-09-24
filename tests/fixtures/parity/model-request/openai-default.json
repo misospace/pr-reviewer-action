@@ -1,0 +1,16 @@
+{
+  "fixture": "openai-default",
+  "request": {
+    "api_format": "openai",
+    "model": "qwen3-32b",
+    "system": "SYSTEM PROMPT",
+    "user": "Review this PR.",
+    "corpus": "## Corpus\n\nLine one.\n",
+    "stream": false,
+    "shape": "default",
+    "max_tokens": null,
+    "temperature": null,
+    "response_format": "off",
+    "tokens_param": "max_tokens"
+  }
+}

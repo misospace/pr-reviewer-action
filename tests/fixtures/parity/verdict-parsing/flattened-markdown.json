@@ -1,0 +1,16 @@
+{
+  "fixture": "flattened-markdown",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## A ## B\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

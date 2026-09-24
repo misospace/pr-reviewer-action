@@ -1,0 +1,19 @@
+{
+  "fixture": "anthropic-blocks",
+  "response": {
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "{\"verdict\": \"approve\"}"
+      },
+      {
+        "type": "text",
+        "text": "{\"verdict\": \"request_changes\", \"review_markdown\": \"## Real\\n\\nBody.\"}"
+      }
+    ],
+    "usage": {
+      "output_tokens": 10
+    },
+    "stop_reason": "end_turn"
+  }
+}

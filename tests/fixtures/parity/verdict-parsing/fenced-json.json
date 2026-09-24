@@ -1,0 +1,16 @@
+{
+  "fixture": "fenced-json",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "```json\n{\"verdict\": \"request_changes\", \"review_markdown\": \"## Fix\\n\\nPlease.\"}\n```"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "fixture": "missing-markdown",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "fixture": "openai-json-object-completion-tokens",
+  "request": {
+    "api_format": "openai",
+    "model": "qwen3-32b",
+    "system": "SYSTEM PROMPT",
+    "user": "Review this PR.",
+    "corpus": "## Corpus\n\nLine one.\n",
+    "stream": false,
+    "shape": "default",
+    "max_tokens": 2048,
+    "temperature": null,
+    "response_format": "json_object",
+    "tokens_param": "max_completion_tokens"
+  }
+}

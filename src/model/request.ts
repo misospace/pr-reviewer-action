@@ -1,0 +1,120 @@
+import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
+
+/**
+ * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
+ * stay semantically identical to `_OPENAI_VERDICT_JSON_SCHEMA` in
+ * pr_reviewer/conversation.py and to the inline `rf_json` literal in
+ * scripts/model_call.sh — the parity harness `model-request-construction`
+ * boundary and tests/v3-schema-contract.test.ts pin it. `findings` and
+ * `requirement_coverage` are nullable-but-required: OpenAI strict mode
+ * requires every property to be listed in `required`, so optionality is
+ * expressed via the null type. The parser tolerates null/absent/malformed
+ * findings.
+ */
+export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
+  type: "json_schema",
+  json_schema: {
+    name: "pr_review",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        verdict: { type: "string", enum: ["approve", "request_changes"] },
+        review_markdown: { type: "string" },
+        findings: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              severity: { type: "string", enum: ["blocker", "major", "minor", "info"] },
+              category: { type: ["string", "null"] },
+              file: { type: ["string", "null"] },
+              line: { type: ["integer", "null"] },
+              message: { type: "string" },
+              preliminary_finding: { type: ["integer", "null"] },
+            },
+            required: ["severity", "category", "file", "line", "message", "preliminary_finding"],
+            additionalProperties: false,
+          },
+        },
+        requirement_coverage: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              requirement_id: { type: "string" },
+              status: { type: "string", enum: ["satisfied", "violated", "unknown"] },
+              evidence: {
+                type: ["array", "null"],
+                items: {
+                  type: "object",
+                  properties: {
+                    kind: { type: "string", enum: ["file", "test", "tool", "ci", "diff"] },
+                    ref: { type: ["string", "null"] },
+                    detail: { type: ["string", "null"] },
+                  },
+                  required: ["kind", "ref", "detail"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["requirement_id", "status", "evidence"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["verdict", "review_markdown", "findings", "requirement_coverage"],
+      additionalProperties: false,
+    },
+  },
+};
+
+function userContent(config: ModelRequestConfig): string {
+  // v2 shape contract: trailing_task puts the corpus first so the instruction
+  // is the last thing the model reads; default puts the instruction first.
+  return config.shape === "trailing_task"
+    ? `${config.corpus}\n\n${config.user}`
+    : `${config.user}\n\n${config.corpus}`;
+}
+
+/**
+ * Build the transport wire payload for a review request. Provider-neutral:
+ * branches only on the configured api format, never on model names.
+ *
+ * - Anthropic always sends `max_tokens` and never response_format/token-param
+ *   switching/stream_options.
+ * - OpenAI-compatible: the token field flips wholesale via `tokensParam`
+ *   (never both), temperature is omitted iff empty, and stream_options is
+ *   attached only while streaming.
+ */
+export function buildModelRequest(config: ModelRequestConfig): TransportWirePayload {
+  const content = userContent(config);
+  if (config.apiFormat === "anthropic") {
+    const body: Record<string, unknown> = {
+      model: config.model,
+      max_tokens: config.maxTokens,
+      stream: config.stream,
+      system: config.system,
+      messages: [{ role: "user", content }],
+    };
+    if (config.temperature !== "") body.temperature = config.temperature;
+    return { endpointPath: "/messages", body: body as unknown as TransportWirePayload["body"] };
+  }
+  const body: Record<string, unknown> = {
+    model: config.model,
+    stream: config.stream,
+    messages: [
+      { role: "system", content: config.system },
+      { role: "user", content },
+    ],
+  };
+  body[config.tokensParam] = config.maxTokens;
+  if (config.temperature !== "") body.temperature = config.temperature;
+  if (config.responseFormat === "json_object") {
+    body.response_format = { type: "json_object" };
+  } else if (config.responseFormat === "json_schema") {
+    body.response_format = OPENAI_VERDICT_JSON_SCHEMA;
+  }
+  if (config.stream) body.stream_options = { include_usage: true };
+  return { endpointPath: "/chat/completions", body: body as unknown as TransportWirePayload["body"] };
+}

@@ -1,0 +1,16 @@
+{
+  "fixture": "anthropic-trailing-task-empty-temperature",
+  "request": {
+    "api_format": "anthropic",
+    "model": "claude-x",
+    "system": "SYSTEM PROMPT",
+    "user": "Review this PR.",
+    "corpus": "## Corpus\n\nLine one.\n",
+    "stream": false,
+    "shape": "trailing_task",
+    "max_tokens": null,
+    "temperature": "",
+    "response_format": "off",
+    "tokens_param": "max_tokens"
+  }
+}

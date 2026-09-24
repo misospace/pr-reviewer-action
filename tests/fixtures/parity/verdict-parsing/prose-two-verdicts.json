@@ -1,0 +1,16 @@
+{
+  "fixture": "prose-two-verdicts",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "Draft: {\"verdict\": \"approve\"}\nFinal: {\"verdict\": \"request_changes\", \"review_markdown\": \"## Real\n\nBody.\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

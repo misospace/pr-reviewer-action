@@ -192,9 +192,13 @@ structured report naming the first divergent boundary.
   to run one fixture through both implementations. Currently:
   `config-default-resolution` (v2: action.yml env-block expression resolution
   plus `scripts/sections/config.sh` vs v3: the typed loader in
-  `dist/index.js`) and `dataflow-662-corpus-truncation` (the #662
+  `dist/index.js`), `dataflow-662-corpus-truncation` (the #662
   broken-arrow counterexample: the vulnerable variant must fail parity, the
-  fixed variant must pass).
+  fixed variant must pass), `model-request-construction` (#677: the v2
+  `build_model_request` jq assembly versus the v3 typed builder in
+  `src/model/request.ts`) and `verdict-parsing` (#677: the v2 tolerant
+  response parser in `pr_reviewer/response_parser.py` versus the v3 port in
+  `src/model/verdict.ts`).
 - **Fixtures** live under `tests/fixtures/parity/<boundary>/*.json`. Later
   migration tickets add fixtures for their boundary as JSON only — never
   harness logic.

@@ -1,0 +1,16 @@
+{
+  "fixture": "raw-newlines",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\n\"verdict\": \"approve\",\n\"review_markdown\": \"line1\nline2\"\n}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

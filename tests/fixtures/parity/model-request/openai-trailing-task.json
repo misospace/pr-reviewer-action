@@ -1,0 +1,16 @@
+{
+  "fixture": "openai-trailing-task",
+  "request": {
+    "api_format": "openai",
+    "model": "qwen3-32b",
+    "system": "SYSTEM PROMPT",
+    "user": "Review this PR.",
+    "corpus": "## Corpus\n\nLine one.\n",
+    "stream": false,
+    "shape": "trailing_task",
+    "max_tokens": null,
+    "temperature": null,
+    "response_format": "off",
+    "tokens_param": "max_tokens"
+  }
+}

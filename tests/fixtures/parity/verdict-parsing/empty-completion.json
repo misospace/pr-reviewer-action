@@ -1,0 +1,16 @@
+{
+  "fixture": "empty-completion",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": ""
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 0
+    }
+  }
+}

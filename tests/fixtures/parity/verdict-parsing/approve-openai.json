@@ -1,0 +1,16 @@
+{
+  "fixture": "approve-openai",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## All good\\n\\nNice.\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 10
+    }
+  }
+}

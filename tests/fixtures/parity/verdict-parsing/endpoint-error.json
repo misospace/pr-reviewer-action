@@ -1,0 +1,9 @@
+{
+  "fixture": "endpoint-error",
+  "response": {
+    "error": {
+      "message": "overloaded",
+      "type": "api_error"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "fixture": "openai-json-schema-stream",
+  "request": {
+    "api_format": "openai",
+    "model": "qwen3-32b",
+    "system": "SYSTEM PROMPT",
+    "user": "Review this PR.",
+    "corpus": "## Corpus\n\nLine one.\n",
+    "stream": true,
+    "shape": "default",
+    "max_tokens": null,
+    "temperature": null,
+    "response_format": "json_schema",
+    "tokens_param": "max_tokens"
+  }
+}
