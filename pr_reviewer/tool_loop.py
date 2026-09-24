@@ -59,13 +59,34 @@ _BUDGET_NOTE = (
     "Finish the analysis with the evidence you already have."
 )
 
+# #701 exhaustion awareness: every loop turn after the first carries the
+# remaining request/round budget, so the model plans against real headroom
+# instead of discovering the ceiling via a refused call. Once few requests
+# remain the note switches from status to direction: stop broad exploration,
+# spend what is left on unresolved blocker hypotheses and verdict evidence.
+LOW_TOOL_REQUESTS_REMAINING = 2
+
+_BUDGET_TURN_NOTE = (
+    "[loop budget] {requests_left} of {requests_total} tool request(s) and "
+    "{rounds_left} of {rounds_total} turn(s) remain."
+)
+_LOW_BUDGET_TURN_NOTE = (
+    "[loop budget] Only {requests_left} tool request(s) and {rounds_left} "
+    "turn(s) remain. Stop broad exploration now: prioritize confirming or "
+    "rejecting your unresolved blocker hypotheses and gathering only the "
+    "evidence still needed for the verdict."
+)
+
 
 @dataclass
 class LoopBudgets:
     """Hard stop conditions. The driver owns these; Conversation's token
     helpers are advisory (see pr_reviewer/conversation.py module docs)."""
 
-    max_tool_calls: int = 4  # total executed calls across rounds (TOOL_MAX_REQUESTS)
+    # Sentinel default only — production always passes an explicit budget from
+    # adaptive_loop_budgets, whose request budget is tier-resolved (#701):
+    # primary 8, smart 16, escalated 20.
+    max_tool_calls: int = 8  # total executed calls across rounds (TOOL_MAX_REQUESTS)
     max_rounds: int = 3  # model round-trips (TOOL_MAX_ROUNDS)
     wall_clock_sec: float = 120.0  # whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC)
     # When the conversation outgrows this, the oldest tool results are
@@ -87,14 +108,18 @@ def adaptive_loop_budgets(
     headroom is 2× the configured rounds (capped at 8); the configured tool-call
     budget is used as-is.
 
-    The budget is the SAME on every route — the route selects the MODEL, never
-    the tool budget. An earlier version shallow-capped the primary route (then
-    misnamed "fast") on low-risk PRs to "save budget on a trivial diff", but the
-    loop already self-limits (it stops as soon as the model stops calling
-    tools), so the cap never saved cost on trivial PRs — it only starved the
-    PRs that genuinely need a multi-hop chain (e.g. reading a deployed version,
-    then verifying it against a host platform's compatibility matrix). The
-    primary model is fully capable; don't ration its evidence-gathering.
+    #701: the request budget is TIER-AWARE. The caller resolves the effective
+    budget from the route (primary ~8, smart ~16, escalated up to 20 — see
+    ``run_tool_harness.resolve_tool_max_requests``) and passes it in here; this
+    function only derives the round headroom and keeps request, round, and
+    wall-clock ceilings independent. An earlier version shallow-capped the
+    primary route (then misnamed "fast") on low-risk PRs to "save budget on a
+    trivial diff", but the loop already self-limits (it stops as soon as the
+    model stops calling tools), so the cap never saved cost on trivial PRs —
+    it only starved the PRs that genuinely need a multi-hop chain (e.g. reading
+    a deployed version, then verifying it against a host platform's
+    compatibility matrix). The primary model is fully capable; don't ration its
+    evidence-gathering.
     """
     rounds = min(max(max_rounds, 1) * 2, 8)
     return LoopBudgets(
@@ -265,6 +290,26 @@ def drive_tool_loop(
                 conversation.truncate_oldest_tool_results(
                     budgets.truncated_result_bytes
                 )
+
+        # #701: keep the model exhaustion-aware. Every turn after the first
+        # states the remaining request/round budget; near the ceiling it also
+        # redirects the remaining spend to blocker hypotheses. Trusted driver
+        # text — a turn_note, never inside the untrusted tool-result envelope.
+        if outcome.rounds > 0:
+            requests_left = budgets.max_tool_calls - calls_executed
+            rounds_left = budgets.max_rounds - outcome.rounds
+            if requests_left <= LOW_TOOL_REQUESTS_REMAINING:
+                note = _LOW_BUDGET_TURN_NOTE
+            else:
+                note = _BUDGET_TURN_NOTE
+            conversation.add_turn_note(
+                note.format(
+                    requests_left=requests_left,
+                    requests_total=budgets.max_tool_calls,
+                    rounds_left=rounds_left,
+                    rounds_total=budgets.max_rounds,
+                )
+            )
 
         payload = conversation.to_request_payload(
             api_format,

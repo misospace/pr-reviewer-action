@@ -497,9 +497,14 @@ inputs:
     required: false
     default: "512"
   tool_max_requests:
-    description: Maximum number of tool requests the harness executes when tool_mode is enabled
+    description: >-
+      Maximum number of tool requests the harness executes when tool_mode is
+      enabled. Empty (the default) resolves a tier-aware budget from the review
+      route (#701): ~8 for the primary route, ~16 for the smart route, and up
+      to 20 for the escalated (deep) path — never above the hard ceiling of 20.
+      An explicit value overrides every tier and is bounded to 1..20.
     required: false
-    default: "4"
+    default: ""
   tool_max_rounds:
     description: >-
       Round budget for tool_mode=native_loop, where a round is a single model turn:

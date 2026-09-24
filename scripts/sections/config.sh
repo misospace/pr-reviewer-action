@@ -71,7 +71,12 @@ RELATED_CODE_CONTEXT="${RELATED_CODE_CONTEXT:-true}"
 RELATED_CODE_MAX_BYTES="${RELATED_CODE_MAX_BYTES:-16000}"
 RELATED_CODE_MIN_BYTES=64
 TOOL_MODE="${TOOL_MODE:-off}"
-TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-4}"
+# #701: no shell-side default — the effective native-loop request budget is
+# tier-aware and resolved at harness time (run_tool_harness.py
+# resolve_tool_max_requests: primary 8, smart 16, escalated 20, hard max 20),
+# because the route is decided by classification long after config resolution.
+# An explicitly configured value passes through untouched.
+TOOL_MAX_REQUESTS="${TOOL_MAX_REQUESTS:-}"
 TOOL_MAX_RESPONSE_BYTES="${TOOL_MAX_RESPONSE_BYTES:-12000}"
 # #540: the tool_planning_* names (from the removed plan_execute planner, #304)
 # were renamed to describe what they actually control. action.yml forwards the

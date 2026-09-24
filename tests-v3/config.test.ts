@@ -114,6 +114,9 @@ test("defaults are contract sourced and parsing is explicit", () => {
   assert.throws(() => loadConfig(contract, { ...raw, "ai-max-tokens": "Infinity" }), /must be an integer/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-max-tokens": "1.5" }), /must be an integer/);
   assert.throws(() => loadConfig(contract, { ...raw, "repo-map-max-bytes": "200001" }), /between 1 and 200000/);
+  // #701: the tool request budget is bounded to the same 1..20 ceiling on both sides.
+  assert.throws(() => loadConfig(contract, { ...raw, "tool-max-requests": "21" }), /between 1 and 20/);
+  assert.throws(() => loadConfig(contract, { ...raw, "tool-max-requests": "0" }), /between 1 and 20/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-api-format": "provider" }), /must be one of/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-stream": "yes" }), /must be 'true' or 'false'/);
   assert.throws(() => loadConfig(contract, { ...raw, "github-token": "" }), /Required input 'github-token' is missing/);

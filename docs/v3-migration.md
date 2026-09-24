@@ -134,6 +134,19 @@ that cutover.
 | `ci_interval_sec` | `ci-interval-sec` |
 | `ci_skip_on_timeout` | `ci-skip-on-timeout` |
 
+### Tier-aware tool request budget (#701)
+
+`tool_max_requests` defaults to **empty** on both sides. The empty value is
+resolved at tool-harness time into a tier-aware budget — primary ~8, smart
+route ~16, escalated (deep) up to 20, hard ceiling 20 — instead of one
+undifferentiated ceiling. Explicit values override every tier (clamped to
+1..20); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs. The v3
+native tool loop must reproduce this resolution and the exhaustion-aware
+behavior (remaining-budget notes on later loop turns, low-budget pivot to
+blocker hypotheses, `tool-call-budget-exhausted` kept as a distinct stop
+reason); the contract description for `tool-max-requests` carries the same
+semantics.
+
 ## Retained outputs
 
 | v2 output | v3 output |

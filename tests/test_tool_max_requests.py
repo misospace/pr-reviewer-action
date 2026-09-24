@@ -1,10 +1,9 @@
-"""Tests for issue #103: respect tool_max_requests in tool harness planner and executor.
+"""Tests for issue #103 and #701: tool_max_requests in the tool harness.
 
 Acceptance criteria:
-  - TOOL_MAX_REQUESTS=1 limits planner prompt and executor to 1 call.
-  - TOOL_MAX_REQUESTS=6 allows up to 6 calls.
-  - Invalid/missing values safely fall back to default (4).
-  - Values are bounded within a reasonable range (1-20 per env_int_bounded).
+  - Explicit TOOL_MAX_REQUESTS values are honoured and clamped to 1..20.
+  - Invalid/missing values fall back to the tier-aware default (#701):
+    primary 8, smart 16, escalated 20.
 """
 
 import os
@@ -84,20 +83,104 @@ class TestEnvIntBounded(TestCase):
 
 
 class TestMaxRequestsBoundedCall(TestCase):
-    """Test that max_requests is read with proper bounds."""
+    """Test that the tier-aware resolver keeps the hard bounds (#701)."""
 
     def setUp(self):
         self.mod = _import_harness()
 
-    def test_bounded_call_signature(self):
-        """Verify env_int_bounded is called with correct bounds for TOOL_MAX_REQUESTS."""
+    def test_resolver_is_used_in_main(self):
+        """main() must resolve the budget via the tier-aware resolver."""
         harness_path = _SCRIPTS_DIR / "run_tool_harness.py"
         source = harness_path.read_text(encoding="utf-8")
+        self.assertIn("max_requests = resolve_tool_max_requests(tier)", source)
+        # The legacy fixed default must not come back as a single undifferentiated ceiling.
+        self.assertNotIn('env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)', source)
 
-        # Should call env_int_bounded with TOOL_MAX_REQUESTS, default 4, min 1, max 20
-        self.assertIn(
-            'env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)', source
+
+class TestTierAwareRequestBudget(TestCase):
+    """#701: the effective request budget follows the review route."""
+
+    def setUp(self):
+        self.mod = _import_harness()
+
+    def _resolve(self, env, tier="primary"):
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.mod.resolve_tool_max_requests(tier)
+
+    def test_primary_default_is_8(self):
+        self.assertEqual(self._resolve({}), 8)
+
+    def test_routed_smart_profile_gets_16(self):
+        self.assertEqual(self._resolve({"REVIEW_CONTEXT_PROFILE": "smart"}), 16)
+
+    def test_smart_tier_gets_16(self):
+        self.assertEqual(self._resolve({}, tier="smart"), 16)
+
+    def test_escalated_tier_gets_20(self):
+        self.assertEqual(
+            self._resolve({"TOOL_ESCALATION": "true"}, tier="smart"), 20
         )
+
+    def test_explicit_value_overrides_every_tier(self):
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "5"}), 5)
+        self.assertEqual(
+            self._resolve({"TOOL_MAX_REQUESTS": "5"}, tier="smart"), 5
+        )
+        self.assertEqual(
+            self._resolve(
+                {"TOOL_MAX_REQUESTS": "5", "TOOL_ESCALATION": "true"}, tier="smart"
+            ),
+            5,
+        )
+
+    def test_explicit_value_clamped_to_hard_bounds(self):
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "99"}), 20)
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "0"}), 1)
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "-3"}), 1)
+
+    def test_smart_override_wins_on_smart_tiers(self):
+        self.assertEqual(
+            self._resolve(
+                {"SMART_TOOL_MAX_REQUESTS": "10", "TOOL_MAX_REQUESTS": "3"},
+                tier="smart",
+            ),
+            10,
+        )
+        self.assertEqual(
+            self._resolve(
+                {
+                    "SMART_TOOL_MAX_REQUESTS": "10",
+                    "TOOL_MAX_REQUESTS": "3",
+                    "TOOL_ESCALATION": "true",
+                },
+                tier="smart",
+            ),
+            10,
+        )
+
+    def test_smart_override_ignored_on_primary(self):
+        self.assertEqual(
+            self._resolve({"SMART_TOOL_MAX_REQUESTS": "10"}), 8
+        )
+
+    def test_invalid_explicit_value_falls_back_to_tier_default(self):
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "abc"}), 8)
+        self.assertEqual(
+            self._resolve({"TOOL_MAX_REQUESTS": "abc"}, tier="smart"), 16
+        )
+
+    def test_route_classification(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.mod.tool_budget_route("primary"), "primary")
+            self.assertEqual(self.mod.tool_budget_route("smart"), "smart")
+        with mock.patch.dict(os.environ, {"TOOL_ESCALATION": "true"}, clear=True):
+            self.assertEqual(self.mod.tool_budget_route("smart"), "escalated")
+        with mock.patch.dict(
+            os.environ, {"REVIEW_CONTEXT_PROFILE": "smart"}, clear=True
+        ):
+            self.assertEqual(self.mod.tool_budget_route("primary"), "smart")
+            # An escalated run is tier=smart regardless of the (primary) profile.
+            self.assertEqual(self.mod.tool_budget_route("smart"), "smart")
 
 
 if __name__ == "__main__":

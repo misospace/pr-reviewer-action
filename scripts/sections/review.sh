@@ -291,10 +291,17 @@ print('yes ' + ','.join(reasons) if escalate else 'no')
 
   cp ai-output.json ai-output.primary.json
 
+  # #701: the escalated smart review gets the deep tool-request budget (up to
+  # 20) rather than the routed-smart budget (~16). The flag scopes to this
+  # escalation attempt only; it is cleared in both outcomes below.
+  TOOL_ESCALATION=true
+  export TOOL_ESCALATION
+
   local smart_ok=0
   if run_smart_review "$USER_MESSAGE"; then
     smart_ok=1
   fi
+  unset TOOL_ESCALATION
 
   if [[ "$smart_ok" -eq 1 ]]; then
     ENFORCEMENT_TOOL_HARNESS="tool-harness.smart.json"

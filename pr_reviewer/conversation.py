@@ -661,6 +661,9 @@ class Conversation:
     #   {"kind": "assistant_tool_calls", "calls": [{"id", "name", "arguments"}]}
     #   {"kind": "tool_result", "call_id": str, "result": Any, "is_error": bool}
     #   {"kind": "system_note", "content": str}   # verdict-turn transcript etc.
+    #   {"kind": "turn_note", "content": str}     # trusted driver guidance
+    #                                             # (#701: remaining-loop-budget
+    #                                             # notes between rounds)
     events: list[dict[str, Any]] = field(default_factory=list)
 
     # Tool schemas advertised on every non-verdict turn. Defaults to the
@@ -748,6 +751,25 @@ class Conversation:
             return
         self.events.append({"kind": "system_note", "content": content})
 
+    def add_turn_note(self, content: str) -> None:
+        """Append trusted driver guidance as its own event (#701).
+
+        Turn notes are produced by the loop driver itself (never by model or
+        tool output), so they are NOT wrapped in the untrusted-data envelope.
+        There is exactly ONE note in the conversation at any time: adding a
+        new note drops any previous one, so the note always sits at the tail
+        with the latest remaining-budget counts instead of piling up a stale
+        note per round. Rendering: OpenAI gets a plain user message; Anthropic
+        cannot have two adjacent user messages, so a note that follows tool
+        results is appended as a text block inside the same user turn that
+        carries those results (tool_result blocks first, then text — the
+        documented Anthropic shape).
+        """
+        if not content:
+            return
+        self.events = [e for e in self.events if e.get("kind") != "turn_note"]
+        self.events.append({"kind": "turn_note", "content": content})
+
     # ---- introspection ---------------------------------------------------
 
     def turns(self) -> int:
@@ -793,7 +815,7 @@ class Conversation:
         for e in self.events:
             # 16 bytes/msg overhead approximates role/formatting tokens.
             total_bytes += 16
-            if e["kind"] in ("user", "assistant_text", "system_note"):
+            if e["kind"] in ("user", "assistant_text", "system_note", "turn_note"):
                 total_bytes += len(e["content"].encode("utf-8"))
             elif e["kind"] == "assistant_tool_calls":
                 for c in e["calls"]:
@@ -883,14 +905,16 @@ class Conversation:
 
     # ---- wire emission ---------------------------------------------------
 
-    def _render_openai_messages(self) -> list[dict[str, Any]]:
+    def _render_openai_messages(self, *, include_turn_notes: bool = True) -> list[dict[str, Any]]:
         """Render neutral events as an OpenAI-format messages list.
 
         System lives at the top level (not in ``messages``). Tool results
         become ``role: tool`` messages keyed by ``tool_call_id``. Assistant
         tool calls are emitted on a single assistant message whose content
         may be ``None`` when the model produced only tool_calls (matching
-        OpenAI's non-streaming schema).
+        OpenAI's non-streaming schema). ``include_turn_notes=False`` (verdict
+        turn) drops driver budget notes — they describe loop-turn state that
+        no longer applies once tools are gone.
         """
         messages: list[dict[str, Any]] = []
         for e in self.events:
@@ -927,11 +951,17 @@ class Conversation:
                         "content": _tool_result_envelope(e),
                     }
                 )
+            elif kind == "turn_note":
+                if not include_turn_notes:
+                    continue
+                # Trusted driver guidance (#701). A user message after tool
+                # messages is valid OpenAI wire shape.
+                messages.append({"role": "user", "content": e["content"]})
             # system_note is only used for the verdict turn — handled in
             # to_request_payload, not here.
         return messages
 
-    def _render_anthropic_messages(self) -> list[dict[str, Any]]:
+    def _render_anthropic_messages(self, *, include_turn_notes: bool = True) -> list[dict[str, Any]]:
         """Render neutral events as an Anthropic-format messages list.
 
         Anthropic has no ``role: system`` inside ``messages``; system lives
@@ -941,7 +971,8 @@ class Conversation:
         onto a single user message to match Anthropic's batching convention.
         Assistant tool calls become ``{"type": "tool_use", "id", "name",
         "input"}`` content blocks; an assistant turn that has only text
-        becomes ``{"type": "text", "text": …}``.
+        becomes ``{"type": "text", "text": …}``. ``include_turn_notes=False``
+        (verdict turn) drops driver budget notes.
         """
         messages: list[dict[str, Any]] = []
         pending_tool_results: list[dict[str, Any]] = []
@@ -1004,6 +1035,20 @@ class Conversation:
                 if e.get("is_error"):
                     block["is_error"] = True
                 pending_tool_results.append(block)
+            elif kind == "turn_note":
+                if not include_turn_notes:
+                    continue
+                # Anthropic forbids two adjacent user messages, so a note that
+                # follows tool results rides in the SAME user turn as a text
+                # block after the tool_result blocks (the documented shape).
+                # With no pending results it becomes a standalone user message.
+                if pending_tool_results:
+                    pending_tool_results.append(
+                        {"type": "text", "text": e["content"]}
+                    )
+                else:
+                    _flush_tool_results()
+                    messages.append({"role": "user", "content": e["content"]})
             # system_note is verdict-turn only — handled in to_request_payload.
         _flush_tool_results()
         return messages
@@ -1073,6 +1118,7 @@ class Conversation:
                 keep_full_history_on_verdict=keep_full_history_on_verdict,
                 response_format=response_format,
                 cache_prefix=cache_prefix,
+                include_turn_notes=not verdict_turn,
             )
         return self._to_openai_payload(
             model=model,
@@ -1083,6 +1129,7 @@ class Conversation:
             keep_full_history_on_verdict=keep_full_history_on_verdict,
             response_format=response_format,
             tokens_param=tokens_param,
+            include_turn_notes=not verdict_turn,
         )
 
     def _to_openai_payload(
@@ -1096,9 +1143,10 @@ class Conversation:
         keep_full_history_on_verdict: bool,
         response_format: str | None,
         tokens_param: str = "max_tokens",
+        include_turn_notes: bool = True,
     ) -> dict[str, Any]:
         system = self.system
-        messages = self._render_openai_messages()
+        messages = self._render_openai_messages(include_turn_notes=include_turn_notes)
 
         if verdict_turn and not keep_full_history_on_verdict:
             system = (
@@ -1150,9 +1198,10 @@ class Conversation:
         keep_full_history_on_verdict: bool,
         response_format: str | None,
         cache_prefix: bool = False,
+        include_turn_notes: bool = True,
     ) -> dict[str, Any]:
         system = self.system
-        messages = self._render_anthropic_messages()
+        messages = self._render_anthropic_messages(include_turn_notes=include_turn_notes)
 
         if verdict_turn and not keep_full_history_on_verdict:
             system = (

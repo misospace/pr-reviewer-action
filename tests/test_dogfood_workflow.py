@@ -171,14 +171,15 @@ def test_dogfood_untouched_inputs_stay_put() -> None:
 def test_public_action_defaults_unchanged() -> None:
     """The public action.yml defaults for the tool budget inputs stay as-is.
 
-    #565 is dogfood-only tuning: consumers of the action must not see their
-    effective budgets change.
+    #701 moved tool_max_requests to a tier-aware resolver: the input default is
+    now empty and the route decides the effective budget (primary 8, smart 16,
+    escalated 20). The other tool-budget inputs keep their #565 defaults.
     """
     defaults = _extract_action_defaults()
 
     expected = {
         "tool_loop_wall_clock_sec": "120",
-        "tool_max_requests": "4",
+        "tool_max_requests": "",
         "tool_max_rounds": "3",
         "tool_turn_timeout_sec": "60",
         "tool_corpus_max_bytes": "50000",

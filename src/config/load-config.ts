@@ -7,6 +7,9 @@ const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Obje
   "repo-map-max-bytes": [1, 200_000],
   "pr-thread-max-bytes": [1, 200_000],
   "deep-review-corpus-max-bytes": [1, 500_000],
+  // #701: the tool request budget is bounded by the same hard ceiling the v2
+  // harness clamps to — an out-of-range explicit value can never widen it.
+  "tool-max-requests": [1, 20],
 });
 
 export type RawInputs = Readonly<Record<string, string | undefined>>;
