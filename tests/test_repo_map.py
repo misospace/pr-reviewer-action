@@ -373,6 +373,67 @@ def test_category_detection(tmp_path):
     assert "security-policy.md" not in repo["categories"]["auth"]
 
 
+def test_auth_base_redos_crafted_long_name():
+    """CodeQL #26 (py/redos): the auth-base pattern must stay linear.
+
+    A tracked filename like ``jwt-`` + ``0_``*N with no extension used to
+    drive the nested ``([-_]\\w+)*`` quantifier into exponential
+    backtracking (≈90 s at N=30 before the fix). The size below is instant
+    on the linear form and catastrophically slow if the nesting returns,
+    so a regression fails this test loudly (CI timeout) instead of passing.
+    """
+    crafted = "jwt-" + "0_" * 30
+    assert repo_map._is_auth(crafted) is False
+    # The same shape with a real extension is a normal auth code name.
+    assert repo_map._is_auth("jwt-" + "0_" * 30 + ".py") is True
+
+
+def test_auth_base_long_name_survives_map_build(tmp_path):
+    files = {
+        "jwt-" + "0_" * 30: "x\n",
+        "auth/jwt_utils.py": "x\n",
+    }
+    repo = build_repo_map(list(files))
+    assert repo["categories"]["auth"] == ["auth/jwt_utils.py"]
+
+
+def test_auth_base_language():
+    """Pin the auth-base language (exact replacement for the old pattern).
+
+    ``_`` is a word char, so chunk boundaries may sit before ``-`` only; the
+    linear form must accept/reject exactly what the old one did.
+    """
+    cases = [
+        # Positive: keyword, then chunks (``-``/``_`` delimited), then ext.
+        ("jwt.py", True),
+        ("auth_utils.py", True),
+        ("token-service.go", True),
+        ("oauth-client.ts", True),
+        ("secrets.py", True),
+        ("tokens.js", True),
+        ("security_audit.py", True),
+        ("jwt-0_0.py", True),
+        ("auth-a-b_c.py", True),  # mixed -/_ chunking must survive
+        ("auth-a-b_c-d_e.py", True),
+        # Python \w is Unicode (deliberately divergent from the ASCII TS port).
+        ("auth-ç.py", True),
+        # Negative: no delimiter after the keyword / non-word gaps.
+        ("oauth2_client.py", False),
+        ("authx.py", False),
+        ("tokenize.py", False),
+        ("jwt-.py", False),
+        ("auth--x.py", False),
+        ("jwt-a-.x", False),
+        ("crypto.py", False),  # segment-only, not a base keyword
+        # Regex matches, doc extension demotes to non-auth (SECURITY.md etc.).
+        ("auth.md", False),
+        ("security-policy.md", False),
+        ("secrets.txt", False),
+    ]
+    for name, expected in cases:
+        assert repo_map._is_auth(name) is expected, name
+
+
 def test_markdown_byte_cap(tmp_path):
     files = {f"pkg/f{i:02d}.py": "x\n" for i in range(30)}
     root = make_repo(tmp_path, files)

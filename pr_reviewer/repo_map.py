@@ -292,7 +292,17 @@ _API_SEGMENTS = {
     "endpoints", "handlers",
 }
 _AUTH_SEGMENTS = {"auth", "security", "secrets", "crypto", "oauth"}
-_AUTH_BASE_RE = re.compile(r"^(auth|security|secrets?|jwt|oauth|tokens?)([-_]\w+)*\.\w+$")
+# CodeQL py/redos: `([-_]\w+)*` is a nested quantifier — `_` is a word char,
+# so chunk boundaries can be redistributed inside a run, and a crafted tracked
+# name (`jwt-` + `0_`*n, no extension) triggers exponential backtracking.
+# Linear-time equivalent: a chunk boundary only ever needs to sit before a
+# `-` (a greedy `\w+` spanning `_` is as good as any split), so
+# `([-_]\w+)*` ≡ `([-_]\w+(?:-\w+)*)?`. `\w` stays Unicode, as before.
+_AUTH_BASE_RE = re.compile(
+    r"^(auth|security|secrets?|jwt|oauth|tokens?)"
+    r"([-_]\w+(?:-\w+)*)?"
+    r"\.\w+$"
+)
 
 
 def _is_manifest(path: str) -> bool:
