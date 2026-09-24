@@ -92,7 +92,10 @@ class TestMaxRequestsBoundedCall(TestCase):
         """main() must resolve the budget via the tier-aware resolver."""
         harness_path = _SCRIPTS_DIR / "run_tool_harness.py"
         source = harness_path.read_text(encoding="utf-8")
-        self.assertIn("max_requests = resolve_tool_max_requests(tier)", source)
+        # #702: main() uses the provenance-aware resolver (which
+        # resolve_tool_max_requests delegates to), so the artifact carries
+        # where the ceiling came from.
+        self.assertIn("max_requests = resolve_tool_budget(tier)", source)
         # The legacy fixed default must not come back as a single undifferentiated ceiling.
         self.assertNotIn('env_int_bounded("TOOL_MAX_REQUESTS", 4, 1, 20)', source)
 

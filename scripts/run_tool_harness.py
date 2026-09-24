@@ -828,8 +828,72 @@ def _write_private_artifact(path, text):
         output.write(text)
 
 
+# Version of the ``tool_loop_telemetry`` object embedded in the harness
+# artifact (#702). Bump when the shape changes; scripts/summarize_tool_loop_
+# telemetry.py reads version 1 only. The shape is the explicitly versioned
+# contract the #678 TypeScript migration must preserve.
+TOOL_LOOP_TELEMETRY_VERSION = 1
+
+
+def build_tool_loop_telemetry(result):
+    """Assemble the #702 budget telemetry object from a finished loop run.
+
+    Returns None when no native loop ran (pre-loop config errors must not
+    fabricate numbers). Consumes ``result["tool_loop_meta"]`` — the raw
+    loop measurements ``run_native_loop`` stashes after ``drive_tool_loop``
+    returns — and folds it with the budget-resolution and verdict keys the
+    run already carries, so every ``write_outputs`` exit path emits the same
+    shape. Counts, sizes, seconds, and enum strings only: never tool
+    arguments, results, prompts, or any other content.
+    """
+    meta = result.pop("tool_loop_meta", None)
+    if not isinstance(meta, dict):
+        return None
+    tool_calls = result.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        # Degraded runs (the model issued no calls) never reach
+        # _summarize_loop_outcome, so tool_calls is unset — and correctly so:
+        # nothing was issued or executed.
+        tool_calls = []
+    return {
+        "version": TOOL_LOOP_TELEMETRY_VERSION,
+        "route": result.get("tool_budget_tier", ""),
+        "budget": {
+            "source": result.get("tool_budget_source", ""),
+            "effective_max_requests": result.get("tool_request_budget", 0),
+            "configured_max_requests": result.get("tool_budget_configured"),
+            "max_rounds": meta.get("max_rounds", 0),
+            "wall_clock_sec": meta.get("wall_clock_sec", 0.0),
+        },
+        "usage": {
+            "tool_calls_issued": result.get("planned_request_count", 0),
+            "tool_calls_executed": len(tool_calls),
+            "rounds_used": result.get("rounds", 0),
+            "requests_remaining_at_stop": meta.get("requests_remaining", 0),
+            "elapsed_sec": round(float(meta.get("elapsed_sec", 0.0)), 3),
+            "tool_result_bytes": meta.get("tool_result_bytes", 0),
+        },
+        "compaction": {
+            "summarize": meta.get("compaction_summarize", 0),
+            "truncate": meta.get("compaction_truncate", 0),
+        },
+        "stop_reason": result.get("stop_reason", ""),
+        "budget_exhausted": bool(result.get("budget_exhausted")),
+        "degraded": "native_loop_degraded" in result,
+        "escalated": result.get("tool_budget_tier", "") == "escalated",
+        "verdict": {
+            "produced": bool(result.get("native_loop_verdict_produced")),
+            "status": result.get("native_loop_verdict_status", ""),
+            "reason": result.get("native_loop_verdict_reason", ""),
+        },
+    }
+
+
 def write_outputs(summary, markdown):
     """Write JSON and markdown outputs from the tool harness."""
+    telemetry = build_tool_loop_telemetry(summary)
+    if telemetry is not None:
+        summary["tool_loop_telemetry"] = telemetry
     tier = os.getenv("TOOL_HARNESS_TIER", "primary")
     stem = "tool-harness.smart" if tier == "smart" else "tool-harness"
     _write_private_artifact(
@@ -935,14 +999,20 @@ def tool_budget_route(tier):
     return "primary"
 
 
-def resolve_tool_max_requests(tier):
-    """Resolve the effective native-loop request budget for this run (#701).
+def resolve_tool_budget(tier):
+    """Resolve the effective request budget WITH its provenance (#702).
 
-    See ``tool_budget_route`` for the tier mapping. Precedence:
-    SMART_TOOL_MAX_REQUESTS (smart/escalated only) > TOOL_MAX_REQUESTS > the
-    route's tier default. Every explicit value is clamped to
-    1..TOOL_REQUEST_HARD_MAX; an unparsable value falls through to the next
-    source, never widening the budget.
+    Returns ``{"route", "budget", "source", "configured"}`` where ``source``
+    names the winning budget input — ``"smart-override"``
+    (SMART_TOOL_MAX_REQUESTS on a smart/escalated route), ``"explicit"``
+    (TOOL_MAX_REQUESTS), or ``"tier-default"`` — and ``configured`` is the
+    winning explicit integer (None for the tier default). This is the
+    evidence side of budget tuning: an operator can tell whether a run's
+    ceiling came from the route default or from configuration without
+    reconstructing the env.
+
+    ``resolve_tool_max_requests`` keeps its int-only contract (tests and the
+    parity fixture pin it) and delegates here.
     """
     route = tool_budget_route(tier)
 
@@ -955,11 +1025,38 @@ def resolve_tool_max_requests(tier):
     if route != "primary":
         tier_override = _clamped(os.getenv("SMART_TOOL_MAX_REQUESTS", "").strip())
         if tier_override is not None:
-            return tier_override
+            return {
+                "route": route,
+                "budget": tier_override,
+                "source": "smart-override",
+                "configured": tier_override,
+            }
     explicit = _clamped(os.getenv("TOOL_MAX_REQUESTS", "").strip())
     if explicit is not None:
-        return explicit
-    return TOOL_REQUEST_TIER_DEFAULTS[route]
+        return {
+            "route": route,
+            "budget": explicit,
+            "source": "explicit",
+            "configured": explicit,
+        }
+    return {
+        "route": route,
+        "budget": TOOL_REQUEST_TIER_DEFAULTS[route],
+        "source": "tier-default",
+        "configured": None,
+    }
+
+
+def resolve_tool_max_requests(tier):
+    """Resolve the effective native-loop request budget for this run (#701).
+
+    See ``tool_budget_route`` for the tier mapping. Precedence:
+    SMART_TOOL_MAX_REQUESTS (smart/escalated only) > TOOL_MAX_REQUESTS > the
+    route's tier default. Every explicit value is clamped to
+    1..TOOL_REQUEST_HARD_MAX; an unparsable value falls through to the next
+    source, never widening the budget.
+    """
+    return resolve_tool_budget(tier)["budget"]
 
 
 def resolve_review_system_prompt():
@@ -1285,6 +1382,20 @@ def run_native_loop(
         f"(stop: {outcome.stop_reason})",
         file=sys.stderr,
     )
+    # #702: raw loop measurements for the artifact's tool_loop_telemetry
+    # object. Stashed here — before the verdict turn — so every later exit
+    # path (smart failure, degraded, success) carries the same telemetry.
+    # Folded into the namespaced object and removed from the artifact by
+    # build_tool_loop_telemetry at write time.
+    result["tool_loop_meta"] = {
+        "requests_remaining": outcome.requests_remaining,
+        "max_rounds": outcome.max_rounds,
+        "wall_clock_sec": outcome.wall_clock_sec,
+        "elapsed_sec": outcome.elapsed_sec,
+        "tool_result_bytes": outcome.tool_result_bytes,
+        "compaction_summarize": outcome.compaction_summarize,
+        "compaction_truncate": outcome.compaction_truncate,
+    }
     if tier == "smart" and (
         outcome.stop_reason in ("request-error", "wall-clock-exceeded")
         or (deadline is not None and time.monotonic() >= deadline)
@@ -1579,7 +1690,7 @@ def main():
         os.getenv("TOOL_CORPUS_MAX_BYTES")
         or os.getenv("TOOL_PLANNING_MAX_CONTEXT_BYTES", "50000")
     )
-    max_requests = resolve_tool_max_requests(tier)
+    max_requests = resolve_tool_budget(tier)
     request_timeout = env_int_bounded("TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300)
 
     allowed_hosts_raw = os.getenv("ALLOWED_SOURCE_HOSTS", "github.com,api.github.com")
@@ -1593,9 +1704,12 @@ def main():
         "executed_request_count": 0,
         "tool_results": [],
         # #701: which route tier resolved the request budget and what it is —
-        # telemetry for the exhaustion-aware budget story.
-        "tool_budget_tier": tool_budget_route(tier),
-        "tool_request_budget": max_requests,
+        # telemetry for the exhaustion-aware budget story. #702 adds where the
+        # ceiling came from and the configured value behind it.
+        "tool_budget_tier": max_requests["route"],
+        "tool_request_budget": max_requests["budget"],
+        "tool_budget_source": max_requests["source"],
+        "tool_budget_configured": max_requests["configured"],
     }
 
     # The native tool-calling loop (#203) is the only tool mode as of 2.0 — the
@@ -1653,7 +1767,7 @@ def main():
         workspace_root,
         max_response_bytes,
         request_timeout,
-        max_requests,
+        max_requests["budget"],
         turn_timeout,
         int(
             os.getenv("TOOL_MAX_TOKENS_PER_TURN")
