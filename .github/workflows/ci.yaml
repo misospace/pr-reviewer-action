@@ -19,7 +19,8 @@ jobs:
       - validate-typescript
       - validate-python
       - validate-static
-      - validate-bash-slow
+      - validate-bash-timeout
+      - validate-bash-gating
       - validate-bash
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -35,7 +36,8 @@ jobs:
             "validate-typescript ${{ needs.validate-typescript.result }}" \
             "validate-python ${{ needs.validate-python.result }}" \
             "validate-static ${{ needs.validate-static.result }}" \
-            "validate-bash-slow ${{ needs.validate-bash-slow.result }}" \
+            "validate-bash-timeout ${{ needs.validate-bash-timeout.result }}" \
+            "validate-bash-gating ${{ needs.validate-bash-gating.result }}" \
             "validate-bash ${{ needs.validate-bash.result }}"; do
             job="${job_result%% *}"
             result="${job_result#* }"
@@ -185,11 +187,12 @@ jobs:
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
-  # The two longest bash suites (CI-status gating and concurrent gating) get
-  # their own runner instead of queueing every other suite behind them. The
-  # suite list lives in tests/slow-bash-suites.txt, which is the single source
-  # of truth shared with validate-bash's exclusion below.
-  validate-bash-slow:
+  # The two longest bash suites (CI API timeout ~66s, concurrent gating ~47s)
+  # each get their own runner instead of queueing the other one (or every
+  # other suite) behind it. Each job reads its suite list from its own file
+  # under tests/slow-bash-suites-*.txt, which are also the single source of
+  # truth for validate-bash's exclusion below.
+  validate-bash-timeout:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -208,7 +211,7 @@ jobs:
         # pinned install the old serial job provided.
         run: pip install -r requirements.txt
 
-      - name: Run long-running bash test suites
+      - name: Run CI API timeout suite
         run: |
           set -euo pipefail
           failed=0
@@ -220,7 +223,39 @@ jobs:
               failed=1
             fi
             echo "::endgroup::"
-          done < tests/slow-bash-suites.txt
+          done < tests/slow-bash-suites-ci-timeout.txt
+          exit "$failed"
+
+  validate-bash-gating:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Same pinned interpreter as validate-python so bash suites that shell
+          # out to python3 see the same version (see the skew note above).
+          python-version: '3.14'
+
+      - name: Install test dependencies
+        # See the note in validate-bash-timeout: suites import PyYAML transitively.
+        run: pip install -r requirements.txt
+
+      - name: Run concurrent gating suite
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            echo "::group::$t"
+            if ! bash "$t"; then
+              echo "::error::$t failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done < tests/slow-bash-suites-gating.txt
           exit "$failed"
 
   validate-bash:
@@ -243,15 +278,16 @@ jobs:
       - name: Run smoke test
         run: tests/smoke_test.sh
 
-      # Auto-discover every bash suite except the slow ones listed in
-      # tests/slow-bash-suites.txt (run by validate-bash-slow) so a new (or
-      # previously unlisted) suite cannot silently stay out of CI.
+      # Auto-discover every bash suite except the slow ones listed in the
+      # tests/slow-bash-suites-*.txt files (run by validate-bash-timeout and
+      # validate-bash-gating) so a new (or previously unlisted) suite cannot
+      # silently stay out of CI.
       - name: Run bash test suites (auto-discover)
         run: |
           set -euo pipefail
           failed=0
           for t in tests/test_*.sh; do
-            if grep -Fxq "$t" tests/slow-bash-suites.txt; then
+            if grep -Fxq "$t" tests/slow-bash-suites-*.txt; then
               continue
             fi
             echo "::group::$t"
