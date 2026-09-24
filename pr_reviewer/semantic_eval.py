@@ -37,6 +37,11 @@ CAPABILITY_AMBIENT_CAPABILITY_LOSS = "ambient_capability_loss"
 CAPABILITY_BACKGROUND_LIFECYCLE = "background_process_lifecycle"
 CAPABILITY_REMEDIATION_TOPOLOGY = "remediation_process_topology"
 CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY = "undeclared_capability_dependency"
+CAPABILITY_CANONICAL_ARTIFACT = "canonical_artifact_propagation"
+CAPABILITY_PRECHECK_CREDENTIAL = "precheck_capability_wiring"
+CAPABILITY_BROKEN_ARROW = "broken_dataflow_arrow"
+CAPABILITY_CORPUS_EVIDENCE = "review_corpus_evidence_transport"
+CAPABILITY_TRUNCATION_COUNTEREXAMPLE = "truncation_counterexample"
 # #661 merge-safety review dispositions: the per-run quality categories the
 # semantic report records so a miss is attributable to its failure mode — the
 # defect was never found, it was found but suppressed as pre-existing to the
@@ -124,6 +129,11 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_BACKGROUND_LIFECYCLE,
         CAPABILITY_REMEDIATION_TOPOLOGY,
         CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY,
+        CAPABILITY_CANONICAL_ARTIFACT,
+        CAPABILITY_PRECHECK_CREDENTIAL,
+        CAPABILITY_BROKEN_ARROW,
+        CAPABILITY_CORPUS_EVIDENCE,
+        CAPABILITY_TRUNCATION_COUNTEREXAMPLE,
     }
 )
 
@@ -242,6 +252,27 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
         "wrapper pid alone does not own the workload", "test collapses the wrapper and payload",
         "exec sleep collapses the process topology", "collapses the wrapper and payload",
         "simplifies away the process topology", "process-topology risk",
+    )),
+    (CAPABILITY_CANONICAL_ARTIFACT, (
+        "canonical linked-issues.json contains bare refs", "classifier reads bare refs instead of fetched labels",
+        "fetched labels never reach the classifier", "linked labels are missing from the canonical artifact",
+    )),
+    (CAPABILITY_PRECHECK_CREDENTIAL, (
+        "precheck lacks the linear api key", "linear key is absent from the precheck environment",
+        "precheck signature ignores linear priority", "linear lookup is unreachable from the precheck step",
+    )),
+    (CAPABILITY_BROKEN_ARROW, (
+        "consumer reads a different artifact", "consumer reads a different environment variable",
+        "helper output never reaches the production consumer", "producer and consumer use different paths",
+    )),
+    (CAPABILITY_CORPUS_EVIDENCE, (
+        "verified exact-head evidence is omitted from the review corpus",
+        "corpus truncation promotes verified evidence into a blocker",
+        "exact-head ci evidence never reaches the reviewer",
+    )),
+    (CAPABILITY_TRUNCATION_COUNTEREXAMPLE, (
+        "truncate_clean writes an oversized marker beyond max_corpus",
+        "oversized marker exceeds the corpus budget",
     )),
 )
 
@@ -1178,6 +1209,8 @@ __all__ = [
     "CAPABILITY_EXECUTION_BOUNDARY_AUTHORITY", "CAPABILITY_AMBIENT_CAPABILITY_LOSS",
     "CAPABILITY_BACKGROUND_LIFECYCLE", "CAPABILITY_REMEDIATION_TOPOLOGY",
     "CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY",
+    "CAPABILITY_CANONICAL_ARTIFACT", "CAPABILITY_PRECHECK_CREDENTIAL",
+    "CAPABILITY_BROKEN_ARROW", "CAPABILITY_CORPUS_EVIDENCE", "CAPABILITY_TRUNCATION_COUNTEREXAMPLE",
     "DISPOSITION_CORRECT", "DISPOSITION_INVALID_REMEDIATION", "DISPOSITION_NOT_FOUND",
     "DISPOSITION_SPECULATIVE_FALSE_POSITIVE", "DISPOSITION_SUPPRESSED_PRE_EXISTING",
     "MERGE_SAFETY_DISPOSITIONS", "MERGE_SAFETY_DISPOSITIONS_ORDER",

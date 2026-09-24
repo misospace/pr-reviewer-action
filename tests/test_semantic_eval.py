@@ -359,10 +359,27 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    assert payload["scenarios_evaluated"] == 17
+    assert payload["scenarios_evaluated"] == 22
+    assert {"6551", "6552", "6553", "6891", "6892"} <= payload["per_scenario_summary"].keys()
+    assert {item["name"] for item in payload["production_dataflow_checks"]} == {
+        "github-label-routing", "linear-composite-precheck", "corpus-evidence-and-broken-arrow",
+    }
+    assert all(item["passed"] for item in payload["production_dataflow_checks"])
     assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0
     assert payload["per_scenario_summary"]["638"]["routes"] == ["primary", "primary+escalation"]
     assert payload["per_scenario_summary"]["645"]["routes"] == ["primary", "primary+escalation"]
+
+
+def test_production_check_failure_fails_historical_gate(monkeypatch, tmp_path: Path) -> None:
+    import scripts.run_semantic_eval_ci as runner
+
+    monkeypatch.setattr(runner, "run_dataflow_checks", lambda: [{"name": "broken-arrow", "passed": False, "detail": "wrong artifact"}])
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--corpus", str(CORPUS), "--output", str(tmp_path / "report.json")])
+    assert runner.main() == 1
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert not payload["passed"]
+    assert payload["summary"]["pass_rate"] == 1.0
+    assert payload["production_dataflow_checks"][0]["detail"] == "wrong artifact"
 
 
 def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:

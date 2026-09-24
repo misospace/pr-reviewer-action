@@ -590,6 +590,7 @@ apply_system_prompt_fragments() {
       vg="$(<"$SCRIPT_DIR/prompt_fragments/concise.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERBOSITY_GUIDANCE\}\}/$vg}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT} Trace producer -> persisted representation -> transport/environment -> consumer -> decision for cross-step features; verify the production wiring uses the same artifact and capability as the tests. A test or CI result absent from a truncated corpus is not evidence that the exact head failed or lacks coverage: distinguish omitted evidence from an observed counterexample, and do not request changes solely because a tail is missing."
   fi
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" && -f classification.json ]]; then
     local kind vb="" dg="" rn=""

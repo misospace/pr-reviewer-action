@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,8 +22,30 @@ DETERMINISTIC_SCENARIOS = frozenset(
         623, 6231, 638, 644, 645, 6451, 8004,
         # PR #654 execution-boundary / lifecycle failure classes (#659).
         6541, 6542, 6543, 6544, 6545, 6546, 6547, 6548, 6549, 6550,
+        # PR #655 producer/artifact/consumer and PR #689 evidence transport (#662).
+        6551, 6552, 6553, 6891, 6892,
     }
 )
+
+
+def run_dataflow_checks() -> list[dict[str, object]]:
+    """Include real production-boundary checks in the historical report."""
+    env = dict(os.environ)
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    checks = (
+        ("github-label-routing", ["bash", str(ROOT / "tests/test_linked_issue_classification.sh")]),
+        ("linear-composite-precheck", ["bash", str(ROOT / "tests/test_precheck_linear_fingerprint.sh")]),
+        ("corpus-evidence-and-broken-arrow", [sys.executable, "-m", "pytest", "tests/test_issue_662_dataflow.py", "-q"]),
+    )
+    results = []
+    for name, argv in checks:
+        try:
+            completed = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
+            results.append({"name": name, "passed": completed.returncode == 0 and "SKIP:" not in completed.stdout + completed.stderr,
+                            "detail": (completed.stdout + completed.stderr)[-2000:] if completed.returncode else ""})
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results.append({"name": name, "passed": False, "detail": str(exc)})
+    return results
 
 
 def main() -> int:
@@ -36,6 +60,10 @@ def main() -> int:
         corpus = SemanticCorpus.from_file(args.corpus)
         validate_semantic_corpus(corpus)
         report = evaluate_semantic_corpus(corpus)
+        report["production_dataflow_checks"] = run_dataflow_checks()
+        report["passed"] = report["passed"] and all(
+            item["passed"] for item in report["production_dataflow_checks"]
+        )
         scenario_numbers = {scenario.number for scenario in corpus.scenarios}
         missing_scenarios = sorted(DETERMINISTIC_SCENARIOS - scenario_numbers)
         no_run_scenarios = sorted(item["scenario_number"] for item in report["scenarios"] if not item["runs"])
@@ -69,6 +97,8 @@ def main() -> int:
     passed = bool(report["scenarios"]) and report["passed"]
     if args.report is None:
         print(json.dumps(report["summary"], sort_keys=True))
+        for item in report["production_dataflow_checks"]:
+            print(f"{item['name']}: {'PASS' if item['passed'] else 'FAIL'} {item['detail']}")
         return 0 if passed else 1
     payload = {
         **report,
@@ -81,6 +111,8 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], sort_keys=True))
+    for item in report["production_dataflow_checks"]:
+        print(f"{item['name']}: {'PASS' if item['passed'] else 'FAIL'} {item['detail']}")
     return 0 if passed else 1
 
 

@@ -29,6 +29,19 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# The test's step-shaped env is valid only if the composite step really binds
+# the credential and loads the shared file before invoking the entrypoint.
+python3 - "$ROOT_DIR/action.yml" <<'PY'
+import sys
+import yaml
+
+steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["runs"]["steps"]
+step = next(s for s in steps if s["name"] == "Check whether review is needed")
+assert step["env"]["LINEAR_API_KEY"] == "${{ inputs.linear_api_key }}"
+assert step["env"]["SHARED_ENV_FILE"] == "${{ steps.shared_env.outputs.path }}"
+assert step["run"].index('load_shared_env "$SHARED_ENV_FILE"') < step["run"].index('check_review_needed.sh')
+PY
+
 PASS=0
 FAIL=0
 # shellcheck source=_lib/assert.sh

@@ -412,6 +412,17 @@ report records primary/escalation fixture routes and negative-control-only
 false-positive metrics. CI runs the same command and uploads
 `semantic-eval-report/report.json`.
 
+Issue #662 adds distinct PR #655 linked-label, Linear precheck, and broken-arrow
+scenarios plus PR #689 exact-head evidence and real-counterexample scenarios.
+The same runner also executes local production-boundary integration checks
+(`production_dataflow_checks` in the report) with fake platform/Linear inputs:
+canonical labels through classification, auto roles and routing; the composite
+precheck through stale-skip/fork gates; and bounded corpus assembly with CI and
+ledger evidence. Any failed check fails qualification even if the reviewer-text
+fixtures pass. Reviewers should trace producer -> persisted representation ->
+transport/environment -> consumer -> decision, distinguishing omitted corpus
+evidence from a reproduced defect.
+
 ### Interpreting the report
 
 The harness prints per-mode `pass_rate` (fraction of expected-evidence

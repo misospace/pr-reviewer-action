@@ -284,6 +284,14 @@ build_review_corpus() {
       cat linked-issues.md
       echo
     fi
+    # Exact-head external checks are authoritative evidence. Place them ahead
+    # of the bulky diff so a body-budget truncation cannot silently turn a
+    # completed check into "not verified" for the final reviewer.
+    if [ -n "$CI_CHECKS_FILE" ] && [ -s "$CI_CHECKS_FILE" ]; then
+      echo "# CI Check Results"
+      cat "$CI_CHECKS_FILE"
+      echo
+    fi
     echo "# PR Files (truncated)"
     echo '```json'
     cat "$files_file"
@@ -313,15 +321,6 @@ build_review_corpus() {
     if [ -s evidence-providers.md ]; then
       echo "# Evidence Providers"
       cat evidence-providers.md
-      echo
-    fi
-    # CI ran to completion in its own sandbox before this review; surface the
-    # per-check outcomes so the model cites real test/lint results instead of
-    # reporting them as "not verifiable". Only present when ci_status_check=true
-    # and external checks existed.
-    if [ -n "$CI_CHECKS_FILE" ] && [ -s "$CI_CHECKS_FILE" ]; then
-      echo "# CI Check Results"
-      cat "$CI_CHECKS_FILE"
       echo
     fi
     echo "# Image Digest Provenance"
