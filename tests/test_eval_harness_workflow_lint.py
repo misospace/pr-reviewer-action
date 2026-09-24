@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "eval-harness.yaml"
@@ -125,4 +126,99 @@ def test_run_eval_harness_step_passes_shellcheck() -> None:
     assert result.returncode == 0, (
         f"`Run eval harness` step failed shellcheck (would break CI validate):\n"
         f"{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_summary_step_fails_on_zero_completed_runs() -> None:
+    """The weekly summary must fail the job when every harness run errored.
+
+    Issue #711: a scheduled sweep where every run errored (run_review.sh had
+    lost its executable bit) still published a green success summary with no
+    pass rates. The summary step must derive ``completed_runs`` from the
+    report and ``sys.exit(1)`` when it is zero — after writing the step
+    summary and tracking-issue comment, so the evidence stays visible.
+    """
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    run_block = _extract_run_block("Summarize weekly run", workflow_text)
+
+    assert "completed_runs" in run_block, (
+        "the summary step must compute `completed_runs` from the report"
+    )
+    assert "all_errored" in run_block and "sys.exit(1)" in run_block, (
+        "the summary step must exit nonzero when every harness run errored "
+        "(issue #711)"
+    )
+    # The failure decision must come after the summary is written, so a red
+    # run still publishes its evidence.
+    assert run_block.index("GITHUB_STEP_SUMMARY") < run_block.index("sys.exit(1)"), (
+        "the zero-completed-runs failure must be decided after the step "
+        "summary is written"
+    )
+    assert "sys.exit(0)" in run_block, (
+        "partial failures must stay non-fatal: the summary step keeps its "
+        "success exits"
+    )
+
+
+def _summary_step_condition() -> str:
+    """The `if:` expression of the `Summarize weekly run` step."""
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["run-eval-harness"]["steps"]
+    summary = next(
+        (s for s in steps if s.get("name") == "Summarize weekly run"), None
+    )
+    assert summary is not None, (
+        "the `Summarize weekly run` step must exist in the eval-harness workflow"
+    )
+    return summary.get("if") or ""
+
+
+def test_summary_step_still_runs_after_failed_harness_step() -> None:
+    """The scheduled summary must not be skipped when the harness step failed.
+
+    Issue #711 follow-up: the harness exits nonzero on an all-errored sweep,
+    which would normally skip every later step — so the step summary and the
+    #472 tracking comment would never be written on exactly the run that
+    needs them. The step condition must therefore use ``!cancelled()``
+    (run after failure, skip only on cancellation), and the summary step's
+    own completed_runs guard supplies the failure afterwards.
+    """
+    condition = _summary_step_condition()
+
+    assert "!cancelled()" in condition, (
+        "the summary step must use `!cancelled()` so it still executes after "
+        "a failed `Run eval harness` step (issue #711)"
+    )
+    assert "always()" not in condition, (
+        "the summary step must not use bare `always()`, which would also run "
+        "on cancelled runs"
+    )
+
+
+def test_summary_step_remains_schedule_only() -> None:
+    """Non-scheduled (workflow_dispatch) runs must stay summary-free."""
+    condition = _summary_step_condition()
+
+    assert "github.event_name == 'schedule'" in condition, (
+        "the summary step must keep the schedule-only gate so manual "
+        "workflow_dispatch runs are unaffected"
+    )
+
+
+def test_report_upload_still_runs_after_failed_harness_step() -> None:
+    """The eval-report artifact must upload even on an all-errored sweep.
+
+    The harness writes the report before exiting nonzero (#711) precisely so
+    this step can capture the per-run errors for debugging; that only works
+    if the upload step keeps an always() condition.
+    """
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["run-eval-harness"]["steps"]
+    upload = next(
+        (s for s in steps if s.get("name") == "Upload eval-report.json"), None
+    )
+    assert upload is not None, "the report upload step must exist"
+    assert "always()" in (upload.get("if") or ""), (
+        "the report upload step must keep `if: always()` so the report "
+        "written by a failing harness run is still captured"
     )
