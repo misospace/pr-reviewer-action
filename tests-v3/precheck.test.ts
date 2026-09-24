@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildMarkerFingerprint,
   collectConfigLines,
@@ -54,6 +66,86 @@ test("marker fingerprints round-trip the empty-diff placeholder and first marker
   assert.deepEqual(parseMarkerFingerprints(body), [marker]);
   assert.equal(extractStoredFingerprint(body), marker);
   assert.equal(extractStoredFingerprint("no marker here"), "");
+});
+
+// ── Config-file reads (the #139 js/file-system-race boundary) ───────────
+
+function configLineFor(env: Record<string, string>, path: string): string | undefined {
+  return collectConfigLines(env).find((line) => line.startsWith(`file:${path}=`));
+}
+
+function withTempDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "pr-fp-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a regular config file is read, folded into the hash, and content-derived", () => {
+  withTempDir((dir) => {
+    const p = join(dir, "system-prompt.txt");
+    writeFileSync(p, "line-one\nline-two\n");
+    const line = configLineFor({ SYSTEM_PROMPT_FILE: p }, p);
+    assert.equal(line, `file:${p}=line-one\nline-two\n`);
+    // The line form is the v2 hashing boundary: verify the digest against a
+    // direct node:crypto computation so a format drift cannot slip through.
+    const lines = collectConfigLines({ SYSTEM_PROMPT_FILE: p });
+    assert.deepEqual(lines, [line]);
+    const expected = createHash("sha256").update(`${lines[0]!.trim()}\n`, "utf8").digest("hex");
+    assert.equal(computeConfigHash(lines), expected);
+    // Editing the file at an unchanged path invalidates (same as v2).
+    const first = computeConfigHash(lines);
+    writeFileSync(p, "line-one EDITED\n");
+    assert.notEqual(computeConfigHash(collectConfigLines({ SYSTEM_PROMPT_FILE: p })), first);
+  });
+});
+
+test("a symlinked config path hashes the target's content, as v2 does", () => {
+  withTempDir((dir) => {
+    const target = join(dir, "real.txt");
+    const link = join(dir, "prompt.txt");
+    writeFileSync(target, "target content\n");
+    symlinkSync(target, link);
+    assert.equal(configLineFor({ SYSTEM_PROMPT_FILE: link }, link), `file:${link}=target content\n`);
+  });
+});
+
+test("directories, broken symlinks, and missing paths are skipped", () => {
+  withTempDir((dir) => {
+    const d = join(dir, "adirectory");
+    mkdirSync(d);
+    const broken = join(dir, "broken");
+    symlinkSync(join(dir, "nowhere"), broken);
+    const missing = join(dir, "missing");
+    const env = { AI_RULES_FILE: d, AI_EXCLUDES_FILE: broken, AI_INCLUDES_FILE: missing };
+    assert.equal(collectConfigLines(env).filter((line) => line.startsWith("file:")).length, 0);
+  });
+});
+
+test("a FIFO at the config path is skipped without blocking the read", () => {
+  // A pre-open type check (lstat/stat) plus a plain "r" open would block
+  // on a FIFO; the single non-blocking open + fstat(fd) must skip it.
+  withTempDir((dir) => {
+    const fifo = join(dir, "fifo");
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+    assert.equal(configLineFor({ SYSTEM_PROMPT_FILE: fifo }, fifo), undefined);
+    const link = join(dir, "fifo-link");
+    symlinkSync(fifo, link);
+    assert.equal(configLineFor({ SYSTEM_PROMPT_FILE: link }, link), undefined);
+  });
+});
+
+test("an unreadable config file is skipped", {
+  skip: process.getuid?.() === 0 ? "running as root: mode 000 is still readable" : false,
+}, () => {
+  withTempDir((dir) => {
+    const p = join(dir, "locked.txt");
+    writeFileSync(p, "secret\n");
+    chmodSync(p, 0o000);
+    assert.equal(configLineFor({ SYSTEM_PROMPT_FILE: p }, p), undefined);
+  });
 });
 
 // ── The decision function ────────────────────────────────────────────────

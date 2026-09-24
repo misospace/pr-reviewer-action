@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -99,12 +99,35 @@ const CONFIG_FILE_VARS: readonly string[] = [
   "EVIDENCE_PROVIDERS_FILE",
 ];
 
+// O_NONBLOCK keeps a config path swapped to a FIFO (or a symlink to one)
+// from blocking the open; such entries fail the fstat regular-file check
+// below and are skipped — the same outcome v2's os.path.isfile produced.
+const CONFIG_FILE_FLAGS: number = fsConstants.O_RDONLY | fsConstants.O_NONBLOCK;
+
+/** Read a config file's content, or null when it is not a readable regular
+ * file. The path is opened exactly once and both the regular-file check
+ * (fstat on the descriptor) and the read (readFileSync on the descriptor)
+ * operate on that one open, so a swap between the two cannot make them see
+ * different resolutions of the same path — no check-then-use TOCTOU
+ * (CodeQL #139, js/file-system-race). Symlink semantics match v2: a symlink
+ * to a regular file reads the target; broken links, directories, FIFOs, and
+ * unreadable/missing paths are skipped. */
 function readFileText(path: string): string | null {
+  let fd: number | undefined;
   try {
-    if (!statSync(path).isFile()) return null;
-    return readFileSync(path, "utf8");
+    fd = openSync(path, CONFIG_FILE_FLAGS);
+    if (!fstatSync(fd).isFile()) return null;
+    return readFileSync(fd, "utf8");
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // A descriptor that is already closed must not mask the result.
+      }
+    }
   }
 }
 
