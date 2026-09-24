@@ -188,6 +188,12 @@ jobs:
           # out to python3 see the same version (see the skew note above).
           python-version: '3.14'
 
+      - name: Install test dependencies
+        # Some suites import PyYAML in inline python (it arrives transitively
+        # via yamllint in requirements.txt), so the bash jobs need the same
+        # pinned install the old serial job provided.
+        run: pip install -r requirements.txt
+
       - name: Run long-running bash test suites
         run: |
           set -euo pipefail
@@ -214,6 +220,10 @@ jobs:
           # Same pinned interpreter as validate-python so bash suites that shell
           # out to python3 see the same version (see the skew note above).
           python-version: '3.14'
+
+      - name: Install test dependencies
+        # See the note in validate-bash-slow: suites import PyYAML transitively.
+        run: pip install -r requirements.txt
 
       - name: Run smoke test
         run: tests/smoke_test.sh
