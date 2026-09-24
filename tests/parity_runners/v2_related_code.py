@@ -30,9 +30,9 @@ def main() -> int:
 
     result = build_related_context(anchor_data, workspace, file_data, git_timeout_sec=git_timeout)
     markdown_cap = fixture.get("markdown_max_bytes", 100000)
-    # The fixture "credentials" are inert dummies exercising the redaction
+    # CodeQL [py/clear-text-logging-of-sensitive-data] The fixture
+    # "credentials" are inert dummies that exist to exercise the redaction
     # path; the printed artifact carries them already replaced by [REDACTED].
-    # codeql[py/clear-text-logging-of-sensitive-data]
     print(json.dumps({
         "ok": True,
         "values": {
