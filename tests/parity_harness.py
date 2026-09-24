@@ -741,6 +741,7 @@ VERDICT_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Boundary: tier-aware tool request budget (#701)
 # ---------------------------------------------------------------------------
 
@@ -786,7 +787,94 @@ TOOL_BUDGET_BOUNDARY = Boundary(
 )
 
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY)
+# ---------------------------------------------------------------------------
+# Boundary: classification + role selection (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_classification(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_classification.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def _run_v3_fixture_mode(mode_argv: list[str], fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    return run_json_runner(
+        [node, "dist/index.js", *mode_argv, str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)},
+    )
+
+
+def run_v3_classification(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["classification-fixture"], fixture, workdir)
+
+
+CLASSIFICATION_BOUNDARY = Boundary(
+    id="classification-role-selection",
+    description=(
+        "#675 classification parity: the v2 deterministic classifier and the "
+        "specialist role selector versus the v3 TypeScript port, driven over "
+        "the same fixture inputs. Covers kind precedence (renovate digest-only, "
+        "dependency upgrades, k8s manifests, security/path kinds), diff-content "
+        "risk flags and route-signal exclusion, linked-issue label flags, "
+        "Linear native priority mapping, must-check derivation, linked-metadata "
+        "uncertainty, the trivial zero-selection gates (with the summary-cap "
+        "conservatism), and every conservative all-roles fallback (unusable "
+        "input, unknown kind, no-lane kind, undetermined metadata). Includes "
+        "the reconstructed #655 GitHub-label and Linear capability cases from "
+        "#662: enriched canonical labels must reach classification and flip "
+        "risk flags and role selection."
+    ),
+    fixtures_dir="classification",
+    run=lambda fixture, workdir: (run_v2_classification(fixture, workdir), run_v3_classification(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: requirement ledger (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_requirement_ledger(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_requirement_ledger.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_requirement_ledger(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["requirement-ledger-fixture"], fixture, workdir)
+
+
+REQUIREMENT_LEDGER_BOUNDARY = Boundary(
+    id="requirement-ledger",
+    description=(
+        "#675 requirement-ledger parity: the v2 deterministic ledger extractor "
+        "and fence-safe markdown renderer versus the v3 TypeScript port, over "
+        "standards/linked-issue/PR-body sources. Covers acceptance/normative/"
+        "invariant extraction rules, fenced-block skipping, content-derived ids, "
+        "cross-source dedup with merged provenance, truncation caps (entry "
+        "count, text length, source capacity with reserved docs, markdown byte "
+        "cap), and hostile-content handling (control characters, backtick runs, "
+        "heading forgery)."
+    ),
+    fixtures_dir="requirement-ledger",
+    run=lambda fixture, workdir: (
+        run_v2_requirement_ledger(fixture, workdir),
+        run_v3_requirement_ledger(fixture, workdir),
+    ),
+)
+
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

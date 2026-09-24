@@ -1,0 +1,10 @@
+{
+  "fixture": "workflows-nontrivial",
+  "description": "Executable .github content (workflows) is never trivial: docs/meta gate defeated, correctness lane runs.",
+  "pr_files": [
+    { "filename": ".github/workflows/ci.yaml", "status": "modified" },
+    { "filename": "docs/index.md", "status": "modified" }
+  ],
+  "diff": "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\n@@ -1 +1 @@\n-  - run: make test\n+  - run: make test TEST_FLAGS=-v\n",
+  "linked_issues": []
+}

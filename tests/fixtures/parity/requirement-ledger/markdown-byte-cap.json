@@ -1,0 +1,9 @@
+{
+  "fixture": "markdown-byte-cap",
+  "description": "Hard UTF-8 byte cap on the rendered ledger: trailing whole entries dropped with a visible omission note, and a multibyte character shrunk char-safely (never split).",
+  "pr_json": null,
+  "linked_issues_markdown": "",
+  "standards_text": "## Acceptance criteria\n\n- first requirement with unicode ✓ marks and é accents\n- second requirement MUST be short\n- third requirement is long enough to push the rendered document past the tiny configured byte cap on its own with plenty of prose padding padding padding padding\n",
+  "standards_ref": "standards.md",
+  "markdown_max_bytes": 220
+}
