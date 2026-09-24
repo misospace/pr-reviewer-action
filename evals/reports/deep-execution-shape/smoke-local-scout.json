@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "generated_at": "2026-09-24T12:38:39.306469+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "tools_off+deep-scout"
+    ],
+    "total_prs": 1,
+    "corpus_source": "/Users/joryirving/git/pr-reviewer-action-review/evals/corpus-specialists.json"
+  },
+  "mode_summary": {
+    "native_loop": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off+deep-scout": {
+      "runs": 1,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 1,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 1,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 1,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": 0.0,
+      "specialist_lead_pass_rate": 0.0,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    }
+  },
+  "per_pr_results": [
+    {
+      "pr_number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 547,
+        "commit_sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 288.228,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab75fa230d61f38d\", \"object",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab75fa230d61f38d\", \"object"
+            },
+            {
+              "id": "security_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab75fa230d61f38d\", \"object"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab75fa230d61f38d\", \"object"
+            },
+            {
+              "id": "no_hallucinated_secret_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType (model output appears truncated at the token limit; increase ai_max_tokens)\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab75fa230d61f38d\", \"object"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    }
+  ]
+}

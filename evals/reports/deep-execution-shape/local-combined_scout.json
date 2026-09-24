@@ -1,0 +1,520 @@
+{
+  "metadata": {
+    "generated_at": "2026-09-24T13:32:24.203099+00:00",
+    "harness_version": "0.1.0",
+    "modes_tested": [
+      "tools_off+deep-scout"
+    ],
+    "total_prs": 5,
+    "corpus_source": "/Users/joryirving/git/pr-reviewer-action-review/evals/corpus-specialists.json"
+  },
+  "mode_summary": {
+    "native_loop": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off": {
+      "runs": 0,
+      "successful_runs": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_wall_clock_sec": 0.0,
+      "findings_count": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 0,
+      "capability_runs": 0,
+      "capability_passes": 0,
+      "specialist_effectiveness_runs": 0,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 0,
+      "specialist_lead_passes": 0,
+      "deep_runs": 0,
+      "specialist_tokens_input": 0,
+      "specialist_tokens_output": 0,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 0,
+      "specialist_request_bytes": 0,
+      "avg_tokens_input": 0,
+      "avg_tokens_output": 0,
+      "avg_wall_clock_sec": 0,
+      "capability_pass_rate": null,
+      "specialist_effectiveness_pass_rate": null,
+      "specialist_lead_pass_rate": null,
+      "avg_specialist_tokens_input": null,
+      "avg_specialist_tokens_output": null,
+      "avg_specialist_tokens_cached": null,
+      "avg_specialist_lead_overlap": null,
+      "avg_specialist_requests": null,
+      "avg_specialist_request_bytes": null
+    },
+    "tools_off+deep-scout": {
+      "runs": 5,
+      "successful_runs": 1,
+      "total_tokens_input": 21557,
+      "total_tokens_output": 1316,
+      "total_wall_clock_sec": 228.0890302079497,
+      "findings_count": 2,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "errors": 4,
+      "capability_runs": 1,
+      "capability_passes": 1,
+      "specialist_effectiveness_runs": 5,
+      "specialist_effectiveness_passes": 0,
+      "specialist_lead_runs": 4,
+      "specialist_lead_passes": 0,
+      "deep_runs": 1,
+      "specialist_tokens_input": 6075,
+      "specialist_tokens_output": 160,
+      "specialist_tokens_cached": 0,
+      "specialist_lead_overlap": 0,
+      "specialist_request_count": 1,
+      "specialist_request_bytes": 25377,
+      "avg_tokens_input": 21557.0,
+      "avg_tokens_output": 1316.0,
+      "avg_wall_clock_sec": 228.089,
+      "capability_pass_rate": 1.0,
+      "specialist_effectiveness_pass_rate": 0.0,
+      "specialist_lead_pass_rate": 0.0,
+      "avg_specialist_tokens_input": 6075.0,
+      "avg_specialist_tokens_output": 160.0,
+      "avg_specialist_tokens_cached": 0.0,
+      "avg_specialist_lead_overlap": 0.0,
+      "avg_specialist_requests": 1.0,
+      "avg_specialist_request_bytes": 25377.0
+    }
+  },
+  "per_pr_results": [
+    {
+      "pr_number": 547,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 547,
+        "commit_sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 32.685,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-b18e8756681d6d9d\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, ",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The security specialist should flag the JWT cache race in the forgejo backend, the final reviewer should verify it against the diff with a finding grounded in that file and adopt it, and no final finding should adopt the unsupported secret-leak lead this diff does not contain.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-b18e8756681d6d9d\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            },
+            {
+              "id": "security_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-b18e8756681d6d9d\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-b18e8756681d6d9d\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            },
+            {
+              "id": "no_hallucinated_secret_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-b18e8756681d6d9d\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    },
+    {
+      "pr_number": 551,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 551,
+        "commit_sha": "13f016d933823771606da74f5ec59c13d253a51e",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 122.351,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-aa2976b0340140f0\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, ",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. The correctness specialist should flag the needs_full_review propagation gap in carry_forward and the final reviewer should verify it against the diff with a finding grounded in that file and adopt it.",
+          "checks": [
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-aa2976b0340140f0\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            },
+            {
+              "id": "correctness_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-aa2976b0340140f0\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.change_anchors\nExpected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-aa2976b0340140f0\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, "
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    },
+    {
+      "pr_number": 612,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 612,
+        "commit_sha": "59e7cf7b3ebc9dd0b0bf66280e7f290849e8c7a8",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 83.668,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): Expected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab78e99f70889f19\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"I'll analyze the PR corpus, focusing on verifying the specialist lead about a potential `NameError` in `forgejo_backend.py`.\\n\\n\", \"tool_calls\": [{\"id\": \"chatcmpl-tool-901fe2ec69c4",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the deep specialist phase; not a reviewer recipe. A risk, not a confirmed defect: the tests specialist should point at coverage for severity-alias and cap normalization in the specialists module, and the final reviewer should adopt that as a coverage finding grounded in that file.",
+          "checks": [
+            {
+              "id": "tests_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab78e99f70889f19\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"I'll analyze the PR corpus, focusing on verifying the specialist lead about a potential `NameError` in `forgejo_backend.py`.\\n\\n\", \"tool_calls\": [{\"id\": \"chatcmpl-tool-901fe2ec69c4"
+            },
+            {
+              "id": "tests_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab78e99f70889f19\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"I'll analyze the PR corpus, focusing on verifying the specialist lead about a potential `NameError` in `forgejo_backend.py`.\\n\\n\", \"tool_calls\": [{\"id\": \"chatcmpl-tool-901fe2ec69c4"
+            },
+            {
+              "id": "expected_coverage_finding",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): Expected JSON object but got NoneType\nPrimary attempt 1: response received but parse/validate failed (parse failure 1/2)\n  response head (first 400 bytes): {\"id\": \"chatcmpl-ab78e99f70889f19\", \"object\": \"chat.completion\", \"model\": \"qwen3.8-27b-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"I'll analyze the PR corpus, focusing on verifying the specialist lead about a potential `NameError` in `forgejo_backend.py`.\\n\\n\", \"tool_calls\": [{\"id\": \"chatcmpl-tool-901fe2ec69c4"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    },
+    {
+      "pr_number": 622,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 622,
+        "commit_sha": "3119b975fd3a503170426e8bcf0730650f6ccb7c",
+        "stage": "primary",
+        "route": "legacy",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 21557,
+        "tokens_output": 1316,
+        "wall_clock_sec": 228.089,
+        "verdict": "request_changes",
+        "verdict_source": "model",
+        "findings_count": 2,
+        "findings": [
+          {
+            "severity": "blocker",
+            "category": "bug",
+            "file": ".github/workflows/codeql.yml",
+            "line": null,
+            "message": "The primary deliverable file (.github/workflows/codeql.yml) is listed in the changed files manifest but its content is absent from the provided diff, making it impossible to verify the linked issue's acceptance criteria are met."
+          },
+          {
+            "severity": "major",
+            "category": "other",
+            "file": "pr_reviewer/forgejo_backend.py",
+            "line": 31,
+            "message": "The JWT cache concurrency fix appears unrelated to the stated PR purpose (adding a CodeQL workflow); if intentional, it should be documented in the PR description, otherwise it should be split into a separate PR."
+          }
+        ],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": null,
+        "model_used": "qwen3.8-27b-chat@https://litellm.jory.dev/v1 (openai)",
+        "deep_review": true,
+        "specialists": {
+          "enabled": true,
+          "aggregate_elapsed_sec": 180.324,
+          "execution": "combined_scout",
+          "specialist_tokens_input": 6075,
+          "specialist_tokens_output": 160,
+          "specialist_tokens_cached": 0,
+          "request_count": 1,
+          "request_bytes_total": 25377,
+          "total_leads": 1,
+          "any_errors": false,
+          "derived": false,
+          "specialist_corpus_bytes": 19392,
+          "specialist_max_tokens": 16375,
+          "roles": [
+            {
+              "role": "correctness",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 1,
+              "elapsed_sec": 180.323,
+              "usage": null
+            },
+            {
+              "role": "security",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 180.323,
+              "usage": null
+            },
+            {
+              "role": "tests",
+              "status": "ok",
+              "error_kind": null,
+              "lead_count": 0,
+              "elapsed_sec": 180.323,
+              "usage": null
+            }
+          ],
+          "leads_by_role": {
+            "correctness": [
+              {
+                "severity": "info",
+                "category": "scope-mismatch",
+                "file": ".github/workflows/codeql.yml",
+                "line": null,
+                "message": "The PR title and body describe adding a CodeQL workflow, but the diff modifies `pr_reviewer/forgejo_backend.py` and its tests; the `.github/workflows/codeql.yml` file is listed as changed in metadata but its content is not present in the provided diff."
+              }
+            ],
+            "security": [],
+            "tests": []
+          }
+        },
+        "specialist_leads": [
+          {
+            "severity": "info",
+            "category": "scope-mismatch",
+            "file": ".github/workflows/codeql.yml",
+            "line": null,
+            "message": "The PR title and body describe adding a CodeQL workflow, but the diff modifies `pr_reviewer/forgejo_backend.py` and its tests; the `.github/workflows/codeql.yml` file is listed as changed in metadata but its content is not present in the provided diff."
+          }
+        ],
+        "capability": {
+          "description": "Grader-only evidence for the negative control; not a reviewer recipe. A simple CI workflow addition must keep the tool loop lean, with no more than four tool calls.",
+          "checks": [
+            {
+              "id": "limits_tool_calls",
+              "type": "max_tool_calls",
+              "passed": true
+            }
+          ],
+          "passed": true
+        },
+        "specialist_capability": {
+          "description": "Grader-only rationale for the negative control; not a reviewer recipe. Deep review must not invent findings on a simple CI workflow addition, and no specialist lead is expected on this change.",
+          "checks": [
+            {
+              "id": "no_final_findings",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "2 matching finding(s); min=0, max=0"
+            },
+            {
+              "id": "no_duplicated_findings",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "2 matching finding(s); min=0, max=0 (dedupe)"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": null
+        }
+      },
+      "capability_pass_rate": {
+        "tools_off+deep-scout": 1.0
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    },
+    {
+      "pr_number": 597,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "tools_off+deep-scout": {
+        "mode": "tools_off+deep-scout",
+        "pr_number": 597,
+        "commit_sha": "778beb7e43d1a9d9b5ba6d969da392a3e9530e5d",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "wall_clock_sec": 47.767,
+        "verdict": null,
+        "verdict_source": null,
+        "findings_count": 0,
+        "findings": [],
+        "tool_calls": [],
+        "tool_stop_reason": null,
+        "error": "Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer",
+        "model_used": "",
+        "deep_review": true,
+        "specialists": null,
+        "specialist_capability": {
+          "description": "Grader-only rationale for the overlap and dedupe scenario; not a reviewer recipe. Both the security and the correctness specialist should flag the fail-open dismiss permission gap in the precheck, the two overlapping leads must collapse into one final finding grounded in that file, and the final reviewer should verify and adopt it.",
+          "checks": [
+            {
+              "id": "security_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer"
+            },
+            {
+              "id": "correctness_lead_generated",
+              "type": "lead_generated",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer"
+            },
+            {
+              "id": "precheck_lead_adopted",
+              "type": "lead_disposition",
+              "scope": "lead",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer"
+            },
+            {
+              "id": "expected_finding_detected",
+              "type": "final_findings_count",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer"
+            },
+            {
+              "id": "overlapping_leads_deduped",
+              "type": "dedupe_final_findings",
+              "scope": "effectiveness",
+              "passed": false,
+              "detail": "run errored: Review failed (exit 1): /Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.pr_thread\n/Users/joryirving/.local/share/mise/installs/python/3.14.6/bin/python3: No module named pr_reviewer.related_context\nTraceback (most recent call last):\n  File \"<stdin>\", line 4, in <module>\nImportError: cannot import name 'reframe_for_corpus' from 'pr_reviewer.repo_map' (/private/var/folders/jh/4ss4bk3x1zgd8ff7nm_j4r0c0000gn/T/eval-harness-c8634bb7/misospace-pr-reviewer-action/pr_reviewer"
+            }
+          ],
+          "passed": false,
+          "effectiveness_passed": false,
+          "lead_passed": false
+        }
+      },
+      "specialist_effectiveness_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      },
+      "specialist_lead_pass_rate": {
+        "tools_off+deep-scout": 0.0
+      }
+    }
+  ]
+}
