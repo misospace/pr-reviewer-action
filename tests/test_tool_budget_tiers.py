@@ -16,8 +16,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _ROOT / "scripts"
 for _path in (str(_SCRIPTS_DIR), str(_ROOT)):
