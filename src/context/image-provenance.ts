@@ -54,6 +54,27 @@ export interface RegistryTargets {
   baseUrl: string;
 }
 
+const REPOSITORY_COMPONENT = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/;
+
+function validRepositoryPath(path: string): boolean {
+  return path.length > 0 && path.split("/").every((part) => REPOSITORY_COMPONENT.test(part));
+}
+
+function registryAndPath(repo: string): { registry: string; path: string } {
+  const parts = repo.split("/");
+  const explicitRegistry = parts.length > 1 ? parts[0] as string : "";
+  if (explicitRegistry === "docker.io" || explicitRegistry === "ghcr.io") {
+    const path = parts.slice(1).join("/");
+    if (!validRepositoryPath(path)) throw new Error(`invalid repository path for ${explicitRegistry}`);
+    return { registry: explicitRegistry, path };
+  }
+  if (["quay.io", "gcr.io", "registry.k8s.io"].includes(explicitRegistry)) {
+    throw new Error(`unsupported registry for repo ${repo}`);
+  }
+  if (parts.length === 2 && validRepositoryPath(repo)) return { registry: "docker.io", path: repo };
+  throw new Error(`unsupported registry for repo ${repo}`);
+}
+
 /** Registry routing for anonymous pulls: docker.io (and bare owner/repo)
  * repos go to registry-1.docker.io with auth.docker.io tokens; ghcr.io repos
  * to ghcr.io with ghcr.io tokens. Unknown registries raise. */
@@ -69,26 +90,15 @@ export function registryTargets(repo: string): RegistryTargets {
       .replaceAll("%28", "(")
       .replaceAll("%29", ")")
       .replaceAll("%2A", "*");
-  if (repo.startsWith("docker.io/")) {
-    const repoPath = repo.slice("docker.io/".length);
+  const { registry, path } = registryAndPath(repo);
+  if (registry === "docker.io") {
     return {
-      repoPath,
-      tokenUrl: `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${quote(repoPath)}:pull`,
+      repoPath: path,
+      tokenUrl: `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${quote(path)}:pull`,
       baseUrl: "https://registry-1.docker.io",
     };
   }
-  if (repo.startsWith("ghcr.io/")) {
-    const repoPath = repo.slice("ghcr.io/".length);
-    return { repoPath, tokenUrl: `https://ghcr.io/token?scope=repository:${quote(repoPath)}:pull`, baseUrl: "https://ghcr.io" };
-  }
-  if (repo.split("/").length === 2 && !["quay.io/", "gcr.io/", "registry.k8s.io/"].some((prefix) => repo.startsWith(prefix))) {
-    return {
-      repoPath: repo,
-      tokenUrl: `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${quote(repo)}:pull`,
-      baseUrl: "https://registry-1.docker.io",
-    };
-  }
-  throw new Error(`unsupported registry for repo ${repo}`);
+  return { repoPath: path, tokenUrl: `https://ghcr.io/token?scope=repository:${quote(path)}:pull`, baseUrl: "https://ghcr.io" };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -183,10 +193,14 @@ export function githubRepoFromSource(source: string | null | undefined): string 
 
 /** Heuristic: first two path segments of an image repo. */
 export function guessRepoFromImage(imageRepo: string): string | null {
-  let tail = imageRepo;
-  if (tail.startsWith("docker.io/")) tail = tail.slice("docker.io/".length);
-  else if (tail.startsWith("ghcr.io/")) tail = tail.slice("ghcr.io/".length);
-  const parts = tail.split("/");
+  let parsed: { registry: string; path: string };
+  try {
+    parsed = registryAndPath(imageRepo);
+  } catch {
+    return null;
+  }
+  const parts = parsed.path.split("/");
+  if (parsed.registry === "docker.io" && parts.length === 1) return `library/${parts[0]}`;
   if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
   return null;
 }

@@ -60,6 +60,15 @@ test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () 
   assert.equal(docker.tokenUrl, "https://auth.docker.io/token?service=registry.docker.io&scope=repository:o/app:pull");
   assert.equal(registryTargets("o/app").baseUrl, "https://registry-1.docker.io");
   assert.throws(() => registryTargets("quay.io/o/app"), /unsupported registry/);
+  for (const hostile of [
+    "evil-docker.io/o/app", "evil-ghcr.io/o/app", "docker.io.evil/o/app",
+    "ghcr.io@evil.example/o/app", "ghcr.io/o%2fother/app", "ghcr.io/o/../app",
+    "ghcr.io/o//app", "ghcr.io/o/app?next=evil",
+  ]) {
+    assert.throws(() => registryTargets(hostile), /invalid repository path|unsupported registry/);
+    assert.equal(guessRepoFromImage(hostile), null);
+  }
+  assert.equal(guessRepoFromImage("docker.io/nginx"), "library/nginx");
 });
 
 test("fetch shapes registry payloads into label provenance and surfaces errors", async () => {

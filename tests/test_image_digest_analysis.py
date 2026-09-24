@@ -164,6 +164,37 @@ class TestFetchAllMetadata:
 
 
 class TestResolveCompareRepo:
+    @pytest.mark.parametrize(
+        "repo",
+        [
+            "evil-docker.io/acme/app",
+            "evil-ghcr.io/acme/app",
+            "docker.io.evil/acme/app",
+            "ghcr.io@evil.example/acme/app",
+            "ghcr.io/acme%2fother/app",
+            "ghcr.io/acme/../app",
+            "ghcr.io/acme//app",
+            "ghcr.io/acme/app?next=evil",
+        ],
+    )
+    def test_registry_targets_rejects_misleading_hosts_and_paths(self, repo):
+        with pytest.raises(ValueError):
+            ida.registry_targets(repo)
+
+    @pytest.mark.parametrize(
+        "repo",
+        [
+            "evil-docker.io/acme/app",
+            "evil-ghcr.io/acme/app",
+            "docker.io.evil/acme/app",
+            "ghcr.io@evil.example/acme/app",
+            "ghcr.io/acme%2fother/app",
+            "ghcr.io/acme/../app",
+        ],
+    )
+    def test_image_heuristic_rejects_misleading_hosts_and_paths(self, repo):
+        assert ida.guess_repo_from_image(repo) is None
+
     def test_matching_labels(self):
         old = {"source": "https://github.com/acme/app"}
         new = {"source": "https://github.com/acme/app"}
