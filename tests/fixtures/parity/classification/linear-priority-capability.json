@@ -1,6 +1,6 @@
 {
   "fixture": "linear-priority-capability",
-  "description": "#655 Linear capability case (reconstructed from #662): Linear native priority reaches classification through the canonical linked-issue representation — priority 2 maps onto the priority/p1 synthetic label and selects the correctness lane.",
+  "description": "#655 Linear capability case (reconstructed from #662): a Linear issue in the EXACT shape the producer emits (linear_context.fetch_issue — source/ref/identifier/title/body/url/state/priority/priority_label/labels; no repo, no number) reaches classification through canonicalLinkedIssue — priority 2 maps onto the priority/p1 synthetic label and selects the correctness lane.",
   "pr_files": [
     { "filename": "src/app/handler.ts", "status": "modified" }
   ],
@@ -10,8 +10,6 @@
       "source": "linear",
       "ref": "TEAM-77",
       "identifier": "TEAM-77",
-      "repo": "",
-      "number": 77,
       "title": "Handler drops malformed payloads",
       "body": "High priority defect from the intake board.",
       "url": "https://linear.app/team/issue/TEAM-77",

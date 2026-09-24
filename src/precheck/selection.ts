@@ -1,6 +1,7 @@
 import type { PlatformAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
-import { extractLinkedIssueRefs, labelsOf } from "./linked-issues.js";
+import { canonicalLinkedIssue, type LinkedIssue } from "../context/types.js";
+import { extractLinkedIssueRefs, type LinkedIssueRef } from "./linked-issues.js";
 import { collectFromPr, extractIssueIdentifiers, parsePrefixes } from "./linear.js";
 import { pythonJsonStringify } from "./metadata.js";
 import { createHash } from "node:crypto";
@@ -72,7 +73,7 @@ export async function buildSelectionSignature(
   for (const item of extractLinkedIssueRefs(body, repo)) {
     const fetched = unwrap(await adapter.ghApi(`repos/${item.repo}/issues/${item.number}`));
     if (typeof fetched === "object" && fetched !== null && !(fetched as Record<string, unknown>).error) {
-      issues.push({ ref: item.ref, repo: item.repo, number: item.number, labels: labelsOf(fetched).sort() });
+      issues.push(signatureLinkedIssue(item, canonicalLinkedIssue(fetched, item.repo)));
     } else {
       // Unknown labels cannot be omitted into a skip: fail the build so the
       // caller forces a fresh review.
@@ -102,16 +103,48 @@ export async function buildSelectionSignature(
   return { signature: `sha256:${digest}`, error: "" };
 }
 
-interface LinearIssueSummary {
-  identifier: string;
-  priority: number | null;
-  labels: string[];
+// ---------------------------------------------------------------------------
+// Selection-signature serialization boundary (snake_case, hashed byte form)
+// ---------------------------------------------------------------------------
+
+/** The signature payload shapes are persisted/parity boundaries: the v2
+ * builder (`scripts/build_selection_fingerprint.py`) hashes the identical
+ * `json.dumps(sort_keys=True)` payload, so these converters are the EXPLICIT
+ * canonical→boundary mapping — the internal types stay camelCase (#669) and
+ * the hashed bytes stay byte-equivalent. */
+
+/** Boundary shape for one GitHub linked issue: identity comes from the
+ * extracted reference (v2 hashes the raw `#N` / `owner/repo#N` text), the
+ * labels come from the canonical issue with v2's `_labels_of` semantics
+ * (trim, drop empties, sort). */
+function signatureLinkedIssue(
+  ref: LinkedIssueRef,
+  issue: LinkedIssue,
+): { ref: string; repo: string; number: number; labels: string[] } {
+  return {
+    ref: ref.ref,
+    repo: ref.repo,
+    number: ref.number,
+    labels: issue.labels.map((label) => label.name.trim()).filter((name) => name !== "").sort(),
+  };
+}
+
+/** Boundary shape for one Linear issue (v2 `_linear_state`): the identifier
+ * is the canonical ref, the native priority is hashed verbatim (classifier
+ * maps 1→priority/p0, 2→priority/p1), label names are taken as-is (no trim)
+ * when non-empty, sorted. */
+function signatureLinearIssue(issue: LinkedIssue): { identifier: string; priority: number | null; labels: string[] } {
+  return {
+    identifier: issue.ref,
+    priority: issue.priority,
+    labels: issue.labels.filter((label) => label.name !== "").map((label) => label.name).sort(),
+  };
 }
 
 async function linearStateFor(
   title: string,
   context: { isFork: boolean; options: SelectionOptions },
-): Promise<{ issues: LinearIssueSummary[]; error: string }> {
+): Promise<{ issues: { identifier: string; priority: number | null; labels: string[] }[]; error: string }> {
   const prefixesRaw = (context.options.linearIssuePrefixes ?? "").trim();
   const apiKey = (context.options.linearApiKey ?? "").trim();
   if (!prefixesRaw || !apiKey) return { issues: [], error: "" };
@@ -146,13 +179,7 @@ async function linearStateFor(
       return { issues: [], error: `linear fetch failed for ${identifier}: ${message}` };
     }
     return {
-      issues: issues.map((issue) => ({
-        identifier: String(issue.identifier || ""),
-        // The raw native priority is what the selection reads, so hash it
-        // verbatim (classifier maps 1→priority/p0, 2→priority/p1).
-        priority: issue.priority,
-        labels: issue.labels.map((label) => String(label.name)).sort(),
-      })),
+      issues: issues.map(signatureLinearIssue),
       error: "",
     };
   } catch (error) {

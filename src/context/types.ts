@@ -7,6 +7,12 @@
  * (a rendered view and a canonical artifact drifting apart) cannot recur
  * unnoticed: there is exactly one representation per concept.
  *
+ * Naming follows the #669 contract: TypeScript internal types and properties
+ * are camelCase. Legacy snake_case survives only at persisted/parity
+ * serialization boundaries (artifacts byte-compared against the v2 Python
+ * implementation), reached through explicit converters — never by renaming
+ * the internal shape.
+ *
  * Producers stay pure normalizers: network fetch policy and security stay in
  * the platform/tool boundary modules. */
 
@@ -20,11 +26,11 @@ export interface IssueLabel {
 
 /** Canonical linked issue: the one representation the classifier, the role
  * selector, the selection signature, and the rendered corpus all derive
- * from. Field names are snake_case to stay byte-comparable with the v2
- * artifacts. */
+ * from. GitHub/Forgejo REST payloads, the Linear GraphQL adapter's output,
+ * and already-canonical issues all normalize into this one shape. */
 export interface LinkedIssue {
   source: LinkedIssueSource;
-  /** `owner/repo#123` or `TEAM-123`. */
+  /** `owner/repo#123`, or the Linear `TEAM-123` identifier. */
   ref: string;
   repo: string;
   number: number;
@@ -34,7 +40,7 @@ export interface LinkedIssue {
   state: string;
   /** Linear native priority (0–4). `null` when the source has no priority. */
   priority: number | null;
-  priority_label: string;
+  priorityLabel: string;
   labels: IssueLabel[];
 }
 
@@ -89,7 +95,7 @@ export function canonicalLinkedIssue(raw: unknown, defaultRepo = ""): LinkedIssu
     url: asString(rec.url) || asString(rec.html_url),
     state: asString(rec.state),
     priority: priorityValue,
-    priority_label: priorityLabel,
+    priorityLabel,
     labels: normalizeLabels(rec.labels),
   };
 }
@@ -156,11 +162,11 @@ export interface CanonicalPullRequest {
   body: string;
   state: string;
   draft: boolean;
-  head_sha: string;
-  head_ref: string;
-  base_ref: string;
+  headSha: string;
+  headRef: string;
+  baseRef: string;
   author: string;
-  html_url: string;
+  htmlUrl: string;
 }
 
 /** Normalize one untrusted PR payload (GitHub/Forgejo PR shape) into the
@@ -177,11 +183,11 @@ export function canonicalPullRequest(raw: unknown): CanonicalPullRequest {
     body: asString(rec.body),
     state: asString(rec.state),
     draft: rec.draft === true,
-    head_sha: asString(head.sha),
-    head_ref: asString(head.ref),
-    base_ref: asString(base.ref),
+    headSha: asString(head.sha),
+    headRef: asString(head.ref),
+    baseRef: asString(base.ref),
     author: asString(user.login),
-    html_url: asString(rec.html_url),
+    htmlUrl: asString(rec.html_url),
   };
 }
 

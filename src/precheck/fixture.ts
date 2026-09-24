@@ -1,7 +1,8 @@
 import type { FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
+import { type LinkedIssue } from "../context/types.js";
 import { runPrecheck, type PrecheckOutput } from "./decide.js";
-import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult, type LinearIssue } from "./linear.js";
+import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult } from "./linear.js";
 
 /** Fixture-driven precheck for the #673 parity harness (#674): a
  * PlatformAdapter whose responses come from the fixture JSON, plus the CLI
@@ -85,7 +86,7 @@ export function fixtureLinearCollector(spec: PrecheckFixture["platform"]): (titl
   const linearMap = spec.linear ?? {};
   const linearFail = new Set(spec.linear_fail ?? []);
   return async (_title, prefixes) => {
-    const issues: LinearIssue[] = [];
+    const issues: LinkedIssue[] = [];
     const errors: [string, string][] = [];
     for (const identifier of extractIssueIdentifiers(_title, prefixes)) {
       if (linearFail.has(identifier)) {
@@ -101,13 +102,14 @@ export function fixtureLinearCollector(spec: PrecheckFixture["platform"]): (titl
       issues.push({
         source: "linear",
         ref: identifier,
-        identifier,
+        repo: "",
+        number: 0,
         title: String(issue.title ?? ""),
         body: String(issue.body ?? ""),
         url: String(issue.url ?? ""),
         state: String(issue.state ?? ""),
         priority,
-        priority_label: priority !== null ? LINEAR_PRIORITY_LABELS[priority] ?? "" : "",
+        priorityLabel: priority !== null ? LINEAR_PRIORITY_LABELS[priority] ?? "" : "",
         labels: (issue.labels ?? []).map((name) => ({ name: String(name) })),
       });
     }

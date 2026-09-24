@@ -1,22 +1,17 @@
 {
   "fixture": "github-security-label",
-  "description": "#655 GitHub-label case (reconstructed from #662): the enriched canonical linked-issue representation carries the security and priority labels into classification, flipping risk flags, route signals, must-checks, and role selection.",
+  "description": "#655 GitHub-label case (reconstructed from #662): a linked issue in the EXACT shape the producer emits (the platform issues API — number/title/body/state/html_url/labels; no source, ref, repo, url, priority, or priority_label fields) reaches classification through canonicalLinkedIssue, and the security and priority labels flip risk flags, route signals, must-checks, and role selection.",
   "pr_files": [
     { "filename": "src/auth/login.py", "status": "modified" }
   ],
   "diff": "diff --git a/src/auth/login.py b/src/auth/login.py\n+++ b/src/auth/login.py\n@@ -10,7 +10,7 @@\n-    token = request.cookies.get('t')\n+    token = request.headers.get('Authorization')\n",
   "linked_issues": [
     {
-      "source": "github",
-      "ref": "owner/repo#12",
-      "repo": "owner/repo",
       "number": 12,
       "title": "Login endpoint accepts forged tokens",
       "body": "Reported by audit. Priority: p1.",
-      "url": "https://github.com/owner/repo/issues/12",
       "state": "open",
-      "priority": null,
-      "priority_label": "",
+      "html_url": "https://github.com/owner/repo/issues/12",
       "labels": [
         { "name": "security" },
         { "name": "priority/p1" }

@@ -38,8 +38,12 @@ test("canonicalLinkedIssue recognizes the Linear shape and keeps native priority
   assert.equal(issue.source, "linear");
   assert.equal(issue.ref, "TEAM-77");
   assert.equal(issue.priority, 2);
-  assert.equal(issue.priority_label, "High");
+  assert.equal(issue.priorityLabel, "High");
   assert.equal(issue.body, "body from description");
+  // The producer emits no repo/number: they degrade without affecting the
+  // identity the classifier and selector consume.
+  assert.equal(issue.repo, "");
+  assert.equal(issue.number, 0);
 });
 
 test("canonicalLinkedIssue degrades unusable input without throwing", () => {
@@ -81,9 +85,9 @@ test("canonicalPullRequest normalizes the gh pr view shape", () => {
     user: { login: "someone" },
     html_url: "https://github.com/o/r/pull/9",
   });
-  assert.equal(pr.head_sha, "abc");
-  assert.equal(pr.head_ref, "feat");
-  assert.equal(pr.base_ref, "main");
+  assert.equal(pr.headSha, "abc");
+  assert.equal(pr.headRef, "feat");
+  assert.equal(pr.baseRef, "main");
   assert.equal(pr.author, "someone");
   assert.equal(pr.draft, true);
   assert.equal(canonicalPullRequest("nope").number, 0);
