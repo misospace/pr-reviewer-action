@@ -25,13 +25,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require every validation job to pass
+        # Each dependency is checked by name: a skipped, cancelled, or
+        # missing result can never read as success, so a leaf that silently
+        # fails to run always fails this gate (and with it branch protection).
         run: |
-          results='${{ toJSON(needs.*.result) }}'
-          echo "Validation job results: $results"
-          if ! jq -e 'length > 0 and all(. == "success")' >/dev/null <<< "$results"; then
-            echo "::error::One or more validation jobs did not pass"
-            exit 1
-          fi
+          set -euo pipefail
+          fail=0
+          for job_result in \
+            "validate-typescript ${{ needs.validate-typescript.result }}" \
+            "validate-python ${{ needs.validate-python.result }}" \
+            "validate-static ${{ needs.validate-static.result }}" \
+            "validate-bash-slow ${{ needs.validate-bash-slow.result }}" \
+            "validate-bash ${{ needs.validate-bash.result }}"; do
+            job="${job_result%% *}"
+            result="${job_result#* }"
+            echo "$job: $result"
+            if [[ "$result" != "success" ]]; then
+              echo "::error::$job did not pass (result: $result)"
+              fail=1
+            fi
+          done
+          exit "$fail"
 
   validate-typescript:
     runs-on: ubuntu-latest
@@ -40,7 +54,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           cache: npm
@@ -173,8 +187,8 @@ jobs:
 
   # The two longest bash suites (CI-status gating and concurrent gating) get
   # their own runner instead of queueing every other suite behind them. The
-  # suite list is explicit and mirrored in the exclusion in validate-bash —
-  # keep both in sync when promoting a suite here.
+  # suite list lives in tests/slow-bash-suites.txt, which is the single source
+  # of truth shared with validate-bash's exclusion below.
   validate-bash-slow:
     runs-on: ubuntu-latest
     steps:
@@ -198,14 +212,15 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for t in tests/test_ci_api_timeout.sh tests/test_concurrent_gating.sh; do
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"
               failed=1
             fi
             echo "::endgroup::"
-          done
+          done < tests/slow-bash-suites.txt
           exit "$failed"
 
   validate-bash:
@@ -228,17 +243,17 @@ jobs:
       - name: Run smoke test
         run: tests/smoke_test.sh
 
-      # Auto-discover every bash suite except the two long-running ones run in
-      # validate-bash-slow (keep that list in sync) so a new (or previously
-      # unlisted) suite cannot silently stay out of CI.
+      # Auto-discover every bash suite except the slow ones listed in
+      # tests/slow-bash-suites.txt (run by validate-bash-slow) so a new (or
+      # previously unlisted) suite cannot silently stay out of CI.
       - name: Run bash test suites (auto-discover)
         run: |
           set -euo pipefail
           failed=0
           for t in tests/test_*.sh; do
-            case "$t" in
-              tests/test_ci_api_timeout.sh|tests/test_concurrent_gating.sh) continue ;;
-            esac
+            if grep -Fxq "$t" tests/slow-bash-suites.txt; then
+              continue
+            fi
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"

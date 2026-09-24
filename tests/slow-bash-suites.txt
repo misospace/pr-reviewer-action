@@ -1,0 +1,2 @@
+tests/test_ci_api_timeout.sh
+tests/test_concurrent_gating.sh
