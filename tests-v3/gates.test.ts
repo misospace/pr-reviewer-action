@@ -34,13 +34,14 @@ const ambientBase: NodeJS.ProcessEnv = {
 test("gates compose concurrently: wall clock near max, not the sum", async () => {
   const startedAt = Date.now();
   const result = await runConcurrentGates({
-    ci: sleepBranch(0.5),
-    specialists: sleepBranch(0.2),
+    ci: sleepBranch(1),
+    specialists: sleepBranch(0.3),
     ambientEnv: ambientBase,
   });
   const elapsed = Date.now() - startedAt;
-  // max = 500ms, sum = 700ms; generous margins for loaded runners.
-  assert.ok(elapsed >= 480 && elapsed < 650, `elapsed ${elapsed}ms must be near max(500), not sum(700)`);
+  // max = 1000ms, sum = 1300ms; generous margins for loaded runners (the
+  // test runner executes files concurrently).
+  assert.ok(elapsed >= 950 && elapsed < 1250, `elapsed ${elapsed}ms must be near max(1000), not sum(1300)`);
   assert.equal(result.ci.ok, true);
   assert.equal(result.specialists.ok, true);
 });
@@ -232,4 +233,50 @@ test("launch refusal is loud: GateLaunchError thrown, sibling terminated", async
   assert.equal(probe.ok, false, "with pgrep unavailable the gates must refuse to launch");
   assert.equal(probe.name, "GateLaunchError");
   assert.match(probe.message ?? "", /pgrep is required/);
+});
+
+test("preflight re-probes pgrep on every call (no stale availability cache)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-pgrep-probe-"));
+  mkdirSync(dir, { recursive: true });
+  const fakePgrep = join(dir, "pgrep");
+  // Executable bit is required — execvp must be able to exec it.
+  writeFileSync(fakePgrep, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const scriptPath = join(dir, "probe.cjs");
+  const buildDir = join(process.cwd(), ".test-build", "src", "runtime");
+  writeFileSync(
+    scriptPath,
+    `
+    const path = require('path');
+    const fs = require('fs');
+    const { preflightTreeCleanup } = require(path.join(${JSON.stringify(buildDir)}, 'process-tree.js'));
+    (async () => {
+      const outcomes = [];
+      // First call: the fake pgrep exists on PATH.
+      try { await preflightTreeCleanup(); outcomes.push({ ok: true }); }
+      catch (e) { outcomes.push({ ok: false, message: e.message }); }
+      // Remove it; the SECOND call must observe the change and refuse — a
+      // cached probe would silently keep claiming availability.
+      fs.unlinkSync(${JSON.stringify(fakePgrep)});
+      try { await preflightTreeCleanup(); outcomes.push({ ok: true }); }
+      catch (e) { outcomes.push({ ok: false, message: e.message }); }
+      process.stdout.write(JSON.stringify(outcomes), () => process.exit(0));
+    })();
+  `,
+  );
+  const handle = runProcess({
+    file: execPath,
+    args: [scriptPath],
+    env: { PATH: dir, HOME: ambientBase.HOME ?? "" },
+    timeoutMs: 20_000,
+  });
+  const probeResult = await handle.result;
+  assert.equal(probeResult.status, "exited");
+  const outcomes = JSON.parse(probeResult.stdout.toString("utf8")) as Array<{
+    ok: boolean;
+    message?: string;
+  }>;
+  assert.equal(outcomes.length, 2);
+  assert.equal(outcomes[0]!.ok, true, "preflight succeeds while pgrep is present");
+  assert.equal(outcomes[1]!.ok, false, "preflight must re-probe and refuse once pgrep is gone");
+  assert.match(outcomes[1]!.message ?? "", /pgrep is required/);
 });

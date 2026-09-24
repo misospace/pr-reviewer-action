@@ -9,7 +9,10 @@ import type { EnvAllowlist } from "../runtime/env.js";
  * Trust boundary preserved verbatim: a string `command` is trusted
  * operator-supplied input and runs via `bash -lc` (the full shell-injection
  * surface is intentional for that shape; argv lists are preferred), exactly
- * like v2. The executed child owns a process group, so a provider that
+ * like v2. Provenance constraint: provider specs come from operator-managed
+ * workflow configuration (the `evidence_providers_file` input), never from
+ * PR-controlled content — a future caller must not wire PR/issue-derived
+ * specs into this executor without adding its own allowlist layer. The executed child owns a process group, so a provider that
  * outlives its deadline cannot leave transport children behind — the whole
  * tree is terminated (the v2 `subprocess.run(timeout=)` path only killed the
  * direct child).

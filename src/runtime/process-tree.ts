@@ -39,24 +39,32 @@ const KILL_SETTLE_MS = 150;
 
 let pgrepAvailability: Promise<boolean> | null = null;
 
-/** True when `pgrep` exists and is executable (any exit code counts as ran). */
+/**
+ * Probe `pgrep` availability. NOT cached across calls: a once-per-process
+ * cache would let a later-unavailable pgrep silently degrade the sweep while
+ * the cached answer still claimed success — the cleanups report what they
+ * actually observed, per termination. The probe is one spawn; gates pay it
+ * once per fork, terminations once per cleanup.
+ */
 export function pgrepAvailable(): Promise<boolean> {
-  pgrepAvailability ??= new Promise<boolean>((resolve) => {
-    if (!isPosix()) {
-      resolve(false);
-      return;
-    }
+  if (!isPosix()) {
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const done = (value: boolean): void => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
     const probe = spawn("pgrep", ["-P", "1"], { stdio: "ignore" });
-    probe.on("error", () => resolve(false));
-    probe.on("spawn", () => {
-      // The binary exists; the exit code (children of pid 1 or not) is
-      // irrelevant to availability.
-      resolve(true);
-      probe.removeAllListeners("close");
-    });
-    probe.on("close", () => resolve(true));
+    // ENOENT (and any other launch failure) means descendant discovery is
+    // unavailable. A successful exec is proven by the `close` event: there is
+    // no shell involved, so "command not found" can only ever arrive here.
+    probe.on("error", () => done(false));
+    probe.on("close", () => done(true));
   });
-  return pgrepAvailability;
 }
 
 /**
@@ -91,8 +99,8 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-async function pgrepChildren(pid: number): Promise<number[]> {
-  return new Promise<number[]>((resolve) => {
+async function pgrepChildren(pid: number): Promise<{ pids: number[]; ran: boolean }> {
+  return new Promise<{ pids: number[]; ran: boolean }>((resolve) => {
     const probe = spawn("pgrep", ["-P", String(pid)], {
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -108,11 +116,19 @@ async function pgrepChildren(pid: number): Promise<number[]> {
           children.push(value);
         }
       }
-      resolve(children);
+      resolve({ pids: children, ran: true });
     };
-    probe.on("error", () => resolve([]));
+    probe.on("error", () => resolve({ pids: [], ran: false }));
     probe.on("close", finish);
   });
+}
+
+export interface DescendantSnapshot {
+  /** Breadth-first descendant PIDs (children before grandchildren). */
+  pids: number[];
+  /** False when any pgrep invocation failed to launch — the walk is then
+   * incomplete and callers must not claim a swept tree. */
+  pgrepRan: boolean;
 }
 
 /**
@@ -121,13 +137,15 @@ async function pgrepChildren(pid: number): Promise<number[]> {
  * addressable). Bounded by {@link MAX_TREE_NODES}; the walk order is
  * deterministic for a given tree.
  */
-export async function collectDescendants(rootPid: number): Promise<number[]> {
+export async function collectDescendants(rootPid: number): Promise<DescendantSnapshot> {
   const ordered: number[] = [];
+  let pgrepRan = true;
   let frontier = [rootPid];
   while (frontier.length > 0 && ordered.length < MAX_TREE_NODES) {
     const next: number[] = [];
     for (const pid of frontier) {
-      const children = await pgrepChildren(pid);
+      const { pids: children, ran } = await pgrepChildren(pid);
+      if (!ran) pgrepRan = false;
       for (const child of children) {
         if (ordered.length >= MAX_TREE_NODES) break;
         ordered.push(child);
@@ -136,7 +154,7 @@ export async function collectDescendants(rootPid: number): Promise<number[]> {
     }
     frontier = next;
   }
-  return ordered;
+  return { pids: ordered, pgrepRan };
 }
 
 export interface TerminationReport {
@@ -193,9 +211,12 @@ export async function terminateProcessTree(
 
   report.swept = await pgrepAvailable();
   if (report.swept) {
-    report.snapshot = await collectDescendants(pid);
-  } else {
-    report.issues.push("pgrep unavailable: cleanup ran group-only (preflight should have refused this launch)");
+    const snapshot = await collectDescendants(pid);
+    report.snapshot = snapshot.pids;
+    report.swept = snapshot.pgrepRan;
+  }
+  if (!report.swept) {
+    report.issues.push("pgrep unavailable during termination: cleanup ran group-only, the snapshot is incomplete");
   }
 
   // TERM phase: the whole current group at once, then the snapshot (catches
