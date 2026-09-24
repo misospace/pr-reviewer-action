@@ -4,6 +4,10 @@
       "number": 547,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/547",
+      "fixture": {
+        "path": "specialists/547.json",
+        "sha256": "25ef531d7bfeda0e4ba489a49f10cab762665909d42ecc5c421eb2867c758626"
+      },
       "title": "fix(forgejo): make the Authorized Integration JWT cache thread-safe",
       "known_findings": [
         {
@@ -57,6 +61,10 @@
       "number": 551,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/551",
+      "fixture": {
+        "path": "specialists/551.json",
+        "sha256": "8ffffba85cb01170bfe07ac94108f7867a89f776b9760adaedd19ce358ed4408"
+      },
       "title": "fix(carry-forward): propagate needs_full_review so unverifiable carried findings trigger a full review next run",
       "known_findings": [
         {
@@ -103,6 +111,10 @@
       "number": 612,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/612",
+      "fixture": {
+        "path": "specialists/612.json",
+        "sha256": "82c16298e4ea6cd4de657d3202d873861bd5aa9d9e4ae0987b6ef10d68a5f100"
+      },
       "title": "feat(review): add bounded specialist advisory-contract module",
       "known_findings": [],
       "specialist_expectations": {
@@ -142,6 +154,10 @@
       "number": 622,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/622",
+      "fixture": {
+        "path": "specialists/622.json",
+        "sha256": "29057029dd81c933bf57262bf22afece7b9a2e9097548fededc5dc7989b0207a"
+      },
       "title": "ci(codeql): add CodeQL python analysis workflow",
       "known_findings": [],
       "expected_evidence": {
@@ -176,6 +192,10 @@
       "number": 597,
       "repo_full_name": "misospace/pr-reviewer-action",
       "url": "https://github.com/misospace/pr-reviewer-action/pull/597",
+      "fixture": {
+        "path": "specialists/597.json",
+        "sha256": "a7e685d39f846e53486522b7c1c2f2218a02d3714facaa1ee094e3093ca6bf4a"
+      },
       "title": "fix(precheck): fail closed when the @ai-reviewer dismiss permission check can't run",
       "known_findings": [
         {

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "scenario": 622,
+  "provenance": {
+    "historical_pr": 622,
+    "state": "merged",
+    "merge_commit": "cbf26aad155e087a28236c60f61cb93d8690ba73",
+    "source": "retained diff and post-image authored from squash-merge commit cbf26aad155e for issue #712"
+  },
+  "pr_json": {
+    "number": 622,
+    "title": "ci(codeql): add CodeQL python analysis workflow",
+    "body": "Static security analysis gate for #621. CodeQL runs the explicit `security-and-quality` query suite over the checkout; the python arm covers `pr_reviewer/` plus the Python helpers under `scripts/` — the command-line-injection, path-traversal, SSRF and token-handling classes named in the SECURITY.md threat model that gitleaks/shellcheck/pytest can't see semantically. (The implicit v4 suite is `default`, so the suite is pinned explicitly rather than assumed.)\n\nBash is intentionally **not** in the matrix: CodeQL ships no bash extractor — the first revision of this PR proved it (init hard-fails with \"Did not recognize the following languages: bash\"). Shell scripts stay covered by the existing shellcheck gate in ci.yaml.\n\nScope note: an earlier revision also bundled a repo-wide ruff-format bootstrap (~105 files) that #621 never asked for; that has been dropped — bulk reformatting of security-sensitive modules deserves its own reviewed change, not a ride-along on a workflow addition.\n\nFixes #621\n\n_Originally opened by foreman (workload wl-misospace-pr-reviewer-action-621); reworked by agentic-local after the bash matrix was found to be unsatisfiable._",
+    "head": {
+      "sha": "3119b975fd3a503170426e8bcf0730650f6ccb7c",
+      "ref": "foreman/wl-misospace-pr-reviewer-action-621/issue-621"
+    },
+    "base": {
+      "sha": "535f1b384b4c245c6b51d57176ceac51510bbc88",
+      "ref": "main"
+    },
+    "user": {
+      "login": "itsmiso-ai"
+    },
+    "changed_files": 1,
+    "additions": 64,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/622"
+  },
+  "diff": "diff --git a/.github/workflows/codeql.yml b/.github/workflows/codeql.yml\nnew file mode 100644\nindex 0000000..9b37d91\n--- /dev/null\n+++ b/.github/workflows/codeql.yml\n@@ -0,0 +1,64 @@\n+# CodeQL analysis for this repository.\n+#\n+# CodeQL adds semantic security analysis on top of the existing CI gates\n+# (gitleaks, shellcheck, yamllint, actionlint, and pytest) in ci.yaml. The\n+# static linters cannot see the finding classes this workflow targets — the\n+# threat model in SECURITY.md:\n+#\n+#   - py/command-line-injection at the subprocess call sites in\n+#     pr_reviewer/tool_executors.py\n+#   - path traversal via pr_reviewer/tool_executors.py\n+#     `_resolve_workspace_path`\n+#   - SSRF in pr_reviewer/http_client.py\n+#   - token/secret handling in pr_reviewer/transport.py,\n+#     pr_reviewer/tangled_session.py, and pr_reviewer/forgejo_backend.py\n+#\n+# The whole checkout is analysed; pr_reviewer/ and scripts/ (which contains\n+# Python helpers alongside its shell scripts) dominate it.\n+#\n+# Bash is intentionally NOT in the matrix: CodeQL ships no bash extractor\n+# (verified by a failed run of the predecessor PR #622 — the init step\n+# hard-fails with \"Did not recognize the following languages: bash\"), so\n+# shell scripts stay covered by the shellcheck gate in ci.yaml.\n+name: CodeQL\n+\n+on:\n+  push:\n+    branches: [\"main\"]\n+  pull_request:\n+\n+permissions:\n+  contents: read\n+\n+jobs:\n+  analyze:\n+    name: Analyze (${{ matrix.language }})\n+    runs-on: ubuntu-latest\n+    permissions:\n+      security-events: write\n+      contents: read\n+      actions: read\n+    strategy:\n+      fail-fast: false\n+      matrix:\n+        # Python is the only supported/analysed surface today. To extend the\n+        # scan, add a language CodeQL actually ships an extractor for here\n+        # (bash is not one — see the note at the top of this file).\n+        language: [python]\n+    steps:\n+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n+\n+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n+        with:\n+          python-version: '3.14'\n+\n+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0\n+        with:\n+          languages: ${{ matrix.language }}\n+          build-mode: none\n+          # Pin the query suite explicitly: the implicit v4 suite is\n+          # `default`, not `security-and-quality`, and #621's acceptance\n+          # requires the full security-and-quality pack.\n+          queries: security-and-quality\n+\n+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0\n",
+  "pr_files": [
+    {
+      "filename": ".github/workflows/codeql.yml",
+      "status": "added",
+      "additions": 64,
+      "deletions": 0,
+      "changes": 64
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/codeql.yml",
+      "content": "# CodeQL analysis for this repository.\n#\n# CodeQL adds semantic security analysis on top of the existing CI gates\n# (gitleaks, shellcheck, yamllint, actionlint, and pytest) in ci.yaml. The\n# static linters cannot see the finding classes this workflow targets — the\n# threat model in SECURITY.md:\n#\n#   - py/command-line-injection at the subprocess call sites in\n#     pr_reviewer/tool_executors.py\n#   - path traversal via pr_reviewer/tool_executors.py\n#     `_resolve_workspace_path`\n#   - SSRF in pr_reviewer/http_client.py\n#   - token/secret handling in pr_reviewer/transport.py,\n#     pr_reviewer/tangled_session.py, and pr_reviewer/forgejo_backend.py\n#\n# The whole checkout is analysed; pr_reviewer/ and scripts/ (which contains\n# Python helpers alongside its shell scripts) dominate it.\n#\n# Bash is intentionally NOT in the matrix: CodeQL ships no bash extractor\n# (verified by a failed run of the predecessor PR #622 — the init step\n# hard-fails with \"Did not recognize the following languages: bash\"), so\n# shell scripts stay covered by the shellcheck gate in ci.yaml.\nname: CodeQL\n\non:\n  push:\n    branches: [\"main\"]\n  pull_request:\n\npermissions:\n  contents: read\n\njobs:\n  analyze:\n    name: Analyze (${{ matrix.language }})\n    runs-on: ubuntu-latest\n    permissions:\n      security-events: write\n      contents: read\n      actions: read\n    strategy:\n      fail-fast: false\n      matrix:\n        # Python is the only supported/analysed surface today. To extend the\n        # scan, add a language CodeQL actually ships an extractor for here\n        # (bash is not one — see the note at the top of this file).\n        language: [python]\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n\n      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n        with:\n          python-version: '3.14'\n\n      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0\n        with:\n          languages: ${{ matrix.language }}\n          build-mode: none\n          # Pin the query suite explicitly: the implicit v4 suite is\n          # `default`, not `security-and-quality`, and #621's acceptance\n          # requires the full security-and-quality pack.\n          queries: security-and-quality\n\n      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0\n"
+    }
+  ]
+}
