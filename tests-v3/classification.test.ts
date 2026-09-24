@@ -215,6 +215,21 @@ test("traversal literals outside module specifiers still classify path handling"
     linkedIssues: [],
   });
   assert.equal(code.prKind, "path_handling_changes");
+
+  // Specifier neutralization is literal-scoped, not line-scoped: a real
+  // traversal on the same source line as a require/import specifier still
+  // fires, with the flag and the path must_check items.
+  const mixed = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "src/app.ts" })],
+    diffText: '+const x = require("../lib"); fs.readFile("../../etc/passwd");\n'
+      + '+import { a } from "../lib"; fs.readFile("../../etc/shadow");\n'
+      + '+import { runProcess } from "../runtime/subprocess.js";\n',
+    linkedIssues: [],
+  });
+  assert.equal(mixed.prKind, "path_handling_changes");
+  assert.ok(mixed.riskFlags.includes("path_handling_changes"));
+  assert.ok(mixed.mustCheck.includes("review for path traversal vulnerabilities"));
+  assert.ok(mixed.mustCheck.includes("test with edge-case paths (null bytes, symlinks)"));
   const prose = classifyPr({
     prFiles: [canonicalChangedFile({ filename: "README.md" })],
     diffText: "+The helper sanitizes all user-provided paths before use.\n",

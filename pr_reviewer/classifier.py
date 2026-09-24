@@ -160,29 +160,29 @@ PATH_HANDLING_PATTERNS = [
 # classify as path handling (the #679 review false positive).
 PATH_TRAVERSAL_PATTERN = re.compile(r"\.\./|\.\.\\", re.IGNORECASE)
 
-# A diff line that adds/removes an ESM/CJS module specifier is module
-# resolution, not filesystem path handling. Two shapes: statements anchored at
-# the line start (`import ...`, `export ...`, `} from "..."`, a bare
-# `from "..."` continuation) and call forms anywhere in the line
-# (`require("...")`, `await import("...")`).
-_MODULE_SPECIFIER_ANCHORED = re.compile(
-    r"""^\s*[+-]?\s*(?:(?:import|export)\b|\}?\s*from\s*['"`]|from\s*['"`])"""
+# A module specifier is the quoted path inside an ESM/CJS import construct —
+# `from "../x.js"`, `require("../x")`, `import("../x")`, a side-effect
+# `import "../x.css"`. Specifier literals are module resolution, not
+# filesystem path handling. Only the quoted literal is neutralized: other
+# content on the same source line (a real `../` traversal next to a require
+# call) must still count as traversal.
+_SPECIFIER_QUOTED = re.compile(
+    r"""\bfrom\s*(['"])[^'"]*\1"""
+    r"""|\brequire\s*\(\s*(['"])[^'"]*\2"""
+    r"""|\bimport\s*\(\s*(['"])[^'"]*\3"""
+    r"""|\bimport\s+(['"])[^'"]*\4""",
+    re.IGNORECASE,
 )
-_MODULE_SPECIFIER_CALL = re.compile(
-    r"""\b(?:await\s+)?(?:require|import)\s*\(\s*['"`]"""
-)
-
-
-def _is_module_specifier_line(line: str) -> bool:
-    return bool(_MODULE_SPECIFIER_ANCHORED.match(line) or _MODULE_SPECIFIER_CALL.search(line))
 
 
 def _diff_without_module_specifiers(diff_text: str) -> str:
-    """Diff text with module-specifier lines removed, for the
-    path-traversal heuristic only."""
+    """Diff text with module-specifier literals neutralized, for the
+    path-traversal heuristic only. Line structure is preserved: only the
+    quoted specifier path is replaced, so traversal literals elsewhere on
+    the same line still match."""
     return "\n".join(
-        line for line in diff_text.splitlines()
-        if not _is_module_specifier_line(line)
+        _SPECIFIER_QUOTED.sub('""', line)
+        for line in diff_text.splitlines()
     )
 
 

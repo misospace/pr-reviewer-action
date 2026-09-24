@@ -127,23 +127,19 @@ const PATH_HANDLING_PATTERNS: readonly RegExp[] = [
  * classify as path handling (the #679 review false positive). */
 const PATH_TRAVERSAL_PATTERN = /\.\.\/|\.\.\\/i;
 
-/** A diff line that adds/removes an ESM/CJS module specifier is module
- * resolution, not filesystem path handling. Two shapes: statements anchored
- * at the line start (`import ...`, `export ...`, `} from "..."`, a bare
- * `from "..."` continuation) and call forms anywhere in the line
- * (`require("...")`, `await import("...")`). */
-const MODULE_SPECIFIER_ANCHORED =
-  /^\s*[+-]?\s*(?:(?:import|export)\b|\}?\s*from\s*['"`]|from\s*['"`])/;
-const MODULE_SPECIFIER_CALL = /\b(?:await\s+)?(?:require|import)\s*\(\s*['"`]/;
-
-function isModuleSpecifierLine(line: string): boolean {
-  return MODULE_SPECIFIER_ANCHORED.test(line) || MODULE_SPECIFIER_CALL.test(line);
-}
+/** A module specifier is the quoted path inside an ESM/CJS import construct —
+ * `from "../x.js"`, `require("../x")`, `import("../x")`, a side-effect
+ * `import "../x.css"`. Specifier literals are module resolution, not
+ * filesystem path handling. Only the quoted literal is neutralized: other
+ * content on the same source line (a real `../` traversal next to a require
+ * call) must still count as traversal. */
+const SPECIFIER_QUOTED =
+  /\bfrom\s*(['"])[^'"]*\1|\brequire\s*\(\s*(['"])[^'"]*\2|\bimport\s*\(\s*(['"])[^'"]*\3|\bimport\s+(['"])[^'"]*\4/gi;
 
 function diffWithoutModuleSpecifiers(diffText: string): string {
   return diffText
     .split("\n")
-    .filter((line) => !isModuleSpecifierLine(line))
+    .map((line) => line.replace(SPECIFIER_QUOTED, '""'))
     .join("\n");
 }
 

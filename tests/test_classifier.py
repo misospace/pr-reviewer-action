@@ -237,6 +237,22 @@ class TestPRKindPathHandlingChanges:
         diff = "+def sanitize_path(p):\n+    return resolvePath(p)\n"
         assert _classify_pr_kind([_make_file("src/x.py")], diff) == "path_handling_changes"
 
+    def test_same_line_specifier_and_traversal_still_fires(self):
+        # Specifier neutralization is literal-scoped: a real traversal on the
+        # same source line as a require/import specifier must still count.
+        diff = "\n".join([
+            '+const x = require("../lib"); fs.readFile("../../etc/passwd");',
+            '+import { a } from "../lib"; fs.readFile("../../etc/shadow");',
+            '+import { runProcess } from "../runtime/subprocess.js";',
+        ])
+        files = [_make_file("src/app.ts")]
+        assert _classify_pr_kind(files, diff) == "path_handling_changes"
+        flags, attribution = _detect_risk_flags(files, diff, [])
+        assert "path_handling_changes" in flags
+        checks = _build_must_check("app_code", ["path_handling_changes"])
+        assert any("path traversal" in c for c in checks)
+        assert any("edge-case paths" in c for c in checks)
+
 
 class TestPRKindSecretHandlingChanges:
     @pytest.mark.parametrize("fname", [

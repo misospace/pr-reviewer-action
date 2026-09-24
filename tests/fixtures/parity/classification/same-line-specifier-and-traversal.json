@@ -1,0 +1,13 @@
+{
+  "fixture": "same-line-specifier-and-traversal",
+  "description": "Module-specifier neutralization is literal-scoped, not line-scoped: a real ../ traversal on the same source line as a require/import specifier still classifies path_handling_changes with the flag and the path must_check items, while pure specifier lines stay app_code.",
+  "pr_files": [
+    {
+      "filename": "src/app.ts",
+      "status": "modified",
+      "additions": 4
+    }
+  ],
+  "diff": "+const x = require(\"../lib\"); fs.readFile(\"../../etc/passwd\");\n+import { a } from \"../lib\"; fs.readFile(\"../../etc/shadow\");\n+import { runProcess } from \"../runtime/subprocess.js\";\n+const mod = require(\"../lib/util.js\");\n context line\n",
+  "linked_issues": []
+}
