@@ -1,0 +1,91 @@
+{
+  "fixture": "source-mismatch",
+  "description": "Compare-repo resolution: agreeing OCI labels win, disagreeing old/new labels produce the mismatch bullet with the heuristic fallback, and a single-sided label resolves to the labeled side. Git-clone source URLs normalize through the .git strip.",
+  "diff": "diff --git a/apps/one.yaml b/apps/one.yaml\n-   image: ghcr.io/k8s-apps/one:1.0@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   image: ghcr.io/k8s-apps/one:1.0@sha256:2222222222222222222222222222222222222222222222222222222222222222\ndiff --git a/apps/two.yaml b/apps/two.yaml\n-   image: ghcr.io/k8s-apps/two:2.0@sha256:3333333333333333333333333333333333333333333333333333333333333333\n+   image: ghcr.io/k8s-apps/two:2.0@sha256:4444444444444444444444444444444444444444444444444444444444444444\n",
+  "http": [
+    {
+      "match": "/manifests/1111111111111111111111111111111111111111111111111111111111111111",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "match": "/blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": {
+        "created": "2026-01-05T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "aaaa1111cccc",
+            "org.opencontainers.image.source": "git@github.com:ownerA/one.git",
+            "org.opencontainers.image.version": "1.0.0",
+            "org.opencontainers.image.ref_name": "1.0.0",
+            "org.opencontainers.image.ref.name": "1.0.0"
+          }
+        }
+      }
+    },
+    {
+      "match": "/manifests/2222222222222222222222222222222222222222222222222222222222222222",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "match": "/blobs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": {
+        "created": "2026-01-05T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "bbbb2222dddd",
+            "org.opencontainers.image.source": "https://github.com/ownerB/one",
+            "org.opencontainers.image.version": "1.0.1",
+            "org.opencontainers.image.ref_name": "1.0.1",
+            "org.opencontainers.image.ref.name": "1.0.1"
+          }
+        }
+      }
+    },
+    {
+      "match": "/manifests/3333333333333333333333333333333333333333333333333333333333333333",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json"
+      }
+    },
+    {
+      "match": "/manifests/4444444444444444444444444444444444444444444444444444444444444444",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    },
+    {
+      "match": "/blobs/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "body": {
+        "created": "2026-01-05T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "cccc3333eeee",
+            "org.opencontainers.image.source": "https://github.com/ownerC/two",
+            "org.opencontainers.image.version": "2.0.1",
+            "org.opencontainers.image.ref_name": "2.0.1",
+            "org.opencontainers.image.ref.name": "2.0.1"
+          }
+        }
+      }
+    },
+    {
+      "match": "token",
+      "body": {
+        "token": "fixture-anonymous-token"
+      }
+    }
+  ]
+}

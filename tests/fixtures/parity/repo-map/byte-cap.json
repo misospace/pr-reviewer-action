@@ -1,0 +1,23 @@
+{
+  "fixture": "byte-cap",
+  "description": "Hard markdown byte cap: the cut lands on a line boundary inside/around the tree fence with the closing fence restored and the visible tree note; the trust-framed document is compared too.",
+  "options": {
+    "max_markdown_bytes": 700
+  },
+  "files": [
+    "pyproject.toml",
+    "AGENTS.md",
+    "src/alpha/one.py",
+    "src/alpha/two.py",
+    "src/beta/three.go",
+    "src/beta/four.go",
+    "src/gamma/five.rs",
+    "src/gamma/six.rs",
+    "src/delta/seven.ts",
+    "src/delta/eight.ts",
+    "src/epsilon/nine.py",
+    "src/epsilon/ten.py",
+    "tests/test_alpha.py",
+    "tests/test_beta.go"
+  ]
+}

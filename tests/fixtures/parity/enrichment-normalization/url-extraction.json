@@ -1,0 +1,16 @@
+{
+  "fixture": "url-extraction",
+  "description": "URL extraction details: dedup, sorted output, trailing punctuation stripped, limit applied, redirect.github.com normalization, allowlist parsing with spaces and case.",
+  "body": "Links: https://example.com/a. See https://redirect.github.com/o/r/issues/1, and https://redirect.github.com/o/r/issues/1 again. Also https://EXAMPLE.com/Upper.",
+  "diff": "+ https://example.org/from-diff;\n+ https://example.com/a\n",
+  "url_limit": 3,
+  "allowed_hosts_raw": "  GitHub.com , , ghcr.IO ,,",
+  "urls": [
+    "http://github.com/o/r/releases/tag/v1",
+    "https://github.com/o/r/compare/v1...v2?w=1",
+    "https://my.forge.dev/team/proj/releases/tag/1.2.3",
+    "https://my.forge.dev/team/proj/compare/main...feature",
+    "ftp://example.com/not-http",
+    "https://github.com/o/r/wiki"
+  ]
+}

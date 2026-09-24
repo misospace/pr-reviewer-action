@@ -1,0 +1,20 @@
+{
+  "fixture": "legacy-anchors",
+  "description": "Legacy flat anchor shape (kind=symbol entries with source/value), a removed file whose old and new names are both excluded from hits, and grep hits with secrets redacted from snippets.",
+  "repo_files": {
+    "src/service.py": "def handle(req):\n    token = 'ghp_0123456789abcdefghij0123456789abcd'\n    return handle(req)\n",
+    "src/util.py": "from src.service import handle\nhandle(1)\n",
+    "tests/test_service.py": "import handle from service\nhandle('ghp_0123456789abcdefghij0123456789abcd')\n",
+    "setup.py": "from setuptools import setup\nsetup(name=\"svc\")\n"
+  },
+  "anchors": {
+    "anchors": [
+      {"kind": "symbol", "confidence": "high", "source": "src/service.py", "value": "handle"},
+      {"kind": "symbol", "confidence": "high", "source": "src/removed.py", "value": "handle"},
+      {"kind": "symbol", "confidence": "medium", "source": "src/service.py", "value": "handle"}
+    ]
+  },
+  "files": [
+    {"filename": "src/new_name.py", "previous_filename": "src/removed.py", "status": "removed"}
+  ]
+}

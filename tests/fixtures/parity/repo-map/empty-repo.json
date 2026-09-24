@@ -1,0 +1,5 @@
+{
+  "fixture": "empty-repo",
+  "description": "Initialized but empty repository: zero tracked files, zero directories, no languages, empty tree with the visible _(empty)_ block and no truncation.",
+  "files": []
+}

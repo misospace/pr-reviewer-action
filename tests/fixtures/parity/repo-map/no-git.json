@@ -1,0 +1,8 @@
+{
+  "fixture": "no-git",
+  "description": "Clean failure: the prepared directory is not a Git repository, so both sides must fail with the identical git error instead of emitting a misleading partial map.",
+  "repo": false,
+  "files": [
+    "lone.py"
+  ]
+}

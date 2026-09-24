@@ -1,0 +1,15 @@
+{
+  "fixture": "renovate-diff",
+  "description": "Realistic renovate-style PR: URL extraction from body+diff with trailing-punctuation stripping, version hints from changed lines, title-version precedence, GHCR extraction, hex compare SHAs with letters.",
+  "body": "Updates ghcr.io/k8s-apps/metrics from 1.2.2 to 1.2.3.\nSee https://github.com/k8s-apps/metrics/releases/tag/v1.2.3 for notes.",
+  "diff": "+ image: ghcr.io/k8s-apps/metrics:v1.2.3@sha256:0abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890\n+ tag: 1.2.3\n- tag: 1.2.2\n+ repository: ghcr.io/k8s-apps/metrics\nsome context line\n+ https://github.com/k8s-apps/metrics/compare/v1.2.2...v1.2.3\n",
+  "title": "Update ghcr.io/k8s-apps/metrics Docker tag from 1.2.2 to v1.2.3",
+  "allowed_hosts_raw": "GITHUB.COM, ghcr.io",
+  "urls": [
+    "https://github.com/k8s-apps/metrics/releases/tag/v1.2.3",
+    "https://github.com/k8s-apps/metrics/compare/v1.2.2...v1.2.3",
+    "https://git.example.com/o/p/releases/tag/2.0?download=1",
+    "https://git.example.com/o/p/compare/1.0...2.0#files",
+    "https://example.org/not-a-release"
+  ]
+}

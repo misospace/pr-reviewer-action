@@ -1,0 +1,9 @@
+{
+  "fixture": "no-anchors",
+  "description": "Invalid anchor payload: a non-object artifact degrades to the explicit invalid_input error with truncated=true instead of raising.",
+  "repo_files": {
+    "src/app.py": "x = 1\n"
+  },
+  "anchors": "not-an-object",
+  "files": []
+}

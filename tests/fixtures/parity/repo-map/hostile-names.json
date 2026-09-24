@@ -1,0 +1,20 @@
+{
+  "fixture": "hostile-names",
+  "description": "Untrusted path rendering: backtick runs (single, double, the exact triple-delimiter case, four+), newlines and tabs, Unicode, spaces, a name that is itself the tree fence string, and a name exceeding the 200-char display cap.",
+  "files": [
+    "plain.py",
+    "back`tick.py",
+    "double``tick.py",
+    "triple```tick.py",
+    "quad````tick.py",
+    "long``````run.py",
+    "weird\nname.py",
+    "tab\tstop.py",
+    "uni-é中.py",
+    "has space.py",
+    "````",
+    "````text",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.py",
+    "src/nested``/deep.md"
+  ]
+}

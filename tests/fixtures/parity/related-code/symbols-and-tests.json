@@ -1,0 +1,32 @@
+{
+  "fixture": "symbols-and-tests",
+  "description": "The main path: high-confidence symbols searched with fixed-string git grep (low-confidence and deleted-file symbols skipped), hits exclude changed paths, scored test discovery, nearest-first manifests across levels, and file-list rename tracking.",
+  "repo_files": {
+    "src/app.py": "from src.other import run_pipeline\nclass App:\n    def start(self):\n        run_pipeline(1)\n",
+    "src/other.py": "def run_pipeline(items):\n    return [i * 2 for i in items]\ndef run_pipeline_v2(items):\n    return run_pipeline(items) + [0]\n",
+    "tests/test_app.py": "from src.app import App\ndef test_app():\n    assert App()\n",
+    "src/app.test.ts": "import { runPipeline } from './other';\n",
+    "src/pyproject.toml": "[project]\nname = \"app\"\n",
+    "pyproject.toml": "[project]\nname = \"root\"\n",
+    "src/nested/package.json": "{\"name\": \"nested\"}\n",
+    "src/nested/deeper/package.json": "{\"name\": \"deep\"}\n",
+    "src/renamed.py": "# moved file\nrun_pipeline_hint_without_call\n"
+  },
+  "anchors": {
+    "version": 1,
+    "files": [
+      {"path": "src/app.py", "symbols": [
+        {"name": "run_pipeline", "confidence": "high"},
+        {"name": "low_conf_thing", "confidence": "low"},
+        {"name": "App", "confidence": "high"}
+      ]},
+      {"path": "src/deleted.py", "deleted": true, "symbols": [
+        {"name": "ghost_symbol", "confidence": "high"}
+      ]}
+    ]
+  },
+  "files": [
+    {"filename": "src/app.py", "status": "modified", "additions": 2},
+    {"filename": "src/old.py", "previous_filename": "src/renamed.py", "status": "renamed"}
+  ]
+}

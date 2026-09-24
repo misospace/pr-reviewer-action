@@ -1,0 +1,42 @@
+{
+  "fixture": "digest-only",
+  "description": "Digest-only changes: no tags, empty OCI labels (unknown revision), heuristic compare repo, and a failing compare lookup rendered as unavailable.",
+  "diff": "diff --git a/charts/app/values.yaml b/charts/app/values.yaml\n- digest: sha256:3333333333333333333333333333333333333333333333333333333333333333\n+ digest: sha256:4444444444444444444444444444444444444444444444444444444444444444\n",
+  "http": [
+    {
+      "match": "/manifests/3333333333333333333333333333333333333333333333333333333333333333",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json"
+      }
+    },
+    {
+      "match": "/manifests/4444444444444444444444444444444444444444444444444444444444444444",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    },
+    {
+      "match": "/blobs/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "body": {
+        "created": null,
+        "config": {
+          "Labels": null
+        }
+      }
+    },
+    {
+      "match": "api.github.com",
+      "body": null,
+      "error": "HTTP request failed: 404 not found"
+    },
+    {
+      "match": "token",
+      "body": {
+        "token": "fixture-anonymous-token"
+      }
+    }
+  ]
+}

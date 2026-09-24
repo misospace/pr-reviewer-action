@@ -1,0 +1,12 @@
+{
+  "fixture": "fetch-errors",
+  "description": "Failure paths: unsupported registry routing and token fetch failures degrade into visible metadata error bullets with unknown revisions and an unavailable compare.",
+  "diff": "diff --git a/k8s/deploy.yaml b/k8s/deploy.yaml\n-   image: quay.io/k8s/app:1.0@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   image: quay.io/k8s/app:1.0@sha256:2222222222222222222222222222222222222222222222222222222222222222\n",
+  "http": [
+    {
+      "match": "token",
+      "body": null,
+      "error": "HTTP request failed: connection refused"
+    }
+  ]
+}

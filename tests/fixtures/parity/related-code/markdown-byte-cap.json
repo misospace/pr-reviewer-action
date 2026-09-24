@@ -1,0 +1,22 @@
+{
+  "fixture": "markdown-byte-cap",
+  "description": "Hard markdown byte cap: whole lines are dropped until the cut note fits, with the visible cap note appended; the JSON document stays under its structural limit.",
+  "markdown_max_bytes": 600,
+  "repo_files": {
+    "src/one.py": "def alpha():\n    pass\n",
+    "src/two.py": "from src.one import alpha\nalpha()\n",
+    "src/three.py": "from src.one import alpha as a2\na2()\n",
+    "src/four.py": "alpha_reference_only\n",
+    "src/five.py": "alpha_again\n",
+    "src/six.py": "alpha_more\n",
+    "src/seven.py": "alpha_even_more\n",
+    "tests/test_one.py": "from src.one import alpha\nalpha()\n"
+  },
+  "anchors": {
+    "files": [
+      {"path": "src/one.py", "symbols": [
+        {"name": "alpha", "confidence": "high"}
+      ]}
+    ]
+  }
+}

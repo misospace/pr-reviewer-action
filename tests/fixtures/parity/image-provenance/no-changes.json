@@ -1,0 +1,6 @@
+{
+  "fixture": "no-changes",
+  "description": "A diff without any digest lines yields the explicit no-changes document without any registry traffic.",
+  "diff": "diff --git a/README.md b/README.md\n+hello world\n-image: not-a-digest\n",
+  "http": []
+}

@@ -1,0 +1,13 @@
+{
+  "fixture": "git-error",
+  "description": "Git unavailable: the prepared directory is not a repository, so ls-files fails and the error lands in artifact errors with the git_error reason (grep is skipped, discovery runs over an empty tracked set).",
+  "repo": false,
+  "repo_files": {
+    "src/app.py": "x = 1\n"
+  },
+  "anchors": {
+    "files": [
+      {"path": "src/app.py", "symbols": [{"name": "x", "confidence": "high"}]}
+    ]
+  }
+}

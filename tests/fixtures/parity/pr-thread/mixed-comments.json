@@ -1,0 +1,15 @@
+{
+  "fixture": "mixed-comments",
+  "description": "Ordering and filtering: mixed Z/offset/naive timestamps and unparseable stamps sort deterministically (oldest first, unparseable last, id tie-break), the action's own managed comments (sticky, metadata, sha, fingerprint variants) are dropped, empty bodies are dropped, heading fields are sanitized.",
+  "comments": [
+    {"id": 3, "user": {"login": "carol"}, "created_at": "2026-03-02T10:00:00+02:00", "updated_at": "2026-03-02T10:00:00+02:00", "body": "Offset-zone comment that is actually the earliest."},
+    {"id": 1, "user": {"login": "alice"}, "created_at": "2026-03-02T09:00:00Z", "updated_at": "", "body": "First real comment."},
+    {"id": 2, "user": {"login": "bob"}, "created_at": "not-a-date", "updated_at": "", "body": "Unparseable stamp sorts last."},
+    {"id": 4, "user": {"login": "bot"}, "created_at": "2026-03-01T00:00:00Z", "updated_at": "", "body": "<!-- ai-pr-reviewer -->\nmanaged sticky comment body"},
+    {"id": 5, "user": {"login": "bot"}, "created_at": "2026-03-01T00:00:01Z", "updated_at": "", "body": "<!-- ai-pr-reviewer:{\"sha\": \"abc\"} --> managed metadata"},
+    {"id": 6, "user": {"login": "bot"}, "created_at": "2026-03-01T00:00:02Z", "updated_at": "", "body": "review of <!-- ai-pr-review-sha:deadbeef --> head"},
+    {"id": 7, "user": {"login": "eve"}, "created_at": "2026-03-03T00:00:00Z", "updated_at": "", "body": "   "},
+    {"id": 8, "user": {"login": ""}, "created_at": "2026-03-02T12:00:00Z", "updated_at": "", "body": "Author-less comment falls back to unknown.\nMulti-line body with\nline breaks."},
+    {"id": 9, "user": {"login": "n\u0000ul"}, "created_at": "2026-03-02T13:00:00Z", "updated_at": "", "body": "Author name with a control character."}
+  ]
+}

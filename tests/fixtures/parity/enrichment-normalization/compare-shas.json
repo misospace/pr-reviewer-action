@@ -1,0 +1,6 @@
+{
+  "fixture": "compare-shas",
+  "description": "Compare-SHA extraction: exactly one removed and one added hex SHA (letters required, lowercased), plus a pure-numeric line that must be ignored, and an ambiguous multi-SHA case in the same diff for the hints the selector never sees.",
+  "diff": "- tag: app@sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222\n+ tag: app@sha256:ffff6666eeee5555dddd4444cccc3333bbbb2222aaaa1111ffff6666eeee5555\n+ version: 2024.09.13\n",
+  "title": null
+}

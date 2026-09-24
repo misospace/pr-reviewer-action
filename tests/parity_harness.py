@@ -875,7 +875,207 @@ REQUIREMENT_LEDGER_BOUNDARY = Boundary(
 )
 
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY)
+# ---------------------------------------------------------------------------
+# Boundary: enrichment normalization (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_enrichment(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_enrichment.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_enrichment(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["enrichment-fixture"], fixture, workdir)
+
+
+ENRICHMENT_BOUNDARY = Boundary(
+    id="enrichment-normalization",
+    description=(
+        "#675 enrichment-normalization parity: the v2 pure extraction and "
+        "normalization functions (URL extraction with redirect.github.com "
+        "normalization, allowlist string parsing, version hints, target-"
+        "version selection with tail -n1 hint semantics, GHCR image "
+        "extraction, old→new compare-SHA extraction, release/compare URL "
+        "classification) versus the v3 TypeScript port. The DNS resolution / "
+        "public-IP fetch-security functions are out of scope: that is fetch "
+        "policy owned by the platform/tool boundaries and stays in v2."
+    ),
+    fixtures_dir="enrichment-normalization",
+    run=lambda fixture, workdir: (run_v2_enrichment(fixture, workdir), run_v3_enrichment(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: repository map (#675)
+# ---------------------------------------------------------------------------
+
+
+sys.path.insert(0, str(ROOT / "tests" / "parity_runners"))
+from repo_fixture import prepare_repo  # noqa: E402
+
+
+def run_v2_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    repo = prepare_repo(workdir / "repo-v2", fixture)
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_repo_map.py"), str(_fixture_path(fixture)), str(repo)],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    repo = prepare_repo(workdir / "repo-v3", fixture)
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    return run_json_runner(
+        [node, "dist/index.js", "repo-map-fixture", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(workdir),
+            "PARITY_REPO_DIR": str(repo),
+        },
+    )
+
+
+REPO_MAP_BOUNDARY = Boundary(
+    id="repo-map",
+    description=(
+        "#675 repository-map parity: the v2 deterministic bounded repo-map "
+        "builder (git ls-files seeding, language/important/category "
+        "classification, bounded depth-major tree, visible truncation) and "
+        "its fence-safe JSON/Markdown renderers plus trust framing versus the "
+        "v3 TypeScript port. Covers mixed-language trees, hostile filenames "
+        "(backtick runs, newlines, Unicode, fence strings, display caps), "
+        "every truncation reason, hard markdown byte caps, framed rendering, "
+        "and the clean no-Git failure."
+    ),
+    fixtures_dir="repo-map",
+    run=lambda fixture, workdir: (run_v2_repo_map(fixture, workdir), run_v3_repo_map(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: PR thread context (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_pr_thread.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["pr-thread-fixture"], fixture, workdir)
+
+
+PR_THREAD_BOUNDARY = Boundary(
+    id="pr-thread",
+    description=(
+        "#675 PR-thread parity: the v2 bounded conversation-comment builder "
+        "(timestamp/id ordering with unparseable stamps last, managed-comment "
+        "filtering, marker-line stripping, secret redaction, control-char "
+        "hygiene, per-comment byte truncation, whole-comment byte budget with "
+        "visible omission) versus the v3 TypeScript port. Covers hostile "
+        "bodies (backtick fences, forged markers, credential shapes) and the "
+        "custom managed-marker substring mode."
+    ),
+    fixtures_dir="pr-thread",
+    run=lambda fixture, workdir: (run_v2_pr_thread(fixture, workdir), run_v3_pr_thread(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: related-code context (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    repo = prepare_repo(workdir / "repo-v2", fixture)
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_related_code.py"), str(_fixture_path(fixture)), str(repo)],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    repo = prepare_repo(workdir / "repo-v3", fixture)
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    return run_json_runner(
+        [node, "dist/index.js", "related-code-fixture", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(workdir),
+            "PARITY_REPO_DIR": str(repo),
+        },
+    )
+
+
+RELATED_CODE_BOUNDARY = Boundary(
+    id="related-code",
+    description=(
+        "#675 related-code parity: the v2 deterministic bounded related-code "
+        "scanner (high-confidence symbol anchors, fixed-string git grep with "
+        "per-symbol/global caps and extra-hit detection, test discovery with "
+        "scored stems, nearest-first manifests, changed/deleted path "
+        "exclusion, secret-redacted snippets, explicit git errors, and the "
+        "structural JSON byte cap) versus the v3 TypeScript port, over "
+        "identical harness-prepared worktrees."
+    ),
+    fixtures_dir="related-code",
+    run=lambda fixture, workdir: (run_v2_related_code(fixture, workdir), run_v3_related_code(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: image digest provenance (#675)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_image_provenance(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_image_provenance.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_image_provenance(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["image-provenance-fixture"], fixture, workdir)
+
+
+IMAGE_PROVENANCE_BOUNDARY = Boundary(
+    id="image-provenance",
+    description=(
+        "#675 image-digest provenance parity: the v2 diff parser (repository:/"
+        "tag:/digest:/image: bucketing and old→new pairing), registry target "
+        "routing, manifest/config normalization into OCI label provenance, "
+        "GitHub compare post-processing, compare-repo resolution (OCI source "
+        "labels with mismatch detection and the image-repo heuristic), and "
+        "the rendered document versus the v3 TypeScript port with the same "
+        "fixture-routed transport. The HTTP transport itself (curl, tokens, "
+        "budgets) is fetch policy that stays in v2."
+    ),
+    fixtures_dir="image-provenance",
+    run=lambda fixture, workdir: (run_v2_image_provenance(fixture, workdir), run_v3_image_provenance(fixture, workdir)),
+)
+
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

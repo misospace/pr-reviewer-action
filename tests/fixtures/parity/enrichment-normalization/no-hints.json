@@ -1,0 +1,7 @@
+{
+  "fixture": "no-hints",
+  "description": "Nothing extractable: empty diff and body produce empty values, an empty target version, and no compare pair.",
+  "body": "",
+  "diff": "",
+  "title": "chore: tweak"
+}

@@ -1,0 +1,10 @@
+{
+  "fixture": "custom-marker",
+  "description": "Custom managed-marker mode: the marker is a plain substring filter (like the jq filter), not the default regex, and empty bodies are still dropped.",
+  "marker": "MANAGED-REVIEW-BOT",
+  "comments": [
+    {"id": 41, "user": "bot", "created_at": "2026-03-01T00:00:00Z", "updated_at": "", "body": "MANAGED-REVIEW-BOT: my own comment"},
+    {"id": 42, "user": "human", "created_at": "2026-03-02T00:00:00Z", "updated_at": "", "body": "a real comment mentioning MANAGED-REVIEW-BOT in passing"},
+    {"id": 43, "user": "ghost", "created_at": "2026-03-03T00:00:00Z", "updated_at": "", "body": "   "}
+  ]
+}

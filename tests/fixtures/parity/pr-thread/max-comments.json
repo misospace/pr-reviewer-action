@@ -1,0 +1,11 @@
+{
+  "fixture": "max-comments",
+  "description": "max_comments keeps only the most recent comments (rendered oldest first) with the visible showing/omission notes.",
+  "comments": [
+    {"id": 21, "user": "u1", "created_at": "2026-03-01T00:00:00Z", "updated_at": "", "body": "oldest one"},
+    {"id": 22, "user": "u2", "created_at": "2026-03-02T00:00:00Z", "updated_at": "", "body": "second"},
+    {"id": 23, "user": "u3", "created_at": "2026-03-03T00:00:00Z", "updated_at": "", "body": "third"},
+    {"id": 24, "user": "u4", "created_at": "2026-03-04T00:00:00Z", "updated_at": "", "body": "newest one"}
+  ],
+  "max_comments": 2
+}

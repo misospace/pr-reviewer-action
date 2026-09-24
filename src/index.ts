@@ -6,6 +6,13 @@ import { runRequestBuilderMode, runToolBudgetMode, runVerdictParserMode } from "
 import { classificationFixtureMain } from "./classification/fixture.js";
 import { runPrecheckFixture } from "./precheck/index.js";
 import { requirementLedgerFixtureMain } from "./requirements/fixture.js";
+import {
+  runEnrichmentFixture,
+  runImageProvenanceFixture,
+  runPrThreadFixture,
+  runRelatedCodeFixture,
+  runRepoMapFixture,
+} from "./context/fixture.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 
 export function main(): void {
@@ -45,6 +52,16 @@ export async function requirementLedgerParityMain(fixturePath: string): Promise<
   await requirementLedgerFixtureMain(fixturePath);
 }
 
+async function contextFixtureMain(mode: string, fixturePath: string): Promise<void> {
+  assertSupportedNode(process.versions.node);
+  const result = await (mode === "enrichment-fixture" ? Promise.resolve(runEnrichmentFixture(fixturePath))
+    : mode === "repo-map-fixture" ? Promise.resolve(runRepoMapFixture(fixturePath))
+    : mode === "pr-thread-fixture" ? Promise.resolve(runPrThreadFixture(fixturePath))
+    : mode === "related-code-fixture" ? runRelatedCodeFixture(fixturePath)
+    : runImageProvenanceFixture(fixturePath));
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 if (require.main === module) {
   const argv = process.argv.slice(2);
   const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
@@ -62,6 +79,11 @@ if (require.main === module) {
   } else if (firstArg === "requirement-ledger-fixture") {
     requirementLedgerParityMain(argv[1] ?? "").catch((error: unknown) => {
       process.stderr.write(`v3 requirement-ledger fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      process.exitCode = 1;
+    });
+  } else if (["enrichment-fixture", "repo-map-fixture", "pr-thread-fixture", "related-code-fixture", "image-provenance-fixture"].includes(firstArg)) {
+    contextFixtureMain(firstArg, argv[1] ?? "").catch((error: unknown) => {
+      process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
   } else if (mode === "v3-request-builder" && firstArg) {

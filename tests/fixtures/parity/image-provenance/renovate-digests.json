@@ -1,0 +1,199 @@
+{
+  "fixture": "renovate-digests",
+  "description": "Happy path: digest swaps under the same tag base pair old→new (both the tag: form and the inline image: form), with OCI index manifests (six-platform cap), config labels driving revision/source/version, and compare post-processing with commit first-lines and changed files.",
+  "diff": "diff --git a/deploy/metrics.yaml b/deploy/metrics.yaml\nindex 0000001..0000002 100644\n--- a/deploy/metrics.yaml\n+++ b/deploy/metrics.yaml\n@@ -5,7 +5,7 @@\n   spec:\n+   repository: ghcr.io/k8s-apps/metrics\n-   tag: metrics@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   tag: metrics@sha256:2222222222222222222222222222222222222222222222222222222222222222\ndiff --git a/deploy/inline.yaml b/deploy/inline.yaml\n-   image: ghcr.io/k8s-apps/metrics:v1.2.2@sha256:3333333333333333333333333333333333333333333333333333333333333333\n+   image: ghcr.io/k8s-apps/metrics:v1.2.2@sha256:4444444444444444444444444444444444444444444444444444444444444444\n",
+  "http": [
+    {
+      "match": "/manifests/1111111111111111111111111111111111111111111111111111111111111111",
+      "body": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+          {
+            "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "amd64",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arm64",
+              "os": "linux"
+            }
+          }
+        ],
+        "config": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "match": "/blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": {
+        "created": "2026-01-05T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "abc123def456",
+            "org.opencontainers.image.source": "https://github.com/k8s-apps/metrics",
+            "org.opencontainers.image.version": "v1.2.2",
+            "org.opencontainers.image.ref_name": "v1.2.2",
+            "org.opencontainers.image.ref.name": "v1.2.2"
+          }
+        }
+      }
+    },
+    {
+      "match": "/manifests/2222222222222222222222222222222222222222222222222222222222222222",
+      "body": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+          {
+            "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch7",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch8",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch9",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch0",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch1",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch2",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch3",
+              "os": "linux"
+            }
+          },
+          {
+            "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {
+              "architecture": "arch4",
+              "os": "linux"
+            }
+          }
+        ],
+        "config": {
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "match": "/blobs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": {
+        "created": "2026-01-05T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "def456789abc",
+            "org.opencontainers.image.source": "https://github.com/k8s-apps/metrics",
+            "org.opencontainers.image.version": "v1.2.3",
+            "org.opencontainers.image.ref_name": "v1.2.3",
+            "org.opencontainers.image.ref.name": "v1.2.3"
+          }
+        }
+      }
+    },
+    {
+      "match": "/manifests/3333333333333333333333333333333333333333333333333333333333333333",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "match": "/manifests/4444444444444444444444444444444444444444444444444444444444444444",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "match": "api.github.com",
+      "body": {
+        "status": "ahead",
+        "ahead_by": 2,
+        "behind_by": 0,
+        "total_commits": 2,
+        "html_url": "https://github.com/k8s-apps/metrics/compare/abc123def456...def456789abc",
+        "commits": [
+          {
+            "sha": "abc123def4567890abcdef1234567890abcdef12",
+            "commit": {
+              "message": "Fix scrape config\n\nLonger explanation body."
+            }
+          },
+          {
+            "sha": "def456789abc0123456789abcdef0123456789ab",
+            "commit": {
+              "message": "Bump chart deps"
+            }
+          }
+        ],
+        "files": [
+          {
+            "filename": "pkg/scrape.go",
+            "status": "modified",
+            "changes": 21
+          },
+          {
+            "filename": "docs/update.md",
+            "status": "added",
+            "changes": 4
+          }
+        ]
+      }
+    },
+    {
+      "match": "token",
+      "body": {
+        "token": "fixture-anonymous-token"
+      }
+    }
+  ]
+}

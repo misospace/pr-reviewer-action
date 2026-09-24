@@ -1,0 +1,25 @@
+{
+  "fixture": "caps-and-truncation",
+  "description": "Every truncation reason at once: depth cap (deep files omitted), entry cap (tree cut), per-category cap (tests and manifests truncated), roots cap, and important-files cap — with visible reasons and omitted counts.",
+  "options": {
+    "max_depth": 1,
+    "max_entries": 4,
+    "max_files_per_category": 1
+  },
+  "files": [
+    "a.py",
+    "b.py",
+    "deep/one.py",
+    "deep/two.py",
+    "deeper/three/four.py",
+    "pyproject.toml",
+    "package.json",
+    "requirements.txt",
+    "Makefile",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "tests/test_a.py",
+    "tests/test_b.py",
+    "migrations/0001.py"
+  ]
+}

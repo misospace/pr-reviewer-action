@@ -1,0 +1,10 @@
+{
+  "fixture": "hint-caps",
+  "description": "Extraction caps: version hints stop at the cap (first N changed lines win), unbounded URL extraction, chart/appVersion/digest hint keywords, and hint-semver fallback when the title has no version token.",
+  "body": "",
+  "diff": "+ image: quay.io/o/a:1.0.0\n+ chart: my-chart-0.1.2\n+ appVersion: 2.3.4\n+ digest: sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n+ version: 9.9.9\n+ version: 8.8.8\n",
+  "title": "Bump things",
+  "url_limit": null,
+  "version_hint_limit": 3,
+  "urls": []
+}
