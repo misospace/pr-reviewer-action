@@ -30,7 +30,7 @@ def main() -> int:
     # The fixture "credentials" are inert dummies that exist to exercise the
     # redaction path; the printed markdown carries them already replaced by
     # [REDACTED].
-    # CodeQL [py/clear-text-logging-sensitive-data]
+    # codeql[py/clear-text-logging-sensitive-data]
     print(json.dumps({"ok": True, "values": {"markdown": markdown}}, ensure_ascii=False))
     return 0
 
