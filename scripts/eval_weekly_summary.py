@@ -40,9 +40,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# The weekly summary is posted as a comment on this tracking issue (#472).
-TRACKING_ISSUE_NUMBER = 472
-
 # Below this capability pass rate a mode is flagged with a warning emoji
 # (matches the runbook's "a pass rate below 0.95 should block the release").
 PASS_RATE_GREEN_THRESHOLD = 0.95
@@ -215,11 +212,13 @@ def _utc_stamp() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _post_tracking_comment(body: str) -> None:
-    """Best-effort post of the summary to the #472 tracking issue.
+def _post_tracking_comment(body: str, issue_number: int) -> None:
+    """Best-effort post of the summary to the tracking issue.
 
-    Never raises: a tracker outage must not fail the whole job just for
-    the comment (the step summary itself is the primary surface).
+    The issue number comes from the caller's ``--post-issue`` argument
+    (the workflow passes the #472 tracking issue explicitly). Never
+    raises: a tracker outage must not fail the whole job just for the
+    comment (the step summary itself is the primary surface).
     """
     from urllib.request import Request, urlopen
 
@@ -233,7 +232,7 @@ def _post_tracking_comment(body: str) -> None:
         )
         return
     summary_url = (
-        f"https://api.github.com/repos/{gh_repo}/issues/{TRACKING_ISSUE_NUMBER}/comments"
+        f"https://api.github.com/repos/{gh_repo}/issues/{issue_number}/comments"
     )
     payload = json.dumps({"body": body}).encode("utf-8")
     req = Request(
@@ -283,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NUMBER",
         help=(
             "Also post the summary as a comment on this issue (best-effort; "
-            "requires GITHUB_TOKEN and GITHUB_REPOSITORY)"
+            "requires GITHUB_TOKEN and GITHUB_REPOSITORY; the scheduled "
+            "sweep passes the #472 tracking issue)"
         ),
     )
     args = parser.parse_args(argv)
@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         print(body)
 
     if args.post_issue is not None:
-        _post_tracking_comment(body)
+        _post_tracking_comment(body, args.post_issue)
 
     # Fail after the summary and tracking-issue comment are written, so
     # the evidence is still visible on a red run (issue #711).

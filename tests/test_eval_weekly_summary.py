@@ -24,7 +24,9 @@ Covered behavior:
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -35,7 +37,7 @@ _SCRIPTS_DIR = _ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import pytest
+import eval_weekly_summary
 from eval_harness import BenchmarkCorpus, BenchmarkResult, ReviewRun, generate_report
 from eval_weekly_summary import (
     all_runs_errored,
@@ -451,9 +453,18 @@ class TestDeterminism:
 
 
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
+    """Run the summary CLI in an environment-deterministic way.
+
+    A GitHub Actions runner exports ``GITHUB_STEP_SUMMARY``; inherited by
+    the child, the CLI would correctly append there instead of printing to
+    stdout, breaking the stdout-facing assertions. Strip it here — the
+    real append behavior has its own explicit test below.
+    """
+    env = dict(os.environ)
+    env.pop("GITHUB_STEP_SUMMARY", None)
     return subprocess.run(
         [sys.executable, str(_SCRIPTS_DIR / "eval_weekly_summary.py"), *argv],
-        capture_output=True, text=True, cwd=_ROOT, check=False,
+        capture_output=True, text=True, cwd=_ROOT, check=False, env=env,
     )
 
 
@@ -537,3 +548,71 @@ class TestCliFixtures:
         appended = summary_file.read_text(encoding="utf-8")
         assert appended.startswith("existing\n")
         assert "## Weekly eval-harness regression summary" in appended
+
+
+class TestPostIssueArgument:
+    """``--post-issue NUMBER`` is authoritative for the tracking comment."""
+
+    def test_argument_drives_the_comment_url(self, tmp_path, monkeypatch):
+        """The supplied issue number reaches the posted comment URL."""
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))["body"]
+            return io.BytesIO(b"{}")
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "715",
+        ])
+
+        assert rc == 0
+        assert captured["url"] == (
+            "https://api.github.com/repos/misospace/pr-reviewer-action"
+            "/issues/715/comments"
+        )
+        assert "## Weekly eval-harness regression summary" in captured["body"]
+
+    def test_workflow_contract_targets_the_tracking_issue(self, tmp_path, monkeypatch):
+        """The scheduled sweep's --post-issue 472 hits the #472 issue."""
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            return io.BytesIO(b"{}")
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "472",
+        ])
+
+        assert rc == 0
+        assert captured["url"].endswith("/issues/472/comments")
+
+    def test_skips_gracefully_without_credentials(self, tmp_path, monkeypatch, capsys):
+        """No token/repo env → best-effort skip, never a crash."""
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "472",
+        ])
+
+        assert rc == 0
+        assert "skipping the" in capsys.readouterr().err
