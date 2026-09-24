@@ -1979,12 +1979,20 @@ def generate_report(
             mm["avg_specialist_request_bytes"] = None
 
     semantic_report = evaluate_live_semantics(corpus.semantic_corpus, results)
+    total_runs = sum(len(bm.runs) for bm in results)
+    completed_runs = sum(1 for bm in results for r in bm.runs if not r.error)
     report = {
         "metadata": {
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "harness_version": "0.1.0",
             "modes_tested": sorted(active_modes),
             "total_prs": len(results),
+            # Machine-checkable completion counts (#711): a sweep where every
+            # run errored has pass_rate=None everywhere, which must fail the
+            # CI job instead of publishing an empty success summary.
+            "total_runs": total_runs,
+            "completed_runs": completed_runs,
+            "errored_runs": total_runs - completed_runs,
             "corpus_source": None,  # set by caller
         },
         "mode_summary": {m: mode_metrics[m] for m in sorted(mode_metrics)},
@@ -1999,6 +2007,23 @@ def generate_report(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def count_completed_runs(report: dict[str, Any]) -> int:
+    """The report's completed-run count, tolerating pre-#711 reports.
+
+    Prefers ``metadata.completed_runs``; when absent (a report written by an
+    older harness) falls back to summing ``mode_summary[*].successful_runs``.
+    The eval-harness workflow's summary step mirrors this same fallback.
+    """
+    completed = report.get("metadata", {}).get("completed_runs")
+    if isinstance(completed, bool) or not isinstance(completed, int):
+        completed = sum(
+            block.get("successful_runs", 0)
+            for block in report.get("mode_summary", {}).values()
+            if isinstance(block, dict) and isinstance(block.get("successful_runs", 0), int)
+        )
+    return completed
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -2189,12 +2214,29 @@ def main() -> int:
 
     output_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
 
+    # Write the report first even when failing, so the CI artifact upload
+    # still captures the per-run errors for debugging (#711).
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output_text, encoding="utf-8")
         print(f"\nReport written to {args.output}", file=sys.stderr)
     else:
         print(output_text)
+
+    # Fail when zero runs completed (#711): every pass rate is undefined, so
+    # reporting success would hide a broken sweep (e.g. the scheduled run
+    # where run_review.sh had lost its executable bit). Partial failures
+    # stay non-fatal — those reports carry real pass rates.
+    completed_runs = count_completed_runs(report)
+    if completed_runs == 0:
+        print(
+            "Error: 0 of "
+            f"{report['metadata'].get('total_runs', 'unknown')} harness runs "
+            "completed; every run errored, so no pass rates exist. "
+            "Failing (issue #711).",
+            file=sys.stderr,
+        )
+        return 1
 
     return 0
 

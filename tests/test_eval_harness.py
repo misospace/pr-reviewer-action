@@ -12,6 +12,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pytest
+import eval_harness
 from eval_harness import (
     BenchmarkCorpus,
     BenchmarkResult,
@@ -679,6 +680,113 @@ class TestToolRequiredScenario:
         assert cap["passed"] is False
         assert any(c["id"] == "cited_loader_in_review" and not c["passed"]
                    for c in cap["checks"])
+
+
+# ---------------------------------------------------------------------------
+# Zero-completed-runs failure guard (issue #711)
+# ---------------------------------------------------------------------------
+
+class TestCompletedRunCounts:
+    def test_metadata_counts_completed_and_errored_runs(self):
+        corpus = BenchmarkCorpus(prs=[{
+            "number": 1,
+            "repo_full_name": "test/repo",
+            "url": "https://github.com/test/repo/pull/1",
+            "known_findings": [],
+        }])
+        results = [BenchmarkResult(
+            pr_number=1,
+            repo_full_name="test/repo",
+            runs=[
+                ReviewRun(mode="tools_off", pr_number=1, repo_full_name="test/repo"),
+                ReviewRun(mode="native_loop", pr_number=1, repo_full_name="test/repo",
+                          error="Review failed (exit 1): boom"),
+            ],
+        )]
+
+        report = generate_report(results, corpus)
+
+        assert report["metadata"]["total_runs"] == 2
+        assert report["metadata"]["completed_runs"] == 1
+        assert report["metadata"]["errored_runs"] == 1
+
+    def test_count_completed_runs_falls_back_for_pre_711_reports(self):
+        report = {
+            "metadata": {},
+            "mode_summary": {
+                "tools_off": {"successful_runs": 3},
+                "native_loop": {"successful_runs": 0},
+            },
+        }
+        assert eval_harness.count_completed_runs(report) == 3
+
+    def test_count_completed_runs_prefers_metadata(self):
+        report = {
+            "metadata": {"completed_runs": 5},
+            "mode_summary": {"tools_off": {"successful_runs": 1}},
+        }
+        assert eval_harness.count_completed_runs(report) == 5
+
+
+class TestMainExitCode:
+    """main() must fail when zero runs completed, still writing the report."""
+
+    @staticmethod
+    def _run_main(monkeypatch, tmp_path: Path, outcomes) -> tuple[int, Path]:
+        """Run main() with run_review_for_pr stubbed to `outcomes` (per PR)."""
+        corpus_path = tmp_path / "corpus.json"
+        corpus_path.write_text(json.dumps({
+            "benchmark_corpus": [
+                {"number": i, "repo_full_name": "test/repo",
+                 "url": f"https://github.com/test/repo/pull/{i}", "known_findings": []}
+                for i in (1, 2)
+            ],
+        }), encoding="utf-8")
+        output_path = tmp_path / "report.json"
+
+        calls = iter(outcomes)
+
+        def fake_run_review_for_pr(pr, mode, work_dir, model_config, **kwargs):
+            return ReviewRun(
+                mode=mode, pr_number=pr["number"], repo_full_name=pr["repo_full_name"],
+                error=next(calls),
+            )
+
+        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr(sys, "argv", [
+            "eval_harness.py",
+            "--corpus", str(corpus_path),
+            "--modes", "tools_off",
+            "--runs-per-mode", "1",
+            "--output", str(output_path),
+        ])
+        exit_code = eval_harness.main()
+        return exit_code, output_path
+
+    def test_all_runs_errored_fails_but_writes_report(self, monkeypatch, tmp_path):
+        exit_code, output_path = self._run_main(
+            monkeypatch, tmp_path, ["pr broke", "pr broke"]
+        )
+        assert exit_code == 1
+        report = json.loads(output_path.read_text(encoding="utf-8"))
+        assert report["metadata"]["completed_runs"] == 0
+        assert report["metadata"]["total_runs"] == 2
+
+    def test_partial_failures_stay_non_fatal(self, monkeypatch, tmp_path):
+        exit_code, output_path = self._run_main(
+            monkeypatch, tmp_path, ["pr broke", None]
+        )
+        assert exit_code == 0
+        report = json.loads(output_path.read_text(encoding="utf-8"))
+        assert report["metadata"]["completed_runs"] == 1
+
+    def test_all_completed_passes(self, monkeypatch, tmp_path):
+        exit_code, output_path = self._run_main(
+            monkeypatch, tmp_path, [None, None]
+        )
+        assert exit_code == 0
+        report = json.loads(output_path.read_text(encoding="utf-8"))
+        assert report["metadata"]["completed_runs"] == 2
 
 
 if __name__ == "__main__":

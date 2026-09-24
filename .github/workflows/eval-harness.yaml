@@ -144,6 +144,22 @@ jobs:
           summary_lines.append(f"- **Modes tested:** {', '.join(modes) if modes else '_none reported_'}")
           summary_lines.append(f"- **PRs evaluated:** {report.get('metadata', {}).get('pr_count', 'n/a')}")
 
+          # Zero completed runs means every pass rate is undefined — the job
+          # must fail rather than publish a success summary (issue #711).
+          # Prefers metadata.completed_runs; falls back to summing
+          # mode_summary successful_runs for pre-#711 reports (mirrors
+          # count_completed_runs in scripts/eval_harness.py).
+          completed_runs = report.get("metadata", {}).get("completed_runs")
+          if not isinstance(completed_runs, int) or isinstance(completed_runs, bool):
+              completed_runs = sum(
+                  block.get("successful_runs", 0)
+                  for block in report.get("mode_summary", {}).values()
+                  if isinstance(block, dict)
+              )
+          total_runs = report.get("metadata", {}).get("total_runs")
+          if isinstance(total_runs, int) and not isinstance(total_runs, bool):
+              summary_lines.append(f"- **Runs completed:** {completed_runs}/{total_runs}")
+
           any_regression = False
           for mode in modes:
               block = report.get("modes", {}).get(mode, {})
@@ -158,6 +174,13 @@ jobs:
           if any_regression:
               summary_lines.append("")
               summary_lines.append("> ⚠️ One or more modes show regressions vs. last weekly baseline.")
+
+          all_errored = completed_runs == 0
+          if all_errored:
+              summary_lines.append("")
+              summary_lines.append(
+                  "> ❌ Every harness run errored; no pass rates exist. Failing the job (issue #711)."
+              )
 
           body = "\n".join(summary_lines)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
@@ -190,4 +213,9 @@ jobs:
               # Posting the summary is best-effort; don't fail the whole job
               # just because the issue tracker was unavailable.
               print(f"Failed to post summary to {summary_url}: {exc}", file=sys.stderr)
+
+          # Fail after the summary and tracking-issue comment are written, so
+          # the evidence is still visible on a red run (issue #711).
+          if all_errored:
+              sys.exit(1)
           PYEOF

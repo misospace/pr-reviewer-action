@@ -126,3 +126,34 @@ def test_run_eval_harness_step_passes_shellcheck() -> None:
         f"`Run eval harness` step failed shellcheck (would break CI validate):\n"
         f"{result.stdout}\n{result.stderr}"
     )
+
+
+def test_summary_step_fails_on_zero_completed_runs() -> None:
+    """The weekly summary must fail the job when every harness run errored.
+
+    Issue #711: a scheduled sweep where every run errored (run_review.sh had
+    lost its executable bit) still published a green success summary with no
+    pass rates. The summary step must derive ``completed_runs`` from the
+    report and ``sys.exit(1)`` when it is zero — after writing the step
+    summary and tracking-issue comment, so the evidence stays visible.
+    """
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    run_block = _extract_run_block("Summarize weekly run", workflow_text)
+
+    assert "completed_runs" in run_block, (
+        "the summary step must compute `completed_runs` from the report"
+    )
+    assert "all_errored" in run_block and "sys.exit(1)" in run_block, (
+        "the summary step must exit nonzero when every harness run errored "
+        "(issue #711)"
+    )
+    # The failure decision must come after the summary is written, so a red
+    # run still publishes its evidence.
+    assert run_block.index("GITHUB_STEP_SUMMARY") < run_block.index("sys.exit(1)"), (
+        "the zero-completed-runs failure must be decided after the step "
+        "summary is written"
+    )
+    assert "sys.exit(0)" in run_block, (
+        "partial failures must stay non-fatal: the summary step keeps its "
+        "success exits"
+    )
