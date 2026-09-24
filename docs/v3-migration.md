@@ -199,9 +199,23 @@ structured report naming the first divergent boundary.
   migration tickets add fixtures for their boundary as JSON only — never
   harness logic.
 - **Approved divergences** (`tests/fixtures/parity/approved-divergences.json`)
-  pin intentional v3 contract changes to the exact key with a stated reason.
-  Drift on any key without an entry fails the run; outcome-level drift is
-  only approvable when the fixture is pinned by named entries.
+  pin intentional v3 contract changes to the EXACT divergence: boundary +
+  fixture(s) + key + the expected old AND new values (for outcome-level
+  drift, the `ok` / `error:<category>` tokens). An approval never extends
+  beyond the pinned fixture and value pair — if v3 starts returning a
+  different wrong value for an approved key, the run fails. Drift on any
+  fixture/key/value not pinned here fails the run.
+- **Counterexample fixtures** (fixtures whose `expected.outcome` is `drift`)
+  must declare their divergence signature: every key that must drift with
+  its exact old/new values, and nothing beyond them. A missing declared
+  drift, a changed drift value, or any undeclared extra drift fails the run.
+- **Numeric equality** applies only to keys the v3 contract declares numeric
+  (`INTEGER_INPUTS`/`FLOAT_INPUTS`); every other key — including strings
+  that look numeric — compares as an exact canonical string.
+- **Error categories** fail closed: two errors that both map to no known
+  category never compare equal by category — their scrubbed texts must
+  match byte-for-byte or the fixture drifts, forcing the boundary's category
+  table to name the category.
 - **Migration gates** run before the boundaries: the #698 production dataflow
   qualification (`tests/test_issue_662_dataflow.py`) and the #661/#666
   semantic qualification (`scripts/run_semantic_eval_ci.py` over

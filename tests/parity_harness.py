@@ -17,12 +17,23 @@ Structure:
   irrelevant are ever normalized. Verdicts, risk flags, selected roles,
   corpus content, security-gate decisions, routing, and error categories are
   compared as-is.
-- Numeric-class config values compare by numeric equality (v2 preserves the
-  raw string form, v3 resolves a typed number with canonical formatting);
-  everything else compares as an exact canonical string.
-- A divergence is only acceptable when it is pinned, with a reason, in
-  ``tests/fixtures/parity/approved-divergences.json`` — intentional v3
-  contract changes are versioned and visible, never hidden.
+- Numeric equality is applied ONLY to keys the contract declares numeric
+  (INTEGER_INPUTS/FLOAT_INPUTS); every other key — including strings that
+  happen to look numeric — compares as an exact canonical string.
+- Error categories compare through the boundary's shared vocabulary. Two
+  errors that both map to no known category never compare equal: their
+  scrubbed texts must match byte-for-byte or the fixture drifts (fail
+  closed), forcing the boundary table to name the category.
+- A divergence is only acceptable when an entry in
+  ``tests/fixtures/parity/approved-divergences.json`` pins the EXACT
+  divergence: boundary + fixture + key + the expected old AND new values
+  (or outcome/error categories). An approved divergence on one fixture or
+  value never approves another; a key drifting to a different wrong value
+  fails the run.
+- A fixture that exists to prove drift detection (a counterexample) must
+  declare its expected divergence signature — every key with its expected
+  old/new values, and nothing beyond them. Missing or undeclared drift
+  fails the run.
 - The #698 production dataflow qualification and the #666/#661 semantic
   qualification run as migration gates before the boundaries; a gate failure
   fails the harness regardless of boundary results.
@@ -84,8 +95,6 @@ def canonical(value: Any) -> str:
         return "true"
     if value is False:
         return "false"
-    if isinstance(value, (int, float)):
-        return str(value)
     return str(value)
 
 
@@ -114,7 +123,7 @@ class SideResult:
 @dataclass
 class FixtureOutcome:
     fixture: str
-    status: str  # match | approved_divergence | drift | runner_error
+    status: str  # match | approved_divergence | expected_drift | drift | runner_error
     divergences: list[dict[str, Any]] = field(default_factory=list)
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -128,6 +137,7 @@ class Boundary:
     error_categories: tuple[tuple[re.Pattern[str], str], ...] = ()
     key_mapping: dict[str, str] = field(default_factory=dict)  # v3 key -> v2 key
     secret_keys: set[str] = field(default_factory=set)  # v3 keys (secrets)
+    numeric_keys: set[str] = field(default_factory=set)  # v3 keys declared numeric
     scope_rule: str | None = None  # "config": mechanical v2-transport scope
     static_exclusions: dict[str, str] = field(default_factory=dict)  # v2 key -> reason
 
@@ -141,6 +151,8 @@ class Boundary:
         if left.ok != right.ok:
             divergences.append({
                 "key": "<outcome>",
+                "old": "ok" if left.ok else f"error:{categorize(left.error or '', self.error_categories)}",
+                "new": "ok" if right.ok else f"error:{categorize(right.error or '', self.error_categories)}",
                 "detail": f"old ok={left.ok} new ok={right.ok}",
             })
         elif not left.ok:
@@ -149,8 +161,24 @@ class Boundary:
             if left_category != right_category:
                 divergences.append({
                     "key": "<error-category>",
+                    "old": f"error:{left_category}",
+                    "new": f"error:{right_category}",
                     "detail": f"old={left_category} new={right_category}",
                 })
+            elif left_category == "uncategorized":
+                # Fail closed: two errors that map to no known category never
+                # compare equal by category. Their scrubbed texts must match
+                # exactly, or the fixture drifts and the boundary table must
+                # learn the category.
+                left_text = self.redact_secrets(fixture, scrub(left.error or ""))
+                right_text = self.redact_secrets(fixture, scrub(right.error or ""))
+                if left_text != right_text:
+                    divergences.append({
+                        "key": "<error-text>",
+                        "old": left_text,
+                        "new": right_text,
+                        "detail": "both errors are uncategorized and their scrubbed texts differ",
+                    })
         else:
             excluded = self.compute_exclusions(left)
             compared = 0
@@ -160,49 +188,62 @@ class Boundary:
                     continue
                 compared += 1
                 if v2_key not in left.values:
-                    divergences.append({"key": key, "detail": "missing on old side"})
+                    divergences.append({"key": key, "old": "<missing>", "new": self.normalize_key(key, right_value),
+                                        "detail": "missing on old side"})
                     continue
                 left_text = self.normalize_key(key, left.values[v2_key])
                 right_text = self.normalize_key(key, right_value)
-                if left_text == right_text or numeric_equal(left_text, right_text):
+                if self.values_equal(key, left_text, right_text):
                     continue
-                divergences.append({"key": key, "detail": f"old={left_text!r} new={right_text!r}"})
+                divergences.append({"key": key, "old": left_text, "new": right_text,
+                                    "detail": f"old={left_text!r} new={right_text!r}"})
             if compared == 0:
-                divergences.append({"key": "<scope>", "detail": "no keys left in scope; boundary scope collapsed", "approved": False})
-        entries = [e for e in load_approved() if e["boundary"] == self.id]
-        approved_keys = {e["key"] for e in entries if e.get("fixture") in (None, "*", fixture["fixture"])}
-        # Outcome-level drift (one side rejects, the other continues) is
-        # approvable when the fixture itself is pinned by named entries: the
-        # entries name the inputs whose handling changed and state the reason.
-        fixture_pinned = any(e.get("fixture") == fixture["fixture"] for e in entries)
+                divergences.append({"key": "<scope>", "old": "", "new": "",
+                                    "detail": "no keys left in scope; boundary scope collapsed", "approved": False})
         status = "match"
         if divergences:
             for divergence in divergences:
-                if divergence["key"] == "<outcome>":
-                    divergence["approved"] = fixture_pinned
-                else:
-                    divergence["approved"] = divergence["key"] in approved_keys
+                divergence["approved"] = self.approval_for(fixture, divergence) is not None
             status = "approved_divergence" if all(d["approved"] for d in divergences) else "drift"
-        expected = fixture.get("expected")
-        if expected == "drift":
-            if status == "drift":
-                # The vulnerable variant diverged exactly as the counterexample
-                # requires: the harness detected the broken wiring.
-                status = "expected_drift"
-                divergences = [{**d, "approved": True} for d in divergences]
-            elif status in ("match", "approved_divergence"):
-                status = "drift"
-                divergences = [{"key": "<counterexample>", "detail": "vulnerable fixture no longer diverges from production; the counterexample stopped reproducing", "approved": False}]
+        status, divergences = self.apply_expected_drift(fixture, status, divergences)
         detail: dict[str, Any] = {}
         if not left.ok and left.error:
-            detail["old_error"] = scrub(left.error)[-800:]
+            detail["old_error"] = self.redact_secrets(fixture, scrub(left.error))[-800:]
         if not right.ok and right.error:
-            detail["new_error"] = scrub(right.error)[-800:]
+            detail["new_error"] = self.redact_secrets(fixture, scrub(right.error))[-800:]
         if left.unresolved or right.unresolved:
             detail["unresolved_bindings"] = sorted(set(left.unresolved) | set(right.unresolved))
         if excluded:
             detail["excluded_keys"] = excluded
         return FixtureOutcome(fixture["fixture"], status, divergences=divergences, detail=detail)
+
+    # -- comparison ---------------------------------------------------------
+
+    def values_equal(self, key: str, left: str, right: str) -> bool:
+        """Numeric equality ONLY for keys the contract declares numeric;
+        everything else — including strings that look numeric — is an exact
+        canonical string comparison."""
+        if key in self.numeric_keys and numeric_equal(left, right):
+            return True
+        return left == right
+
+    def normalize_key(self, key: str, value: Any) -> str:
+        text = canonical(value)
+        if key in self.secret_keys:
+            return "[REDACTED]" if text != "" else ""
+        return scrub(text)
+
+    def redact_secrets(self, fixture: dict[str, Any], text: str) -> str:
+        """Replace raw fixture values of secret inputs before any error text
+        is stored in the report. Error paths can echo input values; secret
+        values must never survive into report artifacts."""
+        result = text
+        for value in secret_raw_values(fixture):
+            if value:
+                result = result.replace(value, "[REDACTED]")
+        return result
+
+    # -- scope ---------------------------------------------------------------
 
     def compute_exclusions(self, left: SideResult) -> dict[str, str]:
         """Keys outside this boundary's comparison scope, with reasons."""
@@ -221,11 +262,76 @@ class Boundary:
                     excluded[v2_key] = "not transported through the v2 resolved environment; consumed downstream of config resolution"
         return excluded
 
-    def normalize_key(self, key: str, value: Any) -> str:
-        text = canonical(value)
-        if key in self.secret_keys:
-            return "[REDACTED]" if text != "" else ""
-        return scrub(text)
+    # -- approvals -----------------------------------------------------------
+
+    def approval_for(self, fixture: dict[str, Any], divergence: dict[str, Any]) -> dict[str, Any] | None:
+        """An approval must pin the exact divergence: boundary + fixture(s) +
+        key + the expected old AND new values (for outcome/error-category
+        divergences, the "ok" / "error:<category>" tokens). Approval on one
+        fixture, key, or value pair never extends to another."""
+        for entry in load_approved():
+            if entry["boundary"] != self.id or entry["key"] != divergence["key"]:
+                continue
+            if not entry_fixtures(entry).issuperset({fixture["fixture"]}):
+                continue
+            expected = entry.get("expected") or {}
+            old_ok = self.values_equal(divergence["key"], str(expected.get("old", "")), divergence["old"])
+            new_ok = self.values_equal(divergence["key"], str(expected.get("new", "")), divergence["new"])
+            if old_ok and new_ok:
+                return entry
+        return None
+
+    # -- counterexample signatures -------------------------------------------
+
+    def apply_expected_drift(self, fixture: dict[str, Any], status: str,
+                             divergences: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        expected = fixture.get("expected") or {}
+        if not isinstance(expected, dict) or expected.get("outcome") != "drift":
+            return status, divergences
+        declared = expected.get("divergences")
+        if not isinstance(declared, list) or not declared:
+            return "drift", [{
+                "key": "<counterexample>",
+                "old": "", "new": "",
+                "detail": 'expected.outcome=drift requires a non-empty "divergences" signature (key + old + new each)',
+                "approved": False,
+            }]
+        problems: list[dict[str, Any]] = []
+        declared_keys: set[str] = set()
+        for spec in declared:
+            key = str(spec.get("key", ""))
+            declared_keys.add(key)
+            actual = next((d for d in divergences if d["key"] == key
+                           and self.values_equal(key, str(spec.get("old", "")), d.get("old", ""))
+                           and self.values_equal(key, str(spec.get("new", "")), d.get("new", ""))), None)
+            if actual is None:
+                observed = next((d for d in divergences if d["key"] == key), None)
+                observed_text = f" (observed old={observed.get('old')!r} new={observed.get('new')!r})" if observed else ""
+                problems.append({
+                    "key": key,
+                    "old": str(spec.get("old", "")), "new": str(spec.get("new", "")),
+                    "detail": f"declared counterexample divergence not observed{observed_text}",
+                    "approved": False,
+                })
+        undeclared = [d for d in divergences if d["key"] not in declared_keys]
+        for d in undeclared:
+            problems.append({"key": d["key"], "old": d.get("old", ""), "new": d.get("new", ""),
+                             "detail": f"undeclared divergence beyond the counterexample signature: {d.get('detail', '')}",
+                             "approved": False})
+        if problems or undeclared:
+            return "drift", problems
+        # The vulnerable variant diverged exactly as the counterexample
+        # requires: the harness detected the broken wiring.
+        return "expected_drift", [{**d, "approved": True,
+                                   "approved_via": "declared counterexample signature"} for d in divergences]
+
+
+def entry_fixtures(entry: dict[str, Any]) -> set[str]:
+    if "fixture" in entry:
+        return {str(entry["fixture"])}
+    if "fixtures" in entry:
+        return {str(f) for f in entry["fixtures"]}
+    return set()
 
 
 def categorize(error: str, categories: tuple[tuple[re.Pattern[str], str], ...]) -> str:
@@ -241,9 +347,14 @@ def load_approved() -> list[dict[str, Any]]:
     data = json.loads(APPROVED_PATH.read_text())
     entries = data.get("entries", [])
     for entry in entries:
-        for field_name in ("boundary", "key", "reason"):
+        for field_name in ("boundary", "key", "reason", "expected"):
             if not entry.get(field_name):
                 raise RuntimeError(f"approved-divergences entry missing '{field_name}': {entry}")
+        if not entry_fixtures(entry):
+            raise RuntimeError(f"approved-divergences entry must name its fixture(s): {entry}")
+        expected = entry["expected"]
+        if not isinstance(expected, dict) or "old" not in expected or "new" not in expected:
+            raise RuntimeError(f"approved-divergences entry expected must pin old and new: {entry}")
     return entries
 
 
@@ -256,23 +367,57 @@ def load_contract() -> dict[str, Any]:
     return yaml.safe_load(CONTRACT_PATH.read_text())
 
 
-def config_key_mapping() -> tuple[dict[str, str], set[str]]:
-    """Map v3 camelCase config keys to v2 env var names; collect secret keys."""
+@dataclass
+class ConfigSurface:
+    mapping: dict[str, str]  # v3 camelCase key -> v2 env var name
+    secrets: set[str]        # v3 camelCase keys of secret inputs
+    numeric: set[str]        # v3 camelCase keys declared numeric (INTEGER/FLOAT)
+    secret_v2_ids: set[str]  # v2 ids of secret inputs (for report redaction)
+
+
+def to_camel_case(input_id: str) -> str:
+    return re.sub(r"-([a-z0-9])", lambda m: m.group(1).upper(), input_id)
+
+
+def config_surface() -> ConfigSurface:
+    """Derive the comparison surface from the sources of truth: the v3
+    contract (key mapping, secret inputs) and the v3 schema (numeric classes)."""
     schema = (ROOT / "src" / "config" / "schema.ts").read_text()
-    match = re.search(r"SECRET_INPUTS = new Set\(\[(.*?)\]\)", schema, re.S)
-    if not match:
-        raise RuntimeError("SECRET_INPUTS not found in src/config/schema.ts")
-    secret_ids = set(re.findall(r'"([^"]+)"', match.group(1)))
+    secret_ids = _schema_set(schema, "SECRET_INPUTS")
+    numeric_ids = _schema_set(schema, "INTEGER_INPUTS") | _schema_set(schema, "FLOAT_INPUTS")
     mapping: dict[str, str] = {}
     secrets: set[str] = set()
-    for item in load_contract()["inputs"]:
-        camel = re.sub(r"-([a-z0-9])", lambda m: m.group(1).upper(), item["id"])
+    numeric: set[str] = set()
+    contract = load_contract()
+    for item in contract["inputs"]:
+        camel = to_camel_case(item["id"])
         # The v2 pipeline binds the token input to GH_TOKEN (with the ambient
         # GITHUB_TOKEN as config.sh's fallback), never to GITHUB_TOKEN itself.
         mapping[camel] = "GH_TOKEN" if item["id"] == "github-token" else item["v2_id"].upper()
         if item["id"] in secret_ids:
             secrets.add(camel)
-    return mapping, secrets
+        if item["id"] in numeric_ids:
+            numeric.add(camel)
+    return ConfigSurface(
+        mapping=mapping,
+        secrets=secrets,
+        numeric=numeric,
+        secret_v2_ids={item["v2_id"] for item in contract["inputs"] if item["id"] in secret_ids},
+    )
+
+
+def _schema_set(schema: str, name: str) -> set[str]:
+    match = re.search(rf"{name} = new Set\(\[(.*?)\]\)", schema, re.S)
+    if not match:
+        raise RuntimeError(f"{name} not found in src/config/schema.ts")
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+def secret_raw_values(fixture: dict[str, Any]) -> list[str]:
+    """Raw fixture values of secret inputs, for report redaction."""
+    surface = config_surface()
+    raw = fixture.get("raw", {})
+    return [str(raw[v2_id]) for v2_id in surface.secret_v2_ids if v2_id in raw]
 
 
 def run_json_runner(command: list[str], workdir: Path, timeout: int) -> SideResult:
@@ -406,8 +551,9 @@ TRUNCATION_BOUNDARY = Boundary(
         "#662 corpus-truncation dataflow counterexample: the production "
         "truncate_clean versus the reconstructed pre-fix broken-arrow variant, "
         "run against the same oversized-marker fixture. The vulnerable "
-        "fixture must fail parity (drift is observable, never normalized "
-        "away); the fixed variant must pass."
+        "fixture must fail parity with exactly its declared divergence "
+        "signature (drift is observable, never normalized away); the fixed "
+        "variant must pass."
     ),
     fixtures_dir="dataflow-662",
     run=lambda fixture, workdir: (
@@ -476,9 +622,10 @@ def load_fixtures(boundary: Boundary) -> list[dict[str, Any]]:
 
 
 def evaluate_boundary(boundary: Boundary, workdir: Path) -> dict[str, Any]:
-    mapping, secrets = config_key_mapping()
-    boundary.key_mapping = mapping
-    boundary.secret_keys = secrets
+    surface = config_surface()
+    boundary.key_mapping = surface.mapping
+    boundary.secret_keys = surface.secrets
+    boundary.numeric_keys = surface.numeric
     outcomes = []
     for fixture in load_fixtures(boundary):
         with tempfile.TemporaryDirectory(prefix="parity-fixture-") as td:

@@ -1,123 +1,119 @@
 {
   "comment": [
     "Approved divergences for the v2-to-v3 parity harness (#673).",
-    "Each entry pins an observable v2-vs-v3 behavior difference to the exact",
-    "config key that produces it (boundary-wide), with a stated reason. Drift",
-    "on any key not listed here fails the harness. Intentional v3 contract",
-    "changes must be recorded here rather than hidden or normalized away.",
-    "An entry may optionally carry 'fixture' to restrict it to one fixture; an",
-    "outcome-level drift (<outcome>) is only approvable when the fixture is",
-    "named by at least one entry."
+    "Every entry pins the EXACT divergence it approves: boundary, fixture(s),",
+    "config key, and the expected old AND new values (for outcome-level drift,",
+    "the 'ok' / 'error:<category>' tokens). An approval never extends beyond",
+    "the pinned fixture and value pair: if v3 starts returning a different",
+    "wrong value for an approved key, the harness fails. Drift on any",
+    "fixture/key/value not pinned here fails the run."
   ],
   "schema_version": 1,
   "entries": [
     {
       "boundary": "config-default-resolution",
-      "fixture": "uppercase-api-format",
-      "key": "<outcome>",
-      "reason": "v2 normalized the api format case-insensitively (normalize_api_format lowercases before validating); the v3 contract accepts only the exact declared enum values and rejects anything else at resolution time."
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "numeric-bounds"],
+      "key": "aiPrimaryApiFormat",
+      "expected": { "old": "", "new": "openai" },
+      "reason": "Tier representation change: v3 resolves the primary tier's api format at config time (resolveInherited, inheriting 'openai'); v2 left it empty and fell back at call time (classification.sh PRIMARY_* resolution). The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "aiPrimaryApiFormat",
+      "expected": { "old": "", "new": "anthropic" },
+      "reason": "Tier representation change: v3 resolves the primary tier's api format at config time (resolveInherited, inheriting the configured 'anthropic'); v2 left it empty and fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "key": "aiPrimaryBaseUrl",
+      "expected": { "old": "", "new": "https://primary.example.com/v1" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "key": "aiPrimaryModel",
+      "expected": { "old": "", "new": "primary-model" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryModel from aiModel in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "numeric-bounds"],
+      "key": "aiSmartApiFormat",
+      "expected": { "old": "", "new": "openai" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartApiFormat from aiApiFormat ('openai') in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "aiSmartApiFormat",
+      "expected": { "old": "", "new": "anthropic" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartApiFormat from aiApiFormat ('anthropic') in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "key": "aiSmartBaseUrl",
+      "expected": { "old": "", "new": "https://primary.example.com/v1" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["tier-inheritance"],
+      "key": "aiPrimaryApiKey",
+      "expected": { "old": "", "new": "[REDACTED]" },
+      "reason": "Secret presence representation: v3 inherits the primary tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["tier-inheritance"],
+      "key": "aiSmartApiKey",
+      "expected": { "old": "", "new": "[REDACTED]" },
+      "reason": "Secret presence representation: v3 inherits the smart tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "primaryModelContextTokens",
+      "expected": { "old": "", "new": "200000" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves primaryModelContextTokens from modelContextTokens (200000) in resolveInherited; v2 left it empty and apply_context_limits fell back to the identical global budget."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "smartModelContextTokens",
+      "expected": { "old": "", "new": "200000" },
+      "reason": "Tier inheritance moved from call time to config time: v3 resolves smartModelContextTokens from modelContextTokens (200000) in resolveInherited; v2 left it empty and apply_context_limits fell back to the identical global budget."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "key": "forgejoToken",
+      "expected": { "old": "[REDACTED]", "new": "" },
+      "reason": "v2 inherits the Forgejo token from the GitHub token through the action.yml env expression (inputs.forgejo_token || inputs.github_token); the v3 loader does not inherit it. The #681 cutover must re-wire this fallback in the v3 composite env block; pinned here so the gap stays visible until then."
     },
     {
       "boundary": "config-default-resolution",
       "fixture": "degradable-enums",
       "key": "<outcome>",
-      "reason": "Fixture-level outcome: v2 continues the review with degraded defaults; v3 rejects the input at resolution time. The per-key entries below pin every input whose handling changed."
+      "expected": { "old": "ok", "new": "error:invalid-enum" },
+      "reason": "v2 degrades each unrecognized enum-shaped dial to its default with an ERROR log and continues the review (ai_response_format->off, verdict_policy->model, review_verbosity->normal after lowercasing, tool_mode->off including the removed plan_execute_* names from #304); the v3 contract validates enums strictly at resolution time and rejects the input."
     },
     {
       "boundary": "config-default-resolution",
       "fixture": "invalid-integers",
       "key": "<outcome>",
-      "reason": "Fixture-level outcome: v2 continues the review with degraded defaults; v3 rejects the input at resolution time. The per-key entries below pin every input whose handling changed."
+      "expected": { "old": "ok", "new": "error:invalid-number" },
+      "reason": "v2 degrades malformed or out-of-range numeric inputs to their defaults with an ERROR log and continues (ai_max_tokens->8192, ai_temperature->0.1, tool_min_successful_requests->0, repo_map_max_bytes->12000 within the same 1..200000 bounds); the v3 contract rejects them at resolution time."
     },
     {
       "boundary": "config-default-resolution",
-      "key": "aiResponseFormat",
-      "reason": "v2 degraded an unrecognized ai_response_format to 'off' with an ERROR log and continued the review; the v3 contract validates the enum strictly and rejects the input."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "verdictPolicy",
-      "reason": "v2 degraded an unrecognized verdict_policy to 'model' with an ERROR log and continued; v3 rejects it (strict enum on the typed contract)."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "reviewVerbosity",
-      "reason": "v2 lowercased then degraded an unrecognized review_verbosity to 'normal' with an ERROR log; v3 accepts only the exact declared enum values."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "toolMode",
-      "reason": "v2 degraded unrecognized tool_mode values (including the removed plan_execute_* names, #304) to 'off' with an ERROR log; v3 accepts only off|native_loop and rejects the input."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiMaxTokens",
-      "reason": "v2 degraded a malformed or out-of-range ai_max_tokens to 8192 with an ERROR log and continued; v3 rejects it (integer syntax plus positive-integer bound at resolution time)."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiTemperature",
-      "reason": "v2 degraded a non-numeric ai_temperature to 0.1 with an ERROR log and continued; v3 requires a finite number at resolution time."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "toolMinSuccessfulRequests",
-      "reason": "v2 degraded a malformed tool_min_successful_requests to 0 with an ERROR log and continued; v3 rejects negative integers at resolution time."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "repoMapMaxBytes",
-      "reason": "v2 degraded an out-of-range repo_map_max_bytes to 12000 with an ERROR log and continued; v3 enforces the same 1..200000 bounds strictly and rejects the input."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiPrimaryApiFormat",
-      "reason": "Tier representation change: v3 resolves the primary tier's api format at config time (resolveInherited); v2 left it empty and fell back at call time (classification.sh PRIMARY_* resolution). The effective call-time value is identical."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiPrimaryBaseUrl",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiPrimaryModel",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryModel from aiModel in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiPrimaryApiKey",
-      "reason": "Secret presence representation: v3 inherits the primary tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiSmartApiFormat",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartApiFormat from aiApiFormat in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiSmartBaseUrl",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "aiSmartApiKey",
-      "reason": "Secret presence representation: v3 inherits the smart tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "primaryModelContextTokens",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves primaryModelContextTokens from modelContextTokens in resolveInherited; v2 left it empty and apply_context_limits fell back to the global budget (identical effective budget)."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "smartModelContextTokens",
-      "reason": "Tier inheritance moved from call time to config time: v3 resolves smartModelContextTokens from modelContextTokens in resolveInherited; v2 left it empty and apply_context_limits fell back to the global budget (identical effective budget)."
-    },
-    {
-      "boundary": "config-default-resolution",
-      "key": "forgejoToken",
-      "reason": "v2 inherits the Forgejo token from the GitHub token through the action.yml env expression (inputs.forgejo_token || inputs.github_token); the v3 loader does not inherit it. The #681 cutover must re-wire this fallback in the v3 composite env block; pinned here so the gap stays visible until then."
+      "fixture": "uppercase-api-format",
+      "key": "<outcome>",
+      "expected": { "old": "ok", "new": "error:invalid-enum" },
+      "reason": "v2 normalized the api format case-insensitively (normalize_api_format lowercases before validating); the v3 contract accepts only the exact declared enum values and rejects anything else at resolution time."
     }
   ]
 }
