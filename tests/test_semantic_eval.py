@@ -1364,6 +1364,33 @@ def test_661_calibration_fixtures_do_not_inflate_pass_rate() -> None:
     assert report["passed"] is True
 
 
+def test_661_attribution_rates_are_reviewer_runs_only() -> None:
+    """attribution_rates must describe reviewer outputs, not answer-key fixtures.
+
+    #661 computes every reviewer-facing metric over reviewer runs only; stage
+    attribution is no exception. A calibration fixture whose findings land in
+    a different tier than the reviewer runs must not move the rates, and a
+    calibration-only scenario must report 0.0 for every stage rather than a
+    value derived from the answer key.
+    """
+    corpus = SemanticCorpus.from_file(CORPUS)
+    item = next(s for s in corpus.scenarios if s.number == 6541)
+    reviewer = {key: value for key, value in item.offline_runs[0].items() if key != "expected_disposition"}
+    calibrated = json.loads(json.dumps(item.offline_runs[2]))  # escalation-tier reference run
+    calibrated["expected_disposition"] = DISPOSITION_CORRECT
+    item.offline_runs = [reviewer, calibrated]
+    report = evaluate_semantic_corpus(corpus)
+    summary = next(r for r in report["scenarios"] if r["scenario_number"] == 6541)
+    assert summary["attribution_rates"] == {"specialist": 0.0, "primary": 1.0, "escalation": 0.0}
+    assert summary["disposition_calibration_rate"] == 1.0
+    assert report["passed"] is True
+
+    item.offline_runs = [json.loads(json.dumps(calibrated))]
+    report = evaluate_semantic_corpus(corpus)
+    summary = next(r for r in report["scenarios"] if r["scenario_number"] == 6541)
+    assert summary["attribution_rates"] == {"specialist": 0.0, "primary": 0.0, "escalation": 0.0}
+
+
 def test_661_genuine_miss_fails_the_gate_despite_clean_calibration() -> None:
     """A real reviewer run that misses the defect fails the gate.
 

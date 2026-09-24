@@ -395,13 +395,20 @@ def calibration_corpus_sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def judge_system_prompt_sha256() -> str:
+    """Exact content hash of the frozen judge system prompt (hex sha256)."""
+    return hashlib.sha256(JUDGE_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+
+
 def judge_config_identity(judge_model: str, corpus_path: str | Path) -> dict:
     """The identity a calibration run must record and a live scoring run must
-    match: prompt version, judge model, judge settings, and the calibration
-    corpus content hash. Deliberately excludes the corpus *path* (machine
-    dependent) — content is what must be identical."""
+    match: prompt version, the exact prompt-content hash (so a prompt edit
+    without a version bump still fails closed), judge model, judge settings,
+    and the calibration corpus content hash. Deliberately excludes the corpus
+    *path* (machine dependent) — content is what must be identical."""
     return {
         "judge_prompt_version": JUDGE_PROMPT_VERSION,
+        "judge_system_prompt_sha256": judge_system_prompt_sha256(),
         "judge_model": judge_model,
         "max_tokens": JUDGE_MAX_TOKENS,
         "first_temperature": JUDGE_FIRST_TEMPERATURE,

@@ -1038,8 +1038,9 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         aggregate["route_expected"] = scenario.route
         aggregate["stage_attribution_expected"] = scenario.stage_attribution
 
+        reviewer_runs = [result for result in per_run if not result.calibration_run]
         aggregate["attribution_rates"] = {
-            stage: round(sum(stage in result.stages_hit for result in per_run) / len(per_run), 4) if per_run else 0.0
+            stage: round(sum(stage in result.stages_hit for result in reviewer_runs) / len(reviewer_runs), 4) if reviewer_runs else 0.0
             for stage in ("specialist", "primary", "escalation")
         }
         scenario_reports.append(aggregate)

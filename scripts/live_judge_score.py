@@ -252,7 +252,12 @@ def compare(arms: list[dict]) -> dict:
     return {"arms": by_arm, "delta_treatment_minus_baseline": delta}
 
 
-def validate_arms(baseline: dict, treatment: dict) -> list[str]:
+def validate_arms(
+    baseline: dict,
+    treatment: dict,
+    expected_scenarios: set[int] | None = None,
+    allow_subset: bool = False,
+) -> list[str]:
     """Fail-closed structural comparability check for a live A/B.
 
     An incomplete or asymmetric arm must be REJECTED, never scored: the two arms
@@ -260,6 +265,18 @@ def validate_arms(baseline: dict, treatment: dict) -> list[str]:
     rep ids/counts per scenario) or the delta is meaningless. Also rejects
     duplicate scenario ids and duplicate rep ids within a scenario, and requires
     each payload to declare its arm role.
+
+    Each payload must also declare an integer ``reps >= 1`` (both arms declaring
+    the same rep count), and every scenario in every arm must carry exactly the
+    rep ids ``{1, 2, ..., reps}`` — a short set, a gap, or a wrong base is
+    rejected.
+
+    When ``expected_scenarios`` (the frozen calibration corpus scenario set) is
+    given, the scored scenario set must EXACTLY match it (missing and extra
+    scenarios are reported separately). ``allow_subset=True`` is the explicit
+    opt-in for an intentional subset experiment: the arms may then cover a proper
+    subset of the corpus, but each arm must still be a subset of it and the two
+    arms must still cover identical scenario sets.
     """
     errors: list[str] = []
     if not isinstance(baseline, dict) or baseline.get("arm") != "baseline":
@@ -268,6 +285,25 @@ def validate_arms(baseline: dict, treatment: dict) -> list[str]:
         errors.append("--treatment payload must declare arm: treatment")
     if not isinstance(baseline, dict) or not isinstance(treatment, dict):
         return errors
+
+    def declared_reps(payload: dict, label: str) -> Optional[int]:
+        reps = payload.get("reps")
+        if not isinstance(reps, int) or isinstance(reps, bool) or reps < 1:
+            errors.append(f"{label} must declare an integer reps >= 1")
+            return None
+        return reps
+
+    base_reps_count = declared_reps(baseline, "baseline")
+    treat_reps_count = declared_reps(treatment, "treatment")
+    if (
+        base_reps_count is not None
+        and treat_reps_count is not None
+        and base_reps_count != treat_reps_count
+    ):
+        errors.append(
+            "arms declare different reps: "
+            f"baseline={base_reps_count}, treatment={treat_reps_count}"
+        )
 
     def scenario_map(payload: dict, label: str) -> dict[int, dict]:
         scenarios = payload.get("scenarios")
@@ -295,6 +331,22 @@ def validate_arms(baseline: dict, treatment: dict) -> list[str]:
             f"baseline-only={sorted(set(base_map) - set(treat_map))}, "
             f"treatment-only={sorted(set(treat_map) - set(base_map))}"
         )
+
+    if expected_scenarios is not None:
+        for label, index in (("baseline", base_map), ("treatment", treat_map)):
+            extra = sorted(set(index) - expected_scenarios)
+            if extra:
+                errors.append(
+                    f"{label} references scenarios absent from the frozen "
+                    f"corpus {extra}"
+                )
+            if not allow_subset:
+                missing = sorted(expected_scenarios - set(index))
+                if missing:
+                    errors.append(
+                        f"{label} missing scenarios {missing} from the "
+                        "frozen corpus"
+                    )
 
     def rep_ids(entry: dict, label: str, number: int) -> list[int]:
         runs = entry.get("runs")
@@ -325,15 +377,62 @@ def validate_arms(baseline: dict, treatment: dict) -> list[str]:
                 f"scenario {number}: arms have different rep ids/counts "
                 f"(baseline={sorted(base_reps)}, treatment={sorted(treat_reps)})"
             )
+
+    def raw_rep_ids(entry: dict) -> list[int]:
+        runs = entry.get("runs")
+        if not isinstance(runs, list):
+            return []
+        return [
+            run["rep"] for run in runs
+            if isinstance(run, dict)
+            and isinstance(run.get("rep"), int)
+            and not isinstance(run.get("rep"), bool)
+        ]
+
+    for label, index, declared in (
+        ("baseline", base_map, base_reps_count),
+        ("treatment", treat_map, treat_reps_count),
+    ):
+        if declared is None:
+            continue
+        for number in sorted(index):
+            ids = raw_rep_ids(index[number])
+            unique = set(ids)
+            # `declared` distinct integers all lying in [1, declared] are
+            # exactly {1..declared}; this proves the rep set is complete
+            # without ever materialising the range (a hostile `reps` must
+            # not be able to allocate).
+            complete = (
+                len(unique) == declared
+                and len(ids) == declared
+                and (not unique or (min(unique) == 1 and max(unique) == declared))
+            )
+            if not complete:
+                errors.append(
+                    f"{label} scenario {number} declares reps={declared} "
+                    f"but carries rep ids {sorted(unique)} "
+                    f"(expected exactly the {declared} ids 1..{declared})"
+                )
     return errors
 
 
+def _normalize_base_url(url: Any) -> str:
+    """Normalize a judge endpoint for identity comparison: strip surrounding
+    whitespace and trailing slashes only. A ``/v1`` path segment stays
+    significant, so the same model alias behind a different gateway is never
+    treated as equal."""
+    if not isinstance(url, str):
+        return ""
+    return url.strip().rstrip("/")
+
+
 def _load_verified_calibration(
-    artifact_path: Path, judge_model: str, corpus_path: Path
+    artifact_path: Path, judge_model: str, corpus_path: Path, base_url: str
 ) -> tuple[Optional[dict], list[str]]:
     """Load the calibration artifact and prove it is the SAME frozen instrument
     this live run is about to use. A different prompt version, judge model,
-    judge setting, or calibration corpus fails closed."""
+    judge setting, calibration corpus, or judge endpoint (base_url) fails
+    closed."""
     try:
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -352,6 +451,21 @@ def _load_verified_calibration(
         )
     expected = semantic_judge.judge_config_identity(judge_model, corpus_path)
     errors.extend(semantic_judge.verify_judge_config(artifact.get("judge_config"), expected))
+    recorded_base_url = artifact.get("base_url")
+    if not isinstance(recorded_base_url, str):
+        errors.append(
+            "calibration artifact base_url is missing or not a string "
+            f"(base_url={recorded_base_url!r})"
+        )
+    elif _normalize_base_url(recorded_base_url) != _normalize_base_url(base_url):
+        errors.append(
+            "calibration artifact base_url does not match this run's judge "
+            f"endpoint (artifact={recorded_base_url!r}, live={base_url!r})"
+        )
+    if not _normalize_base_url(base_url):
+        errors.append(
+            "this run's judge endpoint (base_url) is empty after normalization"
+        )
     return artifact, errors
 
 
@@ -360,6 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Score blinded #661 live A/B outputs with the frozen semantic judge.",
     )
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    parser.add_argument(
+        "--allow-subset-scenarios", action="store_true",
+        help="explicit opt-in for an intentional subset experiment instead of "
+             "the required full frozen-corpus scenario set",
+    )
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--treatment", type=Path, required=True)
     parser.add_argument(
@@ -391,12 +510,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
     treatment = json.loads(args.treatment.read_text(encoding="utf-8"))
-    arm_errors = validate_arms(baseline, treatment)
+    answer_keys = _answer_key_index(corpus)
+    arm_errors = validate_arms(
+        baseline, treatment,
+        expected_scenarios=set(answer_keys),
+        allow_subset=args.allow_subset_scenarios,
+    )
     if arm_errors:
         print("Arms are not comparable — refusing to score:",
               *arm_errors, sep="\n  ", file=sys.stderr)
         return 2
-    answer_keys = _answer_key_index(corpus)
     arm_numbers = {
         entry["scenario"]
         for payload in (baseline, treatment)
@@ -411,7 +534,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
     artifact, calibration_errors = _load_verified_calibration(
-        args.calibration_artifact, args.judge_model, args.corpus
+        args.calibration_artifact, args.judge_model, args.corpus, args.base_url
     )
     if calibration_errors:
         print("Calibration artifact does not match this frozen judge — "

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from pr_reviewer import semantic_judge
 from pr_reviewer.semantic_eval import (
     DISPOSITION_CORRECT,
     DISPOSITION_INVALID_REMEDIATION,
@@ -21,12 +22,15 @@ from pr_reviewer.semantic_judge import (
     SemanticJudgeError,
     blind_response,
     build_judge_messages,
+    judge_config_identity,
+    judge_system_prompt_sha256,
     load_calibration_corpus,
     parse_judge_output,
     render_rubric,
     response_text_for_citation,
     validate_calibration_corpus,
     validate_citations,
+    verify_judge_config,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -120,6 +124,51 @@ class TestPromptStability:
     def test_system_prompt_names_dispositions_and_trust_rule(self):
         for token in ("not_found", "speculative_false_positive", "untrusted"):
             assert token in JUDGE_SYSTEM_PROMPT
+
+
+class TestJudgeConfigIdentity:
+    def test_identity_carries_exact_prompt_content_hash(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        assert identity["judge_system_prompt_sha256"] == (
+            hashlib.sha256(JUDGE_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+        )
+
+    def test_verify_clean_for_fresh_identity(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        assert "judge_system_prompt_sha256" in identity
+        assert verify_judge_config(dict(identity), identity) == []
+
+    def test_verify_rejects_mutated_prompt_hash(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        stale = dict(identity)
+        stale["judge_system_prompt_sha256"] = "0" * 64
+        errors = verify_judge_config(stale, identity)
+        assert any(
+            "judge_system_prompt_sha256" in error and "mismatch" in error
+            for error in errors
+        )
+
+    def test_verify_rejects_missing_prompt_hash(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        stale = dict(identity)
+        del stale["judge_system_prompt_sha256"]
+        errors = verify_judge_config(stale, identity)
+        assert any(
+            "judge_system_prompt_sha256" in error and "missing" in error
+            for error in errors
+        )
+
+    def test_prompt_edit_changes_hash_and_rejects_stale_identity(self, monkeypatch):
+        before_identity = judge_config_identity("judge-model", CORPUS_PATH)
+        before_hash = judge_system_prompt_sha256()
+        monkeypatch.setattr(
+            semantic_judge, "JUDGE_SYSTEM_PROMPT", semantic_judge.JUDGE_SYSTEM_PROMPT + "\n# edit"
+        )
+        assert judge_system_prompt_sha256() != before_hash
+        after_identity = judge_config_identity("judge-model", CORPUS_PATH)
+        assert after_identity["judge_system_prompt_sha256"] != before_hash
+        errors = verify_judge_config(before_identity, after_identity)
+        assert any("judge_system_prompt_sha256" in error for error in errors)
 
 
 class TestBuildJudgeMessages:
