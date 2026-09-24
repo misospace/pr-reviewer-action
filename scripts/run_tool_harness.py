@@ -834,58 +834,126 @@ def _write_private_artifact(path, text):
 # contract the #678 TypeScript migration must preserve.
 TOOL_LOOP_TELEMETRY_VERSION = 1
 
+# Stop reason for runs that aborted before the loop could start (#702):
+# missing corpus or missing required model configuration. The specific
+# kind rides the ``failure`` field; the flat ``planning_error``/``error``
+# keys keep their historical content for the run log.
+PRE_LOOP_STOP_REASON = "harness-abort"
+
+
+def _telemetry_budget_provenance(result):
+    """The route/resolution part of the telemetry object (#702).
+
+    Known even on pre-loop aborts: main() resolves the budget before the
+    corpus/config checks run.
+    """
+    return {
+        "source": result.get("tool_budget_source", ""),
+        "effective_max_requests": result.get("tool_request_budget", 0),
+        "configured_max_requests": result.get("tool_budget_configured"),
+    }
+
+
+def _pre_loop_failure_kind(result):
+    """Classify a never-started-loop run, or None when a loop may have run."""
+    if result.get("planning_error"):
+        return "missing-corpus"
+    if result.get("error"):
+        return "missing-config"
+    return None
+
 
 def build_tool_loop_telemetry(result):
-    """Assemble the #702 budget telemetry object from a finished loop run.
+    """Assemble the #702 budget telemetry object from a harness run.
 
-    Returns None when no native loop ran (pre-loop config errors must not
-    fabricate numbers). Consumes ``result["tool_loop_meta"]`` — the raw
-    loop measurements ``run_native_loop`` stashes after ``drive_tool_loop``
-    returns — and folds it with the budget-resolution and verdict keys the
-    run already carries, so every ``write_outputs`` exit path emits the same
-    shape. Counts, sizes, seconds, and enum strings only: never tool
-    arguments, results, prompts, or any other content.
+    Two shapes, discriminated by ``phase``:
+
+    - ``"loop"`` — the native loop ran. Consumes
+      ``result["tool_loop_meta"]`` (the raw measurements
+      ``run_native_loop`` stashes after ``drive_tool_loop`` returns) and
+      folds it with the budget-resolution and verdict keys the run
+      already carries. Every ``write_outputs`` exit path after the loop
+      emits this shape.
+    - ``"pre-loop"`` — the harness aborted before the loop could start
+      (missing corpus / missing required model configuration). Emits the
+      known route/budget provenance with zero calls/rounds/bytes and
+      ``stop_reason: harness-abort`` plus the ``failure`` kind — the run
+      counts in aggregates without being mistaken for loop activity.
+
+    Returns None only when neither shape applies (no loop meta AND no
+    pre-loop failure marker). Counts, sizes, seconds, and enum strings
+    only: never tool arguments, results, prompts, or any other content.
     """
+    route = result.get("tool_budget_tier", "")
     meta = result.pop("tool_loop_meta", None)
-    if not isinstance(meta, dict):
+    if isinstance(meta, dict):
+        tool_calls = result.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            # Degraded runs (the model issued no calls) never reach
+            # _summarize_loop_outcome, so tool_calls is unset — and
+            # correctly so: nothing was issued or executed.
+            tool_calls = []
+        return {
+            "version": TOOL_LOOP_TELEMETRY_VERSION,
+            "phase": "loop",
+            "route": route,
+            "budget": {
+                **_telemetry_budget_provenance(result),
+                "max_rounds": meta.get("max_rounds", 0),
+                "wall_clock_sec": meta.get("wall_clock_sec", 0.0),
+            },
+            "usage": {
+                "tool_calls_issued": result.get("planned_request_count", 0),
+                "tool_calls_executed": len(tool_calls),
+                "rounds_used": result.get("rounds", 0),
+                "requests_remaining_at_stop": meta.get("requests_remaining", 0),
+                "elapsed_sec": round(float(meta.get("elapsed_sec", 0.0)), 3),
+                "tool_result_bytes": meta.get("tool_result_bytes", 0),
+            },
+            "compaction": {
+                "summarize": meta.get("compaction_summarize", 0),
+                "truncate": meta.get("compaction_truncate", 0),
+            },
+            "stop_reason": result.get("stop_reason", ""),
+            "budget_exhausted": bool(result.get("budget_exhausted")),
+            "degraded": "native_loop_degraded" in result,
+            "escalated": route == "escalated",
+            "verdict": {
+                "produced": bool(result.get("native_loop_verdict_produced")),
+                "status": result.get("native_loop_verdict_status", ""),
+                "reason": result.get("native_loop_verdict_reason", ""),
+            },
+        }
+
+    failure = _pre_loop_failure_kind(result)
+    if failure is None:
         return None
-    tool_calls = result.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        # Degraded runs (the model issued no calls) never reach
-        # _summarize_loop_outcome, so tool_calls is unset — and correctly so:
-        # nothing was issued or executed.
-        tool_calls = []
+    effective = result.get("tool_request_budget", 0)
     return {
         "version": TOOL_LOOP_TELEMETRY_VERSION,
-        "route": result.get("tool_budget_tier", ""),
+        "phase": "pre-loop",
+        "route": route,
         "budget": {
-            "source": result.get("tool_budget_source", ""),
-            "effective_max_requests": result.get("tool_request_budget", 0),
-            "configured_max_requests": result.get("tool_budget_configured"),
-            "max_rounds": meta.get("max_rounds", 0),
-            "wall_clock_sec": meta.get("wall_clock_sec", 0.0),
+            **_telemetry_budget_provenance(result),
+            "max_rounds": 0,
+            "wall_clock_sec": 0.0,
         },
         "usage": {
-            "tool_calls_issued": result.get("planned_request_count", 0),
-            "tool_calls_executed": len(tool_calls),
-            "rounds_used": result.get("rounds", 0),
-            "requests_remaining_at_stop": meta.get("requests_remaining", 0),
-            "elapsed_sec": round(float(meta.get("elapsed_sec", 0.0)), 3),
-            "tool_result_bytes": meta.get("tool_result_bytes", 0),
+            "tool_calls_issued": 0,
+            "tool_calls_executed": 0,
+            "rounds_used": 0,
+            # Nothing was consumed: the full effective budget remains.
+            "requests_remaining_at_stop": effective,
+            "elapsed_sec": 0.0,
+            "tool_result_bytes": 0,
         },
-        "compaction": {
-            "summarize": meta.get("compaction_summarize", 0),
-            "truncate": meta.get("compaction_truncate", 0),
-        },
-        "stop_reason": result.get("stop_reason", ""),
-        "budget_exhausted": bool(result.get("budget_exhausted")),
-        "degraded": "native_loop_degraded" in result,
-        "escalated": result.get("tool_budget_tier", "") == "escalated",
-        "verdict": {
-            "produced": bool(result.get("native_loop_verdict_produced")),
-            "status": result.get("native_loop_verdict_status", ""),
-            "reason": result.get("native_loop_verdict_reason", ""),
-        },
+        "compaction": {"summarize": 0, "truncate": 0},
+        "stop_reason": PRE_LOOP_STOP_REASON,
+        "failure": failure,
+        "budget_exhausted": False,
+        "degraded": False,
+        "escalated": route == "escalated",
+        "verdict": {"produced": False, "status": "", "reason": ""},
     }
 
 

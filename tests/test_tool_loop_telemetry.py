@@ -5,12 +5,15 @@ Covers:
     path (requests remaining, elapsed, effective ceilings, result bytes,
     compaction occurrences);
   - the namespaced ``tool_loop_telemetry`` object build_tool_loop_telemetry
-    assembles (and that it consumes tool_loop_meta, so the raw stash never
-    reaches the artifact);
-  - the flat budget-provenance keys main() writes and the absence of loop
-    telemetry on the never-ran-a-loop path;
-  - the deterministic summarizer aggregates, markdown view, and skipped
-    handling in scripts/summarize_tool_loop_telemetry.py.
+    assembles in its two shapes — ``phase: "loop"`` (meta-stash fold, and
+    that the raw stash never reaches the artifact) and ``phase:
+    "pre-loop"`` (missing-corpus / missing-config aborts reported
+    explicitly with zero loop activity);
+  - the flat budget-provenance keys main() writes on every path;
+  - the deterministic summarizer aggregates — including the aggregate
+    denominator behavior: pre-loop aborts count as runs and in the
+    stop-reason distribution, while loop-behavior rates stay scoped to
+    ``loop_runs`` — in scripts/summarize_tool_loop_telemetry.py.
 """
 
 from __future__ import annotations
@@ -250,10 +253,73 @@ def test_telemetry_consumes_meta_stash():
     assert "tool_loop_meta" not in result
 
 
-def test_telemetry_none_without_loop():
-    # The missing-corpus / missing-env paths write outputs without ever
-    # running a loop: no fabricated numbers.
+def test_telemetry_none_without_loop_or_failure():
+    # No loop meta AND no pre-loop failure marker: nothing to report.
     assert rth.build_tool_loop_telemetry({"mode": "off"}) is None
+
+
+def test_pre_loop_telemetry_missing_corpus():
+    result = {
+        "mode": "off",
+        "planned_request_count": 0,
+        "executed_request_count": 0,
+        "tool_results": [],
+        "tool_budget_tier": "primary",
+        "tool_request_budget": 8,
+        "tool_budget_source": "tier-default",
+        "tool_budget_configured": None,
+        "planning_error": "Missing review-corpus.truncated.md",
+    }
+    telemetry = rth.build_tool_loop_telemetry(result)
+    assert telemetry["version"] == 1
+    assert telemetry["phase"] == "pre-loop"
+    assert telemetry["route"] == "primary"
+    assert telemetry["budget"]["source"] == "tier-default"
+    assert telemetry["budget"]["effective_max_requests"] == 8
+    assert telemetry["budget"]["configured_max_requests"] is None
+    assert telemetry["usage"] == {
+        "tool_calls_issued": 0,
+        "tool_calls_executed": 0,
+        "rounds_used": 0,
+        "requests_remaining_at_stop": 8,
+        "elapsed_sec": 0.0,
+        "tool_result_bytes": 0,
+    }
+    assert telemetry["compaction"] == {"summarize": 0, "truncate": 0}
+    assert telemetry["stop_reason"] == "harness-abort"
+    assert telemetry["failure"] == "missing-corpus"
+    assert telemetry["budget_exhausted"] is False
+    assert telemetry["degraded"] is False
+    assert telemetry["verdict"] == {"produced": False, "status": "", "reason": ""}
+
+
+def test_pre_loop_telemetry_missing_config():
+    result = {
+        "mode": "off",
+        "planned_request_count": 0,
+        "executed_request_count": 0,
+        "tool_results": [],
+        "tool_budget_tier": "escalated",
+        "tool_request_budget": 5,
+        "tool_budget_source": "explicit",
+        "tool_budget_configured": 5,
+        "error": "Missing REPO, AI_BASE_URL, or AI_MODEL",
+        "stop_reason": "request-error",
+    }
+    telemetry = rth.build_tool_loop_telemetry(result)
+    assert telemetry["phase"] == "pre-loop"
+    assert telemetry["route"] == "escalated"
+    assert telemetry["escalated"] is True
+    assert telemetry["failure"] == "missing-config"
+    assert telemetry["stop_reason"] == "harness-abort"
+    assert telemetry["budget"]["source"] == "explicit"
+    assert telemetry["usage"]["requests_remaining_at_stop"] == 5
+
+
+def test_loop_telemetry_carries_phase():
+    telemetry = rth.build_tool_loop_telemetry(_finished_result())
+    assert telemetry["phase"] == "loop"
+    assert "failure" not in telemetry
 
 
 def test_telemetry_degraded_run():
@@ -369,8 +435,40 @@ def test_main_flat_provenance_keys(monkeypatch, tmp_path):
     assert artifact["tool_request_budget"] == 5
     assert artifact["tool_budget_source"] == "explicit"
     assert artifact["tool_budget_configured"] == 5
-    # The loop never ran (no corpus): no telemetry object may be fabricated.
-    assert "tool_loop_telemetry" not in artifact
+    # The loop never ran (no corpus): the abort is reported explicitly,
+    # never as loop activity.
+    telemetry = artifact["tool_loop_telemetry"]
+    assert telemetry["phase"] == "pre-loop"
+    assert telemetry["failure"] == "missing-corpus"
+    assert telemetry["stop_reason"] == "harness-abort"
+    assert telemetry["usage"]["tool_calls_executed"] == 0
+
+
+def test_main_missing_config_telemetry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_STREAM", "false")
+    monkeypatch.chdir(tmp_path)
+    # The corpus check runs first; satisfy it so the config check is what aborts.
+    (tmp_path / "review-corpus.truncated.md").write_text("# corpus\n")
+    assert rth.main() == 0
+    artifact = json.loads((tmp_path / "tool-harness.json").read_text())
+    telemetry = artifact["tool_loop_telemetry"]
+    assert telemetry["phase"] == "pre-loop"
+    assert telemetry["failure"] == "missing-config"
+    assert telemetry["route"] == "primary"
+    assert telemetry["budget"]["effective_max_requests"] == 8
+    assert telemetry["verdict"] == {"produced": False, "status": "", "reason": ""}
+
+
+def test_main_smart_tier_abort_keeps_route(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_STREAM", "false")
+    monkeypatch.setenv("TOOL_HARNESS_TIER", "smart")
+    monkeypatch.chdir(tmp_path)
+    assert rth.main() == 0
+    artifact = json.loads((tmp_path / "tool-harness.smart.json").read_text())
+    telemetry = artifact["tool_loop_telemetry"]
+    assert telemetry["phase"] == "pre-loop"
+    assert telemetry["route"] == "smart"
+    assert telemetry["budget"]["effective_max_requests"] == 16
 
 
 # ---------------------------------------------------------------------------
@@ -378,9 +476,10 @@ def test_main_flat_provenance_keys(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _record(route, executed, remaining, effective, stop, exhausted=False, produced=False):
-    return {
+def _record(route, executed, remaining, effective, stop, exhausted=False, produced=False, phase="loop", failure=None):
+    record = {
         "version": 1,
+        "phase": phase,
         "route": route,
         "budget": {"effective_max_requests": effective},
         "usage": {"tool_calls_executed": executed, "requests_remaining_at_stop": remaining},
@@ -388,6 +487,9 @@ def _record(route, executed, remaining, effective, stop, exhausted=False, produc
         "budget_exhausted": exhausted,
         "verdict": {"produced": produced},
     }
+    if failure is not None:
+        record["failure"] = failure
+    return record
 
 
 def test_summarizer_aggregates_by_route():
@@ -446,6 +548,59 @@ def test_summarizer_unknown_route_is_visible_not_fatal():
     report = summarize([_record("weird", 1, 7, 8, "model-stopped")])
     assert report["by_route"]["unknown"]["runs"] == 1
     assert report["runs"] == 1
+
+
+def test_summarizer_counts_pre_loop_aborts_as_runs_not_loop_activity():
+    report = summarize(
+        [
+            _record("primary", 4, 4, 8, "model-stopped", produced=True),
+            _record("primary", 0, 8, 8, "harness-abort", phase="pre-loop", failure="missing-corpus"),
+            _record("primary", 0, 8, 8, "harness-abort", phase="pre-loop", failure="missing-config"),
+        ]
+    )
+    primary = report["by_route"]["primary"]
+    # The aborts are in the run count and the stop-reason distribution...
+    assert primary["runs"] == 3
+    assert report["overall"]["stop_reasons"] == {
+        "harness-abort": 2,
+        "model-stopped": 1,
+    }
+    # ...but are never loop activity: loop-scoped metrics see one run.
+    assert primary["loop_runs"] == 1
+    assert primary["exhaustion"] == {"count": 0, "rate": 0.0}
+    # p50/p90 exclude the fabricated zeros of runs that never started.
+    assert primary["tool_calls_executed"] == {"p50": 4.0, "p90": 4.0}
+
+
+def test_summarizer_exhaustion_rate_denominator_is_loop_runs():
+    report = summarize(
+        [
+            _record("smart", 16, 0, 16, "tool-call-budget-exhausted", exhausted=True),
+            _record("smart", 0, 16, 16, "harness-abort", phase="pre-loop", failure="missing-corpus"),
+            _record("smart", 0, 16, 16, "harness-abort", phase="pre-loop", failure="missing-config"),
+        ]
+    )
+    smart = report["by_route"]["smart"]
+    assert smart["runs"] == 3
+    assert smart["loop_runs"] == 1
+    assert smart["exhaustion"] == {"count": 1, "rate": 1.0}
+
+
+def test_summarizer_legacy_records_without_phase_are_loop_runs():
+    legacy = _record("primary", 2, 6, 8, "model-stopped")
+    del legacy["phase"]
+    report = summarize([legacy])
+    assert report["by_route"]["primary"]["loop_runs"] == 1
+    assert report["by_route"]["primary"]["tool_calls_executed"]["p50"] == 2.0
+
+
+def test_summarizer_headroom_excludes_pre_loop_runs():
+    # A pre-loop record's full remaining budget must not read as a
+    # voluntary stop with 100% headroom.
+    report = summarize(
+        [_record("primary", 0, 8, 8, "harness-abort", phase="pre-loop", failure="missing-config")]
+    )
+    assert report["by_route"]["primary"]["voluntary_headroom"]["voluntary_stops"] == 0
 
 
 def test_percentile_basics():

@@ -49,6 +49,13 @@ HEADROOM_THRESHOLD = 0.25
 
 ROUTES = ("primary", "smart", "escalated")
 
+# #702: phase discriminator on version-1 telemetry records. "pre-loop"
+# runs aborted before the native loop started (missing corpus / missing
+# config); they count as runs and in the stop-reason distribution but are
+# never loop activity. Records from before the field existed are loop runs.
+LOOP_PHASE = "loop"
+PRE_LOOP_PHASE = "pre-loop"
+
 
 def percentile(sorted_values: list[int], pct: float) -> float | None:
     """Linear-interpolated percentile of an already-sorted list.
@@ -71,6 +78,7 @@ def percentile(sorted_values: list[int], pct: float) -> float | None:
 def _new_bucket() -> dict:
     return {
         "runs": 0,
+        "loop_runs": 0,
         "exhaustion": {"count": 0, "rate": None},
         "tool_calls_executed": {"p50": None, "p90": None},
         "voluntary_headroom": {
@@ -92,10 +100,13 @@ def _fold(bucket: dict, telemetry: dict) -> None:
     reason = telemetry.get("stop_reason") or "unknown"
     bucket["stop_reasons"][reason] = bucket["stop_reasons"].get(reason, 0) + 1
 
+    phase = telemetry.get("phase", LOOP_PHASE)
     usage = telemetry.get("usage") if isinstance(telemetry.get("usage"), dict) else {}
     executed = usage.get("tool_calls_executed")
-    if isinstance(executed, int) and not isinstance(executed, bool):
-        bucket["_executed"].append(executed)
+    if phase == LOOP_PHASE:
+        bucket["loop_runs"] += 1
+        if isinstance(executed, int) and not isinstance(executed, bool):
+            bucket["_executed"].append(executed)
 
     budget = telemetry.get("budget") if isinstance(telemetry.get("budget"), dict) else {}
     effective = budget.get("effective_max_requests")
@@ -110,7 +121,8 @@ def _fold(bucket: dict, telemetry: dict) -> None:
 
     remaining = usage.get("requests_remaining_at_stop")
     if (
-        telemetry.get("stop_reason") == VOLUNTARY_STOP_REASON
+        phase == LOOP_PHASE
+        and telemetry.get("stop_reason") == VOLUNTARY_STOP_REASON
         and isinstance(effective, int)
         and not isinstance(effective, bool)
         and effective > 0
@@ -125,8 +137,9 @@ def _fold(bucket: dict, telemetry: dict) -> None:
 
 
 def _merge(dst: dict, src: dict) -> None:
-    """Fold a finalized route bucket into the overall bucket."""
+    """Fold an unfinalized route bucket into the overall bucket."""
     dst["runs"] += src["runs"]
+    dst["loop_runs"] += src["loop_runs"]
     dst["exhaustion"]["count"] += src["exhaustion"]["count"]
     dst["exhausted_usable_verdict"]["count"] += src["exhausted_usable_verdict"]["count"]
     dst["_executed"].extend(src["_executed"])
@@ -141,11 +154,16 @@ def _merge(dst: dict, src: dict) -> None:
 
 
 def _finalize(bucket: dict) -> dict:
-    """Replace working state with the computed rates and percentiles."""
+    """Replace working state with the computed rates and percentiles.
+
+    Loop-behavior metrics (exhaustion rate, executed-call percentiles,
+    exhausted-with-verdict rate) are scoped to ``loop_runs``: pre-loop
+    aborts count as runs but contribute no loop activity to a rate.
+    """
     executed_sorted = sorted(bucket.pop("_executed"))
-    runs = bucket["runs"]
-    if runs:
-        bucket["exhaustion"]["rate"] = round(bucket["exhaustion"]["count"] / runs, 4)
+    loop_runs = bucket["loop_runs"]
+    if loop_runs:
+        bucket["exhaustion"]["rate"] = round(bucket["exhaustion"]["count"] / loop_runs, 4)
         bucket["tool_calls_executed"]["p50"] = percentile(executed_sorted, 0.50)
         bucket["tool_calls_executed"]["p90"] = percentile(executed_sorted, 0.90)
         exhausted = bucket["exhaustion"]["count"]
@@ -202,14 +220,14 @@ def render_markdown(report: dict, skipped: int) -> str:
             return "n/a"
         return f"{value:g}"
 
-    lines.append("| Route | Runs | Exhaustion | Executed p50 | Executed p90 | Voluntary ≥25% headroom | Exhausted w/ usable verdict |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| Route | Runs | Loop runs | Exhaustion | Executed p50 | Executed p90 | Voluntary ≥25% headroom | Exhausted w/ usable verdict |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     routes = [r for r in (*ROUTES, "unknown") if r in report["by_route"]]
     for route in routes:
         bucket = report["by_route"][route]
         voluntary = bucket["voluntary_headroom"]
         lines.append(
-            f"| {route} | {bucket['runs']} "
+            f"| {route} | {bucket['runs']} | {bucket['loop_runs']} "
             f"| {bucket['exhaustion']['count']} ({fmt_pct(bucket['exhaustion']['rate'])}) "
             f"| {fmt_num(bucket['tool_calls_executed']['p50'])} "
             f"| {fmt_num(bucket['tool_calls_executed']['p90'])} "
