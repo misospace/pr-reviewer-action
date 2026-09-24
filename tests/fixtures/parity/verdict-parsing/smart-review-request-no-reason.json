@@ -1,0 +1,16 @@
+{
+  "fixture": "smart-review-request-no-reason",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Recommendation\\nApprove.\\n\\nConflicting evidence requires a stronger synthesis pass.\", \"findings\": [], \"smart_review_requested\": true, \"smart_review_reason\": null, \"confidence\": null}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 40
+    }
+  }
+}

@@ -1283,6 +1283,12 @@ _OPENAI_VERDICT_JSON_SCHEMA: dict[str, Any] = {
             "properties": {
                 "verdict": {"type": "string", "enum": ["approve", "request_changes"]},
                 "review_markdown": {"type": "string"},
+                # #721: the reviewer's structured request for a smart-tier
+                # second pass. Only the JSON boolean true requests one; the
+                # parser normalizes everything else to False so prose can
+                # never forge the escalation.
+                "smart_review_requested": {"type": "boolean"},
+                "smart_review_reason": {"type": ["string", "null"]},
                 "findings": {
                     "type": ["array", "null"],
                     "items": {
@@ -1334,7 +1340,7 @@ _OPENAI_VERDICT_JSON_SCHEMA: dict[str, Any] = {
                     },
                 },
             },
-            "required": ["verdict", "review_markdown", "findings", "requirement_coverage"],
+            "required": ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage"],
             "additionalProperties": False,
         },
     },

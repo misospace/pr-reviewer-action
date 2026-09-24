@@ -101,12 +101,22 @@ export interface NormalizedFinding {
 /**
  * Contract 4: parsed review verdict. `extra` carries every additional key the
  * model produced (v2 passes them through to ai-output.json untouched).
+ *
+ * `smartReviewRequested` / `smartReviewReason` (#721) are the reviewer's
+ * structured request for a smart-tier second pass, normalized by the parser:
+ * requested is true only for the JSON boolean `true`, and the reason is a
+ * bounded single-line string (or null). PR-controlled prose cannot forge the
+ * request — the fields are read from the parsed verdict object, never from
+ * review markdown.
  */
 export interface ParsedReviewVerdict {
   verdict: VerdictValue;
   reviewMarkdown: string;
   findings: NormalizedFinding[];
   requirementCoverage: unknown;
+  smartReviewRequested: boolean;
+  /** Bounded single-line reason; null when no request (or no usable reason). */
+  smartReviewReason: string | null;
   extra: Record<string, unknown>;
 }
 

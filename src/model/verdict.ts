@@ -27,6 +27,38 @@ const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "
 const MAX_FINDINGS = 50;
 const MAX_FINDING_MESSAGE_CHARS = 2000;
 
+// #721: bounded reviewer-request reason. Control chars (everything at or
+// below SPACE plus DEL) collapse to one space so the reason can never break
+// single-line consumers; the cap bounds one model answer. Byte-identical to
+// pr_reviewer/response_parser.py's _SMART_REVIEW_REASON_CONTROL_RE +
+// _MAX_SMART_REVIEW_REASON_CHARS.
+const MAX_SMART_REVIEW_REASON_CHARS = 400;
+const SMART_REVIEW_REASON_CONTROL = /[\u0000-\u0020\u007f]+/g;
+
+/**
+ * #721: normalize the reviewer's structured smart-review request.
+ * `smart_review_requested` is true only for the JSON boolean `true`; every
+ * other value (absent, false, `"true"`, 1, null) is malformed or absent and
+ * is coerced to false — malformed output is never an escalation request.
+ * The reason is kept only for a genuine request and only as a bounded,
+ * control-char-free single-line string; otherwise null.
+ */
+function normalizeSmartReviewRequest(parsed: Record<string, unknown>): {
+  requested: boolean;
+  reason: string | null;
+} {
+  const requested = parsed.smart_review_requested === true;
+  let reason: string | null = null;
+  if (requested && typeof parsed.smart_review_reason === "string") {
+    reason =
+      parsed.smart_review_reason
+        .replace(SMART_REVIEW_REASON_CONTROL, " ")
+        .trim()
+        .slice(0, MAX_SMART_REVIEW_REASON_CHARS) || null;
+  }
+  return { requested, reason };
+}
+
 const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]);
 
 const TRUNC_SUFFIX = " (model output appears truncated at the token limit; increase ai_max_tokens)";
@@ -390,15 +422,22 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
 
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(parsed)) {
-    if (key !== "verdict" && key !== "review_markdown" && key !== "findings" && key !== "requirement_coverage") {
+    if (
+      key !== "verdict" && key !== "review_markdown" && key !== "findings"
+      && key !== "requirement_coverage"
+      && key !== "smart_review_requested" && key !== "smart_review_reason"
+    ) {
       extra[key] = value;
     }
   }
+  const smartRequest = normalizeSmartReviewRequest(parsed);
   return {
     verdict,
     reviewMarkdown: markdown,
     findings: normalizeFindings(parsed.findings),
     requirementCoverage: parsed.requirement_coverage,
+    smartReviewRequested: smartRequest.requested,
+    smartReviewReason: smartRequest.reason,
     extra,
   };
 }

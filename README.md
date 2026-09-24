@@ -276,11 +276,11 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `ai_smart_api_format` | API format for the smart model; defaults to `ai_api_format` | No | `""` |
 | `ai_smart_api_key` | API key for the smart model; defaults to `ai_api_key` | No | `""` |
 | `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode. Matched against `route_signals` (linked-issue flags + file-based signals backed by an actual changed filename), so a PR whose diff merely mentions a pattern does not route | No | security/priority/auth/route/file-serving/path/secret/db list |
-| `escalate_on_incomplete_required_checks` | Escalate primary-route reviews with unaddressed required checks to the smart model (`auto` mode). Off by default — routine dependency/Renovate reviews that omit literal checklist phrases should not alone trigger smart escalation | No | `false` |
-| `escalate_on_fast_request_changes` | Escalate primary-route reviews whose verdict is `request_changes` (`auto` mode) | No | `true` |
-| `escalate_on_fast_low_confidence` | Escalate low-confidence primary-route reviews: a stub review (below ~80 chars) or substantive Unknowns content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation; concise confident reviews are not escalated, regardless of diff size (`auto` mode) | No | `true` |
-| `escalate_on_tool_or_evidence_blockers` | Escalate when evidence blockers exist or every executed tool request failed (`auto` mode) | No | `true` |
-| `escalate_on_tool_planning_failure` | Escalate when the tool-harness planning call failed (`auto` mode). Off by default: a planning failure degrades the review to no-tools, it does not signal risk | No | `false` |
+| `escalate_on_incomplete_required_checks` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only (the primary model's structured `smart_review_requested` verdict field). The value is ignored except for a startup notice | No | `false` |
+| `escalate_on_fast_request_changes` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `true` |
+| `escalate_on_fast_low_confidence` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `true` |
+| `escalate_on_tool_or_evidence_blockers` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. Evidence/tool blockers remain subject to deterministic enforcement. The value is ignored except for a startup notice | No | `true` |
+| `escalate_on_tool_planning_failure` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `false` |
 
 </details>
 
@@ -452,7 +452,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
-| `escalation_reason` | Comma-separated escalation trigger names when `review_route` is `escalated` (empty otherwise) |
+| `escalation_reason` | `reviewer_requested` when the primary reviewer's structured `smart_review_requested` field triggered the escalated re-review (`review_route` is `escalated`); empty otherwise |
 | `findings` | Normalized structured findings as a JSON array (`[]` when the model produced none) |
 | `review_markdown` | Full markdown review body |
 | `analysis_engine` | Model and endpoint that produced the final result, annotated with how it was chosen: `— fast route`, `— routed smart (risk match: …)`, `— escalated (…)`, or `— fallback (primary failed)`. Unannotated when routing is off |
@@ -736,7 +736,7 @@ The bundled default prompt is written for thoroughness: it asks for a recommenda
 Two things are explicitly exempt, because brevity must not hide a gap:
 
 - **`must_check` coverage** — every required check still gets an explicit mention (one clause is enough). Dropping them would make the deterministic completeness validation report a false `complete`, or force an escalation.
-- **The Unknowns or Needs Verification section** — still emitted whenever evidence is incomplete. `escalate_on_fast_low_confidence` reads it, so suppressing it would silently downgrade an under-reviewed PR to a confident-looking approval.
+- **The Unknowns or Needs Verification section** — still emitted whenever evidence is incomplete. Suppressing it would hide genuine uncertainty from the review reader; it does not by itself trigger a smart escalation (#721), so the section is purely informational now.
 
 Nothing changes at `normal`: the assembled prompt is byte-identical to a run without the input, and the default contributes nothing to the config fingerprint, so upgrading does not trigger a re-review. Switching to `concise` does change the fingerprint, so the next run re-reviews under the new prompt.
 
@@ -965,15 +965,18 @@ Routing rules:
 
 ### 🪜 Escalation of insufficient fast reviews
 
-In `auto` mode, a fast review can also be **escalated after the fact**: the action evaluates the raw fast output and re-runs the review on the smart model when any enabled trigger fires:
+In `auto` mode, a successful primary review can be re-run on the smart model — but since #721 that happens **only when the primary reviewer itself asks for it**. The primary model returns a structured `smart_review_requested` field (with a bounded `smart_review_reason`) in its verdict JSON; the action escalates only when that field is the JSON boolean `true`. PR-controlled prose or Markdown cannot forge the request, malformed output is never treated as one, and a smart review cannot request another smart review.
 
-- `escalate_on_fast_request_changes` — the fast model wants changes; let the smart model confirm or overturn before a human is summoned.
-- `escalate_on_incomplete_required_checks` (default **false**) — the fast review never discussed one of the classifier's required checks. Off by default: a routine dependency/Renovate review that omits literal checklist phrases should not alone trigger smart escalation.
-- `escalate_on_fast_low_confidence` — the review is a **stub** (below ~80 chars, e.g. "LGTM.") or carries substantive "Unknowns or Needs Verification" content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation because the smart model cannot manufacture missing evidence. A concise but real review is trusted **regardless of diff size**: the review length is no longer scaled with the diff. Genuinely under-reviewed risky PRs are still caught by `request_changes`, substantive Unknowns, blockers, and risk-flag routing.
-- `escalate_on_tool_or_evidence_blockers` — evidence providers reported a blocker, or tool requests executed and every one failed.
-- `escalate_on_tool_planning_failure` (default **false**) — the harness planning call failed before any tools ran. Off by default because a planning failure means the review proceeded with less evidence (the same situation as `tool_mode: off`), not that the PR is risky; the failure is still recorded in the step summary.
+The primary prompt instructs the reviewer to request a second pass only when it believes one is materially necessary — e.g. it cannot confidently resolve a correctness/security question from the available evidence, conflicting evidence needs a stronger synthesis, or it identified a high-risk area it cannot confidently disposition. It should not request one merely because the verdict is `request_changes`, because it wrote an Unknowns section, because requirement coverage is unknown, or because a tool failed.
 
-Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` lists the trigger names; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
+The former heuristic triggers are **deprecated and inert** (telemetry only; a startup notice fires when a non-default value is configured):
+
+- `escalate_on_fast_request_changes`, `escalate_on_fast_low_confidence`, `escalate_on_tool_or_evidence_blockers`, `escalate_on_incomplete_required_checks`, `escalate_on_tool_planning_failure` — no longer initiate a smart call.
+- The autonomous incomplete-requirement-coverage retry is removed; unknown coverage stays visible in the coverage artifact and step summary, and the primary reviewer may fold it into its own escalation request.
+
+Unchanged: deterministic direct smart routing **before** the primary runs (`escalate_on_risk_flags`), primary failure → fallback as availability recovery, the fallback never being an escalation target, and deterministic enforcement independent of escalation.
+
+Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` carries `reviewer_requested`; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
 ## 💾 Token-saving with the unchanged-diff skip
 

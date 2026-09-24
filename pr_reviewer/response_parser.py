@@ -9,6 +9,7 @@ by markdown code fences or prose.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any
 
@@ -279,6 +280,41 @@ _SEVERITY_ALIASES = {
     "info": "info", "note": "info", "nit": "info", "suggestion": "info",
 }
 
+# #721: post-primary smart escalation is reviewer-requested only. The request
+# is a structured verdict field, never prose. The reason is bounded so one
+# model answer cannot flood artifacts or step outputs.
+_MAX_SMART_REVIEW_REASON_CHARS = 400
+
+# Characters that break single-line consumers (step outputs, log lines,
+# metadata markers): everything at or below SPACE plus DEL collapses to one
+# space. Mirrored byte-for-byte by src/model/verdict.ts.
+_SMART_REVIEW_REASON_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]+")
+
+
+def _normalize_smart_review_request(parsed: dict[str, Any]) -> None:
+    """Normalize the reviewer's structured smart-review request (#721).
+
+    ``smart_review_requested`` is ``True`` only when the model emitted the
+    JSON boolean ``true`` at the top level of the verdict object; every
+    other value (absent, false, the string ``"true"``, ``1``, null) is a
+    malformed or absent request and is coerced to ``False`` — malformed
+    output is never treated as an escalation request. The reason is kept
+    only for a genuine request and only as a bounded, control-char-free,
+    single-line string; otherwise it is ``None``. The canonical values are
+    written back so downstream consumers (shell ``jq``, enforcement,
+    artifacts) always see normalized fields and PR-controlled text cannot
+    forge the request through a type confusion.
+    """
+    requested = parsed.get("smart_review_requested") is True
+    reason: str | None = None
+    if requested and isinstance(parsed.get("smart_review_reason"), str):
+        reason = _SMART_REVIEW_REASON_CONTROL_RE.sub(
+            " ", parsed["smart_review_reason"]
+        ).strip()[:_MAX_SMART_REVIEW_REASON_CHARS]
+        reason = reason or None
+    parsed["smart_review_requested"] = requested
+    parsed["smart_review_reason"] = reason
+
 _FINDING_CATEGORIES = {
     "bug", "security", "performance", "style", "docs", "question", "other",
 }
@@ -499,6 +535,11 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     # Optional structured findings: normalised when present, empty when the
     # model (typically a weaker local one) does not produce them.
     parsed["findings"] = _normalize_findings(parsed.get("findings"))
+
+    # Structured reviewer-requested smart escalation (#721): normalized
+    # unconditionally so a malformed or absent field can never masquerade as
+    # an escalation request downstream.
+    _normalize_smart_review_request(parsed)
 
     return parsed
 

@@ -1,0 +1,16 @@
+{
+  "fixture": "smart-review-not-requested",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"request_changes\", \"review_markdown\": \"## Recommendation\\nRequest changes.\\n\\n## Unknowns or Needs Verification\\nCould not verify the upstream changelog.\", \"findings\": [{\"severity\": \"major\", \"category\": \"bug\", \"file\": \"src/a.py\", \"line\": 12, \"message\": \"off-by-one\"}], \"smart_review_requested\": false, \"smart_review_reason\": \"leftover reason must be dropped\", \"confidence\": 0.9}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 48
+    }
+  }
+}

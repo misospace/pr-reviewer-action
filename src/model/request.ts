@@ -9,7 +9,9 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * `requirement_coverage` are nullable-but-required: OpenAI strict mode
  * requires every property to be listed in `required`, so optionality is
  * expressed via the null type. The parser tolerates null/absent/malformed
- * findings.
+ * findings. `smart_review_requested`/`smart_review_reason` (#721) are the
+ * reviewer's structured request for a smart-tier second pass; the parser
+ * normalizes them so only the JSON boolean `true` requests one.
  */
 export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
   type: "json_schema",
@@ -21,6 +23,8 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
       properties: {
         verdict: { type: "string", enum: ["approve", "request_changes"] },
         review_markdown: { type: "string" },
+        smart_review_requested: { type: "boolean" },
+        smart_review_reason: { type: ["string", "null"] },
         findings: {
           type: ["array", "null"],
           items: {
@@ -63,7 +67,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           },
         },
       },
-      required: ["verdict", "review_markdown", "findings", "requirement_coverage"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage"],
       additionalProperties: false,
     },
   },

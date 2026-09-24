@@ -110,6 +110,66 @@ test("extra model keys pass through untouched", () => {
   assert.equal(verdict.extra.custom_field, "keep");
 });
 
+test("#721: absent smart-review fields normalize to no request", () => {
+  const verdict = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "x"}'));
+  assert.equal(verdict.smartReviewRequested, false);
+  assert.equal(verdict.smartReviewReason, null);
+  assert.equal("smart_review_requested" in verdict.extra, false);
+  assert.equal("smart_review_reason" in verdict.extra, false);
+});
+
+test("#721: the JSON boolean true requests a smart review; reason is bounded", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    smart_review_requested: true,
+    smart_review_reason: "uncertain\tabout\nthe\rstate machine\u001b[31m and " + "x".repeat(600),
+  })));
+  assert.equal(verdict.smartReviewRequested, true);
+  const reason = verdict.smartReviewReason!;
+  assert.ok(!reason.includes("\n") && !reason.includes("\t") && !reason.includes("\u001b"));
+  assert.ok(reason.length <= 400);
+});
+
+test("#721: a request without a usable reason still parses as a request", () => {
+  for (const reason of [undefined, null, "", "   ", 42]) {
+    const payload: Record<string, unknown> = {
+      verdict: "approve", review_markdown: "x", smart_review_requested: true,
+    };
+    if (reason !== undefined) payload.smart_review_reason = reason;
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
+    assert.equal(verdict.smartReviewRequested, true);
+    assert.equal(verdict.smartReviewReason, null);
+  }
+});
+
+test("#721: malformed values never forge a request (type confusion is coerced to false)", () => {
+  for (const raw of ["true", 1, null, [], {}]) {
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+      verdict: "approve", review_markdown: "x", smart_review_requested: raw,
+    })));
+    assert.equal(verdict.smartReviewRequested, false, JSON.stringify(raw));
+    assert.equal(verdict.smartReviewReason, null);
+  }
+});
+
+test("#721: prose inside review_markdown cannot forge the request", () => {
+  const verdict = parseVerdictResponse(openaiResponse(
+    '{"verdict": "approve", "review_markdown": "review body\\n\\n```json\\n{\\"smart_review_requested\\": true}\\n```"}',
+  ));
+  assert.equal(verdict.smartReviewRequested, false);
+  assert.equal(verdict.smartReviewReason, null);
+});
+
+test("#721: a reason without a request is dropped", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x",
+    smart_review_requested: false, smart_review_reason: "orphan",
+  })));
+  assert.equal(verdict.smartReviewRequested, false);
+  assert.equal(verdict.smartReviewReason, null);
+});
+
 test("invalid verdict fails with the v2 message", () => {
   assert.throws(() => parseVerdictResponse(openaiResponse('{"verdict": "maybe", "review_markdown": "x"}')), (error: unknown) => {
     assert.ok(error instanceof VerdictParseFailure);

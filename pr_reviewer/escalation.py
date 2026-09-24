@@ -1,10 +1,24 @@
-"""Escalation decision for fast→smart review routing (#160).
+"""Escalation decision for fast→smart review routing.
 
-After the fast model produced a review, decide deterministically whether the
-smart model should re-review. Every trigger is boring and testable on
-purpose: verdict value, required-check keyword validation, an explicit
-Unknowns/Needs-Verification section (or a suspiciously short review), and
-blocker-level evidence/tool signals.
+#721 makes post-primary smart escalation **reviewer-requested only**: the
+sole escalation trigger after a successful primary review is the primary
+model's own structured verdict field ``smart_review_requested`` (parsed and
+normalized by :mod:`pr_reviewer.response_parser`, never inferred from
+review prose). :func:`reviewer_requested_escalation` reads that field.
+
+The former heuristic triggers (:func:`should_escalate` — request_changes,
+low confidence / Unknowns sections, tool/evidence blockers, incomplete
+required checks, tool planning failure) remain in this module **as
+telemetry only**: they stay boring and testable so the review step can log
+which signals would historically have fired, but they must never
+independently initiate a smart call after a successful primary review.
+
+Unchanged invariants (still owned by the review orchestration, not here):
+deterministic direct smart routing *before* the primary runs; primary
+failure → fallback as availability recovery; the fallback is never a
+quality-escalation target; smart failure restores/publishes the primary
+review; and no escalation loops (a smart review cannot request another
+smart review).
 """
 
 from __future__ import annotations
@@ -150,10 +164,16 @@ def should_escalate(
     evidence_path: str = "evidence-providers.json",
     tool_harness_path: str = "tool-harness.json",
 ) -> tuple[bool, list[str]]:
-    """Return (escalate, reasons) for the fast review in *output_path*.
+    """Return (escalate, reasons) the heuristics would have fired on (#721).
 
-    Must run on the raw fast output — before verdict_policy / completeness
-    validation mutate it — so the triggers see what the model actually said.
+    **Telemetry only.** Since #721 this function's result must never gate a
+    smart call after a successful primary review — the review step logs it
+    so operators still see which historical signals a run carried, but the
+    escalation decision itself is :func:`reviewer_requested_escalation`.
+
+    Must run on the raw primary output — before verdict_policy /
+    completeness validation / enforcement mutate it — so the telemetry sees
+    what the model actually said.
     """
     data = _load(output_path)
     review = str(data.get("review_markdown") or "")
@@ -185,3 +205,30 @@ def should_escalate(
         reasons.append("tool_planning_failed")
 
     return bool(reasons), reasons
+
+
+def reviewer_requested_escalation(
+    output_path: str = "ai-output.json",
+) -> tuple[bool, str | None]:
+    """The primary reviewer's explicit structured smart-review request (#721).
+
+    The ONLY post-primary escalation trigger: reads the structured verdict
+    fields ``smart_review_requested`` / ``smart_review_reason`` from the
+    parsed primary output. Those fields are normalized by
+    :mod:`pr_reviewer.response_parser` (boolean-true only, bounded
+    single-line reason), so PR-controlled prose or Markdown in
+    ``review_markdown`` cannot forge the request, and malformed model
+    output is never treated as one. The reason is advisory context for
+    logs/artifacts; it never widens the decision.
+
+    Never raises: a missing / malformed artifact degrades to
+    ``(False, None)``. The boolean alone drives the decision — the reason is
+    advisory context and is dropped when absent or blank. Returns
+    ``(requested, reason)``.
+    """
+    data = _load(output_path)
+    requested = data.get("smart_review_requested") is True
+    reason = data.get("smart_review_reason")
+    if not (requested and isinstance(reason, str) and reason.strip()):
+        reason = None
+    return requested, reason

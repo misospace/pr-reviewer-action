@@ -1,0 +1,16 @@
+{
+  "fixture": "smart-review-request",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Recommendation\\nApprove with an open question.\\n\\nThe state transition is defensible but I cannot confidently disposition the auth path from the corpus.\", \"findings\": [], \"smart_review_requested\": true, \"smart_review_reason\": \"cannot confidently disposition the auth path change from the available evidence\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 64
+    }
+  }
+}

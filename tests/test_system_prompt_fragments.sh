@@ -106,9 +106,9 @@ check_contains "concise keeps the base output schema" "$OUT" "Return STRICT JSON
 check_not_contains "concise leaves no placeholder" "$OUT" "{{"
 # Brevity must not defeat the two mechanisms that depend on the model actually
 # writing something: completeness.py keyword-matches must_check items against
-# review_markdown, and escalate_on_fast_low_confidence reads the Unknowns
-# section. A fragment that let the model drop either would trade verbosity for
-# a false "complete" or a silently under-reviewed PR.
+# review_markdown, and the Unknowns section is the reader-visible record of
+# what evidence was missing (since #721 it does not itself trigger escalation,
+# but suppressing it would still hide uncertainty from the review reader).
 check_contains "concise exempts must_check coverage" "$OUT" \
   "address every must_check item explicitly"
 check_contains "concise exempts the Unknowns section" "$OUT" \

@@ -451,6 +451,29 @@ ESCALATE_ON_FAST_LOW_CONFIDENCE="$(printf '%s' "$ESCALATE_ON_FAST_LOW_CONFIDENCE
 ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS="$(printf '%s' "$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS" | tr '[:upper:]' '[:lower:]')"
 ESCALATE_ON_TOOL_PLANNING_FAILURE="$(printf '%s' "$ESCALATE_ON_TOOL_PLANNING_FAILURE" | tr '[:upper:]' '[:lower:]')"
 
+# #721: post-primary smart escalation is reviewer-requested only — the
+# primary model's structured smart_review_requested verdict field. These
+# heuristic knobs no longer initiate a smart call after a successful primary
+# review; the inputs stay accepted for backward compatibility and any
+# non-default value gets a loud notice so behavior never changes silently.
+# (escalate_on_risk_flags is NOT affected: it drives deterministic direct
+# smart routing before the primary runs, which #721 preserves.)
+if [[ "$ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS" != "false" ]]; then
+  log "NOTE: escalate_on_incomplete_required_checks no longer triggers post-primary smart escalation (#721): escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is accepted for backward compatibility."
+fi
+if [[ "$ESCALATE_ON_FAST_REQUEST_CHANGES" != "true" ]]; then
+  log "NOTE: escalate_on_fast_request_changes no longer triggers post-primary smart escalation (#721): escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is accepted for backward compatibility."
+fi
+if [[ "$ESCALATE_ON_FAST_LOW_CONFIDENCE" != "true" ]]; then
+  log "NOTE: escalate_on_fast_low_confidence no longer triggers post-primary smart escalation (#721): escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is accepted for backward compatibility."
+fi
+if [[ "$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS" != "true" ]]; then
+  log "NOTE: escalate_on_tool_or_evidence_blockers no longer triggers post-primary smart escalation (#721): escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is accepted for backward compatibility."
+fi
+if [[ "$ESCALATE_ON_TOOL_PLANNING_FAILURE" != "false" ]]; then
+  log "NOTE: escalate_on_tool_planning_failure no longer triggers post-primary smart escalation (#721): escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is accepted for backward compatibility."
+fi
+
 # The fallback endpoint/format/key inherit from the primary when the caller leaves them
 # blank (action.yml), so AI_FALLBACK_BASE_URL is non-empty here even for a caller that
 # configured no fallback at all. Nothing in the resolved environment records whether the

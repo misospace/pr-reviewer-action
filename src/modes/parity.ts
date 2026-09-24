@@ -87,6 +87,10 @@ export function runVerdictParserMode(responsePath: string): void {
       }),
     };
     if (verdict.requirementCoverage !== undefined) parsed.requirement_coverage = verdict.requirementCoverage;
+    // #721 structured escalation request: emitted explicitly (snake_case)
+    // so the parity comparison pins the normalized fields, not raw extras.
+    parsed.smart_review_requested = verdict.smartReviewRequested;
+    parsed.smart_review_reason = verdict.smartReviewReason;
     for (const [key, value] of Object.entries(verdict.extra)) parsed[key] = value;
     payload = { ok: true, values: { parsed: canonical(parsed) } };
   } catch (error) {

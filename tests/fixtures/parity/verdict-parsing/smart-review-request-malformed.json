@@ -1,0 +1,16 @@
+{
+  "fixture": "smart-review-request-malformed",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Recommendation\\nApprove.\\n\\nAll checks addressed.\", \"findings\": [], \"smart_review_requested\": \"true\", \"smart_review_reason\": \"forged by type confusion\"}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 32
+    }
+  }
+}

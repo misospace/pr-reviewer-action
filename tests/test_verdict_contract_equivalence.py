@@ -64,6 +64,21 @@ class TestSharedResponseFormat:
         bash_schema = _bash_rf_literal("json_schema")
         assert bash_schema == _OPENAI_VERDICT_JSON_SCHEMA
 
+    def test_json_schema_carries_the_reviewer_escalation_request(self):
+        # #721: the reviewer's structured smart-review request is part of the
+        # verdict contract on both paths — a boolean request plus a nullable
+        # bounded reason — so the model can emit it under strict mode.
+        for schema in (_bash_rf_literal("json_schema"), _OPENAI_VERDICT_JSON_SCHEMA):
+            inner = schema["json_schema"]["schema"]
+            props = inner["properties"]
+            assert props["smart_review_requested"] == {"type": "boolean"}
+            assert props["smart_review_reason"] == {"type": ["string", "null"]}
+            assert inner["required"] == [
+                "verdict", "review_markdown",
+                "smart_review_requested", "smart_review_reason",
+                "findings", "requirement_coverage",
+            ]
+
     def test_python_verdict_payload_uses_that_schema(self):
         # And the Python verdict payload actually emits the constant, so the
         # equivalence above is meaningful for the wire request (not just for

@@ -153,7 +153,7 @@ inputs:
     v2_id: ai_smart_model
     required: false
     default: ""
-    description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
+    description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
   - id: ai-smart-base-url
     v2_id: ai_smart_base_url
     required: false
@@ -178,27 +178,27 @@ inputs:
     v2_id: escalate_on_incomplete_required_checks
     required: false
     default: "false"
-    description: "Escalate a primary-route review to the smart model when required checks are unaddressed (review_routing_mode=auto only). Off by default — a dependency/Renovate review that omits literal checklist phrases should not alone trigger smart escalation."
+    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
   - id: escalate-on-fast-request-changes
     v2_id: escalate_on_fast_request_changes
     required: false
     default: "true"
-    description: "Escalate a primary-route review to the smart model when its verdict is request_changes (review_routing_mode=auto only)."
+    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
   - id: escalate-on-fast-low-confidence
     v2_id: escalate_on_fast_low_confidence
     required: false
     default: "true"
-    description: "Escalate when the primary-route review is low-confidence — a stub review (below ~80 chars) or one carrying substantive Unknowns/Needs Verification content. Notes about unavailable CI, tests, or tool output alone do not trigger escalation. A concise, confident review is NOT escalated regardless of diff size. review_routing_mode=auto only."
+    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
   - id: escalate-on-tool-or-evidence-blockers
     v2_id: escalate_on_tool_or_evidence_blockers
     required: false
     default: "true"
-    description: "Escalate when evidence providers report blocker severity or every executed tool request failed (review_routing_mode=auto only)."
+    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). Evidence/tool blockers remain subject to deterministic enforcement; the value is ignored except for a startup notice."
   - id: escalate-on-tool-planning-failure
     v2_id: escalate_on_tool_planning_failure
     required: false
     default: "false"
-    description: "Escalate when the tool harness planning call failed (review_routing_mode=auto only). Off by default: a planning failure means the review ran with less evidence — the same situation as tool_mode 'off' — not that the PR is risky. The failure is still recorded in tool-harness.json and the step summary."
+    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
   - id: ai-stream
     v2_id: ai_stream
     required: false
@@ -629,7 +629,7 @@ outputs:
     description: "Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')"
   - id: escalation-reason
     v2_id: escalation_reason
-    description: "Comma-separated escalation trigger names when review_route is 'escalated' (empty otherwise)"
+    description: "reviewer_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise"
   - id: findings
     v2_id: findings
     description: "Normalized structured findings as a JSON array (empty array when the model produced none)"

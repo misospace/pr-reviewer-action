@@ -196,13 +196,20 @@ else
   fi
 fi
 
-# ── Escalation (#160) ────────────────────────────────────────────────
-# When the primary route produced this review and a configured trigger fires
-# (request_changes, unaddressed required checks, low confidence, blocker
-# signals), re-run the review on the smart model and publish only that result.
+# ── Escalation (#160, #721) ──────────────────────────────────────────
+# When the primary route produced this review AND the primary model itself
+# requested a stronger second pass via the structured `smart_review_requested`
+# verdict field (#721), re-run the review on the smart model and publish only
+# that result. The request is structured model output parsed and normalized by
+# pr_reviewer.response_parser — PR-controlled prose/Markdown cannot forge it,
+# and malformed output is never treated as a request. The former heuristic
+# triggers (request_changes, low confidence, tool/evidence blockers,
+# incomplete checks, planning failure, the autonomous incomplete_coverage
+# retry) are TELEMETRY ONLY since #721: they may not initiate a smart call.
 # Escalation requires a configured smart model (ai_smart_model) — it NEVER
-# escalates to the fallback. The primary output is kept as ai-output.primary.json
-# for debugging. A smart-model failure keeps the primary review.
+# escalates to the fallback. The primary output is kept as
+# ai-output.primary.json for debugging. A smart-model failure keeps the
+# primary review.
 ESCALATION_REASONS=""
 ENFORCEMENT_TOOL_HARNESS="tool-harness.json"
 rm -f tool-harness.smart.json tool-harness.smart.md review-corpus.smart.truncated.md
@@ -268,26 +275,39 @@ maybe_escalate_review() {
     return 0
   fi
 
-  # Decide on the RAW primary output, before verdict policy / completeness
-  # validation / enforcement mutate it.
-  local decision
+  # #721: the escalation decision is the parsed primary verdict's structured
+  # request, evaluated on the RAW primary output before verdict policy /
+  # completeness validation / enforcement mutate it. The heuristic signals
+  # are computed for telemetry only — they can no longer initiate a call.
+  local decision requested reason telemetry
   decision="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 -c "
-from pr_reviewer.escalation import should_escalate
-escalate, reasons = should_escalate(
-    on_incomplete=('$ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS' == 'true'),
-    on_request_changes=('$ESCALATE_ON_FAST_REQUEST_CHANGES' == 'true'),
-    on_low_confidence=('$ESCALATE_ON_FAST_LOW_CONFIDENCE' == 'true'),
-    on_blockers=('$ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS' == 'true'),
-    on_planning_failure=('$ESCALATE_ON_TOOL_PLANNING_FAILURE' == 'true'),
+import json
+from pr_reviewer.escalation import reviewer_requested_escalation, should_escalate
+requested, reason = reviewer_requested_escalation()
+# Telemetry only (#721): every historical heuristic signal is reported, none
+# of them gates the decision.
+_, telemetry = should_escalate(
+    on_incomplete=True,
+    on_request_changes=True,
+    on_low_confidence=True,
+    on_blockers=True,
+    on_planning_failure=True,
 )
-print('yes ' + ','.join(reasons) if escalate else 'no')
-" 2>/dev/null || echo no)"
-  if [[ "$decision" == "no" || -z "$decision" ]]; then
-    log "No escalation triggers fired; keeping the primary review"
+print(json.dumps({'requested': requested, 'reason': reason, 'telemetry': telemetry}))
+" 2>/dev/null || echo '{}')"
+  requested="$(printf '%s' "$decision" | jq -r '.requested // false' 2>/dev/null || echo false)"
+  telemetry="$(printf '%s' "$decision" | jq -r '.telemetry // [] | join(",")' 2>/dev/null || true)"
+  if [[ "$requested" != "true" ]]; then
+    if [[ -n "$telemetry" ]]; then
+      log "Heuristic escalation signals present but telemetry-only since #721: ${telemetry}"
+    else
+      log "No reviewer-requested smart escalation; keeping the primary review"
+    fi
     return 0
   fi
-  ESCALATION_REASONS="${decision#yes }"
-  log "Escalating to smart model $SMART_MODEL ($ESCALATION_REASONS)"
+  reason="$(printf '%s' "$decision" | jq -r '.reason // empty' 2>/dev/null || true)"
+  ESCALATION_REASONS="reviewer_requested"
+  log "Escalating to smart model $SMART_MODEL (reviewer_requested${reason:+: $reason})"
 
   cp ai-output.json ai-output.primary.json
 
@@ -304,6 +324,23 @@ print('yes ' + ','.join(reasons) if escalate else 'no')
   unset TOOL_ESCALATION
 
   if [[ "$smart_ok" -eq 1 ]]; then
+    # #721 no-recursion invariant: the smart review's own output can never
+    # request another escalation. The decision was consumed from the PRIMARY
+    # verdict; clear the request fields on the published smart verdict so no
+    # downstream consumer can mistake the smart model's echo for a new one.
+    python3 - > /dev/null 2>&1 <<'PY'
+import json
+try:
+    with open("ai-output.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict):
+        data["smart_review_requested"] = False
+        data["smart_review_reason"] = None
+        with open("ai-output.json", "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+except (OSError, ValueError):
+    pass
+PY
     ENFORCEMENT_TOOL_HARNESS="tool-harness.smart.json"
     REVIEW_ROUTE="escalated"
     ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
@@ -332,10 +369,17 @@ fi
 
 apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$ENFORCEMENT_TOOL_HARNESS"
 
-# ── Requirement Coverage merge + completeness retry (#624, #626) ───
+# ── Requirement Coverage artifact (#624, #721) ───────────────────────
 # Fold the final reviewer's requirement_coverage claims into a standalone,
-# deterministic artifact. It remains advisory: unknown requirements never alter
-# a verdict. They can, however, cause one targeted fast-to-smart retry.
+# deterministic artifact. It remains advisory: unknown requirements never
+# alter a verdict. Since #721 unknown/incomplete coverage must NOT
+# independently spend a smart call — the former autonomous
+# maybe_escalate_coverage_review / incomplete_coverage retry is removed, and
+# the primary reviewer (which already receives the requirement ledger) may
+# request the smart second pass itself via smart_review_requested when
+# unresolved coverage represents a substantive question. Unknown coverage
+# stays visible in this artifact, the step summary, and telemetry, subject
+# to existing deterministic enforcement semantics.
 build_requirement_coverage() {
   : > requirement-coverage.json
   if [ -s requirement-ledger.json ]; then
@@ -347,104 +391,6 @@ build_requirement_coverage() {
 }
 
 build_requirement_coverage
-
-maybe_escalate_coverage_review() {
-  # Preserve the existing fast-to-smart safety boundaries and never make a
-  # second smart call after any ordinary escalation.
-  [[ "$REVIEW_ROUTING_MODE" == "auto" ]] || return 0
-  [[ "${REVIEW_ROUTE:-legacy}" == "primary" ]] || return 0
-  [[ -n "$SMART_MODEL_RESOLVED" ]] || return 0
-  [[ "$SMART_BASE_URL" != "$AI_BASE_URL" || "$SMART_MODEL" != "$AI_MODEL" ]] || return 0
-  if [[ "${PRIMARY_OK:-0}" -ne 1 && "$SMART_BASE_URL" == "$AI_FALLBACK_BASE_URL" && "$SMART_MODEL" == "$AI_FALLBACK_MODEL" ]]; then
-    log "Skipping coverage escalation: the fallback model that produced this review is the smart model"
-    return 0
-  fi
-  [ -s requirement-coverage.json ] || return 0
-
-  local decision retry_prompt smart_ok=0
-  decision="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
-from pr_reviewer.requirement_coverage import should_escalate_coverage
-escalate, ids = should_escalate_coverage()
-print("yes" if escalate and ids else "no")
-PY
-)"
-  [[ "$decision" == "yes" ]] || return 0
-
-  # Back up the preliminary output BEFORE building the retry prompt: the
-  # renderer loads it as a safe data block so the smart model sees the
-  # complete preliminary finding/review context, and it is the fallback
-  # restored if the smart call fails.
-  cp ai-output.json ai-output.coverage-primary.json
-
-  retry_prompt="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
-from pr_reviewer import requirement_coverage, requirement_ledger
-coverage = requirement_coverage.load_coverage("requirement-coverage.json")
-ledger = requirement_ledger.load_ledger("requirement-ledger.json")
-# load_coverage is a tolerant generic JSON loader; the primary handoff must
-# remain a parsed object or the targeted retry is unsafe to run.
-primary = requirement_coverage.load_coverage("ai-output.coverage-primary.json")
-if not isinstance(primary, dict):
-    raise SystemExit(1)
-print(requirement_coverage.render_coverage_retry_prompt(coverage, ledger, primary), end="")
-PY
-)"
-  [ -n "$retry_prompt" ] || {
-    log "Skipping coverage escalation: preliminary review context is unreadable"
-    return 0
-  }
-
-  ESCALATION_REASONS="${ESCALATION_REASONS:+${ESCALATION_REASONS},}incomplete_coverage"
-  log "Escalating to smart model $SMART_MODEL (incomplete_coverage)"
-  if build_review_corpus smart && call_model_tier smart "$retry_prompt" review-corpus.smart.truncated.md ai-request.smart.json ai-response.smart.json; then
-    smart_ok=1
-  fi
-
-  if [[ "$smart_ok" -eq 1 ]]; then
-    local disposition_result
-    disposition_result="$(PYTHONPATH="${SCRIPT_DIR}/.." python3 - <<'PY' 2>/dev/null || true
-from pr_reviewer import requirement_coverage
-primary = requirement_coverage.load_coverage("ai-output.coverage-primary.json")
-smart = requirement_coverage.load_coverage("ai-output.json")
-ok, reason = requirement_coverage.validate_preliminary_dispositions(primary, smart)
-print("ok" if ok else reason)
-PY
-)"
-    if [[ "$disposition_result" != "ok" ]]; then
-      smart_ok=0
-      log "Rejecting smart coverage retry: preliminary finding dispositions are incomplete (${disposition_result:-invalid})"
-    else
-      # preliminary_finding is internal retry metadata only; the published
-      # finding contract stays severity/category/file/line/message.
-      python3 - <<'PY' 2>/dev/null || true
-import json
-from pr_reviewer import requirement_coverage
-smart = requirement_coverage.load_coverage("ai-output.json")
-requirement_coverage.strip_preliminary_correlation(smart)
-with open("ai-output.json", "w", encoding="utf-8") as fh:
-    json.dump(smart, fh)
-PY
-    fi
-  fi
-
-  if [[ "$smart_ok" -eq 1 ]]; then
-    # This targeted corpus retry does not replace the primary tool evidence.
-    apply_all_enforcement_wrapper "$EVIDENCE_BLOCKER_ENABLED" "$TOOL_FAILURE_ENABLED" "$TOOL_MIN_SUCCESSFUL_REQUESTS" "$VERDICT_POLICY" "$VALIDATE_REQUIRED_CHECKS" "$REQUIRED_CHECK_VALIDATION_MODE" "$ENFORCEMENT_TOOL_HARNESS"
-    build_requirement_coverage
-    REVIEW_ROUTE="escalated"
-    ROUTE_REASON="escalated: ${ESCALATION_REASONS}"
-    ANALYSIS_ENGINE="$(annotate_analysis_engine "$SMART_MODEL@$SMART_BASE_URL ($SMART_API_FORMAT)" escalated)"
-    log "Smart model completed the targeted coverage verification"
-  else
-    cp ai-output.coverage-primary.json ai-output.json
-    ESCALATION_REASONS="$(printf '%s' "$ESCALATION_REASONS" | python3 -c '
-import sys
-print(",".join(part for part in sys.stdin.read().strip().split(",") if part and part != "incomplete_coverage"))
-')"
-    log "Smart model failed during targeted coverage verification; publishing the primary review"
-  fi
-}
-
-maybe_escalate_coverage_review
 
 echo "analysis_engine=$ANALYSIS_ENGINE" >> "$OUTPUT_FILE"
 echo "verdict=$(jq -r '.verdict' ai-output.json)" >> "$OUTPUT_FILE"
