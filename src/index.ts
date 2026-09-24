@@ -3,6 +3,7 @@ import { loadConfig } from "./config/load-config.js";
 import { toJSON } from "./config/types.js";
 import { assertSupportedNode } from "./runtime/node-version.js";
 import { runRequestBuilderMode, runVerdictParserMode } from "./modes/parity.js";
+import { runPrecheckFixture } from "./precheck/index.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 
 export function main(): void {
@@ -15,13 +16,28 @@ export function main(): void {
   }
 }
 
+/** Fixture-mode precheck CLI for the #673 parity harness and tests-v3:
+ * `node dist/index.js precheck-fixture <fixture.json>` prints a single JSON
+ * line `{ok, values, stderr}` describing the precheck decision outputs. */
+export async function precheckFixtureMain(fixturePath: string): Promise<void> {
+  assertSupportedNode(process.versions.node);
+  const result = await runPrecheckFixture(fixturePath);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 if (require.main === module) {
+  const argv = process.argv.slice(2);
   const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
-  const fixturePath = process.argv[2] ?? "";
-  if (mode === "v3-request-builder" && fixturePath) {
-    runRequestBuilderMode(fixturePath);
-  } else if (mode === "v3-verdict-parser" && fixturePath) {
-    runVerdictParserMode(fixturePath);
+  const firstArg = argv[0] ?? "";
+  if (firstArg === "precheck-fixture") {
+    precheckFixtureMain(argv[1] ?? "").catch((error: unknown) => {
+      process.stderr.write(`v3 precheck fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      process.exitCode = 1;
+    });
+  } else if (mode === "v3-request-builder" && firstArg) {
+    runRequestBuilderMode(firstArg);
+  } else if (mode === "v3-verdict-parser" && firstArg) {
+    runVerdictParserMode(firstArg);
   } else if (mode !== "") {
     process.stderr.write(`v3 runtime: unknown parity mode '${mode}'\n`);
     process.exitCode = 1;
