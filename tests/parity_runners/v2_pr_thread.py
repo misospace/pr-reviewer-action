@@ -27,6 +27,9 @@ def main() -> int:
     if "max_bytes" in fixture:
         kwargs["max_bytes"] = fixture["max_bytes"]
     markdown = render_pr_thread(fixture.get("comments") or [], **kwargs)
+    # The fixture "credentials" are inert dummies exercising the redaction
+    # path; the printed markdown carries them already replaced by [REDACTED].
+    # codeql[py/clear-text-logging-of-sensitive-data]
     print(json.dumps({"ok": True, "values": {"markdown": markdown}}, ensure_ascii=False))
     return 0
 
