@@ -9,26 +9,38 @@ permissions:
   contents: read
 
 jobs:
+  # Stable aggregate gate: branch protection requires "CI / validate", and it
+  # keeps failing whenever any parallel validation job fails (the explicit
+  # always()+result check matters — a merely skipped required check can be
+  # treated as satisfied). The leaf jobs below split the former serial
+  # validate job for wall-clock latency; no validation is weakened or skipped.
   validate:
+    needs:
+      - validate-typescript
+      - validate-python
+      - validate-static
+      - validate-bash-slow
+      - validate-bash
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every validation job to pass
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Validation job results: $results"
+          if ! jq -e 'length > 0 and all(. == "success")' >/dev/null <<< "$results"; then
+            echo "::error::One or more validation jobs did not pass"
+            exit 1
+          fi
+
+  validate-typescript:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history so the gitleaks CLI below can scan every commit, not
-          # just the PR merge ref of a shallow checkout.
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          # Pinned to 3.14 to match the local dev interpreter — a version skew
-          # between local and CI is how the duplicate-key regression test first
-          # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
-          python-version: '3.14'
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
@@ -42,7 +54,66 @@ jobs:
           npm run build
           git diff --exit-code HEAD -- dist
 
+  validate-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Pinned to 3.14 to match the local dev interpreter — a version skew
+          # between local and CI is how the duplicate-key regression test first
+          # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
+          python-version: '3.14'
+
       - name: Install test dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Python scripts
+        run: find scripts pr_reviewer tests -name '*.py' -print0 | xargs -0 python3 -m py_compile
+
+      - name: Run offline semantic regression gate
+        run: |
+          mkdir -p semantic-eval-report
+          python3 scripts/run_semantic_eval_ci.py \
+            --corpus evals/corpus-historical-dogfood.json \
+            --output semantic-eval-report/report.json
+
+      - name: Upload semantic regression report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: semantic-eval-report
+          path: semantic-eval-report/report.json
+          if-no-files-found: warn
+
+      # Coverage is scoped to pr_reviewer/ and scripts/ — the bash test suites
+      # cover the shell side, which pytest-cov can't measure.
+      # Threshold: measured baseline was 76% (2026-07-03); gate at 72 to absorb
+      # small fluctuations. Ratchet toward the audit's 80% as coverage grows.
+      - name: Run Python tests (auto-discover all 215)
+        run: |
+          COV_FAIL_UNDER=72
+          pytest tests/ -v --tb=short \
+            --cov=pr_reviewer --cov=scripts \
+            --cov-report=term-missing:skip-covered \
+            --cov-fail-under="$COV_FAIL_UNDER"
+
+  validate-static:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the gitleaks CLI below can scan every commit, not
+          # just the PR merge ref of a shallow checkout.
+          fetch-depth: 0
+
+      - name: Install lint dependencies
+        # Same pinned set as validate-python; this job only needs yamllint
+        # from it. Keeping one requirements file means one supply-chain pin.
         run: pip install -r requirements.txt
 
       - name: Validate action metadata YAML
@@ -94,52 +165,70 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck
 
-      - name: Check Python scripts
-        run: find scripts pr_reviewer tests -name '*.py' -print0 | xargs -0 python3 -m py_compile
-
-      - name: Run offline semantic regression gate
-        run: |
-          mkdir -p semantic-eval-report
-          python3 scripts/run_semantic_eval_ci.py \
-            --corpus evals/corpus-historical-dogfood.json \
-            --output semantic-eval-report/report.json
-
-      - name: Upload semantic regression report
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: semantic-eval-report
-          path: semantic-eval-report/report.json
-          if-no-files-found: warn
-
       - name: Verify smoke test helper is executable
         run: test -x tests/smoke_test.sh
-
-      - name: Run smoke test
-        run: tests/smoke_test.sh
 
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
-      # Coverage is scoped to pr_reviewer/ and scripts/ — the bash test suites
-      # below cover the shell side, which pytest-cov can't measure.
-      # Threshold: measured baseline was 76% (2026-07-03); gate at 72 to absorb
-      # small fluctuations. Ratchet toward the audit's 80% as coverage grows.
-      - name: Run Python tests (auto-discover all 215)
-        run: |
-          COV_FAIL_UNDER=72
-          pytest tests/ -v --tb=short \
-            --cov=pr_reviewer --cov=scripts \
-            --cov-report=term-missing:skip-covered \
-            --cov-fail-under="$COV_FAIL_UNDER"
+  # The two longest bash suites (CI-status gating and concurrent gating) get
+  # their own runner instead of queueing every other suite behind them. The
+  # suite list is explicit and mirrored in the exclusion in validate-bash —
+  # keep both in sync when promoting a suite here.
+  validate-bash-slow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Auto-discover every bash suite so a new (or previously unlisted) suite
-      # cannot silently stay out of CI. The smoke test runs separately above.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Same pinned interpreter as validate-python so bash suites that shell
+          # out to python3 see the same version (see the skew note above).
+          python-version: '3.14'
+
+      - name: Run long-running bash test suites
+        run: |
+          set -euo pipefail
+          failed=0
+          for t in tests/test_ci_api_timeout.sh tests/test_concurrent_gating.sh; do
+            echo "::group::$t"
+            if ! bash "$t"; then
+              echo "::error::$t failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+  validate-bash:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Same pinned interpreter as validate-python so bash suites that shell
+          # out to python3 see the same version (see the skew note above).
+          python-version: '3.14'
+
+      - name: Run smoke test
+        run: tests/smoke_test.sh
+
+      # Auto-discover every bash suite except the two long-running ones run in
+      # validate-bash-slow (keep that list in sync) so a new (or previously
+      # unlisted) suite cannot silently stay out of CI.
       - name: Run bash test suites (auto-discover)
         run: |
           set -euo pipefail
           failed=0
           for t in tests/test_*.sh; do
+            case "$t" in
+              tests/test_ci_api_timeout.sh|tests/test_concurrent_gating.sh) continue ;;
+            esac
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"
