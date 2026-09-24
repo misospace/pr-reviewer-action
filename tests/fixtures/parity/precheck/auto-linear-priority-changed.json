@@ -1,0 +1,71 @@
+{
+  "env": {
+    "REPO": "misospace/demo",
+    "PR_NUMBER": "42",
+    "PUBLISH_MODE": "comment",
+    "AI_MODEL": "test-model",
+    "DEEP_REVIEW": "auto",
+    "LINEAR_ISSUE_PREFIXES": "ENG",
+    "LINEAR_API_KEY": "stub-key",
+    "LINEAR_API_KEY_CONFIGURED": "true"
+  },
+  "platform": {
+    "diff": "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+    "comments": [],
+    "reviews": [],
+    "pr": {
+      "title": "Fix ENG-42 bug",
+      "body": "Fixes #12",
+      "head": {
+        "sha": "head-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      },
+      "base": {
+        "sha": "base-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      }
+    },
+    "gh_api": {
+      "repos/misospace/demo/pulls/42": {
+        "title": "Fix ENG-42 bug",
+        "body": "Fixes #12",
+        "head": {
+          "sha": "head-abc",
+          "repo": {
+            "full_name": "misospace/demo"
+          }
+        },
+        "base": {
+          "sha": "base-abc",
+          "repo": {
+            "full_name": "misospace/demo"
+          }
+        }
+      },
+      "repos/misospace/demo/issues/12": {
+        "labels": [
+          {
+            "name": "bug"
+          }
+        ]
+      }
+    },
+    "linear": {
+      "ENG-42": {
+        "title": "t",
+        "body": "b",
+        "state": "In Progress",
+        "priority": 2,
+        "labels": [
+          "Feature"
+        ]
+      }
+    }
+  },
+  "fixture": "auto-linear-priority-changed",
+  "description": "parity fixture for precheck-decision boundary (#674): auto-linear-priority-changed"
+}

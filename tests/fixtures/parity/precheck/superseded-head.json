@@ -1,0 +1,37 @@
+{
+  "env": {
+    "REPO": "misospace/demo",
+    "PR_NUMBER": "42",
+    "PUBLISH_MODE": "comment",
+    "AI_MODEL": "test-model"
+  },
+  "event_head_sha": "old-head-sha",
+  "platform": {
+    "diff": "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+    "comments": [
+      {
+        "id": 1,
+        "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:0000000000000000000000000000000000000000000000000000000000000000|cfg:1111111111111111111111111111111111111111111111111111111111111111 -->\n## Review\nBody text.\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"head-old\",\"base_sha\":\"base-old\",\"review_result\":\"clean\"} -->\n",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-02T00:00:00Z"
+      }
+    ],
+    "reviews": [],
+    "pr": {
+      "head": {
+        "sha": "head-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      },
+      "base": {
+        "sha": "base-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      }
+    }
+  },
+  "fixture": "superseded-head",
+  "description": "parity fixture for precheck-decision boundary (#674): superseded-head"
+}

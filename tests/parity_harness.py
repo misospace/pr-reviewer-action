@@ -562,7 +562,84 @@ TRUNCATION_BOUNDARY = Boundary(
     ),
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY)
+# ---------------------------------------------------------------------------
+# Boundary: precheck decision (#674)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_selection_unavailable(fixture: dict[str, Any], result: SideResult) -> SideResult:
+    """When the fixture declares a conservative selection-signature failure,
+    the broad fingerprint carries a per-run unique ``unavailable-…`` sentinel
+    inside its config hash — nondeterministic by design (it must never match
+    a stored marker). The observable contract is that the hash differs from
+    the stored one, so both sides' hash halves are normalized to a shared
+    placeholder. Any other value (the diff half, or a deterministic
+    signature) is compared as-is."""
+    if fixture.get("selection") != "unavailable" or not result.ok:
+        return result
+    values = dict(result.values)
+    fingerprint = str(values.get("diff_fingerprint", ""))
+    match = re.match(r"^(.*\|cfg:).*$", fingerprint, re.S)
+    if match:
+        values["diff_fingerprint"] = f"{match.group(1)}unavailable"
+    result.values = values
+    return result
+
+
+def run_v2_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    result = run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_precheck.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+    return _normalize_selection_unavailable(fixture, result)
+
+
+def run_v3_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    proc = subprocess.run(
+        [node, "dist/index.js", "precheck-fixture", str(_fixture_path(fixture))],
+        cwd=str(ROOT),
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        return SideResult(ok=False, error=proc.stderr.strip())
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    result = SideResult(ok=payload["ok"], values=payload.get("values", {}), error=payload.get("stderr"))
+    return _normalize_selection_unavailable(fixture, result)
+
+
+PRECHECK_CATEGORIES = (
+    (re.compile(r"Missing REPO or PR_NUMBER"), "missing-input"),
+    (re.compile(r"unsupported PLATFORM", re.IGNORECASE), "invalid-platform"),
+    (re.compile(r"Could not determine Forgejo permission"), "forgejo-permission-unknown"),
+    (re.compile(r"lacks Forgejo write permission"), "forgejo-permission-denied"),
+)
+
+PRECHECK_BOUNDARY = Boundary(
+    id="precheck-decision",
+    description=(
+        "Equivalent precheck decisions (#674): the v2 production path "
+        "(scripts/check_review_needed.sh + pr_reviewer.precheck + "
+        "build_selection_fingerprint, platform I/O via the real platform "
+        "seam) versus the v3 TypeScript platform adapters and precheck "
+        "decision modules, driven over the same fixture platform state. "
+        "Covers unchanged/changed fingerprints, linked-issue label and "
+        "Linear priority changes, failed metadata lookups, fork-disabled "
+        "private lookups, forced re-review, unrelated-label no-ops, "
+        "superseded heads, and GitHub vs Forgejo."
+    ),
+    fixtures_dir="precheck",
+    run=lambda fixture, workdir: (run_v2_precheck(fixture, workdir), run_v3_precheck(fixture, workdir)),
+    error_categories=PRECHECK_CATEGORIES,
+)
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY)
 
 
 # ---------------------------------------------------------------------------

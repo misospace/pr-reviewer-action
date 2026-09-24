@@ -239,6 +239,28 @@ mechanically scoped out of the config boundary and reported as
 (config.sh's `GH_TOKEN:-${GITHUB_TOKEN:-}` fallback). Numeric-class values
 compare by numeric equality; secrets compare by redacted presence only.
 
+### The `precheck-decision` boundary (#674)
+
+Compares the full precheck decision path: the v2 production stack
+(`scripts/check_review_needed.sh` + `pr_reviewer.precheck` +
+`scripts/build_selection_fingerprint.py`, with platform I/O served through
+the real platform seam stubs) versus the v3 TypeScript modules under
+`src/platform/` and `src/precheck/` (`node dist/index.js precheck-fixture`).
+Fixtures under `tests/fixtures/parity/precheck/` cover unchanged and changed
+fingerprints, changed linked-issue labels, changed Linear priority/labels,
+failed metadata lookups, fork-disabled private lookups, forced rereview,
+unrelated-label no-ops, superseded heads, and GitHub vs Forgejo — each
+compared over the exact `$GITHUB_OUTPUT` key/value surface.
+
+The selection-signature hash is compared byte-for-byte whenever the
+signature is determinate; when a fixture declares
+`"selection": "unavailable"`, the conservative per-run-unique sentinel makes
+the config-hash half nondeterministic by design (it must never match a
+stored marker), so both sides' hash half is normalized to a shared
+placeholder while the diff half and the forced-review decision still compare
+as-is. Error cases compare through the boundary's category table
+(missing input, unsupported platform, Forgejo permission refusal modes).
+
 ## Workflow examples
 
 ```yaml

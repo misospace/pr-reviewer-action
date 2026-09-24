@@ -1,0 +1,54 @@
+{
+  "env": {
+    "REPO": "misospace/demo",
+    "PR_NUMBER": "42",
+    "PUBLISH_MODE": "comment",
+    "AI_MODEL": "test-model",
+    "DEEP_REVIEW": "auto"
+  },
+  "selection": "unavailable",
+  "platform": {
+    "diff": "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+    "comments": [],
+    "reviews": [],
+    "pr": {
+      "title": "Fix ENG-42 bug",
+      "body": "Fixes #12",
+      "head": {
+        "sha": "head-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      },
+      "base": {
+        "sha": "base-abc",
+        "repo": {
+          "full_name": "misospace/demo"
+        }
+      }
+    },
+    "gh_api": {
+      "repos/misospace/demo/pulls/42": {
+        "title": "Fix ENG-42 bug",
+        "body": "Fixes #12",
+        "head": {
+          "sha": "head-abc",
+          "repo": {
+            "full_name": "misospace/demo"
+          }
+        },
+        "base": {
+          "sha": "base-abc",
+          "repo": {
+            "full_name": "misospace/demo"
+          }
+        }
+      },
+      "repos/misospace/demo/issues/12": {
+        "error": "GitHub API error: 500"
+      }
+    }
+  },
+  "fixture": "auto-linked-issue-failure",
+  "description": "parity fixture for precheck-decision boundary (#674): auto-linked-issue-failure"
+}
