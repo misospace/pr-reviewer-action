@@ -37,8 +37,6 @@ const GRACE_POLL_MS = 50;
 /** Short settle window after the KILL phase before declaring survivors. */
 const KILL_SETTLE_MS = 150;
 
-let pgrepAvailability: Promise<boolean> | null = null;
-
 /**
  * Probe `pgrep` availability. NOT cached across calls: a once-per-process
  * cache would let a later-unavailable pgrep silently degrade the sweep while

@@ -50,10 +50,16 @@ export interface ProcessResult {
 }
 
 export interface ProcessHandle {
-  /** Leader PID, or null when nothing was launched. */
+  /** Leader PID, or null when nothing was launched (yet, or refused). */
   pid: number | null;
   result: Promise<ProcessResult>;
-  /** Set synchronously when the launch was refused before spawn. */
+  /**
+   * Resolves once the launch attempt itself completed — spawned, or refused
+   * (async refusals such as the pgrep preflight settle here, not just the
+   * synchronous ones). Await this before reading `launchRefusal`.
+   */
+  launched: Promise<void>;
+  /** Set when the launch was refused before spawn (sync or async preflight). */
   launchRefusal: string | null;
   /** Terminate the whole tree now. Idempotent. */
   abort(): Promise<void>;
@@ -80,6 +86,12 @@ export const DEFAULT_TERMINATE_GRACE_MS = 2_000;
 /** After the leader exits, stray pipe holders get this long before streams are cut. */
 const EXIT_STREAM_DRAIN_MS = 1_000;
 
+interface CaptureTarget {
+  chunks: Buffer[];
+  bytes: number;
+  truncated: boolean;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -91,14 +103,10 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
   const maxBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const startedAt = Date.now();
 
-interface CaptureTarget {
-  chunks: Buffer[];
-  bytes: number;
-  truncated: boolean;
-}
-
-const stdoutCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
-const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
+  // Per-call capture state — deliberately NOT module-scoped: concurrent
+  // runProcess calls must never share capture buffers.
+  const stdoutCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
+  const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
 
   let child: ChildProcess | null = null;
   let settled = false;
@@ -211,36 +219,45 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
     launchRefusal: null,
   };
 
+  let resolveLaunched!: () => void;
+  const launchedPromise = new Promise<void>((resolve) => {
+    resolveLaunched = resolve;
+  });
+
   // The launch is async because the pgrep preflight is: every tree-owning
   // child refuses to start when descendant cleanup cannot be guaranteed.
   // This is the shared boundary — the evidence-provider path reaches
   // runProcess directly (no gate preflight ahead of it), so the invariant
   // must live here, not at each call site.
   const launch = async (): Promise<void> => {
-    if (!(await pgrepAvailable())) {
-      const refusal =
-        "pgrep is required to guarantee descendant cleanup for tree-owning children; install procps (pgrep) on the runner";
-      state.launchRefusal = refusal;
-      settle(() => spawnErrorResult(`${options.file}: ${refusal}`));
-      return;
-    }
-    // A cancel that arrived while the probe ran must never spawn the
-    // workload: check-then-spawn is one synchronous block.
-    if (terminateReason !== null) {
-      const refusal = `${options.file}: cancelled before launch (${terminateReason})`;
-      state.launchRefusal = refusal;
-      settle(() => spawnErrorResult(refusal));
-      return;
-    }
+    try {
+      if (!(await pgrepAvailable())) {
+        const refusal =
+          "pgrep is required to guarantee descendant cleanup for tree-owning children; install procps (pgrep) on the runner";
+        state.launchRefusal = refusal;
+        settle(() => spawnErrorResult(`${options.file}: ${refusal}`));
+        return;
+      }
+      // A cancel that arrived while the probe ran must never spawn the
+      // workload: check-then-spawn is one synchronous block.
+      if (terminateReason !== null) {
+        const refusal = `${options.file}: cancelled before launch (${terminateReason})`;
+        state.launchRefusal = refusal;
+        settle(() => spawnErrorResult(refusal));
+        return;
+      }
 
-    child = spawn(options.file, options.args ?? [], {
-      detached: true,
-      cwd: options.cwd,
-      env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    state.pid = child.pid ?? null;
+      child = spawn(options.file, options.args ?? [], {
+        detached: true,
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      state.pid = child.pid ?? null;
+    } finally {
+      resolveLaunched();
+    }
 
     child.stdout?.on("data", (chunk: Buffer) => {
       collectChunk(stdoutCapture, chunk);
@@ -303,6 +320,7 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
     get pid(): number | null {
       return state.pid;
     },
+    launched: launchedPromise,
     get launchRefusal(): string | null {
       return state.launchRefusal;
     },
@@ -324,6 +342,7 @@ const stderrCapture: CaptureTarget = { chunks: [], bytes: 0, truncated: false };
 function refusedHandle(refusal: string, result: ProcessResult): ProcessHandle {
   return {
     pid: null,
+    launched: Promise.resolve(),
     launchRefusal: refusal,
     result: Promise.resolve(result),
     abort: () => Promise.resolve(),

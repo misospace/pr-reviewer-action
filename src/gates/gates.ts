@@ -176,21 +176,26 @@ export async function runConcurrentGates(
   const ciHandle = options.ci ? launch("ci", options.ci) : null;
   const specialistHandle = options.specialists ? launch("specialists", options.specialists) : null;
 
-  // Launch refusals are loud: terminate any sibling that already launched,
-  // reap it, then fail. Never enter concurrency with a hole in ownership.
-  for (const [gate, handle] of [
-    ["ci", ciHandle],
-    ["specialists", specialistHandle],
-  ] as const) {
-    if (handle !== null && handle.launchRefusal !== null) {
-      const refusal: string = handle.launchRefusal;
-      const siblings = [ciHandle, specialistHandle].filter(
-        (candidate): candidate is ProcessHandle =>
-          candidate !== null && candidate !== handle,
-      );
+  // Launch refusals are loud — including the async pgrep-refusal path: wait
+  // for both launch attempts to complete (this is the fork attempt, not the
+  // workload join — the branches keep running concurrently), then check. If
+  // pgrep vanished between the preflight and a branch's own preflight, the
+  // refusal surfaces here and the sibling tree is terminated, instead of the
+  // run silently degrading to fail-soft spawn_error outcomes.
+  const branches = [
+    { gate: "ci" as const, handle: ciHandle },
+    { gate: "specialists" as const, handle: specialistHandle },
+  ];
+  await Promise.all(branches.map((branch) => (branch.handle ? branch.handle.launched : null)));
+  for (const branch of branches) {
+    if (branch.handle !== null && branch.handle.launchRefusal !== null) {
+      const refusal: string = branch.handle.launchRefusal;
+      const siblings = branches
+        .map((candidate) => candidate.handle)
+        .filter((candidate): candidate is ProcessHandle => candidate !== null && candidate !== branch.handle);
       for (const sibling of siblings) await sibling.abort();
       await Promise.allSettled(siblings.map((sibling) => sibling.result));
-      throw new GateLaunchError(gate, refusal);
+      throw new GateLaunchError(branch.gate, refusal);
     }
   }
 

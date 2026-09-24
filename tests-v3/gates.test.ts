@@ -34,14 +34,16 @@ const ambientBase: NodeJS.ProcessEnv = {
 test("gates compose concurrently: wall clock near max, not the sum", async () => {
   const startedAt = Date.now();
   const result = await runConcurrentGates({
-    ci: sleepBranch(2),
-    specialists: sleepBranch(0.5),
+    ci: sleepBranch(3),
+    specialists: sleepBranch(1),
     ambientEnv: ambientBase,
   });
   const elapsed = Date.now() - startedAt;
-  // max = 2000ms, sum = 2500ms; generous margins for loaded runners (the
-  // test runner executes files concurrently).
-  assert.ok(elapsed >= 1950 && elapsed < 2350, `elapsed ${elapsed}ms must be near max(2000), not sum(2500)`);
+  // max = 3000ms, sum = 4000ms — the same margins as the bash
+  // test_concurrent_gating.sh composition cases, for the same reason: sleep
+  // can only overshoot under load, so the window must tolerate ~600ms of
+  // runner contention while still excluding the sum.
+  assert.ok(elapsed >= 2950 && elapsed < 3600, `elapsed ${elapsed}ms must be near max(3000), not sum(4000)`);
   assert.equal(result.ci.ok, true);
   assert.equal(result.specialists.ok, true);
 });
@@ -231,6 +233,57 @@ test("both gates disabled succeeds even without pgrep (v2 no-op parity)", async 
   assert.equal(probe.ok, true, "disabled gates are a no-op fast path even without pgrep");
   assert.equal(probe.ci?.ran, false);
   assert.equal(probe.specialists?.ran, false);
+});
+
+test("async pgrep refusal after a passing preflight is still loud (GateLaunchError)", async () => {
+  // A self-removing fake pgrep: the gates preflight probe (call 1) succeeds,
+  // then the binary is gone, so each branch's own runProcess preflight (the
+  // async refusal path) fails. The gates must throw GateLaunchError — not
+  // degrade to fail-soft spawn_error outcomes.
+  const dir = mkdtempSync(join(tmpdir(), "v3-async-refusal-"));
+  mkdirSync(dir, { recursive: true });
+  const fakePgrep = join(dir, "pgrep");
+  // The fake runs with PATH=dir only, so every command it needs must be an
+  // absolute path (it removes itself after the first invocation).
+  writeFileSync(
+    fakePgrep,
+    "#!/bin/sh\n/bin/sleep 0.05\n/bin/rm -f \"$0\"\nexit 0\n",
+    { mode: 0o755 },
+  );
+  const scriptPath = join(dir, "probe.cjs");
+  const buildDir = join(process.cwd(), ".test-build", "src", "gates");
+  writeFileSync(
+    scriptPath,
+    `
+    const path = require('path');
+    const { runConcurrentGates } = require(path.join(${JSON.stringify(buildDir)}, 'gates.js'));
+    runConcurrentGates({
+      ci: { file: 'bash', args: ['-c', 'exit 0'], envAllowlist: ['PATH'] },
+      specialists: { file: 'bash', args: ['-c', 'exit 0'], envAllowlist: ['PATH'] },
+      ambientEnv: { PATH: ${JSON.stringify(dir)}, HOME: '' },
+    }).then(
+      (r) => process.stdout.write(JSON.stringify({ ok: true, r }), () => process.exit(0)),
+      (e) => process.stdout.write(JSON.stringify({ ok: false, name: e.name, gate: e.gate, message: e.message }), () => process.exit(0)),
+    );
+  `,
+  );
+  const handle = runProcess({
+    file: execPath,
+    args: [scriptPath],
+    env: { PATH: dir, HOME: ambientBase.HOME ?? "" },
+    timeoutMs: 20_000,
+  });
+  const probeResult = await handle.result;
+  assert.equal(probeResult.status, "exited");
+  const probe = JSON.parse(probeResult.stdout.toString("utf8")) as {
+    ok: boolean;
+    name?: string;
+    gate?: string;
+    message?: string;
+  };
+  assert.equal(probe.ok, false, "the run must not continue with fail-soft spawn_error outcomes");
+  assert.equal(probe.name, "GateLaunchError");
+  assert.match(probe.message ?? "", /pgrep is required/);
 });
 
 test("launch refusal is loud: GateLaunchError thrown, sibling terminated", async () => {
