@@ -63,7 +63,7 @@ test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () 
   for (const hostile of [
     "evil-docker.io/o/app", "evil-ghcr.io/o/app", "docker.io.evil/o/app",
     "ghcr.io@evil.example/o/app", "ghcr.io/o%2fother/app", "ghcr.io/o/../app",
-    "ghcr.io/o//app", "ghcr.io/o/app?next=evil",
+    "ghcr.io/o//app", "ghcr.io/o/%2e%2e/app", "ghcr.io/o/%00app", "ghcr.io/o/app?next=evil",
   ]) {
     assert.throws(() => registryTargets(hostile), /invalid repository path|unsupported registry/);
     assert.equal(guessRepoFromImage(hostile), null);
@@ -74,6 +74,15 @@ test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () 
 test("fetch shapes registry payloads into label provenance and surfaces errors", async () => {
   const { fetchDigestMetadata } = await import("../src/context/index.js");
   const urls: string[] = [];
+  for (const repo of ["ghcr.io/o/%2e%2e/app", "ghcr.io/o/%00app", "ghcr.io/o//app"]) {
+    let called = false;
+    const invalid = await fetchDigestMetadata(repo, D1, async () => {
+      called = true;
+      throw new Error("unexpected request");
+    });
+    assert.equal(called, false);
+    assert.match(invalid.error ?? "", /invalid repository path/);
+  }
   const meta = await fetchDigestMetadata("ghcr.io/o/img", D1, async (url) => {
     urls.push(url);
     if (url.includes("/token")) return { token: "t" };

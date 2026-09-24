@@ -174,6 +174,8 @@ class TestResolveCompareRepo:
             "ghcr.io/acme%2fother/app",
             "ghcr.io/acme/../app",
             "ghcr.io/acme//app",
+            "ghcr.io/acme/%2e%2e/app",
+            "ghcr.io/acme/%00app",
             "ghcr.io/acme/app?next=evil",
         ],
     )
@@ -190,10 +192,32 @@ class TestResolveCompareRepo:
             "ghcr.io@evil.example/acme/app",
             "ghcr.io/acme%2fother/app",
             "ghcr.io/acme/../app",
+            "ghcr.io/acme//app",
+            "ghcr.io/acme/%2e%2e/app",
+            "ghcr.io/acme/%00app",
         ],
     )
     def test_image_heuristic_rejects_misleading_hosts_and_paths(self, repo):
         assert ida.guess_repo_from_image(repo) is None
+
+    @pytest.mark.parametrize(
+        "repo",
+        [
+            "ghcr.io/acme/%2e%2e/app",
+            "ghcr.io/acme/%00app",
+            "ghcr.io/acme//app",
+        ],
+    )
+    def test_fetch_invalid_repository_never_calls_http(self, repo):
+        def fail_http_json(url, headers=None):
+            raise AssertionError(f"network should not be touched for {repo}: {url}")
+
+        with mock.patch.object(ida, "http_json", fail_http_json):
+            result = ida.fetch_digest_metadata(repo, DIGEST_A)
+        assert "invalid repository path" in result["error"]
+
+    def test_docker_hub_single_name_uses_library_namespace(self):
+        assert ida.guess_repo_from_image("docker.io/nginx") == "library/nginx"
 
     def test_matching_labels(self):
         old = {"source": "https://github.com/acme/app"}
