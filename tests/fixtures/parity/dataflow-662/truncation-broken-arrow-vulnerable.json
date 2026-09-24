@@ -1,0 +1,19 @@
+{
+  "fixture": "truncation-broken-arrow-vulnerable",
+  "description": "The reconstructed pre-fix broken-arrow branch (#662) against the production implementation on the same input. The fixture declares its expected divergence signature: every key that must drift, with the exact old/new values, and nothing beyond them. Missing declared drift, a changed drift value, or any undeclared extra drift fails the run.",
+  "source": "#662 scenario 6892 counterexample; vulnerable variant reconstructed identically to tests/test_issue_662_dataflow.py",
+  "content": "many bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\n",
+  "budget": 3,
+  "marker": "oversized marker",
+  "sides": {
+    "old": { "variant": "production" },
+    "new": { "variant": "vulnerable" }
+  },
+  "expected": {
+    "outcome": "drift",
+    "divergences": [
+      { "key": "output_bytes", "old": "3", "new": "18" },
+      { "key": "output_sha256", "old": "ab5df625bc76dbd4e163bed2dd888df828f90159bb93556525c31821b6541d46", "new": "768a074f1b83eadee13eac33417b2c87618148b3124a085f7075a305d859c3de" }
+    ]
+  }
+}

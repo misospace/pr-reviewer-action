@@ -1,0 +1,16 @@
+{
+  "fixture": "empty-temperature-omitted",
+  "description": "An explicitly empty ai_temperature means 'omit the field' on both sides (bash keeps the empty string; the v3 loader special-cases ai-temperature).",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_temperature": ""
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "fixture": "invalid-integers",
+  "description": "v2 degrades malformed or out-of-range numeric inputs to their defaults with an ERROR log and continues; the v3 contract rejects them at resolution time.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_max_tokens": "12foo",
+    "ai_temperature": "warm",
+    "tool_min_successful_requests": "-2",
+    "repo_map_max_bytes": "200001"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "fixture": "invalid-api-format",
+  "description": "An unrecognizable api format is rejected by both sides (v2 config.sh exits after the normalize_api_format guard; v3 loadConfig throws) with the same error category.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_api_format": "provider"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

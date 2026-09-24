@@ -1,0 +1,33 @@
+{
+  "fixture": "explicit-values",
+  "description": "Explicit typed values across boolean, integer, enum, and string classes: both sides must resolve the same config surface.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "7",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_max_tokens": "4096",
+    "ai_stream": "false",
+    "ai_api_format": "anthropic",
+    "inline_findings_max": "5",
+    "ai_primary_retries": "3",
+    "ai_primary_retry_delay_sec": "7",
+    "deep_review": "auto",
+    "review_routing_mode": "auto",
+    "context_limit_mode": "low",
+    "model_context_tokens": "200000",
+    "primary_request_shape": "trailing_task",
+    "tool_mode": "native_loop",
+    "publish_mode": "review_verdict",
+    "verdict_policy": "findings_severity_gated",
+    "upstream_link_mode": "togithub",
+    "linear_issue_prefixes": "ENG-1,ENG-2",
+    "repo_map_max_bytes": "9000",
+    "pr_thread_max_bytes": "4000"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "7"
+  }
+}

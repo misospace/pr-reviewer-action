@@ -1,0 +1,14 @@
+{
+  "fixture": "missing-required",
+  "description": "ai_base_url unset: v2 fails the required-environment guard, v3 fails the required-input check — same error category.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_model": "primary-model"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

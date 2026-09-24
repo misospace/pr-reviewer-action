@@ -1,0 +1,15 @@
+{
+  "fixture": "empty-required",
+  "description": "ai_base_url explicitly empty: both sides reject it (an empty string cannot satisfy a required input).",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "",
+    "ai_model": "primary-model"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

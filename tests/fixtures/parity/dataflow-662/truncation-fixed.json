@@ -1,0 +1,12 @@
+{
+  "fixture": "truncation-fixed",
+  "description": "The production truncate_clean twice against the same oversized input: deterministic, byte-identical output at exactly the requested budget (#662 scenario 6892 domain).",
+  "source": "#662 broken-arrow counterexample domain; production wiring qualified by #698 (tests/test_issue_662_dataflow.py)",
+  "content": "many bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\n",
+  "budget": 3,
+  "marker": "oversized marker",
+  "sides": {
+    "old": { "variant": "production" },
+    "new": { "variant": "production" }
+  }
+}

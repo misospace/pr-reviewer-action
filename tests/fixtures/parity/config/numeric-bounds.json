@@ -1,0 +1,21 @@
+{
+  "fixture": "numeric-bounds",
+  "description": "Integer bounds that both sides enforce (repo-map/pr-thread byte caps) at their edges, plus pass-through integers the v2 pipeline does not clamp.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "repo_map_max_bytes": "200000",
+    "pr_thread_max_bytes": "1",
+    "deep_review_corpus_max_bytes": "500000",
+    "tool_max_requests": "2",
+    "tool_min_successful_requests": "0",
+    "ci_interval_sec": "15"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}
