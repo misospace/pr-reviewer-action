@@ -1,0 +1,13 @@
+{
+  "fixture": "truncation-broken-arrow-vulnerable",
+  "description": "The reconstructed pre-fix broken-arrow branch (#662) against the production implementation on the same input: the harness must detect the drift (the vulnerable variant emits a suffix larger than the requested budget) instead of normalizing it away.",
+  "source": "#662 scenario 6892 counterexample; vulnerable variant reconstructed identically to tests/test_issue_662_dataflow.py",
+  "expected": "drift",
+  "content": "many bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\nmany bytes\n",
+  "budget": 3,
+  "marker": "oversized marker",
+  "sides": {
+    "old": { "variant": "production" },
+    "new": { "variant": "vulnerable" }
+  }
+}

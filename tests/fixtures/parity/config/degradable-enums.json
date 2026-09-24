@@ -1,0 +1,19 @@
+{
+  "fixture": "degradable-enums",
+  "description": "v2 degrades unrecognized enum-shaped dials to their defaults with an ERROR log and continues the review; the v3 contract validates enums strictly at resolution time and rejects the input.",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_response_format": "json",
+    "verdict_policy": "strict",
+    "review_verbosity": "LOUD",
+    "tool_mode": "plan_execute_once"
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}

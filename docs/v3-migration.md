@@ -178,6 +178,53 @@ These v2 fields have no v3 ID or compatibility alias:
 The `tool_planning_*` inputs are currently deprecated fallback inputs in v2
 and are removed in v3. They are intentionally not copied into the v3 contract.
 
+## Parity harness (#673)
+
+The `tests/parity_harness.py` harness blocks the TypeScript cutover on
+observable behavior drift, not on source comparison or unit-test counts. It
+runs equivalent v2/v3 runtime stages against the same fixtures, normalizes
+only expected-to-vary nondeterministic values (temp paths, timestamps,
+durations, PIDs, request ids — never verdicts, risk flags, roles, corpus
+content, security-gate decisions, routing, or error categories), and emits a
+structured report naming the first divergent boundary.
+
+- **Boundaries** are declared in `BOUNDARIES` in the harness; each knows how
+  to run one fixture through both implementations. Currently:
+  `config-default-resolution` (v2: action.yml env-block expression resolution
+  plus `scripts/sections/config.sh` vs v3: the typed loader in
+  `dist/index.js`) and `dataflow-662-corpus-truncation` (the #662
+  broken-arrow counterexample: the vulnerable variant must fail parity, the
+  fixed variant must pass).
+- **Fixtures** live under `tests/fixtures/parity/<boundary>/*.json`. Later
+  migration tickets add fixtures for their boundary as JSON only — never
+  harness logic.
+- **Approved divergences** (`tests/fixtures/parity/approved-divergences.json`)
+  pin intentional v3 contract changes to the exact key with a stated reason.
+  Drift on any key without an entry fails the run; outcome-level drift is
+  only approvable when the fixture is pinned by named entries.
+- **Migration gates** run before the boundaries: the #698 production dataflow
+  qualification (`tests/test_issue_662_dataflow.py`) and the #661/#666
+  semantic qualification (`scripts/run_semantic_eval_ci.py` over
+  `evals/corpus-historical-dogfood.json`). A gate failure fails the harness;
+  the scorer is referenced, not duplicated.
+
+```bash
+python3 tests/parity_harness.py                      # gates + all boundaries
+python3 tests/parity_harness.py --report parity-report.json
+python3 tests/parity_harness.py --boundary config-default-resolution --skip-gates
+```
+
+Config-boundary notes: the v2 side replays the action.yml env-block
+expressions (plain `inputs.x`, `a || b` chains, the `x != '' && x || y`
+legacy-fallback idiom; `github.*` context terms come from the fixture's
+`ambient` map; unmodelable expressions are skipped and reported as
+`unresolved_bindings`). Inputs the v2 pipeline never transports through the
+resolved environment (it reads them from the raw input in later steps) are
+mechanically scoped out of the config boundary and reported as
+`excluded_keys`. The v2 `github_token` binding is compared through `GH_TOKEN`
+(config.sh's `GH_TOKEN:-${GITHUB_TOKEN:-}` fallback). Numeric-class values
+compare by numeric equality; secrets compare by redacted presence only.
+
 ## Workflow examples
 
 ```yaml

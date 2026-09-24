@@ -1,0 +1,31 @@
+{
+  "fixture": "tier-inheritance",
+  "description": "Empty fallback/primary/smart inputs inherit from the primary tier on both sides (v2: action.yml 'a || b' env expressions plus config.sh fallbacks; v3: resolveInherited).",
+  "raw": {
+    "github_token": "dummy-token",
+    "repo": "owner/repo",
+    "pr_number": "1",
+    "ai_base_url": "https://primary.example.com/v1",
+    "ai_model": "primary-model",
+    "ai_api_key": "primary-api-key-dummy",
+    "ai_stream": "false",
+    "ai_fallback_base_url": "",
+    "ai_fallback_api_key": "",
+    "ai_fallback_stream": "",
+    "ai_fallback_request_timeout_sec": "",
+    "ai_fallback_connect_timeout_sec": "",
+    "ai_primary_model": "",
+    "ai_primary_base_url": "",
+    "ai_primary_api_format": "",
+    "ai_primary_api_key": "",
+    "ai_smart_base_url": "https://smart.example.com/v1",
+    "ai_smart_api_format": "",
+    "ai_smart_api_key": "",
+    "primary_model_context_tokens": "",
+    "smart_model_context_tokens": ""
+  },
+  "ambient": {
+    "github.repository": "owner/repo",
+    "github.event.pull_request.number": "1"
+  }
+}
