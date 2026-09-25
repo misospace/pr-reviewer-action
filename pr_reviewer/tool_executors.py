@@ -506,13 +506,17 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
     path recoverable from the line — even a colon in the path can't confuse
     the ``file:lineno:content`` parsing.
 
-    Patterns use git's default (basic regular expression) matching, so
-    metacharacters like ``.`` and ``*`` are active — escape them for a literal
-    search. Both the pattern and the path are placed after ``--`` in an argv
-    list (never a shell string), so neither can be re-read as a git option.
+    Patterns use extended regular expressions (``-E``), the dialect models
+    write by default: ``a|b`` is alternation, not a literal pipe. Under git's
+    basic-regex default ``FOO|BAR`` silently matched nothing, and reviewers
+    reported symbols the diff plainly adds as absent. A pattern that is not a
+    valid ERE (``foo(``) is retried once as a fixed string and the result
+    carries a ``note`` saying so. Both the pattern and the path are placed
+    after ``--`` in an argv list (never a shell string), so neither can be
+    re-read as a git option.
     """
     max_results = clamp_grep_max_results(max_results)
-    args = ["git", "grep", "-n", "-z", "--", pattern]
+    args = ["git", "grep", "-n", "-z", "-E", "--", pattern]
     if path is None:
         # No explicit path: preserve the historical whole-worktree
         # invocation byte-for-byte (single ``--`` before the pattern, ``.``
@@ -537,14 +541,28 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
             text=True,
             timeout=request_timeout,
         )
+        note = None
         if result.returncode not in (0, 1):
-            return {"error": f"git grep failed: {result.stderr.strip()}"}
+            fixed = subprocess.run(
+                [*args[:4], "-F", *args[5:]],
+                cwd=workspace_root,
+                capture_output=True,
+                text=True,
+                timeout=request_timeout,
+            )
+            if fixed.returncode not in (0, 1):
+                return {"error": f"git grep failed: {result.stderr.strip()}"}
+            result = fixed
+            note = "pattern is not a valid extended regex; searched as a fixed string"
         # Parse all raw -z records before applying max_results. A path may
         # contain a newline, so splitting stdout into lines first would let a
         # sensitive descendant lose its path boundary before redaction.
         records = _parse_grep_z_records(result.stdout)
         matches = [_redact_grep_record(rec, workspace_root) for rec in records]
-        return {"matches": matches[:max_results]}
+        out = {"matches": matches[:max_results]}
+        if note:
+            out["note"] = note
+        return out
     except subprocess.TimeoutExpired:
         return {"error": f"git grep timed out after {request_timeout}s"}
     except Exception as exc:
@@ -929,6 +947,8 @@ def execute_tool_request(
             matches = res.get("matches", [])
             text, truncated = mask_and_truncate("\n".join(matches), max_response_bytes)
             tool_result["result"] = {"matches": text.splitlines(), "truncated": truncated}
+            if res.get("note"):
+                tool_result["result"]["note"] = res["note"]
 
         elif tool_name == "repo_contents":
             repo = args.get("repo", "")

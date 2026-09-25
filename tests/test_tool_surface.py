@@ -317,7 +317,7 @@ def test_git_grep_default_argv_preserved(git_repo):
         res = tool_executors.git_grep("pattern", str(git_repo))
     assert res == {"matches": []}
     mock_run.assert_called_once_with(
-        ["git", "grep", "-n", "-z", "--", "pattern", "."],
+        ["git", "grep", "-n", "-z", "-E", "--", "pattern", "."],
         cwd=str(git_repo),
         capture_output=True,
         text=True,
@@ -333,14 +333,14 @@ def test_git_grep_double_dash_argv_with_path(git_repo):
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         tool_executors.git_grep("p", str(git_repo), 15, path="sub")
     args = mock_run.call_args[0][0]
-    assert args[:6] == ["git", "grep", "-n", "-z", "--", "p"]
-    assert args[6] == "--"  # pathspec separator: a dash-leading path is safe
+    assert args[:7] == ["git", "grep", "-n", "-z", "-E", "--", "p"]
+    assert args[7] == "--"  # pathspec separator: a dash-leading path is safe
     expected = [
         "sub",
         (git_repo / "sub").resolve().as_posix(),
         str(git_repo / "sub"),
     ]
-    assert args[7] in expected
+    assert args[8] in expected
     assert "shell" not in mock_run.call_args[1]
 
 
@@ -418,6 +418,26 @@ def test_git_grep_no_match_ok_empty(git_repo):
     assert res["status"] == "ok"
     assert res["result"]["matches"] == []
 
+
+
+def test_git_grep_alternation_matches_either_branch(tmp_path):
+    # Models write ERE: "A|B" must alternate. Under basic regex the pipe was a
+    # literal and this returned nothing, which reviewers read as "symbol absent".
+    repo = _grep_repo(tmp_path, {"a.sh": "apply_fragments() {\n", "b.txt": "{{FALSIFICATION_GUIDANCE}}\n"})
+    res = _exec("git_grep", {"pattern": "FALSIFICATION_GUIDANCE|apply_fragments"}, repo)
+    assert res["status"] == "ok"
+    assert sorted(_split_match(m)[0] for m in res["result"]["matches"]) == ["a.sh", "b.txt"]
+    assert "note" not in res["result"]
+
+
+def test_git_grep_invalid_ere_falls_back_to_fixed_string(tmp_path):
+    # "foo(" is literal under basic regex but an unbalanced group under ERE;
+    # it must still find the call site rather than error.
+    repo = _grep_repo(tmp_path, {"a.py": "x = foo(1)\n", "b.py": "foo = 2\n"})
+    res = _exec("git_grep", {"pattern": "foo("}, repo)
+    assert res["status"] == "ok"
+    assert [_split_match(m) for m in res["result"]["matches"]] == [("a.py", "1", "x = foo(1)")]
+    assert "fixed string" in res["result"]["note"]
 
 # ── git_grep redaction + byte-bounding regressions (#568) ───────────────────
 #
