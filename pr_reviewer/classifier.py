@@ -247,30 +247,71 @@ _QUOTED_STATIC_LITERAL = re.compile(
     r"|`[^`$%{}]*`"
 )
 
-
-def _refuse_untrusted_anchor_neutralization(match: re.Match) -> str:
-    """Replacement callback for the trusted-anchor call patterns: neutralize
-    the matched call only when no untrusted-source token appears OUTSIDE its
-    quoted string literals. A call like
-    `os.path.join(__dirname, request.args["path"])` is an untrusted-path
-    surface and must stay in the scanned text."""
-    text = match.group(0)
-    static_text = _QUOTED_STATIC_LITERAL.sub('""', text)
-    if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
-        return text
-    return '""'
+# Simple assignment target: a leading identifier bound with `=` or `:=`
+# (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
+# marker is skipped). Deliberately NOT a general lvalue grammar — tuples,
+# subscripts, and attribute targets yield no one-hop edge.
+_UNTRUSTED_ASSIGNMENT = re.compile(
+    r"^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*:?="
+)
 
 
-def _neutralize_path_false_positives(line: str) -> str:
+def _one_hop_untrusted_targets(prev_line: str, next_line: str) -> list[str]:
+    """Assignment-target identifiers carried by adjacent untrusted-source
+    lines: the one-hop def/use candidates for the line being neutralized or
+    scanned. Bounded by construction (at most two neighbors)."""
+    targets: list[str] = []
+    for line in (prev_line, next_line):
+        if not any(pat.search(line) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            continue
+        m = _UNTRUSTED_ASSIGNMENT.match(line)
+        if m and m.group(1) not in targets:
+            targets.append(m.group(1))
+    return targets
+
+
+def _neutralize_path_false_positives(
+    line: str,
+    prev_line: str = "",
+    next_line: str = "",
+) -> str:
     """One diff line with trusted path scaffolding neutralized (replaced by
     an empty literal). Line structure is preserved: neutralization is
     literal-scoped, so material signals elsewhere on the same line still
-    match."""
+    match. The adjacent RAW lines feed the one-hop def/use check: an anchor
+    call is NOT neutralized when one of its operands is a variable that an
+    adjacent untrusted-source line assigns — otherwise
+    `name = request.args["path"]` / `path.resolve(__dirname, name)` would
+    lose its construction call before the untrusted-join scan sees it."""
+    one_hop = _one_hop_untrusted_targets(prev_line, next_line)
+
+    def _refuse(match: re.Match) -> str:
+        text = match.group(0)
+        static_text = _QUOTED_STATIC_LITERAL.sub('""', text)
+        if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            return text
+        if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
+            return text
+        return '""'
+
     line = _SPECIFIER_QUOTED.sub('""', line)
-    line = _ANCHOR_PATH_CALL.sub(_refuse_untrusted_anchor_neutralization, line)
-    line = _PATHLIB_ANCHOR_CHAIN.sub(_refuse_untrusted_anchor_neutralization, line)
+    line = _ANCHOR_PATH_CALL.sub(_refuse, line)
+    line = _PATHLIB_ANCHOR_CHAIN.sub(_refuse, line)
     line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
     return line
+
+
+def _neutralize_chunk_lines(lines: list[str]) -> list[str]:
+    """Neutralize a diff chunk line by line, feeding each line its adjacent
+    RAW neighbors for the one-hop untrusted-flow refusal."""
+    return [
+        _neutralize_path_false_positives(
+            line,
+            lines[index - 1] if index > 0 else "",
+            lines[index + 1] if index + 1 < len(lines) else "",
+        )
+        for index, line in enumerate(lines)
+    ]
 
 
 # Material content signal classes: each entry is (signal class, patterns).
@@ -313,13 +354,13 @@ PATH_HANDLING_CONTENT_CLASSES: list[tuple[str, list[re.Pattern]]] = [
 ]
 
 # Untrusted-source join: a path construction/consumption call that reaches a
-# request/user-controlled value. Requires BOTH sides within a ±1-line window
-# (deterministic, bounded) so either alone never fires: a constant-path join
-# is trusted bookkeeping, and a request dictionary in unrelated code is not a
-# path surface. Multi-line dataflow through a neutral variable name
-# (`name = request.args["path"]` … `os.path.join(base, name)`) stays within
-# the window; wider flows are the model reviewer's job, not the lexical
-# classifier's.
+# request/user-controlled value. Same-line construction with an untrusted
+# operand fires directly; for ADJACENT-line flow the rule is one-hop def/use,
+# not co-occurrence: the untrusted line must carry a simple assignment
+# (`name = request.args[...]`) whose exact target identifier the construction
+# line uses. An unrelated request/user/payload token near a constant join
+# never fires. Multi-hop flows through neutral intermediaries are the model
+# reviewer's job, not the lexical classifier's.
 PATH_CONSTRUCTION_PATTERNS = [
     re.compile(r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b", re.IGNORECASE),
     re.compile(r"\bPath\s*\("),  # pathlib constructor (case-sensitive)
@@ -478,7 +519,7 @@ def evaluate_path_handling_signals(
     for chunk_file, lines in _split_diff_chunks(diff_text):
         if not lines:
             continue
-        neutralized = [_neutralize_path_false_positives(line) for line in lines]
+        neutralized = _neutralize_chunk_lines(lines)
         if chunk_file is not None:
             is_test = _is_test_path(chunk_file)
         else:
@@ -496,17 +537,35 @@ def evaluate_path_handling_signals(
                 )
                 break  # one bucket entry per class per chunk; samples merge below
 
-        # Untrusted-source join: construction call + untrusted value in the
-        # same line or an adjacent line.
-        for index, line in enumerate(neutralized):
-            if not any(pat.search(line) for pat in PATH_CONSTRUCTION_PATTERNS):
+        # Untrusted-source join: same-line construction + untrusted operand
+        # fires directly; adjacent lines fire only on a one-hop def/use edge
+        # (the untrusted line's assignment target is used by the
+        # construction). Checks run on quote-stripped text (static string
+        # literals are not untrusted data; interpolation-shaped literals stay
+        # visible). Co-occurrence alone never fires.
+        for index, raw_line in enumerate(lines):
+            flow_text = _QUOTED_STATIC_LITERAL.sub('""', neutralized[index])
+            if not any(pat.search(flow_text) for pat in PATH_CONSTRUCTION_PATTERNS):
                 continue
-            window = "\n".join(neutralized[max(0, index - 1):index + 2])
-            if any(pat.search(window) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            if any(pat.search(flow_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
                 _record_signal(
                     buckets, "untrusted_source_join", source, chunk_file,
-                    _path_sample(lines[index]),
+                    _path_sample(raw_line),
                 )
+                continue
+            for adj_index in (index - 1, index + 1):
+                if not 0 <= adj_index < len(lines):
+                    continue
+                adj_line = lines[adj_index]
+                if not any(pat.search(adj_line) for pat in UNTRUSTED_SOURCE_PATTERNS):
+                    continue
+                m = _UNTRUSTED_ASSIGNMENT.match(adj_line)
+                if m and re.search(rf"\b{re.escape(m.group(1))}\b", flow_text):
+                    _record_signal(
+                        buckets, "untrusted_source_join", source, chunk_file,
+                        _path_sample(raw_line),
+                    )
+                    break
 
     return list(fired_buckets.values()), list(discounted_buckets.values())
 

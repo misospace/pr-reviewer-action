@@ -284,6 +284,59 @@ test("#749: anchor joins with demonstrably static arguments are trusted bookkeep
   assert.ok(!result.riskFlags.includes("path_handling_changes"));
 });
 
+test("#749: one-hop def/use into trusted-anchor constructions still fires", () => {
+  const cases: [string, string][] = [
+    ["path.resolve", "+name = request.args['path']\n+target = path.resolve(__dirname, name)\n"],
+    ["os.path.join dirname", "+name = request.args['path']\n+target = os.path.join(os.path.dirname(__file__), name)\n"],
+    ["pathlib joinpath", "+name = request.args['path']\n+out = Path(__file__).resolve().parent.joinpath(name)\n"],
+  ];
+  for (const [label, diff] of cases) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", label);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+      `${label}: expected an untrusted_source_join signal`,
+    );
+  }
+});
+
+test("#749: adjacency is not flow — unrelated request line near a constant join stays clean", () => {
+  const result = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+request_id = request.args['id']\n+target = os.path.join(base, 'static')\n",
+    linkedIssues: [],
+  });
+  assert.equal(result.prKind, "app_code");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+  assert.equal(result.pathHandlingProvenance.fired, false);
+  assert.deepEqual(result.pathHandlingProvenance.signals, []);
+
+  // An untrusted token nearby without an assignment target yields no edge.
+  const noAssignment = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+log.info('request received: %s', sid)\n+target = os.path.join(base, 'static')\n",
+    linkedIssues: [],
+  });
+  assert.equal(noAssignment.prKind, "app_code");
+
+  // A static string literal containing untrusted vocabulary is data.
+  const quoted = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+target = os.path.join(base, "request")\n',
+    linkedIssues: [],
+  });
+  assert.equal(quoted.prKind, "app_code");
+
+  // An adjacent assignment from a NON-untrusted source is no edge either.
+  const nonUntrusted = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+title = config['title']\n+templates = path.resolve(__dirname, title)\n",
+    linkedIssues: [],
+  });
+  assert.equal(nonUntrusted.prKind, "app_code");
+  assert.equal(nonUntrusted.pathHandlingProvenance.fired, false);
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],

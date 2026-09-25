@@ -160,3 +160,32 @@ def test_anchor_join_with_untrusted_operand_fires(tmp_path) -> None:
         signal["signal"] == "untrusted_source_join"
         for signal in result["path_handling_provenance"]["signals"]
     )
+
+
+def test_anchor_call_with_adjacent_one_hop_variable_fires(tmp_path) -> None:
+    # One-hop def/use into an anchor construction: the neutralization must be
+    # refused when the operand is assigned by an adjacent untrusted line.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+name = request.args['path']\n"
+        "+target = os.path.join(os.path.dirname(__file__), name)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )
+
+
+def test_unrelated_adjacent_request_line_does_not_fire(tmp_path) -> None:
+    # Adjacency is not flow: the constant join never uses `request_id`.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+request_id = request.args['id']\n"
+        "+target = os.path.join(base, 'static')\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert "path_handling_changes" not in result["risk_flags"]
+    assert result["path_handling_provenance"]["fired"] is False

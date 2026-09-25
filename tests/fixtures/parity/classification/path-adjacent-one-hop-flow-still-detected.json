@@ -1,0 +1,10 @@
+{
+  "fixture": "path-adjacent-one-hop-flow-still-detected",
+  "description": "#749 one-hop def/use regressions: an untrusted-source assignment one line above a path construction must fire even when the construction is a trusted-anchor call (path.resolve(__dirname, name), os.path.join(os.path.dirname(__file__), name), a pathlib chain joinpath) — the anchor neutralization must be refused so the construction survives to be scanned. The plain non-anchor one-hop join keeps firing under the tightened def/use rule.",
+  "pr_files": [
+    { "filename": "src/app/flow.py", "status": "modified", "additions": 2 },
+    { "filename": "src/app/flow.ts", "status": "modified", "additions": 2 }
+  ],
+  "diff": "diff --git a/src/app/flow.py b/src/app/flow.py\n+++ b/src/app/flow.py\n@@ -1,2 +1,4 @@\n+name = request.args[\"path\"]\n+target = os.path.join(os.path.dirname(__file__), name)\ndiff --git a/src/app/flow.ts b/src/app/flow.ts\n+++ b/src/app/flow.ts\n@@ -1,2 +1,4 @@\n+const requested = req.query.path;\n+const resolved = path.resolve(__dirname, requested);\n",
+  "linked_issues": []
+}

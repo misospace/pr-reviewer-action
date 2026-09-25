@@ -1,0 +1,10 @@
+{
+  "fixture": "path-unrelated-adjacency-not-path-handling",
+  "description": "#749 adjacency-is-not-flow negative controls: an adjacent untrusted-source assignment whose target the construction never uses (request_id near a constant join), an untrusted token with no assignment target at all, and a trusted-anchor call whose operand is assigned from a NON-untrusted adjacent line are all trusted/clean — path_handling must not fire and the provenance artifact stays empty. Co-occurrence never substitutes for the one-hop def/use edge.",
+  "pr_files": [
+    { "filename": "src/app/clean.py", "status": "modified", "additions": 2 },
+    { "filename": "src/app/clean.ts", "status": "modified", "additions": 2 }
+  ],
+  "diff": "diff --git a/src/app/clean.py b/src/app/clean.py\n+++ b/src/app/clean.py\n@@ -1,2 +1,4 @@\n+request_id = request.args[\"id\"]\n+target = os.path.join(base, \"static\")\ndiff --git a/src/app/clean.ts b/src/app/clean.ts\n+++ b/src/app/clean.ts\n@@ -1,2 +1,4 @@\n+const title = config.title;\n+const templates = path.resolve(__dirname, title);\n",
+  "linked_issues": []
+}

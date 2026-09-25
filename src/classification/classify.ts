@@ -196,27 +196,68 @@ const ANCHOR_PATH_CALL =
  * untrusted-token check (fail toward detection). */
 const QUOTED_STATIC_LITERAL = /"[^"$%{}]*"|'[^'$%{}]*'|`[^`$%{}]*`/g;
 
-/** Replacement callback for the trusted-anchor call patterns: neutralize the
- * matched call only when no untrusted-source token appears OUTSIDE its quoted
- * string literals. A call like
- * `os.path.join(__dirname, request.args["path"])` is an untrusted-path
- * surface and must stay in the scanned text. */
-function refuseUntrustedAnchorNeutralization(match: string): string {
-  const staticText = match.replace(QUOTED_STATIC_LITERAL, '""');
-  if (matchesAny(staticText, UNTRUSTED_SOURCE_PATTERNS)) return match;
-  return '""';
+/** Simple assignment target: a leading identifier bound with `=` or `:=`
+ * (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
+ * marker is skipped). Deliberately NOT a general lvalue grammar — tuples,
+ * subscripts, and attribute targets yield no one-hop edge. */
+const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*:?=/;
+
+/** Assignment-target identifiers carried by adjacent untrusted-source lines:
+ * the one-hop def/use candidates for the line being neutralized or scanned.
+ * Bounded by construction (at most two neighbors). */
+function oneHopUntrustedTargets(prevLine: string, nextLine: string): string[] {
+  const targets: string[] = [];
+  for (const line of [prevLine, nextLine]) {
+    if (!matchesAny(line, UNTRUSTED_SOURCE_PATTERNS)) continue;
+    const m = UNTRUSTED_ASSIGNMENT.exec(line);
+    if (m && m[1] && !targets.includes(m[1])) targets.push(m[1]);
+  }
+  return targets;
 }
 
-function neutralizePathFalsePositives(line: string): string {
+/** Escape-free word-boundary membership: `ident` is `[A-Za-z_]\w*` by
+ * construction, so the pattern has no metacharacters. */
+function mentionsIdentifier(text: string, ident: string): boolean {
+  return new RegExp(`\\b${ident}\\b`).test(text);
+}
+
+function neutralizePathFalsePositives(
+  line: string,
+  prevLine = "",
+  nextLine = "",
+): string {
   /** One diff line with trusted path scaffolding neutralized (replaced by
    * an empty literal). Line structure is preserved: neutralization is
    * literal-scoped, so material signals elsewhere on the same line still
-   * match. */
+   * match. The adjacent RAW lines feed the one-hop def/use check: an anchor
+   * call is NOT neutralized when one of its operands is a variable that an
+   * adjacent untrusted-source line assigns — otherwise
+   * `name = request.args["path"]` / `path.resolve(__dirname, name)` would
+   * lose its construction call before the untrusted-join scan sees it. */
+  const oneHop = oneHopUntrustedTargets(prevLine, nextLine);
+  const refuse = (match: string): string => {
+    const staticText = match.replace(QUOTED_STATIC_LITERAL, '""');
+    if (matchesAny(staticText, UNTRUSTED_SOURCE_PATTERNS)) return match;
+    if (oneHop.some((ident) => mentionsIdentifier(staticText, ident))) return match;
+    return '""';
+  };
   return line
     .replace(SPECIFIER_QUOTED, '""')
-    .replace(ANCHOR_PATH_CALL, (m) => refuseUntrustedAnchorNeutralization(m))
-    .replace(PATHLIB_ANCHOR_CHAIN, (m) => refuseUntrustedAnchorNeutralization(m))
+    .replace(ANCHOR_PATH_CALL, refuse)
+    .replace(PATHLIB_ANCHOR_CHAIN, refuse)
     .replace(TRUSTED_ANCHOR_TOKEN, '""');
+}
+
+function neutralizeChunkLines(lines: string[]): string[] {
+  /** Neutralize a diff chunk line by line, feeding each line its adjacent
+   * RAW neighbors for the one-hop untrusted-flow refusal. */
+  return lines.map((line, index) =>
+    neutralizePathFalsePositives(
+      line,
+      index > 0 ? lines[index - 1] ?? "" : "",
+      index + 1 < lines.length ? lines[index + 1] ?? "" : "",
+    ),
+  );
 }
 
 /** Material content signal classes: each entry is (signal class, patterns).
@@ -257,13 +298,13 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
 ];
 
 /** Untrusted-source join: a path construction/consumption call that reaches a
- * request/user-controlled value. Requires BOTH sides within a ±1-line window
- * (deterministic, bounded) so either alone never fires: a constant-path join
- * is trusted bookkeeping, and a request dictionary in unrelated code is not a
- * path surface. Multi-line dataflow through a neutral variable name
- * (`name = request.args["path"]` … `os.path.join(base, name)`) stays within
- * the window; wider flows are the model reviewer's job, not the lexical
- * classifier's. */
+ * request/user-controlled value. Same-line construction with an untrusted
+ * operand fires directly; for ADJACENT-line flow the rule is one-hop def/use,
+ * not co-occurrence: the untrusted line must carry a simple assignment
+ * (`name = request.args[...]`) whose exact target identifier the construction
+ * line uses. An unrelated request/user/payload token near a constant join
+ * never fires. Multi-hop flows through neutral intermediaries are the model
+ * reviewer's job, not the lexical classifier's. */
 const PATH_CONSTRUCTION_PATTERNS: readonly RegExp[] = [
   /os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b/i,
   /\bPath\s*\(/, // pathlib constructor (case-sensitive)
@@ -440,7 +481,7 @@ export function evaluatePathHandlingSignals(
     filenames.length > 0 && filenames.every((name) => isTestPath(name));
   for (const [chunkFile, lines] of splitDiffChunks(diffText)) {
     if (lines.length === 0) continue;
-    const neutralized = lines.map((line) => neutralizePathFalsePositives(line));
+    const neutralized = neutralizeChunkLines(lines);
     const isTest =
       chunkFile !== null ? isTestPath(chunkFile) : allFilesAreTests;
     const buckets = isTest ? discountedBuckets : firedBuckets;
@@ -454,13 +495,29 @@ export function evaluatePathHandlingSignals(
       }
     }
 
-    // Untrusted-source join: construction call + untrusted value in the
-    // same line or an adjacent line.
-    for (let index = 0; index < neutralized.length; index++) {
-      if (!matchesAny(neutralized[index] ?? "", PATH_CONSTRUCTION_PATTERNS)) continue;
-      const window = neutralized.slice(Math.max(0, index - 1), index + 2).join("\n");
-      if (matchesAny(window, UNTRUSTED_SOURCE_PATTERNS)) {
-        recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(lines[index] ?? ""));
+    // Untrusted-source join: same-line construction + untrusted operand
+    // fires directly; adjacent lines fire only on a one-hop def/use edge
+    // (the untrusted line's assignment target is used by the construction).
+    // Checks run on quote-stripped text (static string literals are not
+    // untrusted data; interpolation-shaped literals stay visible).
+    // Co-occurrence alone never fires.
+    for (let index = 0; index < lines.length; index++) {
+      const rawLine = lines[index] ?? "";
+      const flowText = (neutralized[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
+      if (!matchesAny(flowText, PATH_CONSTRUCTION_PATTERNS)) continue;
+      if (matchesAny(flowText, UNTRUSTED_SOURCE_PATTERNS)) {
+        recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
+        continue;
+      }
+      for (const adjIndex of [index - 1, index + 1]) {
+        if (adjIndex < 0 || adjIndex >= lines.length) continue;
+        const adjLine = lines[adjIndex] ?? "";
+        if (!matchesAny(adjLine, UNTRUSTED_SOURCE_PATTERNS)) continue;
+        const m = UNTRUSTED_ASSIGNMENT.exec(adjLine);
+        if (m && m[1] && mentionsIdentifier(flowText, m[1])) {
+          recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
+          break;
+        }
       }
     }
   }

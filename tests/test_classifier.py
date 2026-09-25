@@ -812,6 +812,63 @@ class TestPathHandlingSignalModel:
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
+    # -- One-hop def/use into trusted-anchor constructions -------------------
+
+    def test_anchor_call_with_adjacent_one_hop_variable_fires(self):
+        # The anchor call must NOT be neutralized when one of its operands is
+        # assigned by an adjacent untrusted-source line: the construction
+        # must survive to be detected.
+        diff = "+name = request.args['path']\n+target = path.resolve(__dirname, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_anchor_join_with_adjacent_one_hop_variable_fires(self):
+        diff = "+name = request.args['path']\n+target = os.path.join(os.path.dirname(__file__), name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_pathlib_chain_with_adjacent_one_hop_variable_fires(self):
+        diff = "+name = request.args['path']\n+out = Path(__file__).resolve().parent.joinpath(name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_trusted_anchor_with_non_untrusted_adjacent_identifier_stays_clean(self):
+        # The adjacent assignment exists but its line carries no untrusted
+        # token — no one-hop edge, the anchor call stays trusted bookkeeping.
+        diff = "+title = config['title']\n+templates = path.resolve(__dirname, title)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    # -- Adjacency is not flow (co-occurrence false positive) ----------------
+
+    def test_unrelated_adjacent_request_line_does_not_fire(self):
+        # `request_id` is assigned from a request one line above, but the
+        # constant join never uses it — adjacency alone is not flow.
+        diff = "+request_id = request.args['id']\n+target = os.path.join(base, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["signals"] == []
+
+    def test_unrelated_adjacent_token_without_assignment_does_not_fire(self):
+        # An untrusted token nearby with no assignment target yields no
+        # one-hop edge either.
+        diff = "+log.info('request received: %s', sid)\n+target = os.path.join(base, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_same_line_quoted_untrusted_word_does_not_fire(self):
+        # A static string literal containing untrusted vocabulary is data,
+        # not an operand.
+        diff = '+target = os.path.join(base, "request")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
     def test_user_controlled_path_constructor_fires(self):
         diff = "+dest = pathlib.Path(user_input)\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
