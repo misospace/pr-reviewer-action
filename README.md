@@ -77,6 +77,7 @@ jobs:
 - [Validation](#-validation)
 - [Version pinning and releases](#-version-pinning-and-releases)
 - [Security](#-security)
+- [Fork PR reviews](#-fork-pr-reviews)
 
 ## ⚙️ How it works
 
@@ -1170,6 +1171,16 @@ Stop reading the removed incremental outputs (`effective_review_scope`, `previou
 ## 🔐 Security
 
 See [SECURITY.md](SECURITY.md) for the threat model, controls, and operational guidance.
+
+### Fork PR reviews
+
+Pull requests from forks are reviewed by a separate, privilege-separated
+workflow (`fork-ai-review.yaml`): default-deny behind the maintainer-only
+`ai-review-fork` label, local models only, no fork code ever checked out or
+executed in the privileged run, and bounded compute. The same-repository
+dogfood reviewer skips fork PRs cleanly. See
+[docs/fork-review.md](docs/fork-review.md) for the threat model, the
+authorization flow, and the required `FORK_*` configuration.
 
 ## 📄 License
 

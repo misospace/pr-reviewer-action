@@ -27,7 +27,14 @@ permissions:
 
 jobs:
   review:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # Same-repository PRs (and manual dispatch) only. Cross-repository
+    # (fork) PRs are handled by the privileged fork-ai-review workflow
+    # (workflow_run after CI completes + label-gated pull_request_target).
+    # This job used to fail noisily at the app-token step for forks — fork
+    # pull_request runs never receive secrets — so it now skips them
+    # cleanly instead. The two paths are separate security domains: never
+    # merge them.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.id == github.repository_id && !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -50,9 +57,11 @@ jobs:
         # every PR is reviewed by its own in-flight action code instead of the
         # last release — a PR that breaks the manifest or publish path now
         # fails its own review before it can ship. Also ends the renovate
-        # self-pin churn. Fork PRs are unchanged: they get no secrets and the
-        # job fails at the app-token step. Requires runner >= 2.336.0
+        # self-pin churn. Requires runner >= 2.336.0
         # (github.com hosted runners qualify; not available on GHES).
+        # Fork PRs never reach this step: the job-level `if` skips
+        # cross-repository PRs, which are reviewed by the separate
+        # privileged fork-ai-review workflow instead.
         uses: $/
         with:
           github_token: ${{ steps.app-token.outputs.token }}

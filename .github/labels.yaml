@@ -50,6 +50,12 @@
 - name: ai-review
   color: "b4f8f8"
   description: Request an AI pull request review.
+- name: ai-review-fork
+  color: "1d76ed"
+  description: >
+    Authorize a trusted AI review of a cross-repository (fork) PR by the
+    fork-ai-review workflow. Maintainer-controlled; removing it stops future
+    fork reviews.
 - name: umbrella
   color: "5319e7"
   description: Parent issue that may need decomposition.
