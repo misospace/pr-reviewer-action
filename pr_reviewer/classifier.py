@@ -241,18 +241,59 @@ _ANCHOR_PATH_CALL = re.compile(
 # content is static data. Interpolation-shaped literals are deliberately NOT
 # stripped, so `f"{user}"` / `` `${x}` `` keep their inner text visible to the
 # untrusted-token check (fail toward detection).
-_QUOTED_STATIC_LITERAL = re.compile(
-    r'"[^"$%{}]*"'
-    r"|'[^'$%{}]*'"
-    r"|`[^`$%{}]*`"
-)
+# Static string-literal lexer: replaces STATIC literal contents with an
+# empty literal while preserving interpolation-shaped ones (`f"{x}"`,
+# `` `${y}` ``, `%`-forms), whose inner text stays visible to the
+# untrusted-token check (fail toward detection). A paired-quote char walk
+# (escape-aware) replaces the former regex approximation, which could
+# consume code between two ADJACENT quotes — `f'{x}', request.args['p']`
+# lost its `request` operand to the span between the quotes.
+def _strip_static_string_literals(line: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            content: list[str] = []
+            closed = False
+            while j < n:
+                c = line[j]
+                if c == "\\" and j + 1 < n:
+                    content.append(line[j:j + 2])
+                    j += 2
+                    continue
+                if c == ch:
+                    closed = True
+                    break
+                content.append(c)
+                j += 1
+            if closed:
+                text = "".join(content)
+                if "{" in text or "$" in text or "%" in text:
+                    out.append(ch + text + ch)
+                else:
+                    out.append(ch + ch)
+                i = j + 1
+            else:
+                out.append(ch + "".join(content))
+                i = n
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 # Simple assignment target: a leading identifier bound with `=` or `:=`
 # (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
-# marker is skipped). Deliberately NOT a general lvalue grammar — tuples,
-# subscripts, and attribute targets yield no one-hop edge.
+# marker is skipped). A BOUNDED type annotation is allowed between the
+# target and the `=` (`name: str = ...`, `const n: string = ...`) — typed
+# assignments are idiomatic modern Python/TS, not exotic lvalues. Tuples,
+# subscripts, and attribute targets still yield no one-hop edge. `==`
+# comparisons never match.
 _UNTRUSTED_ASSIGNMENT = re.compile(
-    r"^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*:?="
+    r"^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*"
+    r"([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)"
 )
 
 
@@ -265,7 +306,7 @@ def _untrusted_assignment_target(line: str) -> str | None:
     m = _UNTRUSTED_ASSIGNMENT.match(line)
     if not m:
         return None
-    rhs = _QUOTED_STATIC_LITERAL.sub('""', line[m.end():])
+    rhs = _strip_static_string_literals(line[m.end():])
     if any(pat.search(rhs) for pat in UNTRUSTED_SOURCE_PATTERNS):
         return m.group(1)
     return None
@@ -298,9 +339,31 @@ def _neutralize_path_false_positives(
     lose its construction call before the untrusted-join scan sees it."""
     one_hop = _one_hop_untrusted_targets(prev_line, next_line)
 
+    def _refuse_chain(match: re.Match, line: str) -> str:
+        """Refusal for the `Path(__file__)...` anchor chain. Beyond the usual
+        untrusted/one-hop operand checks, the chain is also NOT neutralized
+        when it continues into a `/` division whose tail reaches an
+        untrusted source or a one-hop target —
+        `Path(__file__).parent / request.args['p']` is a real untrusted-path
+        surface, and neutralizing the chain would delete the `Path(` head
+        the operand scanner needs."""
+        text = match.group(0)
+        static_text = _strip_static_string_literals(text)
+        if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            return text
+        if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
+            return text
+        static_tail = _strip_static_string_literals(line[match.end():])
+        if _PATHLIB_DIVISION_TAIL.match(static_tail):
+            if any(pat.search(static_tail) for pat in UNTRUSTED_SOURCE_PATTERNS):
+                return text
+            if any(re.search(rf"\b{re.escape(ident)}\b", static_tail) for ident in one_hop):
+                return text
+        return '""'
+
     def _refuse(match: re.Match) -> str:
         text = match.group(0)
-        static_text = _QUOTED_STATIC_LITERAL.sub('""', text)
+        static_text = _strip_static_string_literals(text)
         if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
             return text
         if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
@@ -309,7 +372,7 @@ def _neutralize_path_false_positives(
 
     line = _SPECIFIER_QUOTED.sub('""', line)
     line = _ANCHOR_PATH_CALL.sub(_refuse, line)
-    line = _PATHLIB_ANCHOR_CHAIN.sub(_refuse, line)
+    line = _PATHLIB_ANCHOR_CHAIN.sub(lambda m: _refuse_chain(m, line), line)
     line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
     return line
 
@@ -374,45 +437,37 @@ PATH_HANDLING_CONTENT_CLASSES: list[tuple[str, list[re.Pattern]]] = [
 # line uses. An unrelated request/user/payload token near a constant join
 # never fires. Multi-hop flows through neutral intermediaries are the model
 # reviewer's job, not the lexical classifier's.
-# Path construction CALLS: head plus its argument list (up to two levels of
-# paren nesting, so join(dirname(__file__), x) shapes match whole). The
-# untrusted-source scan reads ONLY the captured argument list — the operands
-# — never the assignment LHS, trailing comments, or sibling statements, so
-# incidental lexical words outside the construction cannot donate a token.
-# Heads are compiled from (pattern, flags) pairs; the pathlib constructor
-# stays case-sensitive (case-insensitive `path(` would match method names).
+# Path construction heads: a callee that opens a filesystem-path
+# construction call. The untrusted-source scan reads ONLY the call's
+# argument list — extracted with the balanced-paren scanner at ANY nesting
+# depth — never the assignment LHS, trailing comments, or sibling
+# statements, so incidental lexical words outside the construction cannot
+# donate a token. Heads are compiled from (pattern, flags, is_pathlib)
+# triples; the pathlib constructor stays case-sensitive (case-insensitive
+# `path(` would match method names) and is the only head whose operands
+# continue through `/` division chaining (pathlib's path-join operator).
 _PATH_CONSTRUCTION_HEADS = [
-    (r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)", re.IGNORECASE),
-    (r"\bpath\.(?:join|resolve|normalize|dirname|basename)", re.IGNORECASE),
-    (r"\bjoinpath", re.IGNORECASE),
-    (r"\bfilepath\.\w+", re.IGNORECASE),
-    (r"\b(?:open|fopen)", re.IGNORECASE),
-    (r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", re.IGNORECASE),
-    (r"\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", re.IGNORECASE),
-    (r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", re.IGNORECASE),
-    (r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)", re.IGNORECASE),
-    (r"\bPath", 0),
+    (r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)", re.IGNORECASE, False),
+    (r"\bpath\.(?:join|resolve|normalize|dirname|basename)", re.IGNORECASE, False),
+    (r"\bjoinpath", re.IGNORECASE, False),
+    (r"\bfilepath\.\w+", re.IGNORECASE, False),
+    (r"\b(?:open|fopen)", re.IGNORECASE, False),
+    (r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", re.IGNORECASE, False),
+    (r"\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", re.IGNORECASE, False),
+    (r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", re.IGNORECASE, False),
+    (r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)", re.IGNORECASE, False),
+    (r"\bPath", 0, True),
 ]
 
-_PATH_CONSTRUCTION_ARGS = r"\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)"
-
-PATH_CONSTRUCTION_CALL_PATTERNS = [
-    re.compile(head + _PATH_CONSTRUCTION_ARGS, flags)
-    for head, flags in _PATH_CONSTRUCTION_HEADS
+PATH_CONSTRUCTION_HEADS = [
+    re.compile(head + r"\s*\(", flags)
+    for head, flags, _ in _PATH_CONSTRUCTION_HEADS
 ]
-
-# A construction call left OPEN across the line break (formatted multi-line
-# argument lists): head + `(` with no closing paren later on the line. Its
-# continuation lines ARE the operand list, so the scanner accumulates them
-# (bounded) instead of losing the surface. Deliberately loose on case; firing
-# still requires untrusted operand text.
-_PATH_CONSTRUCTION_OPEN_CALL = re.compile(
-    r"(?:" + "|".join(head for head, _ in _PATH_CONSTRUCTION_HEADS) + r")\s*\((?![^()]*\))",
-    re.IGNORECASE,
-)
 
 # Cap on continuation lines accumulated for one open construction call.
-MAX_CONSTRUCTION_CONTINUATION_LINES = 3
+# Continuation lines are operand-list text by construction (the call is
+# still open), so this is a boundedness horizon, not a precision filter.
+MAX_CONSTRUCTION_CONTINUATION_LINES = 8
 
 # Values an attacker plausibly controls when they reach a filesystem path:
 # HTTP request data, user/model input, CLI arguments, and file-object names
@@ -423,27 +478,37 @@ MAX_CONSTRUCTION_CONTINUATION_LINES = 3
 # `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous
 # in TRUSTED paths; the upload risk lives in the filename operand, which has
 # its own token.
+# Values an attacker plausibly controls when they reach a filesystem path:
+# HTTP request data, user/model input, CLI arguments, and file-object names —
+# `.filename` ATTRIBUTE ACCESS (`file.filename`, `f.filename`) is the classic
+# unsafe-upload operand; a BARE `filename` identifier is deliberately NOT a
+# source (a trusted constant named filename flowing into a path is
+# bookkeeping, and the identifier reference alone is not proof of attacker
+# influence). Sources are word-bounded so benign identifier near-misses
+# (`requester_id`, `username`, `queryset`, `payloads`) never fire; the
+# `user_` prefix form stays a source (`user_input`, `user_supplied`) and
+# real one-hop flow covers every renamed variant. Deliberately EXCLUDED:
+# environment variables and process cwd — env/config paths are operator-owned
+# infrastructure (the PR #748 lesson: CI scripts join env-provided output
+# paths constantly and are not attacker surfaces) — and `upload` directory
+# vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous in TRUSTED paths;
+# the upload risk lives in the filename operand, which has its own shape.
 UNTRUSTED_SOURCE_PATTERNS = [
-    re.compile(r"request", re.IGNORECASE),
-    re.compile(r"\breq\s*\.", re.IGNORECASE),
-    re.compile(r"user", re.IGNORECASE),
+    re.compile(r"\brequest\b", re.IGNORECASE),
+    re.compile(r"\breq\b", re.IGNORECASE),
+    re.compile(r"\buser\b|\buser_", re.IGNORECASE),
     re.compile(r"\binput", re.IGNORECASE),
-    re.compile(r"query", re.IGNORECASE),
-    re.compile(r"params", re.IGNORECASE),
+    re.compile(r"\bquery\b", re.IGNORECASE),
+    re.compile(r"\bparams\b", re.IGNORECASE),
     re.compile(r"\bform\b|formdata", re.IGNORECASE),
-    re.compile(r"payload", re.IGNORECASE),
+    re.compile(r"\bpayload\b", re.IGNORECASE),
     re.compile(r"\bheaders?\b", re.IGNORECASE),
     re.compile(r"\bcookies?\b", re.IGNORECASE),
     re.compile(r"\bstdin\b", re.IGNORECASE),
     re.compile(r"\bargv\b", re.IGNORECASE),
-    # Attribute-access file-object names — `file.filename`, `f.filename` —
-    # the classic unsafe-upload operand. A BARE `filename` identifier is
-    # deliberately NOT a source: a trusted constant (`filename =
-    # "config.json"`) flowing into a path is bookkeeping, and the identifier
-    # reference alone is not proof of attacker influence.
     re.compile(r"\.\s*filename\b", re.IGNORECASE),
     re.compile(r"\boriginalname\b", re.IGNORECASE),
-    re.compile(r"untrusted|unsanitized|attacker", re.IGNORECASE),
+    re.compile(r"\buntrusted|\bunsanitized|\battacker", re.IGNORECASE),
 ]
 
 # Test/fixture file conventions, cross-language. Signals found only in test
@@ -542,13 +607,14 @@ def _strip_line_comment(line: str) -> str:
     return line[:cut]
 
 
-def _balanced_close(text: str, depth: int) -> int | None:
+def _balanced_close(text: str, depth: int, start: int = 0) -> int | None:
     """Index of the `)` that closes a construction call opened `depth` paren
-    levels up, or None when the text ends with the call still open. Nested
-    parens are tracked, so a nested call closing inside the line never
-    terminates the scan early — only the paren that returns the depth to
-    zero does."""
-    for pos, ch in enumerate(text):
+    levels up, scanning from ``start``, or None when the text ends with the
+    call still open. Nested parens are tracked, so a nested call closing
+    inside the line never terminates the scan early — only the paren that
+    returns the depth to zero does."""
+    for pos in range(start, len(text)):
+        ch = text[pos]
         if ch == "(":
             depth += 1
         elif ch == ")":
@@ -558,39 +624,57 @@ def _balanced_close(text: str, depth: int) -> int | None:
     return None
 
 
+# Pathlib division chaining: after a complete `Path(...)` call, an operand
+# may continue through attribute/method chains and one or more `/`
+# path-join divisions (`Path(__file__).parent / request.args['p']`).
+_PATHLIB_DIVISION_TAIL = re.compile(r"\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*/")
+
+
 def _construction_operand_spans(lines: list[str], index: int) -> str:
     """The operand text of the path-construction call(s) actually matched on
-    line ``index``: complete one-level-nested argument lists, and — for a
-    call left open across the line break — the balanced continuation lines
-    up to and including the closing paren. Only call arguments are included:
-    trailing comments (cut at the first `#`/`//`) and sibling statements
-    after the closer are excluded, and nested parentheses are tracked so an
-    inner `)` never ends the scan while outer operands remain. Static quoted
-    literals are stripped before extraction. Empty string when the line
-    constructs no path."""
-    line = _strip_line_comment(_QUOTED_STATIC_LITERAL.sub('""', lines[index]))
-    spans = [
-        m.group(1)
-        for pattern in PATH_CONSTRUCTION_CALL_PATTERNS
-        for m in pattern.finditer(line)
-    ]
-    if not spans:
-        for m in _PATH_CONSTRUCTION_OPEN_CALL.finditer(line):
-            piece = _strip_line_comment(line[m.end():])
-            depth = 1  # the construction call's own open paren
-            for j in range(index + 1, min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, len(lines))):
-                continuation = _strip_line_comment(
-                    _QUOTED_STATIC_LITERAL.sub('""', lines[j])
-                )
-                close = _balanced_close(continuation, depth)
-                if close is None:
-                    piece += "\n" + continuation
-                    depth += continuation.count("(") - continuation.count(")")
-                else:
-                    piece += "\n" + continuation[:close + 1]
-                    depth = 0
-                    break
-            spans.append(piece)
+    line ``index``: balanced-paren argument lists at ANY nesting depth, and —
+    for a call left open across the line break — the bounded continuation
+    lines through the paren that closes the call. Only call arguments are
+    included: trailing comments (cut at the first `#`/`//`) and sibling
+    statements after the closer are excluded, and nested parentheses are
+    tracked so an inner `)` never ends the scan while outer operands remain.
+    Static string literals are lexed out (interpolation-shaped literals keep
+    their content). A complete `Path(...)` call extends through `/` division
+    chaining — pathlib's path-join operator — so
+    ``Path(__file__).parent / request.args['p']`` keeps its untrusted
+    operand. Empty string when the line constructs no path."""
+    line = _strip_line_comment(_strip_static_string_literals(lines[index]))
+    spans: list[str] = []
+    for head, (_, _, is_pathlib) in zip(PATH_CONSTRUCTION_HEADS, _PATH_CONSTRUCTION_HEADS):
+        for m in head.finditer(line):
+            close = _balanced_close(line, 1, start=m.end())
+            if close is None:
+                # Open call: the continuation lines ARE the operand list.
+                # The opening-line remainder's own paren balance seeds the
+                # depth (`os.path.join(foo(`), so a nested call's `)` cannot
+                # close the scan before later operands.
+                piece = line[m.end():]
+                depth = 1 + piece.count("(") - piece.count(")")
+                for j in range(index + 1, min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, len(lines))):
+                    continuation = _strip_line_comment(
+                        _strip_static_string_literals(lines[j])
+                    )
+                    c = _balanced_close(continuation, depth)
+                    if c is None:
+                        piece += "\n" + continuation
+                        depth += continuation.count("(") - continuation.count(")")
+                    else:
+                        piece += "\n" + continuation[:c + 1]
+                        depth = 0
+                        break
+                spans.append(piece)
+            else:
+                operand = line[m.end():close + 1]
+                if is_pathlib:
+                    tail = _PATHLIB_DIVISION_TAIL.match(line, close + 1)
+                    if tail:
+                        operand += "/" + line[tail.end():]
+                spans.append(operand)
     return "\n".join(spans)
 
 

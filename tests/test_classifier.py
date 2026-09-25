@@ -957,6 +957,110 @@ class TestPathHandlingSignalModel:
         fired = result.path_handling_provenance["signals"]
         assert any(s["signal"] == "untrusted_source_join" for s in fired)
 
+    def test_multiline_opening_line_nested_paren_depth(self):
+        # The opening line's REMAINDER contributes its paren balance to the
+        # initial depth: the nested `foo(` means the `safe)` closer must not
+        # terminate the scan before the later untrusted operand.
+        diff = "+target = os.path.join(foo(\n+    safe), request.args['x']\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    # -- Adversarial-review regressions (F1-F8) ------------------------------
+
+    def test_fstring_adjacent_quotes_still_fire(self):
+        # The static-literal lexer pairs quotes correctly: the span between
+        # two adjacent quotes must not swallow `, request.args[`.
+        diff = "+ target = os.path.join(base, f'{x}', request.args['p'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_deep_nesting_one_liner_fires(self):
+        # Balanced-paren extraction has no nesting-depth limit: the OUTER
+        # call's operands are scanned through any number of nested calls.
+        diff = "+ x = os.path.join(os.path.dirname(os.path.realpath(os.path.join(BASE, 'safe'))), request.args['p'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_division_fires(self):
+        # `/` is pathlib's path-join operator: Path(__file__).parent /
+        # request.args['p'] is a real untrusted-path surface. The anchor
+        # chain refuses neutralization so the Path( head survives, and the
+        # operand scan extends through the division.
+        diff = "+ x = Path(__file__).parent / request.args['p']\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_pathlib_division_non_anchor_fires(self):
+        diff = "+ p = Path(BASE) / request.args['x']\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_division_one_hop_fires(self):
+        diff = "+name = request.args['p']\n+x = Path(__file__).parent / name\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_trusted_division_is_clean(self):
+        diff = '+ x = Path(__file__).parent / "static"\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_req_bracket_access_fires(self):
+        # Express.js bracket access: `req` is a request object in either
+        # access form.
+        diff = "+ const target = path.join(base, req['path']);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_vocabulary_near_misses_are_clean(self):
+        # Word-bounded source vocabulary: benign identifier near-misses are
+        # not untrusted sources.
+        for operand in ("requester_id", "username", "queryset", "payloads", "params_dict", "userdata"):
+            diff = f"+ x = os.path.join(base, {operand})\n"
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "app_code", operand
+            assert result.path_handling_provenance["fired"] is False, operand
+
+    def test_user_prefix_identifier_conservative_fire(self):
+        # `user_id`/`user_input`-shaped operands stay sources (user-owned
+        # path components are the classic traversal surface).
+        diff = "+ x = os.path.join(base, user_id)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_typed_annotation_one_hop_fires(self):
+        diff = "+ name: str = request.args['p']\n+ x = os.path.join(base, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_typed_const_ts_one_hop_fires(self):
+        diff = "+ const n: string = request.query.x;\n+ const t = path.join(base, n);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_four_plus_operand_multiline_fires(self):
+        # The continuation cap (8 lines) is a boundedness horizon, not a
+        # precision filter: operands beyond the third line still fire.
+        diff = "+ x = os.path.join(\n+     BASE,\n+     'a',\n+     'b',\n+     request.args['p'],\n+ )\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_deep_nested_multiline_fires(self):
+        diff = ("+ x = os.path.join(\n"
+                "+     os.path.dirname(\n"
+                "+         os.path.realpath(__file__),\n"
+                "+     ),\n"
+                "+     request.args['p'],\n"
+                "+ )\n")
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
     def test_string_join_is_not_path_construction(self):
         # `", ".join(...)` is a string method on delimited text, not a
         # filesystem path construction.

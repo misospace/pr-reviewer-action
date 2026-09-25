@@ -102,7 +102,7 @@ test("file-based flags attribute triggering files; diff-only matches attribute a
   const attributed = classifyPr({ prFiles: files("src/middleware/auth.ts", "readme.md") });
   assert.deepEqual(attributed.riskFlagsWithFiles["auth_changes"], ["src/middleware/auth.ts"]);
 
-  const diffOnly = classifyPr({ prFiles: files("src/store.py"), diffText: "+x = pathlib.Path(userInput)\n" });
+  const diffOnly = classifyPr({ prFiles: files("src/store.py"), diffText: "+x = pathlib.Path(user_input)\n" });
   assert.deepEqual(diffOnly.riskFlagsWithFiles["path_handling_changes"], []);
 
   // Linked flags never appear in the file attribution map.
@@ -111,7 +111,7 @@ test("file-based flags attribute triggering files; diff-only matches attribute a
 });
 
 test("route signals exclude content-only matches (#159)", () => {
-  const result = classifyPr({ prFiles: files("src/store.py"), diffText: "+p = pathlib.Path(userInput)\n" });
+  const result = classifyPr({ prFiles: files("src/store.py"), diffText: "+p = pathlib.Path(user_input)\n" });
   assert.deepEqual(result.routeSignals, []);
   assert.ok(result.riskFlags.includes("path_handling_changes"));
 
@@ -484,6 +484,68 @@ test("#749: operands only — comments, sibling statements, and bare filename id
   assert.ok(nested.pathHandlingProvenance.signals.some(
     (s) => s.signal === "untrusted_source_join",
   ));
+
+  // The opening line's REMAINDER contributes its paren balance to the
+  // initial depth: the nested `foo(` means the `safe)` closer must not
+  // terminate the scan before the later untrusted operand.
+  const remainder = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+target = os.path.join(foo(\n+    safe), request.args['x']\n+)\n",
+    linkedIssues: [],
+  });
+  assert.equal(remainder.prKind, "path_handling_changes");
+  assert.ok(remainder.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
+});
+
+test("#749: adversarial-review regressions (lexer, nesting, division, vocab bounds)", () => {
+  const positives: [string, string, string][] = [
+    // The static-literal lexer pairs quotes correctly: the span between two
+    // adjacent quotes must not swallow `, request.args[`.
+    ["f-string adjacent quotes", "+ target = os.path.join(base, f'{x}', request.args['p'])\n", "src/app.py"],
+    // Balanced-paren extraction has no nesting-depth limit.
+    ["4-level nesting", "+ x = os.path.join(os.path.dirname(os.path.realpath(os.path.join(BASE, 'safe'))), request.args['p'])\n", "src/app.py"],
+    // `/` is pathlib's path-join operator; the chain refuses neutralization
+    // so the Path( head survives and the scan extends through the division.
+    ["pathlib division", "+ x = Path(__file__).parent / request.args['p']\n", "src/app.py"],
+    ["pathlib division non-anchor", "+ p = Path(BASE) / request.args['x']\n", "src/app.py"],
+    ["pathlib division one-hop", "+name = request.args['p']\n+x = Path(__file__).parent / name\n", "src/app.py"],
+    // Express bracket access: `req` is a request object in either form.
+    ["req bracket access", "+ const target = path.join(base, req['path']);\n", "src/app.ts"],
+    // Typed annotations are idiomatic, not exotic lvalues.
+    ["typed annotation", "+ name: str = request.args['p']\n+ x = os.path.join(base, name)\n", "src/app.py"],
+    ["typed const TS", "+ const n: string = request.query.x;\n+ const t = path.join(base, n);\n", "src/app.ts"],
+    // The continuation cap is a boundedness horizon, not a precision filter.
+    ["4+ operand multiline", "+ x = os.path.join(\n+     BASE,\n+     'a',\n+     'b',\n+     request.args['p'],\n+ )\n", "src/app.py"],
+    ["deep nested multiline", "+ x = os.path.join(\n+     os.path.dirname(\n+         os.path.realpath(__file__),\n+     ),\n+     request.args['p'],\n+ )\n", "src/app.py"],
+    // `user_`-prefixed identifiers stay sources.
+    ["user_id operand", "+ x = os.path.join(base, user_id)\n", "src/app.py"],
+  ];
+  for (const [label, diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", label);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), label);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+      `${label}: expected untrusted_source_join`,
+    );
+  }
+
+  // Word-bounded source vocabulary: benign identifier near-misses are not
+  // untrusted sources, and a trusted pathlib division stays clean.
+  for (const operand of ["requester_id", "username", "queryset", "payloads", "params_dict", "userdata"]) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: `+ x = os.path.join(base, ${operand})\n`, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", operand);
+    assert.equal(result.pathHandlingProvenance.fired, false, operand);
+  }
+  const trustedDivision = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+ x = Path(__file__).parent / "static"\n',
+    linkedIssues: [],
+  });
+  assert.equal(trustedDivision.prKind, "app_code");
+  assert.equal(trustedDivision.pathHandlingProvenance.fired, false);
 });
 
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {

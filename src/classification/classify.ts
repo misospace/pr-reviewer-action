@@ -194,13 +194,68 @@ const ANCHOR_PATH_CALL =
  * content is static data. Interpolation-shaped literals are deliberately NOT
  * stripped, so `f"{user}"` / `` `${x}` `` keep their inner text visible to the
  * untrusted-token check (fail toward detection). */
-const QUOTED_STATIC_LITERAL = /"[^"$%{}]*"|'[^'$%{}]*'|`[^`$%{}]*`/g;
+/** Static string-literal lexer: replaces STATIC literal contents with an
+ * empty literal while preserving interpolation-shaped ones (`f"{x}"`,
+ * `` `${y}` ``, `%`-forms), whose inner text stays visible to the
+ * untrusted-token check (fail toward detection). A paired-quote char walk
+ * (escape-aware) replaces the former regex approximation, which could
+ * consume code between two ADJACENT quotes — `f'{x}', request.args['p']`
+ * lost its `request` operand to the span between the quotes. */
+function stripStaticStringLiterals(line: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const ch = line[i] ?? "";
+    if (ch === "'" || ch === '"' || ch === "`") {
+      let j = i + 1;
+      let content = "";
+      let closed = false;
+      while (j < n) {
+        const c = line[j] ?? "";
+        if (c === "\\" && j + 1 < n) {
+          content += line.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (c === ch) {
+          closed = true;
+          break;
+        }
+        content += c;
+        j += 1;
+      }
+      if (closed) {
+        if (content.includes("{") || content.includes("$") || content.includes("%")) {
+          out.push(ch + content + ch);
+        } else {
+          out.push(ch + ch);
+        }
+        i = j + 1;
+      } else {
+        out.push(ch + content);
+        i = n;
+      }
+    } else {
+      out.push(ch);
+      i += 1;
+    }
+  }
+  return out.join("");
+}
 
 /** Simple assignment target: a leading identifier bound with `=` or `:=`
  * (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
  * marker is skipped). Deliberately NOT a general lvalue grammar — tuples,
  * subscripts, and attribute targets yield no one-hop edge. */
-const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*:?=/;
+/** Simple assignment target: a leading identifier bound with `=` or `:=`
+ * (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
+ * marker is skipped). A BOUNDED type annotation is allowed between the
+ * target and the `=` (`name: str = ...`, `const n: string = ...`) — typed
+ * assignments are idiomatic modern Python/TS, not exotic lvalues. Tuples,
+ * subscripts, and attribute targets still yield no one-hop edge. `==`
+ * comparisons never match. */
+const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)/;
 
 /** Assignment-target identifier of a line whose QUOTE-STRIPPED RHS reaches an
  * untrusted source (a one-hop def/use candidate). Null when the line is not a
@@ -210,7 +265,7 @@ const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)
 function untrustedAssignmentTarget(line: string): string | null {
   const m = UNTRUSTED_ASSIGNMENT.exec(line);
   if (!m || !m[1]) return null;
-  const rhs = line.slice(m.index + m[0].length).replace(QUOTED_STATIC_LITERAL, '""');
+  const rhs = stripStaticStringLiterals(line.slice(m.index + m[0].length));
   if (matchesAny(rhs, UNTRUSTED_SOURCE_PATTERNS)) return m[1];
   return null;
 }
@@ -248,15 +303,30 @@ function neutralizePathFalsePositives(
    * lose its construction call before the untrusted-join scan sees it. */
   const oneHop = oneHopUntrustedTargets(prevLine, nextLine);
   const refuse = (match: string): string => {
-    const staticText = match.replace(QUOTED_STATIC_LITERAL, '""');
+    const staticText = stripStaticStringLiterals(match);
     if (matchesAny(staticText, UNTRUSTED_SOURCE_PATTERNS)) return match;
     if (oneHop.some((ident) => mentionsIdentifier(staticText, ident))) return match;
+    return '""';
+  };
+  // Chain refusal: beyond the usual operand checks, the `Path(__file__)...`
+  // chain is also NOT neutralized when it continues into a `/` division
+  // whose tail reaches an untrusted source or a one-hop target —
+  // `Path(__file__).parent / request.args['p']` is a real untrusted-path
+  // surface, and neutralizing the chain would delete the `Path(` head the
+  // operand scanner needs.
+  const refuseChain = (match: string, offset: number): string => {
+    const refused = refuse(match);
+    if (refused !== '""') return refused;
+    const staticTail = stripStaticStringLiterals(line.slice(offset + match.length));
+    if (!PATHLIB_DIVISION_TAIL.test(staticTail)) return refused;
+    if (matchesAny(staticTail, UNTRUSTED_SOURCE_PATTERNS)) return match;
+    if (oneHop.some((ident) => mentionsIdentifier(staticTail, ident))) return match;
     return '""';
   };
   return line
     .replace(SPECIFIER_QUOTED, '""')
     .replace(ANCHOR_PATH_CALL, refuse)
-    .replace(PATHLIB_ANCHOR_CHAIN, refuse)
+    .replace(PATHLIB_ANCHOR_CHAIN, refuseChain)
     .replace(TRUSTED_ANCHOR_TOKEN, '""');
 }
 
@@ -309,42 +379,38 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
   ["path_reference_identifier", [/filepath|pathname/i]],
 ];
 
-/** Path construction CALLS: head plus its argument list (up to two levels of
- * paren nesting, so join(dirname(__file__), x) shapes match whole). The
- * untrusted-source scan reads ONLY the captured argument list — the operands
- * — never the assignment LHS, trailing comments, or sibling statements, so
- * incidental lexical words outside the construction cannot donate a token.
- * Heads are compiled from (pattern, flags) pairs; the pathlib constructor
- * stays case-sensitive (case-insensitive `path(` would match method names).
- * Used only via matchAll (carries /g). */
-const PATH_CONSTRUCTION_HEADS: readonly (readonly [string, string])[] = [
-  ["os\\.path\\.(?:join|normpath|realpath|abspath|relpath|commonpath)", "i"],
-  ["\\bpath\\.(?:join|resolve|normalize|dirname|basename)", "i"],
-  ["\\bjoinpath", "i"],
-  ["\\bfilepath\\.\\w+", "i"],
-  ["\\b(?:open|fopen)", "i"],
-  ["\\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", "i"],
-  ["\\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", "i"],
-  ["\\bshutil\\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", "i"],
-  ["\\bos\\.(?:mkdir|makedirs|unlink|rename|remove)", "i"],
-  ["\\bPath", ""],
+/** Path construction heads: a callee that opens a filesystem-path
+ * construction call. The untrusted-source scan reads ONLY the call's
+ * argument list — extracted with the balanced-paren scanner at ANY nesting
+ * depth — never the assignment LHS, trailing comments, or sibling
+ * statements, so incidental lexical words outside the construction cannot
+ * donate a token. Heads are (pattern, flags, isPathlib) triples; the pathlib
+ * constructor stays case-sensitive (case-insensitive `path(` would match
+ * method names) and is the only head whose operands continue through `/`
+ * division chaining (pathlib's path-join operator). */
+const PATH_CONSTRUCTION_HEADS: readonly (readonly [string, string, boolean])[] = [
+  ["os\\.path\\.(?:join|normpath|realpath|abspath|relpath|commonpath)", "i", false],
+  ["\\bpath\\.(?:join|resolve|normalize|dirname|basename)", "i", false],
+  ["\\bjoinpath", "i", false],
+  ["\\bfilepath\\.\\w+", "i", false],
+  ["\\b(?:open|fopen)", "i", false],
+  ["\\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", "i", false],
+  ["\\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", "i", false],
+  ["\\bshutil\\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", "i", false],
+  ["\\bos\\.(?:mkdir|makedirs|unlink|rename|remove)", "i", false],
+  ["\\bPath", "", true],
 ];
 
-const PATH_CONSTRUCTION_ARGS = "\\s*\\(((?:[^()]|\\((?:[^()]|\\([^()]*\\))*\\))*)\\)";
+const PATH_CONSTRUCTION_HEAD_PATTERNS: readonly { pattern: RegExp; isPathlib: boolean }[] =
+  PATH_CONSTRUCTION_HEADS.map(([head, flags, isPathlib]) => ({
+    pattern: new RegExp(`${head}\\s*\\(`, `${flags}g`),
+    isPathlib,
+  }));
 
-const PATH_CONSTRUCTION_CALL_PATTERNS: readonly RegExp[] =
-  PATH_CONSTRUCTION_HEADS.map(([head, flags]) => new RegExp(head + PATH_CONSTRUCTION_ARGS, `${flags}g`));
-
-/** A construction call left OPEN across the line break (formatted multi-line
- * argument lists): head + `(` with no closing paren later on the line. Its
- * continuation lines ARE the operand list, so the scanner accumulates them
- * (bounded) instead of losing the surface. Deliberately loose on case; firing
- * still requires untrusted operand text. (matchAll-only: carries /g.) */
-const PATH_CONSTRUCTION_OPEN_CALL =
-  new RegExp(`(?:${PATH_CONSTRUCTION_HEADS.map(([head]) => head).join("|")})\\s*\\((?![^()]*\\))`, "gi");
-
-/** Cap on continuation lines accumulated for one open construction call. */
-export const MAX_CONSTRUCTION_CONTINUATION_LINES = 3;
+/** Cap on continuation lines accumulated for one open construction call.
+ * Continuation lines are operand-list text by construction (the call is
+ * still open), so this is a boundedness horizon, not a precision filter. */
+export const MAX_CONSTRUCTION_CONTINUATION_LINES = 8;
 
 /** Values an attacker plausibly controls when they reach a filesystem path:
  * HTTP request data, user/model input, CLI arguments, and file-object names —
@@ -359,21 +425,21 @@ export const MAX_CONSTRUCTION_CONTINUATION_LINES = 3;
  * names are ubiquitous in TRUSTED paths; the upload risk lives in the
  * filename operand, which has its own shape. */
 const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
-  /request/i,
-  /\breq\s*\./i,
-  /user/i,
+  /\brequest\b/i,
+  /\breq\b/i,
+  /\buser\b|\buser_/i,
   /\binput/i,
-  /query/i,
-  /params/i,
+  /\bquery\b/i,
+  /\bparams\b/i,
   /\bform\b|formdata/i,
-  /payload/i,
+  /\bpayload\b/i,
   /\bheaders?\b/i,
   /\bcookies?\b/i,
   /\bstdin\b/i,
   /\bargv\b/i,
   /\.\s*filename\b/i,
   /\boriginalname\b/i,
-  /untrusted|unsanitized|attacker/i,
+  /\buntrusted|\bunsanitized|\battacker/i,
 ];
 
 /** Test/fixture file conventions, cross-language. Signals found only in test
@@ -454,8 +520,8 @@ function stripLineComment(line: string): string {
  * parens are tracked, so a nested call closing inside the line never
  * terminates the scan early — only the paren that returns the depth to
  * zero does. */
-function balancedClose(text: string, depth: number): number | null {
-  for (let pos = 0; pos < text.length; pos++) {
+function balancedClose(text: string, depth: number, start = 0): number | null {
+  for (let pos = start; pos < text.length; pos++) {
     const ch = text[pos];
     if (ch === "(") depth++;
     else if (ch === ")") {
@@ -465,6 +531,11 @@ function balancedClose(text: string, depth: number): number | null {
   }
   return null;
 }
+
+/** Pathlib division chaining: after a complete `Path(...)` call, an operand
+ * may continue through attribute/method chains and one or more `/`
+ * path-join divisions (`Path(__file__).parent / request.args['p']`). */
+const PATHLIB_DIVISION_TAIL = /\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*\//;
 
 /** The operand text of the path-construction call(s) actually matched on line
  * `index`: complete one-level-nested argument lists, and — for a call left
@@ -476,31 +547,42 @@ function balancedClose(text: string, depth: number): number | null {
  * are stripped before extraction. Empty string when the line constructs no
  * path. */
 function constructionOperandSpans(lines: string[], index: number): string {
-  const line = stripLineComment((lines[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""'));
+  const line = stripLineComment(stripStaticStringLiterals(lines[index] ?? ""));
   const spans: string[] = [];
-  for (const pattern of PATH_CONSTRUCTION_CALL_PATTERNS) {
+  for (const { pattern, isPathlib } of PATH_CONSTRUCTION_HEAD_PATTERNS) {
     for (const m of line.matchAll(pattern)) {
-      spans.push(m[1] ?? "");
-    }
-  }
-  if (spans.length === 0) {
-    for (const m of line.matchAll(PATH_CONSTRUCTION_OPEN_CALL)) {
-      const piece = stripLineComment(line.slice(m.index + m[0].length));
-      let accumulated = piece;
-      let depth = 1; // the construction call's own open paren
-      for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
-        const continuation = stripLineComment((lines[j] ?? "").replace(QUOTED_STATIC_LITERAL, '""'));
-        const close = balancedClose(continuation, depth);
-        if (close === null) {
-          accumulated += `\n${continuation}`;
-          depth += (continuation.match(/\(/g) ?? []).length - (continuation.match(/\)/g) ?? []).length;
-        } else {
-          accumulated += `\n${continuation.slice(0, close + 1)}`;
-          depth = 0;
-          break;
+      const close = balancedClose(line, 1, m.index + m[0].length);
+      if (close === null) {
+        // Open call: the continuation lines ARE the operand list. The
+        // opening-line remainder's own paren balance seeds the depth
+        // (`os.path.join(foo(`), so a nested call's `)` cannot close the
+        // scan before later operands.
+        const piece = line.slice(m.index + m[0].length);
+        let depth = 1 + (piece.match(/\(/g) ?? []).length - (piece.match(/\)/g) ?? []).length;
+        let accumulated = piece;
+        for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
+          const continuation = stripLineComment(stripStaticStringLiterals(lines[j] ?? ""));
+          const c = balancedClose(continuation, depth);
+          if (c === null) {
+            accumulated += `\n${continuation}`;
+            depth += (continuation.match(/\(/g) ?? []).length - (continuation.match(/\)/g) ?? []).length;
+          } else {
+            accumulated += `\n${continuation.slice(0, c + 1)}`;
+            depth = 0;
+            break;
+          }
         }
+        spans.push(accumulated);
+      } else {
+        let operand = line.slice(m.index + m[0].length, close + 1);
+        if (isPathlib) {
+          const tail = PATHLIB_DIVISION_TAIL.exec(line.slice(close + 1));
+          if (tail) {
+            operand += "/" + line.slice(close + 1 + (tail.index + tail[0].length));
+          }
+        }
+        spans.push(operand);
       }
-      spans.push(accumulated);
     }
   }
   return spans.join("\n");

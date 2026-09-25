@@ -320,3 +320,54 @@ def test_multiline_nested_construction_fires(tmp_path) -> None:
         signal["signal"] == "untrusted_source_join"
         for signal in result["path_handling_provenance"]["signals"]
     )
+
+
+def test_adversarial_hardening_shapes(tmp_path) -> None:
+    # F1: the static-literal lexer pairs quotes — the f-string's adjacent
+    # quote must not swallow `, request.args[`.
+    # F3: pathlib division chaining keeps its untrusted operand.
+    # F5: word-bounded vocabulary — near-miss identifiers stay clean.
+    fired = _classify(
+        [{"filename": "src/app.py"}],
+        "+joined = os.path.join(base, f'{env}/', request.args['p'])\n",
+        tmp_path,
+    )
+    assert fired["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in fired["path_handling_provenance"]["signals"]
+    )
+
+    divided = _classify(
+        [{"filename": "src/app.py"}],
+        "+divided = Path(__file__).parent / request.args['x']\n",
+        tmp_path,
+    )
+    assert divided["pr_kind"] == "path_handling_changes"
+
+    for operand in ("requester_id", "username", "queryset", "payloads"):
+        clean = _classify(
+            [{"filename": "src/app.py"}],
+            f"+x = os.path.join(base, {operand})\n",
+            tmp_path,
+        )
+        assert clean["pr_kind"] != "path_handling_changes", operand
+        assert clean["path_handling_provenance"]["fired"] is False, operand
+
+
+def test_multiline_opening_line_nested_paren_depth_fires(tmp_path) -> None:
+    # The opening line's remainder (foo() contributes its paren balance to
+    # the initial depth: the `safe)` closer must not end the scan before the
+    # later untrusted operand.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+target = os.path.join(foo(\n"
+        "+    safe), request.args['x']\n"
+        "+)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )

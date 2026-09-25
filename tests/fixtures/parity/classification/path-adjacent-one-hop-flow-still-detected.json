@@ -4,8 +4,9 @@
   "pr_files": [
     { "filename": "src/app/flow.py", "status": "modified", "additions": 2 },
     { "filename": "src/app/flow.ts", "status": "modified", "additions": 2 },
-    { "filename": "src/app/flow_formatted.py", "status": "modified", "additions": 4 }
+    { "filename": "src/app/flow_formatted.py", "status": "modified", "additions": 4 },
+    { "filename": "src/app/flow_open.py", "status": "modified", "additions": 3 }
   ],
-  "diff": "diff --git a/src/app/flow.py b/src/app/flow.py\n+++ b/src/app/flow.py\n@@ -1,2 +1,4 @@\n+name = request.args[\"path\"]\n+target = os.path.join(os.path.dirname(__file__), name)\ndiff --git a/src/app/flow.ts b/src/app/flow.ts\n+++ b/src/app/flow.ts\n@@ -1,2 +1,4 @@\n+const requested = req.query.path;\n+const resolved = path.resolve(__dirname, requested);\ndiff --git a/src/app/flow_formatted.py b/src/app/flow_formatted.py\n+++ b/src/app/flow_formatted.py\n@@ -1,4 +1,8 @@\n+target = os.path.join(\n+    os.path.dirname(__file__),\n+    request.args[\"name\"],\n+)\n",
+  "diff": "diff --git a/src/app/flow.py b/src/app/flow.py\n+++ b/src/app/flow.py\n@@ -1,2 +1,4 @@\n+name = request.args[\"path\"]\n+target = os.path.join(os.path.dirname(__file__), name)\ndiff --git a/src/app/flow.ts b/src/app/flow.ts\n+++ b/src/app/flow.ts\n@@ -1,2 +1,4 @@\n+const requested = req.query.path;\n+const resolved = path.resolve(__dirname, requested);\ndiff --git a/src/app/flow_formatted.py b/src/app/flow_formatted.py\n+++ b/src/app/flow_formatted.py\n@@ -1,4 +1,8 @@\n+target = os.path.join(\n+    os.path.dirname(__file__),\n+    request.args[\"name\"],\n+)\ndiff --git a/src/app/flow_open.py b/src/app/flow_open.py\n+++ b/src/app/flow_open.py\n@@ -1,3 +1,6 @@\n+target = os.path.join(foo(\n+    safe), request.args[\"x\"]\n+)\n",
   "linked_issues": []
 }
