@@ -1,11 +1,20 @@
 """Deterministic review-completeness validation against must_check items.
 
 The classifier (pr_reviewer/classifier.py) emits a must_check list for risky
-PRs and the prompt instructs the model to address each item. This module
-checks whether review_markdown actually *discussed* each required check, by
-shallow keyword matching. It deliberately does not judge correctness — it
-only catches reviews that never mentioned a required check at all, which is
-the common weak-model failure (#158).
+PRs and the prompt instructs the model to disposition each item. Since #750
+a must_check item is a mandatory review QUESTION, not automatically an
+implementation requirement: the model records one structured disposition per
+item in the verdict's ``required_check_dispositions`` array (status
+``satisfied`` / ``not_applicable`` / ``unresolved``), and
+:func:`evaluate_structured_coverage` folds those dispositions against the
+deterministic check list.
+
+Coexistence bridge (until #680 cuts enforcement over): when the parsed
+output carries NO structured dispositions at all, validation falls back to
+the legacy shallow keyword match (:func:`validate_review`) against
+review_markdown — deliberately lenient, documented, and removed by #680.
+When the field IS present, the structured evaluation is authoritative and
+no keyword mention can substitute for a missing or malformed disposition.
 """
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 # Concept keywords per exact must_check string emitted by the classifier.
 # An item counts as addressed when ANY keyword appears in the review text.
@@ -111,6 +121,176 @@ def validate_review(must_check: list[str], review_markdown: str) -> dict:
     return {"validated": not missing, "missing": missing, "addressed": addressed}
 
 
+# ---------------------------------------------------------------------------
+# Structured required-check coverage (#750)
+# ---------------------------------------------------------------------------
+
+# Identity/rationale text is bounded with the same control-char collapse used
+# by response_parser.py (mirrored byte-for-byte by src/enforcement/
+# required-checks.ts).
+_CHECK_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]+")
+_MAX_DROPPED_UNKNOWN = 50
+
+_REASON_OK = "ok"
+_REASON_NO_DISPOSITION = "no-disposition"
+_REASON_NO_STRUCTURED = "no-structured-dispositions"
+_REASON_DUPLICATE = "duplicate-dispositions"
+_REASON_MALFORMED = "malformed-disposition"
+
+
+def _check_identity(check: str) -> str:
+    """Identity key for matching a disposition to its deterministic check.
+
+    Case- and whitespace-normalized so a faithful echo (modulo casing or
+    extra spaces) still matches, while any rewording of the deterministic
+    text — the model inventing, altering, or forging a check — cannot.
+    """
+    return _CHECK_CONTROL_RE.sub(" ", check).strip().lower()
+
+
+def _validate_disposition(item: object) -> dict | None:
+    """Re-validate one disposition defensively against the rawer seam input.
+
+    Returns ``{"identity": ..., "status": ..., "rationale": ...}`` for a
+    usable entry, ``{"identity": ..., "invalid": True}`` for an attributable
+    but malformed one, and ``None`` when the entry cannot be attributed to
+    any check identity at all.
+    """
+    if not isinstance(item, dict):
+        return None
+    check = item.get("check")
+    if not isinstance(check, str):
+        return None
+    identity = _check_identity(check)
+    if not identity:
+        return None
+    raw_status = item.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    if status not in ("satisfied", "not_applicable", "unresolved"):
+        return {"identity": identity, "invalid": True}
+    rationale = item.get("rationale")
+    if not isinstance(rationale, str):
+        rationale = None
+    if status == "not_applicable" and (
+        rationale is None or _CHECK_CONTROL_RE.sub(" ", rationale).strip() == ""
+    ):
+        return {"identity": identity, "invalid": True}
+    # Rationale is passed through unchanged: the parser already sanitized
+    # and bounded it, and the evaluator must not re-shape model text (byte
+    # parity with src/enforcement/required-checks.ts).
+    return {"identity": identity, "status": status, "rationale": rationale}
+
+
+def evaluate_structured_coverage(
+    must_check: list[str], dispositions: list[dict[str, Any]] | None
+) -> dict:
+    """Fold structured dispositions against the deterministic check list.
+
+    Returns the version-1 coverage artifact (byte-identical to
+    ``requiredCheckCoverageToArtifact`` in src/enforcement/required-checks.ts;
+    pinned by the ``required-check-coverage`` parity boundary):
+
+    - ``status``: ``"none"`` (no must_check at all), ``"complete"`` (every
+      check ``satisfied`` or grounded ``not_applicable``), else
+      ``"incomplete"``;
+    - ``structured``: False only when *dispositions* is None — the model
+      produced no structured coverage at all, and every check is recorded
+      unresolved (the conservative v3 semantics; the v2 bridge may fall back
+      to legacy keyword matching in exactly that case);
+    - ``checks``: one row per supplied check, in supplied order, with the
+      resolved status and a machine-readable reason;
+    - ``dropped_unknown``: model check identities that match no supplied
+      check — never credited, recorded for diagnostics only.
+
+    Never raises; never produces or flips a verdict. Duplicate dispositions
+    deterministically invalidate their check; a model disposition can never
+    invent additional mandatory checks.
+    """
+    if not must_check:
+        return {
+            "version": 1,
+            "status": "none",
+            "structured": dispositions is not None,
+            "checks": [],
+            "dropped_unknown": [],
+        }
+
+    rows: dict[str, dict] = {}
+    order: list[str] = []
+    for check in must_check:
+        identity = _check_identity(check)
+        if not identity or identity in rows:
+            continue
+        rows[identity] = {
+            "check": check,
+            "status": "unresolved",
+            "rationale": None,
+            "reason": _REASON_NO_STRUCTURED if dispositions is None else _REASON_NO_DISPOSITION,
+        }
+        order.append(identity)
+
+    dropped_unknown: list[str] = []
+    if dispositions is not None:
+        for item in dispositions:
+            validated = _validate_disposition(item)
+            if validated is None:
+                continue
+            row = rows.get(validated["identity"])
+            if row is None:
+                if len(dropped_unknown) < _MAX_DROPPED_UNKNOWN:
+                    dropped_unknown.append(str(item.get("check", "")))
+                continue
+            if validated.get("invalid"):
+                row["status"] = "unresolved"
+                row["rationale"] = None
+                row["reason"] = _REASON_MALFORMED
+                continue
+            if row["reason"] not in (_REASON_NO_DISPOSITION, _REASON_NO_STRUCTURED):
+                # Second answer for the same check: deterministically
+                # invalidate it — double-answering cannot launder coverage.
+                row["status"] = "unresolved"
+                row["rationale"] = None
+                row["reason"] = _REASON_DUPLICATE
+                continue
+            row["status"] = validated["status"]
+            row["rationale"] = validated["rationale"]
+            row["reason"] = _REASON_OK
+
+    checks = [rows[identity] for identity in order]
+    complete = bool(checks) and all(
+        row["reason"] == _REASON_OK and row["status"] in ("satisfied", "not_applicable")
+        for row in checks
+    )
+    return {
+        "version": 1,
+        "status": "complete" if complete else "incomplete",
+        "structured": dispositions is not None,
+        "checks": checks,
+        "dropped_unknown": dropped_unknown,
+    }
+
+
+def structured_coverage_from_output(must_check: list[str], output: object) -> dict | None:
+    """Return the structured coverage artifact for a parsed review output.
+
+    Tri-state by key presence (#750): ``None`` only when the output does not
+    carry the key at all — true absence, where the legacy keyword path still
+    applies. A key explicitly emitted as ``null``/a non-array (the parser
+    preserves the key with a ``None`` value for that case) is NOT absence:
+    it returns the conservative structured artifact (every check
+    unresolved). Shared by the completeness bridge and the escalation
+    telemetry so both read the same contract.
+    """
+    if not isinstance(output, dict):
+        return None
+    if "required_check_dispositions" not in output:
+        return None
+    dispositions = output["required_check_dispositions"]
+    return evaluate_structured_coverage(
+        must_check, dispositions if isinstance(dispositions, list) else None
+    )
+
+
 def apply_required_check_validation(
     enabled: str = "auto",
     mode: str = "warn",
@@ -151,22 +331,49 @@ def apply_required_check_validation(
         status = "none"
         result = {"status": status, "mode": mode, "missing": [], "addressed": []}
     else:
-        outcome = validate_review(must_check, str(data.get("review_markdown") or ""))
-        status = "complete" if outcome["validated"] else "incomplete"
-        result = {
-            "status": status,
-            "mode": mode,
-            "missing": outcome["missing"],
-            "addressed": outcome["addressed"],
-        }
+        structured = structured_coverage_from_output(must_check, data)
+        if structured is not None:
+            # #750: the model addressed the structured disposition contract
+            # (the key is present) — the structured evaluation is
+            # authoritative and no keyword mention can substitute for a
+            # missing or malformed disposition. A resolved check (satisfied,
+            # or grounded not_applicable) is complete; anything else —
+            # including an explicitly emitted null — is unresolved and
+            # reported as such. `structured` mirrors the artifact: False
+            # when the emitted value carried no usable array.
+            status = structured["status"]
+            unresolved = [row["check"] for row in structured["checks"] if row["status"] == "unresolved"]
+            resolved = [row["check"] for row in structured["checks"] if row["status"] != "unresolved"]
+            result = {
+                "status": status,
+                "mode": mode,
+                "structured": structured["structured"],
+                "missing": unresolved,
+                "addressed": resolved,
+                "checks": structured["checks"],
+                "dropped_unknown": structured["dropped_unknown"],
+            }
+        else:
+            # Coexistence fallback: no structured dispositions at all, so
+            # the legacy shallow keyword match still decides (documented;
+            # #680 removes it).
+            outcome = validate_review(must_check, str(data.get("review_markdown") or ""))
+            status = "complete" if outcome["validated"] else "incomplete"
+            result = {
+                "status": status,
+                "mode": mode,
+                "structured": False,
+                "missing": outcome["missing"],
+                "addressed": outcome["addressed"],
+            }
 
         if status == "incomplete" and mode in ("warn", "fail"):
-            bullets = "\n".join(f"- {item}" for item in outcome["missing"])
+            bullets = "\n".join(f"- {item}" for item in result["missing"])
             data["review_markdown"] = (
                 str(data.get("review_markdown") or "")
                 + "\n\n### Unaddressed required checks\n"
                 + "The classifier marked these checks as required for this PR's "
-                + "risk profile, but the review above does not appear to discuss "
+                + "risk profile, but the review does not resolve or disposition "
                 + "them:\n\n"
                 + bullets
             )

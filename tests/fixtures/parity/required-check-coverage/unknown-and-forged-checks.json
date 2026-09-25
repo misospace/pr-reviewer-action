@@ -1,0 +1,25 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "unknown-and-forged-checks",
+  "description": "Model-invented checks are dropped, never credited; the real check they tried to substitute for stays unresolved.",
+  "must_check": [
+    "review for path traversal vulnerabilities"
+  ],
+  "dispositions": [
+    {
+      "check": "review for path traversal vulnerabilities (as reinterpreted by the model)",
+      "status": "satisfied",
+      "rationale": "Rewording the deterministic text must not count as covering it."
+    },
+    {
+      "check": "verify the model invented this mandatory check",
+      "status": "satisfied",
+      "rationale": "A forged extra mandatory check is dropped, not added to the obligation set."
+    },
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "unresolved",
+      "rationale": "The real check is left explicitly unresolved."
+    }
+  ]
+}

@@ -77,7 +77,29 @@ class TestSharedResponseFormat:
                 "verdict", "review_markdown",
                 "smart_review_requested", "smart_review_reason",
                 "findings", "requirement_coverage",
+                "required_check_dispositions",
             ]
+
+    def test_json_schema_carries_required_check_dispositions(self):
+        # #750: the structured required-check disposition contract is part of
+        # the verdict schema on both paths — identity is the echoed check
+        # text, status is one of the three dispositions, and the rationale is
+        # nullable-but-required (OpenAI strict mode) so not_applicable can
+        # carry its grounded reason.
+        for schema in (_bash_rf_literal("json_schema"), _OPENAI_VERDICT_JSON_SCHEMA):
+            inner = schema["json_schema"]["schema"]
+            props = inner["properties"]
+            dispositions = props["required_check_dispositions"]
+            assert dispositions["type"] == ["array", "null"]
+            item = dispositions["items"]
+            assert item["additionalProperties"] is False
+            assert item["required"] == ["check", "status", "rationale"]
+            assert item["properties"]["check"] == {"type": "string"}
+            assert item["properties"]["status"] == {
+                "type": "string",
+                "enum": ["satisfied", "not_applicable", "unresolved"],
+            }
+            assert item["properties"]["rationale"] == {"type": ["string", "null"]}
 
     def test_python_verdict_payload_uses_that_schema(self):
         # And the Python verdict payload actually emits the constant, so the

@@ -1,0 +1,27 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "mixed-dispositions",
+  "description": "One satisfied, one grounded not_applicable, one unresolved: the unresolved check keeps coverage incomplete.",
+  "must_check": [
+    "review auth flow for regression",
+    "verify session token handling is correct",
+    "check secret rotation impact"
+  ],
+  "dispositions": [
+    {
+      "check": "review auth flow for regression",
+      "status": "satisfied",
+      "rationale": "Auth middleware is untouched; the only change is the login page copy."
+    },
+    {
+      "check": "verify session token handling is correct",
+      "status": "not_applicable",
+      "rationale": "No session issuance, refresh, or validation code appears in the diff."
+    },
+    {
+      "check": "check secret rotation impact",
+      "status": "unresolved",
+      "rationale": "The new config plumbing could read rotated secrets but the corpus does not show the runtime path."
+    }
+  ]
+}

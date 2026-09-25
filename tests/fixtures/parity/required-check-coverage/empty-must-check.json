@@ -1,0 +1,13 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "empty-must-check",
+  "description": "Zero deterministic checks: status none, regardless of what the model emitted — the model cannot invent an obligation set.",
+  "must_check": [],
+  "dispositions": [
+    {
+      "check": "verify the model invented this mandatory check",
+      "status": "satisfied",
+      "rationale": "Invented obligations do not exist."
+    }
+  ]
+}

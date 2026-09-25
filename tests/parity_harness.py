@@ -741,6 +741,50 @@ VERDICT_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# Boundary: structured required-check coverage (#750)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_required_checks.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+    }
+    return run_json_runner(
+        [node, "dist/index.js", "required-check-coverage-fixture", str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+        env=env,
+    )
+
+
+COVERAGE_BOUNDARY = Boundary(
+    id="required-check-coverage",
+    description=(
+        "#750 required-check coverage parity: the v2 structured evaluator "
+        "(pr_reviewer.completeness.evaluate_structured_coverage) versus the "
+        "v3 port (src/enforcement/required-checks.ts) over identity matching "
+        "against the deterministic must_check list, grounded not_applicable "
+        "handling, duplicate/unknown/malformed conservatism, and the "
+        "version-1 coverage artifact."
+    ),
+    fixtures_dir="required-check-coverage",
+    run=lambda fixture, workdir: (run_v2_required_checks(fixture, workdir), run_v3_required_checks(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Boundary: tier-aware tool request budget (#701)
 # ---------------------------------------------------------------------------
@@ -1119,7 +1163,7 @@ CORPUS_BOUNDARY = Boundary(
     error_categories=CORPUS_CATEGORIES,
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY)
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

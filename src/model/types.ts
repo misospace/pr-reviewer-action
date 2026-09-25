@@ -99,6 +99,31 @@ export interface NormalizedFinding {
 }
 
 /**
+ * #750: the three structured dispositions a reviewer may record for a
+ * deterministic `must_check` item. A required check is a mandatory review
+ * QUESTION, not automatically an implementation requirement: `not_applicable`
+ * is a completed disposition when the reviewer can ground it in the actual
+ * change context.
+ */
+export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
+
+export interface NormalizedRequiredCheckDisposition {
+  /** The check text as the model echoed it (sanitized, bounded). */
+  check: string;
+  /**
+   * One of the three reviewer dispositions, or the internal-only
+   * `"invalid"` marker: the model attributed an answer to this check but
+   * the answer was unusable (unknown status alias, ungrounded
+   * not_applicable). The coverage evaluation treats it as
+   * malformed and leaves the check unresolved; it is never a valid
+   * disposition and never appears in the wire schema.
+   */
+  status: RequiredCheckStatus | "invalid";
+  /** Bounded control-char-free rationale; null when absent/empty. */
+  rationale: string | null;
+}
+
+/**
  * Contract 4: parsed review verdict. `extra` carries every additional key the
  * model produced (v2 passes them through to ai-output.json untouched).
  *
@@ -114,6 +139,17 @@ export interface ParsedReviewVerdict {
   reviewMarkdown: string;
   findings: NormalizedFinding[];
   requirementCoverage: unknown;
+  /**
+   * #750: structured dispositions for the deterministic must_check items —
+   * the normalized array when the model emitted a usable one, null when the
+   * key was present but carried no usable array. Tri-state with
+   * `requiredCheckDispositionsEmitted`: only true key absence may use the
+   * legacy coexistence path; an explicitly emitted null/malformed value
+   * fails conservatively as structured-incomplete.
+   */
+  requiredCheckDispositions: NormalizedRequiredCheckDisposition[] | null;
+  /** True iff the model emitted the `required_check_dispositions` key at all. */
+  requiredCheckDispositionsEmitted: boolean;
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;

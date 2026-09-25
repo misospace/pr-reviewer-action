@@ -27,7 +27,7 @@ import json
 import re
 from pathlib import Path
 
-from pr_reviewer.completeness import validate_review
+from pr_reviewer.completeness import structured_coverage_from_output, validate_review
 
 # A review shorter than this is a stub / non-review (e.g. "LGTM.") and is
 # treated as low-confidence regardless of verdict or diff size. Above it, a
@@ -187,8 +187,18 @@ def should_escalate(
         must_check = [
             str(item) for item in (classification.get("must_check") or []) if item
         ]
-        if must_check and not validate_review(must_check, review)["validated"]:
-            reasons.append("incomplete_required_checks")
+        if must_check:
+            # #750: telemetry follows the same structured-first contract as
+            # the completeness bridge, so a grounded not_applicable (or any
+            # complete structured coverage) is not misreported as an
+            # incomplete-required-checks signal. Telemetry only either way:
+            # this reason must never gate a smart call (#721).
+            structured = structured_coverage_from_output(must_check, data)
+            if structured is not None:
+                if structured["status"] != "complete":
+                    reasons.append("incomplete_required_checks")
+            elif not validate_review(must_check, review)["validated"]:
+                reasons.append("incomplete_required_checks")
 
     if on_low_confidence and is_low_confidence(review):
         # Only a stub review or a populated Unknowns section counts — a concise

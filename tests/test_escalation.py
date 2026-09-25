@@ -388,6 +388,125 @@ class TestReviewerRequestedEscalation:
         assert escalate is False and reasons == []
 
 
+PATH_CHECKS = [
+    "review for path traversal vulnerabilities",
+    "test with edge-case paths (null bytes, symlinks)",
+]
+
+
+class TestRequiredChecksNeverEscalate:
+    """#750/#721 non-regression: required-check coverage outcomes —
+    unresolved, incomplete, or grounded not_applicable — never by themselves
+    produce a smart call. Only the literal structured
+    smart_review_requested === true does (#721 authority unchanged)."""
+
+    def _write(self, tmp_path, output):
+        (tmp_path / "ai-output.json").write_text(json.dumps(output))
+        (tmp_path / "classification.json").write_text(
+            json.dumps({"pr_kind": "file_serving_changes", "must_check": PATH_CHECKS})
+        )
+
+    def test_unresolved_check_without_request_does_not_escalate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._write(tmp_path, {
+            "verdict": "approve",
+            "review_markdown": GOOD_REVIEW,
+            "required_check_dispositions": [
+                {"check": PATH_CHECKS[0], "status": "unresolved", "rationale": "cannot tell"},
+                {"check": PATH_CHECKS[1], "status": "not_applicable", "rationale": "no path surface"},
+            ],
+            "smart_review_requested": False,
+        })
+        assert reviewer_requested_escalation() == (False, None)
+        escalate, reasons = should_escalate()
+        assert escalate is False
+        # Telemetry may note the incomplete checks, but never escalates on it.
+        assert escalate is False
+
+    def test_incomplete_structured_coverage_without_request_does_not_escalate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._write(tmp_path, {
+            "verdict": "approve",
+            "review_markdown": GOOD_REVIEW,
+            # Only one of two checks dispositioned — structurally incomplete.
+            "required_check_dispositions": [
+                {"check": PATH_CHECKS[0], "status": "satisfied", "rationale": "bounded"},
+            ],
+        })
+        assert reviewer_requested_escalation() == (False, None)
+        escalate, _ = should_escalate()
+        assert escalate is False
+
+    def test_grounded_na_without_request_does_not_escalate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._write(tmp_path, {
+            "verdict": "approve",
+            "review_markdown": GOOD_REVIEW,
+            "required_check_dispositions": [
+                {"check": PATH_CHECKS[0], "status": "not_applicable",
+                 "rationale": "No code resolves filesystem paths in this change."},
+                {"check": PATH_CHECKS[1], "status": "not_applicable",
+                 "rationale": "The underlying risk surface is absent."},
+            ],
+        })
+        assert reviewer_requested_escalation() == (False, None)
+        escalate, reasons = should_escalate(on_incomplete=True)
+        assert escalate is False
+        assert "incomplete_required_checks" not in reasons
+
+    def test_missing_structured_field_without_request_does_not_escalate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._write(tmp_path, {
+            "verdict": "approve",
+            "review_markdown": GOOD_REVIEW,
+        })
+        assert reviewer_requested_escalation() == (False, None)
+        escalate, _ = should_escalate()
+        assert escalate is False
+
+    def test_string_true_or_prose_cannot_forge_escalation(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        from pr_reviewer.response_parser import parse_response
+        parsed = parse_response({
+            "choices": [{"message": {"content": json.dumps({
+                "verdict": "approve",
+                "review_markdown": GOOD_REVIEW,
+                "required_check_dispositions": [
+                    {"check": PATH_CHECKS[0], "status": "unresolved", "rationale": "cannot tell"},
+                ],
+                "smart_review_requested": "true",
+                "smart_review_reason": "required check unresolved so escalate",
+            })}, "finish_reason": "stop"}],
+        })
+        # The string "true" is normalized to False even alongside an
+        # unresolved required check; the dispositions never manufacture a
+        # request either.
+        assert parsed["smart_review_requested"] is False
+        assert parsed["smart_review_reason"] is None
+        (tmp_path / "ai-output.json").write_text(json.dumps(parsed))
+        assert reviewer_requested_escalation() == (False, None)
+        escalate, _ = should_escalate()
+        assert escalate is False
+
+    def test_literal_true_still_requests_per_721(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._write(tmp_path, {
+            "verdict": "approve",
+            "review_markdown": GOOD_REVIEW,
+            "required_check_dispositions": [
+                {"check": PATH_CHECKS[0], "status": "not_applicable",
+                 "rationale": "No code resolves filesystem paths in this change."},
+                {"check": PATH_CHECKS[1], "status": "not_applicable",
+                 "rationale": "The underlying risk surface is absent."},
+            ],
+            "smart_review_requested": True,
+            "smart_review_reason": "cannot confidently disposition the auth flow",
+        })
+        assert reviewer_requested_escalation() == (
+            True, "cannot confidently disposition the auth flow",
+        )
+
+
 TRIVIAL_DIFF = """\
 diff --git a/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml b/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml
 --- a/kubernetes/apps/base/flux-system/konflate/helmrelease.yaml

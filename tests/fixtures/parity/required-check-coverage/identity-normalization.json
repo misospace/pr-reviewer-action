@@ -1,0 +1,21 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "identity-normalization",
+  "description": "Identity matching tolerates casing and whitespace drift in a faithful echo but never a rewording; duplicate-supplied identities collapse to the first canonical text.",
+  "must_check": [
+    "Review for path traversal vulnerabilities",
+    "check   secret  rotation impact"
+  ],
+  "dispositions": [
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "not_applicable",
+      "rationale": "Case-normalized echo still identifies the deterministic check."
+    },
+    {
+      "check": "CHECK SECRET ROTATION IMPACT",
+      "status": "satisfied",
+      "rationale": "Casing drift in a faithful echo still identifies the check."
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "ungrounded-na",
+  "description": "not_applicable without a usable rationale is malformed — the check stays unresolved instead of being waived.",
+  "must_check": [
+    "check for directory traversal vulnerabilities"
+  ],
+  "dispositions": [
+    {
+      "check": "check for directory traversal vulnerabilities",
+      "status": "not_applicable",
+      "rationale": null
+    }
+  ]
+}

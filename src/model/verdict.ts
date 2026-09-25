@@ -1,4 +1,4 @@
-import type { NormalizedFinding, ParsedReviewVerdict, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedRequiredCheckDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
 
 /**
@@ -34,6 +34,70 @@ const MAX_FINDING_MESSAGE_CHARS = 2000;
 // _MAX_SMART_REVIEW_REASON_CHARS.
 const MAX_SMART_REVIEW_REASON_CHARS = 400;
 const SMART_REVIEW_REASON_CONTROL = /[\u0000-\u0020\u007f]+/g;
+
+// #750: bounded required-check dispositions. The same control-char collapse
+// applies to check identities and rationales; the caps bound one model
+// answer. Byte-identical to pr_reviewer/response_parser.py's
+// _MAX_REQUIRED_CHECK_CHARS / _MAX_RATIONALE_CHARS and the shared control RE.
+const MAX_REQUIRED_CHECKS = 50;
+const MAX_REQUIRED_CHECK_CHARS = 400;
+const MAX_RATIONALE_CHARS = 500;
+
+const REQUIRED_CHECK_STATUSES = new Set<string>(["satisfied", "not_applicable", "unresolved"]);
+
+/**
+ * #750: normalize the model's structured required-check dispositions.
+ * Tri-state with key presence: callers distinguish true absence (the legacy
+ * coexistence path) from an explicitly emitted null/invalid type
+ * (conservatively structured-incomplete, never the fallback).
+ *
+ * Entries are preserved, never silently collapsed. An entry that cannot be
+ * attributed to any check identity (non-object, non-string/empty/oversized
+ * check text) is dropped; an attributable but malformed one — unknown
+ * status prose alias, `not_applicable` without a usable rationale — is
+ * preserved as `{check, status: "invalid", rationale: null}` so the
+ * deterministic coverage evaluation invalidates the check (the same
+ * fail-conservative precedent as requirement_coverage normalizing unusable
+ * claims to `unknown`). Dropping a malformed duplicate must never turn a
+ * valid+malformed double answer into a single valid disposition.
+ */
+function normalizeRequiredCheckDispositions(
+  value: unknown,
+  present: boolean,
+): { present: boolean; dispositions: NormalizedRequiredCheckDisposition[] | null } {
+  if (!present) return { present: false, dispositions: null };
+  if (!Array.isArray(value)) return { present: true, dispositions: null };
+  const dispositions: NormalizedRequiredCheckDisposition[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+
+    const rawCheck = item.check;
+    if (typeof rawCheck !== "string") continue;
+    const check = rawCheck.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
+    if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) continue;
+
+    const rawStatus = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    if (!REQUIRED_CHECK_STATUSES.has(rawStatus)) {
+      dispositions.push({ check, status: "invalid", rationale: null });
+      if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+      continue;
+    }
+
+    let rationale: string | null = null;
+    if (typeof item.rationale === "string") {
+      rationale = item.rationale.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_RATIONALE_CHARS) || null;
+    }
+    if (rawStatus === "not_applicable" && rationale === null) {
+      dispositions.push({ check, status: "invalid", rationale: null });
+      if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+      continue;
+    }
+
+    dispositions.push({ check, status: rawStatus as RequiredCheckStatus, rationale });
+    if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+  }
+  return { present: true, dispositions };
+}
 
 /**
  * #721: normalize the reviewer's structured smart-review request.
@@ -426,16 +490,23 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
       key !== "verdict" && key !== "review_markdown" && key !== "findings"
       && key !== "requirement_coverage"
       && key !== "smart_review_requested" && key !== "smart_review_reason"
+      && key !== "required_check_dispositions"
     ) {
       extra[key] = value;
     }
   }
   const smartRequest = normalizeSmartReviewRequest(parsed);
+  const dispositions = normalizeRequiredCheckDispositions(
+    parsed.required_check_dispositions,
+    "required_check_dispositions" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
     findings: normalizeFindings(parsed.findings),
     requirementCoverage: parsed.requirement_coverage,
+    requiredCheckDispositions: dispositions.dispositions,
+    requiredCheckDispositionsEmitted: dispositions.present,
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
     extra,

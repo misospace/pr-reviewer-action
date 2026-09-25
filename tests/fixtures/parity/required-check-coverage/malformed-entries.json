@@ -1,0 +1,29 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "malformed-entries",
+  "description": "Wrong types, invalid statuses, and non-object entries are rejected deterministically; attributable malformed entries invalidate their check.",
+  "must_check": [
+    "review auth flow for regression",
+    "verify session token handling is correct",
+    "check secret rotation impact"
+  ],
+  "dispositions": [
+    "a bare string entry",
+    42,
+    null,
+    {
+      "check": "review auth flow for regression",
+      "status": "N/A"
+    },
+    {
+      "check": "verify session token handling is correct",
+      "status": "satisfied",
+      "rationale": 7
+    },
+    {
+      "check": "check secret rotation impact",
+      "status": "not_applicable",
+      "rationale": ["not", "a", "string"]
+    }
+  ]
+}

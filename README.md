@@ -92,6 +92,11 @@ flowchart LR
     F --> G[Publish<br/>comment / native review]
 ```
 
+Deeper repository documentation for contributors and agents — the per-module
+code map, review-corpus internals, fork-review security, and the eval
+runbooks — lives under [`docs/`](docs), indexed from
+[`AGENTS.md`](AGENTS.md).
+
 What it supports:
 
 | | |
@@ -155,17 +160,17 @@ The classification is purely rule-based — no model calls are involved. It uses
 | `db_or_migration_changes` | migration data-loss risk; test on a copy of production schema |
 | `linked_security_issue` / `linked_audit_issue` / `linked_priority_p0`/`p1` | explicitly address the linked issue / verify thoroughly |
 
-These checklists exist to keep weaker local models honest on high-risk PRs: the items are injected into the model's instructions ("address EACH of these"), and the review is then **validated** against them.
+These checklists exist to keep weaker local models honest on high-risk PRs: the items are injected into the model's instructions, and the review is then **validated** against them.
 
 ### 📋 Required-check completeness validation
 
-After the model returns, the action deterministically checks whether `review_markdown` actually discussed each `must_check` item (shallow keyword matching — it catches reviews that never mentioned a required check, not incorrect discussion). Controlled by `validate_required_checks` (`auto` = validate when must_check is non-empty) and `required_check_validation_mode`:
+A `must_check` item is a mandatory **review question**, not automatically an implementation requirement: the model records one structured disposition per item in the verdict's `required_check_dispositions` array — `satisfied`, `not_applicable` (requires a concise rationale grounded in the actual change), or `unresolved` — echoing the check text exactly. The action folds those dispositions against the deterministic list: every check `satisfied` or grounded `not_applicable` is `complete`; missing, duplicate, unknown, or malformed dispositions fail conservatively; invented checks are dropped, never credited. When the verdict carries no structured dispositions at all, a legacy shallow keyword match against `review_markdown` still decides (temporary coexistence behavior, removed when v3 enforcement migrates). Controlled by `validate_required_checks` (`auto` = validate when must_check is non-empty) and `required_check_validation_mode`:
 
-- `warn` (default): an **Unaddressed required checks** section listing the missing items is appended to the published review, so a human sees exactly what the model skipped. The verdict is not changed.
+- `warn` (default): an **Unaddressed required checks** section listing the unresolved items is appended to the published review, so a human sees exactly what the model skipped or left unresolved. The verdict is not changed.
 - `fail`: additionally forces a `request_changes` verdict.
 - `metadata_only`: records the result without touching the published review — for downstream automation.
 
-The result is exposed as the `required_checks` output (`complete` / `incomplete` / `none`), written to the run's step summary, and recorded in the managed metadata marker for future runs. Low-risk PRs (empty `must_check`) produce no validation noise.
+The result is exposed as the `required_checks` output (`complete` / `incomplete` / `none`), written to the run's step summary, and recorded in the managed metadata marker for future runs. Low-risk PRs (empty `must_check`) produce no validation noise. Incomplete coverage never triggers smart escalation by itself — the only post-primary smart trigger is the reviewer's explicit structured `smart_review_requested` (#721). The full contract lives in `docs/required-checks.md`.
 
 ### 📒 Requirement ledger & coverage
 
@@ -1131,6 +1136,8 @@ Copyable workflows are included in [`examples/`](examples):
 ### 📊 Specialist corpus & deep A/B
 
 The `eval-harness` workflow (`.github/workflows/eval-harness.yaml`) runs `scripts/eval_harness.py` against the graded corpora — `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and `evals/corpus-specialists.json` — on the weekly scheduled sweep and on demand. The specialist corpus adds a deep-review A/B: the `deep` dispatch input (or `--deep-review false|true|both` locally) runs the specialist phase, and deep runs are labelled `<mode>+deep` in the report. Each fixture's `specialist_expectations` is split into two grading scopes: `lead_checks` (`lead_generated`, `lead_disposition`) are deep-only diagnostics graded only on `<mode>+deep` runs — and a `verified` disposition demands concrete evidence (the adopted finding must be grounded in the expected file via `finding_file_any`, so parroting a specialist's wording proves nothing) — while `effectiveness_checks` (`final_findings_count`, `dedupe_final_findings`) are graded identically on standard and deep runs, keeping the headline comparison an apples-to-apples measure of final-review capability (`specialist_effectiveness_*` rates on both labels; `specialist_lead_*` rates on deep labels only). The harness drives the real review boundary end to end: it passes `REPO`/`PR_NUMBER` to `run_review.sh` and consumes the validated `ai-output.json` artifact (verdict, markdown, production-shape findings) plus specialist telemetry from `specialists.json` and `specialist-<role>.json`. The scheduled sweep stays standard-only, and the production default is unchanged: `deep_review` is still off by default.
+
+The full evaluation runbook — local runs, CI triggers, merge-safety disposition scoring, the offline semantic gate, and the on-demand semantic judge — lives in [`docs/evals.md`](docs/evals.md).
 
 ## 📌 Version pinning and releases
 

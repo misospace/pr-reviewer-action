@@ -118,12 +118,12 @@ inputs:
     v2_id: validate_required_checks
     required: false
     default: "auto"
-    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Validation is deterministic keyword matching — it catches reviews that never discussed a required check, not incorrect discussion."
+    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all."
   - id: required-check-validation-mode
     v2_id: required_check_validation_mode
     required: false
     default: "warn"
-    description: "What to do when required checks are unaddressed. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required_checks output and metadata marker) without changing the published review."
+    description: "What to do when required checks are unresolved or undispositioned. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required_checks output and metadata marker) without changing the published review. Incompleteness never triggers smart escalation by itself (#721)."
   - id: review-routing-mode
     v2_id: review_routing_mode
     required: false
