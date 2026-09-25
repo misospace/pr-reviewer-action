@@ -1,11 +1,33 @@
 {
   "fixture": "path-containment-symlink-archive-still-detected",
-  "description": "#749 positive controls in one PR: containment/normalization logic (os.path.realpath boundary check), a symlink-sensitive operation, and archive extraction (zip-slip surface) in production chunks each fire their own class-categorized signal; the kind, flag, and path must_check items follow. The provenance artifact carries all three signal classes with bounded samples.",
+  "description": "#749 positive controls in one PR: containment/normalization logic (os.path.realpath boundary check), a symlink-sensitive operation, and archive extraction (zip-slip surface) in production chunks each fire their own class-categorized signal; the kind, flag, and path must_check items follow. The provenance artifact carries all three signal classes with bounded samples. Paired vocabulary controls: the SAME sanitize/path vocabulary that is prose in comments and documentation is a real containment signal in executable source (def sanitize_path, commonpath/is_relative_to calls, filepath identifiers).",
   "pr_files": [
-    { "filename": "src/serve.py", "status": "modified", "additions": 2 },
-    { "filename": "src/fsutil.py", "status": "modified", "additions": 1 },
-    { "filename": "src/ingest.py", "status": "modified", "additions": 2 }
+    {
+      "filename": "src/serve.py",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "src/fsutil.py",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "src/ingest.py",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "src/sanitize.py",
+      "status": "modified",
+      "additions": 3
+    },
+    {
+      "filename": "src/refs.py",
+      "status": "modified",
+      "additions": 2
+    }
   ],
-  "diff": "diff --git a/src/serve.py b/src/serve.py\n+++ b/src/serve.py\n@@ -1,2 +1,4 @@\n+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\ndiff --git a/src/fsutil.py b/src/fsutil.py\n+++ b/src/fsutil.py\n@@ -1,1 +1,2 @@\n+os.symlink(target, link_path)\ndiff --git a/src/ingest.py b/src/ingest.py\n+++ b/src/ingest.py\n@@ -1,2 +1,4 @@\n+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n",
+  "diff": "diff --git a/src/serve.py b/src/serve.py\n+++ b/src/serve.py\n@@ -1,2 +1,4 @@\n+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\ndiff --git a/src/fsutil.py b/src/fsutil.py\n+++ b/src/fsutil.py\n@@ -1,1 +1,2 @@\n+os.symlink(target, link_path)\ndiff --git a/src/ingest.py b/src/ingest.py\n+++ b/src/ingest.py\n@@ -1,2 +1,4 @@\n+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\ndiff --git a/src/sanitize.py b/src/sanitize.py\n+++ b/src/sanitize.py\n@@ -1,2 +1,5 @@\n+def sanitize_path(p):\n+    return os.path.commonpath([BASE, p])\ndiff --git a/src/refs.py b/src/refs.py\n+++ b/src/refs.py\n@@ -1,1 +1,3 @@\n+filepath = request.args[\"path\"]\n+if is_relative_to(BASE, filepath):\n    pass\n",
   "linked_issues": []
 }

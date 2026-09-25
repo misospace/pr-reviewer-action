@@ -261,20 +261,58 @@ function stripStaticStringLiterals(line: string): string {
 const UNTRUSTED_ASSIGNMENT =
   /^[+\-]?\s*(?:(?:const|let|var|final|val|my|our|local)\s+)?\s*([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)/;
 
-/** Operand expression after a `/` division operator: to the first statement
- * separator (`;`) or unbalanced `)` — sibling statements and enclosing-call
- * closers are not part of the operand and cannot donate untrusted tokens. */
+/** Closing brackets mapped to their openers, for division-operand scanning. */
+const DIVISION_OPERAND_CLOSERS: Readonly<Record<string, string>> = {
+  ")": "(",
+  "]": "[",
+  "}": "{",
+};
+
+/** The expression belonging to a `/` path-division: scanned from the operand
+ * start to the end of THAT expression, at the operand's starting nesting
+ * level. Terminates on the first top-level `,` or `;`, or on an unmatched
+ * closing bracket (one that closes an enclosing context the operand did not
+ * open). Bracket nesting is tracked per type (`()`, `[]`, `{}`) and quoted
+ * spans are skipped whole (escape-aware), so delimiters inside a
+ * call/subscript/container — or inside a string literal — that belong to the
+ * operand never terminate it, while sibling expressions at the operand's own
+ * level cannot donate untrusted tokens. Operates on the already quote-lexed
+ * representation; surviving quotes are interpolation-shaped literals. */
 function divisionOperand(text: string): string {
-  let depth = 0;
-  for (let pos = 0; pos < text.length; pos++) {
-    const ch = text[pos];
-    if (ch === "(") depth++;
-    else if (ch === ")") {
-      if (depth === 0) return text.slice(0, pos);
-      depth--;
-    } else if (ch === ";") return text.slice(0, pos);
+  const out: string[] = [];
+  const depth: Record<string, number> = { "(": 0, "[": 0, "{": 0 };
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i] ?? "";
+    if (ch === "'" || ch === '"' || ch === "`") {
+      let j = i + 1;
+      while (j < n) {
+        const c = text[j] ?? "";
+        if (c === "\\" && j + 1 < n) {
+          j += 2;
+          continue;
+        }
+        if (c === ch) break;
+        j += 1;
+      }
+      out.push(text.slice(i, j + 1));
+      i = j < n ? j + 1 : n;
+      continue;
+    }
+    if (ch in depth) {
+      depth[ch] = (depth[ch] ?? 0) + 1;
+    } else if (ch in DIVISION_OPERAND_CLOSERS) {
+      const opener = DIVISION_OPERAND_CLOSERS[ch] ?? "";
+      if ((depth[opener] ?? 0) === 0) break; // closes an enclosing context
+      depth[opener] = (depth[opener] ?? 0) - 1;
+    } else if ((ch === "," || ch === ";") && !Object.values(depth).some((d) => d > 0)) {
+      break;
+    }
+    out.push(ch);
+    i += 1;
   }
-  return text;
+  return out.join("");
 }
 
 /** Assignment-target identifier of a line whose QUOTE-STRIPPED RHS reaches an
@@ -367,6 +405,27 @@ function neutralizeChunkLines(lines: string[]): string[] {
 /** Material content signal classes: each entry is (signal class, patterns).
  * These are usage-shaped signals — a bare path-library import or API mention
  * matches none of them. Scanned per diff chunk over neutralized text. */
+/** Lexical code-only material classes: identifier/path vocabulary that only
+ * carries signal in EXECUTABLE source. Documentation files and comments
+ * mention or describe these words (`# sanitize_path handles configured
+ * paths`, `Use sanitize_path before opening files.`) without constructing
+ * any path, so these classes are skipped for documentation-only files and
+ * scanned over comment-stripped code text. Deliberately NOT a phrase
+ * blacklist: the distinction is executable-vs-prose context. All other
+ * classes keep their existing semantics. */
+const LEXICAL_CODE_ONLY_CLASSES = new Set<string>([
+  "path_containment_or_sanitization",
+  "path_reference_identifier",
+]);
+
+/** Documentation-only file types: prose, not executable source. */
+const DOCUMENTATION_EXTENSIONS = [".md", ".rst", ".rest", ".txt", ".adoc"];
+
+function isDocumentationPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
 const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp[]])[] = [
   // Explicit traversal literals (outside specifiers/anchor calls).
   ["traversal_literal", [PATH_TRAVERSAL_PATTERN]],
@@ -535,6 +594,42 @@ function stripLineComment(line: string): string {
     if (pos !== -1 && pos < cut) cut = pos;
   }
   return line.slice(0, cut);
+}
+
+/** Line reduced to its executable-code text for the LEXICAL code-only
+ * material classes: quoted spans are blanked whole (escape-aware — a `#` or
+ * `//` inside a string literal is data, not a comment marker, and string
+ * contents — including interpolation-shaped literals — are data, not code
+ * identifiers), and the line is truncated at the first comment marker (`#`
+ * or `//`) outside quotes. The distinction these classes need is
+ * executable-vs-prose context: `function sanitizePath(p)` is code,
+ * `// sanitize_path helper` and `log.info("sanitize_path ran")` are prose. */
+function stripCodeComments(line: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const ch = line[i] ?? "";
+    if (ch === "'" || ch === '"' || ch === "`") {
+      let j = i + 1;
+      while (j < n) {
+        const c = line[j] ?? "";
+        if (c === "\\" && j + 1 < n) {
+          j += 2;
+          continue;
+        }
+        if (c === ch) break;
+        j += 1;
+      }
+      out.push(ch + ch);
+      i = j < n ? j + 1 : n;
+      continue;
+    }
+    if (ch === "#" || (ch === "/" && i + 1 < n && line[i + 1] === "/")) break;
+    out.push(ch);
+    i += 1;
+  }
+  return out.join("");
 }
 
 /** Index of the `)` that closes a construction call opened `depth` paren
@@ -720,9 +815,23 @@ export function evaluatePathHandlingSignals(
     const buckets = isTest ? discountedBuckets : firedBuckets;
     const source: PathHandlingSignal["source"] = isTest ? "diff_test_file" : "diff";
 
+    // Documentation-only chunks carry no executable context. A headerless
+    // chunk is treated like the test discount: docs-skip only when EVERY
+    // changed file is documentation; mixed or unknown sets stay
+    // conservative (lexical classes still scan).
+    const isDocumentation =
+      chunkFile !== null
+        ? isDocumentationPath(chunkFile)
+        : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
+
     for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
+      const codeOnly = LEXICAL_CODE_ONLY_CLASSES.has(className);
+      if (codeOnly && isDocumentation) continue;
       for (let index = 0; index < neutralized.length; index++) {
-        if (!matchesAny(neutralized[index] ?? "", patterns)) continue;
+        const scanLine = codeOnly
+          ? stripCodeComments(neutralized[index] ?? "")
+          : (neutralized[index] ?? "");
+        if (!matchesAny(scanLine, patterns)) continue;
         recordSignal(buckets, className, source, chunkFile, pathSample(lines[index] ?? ""));
         break; // one bucket entry per class per chunk; samples merge across chunks
       }

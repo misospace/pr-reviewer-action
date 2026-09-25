@@ -1064,6 +1064,93 @@ class TestPathHandlingSignalModel:
             result = classify_pr([_make_file("src/app.py")], diff_text=diff)
             assert result.pr_kind == "path_handling_changes", diff
 
+    def test_division_sibling_expressions_cannot_donate(self):
+        # The division operand ends at the operand's own nesting level: a
+        # sibling expression after a top-level `,`/`;` — in a tuple, list,
+        # dict, call argument, or statement sequence — is not part of the
+        # path-division expression and cannot donate untrusted tokens.
+        for diff in (
+            '+x = (Path(BASE) / "static", request.id)\n',
+            '+x = [Path(BASE) / "static", request.id]\n',
+            '+x = {"path": Path(BASE) / "static", "audit": request.id}\n',
+            '+foo(Path(BASE) / "static", request.id)\n',
+            '+render(Path(BASE) / "static", {"id": request.id})\n',
+            '+d = {"a": 1, "b": Path(BASE) / "static", "c": request.id}\n',
+            '+foo((Path(BASE) / "static", request.id))\n',
+            '+x = Path(BASE) / "static"; y = request.args["p"]\n',
+            '+x = Path(BASE) / a[0], request.args["p"]\n',
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_division_nested_operand_expressions_still_fire(self):
+        # Delimiters nested inside the operand itself — a call, subscript,
+        # attribute chain, container, or string interpolation — do not
+        # terminate the operand scan, so real untrusted operands still fire.
+        for diff in (
+            '+x = Path(BASE) / transform(request.args["p"])\n',
+            '+x = Path(BASE) / parts[request.args["i"]]\n',
+            '+x = Path(BASE) / obj.attr[request.args["i"]]\n',
+            '+d = {"a": 1, "b": Path(BASE) / request.args["p"]}\n',
+            "+x = Path(BASE) / f\"{request.args['p']}\"\n",
+            "+x = Path(BASE) / (request.args['p'])\n",
+            '+x = Path(BASE) / {"k": request.args["p"]}\n',
+            '+x = parts[Path(BASE) / request.args["i"]]\n',
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
+    def test_comment_vocabulary_is_not_code_signal(self):
+        # Comments and string contents are prose, not executable code: the
+        # lexical material classes (containment/sanitization, path reference
+        # identifiers) do not fire from them.
+        for diff, filename in (
+            ("+# sanitize_path handles configured paths\n", "src/app.py"),
+            ("+x = 1  # sanitize_path later\n", "src/app.py"),
+            ("+x = 1  # the filepath is logged\n", "src/app.py"),
+            ("+// sanitize_path helper\n", "src/app.ts"),
+            ("+const x = 1; // pathname docs\n", "src/app.ts"),
+            ('+log.info("sanitize_path ran")\n', "src/app.py"),
+            ('+log.info("filepath is shown")\n', "src/app.py"),
+            ('+log.info(f"sanitize_path ran for {x}")\n', "src/app.py"),
+            ('+_ROOT = Path(__file__).resolve()  # like abspath\n', "src/app.py"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_documentation_files_skip_lexical_classes(self):
+        # Documentation-only files (.md/.rst/.txt/...) carry no executable
+        # context: prose mentioning sanitization/path vocabulary is not a
+        # code signal. A headerless chunk is docs-skipped only when EVERY
+        # changed file is documentation.
+        for diff, filename in (
+            ("+Use sanitize_path before opening files.\n", "docs/guide.md"),
+            ("+The `filepath` value is displayed to the user.\n", "docs/guide.md"),
+            ("+The pathname field is informational.\n", "docs/ref.rst"),
+            ("+Run sanitize_path first.\n", "NOTES.txt"),
+            ("+Use sanitize_path before opening files.\n", "README.md"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_code_context_same_vocabulary_still_fires(self):
+        # Paired controls: the EXACT vocabulary that is prose in comments and
+        # docs is a real signal in executable source.
+        for diff, filename in (
+            ("+def sanitize_path(p):\n    return os.path.commonpath([p])\n", "src/app.py"),
+            ('+filepath = request.args["path"]\n', "src/app.py"),
+            ("+p = commonpath([base, user_input])\n", "src/app.py"),
+            ('+p = os.path.realpath(request.args["p"])\n', "src/app.py"),
+            ("+function sanitizePath(p) {}\n", "src/app.ts"),
+            ("+x = sanitize_path(p)  # filepath helper\n", "src/app.py"),
+            ("+if is_relative_to(base, p):\n    pass\n", "src/app.py"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
     def test_typed_annotation_one_hop_fires(self):
         diff = "+ name: str = request.args['p']\n+ x = os.path.join(base, name)\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)

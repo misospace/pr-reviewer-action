@@ -607,6 +607,94 @@ test("#749: keyword-prefix identifiers and division operand isolation", () => {
   }
 });
 
+test("#749: division sibling expressions cannot donate; nested operand expressions fire", () => {
+  // The division operand ends at the operand's own nesting level: a sibling
+  // expression after a top-level `,`/`;` — tuple, list, dict, call argument,
+  // or statement sequence — is not part of the path-division expression.
+  for (const diff of [
+    '+x = (Path(BASE) / "static", request.id)\n',
+    '+x = [Path(BASE) / "static", request.id]\n',
+    '+x = {"path": Path(BASE) / "static", "audit": request.id}\n',
+    '+foo(Path(BASE) / "static", request.id)\n',
+    '+render(Path(BASE) / "static", {"id": request.id})\n',
+    '+d = {"a": 1, "b": Path(BASE) / "static", "c": request.id}\n',
+    '+foo((Path(BASE) / "static", request.id))\n',
+    '+x = Path(BASE) / "static"; y = request.args["p"]\n',
+    '+x = Path(BASE) / a[0], request.args["p"]\n',
+  ]) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+  }
+  // Delimiters nested inside the operand itself — call, subscript, attribute
+  // chain, container, string interpolation — do not terminate the scan.
+  for (const diff of [
+    '+x = Path(BASE) / transform(request.args["p"])\n',
+    '+x = Path(BASE) / parts[request.args["i"]]\n',
+    '+x = Path(BASE) / obj.attr[request.args["i"]]\n',
+    '+d = {"a": 1, "b": Path(BASE) / request.args["p"]}\n',
+    "+x = Path(BASE) / f\"{request.args['p']}\"\n",
+    "+x = Path(BASE) / (request.args['p'])\n",
+    '+x = Path(BASE) / {"k": request.args["p"]}\n',
+    '+x = parts[Path(BASE) / request.args["i"]]\n',
+  ]) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+});
+
+test("#749: lexical material classes need executable context", () => {
+  // Comments and string contents are prose, not executable code.
+  const proseNegatives: [string, string][] = [
+    ["+# sanitize_path handles configured paths\n", "src/app.py"],
+    ["+x = 1  # sanitize_path later\n", "src/app.py"],
+    ["+x = 1  # the filepath is logged\n", "src/app.py"],
+    ["+// sanitize_path helper\n", "src/app.ts"],
+    ["+const x = 1; // pathname docs\n", "src/app.ts"],
+    ['+log.info("sanitize_path ran")\n', "src/app.py"],
+    ['+log.info("filepath is shown")\n', "src/app.py"],
+    ['+log.info(f"sanitize_path ran for {x}")\n', "src/app.py"],
+    ['+_ROOT = Path(__file__).resolve()  # like abspath\n', "src/app.py"],
+    // Documentation-only files carry no executable context.
+    ["+Use sanitize_path before opening files.\n", "docs/guide.md"],
+    ["+The `filepath` value is displayed to the user.\n", "docs/guide.md"],
+    ["+The pathname field is informational.\n", "docs/ref.rst"],
+    ["+Run sanitize_path first.\n", "NOTES.txt"],
+    ["+Use sanitize_path before opening files.\n", "README.md"],
+  ];
+  for (const [diff, filename] of proseNegatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+  }
+  // Paired controls: the EXACT vocabulary that is prose in comments and docs
+  // is a real signal in executable source.
+  const codePositives: [string, string][] = [
+    ["+def sanitize_path(p):\n    return os.path.commonpath([p])\n", "src/app.py"],
+    ['+filepath = request.args["path"]\n', "src/app.py"],
+    ["+p = commonpath([base, user_input])\n", "src/app.py"],
+    ['+p = os.path.realpath(request.args["p"])\n', "src/app.py"],
+    ["+function sanitizePath(p) {}\n", "src/app.ts"],
+    ["+x = sanitize_path(p)  # filepath helper\n", "src/app.py"],
+    ["+if is_relative_to(base, p):\n    pass\n", "src/app.py"],
+  ];
+  for (const [diff, filename] of codePositives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+  // Other classes keep their existing semantics: traversal literals and
+  // archive operations are meaningful even in comments and docs.
+  const preserved: [string, string][] = [
+    ["+# blocks ../traversal\n", "src/app.py"],
+    ["+see ../etc/passwd\n", "README.md"],
+    ["+# uses extractall\n", "src/app.py"],
+  ];
+  for (const [diff, filename] of preserved) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],

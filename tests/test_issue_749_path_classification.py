@@ -397,6 +397,60 @@ def test_keyword_prefix_and_division_isolation(tmp_path) -> None:
     assert clean["path_handling_provenance"]["fired"] is False
 
 
+def test_division_sibling_and_lexical_context_contracts(tmp_path) -> None:
+    # General contracts, not example-shaped rules:
+    # - a pathlib `/` division operand ends at its own nesting level, so
+    #   sibling expressions (tuple/list/dict/call arguments, statement
+    #   separators) cannot donate untrusted tokens;
+    # - the lexical material classes (containment/sanitization, path
+    #   reference identifiers) require executable context: comments, string
+    #   contents, and documentation-only files are prose.
+    siblings = (
+        '+x = (Path(BASE) / "static", request.id)\n'
+        '+y = [Path(BASE) / "static", request.id]\n'
+        '+z = {"path": Path(BASE) / "static", "audit": request.id}\n'
+        '+foo(Path(BASE) / "static", request.id)\n'
+        '+x = Path(BASE) / "static"; y = request.args["p"]\n'
+    )
+    clean = _classify([{"filename": "src/app.py"}], siblings, tmp_path)
+    assert clean["pr_kind"] != "path_handling_changes"
+    assert clean["path_handling_provenance"]["fired"] is False
+
+    prose = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,5 @@\n"
+        "+# sanitize_path handles configured paths\n"
+        '+log.info("sanitize_path ran")\n'
+        "+x = 1  # the filepath is logged\n"
+        "diff --git a/docs/guide.md b/docs/guide.md\n"
+        "+++ b/docs/guide.md\n"
+        "@@ -1,1 +1,2 @@\n"
+        "+Use sanitize_path before opening files.\n"
+        "+The `filepath` value is displayed to the user.\n"
+    )
+    prose_result = _classify(
+        [{"filename": "src/app.py"}, {"filename": "docs/guide.md"}],
+        prose,
+        tmp_path,
+    )
+    assert prose_result["pr_kind"] != "path_handling_changes"
+    assert prose_result["path_handling_provenance"]["fired"] is False
+
+    # Paired controls: the same vocabulary in executable source fires.
+    code = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,5 @@\n"
+        "+def sanitize_path(p):\n"
+        "+    return os.path.commonpath([BASE, p])\n"
+        '+filepath = request.args["path"]\n'
+    )
+    fired = _classify([{"filename": "src/app.py"}], code, tmp_path)
+    assert fired["pr_kind"] == "path_handling_changes"
+    assert "path_handling_changes" in fired["risk_flags"]
+
+
 def test_multiline_opening_line_nested_paren_depth_fires(tmp_path) -> None:
     # The opening line's remainder (foo() contributes its paren balance to
     # the initial depth: the `safe)` closer must not end the scan before the

@@ -298,22 +298,53 @@ _UNTRUSTED_ASSIGNMENT = re.compile(
 )
 
 
+# Closing brackets mapped to their openers, for division-operand scanning.
+_DIVISION_OPERAND_CLOSER = {")": "(", "]": "[", "}": "{"}
+
+
 def _division_operand(text: str) -> str:
-    """Operand expression after a `/` division operator: to the first
-    statement separator (`;`) or unbalanced `)` — sibling statements and
-    enclosing-call closers are not part of the operand and cannot donate
-    untrusted tokens."""
-    depth = 0
-    for pos, ch in enumerate(text):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth == 0:
-                return text[:pos]
-            depth -= 1
-        elif ch == ";":
-            return text[:pos]
-    return text
+    """The expression belonging to a `/` path-division: scanned from the
+    operand start to the end of THAT expression, at the operand's starting
+    nesting level. Terminates on the first top-level ``,`` or ``;``, or on
+    an unmatched closing bracket (one that closes an enclosing context the
+    operand did not open). Bracket nesting is tracked per type (`()`, `[]`,
+    `{}`) and quoted spans are skipped whole (escape-aware), so delimiters
+    inside a call/subscript/container — or inside a string literal — that
+    belong to the operand never terminate it, while sibling expressions at
+    the operand's own level cannot donate untrusted tokens. Operates on the
+    already quote-lexed representation; surviving quotes are
+    interpolation-shaped literals."""
+    out: list[str] = []
+    depth = {"(": 0, "[": 0, "{": 0}
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            while j < n:
+                c = text[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == ch:
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1 if j < n else n
+            continue
+        if ch in depth:
+            depth[ch] += 1
+        elif ch in _DIVISION_OPERAND_CLOSER:
+            opener = _DIVISION_OPERAND_CLOSER[ch]
+            if depth[opener] == 0:
+                break  # closes an enclosing context: not part of the operand
+            depth[opener] -= 1
+        elif ch in (",", ";") and not any(depth.values()):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _untrusted_assignment_target(line: str) -> str | None:
@@ -396,6 +427,30 @@ def _neutralize_path_false_positives(
     line = _PATHLIB_ANCHOR_CHAIN.sub(lambda m: _refuse_chain(m, line), line)
     line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
     return line
+
+
+# Lexical code-only material classes: identifier/path vocabulary that only
+# carries signal in EXECUTABLE source. Documentation files and comments
+# mention or describe these words (`# sanitize_path handles configured
+# paths`, `Use sanitize_path before opening files.`) without constructing
+# any path, so these classes are skipped for documentation-only files and
+# scanned over comment-stripped code text. Deliberately NOT a phrase
+# blacklist: the distinction is executable-vs-prose context. All other
+# classes keep their existing semantics (traversal literals, archive and
+# symlink operations are meaningful even in comments/docs shapes and are
+# not globally erased).
+LEXICAL_CODE_ONLY_CLASSES = frozenset({
+    "path_containment_or_sanitization",
+    "path_reference_identifier",
+})
+
+# Documentation-only file types: prose, not executable source.
+_DOCUMENTATION_EXTENSIONS = (".md", ".rst", ".rest", ".txt", ".adoc")
+
+
+def _is_documentation_path(path: str) -> bool:
+    """True when a file is documentation-only prose (.md/.rst/.txt/...)."""
+    return path.lower().endswith(_DOCUMENTATION_EXTENSIONS)
 
 
 def _neutralize_chunk_lines(lines: list[str]) -> list[str]:
@@ -628,6 +683,41 @@ def _strip_line_comment(line: str) -> str:
     return line[:cut]
 
 
+def _strip_code_comments(line: str) -> str:
+    """Line reduced to its executable-code text for the LEXICAL code-only
+    material classes: quoted spans are blanked whole (escape-aware — a `#`
+    or `//` inside a string literal is data, not a comment marker, and
+    string contents — including interpolation-shaped literals — are data,
+    not code identifiers), and the line is truncated at the first comment
+    marker (`#` or `//`) outside quotes. The distinction these classes need
+    is executable-vs-prose context: `def sanitize_path(p):` is code,
+    `# sanitize_path handles configured paths` and
+    `log.info("sanitize_path ran")` are prose."""
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            while j < n:
+                c = line[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == ch:
+                    break
+                j += 1
+            out.append(ch + ch)
+            i = j + 1 if j < n else n
+            continue
+        if ch == "#" or (ch == "/" and i + 1 < n and line[i + 1] == "/"):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _balanced_close(text: str, depth: int, start: int = 0) -> int | None:
     """Index of the `)` that closes a construction call opened `depth` paren
     levels up, scanning from ``start``, or None when the text ends with the
@@ -776,10 +866,28 @@ def evaluate_path_handling_signals(
             is_test = all_files_are_tests
         buckets = discounted_buckets if is_test else fired_buckets
         source = "diff_test_file" if is_test else "diff"
+        # Documentation-only chunks carry no executable context. A headerless
+        # chunk is treated like the test discount: docs-skip only when EVERY
+        # changed file is documentation; mixed or unknown sets stay
+        # conservative (lexical classes still scan).
+        if chunk_file is not None:
+            is_documentation = _is_documentation_path(chunk_file)
+        else:
+            is_documentation = bool(filenames) and all(
+                _is_documentation_path(name) for name in filenames
+            )
 
         for class_name, patterns in PATH_HANDLING_CONTENT_CLASSES:
+            code_only = class_name in LEXICAL_CODE_ONLY_CLASSES
+            if code_only and is_documentation:
+                continue
             for index, line in enumerate(neutralized):
-                if not any(pat.search(line) for pat in patterns):
+                scan_line = (
+                    _strip_code_comments(line)
+                    if code_only
+                    else line
+                )
+                if not any(pat.search(scan_line) for pat in patterns):
                     continue
                 _record_signal(
                     buckets, class_name, source, chunk_file,

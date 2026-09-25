@@ -1,12 +1,53 @@
 {
   "fixture": "path-constant-and-prose-not-path-handling",
-  "description": "#749 negative controls: a pathlib constructor with a constant path, path_join with constant arguments, and trusted-anchor joins with static arguments (path.resolve(__dirname, \"../templates\"), path.join(__dirname, \"uploads\")) are path-library usage with no untrusted input flow — quoted literals are static data even when a directory name borrows untrusted vocabulary. Documentation prose mentioning path sanitization is not a code signal. Nothing fires; the provenance artifact is empty on both lists.",
+  "description": "#749 negative controls: a pathlib constructor with a constant path, path_join with constant arguments, and trusted-anchor joins with static arguments (path.resolve(__dirname, \"../templates\"), path.join(__dirname, \"uploads\")) are path-library usage with no untrusted input flow — quoted literals are static data even when a directory name borrows untrusted vocabulary. Documentation prose mentioning path sanitization is not a code signal. Nothing fires; the provenance artifact is empty on both lists. Executable-vs-prose context is the lexical-class rule: comments and string contents (# sanitize_path handles configured paths, log.info(...)) and documentation-only files (.md/.rst/.txt) do not generate path_containment_or_sanitization or path_reference_identifier, while the same vocabulary in executable code does. Division operands end at the operand's own nesting level: sibling expressions in tuples/lists/dicts/call arguments after a pathlib / division cannot donate untrusted tokens.",
   "pr_files": [
-    { "filename": "src/config.py", "status": "modified", "additions": 1 },
-    { "filename": "src/layout.py", "status": "modified", "additions": 1 },
-    { "filename": "src/app.ts", "status": "modified", "additions": 2 },
-    { "filename": "docs/guide.md", "status": "modified", "additions": 1 }
+    {
+      "filename": "src/config.py",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "src/layout.py",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "src/app.ts",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "docs/guide.md",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "src/comments.py",
+      "status": "modified",
+      "additions": 3
+    },
+    {
+      "filename": "src/comments.ts",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "docs/ref.rst",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "NOTES.txt",
+      "status": "modified",
+      "additions": 1
+    },
+    {
+      "filename": "src/division.py",
+      "status": "modified",
+      "additions": 4
+    }
   ],
-  "diff": "+CONFIG = Path('/etc/myapp/config.yaml')\n+layout = os.path.join(base, 'templates')\n+const templates = path.resolve(__dirname, \"../templates\");\n+const uploadsDir = path.join(__dirname, \"uploads\");\n+Operators must sanitize any configured paths before use.\n",
+  "diff": "+CONFIG = Path('/etc/myapp/config.yaml')\n+layout = os.path.join(base, 'templates')\n+const templates = path.resolve(__dirname, \"../templates\");\n+const uploadsDir = path.join(__dirname, \"uploads\");\n+Operators must sanitize any configured paths before use.\ndiff --git a/src/comments.py b/src/comments.py\n+++ b/src/comments.py\n@@ -1,2 +1,5 @@\n+# sanitize_path handles configured paths\n+x = 1  # the filepath is logged\n+log.info(\"sanitize_path ran\")\ndiff --git a/src/comments.ts b/src/comments.ts\n+++ b/src/comments.ts\n@@ -1,1 +1,3 @@\n+// sanitize_path helper\n+const x = 1; // pathname docs\ndiff --git a/docs/ref.rst b/docs/ref.rst\n+++ b/docs/ref.rst\n@@ -1,1 +1,2 @@\n+The pathname field is informational.\ndiff --git a/NOTES.txt b/NOTES.txt\n+++ b/NOTES.txt\n@@ -1,1 +1,2 @@\n+Run sanitize_path first.\ndiff --git a/src/division.py b/src/division.py\n+++ b/src/division.py\n@@ -1,3 +1,7 @@\n+x = (Path(BASE) / \"static\", request.id)\n+y = [Path(BASE) / \"static\", request.id]\n+z = {\"path\": Path(BASE) / \"static\", \"audit\": request.id}\n+foo(Path(BASE) / \"static\", request.id)\n",
   "linked_issues": []
 }
