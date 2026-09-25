@@ -497,6 +497,19 @@ test("#749: operands only — comments, sibling statements, and bare filename id
   assert.ok(remainder.pathHandlingProvenance.signals.some(
     (s) => s.signal === "untrusted_source_join",
   ));
+
+  // Forged/hostile anchors cannot launder operands: an anchor call whose
+  // later arguments reach untrusted input is refused neutralization and
+  // fires (adversarial-boundary convention, #252).
+  const forged = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+const p = path.resolve(import.meta.url, request.args["f"]);\n',
+    linkedIssues: [],
+  });
+  assert.equal(forged.prKind, "path_handling_changes");
+  assert.ok(forged.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
 });
 
 test("#749: adversarial-review regressions (lexer, nesting, division, vocab bounds)", () => {

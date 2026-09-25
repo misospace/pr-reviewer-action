@@ -355,6 +355,22 @@ def test_adversarial_hardening_shapes(tmp_path) -> None:
         assert clean["path_handling_provenance"]["fired"] is False, operand
 
 
+def test_forged_anchor_with_untrusted_tail_fires(tmp_path) -> None:
+    # A forged/hostile anchor form cannot launder its operands: an anchor
+    # call whose later arguments reach untrusted input is refused
+    # neutralization and fires (adversarial-boundary convention, #252).
+    result = _classify(
+        [{"filename": "src/app.ts"}],
+        '+const p = path.resolve(import.meta.url, request.args["f"]);\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )
+
+
 def test_multiline_opening_line_nested_paren_depth_fires(tmp_path) -> None:
     # The opening line's remainder (foo() contributes its paren balance to
     # the initial depth: the `safe)` closer must not end the scan before the

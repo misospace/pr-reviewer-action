@@ -318,7 +318,7 @@ function neutralizePathFalsePositives(
     const refused = refuse(match);
     if (refused !== '""') return refused;
     const staticTail = stripStaticStringLiterals(line.slice(offset + match.length));
-    if (!PATHLIB_DIVISION_TAIL.test(staticTail)) return refused;
+    if (pathlibDivisionTail(staticTail) === null) return refused;
     if (matchesAny(staticTail, UNTRUSTED_SOURCE_PATTERNS)) return match;
     if (oneHop.some((ident) => mentionsIdentifier(staticTail, ident))) return match;
     return '""';
@@ -534,8 +534,30 @@ function balancedClose(text: string, depth: number, start = 0): number | null {
 
 /** Pathlib division chaining: after a complete `Path(...)` call, an operand
  * may continue through attribute/method chains and one or more `/`
- * path-join divisions (`Path(__file__).parent / request.args['p']`). */
-const PATHLIB_DIVISION_TAIL = /\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*\//;
+ * path-join divisions (`Path(__file__).parent / request.args['p']`).
+ * Hand-scanned rather than a regex: the equivalent pattern is
+ * backtrack-prone on adversarial input and the scanned text is
+ * attacker-controlled PR diff content (CodeQL py/js redos). Returns the end
+ * index (exclusive) of the tail, or null. */
+function pathlibDivisionTail(line: string, start = 0): number | null {
+  let i = start;
+  const n = line.length;
+  while (i < n && (line[i] === " " || line[i] === "\t")) i++;
+  while (i < n && line[i] === ".") {
+    let j = i + 1;
+    while (j < n && /[\w\[\]]/.test(line[j] ?? "")) j++;
+    if (j === i + 1) return null; // a bare `.` with no name is not a chain link
+    i = j;
+    if (i < n && line[i] === "(") {
+      const k = line.indexOf(")", i + 1);
+      if (k === -1) return null;
+      i = k + 1;
+    }
+    while (i < n && (line[i] === " " || line[i] === "\t")) i++;
+  }
+  if (i < n && line[i] === "/") return i + 1;
+  return null;
+}
 
 /** The operand text of the path-construction call(s) actually matched on line
  * `index`: complete one-level-nested argument lists, and — for a call left
@@ -576,9 +598,9 @@ function constructionOperandSpans(lines: string[], index: number): string {
       } else {
         let operand = line.slice(m.index + m[0].length, close + 1);
         if (isPathlib) {
-          const tail = PATHLIB_DIVISION_TAIL.exec(line.slice(close + 1));
-          if (tail) {
-            operand += "/" + line.slice(close + 1 + (tail.index + tail[0].length));
+          const tailEnd = pathlibDivisionTail(line, close + 1);
+          if (tailEnd !== null) {
+            operand += "/" + line.slice(tailEnd);
           }
         }
         spans.push(operand);

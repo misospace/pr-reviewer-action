@@ -354,7 +354,7 @@ def _neutralize_path_false_positives(
         if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
             return text
         static_tail = _strip_static_string_literals(line[match.end():])
-        if _PATHLIB_DIVISION_TAIL.match(static_tail):
+        if _pathlib_division_tail(static_tail) is not None:
             if any(pat.search(static_tail) for pat in UNTRUSTED_SOURCE_PATTERNS):
                 return text
             if any(re.search(rf"\b{re.escape(ident)}\b", static_tail) for ident in one_hop):
@@ -627,7 +627,36 @@ def _balanced_close(text: str, depth: int, start: int = 0) -> int | None:
 # Pathlib division chaining: after a complete `Path(...)` call, an operand
 # may continue through attribute/method chains and one or more `/`
 # path-join divisions (`Path(__file__).parent / request.args['p']`).
-_PATHLIB_DIVISION_TAIL = re.compile(r"\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*/")
+# Hand-scanned rather than a regex: the equivalent pattern
+# (`\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*/`) is backtrack-prone on
+# adversarial input and the scanned text is attacker-controlled PR diff
+# content (CodeQL py/js redos).
+def _pathlib_division_tail(line: str, start: int = 0) -> int | None:
+    """End index (exclusive) of a division-chain tail beginning at or after
+    ``start`` — optional whitespace, then zero or more attribute/method
+    chain links (``.name``, ``.name(args)``, ``.name[0]``) — terminated by
+    the `/` division operator. None when the text does not form one."""
+    i = start
+    n = len(line)
+    while i < n and line[i] in " \t":
+        i += 1
+    while i < n and line[i] == ".":
+        j = i + 1
+        while j < n and (line[j].isalnum() or line[j] in "_[]"):
+            j += 1
+        if j == i + 1:
+            return None  # a bare `.` with no name is not a chain link
+        i = j
+        if i < n and line[i] == "(":
+            k = line.find(")", i + 1)
+            if k == -1:
+                return None
+            i = k + 1
+        while i < n and line[i] in " \t":
+            i += 1
+    if i < n and line[i] == "/":
+        return i + 1
+    return None
 
 
 def _construction_operand_spans(lines: list[str], index: int) -> str:
@@ -671,9 +700,9 @@ def _construction_operand_spans(lines: list[str], index: int) -> str:
             else:
                 operand = line[m.end():close + 1]
                 if is_pathlib:
-                    tail = _PATHLIB_DIVISION_TAIL.match(line, close + 1)
-                    if tail:
-                        operand += "/" + line[tail.end():]
+                    tail_end = _pathlib_division_tail(line, close + 1)
+                    if tail_end is not None:
+                        operand += "/" + line[tail_end:]
                 spans.append(operand)
     return "\n".join(spans)
 
