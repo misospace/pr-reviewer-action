@@ -142,10 +142,42 @@ four PR #756-derived path-domain classes plus parser/normalizer, auth/policy,
 and state/retry cross-domain pairs, each with a fixed negative control; the
 prompt treatment itself (`scripts/prompt_fragments/falsification.txt`,
 gated on code-touching pr_kinds) must be measured by a live A/B over this
-corpus — `scripts/eval_harness.py --system-prompt-file` pins an arm's prompt
-verbatim (replace mode, no fragment substitution) so both arms run the same
-corpus through the same harness — and reverted if it does not clear the bar,
-per the #666 precedent.
+corpus and reverted if it does not clear the bar, per the #666 precedent.
+
+The A/B arms run the same corpus through the same harness;
+`scripts/eval_harness.py --system-prompt-file` pins an arm's prompt verbatim
+(replace mode, no fragment substitution). The baseline arm must therefore be
+**main's fully assembled prompt for the eval conditions** — not the raw
+placeholder-stripped file, which would silently drop the related-code and
+PR-thread guidance the treatment arm keeps and make the comparison invalid.
+Materialize it through main's own assembler:
+
+```bash
+git worktree add /tmp/757-baseline main
+( cd /tmp/757-baseline
+  SCRIPT_DIR=/tmp/757-baseline/scripts
+  sed -n '/^apply_system_prompt_fragments()/,/^}/p' "$SCRIPT_DIR/sections/config.sh" > /tmp/asm.sh
+  printf '{"pr_kind":"app_code"}' > classification.json
+  source /tmp/asm.sh
+  SYSTEM_PROMPT="$(<scripts/default_system_prompt.txt)" SYSTEM_PROMPT_IS_DEFAULT=1 \
+    RELATED_CODE_CONTEXT=true PR_THREAD_CONTEXT=true REVIEW_VERBOSITY=normal
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" > /tmp/baseline-prompt.txt )
+git worktree remove /tmp/757-baseline
+# treatment arm: no override (the branch's bundled prompt assembles itself)
+python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
+    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" --output eval-report/treatment.json
+# baseline arm: same corpus, same harness, prompt pinned to main's assembly
+python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
+    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" \
+    --system-prompt-file /tmp/baseline-prompt.txt --output eval-report/baseline.json
+```
+
+Compare the reports' `summary.falsification` blocks
+(`counterexample_attempted_rate`, `counterexample_found_rate`,
+`finding_correct_rate`) and the negative-control `false_positive_rate`.
 
 ## Semantic judge instrument (on-demand; never in normal CI)
 
