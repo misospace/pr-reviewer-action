@@ -1,0 +1,9 @@
+{
+  "context": {
+    "primary_model_context_tokens": "9000",
+    "ai_max_tokens": "8192"
+  },
+  "env": {
+    "tool_mode": "off"
+  }
+}

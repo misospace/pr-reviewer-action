@@ -13,6 +13,7 @@ import {
   runRelatedCodeFixture,
   runRepoMapFixture,
 } from "./context/fixture.js";
+import { runCorpusFixture } from "./corpus/index.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 
 export function main(): void {
@@ -52,6 +53,16 @@ export async function requirementLedgerParityMain(fixturePath: string): Promise<
   await requirementLedgerFixtureMain(fixturePath);
 }
 
+/** Fixture-mode corpus-assembly CLI for the #676 parity harness and
+ * tests-v3: `node dist/index.js corpus-fixture <fixture.json>` prints a
+ * single JSON line `{ok, values, stderr}` comparing the assembled corpus and
+ * its diagnostic artifacts byte-for-byte with the v2 shell pipeline. */
+export async function corpusFixtureMain(fixturePath: string): Promise<void> {
+  assertSupportedNode(process.versions.node);
+  const result = runCorpusFixture(fixturePath);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 async function contextFixtureMain(mode: string, fixturePath: string): Promise<void> {
   assertSupportedNode(process.versions.node);
   const result = await (mode === "enrichment-fixture" ? Promise.resolve(runEnrichmentFixture(fixturePath))
@@ -84,6 +95,11 @@ if (require.main === module) {
   } else if (["enrichment-fixture", "repo-map-fixture", "pr-thread-fixture", "related-code-fixture", "image-provenance-fixture"].includes(firstArg)) {
     contextFixtureMain(firstArg, argv[1] ?? "").catch((error: unknown) => {
       process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      process.exitCode = 1;
+    });
+  } else if (firstArg === "corpus-fixture") {
+    corpusFixtureMain(argv[1] ?? "").catch((error: unknown) => {
+      process.stderr.write(`v3 corpus fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
   } else if (mode === "v3-request-builder" && firstArg) {
