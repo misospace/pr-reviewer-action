@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7576,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7576,
+    "title": "fix(audit): inspect the sink's operand instead of its neighborhood",
+    "body": "",
+    "head": {
+      "sha": "fixture-7576-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7576-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 33,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7576"
+  },
+  "pr_files": [
+    {
+      "filename": "src/sink_audit.py",
+      "status": "added",
+      "additions": 15,
+      "deletions": 0,
+      "changes": 15
+    },
+    {
+      "filename": "tests/test_sink_audit.py",
+      "status": "added",
+      "additions": 18,
+      "deletions": 0,
+      "changes": 18
+    }
+  ],
   "files": [
     {
       "path": "src/sink_audit.py",

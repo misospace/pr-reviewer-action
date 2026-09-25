@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7573,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7573,
+    "title": "feat(guard): canonicalize trusted anchors before rejecting traversal",
+    "body": "",
+    "head": {
+      "sha": "fixture-7573-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7573-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 29,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7573"
+  },
+  "pr_files": [
+    {
+      "filename": "src/path_guard.py",
+      "status": "added",
+      "additions": 12,
+      "deletions": 0,
+      "changes": 12
+    },
+    {
+      "filename": "tests/test_path_guard.py",
+      "status": "added",
+      "additions": 17,
+      "deletions": 0,
+      "changes": 17
+    }
+  ],
   "files": [
     {
       "path": "src/path_guard.py",

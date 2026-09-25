@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7577,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7577,
+    "title": "feat(scan): classify handler lines that serve untrusted upload content",
+    "body": "",
+    "head": {
+      "sha": "fixture-7577-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7577-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 18,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7577"
+  },
+  "pr_files": [
+    {
+      "filename": "src/upload_scan.py",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9
+    },
+    {
+      "filename": "tests/test_upload_scan.py",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9
+    }
+  ],
   "files": [
     {
       "path": "src/upload_scan.py",

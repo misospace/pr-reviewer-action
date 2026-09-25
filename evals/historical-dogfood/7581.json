@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7581,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7581,
+    "title": "feat(policy): enforce the policy of the matched route",
+    "body": "",
+    "head": {
+      "sha": "fixture-7581-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7581-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 25,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7581"
+  },
+  "pr_files": [
+    {
+      "filename": "src/policy.py",
+      "status": "added",
+      "additions": 16,
+      "deletions": 0,
+      "changes": 16
+    },
+    {
+      "filename": "tests/test_policy.py",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9
+    }
+  ],
   "files": [
     {
       "path": "src/policy.py",

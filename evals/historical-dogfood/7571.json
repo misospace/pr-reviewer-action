@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7571,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7571,
+    "title": "feat(guard): classify untrusted path handling in request lines",
+    "body": "",
+    "head": {
+      "sha": "fixture-7571-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7571-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 28,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7571"
+  },
+  "pr_files": [
+    {
+      "filename": "src/source_guard.py",
+      "status": "added",
+      "additions": 19,
+      "deletions": 0,
+      "changes": 19
+    },
+    {
+      "filename": "tests/test_source_guard.py",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9
+    }
+  ],
   "files": [
     {
       "path": "src/source_guard.py",

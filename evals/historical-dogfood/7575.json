@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7575,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7575,
+    "title": "feat(audit): flag dangerous sinks that may receive request data",
+    "body": "",
+    "head": {
+      "sha": "fixture-7575-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7575-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 35,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7575"
+  },
+  "pr_files": [
+    {
+      "filename": "src/sink_audit.py",
+      "status": "added",
+      "additions": 17,
+      "deletions": 0,
+      "changes": 17
+    },
+    {
+      "filename": "tests/test_sink_audit.py",
+      "status": "added",
+      "additions": 18,
+      "deletions": 0,
+      "changes": 18
+    }
+  ],
   "files": [
     {
       "path": "src/sink_audit.py",

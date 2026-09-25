@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7574,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7574,
+    "title": "fix(guard): run the traversal check after canonicalization",
+    "body": "",
+    "head": {
+      "sha": "fixture-7574-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7574-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 33,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7574"
+  },
+  "pr_files": [
+    {
+      "filename": "src/path_guard.py",
+      "status": "added",
+      "additions": 11,
+      "deletions": 0,
+      "changes": 11
+    },
+    {
+      "filename": "tests/test_path_guard.py",
+      "status": "added",
+      "additions": 22,
+      "deletions": 0,
+      "changes": 22
+    }
+  ],
   "files": [
     {
       "path": "src/path_guard.py",

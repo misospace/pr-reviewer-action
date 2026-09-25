@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7580,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7580,
+    "title": "fix(ingest): enforce the raw batch before normalization drops records",
+    "body": "",
+    "head": {
+      "sha": "fixture-7580-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7580-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 49,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7580"
+  },
+  "pr_files": [
+    {
+      "filename": "src/ingest.py",
+      "status": "added",
+      "additions": 27,
+      "deletions": 0,
+      "changes": 27
+    },
+    {
+      "filename": "tests/test_ingest.py",
+      "status": "added",
+      "additions": 22,
+      "deletions": 0,
+      "changes": 22
+    }
+  ],
   "files": [
     {
       "path": "src/ingest.py",

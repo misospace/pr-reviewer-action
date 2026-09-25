@@ -1,4 +1,47 @@
 {
+  "schema": 1,
+  "scenario": 7583,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7583,
+    "title": "feat(retry): idempotent retry for record writes",
+    "body": "",
+    "head": {
+      "sha": "fixture-7583-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7583-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 59,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7583"
+  },
+  "pr_files": [
+    {
+      "filename": "src/retry.py",
+      "status": "added",
+      "additions": 18,
+      "deletions": 0,
+      "changes": 18
+    },
+    {
+      "filename": "tests/test_retry.py",
+      "status": "added",
+      "additions": 41,
+      "deletions": 0,
+      "changes": 41
+    }
+  ],
   "files": [
     {
       "path": "src/retry.py",
