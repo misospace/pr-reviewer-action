@@ -856,7 +856,7 @@ class TestPathHandlingSignalModel:
     # -- Provenance hygiene -------------------------------------------------
 
     def test_provenance_samples_are_bounded_and_control_char_free(self):
-        hostile = "+x = os.path.join(base, request.args['p' * 400 + '\\x01\\x02'])\n"
+        hostile = "+x = os.path.join(base, request.args['p' * 400 + '\\x00\\x01\\x02'])\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=hostile)
         for signal in result.path_handling_provenance["signals"]:
             assert len(signal["samples"]) <= 3

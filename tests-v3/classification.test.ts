@@ -398,7 +398,7 @@ test("#749: filename-backed signals route and attribute; test-file filename hits
 });
 
 test("#749: provenance samples are bounded and control-character-free", () => {
-  const hostile = `+x = os.path.join(base, request.args['${"p".repeat(400)}\\x01\\x02'])\n`;
+  const hostile = `+x = os.path.join(base, request.args['${"p".repeat(400)}\\x00\\x01\\x02'])\n`;
   const result = classifyPr({ prFiles: files("src/app.py"), diffText: hostile, linkedIssues: [] });
   for (const signal of result.pathHandlingProvenance.signals) {
     assert.ok(signal.samples.length <= 3);
