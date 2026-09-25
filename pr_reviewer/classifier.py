@@ -529,16 +529,46 @@ def _record_signal(
         entry["samples"].append(sample)
 
 
+# Truncate a quote-stripped line at its first comment marker (`#` or `//`).
+# String literals are already stripped, so a residual marker is a real
+# comment; interpolation-shaped literals may retain one (conservative
+# truncation of contrived content only).
+def _strip_line_comment(line: str) -> str:
+    cut = len(line)
+    for marker in ("#", "//"):
+        pos = line.find(marker)
+        if pos != -1 and pos < cut:
+            cut = pos
+    return line[:cut]
+
+
+def _balanced_close(text: str, depth: int) -> int | None:
+    """Index of the `)` that closes a construction call opened `depth` paren
+    levels up, or None when the text ends with the call still open. Nested
+    parens are tracked, so a nested call closing inside the line never
+    terminates the scan early — only the paren that returns the depth to
+    zero does."""
+    for pos, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth <= 0:
+                return pos
+    return None
+
+
 def _construction_operand_spans(lines: list[str], index: int) -> str:
     """The operand text of the path-construction call(s) actually matched on
     line ``index``: complete one-level-nested argument lists, and — for a
-    call left open across the line break — the dangling remainder plus its
-    bounded continuation lines (which ARE the call's argument list). Static
-    quoted literals are stripped before extraction. Text outside the calls —
-    assignment LHS, trailing comments, sibling statements — is never
-    included, so it cannot donate an untrusted token. Empty string when the
-    line constructs no path."""
-    line = _QUOTED_STATIC_LITERAL.sub('""', lines[index])
+    call left open across the line break — the balanced continuation lines
+    up to and including the closing paren. Only call arguments are included:
+    trailing comments (cut at the first `#`/`//`) and sibling statements
+    after the closer are excluded, and nested parentheses are tracked so an
+    inner `)` never ends the scan while outer operands remain. Static quoted
+    literals are stripped before extraction. Empty string when the line
+    constructs no path."""
+    line = _strip_line_comment(_QUOTED_STATIC_LITERAL.sub('""', lines[index]))
     spans = [
         m.group(1)
         for pattern in PATH_CONSTRUCTION_CALL_PATTERNS
@@ -546,13 +576,19 @@ def _construction_operand_spans(lines: list[str], index: int) -> str:
     ]
     if not spans:
         for m in _PATH_CONSTRUCTION_OPEN_CALL.finditer(line):
-            piece = line[m.end():]
+            piece = _strip_line_comment(line[m.end():])
             depth = 1  # the construction call's own open paren
             for j in range(index + 1, min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, len(lines))):
-                continuation = _QUOTED_STATIC_LITERAL.sub('""', lines[j])
-                piece += "\n" + continuation
-                depth += continuation.count("(") - continuation.count(")")
-                if depth <= 0:
+                continuation = _strip_line_comment(
+                    _QUOTED_STATIC_LITERAL.sub('""', lines[j])
+                )
+                close = _balanced_close(continuation, depth)
+                if close is None:
+                    piece += "\n" + continuation
+                    depth += continuation.count("(") - continuation.count(")")
+                else:
+                    piece += "\n" + continuation[:close + 1]
+                    depth = 0
                     break
             spans.append(piece)
     return "\n".join(spans)

@@ -924,6 +924,39 @@ class TestPathHandlingSignalModel:
         fired = result.path_handling_provenance["signals"]
         assert any(s["signal"] == "untrusted_source_join" for s in fired)
 
+    def test_multiline_closer_line_comment_is_clean(self):
+        # Continuation lines are scanned only through the closing paren: a
+        # trailing comment after the closer cannot donate a token.
+        diff = "+target = os.path.join(\n+    BASE,\n+)  # request cache path\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_sibling_statement_after_closer_is_clean(self):
+        diff = '+const target = path.join(\n+  BASE,\n+); audit(request.id);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_head_line_comment_is_clean(self):
+        diff = "+target = os.path.join(  # request cache\n+    BASE,\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_nested_construction_fires(self):
+        # Nested parens are tracked: a nested call closing mid-list never
+        # ends the scan while outer operands (a later untrusted argument)
+        # remain.
+        diff = ("+target = os.path.join(\n"
+                "+    os.path.dirname(__file__),\n"
+                "+    request.args['name'],\n"
+                "+)\n")
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
     def test_string_join_is_not_path_construction(self):
         # `", ".join(...)` is a string method on delimited text, not a
         # filesystem path construction.

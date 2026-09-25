@@ -436,16 +436,47 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
+/** Truncate a quote-stripped line at its first comment marker (`#` or `//`).
+ * String literals are already stripped, so a residual marker is a real
+ * comment; interpolation-shaped literals may retain one (conservative
+ * truncation of contrived content only). */
+function stripLineComment(line: string): string {
+  let cut = line.length;
+  for (const marker of ["#", "//"]) {
+    const pos = line.indexOf(marker);
+    if (pos !== -1 && pos < cut) cut = pos;
+  }
+  return line.slice(0, cut);
+}
+
+/** Index of the `)` that closes a construction call opened `depth` paren
+ * levels up, or null when the text ends with the call still open. Nested
+ * parens are tracked, so a nested call closing inside the line never
+ * terminates the scan early — only the paren that returns the depth to
+ * zero does. */
+function balancedClose(text: string, depth: number): number | null {
+  for (let pos = 0; pos < text.length; pos++) {
+    const ch = text[pos];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth <= 0) return pos;
+    }
+  }
+  return null;
+}
+
 /** The operand text of the path-construction call(s) actually matched on line
  * `index`: complete one-level-nested argument lists, and — for a call left
- * open across the line break — the dangling remainder plus its bounded
- * continuation lines (which ARE the call's argument list). Static quoted
- * literals are stripped before extraction. Text outside the calls —
- * assignment LHS, trailing comments, sibling statements — is never included,
- * so it cannot donate an untrusted token. Empty string when the line
- * constructs no path. */
+ * open across the line break — the balanced continuation lines up to and
+ * including the closing paren. Only call arguments are included: trailing
+ * comments (cut at the first `#`/`//`) and sibling statements after the
+ * closer are excluded, and nested parentheses are tracked so an inner `)`
+ * never ends the scan while outer operands remain. Static quoted literals
+ * are stripped before extraction. Empty string when the line constructs no
+ * path. */
 function constructionOperandSpans(lines: string[], index: number): string {
-  const line = (lines[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
+  const line = stripLineComment((lines[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""'));
   const spans: string[] = [];
   for (const pattern of PATH_CONSTRUCTION_CALL_PATTERNS) {
     for (const m of line.matchAll(pattern)) {
@@ -454,15 +485,22 @@ function constructionOperandSpans(lines: string[], index: number): string {
   }
   if (spans.length === 0) {
     for (const m of line.matchAll(PATH_CONSTRUCTION_OPEN_CALL)) {
-      let piece = line.slice(m.index + m[0].length);
+      const piece = stripLineComment(line.slice(m.index + m[0].length));
+      let accumulated = piece;
       let depth = 1; // the construction call's own open paren
       for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
-        const continuation = (lines[j] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
-        piece += `\n${continuation}`;
-        depth += (continuation.match(/\(/g) ?? []).length - (continuation.match(/\)/g) ?? []).length;
-        if (depth <= 0) break;
+        const continuation = stripLineComment((lines[j] ?? "").replace(QUOTED_STATIC_LITERAL, '""'));
+        const close = balancedClose(continuation, depth);
+        if (close === null) {
+          accumulated += `\n${continuation}`;
+          depth += (continuation.match(/\(/g) ?? []).length - (continuation.match(/\)/g) ?? []).length;
+        } else {
+          accumulated += `\n${continuation.slice(0, close + 1)}`;
+          depth = 0;
+          break;
+        }
       }
-      spans.push(piece);
+      spans.push(accumulated);
     }
   }
   return spans.join("\n");

@@ -444,6 +444,46 @@ test("#749: operands only — comments, sibling statements, and bare filename id
   assert.ok(multiline.pathHandlingProvenance.signals.some(
     (s) => s.signal === "untrusted_source_join",
   ));
+
+  // Continuation lines are scanned only through the closing paren: a
+  // trailing comment after the closer cannot donate a token.
+  const multilineComment = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+target = os.path.join(\n+    BASE,\n+)  # request cache path\n",
+    linkedIssues: [],
+  });
+  assert.equal(multilineComment.prKind, "app_code");
+  assert.equal(multilineComment.pathHandlingProvenance.fired, false);
+
+  // Nor can a sibling statement after the closer.
+  const multilineSibling = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+const target = path.join(\n+  BASE,\n+); audit(request.id);\n',
+    linkedIssues: [],
+  });
+  assert.equal(multilineSibling.prKind, "app_code");
+  assert.equal(multilineSibling.pathHandlingProvenance.fired, false);
+
+  // A comment on the open-call head line is likewise excluded.
+  const headComment = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+target = os.path.join(  # request cache\n+    BASE,\n+)\n",
+    linkedIssues: [],
+  });
+  assert.equal(headComment.prKind, "app_code");
+  assert.equal(headComment.pathHandlingProvenance.fired, false);
+
+  // Nested parens are tracked: a nested call closing mid-list never ends
+  // the scan while outer operands (a later untrusted argument) remain.
+  const nested = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+target = os.path.join(\n+    os.path.dirname(__file__),\n+    request.args['name'],\n+)\n",
+    linkedIssues: [],
+  });
+  assert.equal(nested.prKind, "path_handling_changes");
+  assert.ok(nested.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
 });
 
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {

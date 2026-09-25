@@ -278,3 +278,45 @@ def test_multiline_join_direct_operand_fires(tmp_path) -> None:
         signal["signal"] == "untrusted_source_join"
         for signal in result["path_handling_provenance"]["signals"]
     )
+
+
+def test_multiline_closer_line_comment_is_clean(tmp_path) -> None:
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+target = os.path.join(\n"
+        "+    BASE,\n"
+        "+)  # request cache path\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_multiline_sibling_statement_after_closer_is_clean(tmp_path) -> None:
+    result = _classify(
+        [{"filename": "src/app.ts"}],
+        '+const target = path.join(\n'
+        '+  BASE,\n'
+        '+); audit(request.id);\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_multiline_nested_construction_fires(tmp_path) -> None:
+    # A nested call closing before a later untrusted operand must not end
+    # the operand scan early.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+target = os.path.join(\n"
+        "+    os.path.dirname(__file__),\n"
+        "+    request.args['name'],\n"
+        "+)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )
