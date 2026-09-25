@@ -352,7 +352,7 @@ def test_gate_denial_path_never_emits_untrusted_text(gate, tmp_path, monkeypatch
     assert "$" not in out["reason"] and "pwn" not in out["reason"]
 
 
-def test_gate_uses_argv_only_subprocess(gate) -> None:
+def test_gate_uses_argv_only_subprocess(gate, monkeypatch) -> None:
     """Structural check: the real gh_api wrapper never spawns a shell."""
     module = _load_module()
     captured: list[dict] = []
@@ -367,8 +367,11 @@ def test_gate_uses_argv_only_subprocess(gate) -> None:
 
         return Proc()
 
-    module.subprocess.run = spy_run  # type: ignore[assignment]
-    module.os.environ["GITHUB_REPOSITORY"] = REPO
+    # monkeypatch restores the stdlib module attribute after the test —
+    # a plain assignment here would leak the stub into every later
+    # subprocess-based test in the suite (the full-suite pollution class).
+    monkeypatch.setattr(module.subprocess, "run", spy_run)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     module.gh_api("repos/misospace/pr-reviewer-action/pulls/747")
     assert len(captured) == 1
     assert captured[0].get("shell") is False
