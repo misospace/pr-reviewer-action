@@ -1,0 +1,8 @@
+{
+  "context": {
+    "primary_model_context_tokens": "abc"
+  },
+  "env": {
+    "tool_mode": "off"
+  }
+}

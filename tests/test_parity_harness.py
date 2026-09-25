@@ -33,7 +33,25 @@ def test_full_parity_run_passes_with_migration_gates():
     """The harness runs both migration gates (#698 dataflow, #666 semantic)
     and every registered boundary; unapproved drift fails the run."""
     returncode, report = _run_harness()
-    assert returncode == 0
+    if returncode != 0:
+        # Surface the failing gates/fixtures with their divergence keys
+        # instead of a bare exit-code assertion — a red run must be
+        # diagnosable from CI logs alone.
+        gate_failures = [g["id"] for g in report.get("gates", []) if not g.get("ok")]
+        fixture_failures = []
+        for boundary in report.get("boundaries", []):
+            for fixture in boundary.get("fixtures", []):
+                if fixture["status"] in ("match", "approved_divergence", "expected_drift"):
+                    continue
+                details = [
+                    {k: (str(v)[:300] if v is not None else None) for k, v in d.items() if k != "approved"}
+                    for d in fixture.get("divergences", [])
+                ][:4]
+                fixture_failures.append(f"{boundary['id']}/{fixture['fixture']}: {fixture['status']} {details}")
+        raise AssertionError(
+            f"parity harness failed: gates={gate_failures} "
+            f"fixtures={fixture_failures[:12]}"
+        )
     assert report["schema_version"] == 1
     gate_ids = {gate["id"] for gate in report["gates"]}
     assert gate_ids == {"dataflow-qualification-698", "semantic-qualification-666"}

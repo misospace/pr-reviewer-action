@@ -1,0 +1,36 @@
+{
+  "context": {
+    "ci_gate_active": "false"
+  },
+  "env": {
+    "tool_mode": "native_loop",
+    "standards_file": "AGENTS.md",
+    "is_fork_pr": "true",
+    "tool_enable_for_forks": ""
+  },
+  "files": {
+    "AGENTS.md": "# Repo Standards\n\n- Conventional commits.\n- Tests accompany behavior changes.\n- Never execute model-supplied shell text.\n",
+    "manifest-context.md": "No Helm or Kubernetes manifest changes detected.\n",
+    "pr.json": "{\"number\": 676, \"title\": \"v3 TS: migrate corpus assembly\", \"author\": {\"login\": \"joryirving\"}, \"baseRefName\": \"main\", \"headRefName\": \"feat/corpus\", \"headRefOid\": \"abc123def456\", \"changedFiles\": 7, \"additions\": 210, \"deletions\": 34, \"url\": \"https://github.com/misospace/pr-reviewer-action/pull/676\", \"body\": \"Migrates corpus assembly to TypeScript.\\n\\nCloses #676\"}",
+    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [\"auth_changes\"], \"risk_flags_with_files\": [{\"flag\": \"auth_changes\", \"files\": [\"src/auth.ts\"]}], \"changed_files_summary\": [\"src/file0.ts\", \"src/file1.ts\", \"src/file2.ts\", \"src/file3.ts\", \"src/file4.ts\", \"src/file5.ts\", \"src/file6.ts\", \"src/file7.ts\", \"src/file8.ts\", \"src/file9.ts\", \"src/file10.ts\", \"src/file11.ts\", \"src/file12.ts\", \"src/file13.ts\", \"src/file14.ts\", \"src/file15.ts\", \"src/file16.ts\", \"src/file17.ts\", \"src/file18.ts\", \"src/file19.ts\", \"src/file20.ts\", \"src/file21.ts\", \"src/file22.ts\", \"src/file23.ts\", \"src/file24.ts\", \"src/file25.ts\", \"src/file26.ts\", \"src/file27.ts\", \"src/file28.ts\", \"src/file29.ts\"], \"linked_issue_labels\": [\"priority/p1\"], \"must_check\": [\"auth flows reviewed\", \"tests updated\"]}",
+    "linked-issues.md": "",
+    "linked-sources.md": "No linked sources fetched for this review.\n",
+    "image-digest-context.md": "No image digest changes detected.\n",
+    "repo-impact.truncated.md": "No impact-scan hits for the extracted terms.\n",
+    "repo-history.truncated.md": "No repository history context for the extracted terms.\n",
+    "repo-map.md": "# Repository Map (v1)\n\nThe repository structure summary follows.\n\n````\nsrc/\n  corpus/\n````\n",
+    "pr-thread.md": "",
+    "related-code.truncated.md": "",
+    "version-hints.truncated.txt": "version: 1.2.3 -> 1.3.0\n",
+    "evidence-providers.md": "",
+    "requirement-ledger.md": "- the tool harness MUST stay read-only.\n- output MUST be fence-safe.\n",
+    "requirement-ledger-present.txt": "req-abc123\n",
+    "specialists.md": "",
+    "specialist-leads-present.txt": "",
+    "pr.diff": "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n+const x = 1;\n",
+    "pr.diff.truncated": "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n+const x = 1;\n",
+    "pr-files.json": "[{\"filename\": \"src/a.ts\", \"status\": \"modified\", \"additions\": 1}]",
+    "pr-files.truncated.json": "[{\"filename\": \"src/a.ts\", \"status\": \"modified\", \"additions\": 1}]",
+    "ci-checks.txt": "check/unit PASS 12s\ncheck/lint PASS 3s\n"
+  }
+}

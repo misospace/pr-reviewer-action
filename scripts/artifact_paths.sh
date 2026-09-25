@@ -11,7 +11,7 @@ assert_safe_artifact_paths() {
     version-hints.txt version-hints.truncated.txt ghcr-images.txt compare-shas.txt
     linked-sources.md manifest-context.md image-digest-context.md
     repo-impact.md repo-impact.truncated.md repo-history.md repo-history.truncated.md
-    evidence-providers.md evidence-providers.json classification.json
+    evidence-providers.md evidence-providers.json classification.json classification.compact.json
     standards-context.md standards-present.txt tool-harness.md tool-harness.json
     tool-harness.smart.md tool-harness.smart.json
     review-corpus.md review-corpus.truncated.md review-corpus.smart.truncated.md review-corpus.fallback.truncated.md

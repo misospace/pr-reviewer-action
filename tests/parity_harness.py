@@ -1080,7 +1080,46 @@ IMAGE_PROVENANCE_BOUNDARY = Boundary(
 )
 
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY)
+def run_v2_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        ["bash", str(ROOT / "tests" / "parity_runners" / "v2_corpus.sh"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=180,
+    )
+
+
+def run_v3_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["corpus-fixture"], fixture, workdir)
+
+
+# Error vocabulary for the corpus boundary's failure contracts. The v2
+# messages arrive prefixed by the common.sh log stamp (scrubbed) and the
+# "ERROR: " marker; both sides map onto the same shared categories.
+CORPUS_CATEGORIES = (
+    (re.compile(r"expected a positive integer"), "invalid-number"),
+    (re.compile(r"cannot fit AI_MAX_TOKENS"), "budget-too-small"),
+    # Projection failures abort the production review (set -euo pipefail):
+    # v2's stderr is jq's own message, the v3 port throws a typed error.
+    (re.compile(r"jq: error|jq: parse error|jq: projection failed"), "projection-failed"),
+    (re.compile(r"exceeds its [0-9]+-byte context budget"), "corpus-over-budget"),
+)
+
+CORPUS_BOUNDARY = Boundary(
+    id="corpus-assembly",
+    description=(
+        "Equivalent review-corpus assembly: the production corpus.sh pipeline "
+        "(sliced verbatim; #676) versus the v3 TypeScript assembly — section "
+        "order and authority, tier-aware budgets with output-token headroom, "
+        "raw-source smart rebuild (#658/#668), UTF-8-safe truncation, reserved "
+        "standards/ledger/specialist sections, tool-harness placeholder and "
+        "slot semantics, fork gating, and presence signals."
+    ),
+    fixtures_dir="corpus",
+    run=lambda fixture, workdir: (run_v2_corpus(fixture, workdir), run_v3_corpus(fixture, workdir)),
+    error_categories=CORPUS_CATEGORIES,
+)
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

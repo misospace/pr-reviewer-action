@@ -1,0 +1,34 @@
+{
+  "context": {
+    "ci_gate_active": "false"
+  },
+  "env": {
+    "tool_mode": "off",
+    "standards_file": "MISSING.md"
+  },
+  "files": {
+    "AGENTS.md": "# Repo Standards\n\n- Conventional commits.\n- Tests accompany behavior changes.\n- Never execute model-supplied shell text.\n",
+    "manifest-context.md": "No Helm or Kubernetes manifest changes detected.\n",
+    "pr.json": "{not json at all",
+    "classification.json": "{\"pr_kind\": \"docs_only\", \"risk_flags\": []",
+    "linked-issues.md": "",
+    "linked-sources.md": "No linked sources fetched for this review.\n",
+    "image-digest-context.md": "No image digest changes detected.\n",
+    "repo-impact.truncated.md": "No impact-scan hits for the extracted terms.\n",
+    "repo-history.truncated.md": "No repository history context for the extracted terms.\n",
+    "repo-map.md": "# Repository Map (v1)\n\nThe repository structure summary follows.\n\n````\nsrc/\n  corpus/\n````\n",
+    "pr-thread.md": "",
+    "related-code.truncated.md": "",
+    "version-hints.truncated.txt": "version: 1.2.3 -> 1.3.0\n",
+    "evidence-providers.md": "",
+    "requirement-ledger.md": "- the tool harness MUST stay read-only.\n- output MUST be fence-safe.\n",
+    "requirement-ledger-present.txt": "req-abc123\n",
+    "specialists.md": "",
+    "specialist-leads-present.txt": "",
+    "pr.diff": "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n+const x = 1;\n",
+    "pr.diff.truncated": "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n+const x = 1;\n",
+    "pr-files.json": "[{\"filename\": \"src/a.ts\", \"status\": \"modified\", \"additions\": 1}]",
+    "pr-files.truncated.json": "[{\"filename\": \"src/a.ts\", \"status\": \"modified\", \"additions\": 1}]",
+    "ci-checks.txt": "check/unit PASS 12s\ncheck/lint PASS 3s\n"
+  }
+}
