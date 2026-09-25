@@ -92,6 +92,11 @@ flowchart LR
     F --> G[Publish<br/>comment / native review]
 ```
 
+Deeper repository documentation for contributors and agents — the per-module
+code map, review-corpus internals, fork-review security, and the eval
+runbooks — lives under [`docs/`](docs), indexed from
+[`AGENTS.md`](AGENTS.md).
+
 What it supports:
 
 | | |
@@ -1131,6 +1136,8 @@ Copyable workflows are included in [`examples/`](examples):
 ### 📊 Specialist corpus & deep A/B
 
 The `eval-harness` workflow (`.github/workflows/eval-harness.yaml`) runs `scripts/eval_harness.py` against the graded corpora — `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and `evals/corpus-specialists.json` — on the weekly scheduled sweep and on demand. The specialist corpus adds a deep-review A/B: the `deep` dispatch input (or `--deep-review false|true|both` locally) runs the specialist phase, and deep runs are labelled `<mode>+deep` in the report. Each fixture's `specialist_expectations` is split into two grading scopes: `lead_checks` (`lead_generated`, `lead_disposition`) are deep-only diagnostics graded only on `<mode>+deep` runs — and a `verified` disposition demands concrete evidence (the adopted finding must be grounded in the expected file via `finding_file_any`, so parroting a specialist's wording proves nothing) — while `effectiveness_checks` (`final_findings_count`, `dedupe_final_findings`) are graded identically on standard and deep runs, keeping the headline comparison an apples-to-apples measure of final-review capability (`specialist_effectiveness_*` rates on both labels; `specialist_lead_*` rates on deep labels only). The harness drives the real review boundary end to end: it passes `REPO`/`PR_NUMBER` to `run_review.sh` and consumes the validated `ai-output.json` artifact (verdict, markdown, production-shape findings) plus specialist telemetry from `specialists.json` and `specialist-<role>.json`. The scheduled sweep stays standard-only, and the production default is unchanged: `deep_review` is still off by default.
+
+The full evaluation runbook — local runs, CI triggers, merge-safety disposition scoring, the offline semantic gate, and the on-demand semantic judge — lives in [`docs/evals.md`](docs/evals.md).
 
 ## 📌 Version pinning and releases
 
