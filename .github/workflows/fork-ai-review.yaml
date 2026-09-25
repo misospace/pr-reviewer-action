@@ -1,0 +1,259 @@
+name: Fork AI Review
+
+# Privileged AI reviewer for cross-repository (fork) pull requests.
+#
+# Two-stage privilege separation (see docs/fork-review.md):
+#
+#   Stage 1 — GitHub's default `pull_request` CI keeps running fork code with
+#   NO secrets and read-only permissions. Nothing here changes that.
+#
+#   Stage 2 — this workflow runs ONLY trusted code from this repository. It
+#   is triggered exclusively by events the base repository controls: the CI
+#   workflow completing on a pull_request run, or a maintainer adding the
+#   `ai-review-fork` label (labeling requires write/triage permission, so a
+#   fork author can never self-authorize a review).
+#
+# SECURITY INVARIANTS (pinned by tests/test_fork_review_workflow.py):
+#
+# - Every checkout is `ref: ${{ github.sha }}` — a commit on THIS
+#   repository (workflow_run: the default branch; pull_request_target: the
+#   base branch). The fork head (`github.event.workflow_run.head_sha`) is
+#   NEVER checked out, executed, or sourced as configuration; it is
+#   untrusted DATA used only to resolve the PR through the GitHub API.
+# - No artifact or cache produced by the unprivileged fork CI is consumed
+#   or executed here (nothing is downloaded; no cache reads).
+# - The reviewer's model, endpoint, routing, and fallback policy come only
+#   from this file and the FORK_* repo variables. Nothing in the PR —
+#   including edits to action.yml, workflow files, AGENTS.md/CLAUDE.md,
+#   standards files, or prompt files — can configure the review of that PR.
+# - Model compute is default-deny: without the maintainer `ai-review-fork`
+#   label, verified against live API state, no model call is ever made.
+
+on:
+  workflow_run:
+    # Stage-2 handoff: run after the normal (unprivileged) CI workflow has
+    # completed for a pull_request. Push-to-main CI completions are filtered
+    # out in the gate job's `if` (and again in the gate script).
+    workflows: ["CI"]
+    types: [completed]
+  pull_request_target:
+    # Immediate first review when a maintainer adds the authorization label.
+    # pull_request_target runs trusted base-repository workflow code with
+    # base-repo context; the gate job performs no checkout of the fork and
+    # executes no fork content, so this trigger cannot hand fork code any
+    # privilege.
+    types: [labeled]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    # Cheap, API-only authorization/identity decision. Never sees model
+    # credentials. Fails closed: an unexpected error fails this job (no
+    # review runs) instead of defaulting to "proceed".
+    if: >-
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'pull_request' &&
+        (github.event.workflow_run.conclusion == 'success' ||
+         github.event.workflow_run.conclusion == 'failure')) ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.label.name == 'ai-review-fork')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+    steps:
+      - name: Checkout trusted base-repository code
+        # Trusted ref only: github.sha always points at a commit on this
+        # repository for both trigger types. Never the workflow_run head.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Decide whether the fork review is authorized
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Emits proceed/pr_number/head_sha/reason into GITHUB_OUTPUT.
+          # pr_number and head_sha are strictly validated by the script;
+          # untrusted PR text (title, body, branch, ref) is never emitted.
+          python3 scripts/fork_review_gate.py gate --event-file "${GITHUB_EVENT_PATH}"
+
+  review:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    # One active AI review per fork PR: a newer head's run cancels the
+    # in-flight review of a superseded head instead of accumulating
+    # concurrent reviews. `pr_number` reached this expression only after the
+    # gate script validated it as a positive integer.
+    concurrency:
+      group: fork-ai-review-${{ github.repository }}-pr-${{ needs.gate.outputs.pr_number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted base-repository code
+        # The reviewer code (`uses: ./` below) is the code checked out HERE,
+        # at a trusted base-repository commit — never fork-controlled code.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require pinned fork model configuration
+        # The fork reviewer must never silently inherit the org-level
+        # PRIMARY_*/SMART_*/FALLBACK_* dogfood configuration (which is not
+        # local-model-pinned). Missing pins fail loudly; there is no
+        # fallback path. The check includes FORK_LITELLM_API_KEY: without
+        # the model-scoped secret a review would silently issue unauthenticated
+        # model calls. (`secrets` is not available in step `if:` expressions,
+        # so the whole pre-flight runs here with the secret bound via env.)
+        env:
+          FORK_PRIMARY_MODEL: ${{ vars.FORK_PRIMARY_MODEL }}
+          FORK_PRIMARY_FORMAT: ${{ vars.FORK_PRIMARY_FORMAT }}
+          FORK_SMART_MODEL: ${{ vars.FORK_SMART_MODEL }}
+          FORK_SMART_FORMAT: ${{ vars.FORK_SMART_FORMAT }}
+          LITELLM_URL: ${{ vars.LITELLM_URL }}
+          FORK_LITELLM_API_KEY: ${{ secrets.FORK_LITELLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FORK_PRIMARY_MODEL FORK_PRIMARY_FORMAT FORK_SMART_MODEL FORK_SMART_FORMAT LITELLM_URL FORK_LITELLM_API_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Fork AI review is not configured: ${name} is unset."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Set the missing repo variable(s)/secret (FORK_PRIMARY_MODEL, FORK_PRIMARY_FORMAT, FORK_SMART_MODEL, FORK_SMART_FORMAT, LITELLM_URL, FORK_LITELLM_API_KEY — see docs/fork-review.md). The fork reviewer deliberately does not read the org-level PRIMARY_*/SMART_*/FALLBACK_* variables, so a missing pin must fail loudly instead of inheriting the dogfood model policy."
+            exit 1
+          fi
+
+      - name: Generate bot token
+        # Short-lived installation token for publication; only trusted,
+        # base-repository workflow code ever receives it.
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Re-verify PR head before model work
+        # The gate decided minutes ago; re-check that the PR's CURRENT head
+        # still equals the head this run will review before spending any
+        # model compute. Publication is guarded again inside the action
+        # (scripts/verify_pr_head.sh), so a push landing mid-review can
+        # never publish a stale verdict.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GATE_PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          GATE_HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/fork_review_gate.py verify \
+            --pr-number "$GATE_PR_NUMBER" \
+            --expected-sha "$GATE_HEAD_SHA"
+
+      - name: Review fork PR with the trusted reviewer
+        # `./` is the action code checked out in the step above — trusted
+        # base-repository code, never the fork's copy of the action.
+        uses: ./
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          repo: ${{ github.repository }}
+          pr_number: ${{ needs.gate.outputs.pr_number }}
+
+          # ── Local-model-only policy (pinned) ──────────────────────────
+          # Primary and smart models come exclusively from the FORK_* repo
+          # variables. The org-level PRIMARY_MODEL/SMART_MODEL/
+          # FALLBACK_MODEL variables are deliberately NOT referenced: the
+          # dogfood config is not local-only and drifts over time.
+          # FORK_LITELLM_API_KEY is a LiteLLM virtual key scoped to exactly
+          # the two fork models — a credential-level backstop so even a
+          # routing mistake cannot reach another model.
+          ai_base_url: ${{ vars.LITELLM_URL }}
+          ai_api_format: ${{ vars.FORK_PRIMARY_FORMAT }}
+          ai_model: ${{ vars.FORK_PRIMARY_MODEL }}
+          ai_api_key: ${{ secrets.FORK_LITELLM_API_KEY }}
+          ai_response_format: json_object
+
+          # No ai_fallback_* inputs: with ai_fallback_model empty the
+          # pipeline never attempts a fallback call, so an unavailable
+          # local model degrades to on_model_failure=notice (a visible
+          # request_changes notice on the PR) instead of trying another
+          # provider. No cloud/MiniMax/OpenAI/Anthropic fallback exists.
+          on_model_failure: notice
+
+          # Bounded compute: one retry with a short delay (an outage must
+          # not become prolonged load), a capped completion budget, and the
+          # reduced `low` context profile.
+          ai_primary_retries: "1"
+          ai_primary_retry_delay_sec: "5"
+          ai_max_tokens: "16384"
+          context_limit_mode: low
+
+          # Smart escalation: the reviewer-requested post-primary path
+          # (#721) is the only way the smart model is reached; heuristic
+          # escalation is telemetry-only. One smart call at most — no
+          # repeated or recursive escalation exists in the pipeline.
+          review_routing_mode: auto
+          ai_smart_base_url: ${{ vars.LITELLM_URL }}
+          ai_smart_api_format: ${{ vars.FORK_SMART_FORMAT }}
+          ai_smart_model: ${{ vars.FORK_SMART_MODEL }}
+          ai_smart_api_key: ${{ secrets.FORK_LITELLM_API_KEY }}
+
+          # ── Fork feature policy (explicitly pinned) ───────────────────
+          # Native tool calling is OFF: the tool surface executes repository
+          # content against a checked-out workspace, and the workspace here
+          # is the trusted base checkout rather than the fork head, so tool
+          # results could only mislead. Every enrichment path that reads a
+          # checked-out workspace or private credentials is disabled.
+          tool_mode: "off"
+          tool_enable_for_forks: "false"
+          evidence_enable_for_forks: "false"
+          linear_enable_for_forks: "false"
+
+          # Linked-source URL fetching disabled outright: fork-controlled
+          # URLs must not be fetched (even allowlisted hosts) with review
+          # credentials in play.
+          allowed_source_hosts: ""
+
+          # related-code and repo-map scan the local git worktree. The
+          # worktree here is the trusted BASE checkout, not the fork head,
+          # so those sections would describe the wrong tree. Disabled rather
+          # than checking out the fork into the privileged job (see the v3
+          # follow-up note in docs/fork-review.md).
+          related_code_context: "false"
+          repo_map_context: "false"
+
+          # CI already completed — that completion is what triggered this
+          # run. Do not spend wall-clock re-polling the Checks API.
+          ci_status_check: "false"
+
+          # Deep review: classifier-driven specialist selection (possibly
+          # zero roles), bounded below by deep_review_timeout_sec.
+          deep_review: "auto"
+          deep_review_timeout_sec: "300"
+
+          # ── Publication (no native approvals for forks) ───────────────
+          verdict_policy: findings_severity_gated
+          inline_findings: "true"
+          publish_mode: review_verdict
+          allow_approve: "false"
+          approve_forks: "false"
