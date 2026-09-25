@@ -1,0 +1,20 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "duplicate-disposition",
+  "description": "Two dispositions for the same check deterministically invalidate it — double-answering cannot launder coverage.",
+  "must_check": [
+    "verify file path sanitization"
+  ],
+  "dispositions": [
+    {
+      "check": "verify file path sanitization",
+      "status": "satisfied",
+      "rationale": "Inputs are normalized before use."
+    },
+    {
+      "check": "verify file path sanitization",
+      "status": "not_applicable",
+      "rationale": "Second answer trying to convert the satisfied check into a waiver."
+    }
+  ]
+}

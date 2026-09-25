@@ -709,5 +709,112 @@ class TestFindingsNormalization:
         assert result["findings"] == []
 
 
+class TestRequiredCheckDispositions(TestCase):
+    """#750: structured required-check disposition normalization."""
+
+    def _parse(self, dispositions):
+        payload = json.dumps({
+            "verdict": "approve",
+            "review_markdown": "x",
+            "required_check_dispositions": dispositions,
+        })
+        return parse_response({"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]})
+
+    def test_valid_dispositions_normalize(self):
+        out = self._parse([
+            {"check": "review for path traversal vulnerabilities", "status": "not_applicable",
+             "rationale": "no untrusted path surface in this change"},
+            {"check": "verify file path sanitization", "status": "satisfied", "rationale": "bounded to data root"},
+            {"check": "check secret rotation impact", "status": "unresolved"},
+        ])["required_check_dispositions"]
+        assert out == [
+            {"check": "review for path traversal vulnerabilities", "status": "not_applicable",
+             "rationale": "no untrusted path surface in this change"},
+            {"check": "verify file path sanitization", "status": "satisfied", "rationale": "bounded to data root"},
+            {"check": "check secret rotation impact", "status": "unresolved", "rationale": None},
+        ]
+
+    def test_status_case_normalized_but_prose_aliases_rejected(self):
+        out = self._parse([
+            {"check": "check a", "status": "Satisfied", "rationale": "ok"},
+            {"check": "check b", "status": "N/A", "rationale": "prose alias"},
+            {"check": "check c", "status": "not applicable", "rationale": "prose alias"},
+        ])["required_check_dispositions"]
+        assert [d["check"] for d in out] == ["check a"]
+
+    def test_absent_or_non_array_is_none(self):
+        for raw in ([None, "not a list", 42, {}]):
+            payload = json.dumps({"verdict": "approve", "review_markdown": "x", "required_check_dispositions": raw})
+            out = parse_response({"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]})
+            assert out["required_check_dispositions"] is None
+
+    def test_absent_field_key_is_always_written(self):
+        out = parse_response(_make_openai())
+        assert out["required_check_dispositions"] is None
+
+    def test_malformed_entries_dropped(self):
+        out = self._parse([
+            "bare string", 42, None,
+            {"check": "", "status": "satisfied", "rationale": "empty identity"},
+            {"check": 7, "status": "satisfied", "rationale": "wrong type"},
+            {"check": "check a", "status": "n/a", "rationale": "prose"},
+            {"check": "check b", "status": "not_applicable", "rationale": None},
+            {"check": "check c", "status": "not_applicable", "rationale": "   "},
+            {"check": "check d", "status": "satisfied", "rationale": "kept"},
+        ])["required_check_dispositions"]
+        assert out == [{"check": "check d", "status": "satisfied", "rationale": "kept"}]
+
+    def test_not_applicable_requires_rationale(self):
+        out = self._parse([
+            {"check": "check a", "status": "not_applicable", "rationale": "grounded in the diff"},
+            {"check": "check b", "status": "not_applicable"},
+        ])["required_check_dispositions"]
+        assert [d["check"] for d in out] == ["check a"]
+
+    def test_control_chars_collapse_and_rationale_is_bounded(self):
+        rationale = "ok\twith\ncontrol\u001b chars " + "y" * 600
+        out = self._parse([
+            {"check": "review auth flow\u0000\u001b[31m for regression", "status": "satisfied", "rationale": rationale},
+        ])["required_check_dispositions"]
+        entry = out[0]
+        assert entry["check"] == "review auth flow [31m for regression"
+        assert entry["rationale"].startswith("ok with control chars ")
+        assert len(entry["rationale"]) == 500
+        assert "\n" not in entry["rationale"] and "\t" not in entry["rationale"]
+
+    def test_overlong_check_echo_dropped(self):
+        out = self._parse([
+            {"check": "review for path traversal vulnerabilities " + "z" * 400, "status": "satisfied", "rationale": "x"},
+        ])["required_check_dispositions"]
+        assert out == []
+
+    def test_cap_at_50_dispositions(self):
+        out = self._parse([
+            {"check": f"check {i}", "status": "satisfied", "rationale": "r"} for i in range(60)
+        ])["required_check_dispositions"]
+        assert len(out) == 50
+
+    def test_parser_prose_cannot_substitute_for_structured_dispositions(self):
+        # Prose saying "N/A" in review_markdown without the structured field
+        # is just text — the parsed verdict records None either way.
+        payload = json.dumps({
+            "verdict": "approve",
+            "review_markdown": "The path checks are N/A, not applicable, skipped.",
+        })
+        out = parse_response({"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]})
+        assert out["required_check_dispositions"] is None
+
+    def test_openai_and_anthropic_shapes_normalize_identically(self):
+        content = json.dumps({
+            "verdict": "approve", "review_markdown": "x",
+            "required_check_dispositions": [
+                {"check": "check a", "status": "not_applicable", "rationale": "grounded"},
+            ],
+        })
+        openai_out = parse_response({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]})
+        anthropic_out = parse_response({"content": [{"type": "text", "text": content}]})
+        assert openai_out["required_check_dispositions"] == anthropic_out["required_check_dispositions"]
+
+
 if __name__ == "__main__":
     unittest_main()

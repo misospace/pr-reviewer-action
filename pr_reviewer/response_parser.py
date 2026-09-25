@@ -323,6 +323,70 @@ _MAX_FINDINGS = 50
 _MAX_FINDING_MESSAGE_CHARS = 2000
 
 
+# ---------------------------------------------------------------------------
+# Required-check dispositions (#750)
+# ---------------------------------------------------------------------------
+
+# #750: bounded structured required-check dispositions. The same
+# control-char collapse used for the smart-review reason applies to check
+# identities and rationales; the caps bound one model answer. Mirrored
+# byte-for-byte by src/model/verdict.ts.
+_MAX_REQUIRED_CHECKS = 50
+_MAX_REQUIRED_CHECK_CHARS = 400
+_MAX_RATIONALE_CHARS = 500
+
+_REQUIRED_CHECK_STATUSES = ("satisfied", "not_applicable", "unresolved")
+
+
+def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] | None:
+    """Normalise the model's structured required-check dispositions (#750).
+
+    Tolerant by design: a null/absent/non-array field stays ``None`` (the v2
+    coexistence fallback in :mod:`pr_reviewer.completeness` owns that case),
+    and an entry that is not a usable disposition object is dropped — the
+    deterministic coverage evaluation then reports the affected check as
+    unresolved, so dropping is conservative, never lenient. The check text
+    is the identity the model must echo; it is sanitised and bounded but
+    otherwise unaltered, and ``not_applicable`` without a usable rationale
+    is dropped (an ungrounded N/A is never a completed disposition).
+    """
+    if not isinstance(value, list):
+        return None
+
+    dispositions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        raw_check = item.get("check")
+        if not isinstance(raw_check, str):
+            continue
+        check = _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", raw_check).strip()
+        if not check or len(check) > _MAX_REQUIRED_CHECK_CHARS:
+            continue
+
+        raw_status = item.get("status")
+        status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+        if status not in _REQUIRED_CHECK_STATUSES:
+            continue
+
+        rationale = item.get("rationale")
+        if isinstance(rationale, str):
+            rationale = (
+                _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", rationale).strip()[:_MAX_RATIONALE_CHARS]
+                or None
+            )
+        else:
+            rationale = None
+        if status == "not_applicable" and rationale is None:
+            continue
+
+        dispositions.append({"check": check, "status": status, "rationale": rationale})
+        if len(dispositions) >= _MAX_REQUIRED_CHECKS:
+            break
+
+    return dispositions
+
 
 def _normalize_findings(value: Any) -> list[dict[str, Any]]:
     """Normalise an optional model-provided findings array.
@@ -535,6 +599,14 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     # Optional structured findings: normalised when present, empty when the
     # model (typically a weaker local one) does not produce them.
     parsed["findings"] = _normalize_findings(parsed.get("findings"))
+
+    # Structured required-check dispositions (#750): normalized
+    # unconditionally so downstream consumers always see the canonical shape
+    # (None when the model did not emit the field; unusable entries dropped,
+    # which the deterministic coverage evaluation reports as unresolved).
+    parsed["required_check_dispositions"] = _normalize_required_check_dispositions(
+        parsed.get("required_check_dispositions")
+    )
 
     # Structured reviewer-requested smart escalation (#721): normalized
     # unconditionally so a malformed or absent field can never masquerade as

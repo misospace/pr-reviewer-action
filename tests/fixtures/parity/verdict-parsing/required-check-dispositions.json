@@ -1,0 +1,15 @@
+{
+  "fixture": "required-check-dispositions",
+  "description": "#750: valid structured required-check dispositions in a verdict response are normalized and carried on the parsed verdict (mixed statuses; satisfied/unresolved keep optional rationale, not_applicable keeps its grounded one).",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Review\\n\\nAll checks dispositioned.\", \"required_check_dispositions\": [{\"check\": \"review for path traversal vulnerabilities\", \"status\": \"not_applicable\", \"rationale\": \"The diff touches only workflow trigger wiring; no code resolves filesystem paths.\"}, {\"check\": \"verify file path sanitization\", \"status\": \"satisfied\", \"rationale\": \"Paths are bounded to the data root.\"}, {\"check\": \"check secret rotation impact\", \"status\": \"unresolved\"}]}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": { "completion_tokens": 120 }
+  }
+}

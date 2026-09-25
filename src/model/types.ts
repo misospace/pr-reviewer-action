@@ -99,6 +99,23 @@ export interface NormalizedFinding {
 }
 
 /**
+ * #750: the three structured dispositions a reviewer may record for a
+ * deterministic `must_check` item. A required check is a mandatory review
+ * QUESTION, not automatically an implementation requirement: `not_applicable`
+ * is a completed disposition when the reviewer can ground it in the actual
+ * change context.
+ */
+export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
+
+export interface NormalizedRequiredCheckDisposition {
+  /** The check text as the model echoed it (sanitized, bounded). */
+  check: string;
+  status: RequiredCheckStatus;
+  /** Bounded control-char-free rationale; null when absent/empty. */
+  rationale: string | null;
+}
+
+/**
  * Contract 4: parsed review verdict. `extra` carries every additional key the
  * model produced (v2 passes them through to ai-output.json untouched).
  *
@@ -114,6 +131,13 @@ export interface ParsedReviewVerdict {
   reviewMarkdown: string;
   findings: NormalizedFinding[];
   requirementCoverage: unknown;
+  /**
+   * #750: structured dispositions for the deterministic must_check items.
+   * Null when the model did not emit the field at all (legacy coexistence
+   * path); malformed/unknown entries are dropped by the parser and surface
+   * as unresolved coverage in the deterministic completeness evaluation.
+   */
+  requiredCheckDispositions: NormalizedRequiredCheckDisposition[] | null;
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;

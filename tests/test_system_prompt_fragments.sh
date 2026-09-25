@@ -105,12 +105,13 @@ check_contains "concise includes the word budget" "$OUT" "under 300 words"
 check_contains "concise keeps the base output schema" "$OUT" "Return STRICT JSON"
 check_not_contains "concise leaves no placeholder" "$OUT" "{{"
 # Brevity must not defeat the two mechanisms that depend on the model actually
-# writing something: completeness.py keyword-matches must_check items against
-# review_markdown, and the Unknowns section is the reader-visible record of
+# writing something: since #750 the model must disposition every must_check
+# item in required_check_dispositions (and give each one a clause in
+# review_markdown), and the Unknowns section is the reader-visible record of
 # what evidence was missing (since #721 it does not itself trigger escalation,
 # but suppressing it would still hide uncertainty from the review reader).
 check_contains "concise exempts must_check coverage" "$OUT" \
-  "address every must_check item explicitly"
+  "disposition every must_check item in required_check_dispositions"
 check_contains "concise exempts the Unknowns section" "$OUT" \
   "never drop an Unknowns or Needs Verification section"
 

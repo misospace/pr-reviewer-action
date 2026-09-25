@@ -1,4 +1,4 @@
-import type { NormalizedFinding, ParsedReviewVerdict, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedRequiredCheckDisposition, ParsedReviewVerdict, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
 
 /**
@@ -34,6 +34,53 @@ const MAX_FINDING_MESSAGE_CHARS = 2000;
 // _MAX_SMART_REVIEW_REASON_CHARS.
 const MAX_SMART_REVIEW_REASON_CHARS = 400;
 const SMART_REVIEW_REASON_CONTROL = /[\u0000-\u0020\u007f]+/g;
+
+// #750: bounded required-check dispositions. The same control-char collapse
+// applies to check identities and rationales; the caps bound one model
+// answer. Byte-identical to pr_reviewer/response_parser.py's
+// _MAX_REQUIRED_CHECK_CHARS / _MAX_RATIONALE_CHARS and the shared control RE.
+const MAX_REQUIRED_CHECKS = 50;
+const MAX_REQUIRED_CHECK_CHARS = 400;
+const MAX_RATIONALE_CHARS = 500;
+
+const REQUIRED_CHECK_STATUSES = new Set<string>(["satisfied", "not_applicable", "unresolved"]);
+
+/**
+ * #750: normalize the model's structured required-check dispositions.
+ * Tolerant by design: a null/absent/non-array field stays null (the v2
+ * coexistence fallback owns that case), and an entry that is not a usable
+ * disposition object is dropped — the deterministic coverage evaluation
+ * then reports the affected check as unresolved, so dropping is conservative,
+ * never lenient. The check text is the identity the model must echo; it is
+ * sanitized and bounded but otherwise unaltered, and `not_applicable`
+ * without a usable rationale is dropped (an ungrounded N/A is never a
+ * completed disposition).
+ */
+function normalizeRequiredCheckDispositions(value: unknown): NormalizedRequiredCheckDisposition[] | null {
+  if (!Array.isArray(value)) return null;
+  const dispositions: NormalizedRequiredCheckDisposition[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+
+    const rawCheck = item.check;
+    if (typeof rawCheck !== "string") continue;
+    const check = rawCheck.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
+    if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) continue;
+
+    const rawStatus = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    if (!REQUIRED_CHECK_STATUSES.has(rawStatus)) continue;
+
+    let rationale: string | null = null;
+    if (typeof item.rationale === "string") {
+      rationale = item.rationale.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_RATIONALE_CHARS) || null;
+    }
+    if (rawStatus === "not_applicable" && rationale === null) continue;
+
+    dispositions.push({ check, status: rawStatus as NormalizedRequiredCheckDisposition["status"], rationale });
+    if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+  }
+  return dispositions;
+}
 
 /**
  * #721: normalize the reviewer's structured smart-review request.
@@ -426,6 +473,7 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
       key !== "verdict" && key !== "review_markdown" && key !== "findings"
       && key !== "requirement_coverage"
       && key !== "smart_review_requested" && key !== "smart_review_reason"
+      && key !== "required_check_dispositions"
     ) {
       extra[key] = value;
     }
@@ -436,6 +484,7 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
     reviewMarkdown: markdown,
     findings: normalizeFindings(parsed.findings),
     requirementCoverage: parsed.requirement_coverage,
+    requiredCheckDispositions: normalizeRequiredCheckDispositions(parsed.required_check_dispositions),
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
     extra,

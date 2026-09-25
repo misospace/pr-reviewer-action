@@ -24,6 +24,8 @@ DETERMINISTIC_SCENARIOS = frozenset(
         6541, 6542, 6543, 6544, 6545, 6546, 6547, 6548, 6549, 6550,
         # PR #655 producer/artifact/consumer and PR #689 evidence transport (#662).
         6551, 6552, 6553, 6891, 6892,
+        # PR #748 / #750 required-check grounding (ungrounded N/A converse + clean-shape control).
+        7480, 7481,
     }
 )
 

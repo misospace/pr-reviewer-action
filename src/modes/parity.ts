@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { buildModelRequest } from "../model/request.js";
 import { parseVerdictResponse } from "../model/verdict.js";
+import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../enforcement/required-checks.js";
+import { pythonJsonStringify } from "../precheck/metadata.js";
 import { resolveToolMaxRequests } from "../tools/budget.js";
-import type { ModelRequestConfig, RequestShape, ResponseFormatMode, TokensParam, ApiFormat } from "../model/types.js";
+import type { ModelRequestConfig, RequestShape, ResponseFormatMode, TokensParam, ApiFormat, NormalizedRequiredCheckDisposition } from "../model/types.js";
 
 /**
  * Parity-harness runner modes (#677), enabled only through
@@ -68,7 +70,13 @@ export function runRequestBuilderMode(fixturePath: string): void {
 export function runVerdictParserMode(responsePath: string): void {
   let payload: Record<string, unknown>;
   try {
-    const response: unknown = JSON.parse(readFileSync(responsePath, "utf8"));
+    const fixture: unknown = JSON.parse(readFileSync(responsePath, "utf8"));
+    // #750 fix: run the embedded model response, not the fixture wrapper —
+    // feeding the wrapper made every fixture error identically on both sides
+    // and the boundary matched vacuously on a shared NoneType error.
+    const response = typeof fixture === "object" && fixture !== null && "response" in fixture
+      ? (fixture as { response: unknown }).response
+      : fixture;
     const verdict = parseVerdictResponse(response);
     // Mirror the v2 parsed-dict shape: snake_case wire keys, extras inline.
     const parsed: Record<string, unknown> = {
@@ -87,12 +95,57 @@ export function runVerdictParserMode(responsePath: string): void {
       }),
     };
     if (verdict.requirementCoverage !== undefined) parsed.requirement_coverage = verdict.requirementCoverage;
+    // #750 structured required-check dispositions: emitted explicitly
+    // (snake_case) so the parity comparison pins the normalized field, not
+    // raw extras. Null when the model did not emit the field at all.
+    parsed.required_check_dispositions = verdict.requiredCheckDispositions === null
+      ? null
+      : verdict.requiredCheckDispositions.map((disposition) => ({
+        check: disposition.check,
+        status: disposition.status,
+        rationale: disposition.rationale,
+      }));
     // #721 structured escalation request: emitted explicitly (snake_case)
     // so the parity comparison pins the normalized fields, not raw extras.
     parsed.smart_review_requested = verdict.smartReviewRequested;
     parsed.smart_review_reason = verdict.smartReviewReason;
     for (const [key, value] of Object.entries(verdict.extra)) parsed[key] = value;
-    payload = { ok: true, values: { parsed: canonical(parsed) } };
+    payload = { ok: true, values: { parsed: pythonJsonStringify(parsed) } };
+  } catch (error) {
+    payload = { ok: false, stderr: error instanceof Error ? error.message : String(error) };
+  }
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * #750 required-check-coverage parity mode: fold a fixture's deterministic
+ * must_check list and (parser-normalized) dispositions through the v3
+ * coverage evaluator and emit the snake_case artifact for byte comparison
+ * with the v2 evaluator in pr_reviewer/completeness.py.
+ */
+interface CoverageFixture {
+  contract?: string;
+  must_check: unknown;
+  dispositions: unknown;
+}
+
+export function runRequiredCheckCoverageMode(fixturePath: string): void {
+  let payload: Record<string, unknown>;
+  try {
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as CoverageFixture;
+    if (fixture.contract !== "required-check-coverage/v1") {
+      throw new Error("fixture is not required-check-coverage/v1");
+    }
+    const checks = Array.isArray(fixture.must_check) ? fixture.must_check.filter((c): c is string => typeof c === "string") : [];
+    // Pass the fixture dispositions through verbatim (list or null): the
+    // evaluator re-validates every entry defensively, exactly like the v2
+    // evaluator, so hostile fixture content exercises the same path on both
+    // sides.
+    const dispositions = Array.isArray(fixture.dispositions)
+      ? (fixture.dispositions as unknown[])
+      : null;
+    const coverage = evaluateRequiredCheckCoverage(checks, dispositions as NormalizedRequiredCheckDisposition[] | null);
+    payload = { ok: true, values: { coverage: pythonJsonStringify(requiredCheckCoverageToArtifact(coverage)) } };
   } catch (error) {
     payload = { ok: false, stderr: error instanceof Error ? error.message : String(error) };
   }

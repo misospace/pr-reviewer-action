@@ -62,7 +62,7 @@ check_contains "strict mode on" "$MODEL_CALL" '"strict":true'
 check_contains "verdict enum" "$MODEL_CALL" '"enum":["approve","request_changes"]'
 check_contains "severity enum" "$MODEL_CALL" '"enum":["blocker","major","minor","info"]'
 check_contains "findings nullable array" "$MODEL_CALL" '"type":["array","null"]'
-check_contains "top-level required keys" "$MODEL_CALL" '"required":["verdict","review_markdown","smart_review_requested","smart_review_reason","findings","requirement_coverage"]'
+check_contains "top-level required keys" "$MODEL_CALL" '"required":["verdict","review_markdown","smart_review_requested","smart_review_reason","findings","requirement_coverage","required_check_dispositions"]'
 
 echo ""
 echo "=== Path A never advertises tools (verdict/review request drops them) ==="

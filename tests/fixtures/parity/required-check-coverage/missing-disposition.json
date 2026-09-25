@@ -1,0 +1,16 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "missing-disposition",
+  "description": "A supplied check with no disposition at all stays unresolved — omissions cannot pass silently.",
+  "must_check": [
+    "review for path traversal vulnerabilities",
+    "verify file path sanitization"
+  ],
+  "dispositions": [
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "satisfied",
+      "rationale": "Path joining is bounded to the data root with filepath.Base."
+    }
+  ]
+}

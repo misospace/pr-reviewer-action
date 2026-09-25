@@ -42,6 +42,11 @@ CAPABILITY_PRECHECK_CREDENTIAL = "precheck_capability_wiring"
 CAPABILITY_BROKEN_ARROW = "broken_dataflow_arrow"
 CAPABILITY_CORPUS_EVIDENCE = "review_corpus_evidence_transport"
 CAPABILITY_TRUNCATION_COUNTEREXAMPLE = "truncation_counterexample"
+# #750: an ungrounded not_applicable cannot wave away a real required-check
+# risk. A correct review names the concrete risk surface (or calls the N/A
+# waiver ungrounded); a review that emits the N/A token over a present risk
+# detects nothing.
+CAPABILITY_REQUIRED_CHECK_GROUNDING = "required_check_grounding"
 # #661 merge-safety review dispositions: the per-run quality categories the
 # semantic report records so a miss is attributable to its failure mode — the
 # defect was never found, it was found but suppressed as pre-existing to the
@@ -134,6 +139,7 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_BROKEN_ARROW,
         CAPABILITY_CORPUS_EVIDENCE,
         CAPABILITY_TRUNCATION_COUNTEREXAMPLE,
+        CAPABILITY_REQUIRED_CHECK_GROUNDING,
     }
 )
 
@@ -273,6 +279,18 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
     (CAPABILITY_TRUNCATION_COUNTEREXAMPLE, (
         "truncate_clean writes an oversized marker beyond max_corpus",
         "oversized marker exceeds the corpus budget",
+    )),
+    # #750: causal terms only — a generic "be careful with paths" matches
+    # none of these, so only a finding that names the concrete risk surface
+    # (or the ungrounded-waiver mechanism) counts as grounding the check.
+    (CAPABILITY_REQUIRED_CHECK_GROUNDING, (
+        "attacker-controlled path", "user-controlled path", "user-supplied path",
+        "untrusted path", "attacker controlled path", "attacker-controlled input reaches",
+        "path traversal", "directory traversal", "traversal outside",
+        "path is not sanitized", "path is not validated", "unsanitized path",
+        "not_applicable is not grounded", "ungrounded not_applicable", "ungrounded n/a",
+        "n/a is not grounded", "cannot be waived as not applicable",
+        "waives the path check", "waived as not applicable",
     )),
 )
 
@@ -1211,6 +1229,7 @@ __all__ = [
     "CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY",
     "CAPABILITY_CANONICAL_ARTIFACT", "CAPABILITY_PRECHECK_CREDENTIAL",
     "CAPABILITY_BROKEN_ARROW", "CAPABILITY_CORPUS_EVIDENCE", "CAPABILITY_TRUNCATION_COUNTEREXAMPLE",
+    "CAPABILITY_REQUIRED_CHECK_GROUNDING",
     "DISPOSITION_CORRECT", "DISPOSITION_INVALID_REMEDIATION", "DISPOSITION_NOT_FOUND",
     "DISPOSITION_SPECULATIVE_FALSE_POSITIVE", "DISPOSITION_SUPPRESSED_PRE_EXISTING",
     "MERGE_SAFETY_DISPOSITIONS", "MERGE_SAFETY_DISPOSITIONS_ORDER",

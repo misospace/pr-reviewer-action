@@ -131,11 +131,24 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
   const schema = (OPENAI_VERDICT_JSON_SCHEMA.json_schema as unknown as Record<string, unknown>).schema as unknown as Record<string, unknown>;
   assert.deepEqual(
     schema.required,
-    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage"],
+    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
   );
   const properties = schema.properties as unknown as Record<string, { type: unknown }>;
   assert.deepEqual(properties.smart_review_requested!.type, "boolean");
   assert.deepEqual(properties.smart_review_reason!.type, ["string", "null"]);
   const findings = properties.findings! as unknown as { type: string[] };
   assert.deepEqual(findings.type, ["array", "null"]);
+  // #750: one disposition per deterministic must_check item; identity is
+  // the echoed check text; not_applicable carries a grounded rationale.
+  const dispositions = properties.required_check_dispositions! as unknown as {
+    type: string[];
+    items: { properties: Record<string, unknown>; required: string[]; additionalProperties: boolean };
+  };
+  assert.deepEqual(dispositions.type, ["array", "null"]);
+  assert.deepEqual(dispositions.items.required, ["check", "status", "rationale"]);
+  assert.equal(dispositions.items.additionalProperties, false);
+  assert.deepEqual(
+    (dispositions.items.properties.status as { enum: string[] }).enum,
+    ["satisfied", "not_applicable", "unresolved"],
+  );
 });

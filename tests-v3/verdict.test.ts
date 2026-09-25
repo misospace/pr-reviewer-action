@@ -260,3 +260,97 @@ test("anthropic content blocks feed the parser (thinking blocks ignored)", () =>
   });
   assert.equal(verdict.verdict, "request_changes");
 });
+
+test("#750: structured required-check dispositions normalize onto the parsed verdict", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: "review for path traversal vulnerabilities", status: "not_applicable", rationale: "no untrusted path surface" },
+      { check: "verify file path sanitization", status: "satisfied", rationale: "bounded to data root" },
+      { check: "check secret rotation impact", status: "unresolved" },
+      { check: "review auth flow for regression", status: "Satisfied", rationale: "case-normalized status" },
+    ],
+  })));
+  assert.deepEqual(verdict.requiredCheckDispositions, [
+    { check: "review for path traversal vulnerabilities", status: "not_applicable", rationale: "no untrusted path surface" },
+    { check: "verify file path sanitization", status: "satisfied", rationale: "bounded to data root" },
+    { check: "check secret rotation impact", status: "unresolved", rationale: null },
+    { check: "review auth flow for regression", status: "satisfied", rationale: "case-normalized status" },
+  ]);
+  assert.equal("required_check_dispositions" in verdict.extra, false);
+});
+
+test("#750: absent/null/non-array dispositions normalize to null (legacy coexistence path)", () => {
+  for (const raw of [undefined, null, "not a list", 42, {}]) {
+    const payload: Record<string, unknown> = { verdict: "approve", review_markdown: "x" };
+    if (raw !== undefined) payload.required_check_dispositions = raw;
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
+    assert.equal(verdict.requiredCheckDispositions, null, JSON.stringify(raw));
+  }
+});
+
+test("#750: malformed disposition entries are dropped, never credited", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      "bare string", 42, null,
+      { check: "", status: "satisfied", rationale: "empty identity" },
+      { check: 7, status: "satisfied", rationale: "wrong type" },
+      { check: "check a", status: "N/A", rationale: "prose alias" },
+      { check: "check b", status: "not applicable", rationale: "prose alias" },
+      { check: "check c", status: "not_applicable", rationale: null },
+      { check: "check d", status: "not_applicable", rationale: "   " },
+      { check: "check e", status: "satisfied", rationale: 7 },
+      { check: "check f", status: "unresolved", rationale: "explicitly unresolved stays" },
+    ],
+  })));
+  assert.deepEqual(verdict.requiredCheckDispositions, [
+    { check: "check e", status: "satisfied", rationale: null },
+    { check: "check f", status: "unresolved", rationale: "explicitly unresolved stays" },
+  ]);
+});
+
+test("#750: check identities and rationales are sanitized and bounded", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: `review auth flow\u0000\u001b[31m${" for regression".repeat(20)}`, status: "satisfied", rationale: `ok\twith\ncontrol\u001b chars ${"y".repeat(600)}` },
+      { check: "check a", status: "satisfied", rationale: "keep" },
+    ],
+  })));
+  const first = verdict.requiredCheckDispositions![0]!;
+  assert.ok(first.check.length <= 400);
+  assert.ok(!first.check.includes("\u0000") && !first.check.includes("\u001b"));
+  assert.ok(first.rationale !== null && first.rationale.length <= 500);
+  assert.ok(!first.rationale!.includes("\n") && !first.rationale!.includes("\t"));
+  assert.deepEqual(verdict.requiredCheckDispositions![1], { check: "check a", status: "satisfied", rationale: "keep" });
+});
+
+test("#750: a >400-char check echo is dropped, not truncated into a forged identity", () => {
+  const longEcho = "review for path traversal vulnerabilities " + "z".repeat(400);
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: longEcho, status: "satisfied", rationale: "too long to be a faithful echo" },
+    ],
+  })));
+  assert.deepEqual(verdict.requiredCheckDispositions, []);
+});
+
+test("#750: dispositions never forge or alter the smart-review request (#721 authority)", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: "review for path traversal vulnerabilities", status: "not_applicable", rationale: "grounded" },
+    ],
+    smart_review_requested: "true",
+  })));
+  assert.equal(verdict.smartReviewRequested, false);
+  assert.equal(verdict.smartReviewReason, null);
+  assert.equal(verdict.requiredCheckDispositions!.length, 1);
+});
