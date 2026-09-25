@@ -1018,6 +1018,15 @@ class TestPathHandlingSignalModel:
         result = classify_pr([_make_file("src/app.py")], diff_text="\n".join(lines) + "\n")
         assert len(result.path_handling_provenance["signals"]) <= 8
 
+    def test_provenance_files_per_signal_capped(self):
+        # MAX_PATH_FILES: one signal bucket attributes at most 8 files even
+        # when more changed files carry the vocabulary.
+        files = [_make_file(f"src/filepath_{i}.py") for i in range(10)]
+        result = classify_pr(files)
+        signals = result.path_handling_provenance["signals"]
+        assert len(signals) == 1
+        assert len(signals[0]["files"]) == 8
+
 
 class TestRouteSignals:
     """route_signals drives smart routing and must exclude content-only matches

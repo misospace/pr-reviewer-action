@@ -575,10 +575,32 @@ test("#749: provenance samples are bounded and control-character-free", () => {
   }
 });
 
-test("#749: provenance signal buckets are capped", () => {
+test("#749: provenance buckets are capped (signals and files-per-signal)", () => {
   const lines = Array.from({ length: 40 }, (_, i) => `+a${i} = os.path.join(base, request.args['p'])`);
   const result = classifyPr({ prFiles: files("src/app.py"), diffText: `${lines.join("\n")}\n`, linkedIssues: [] });
   assert.ok(result.pathHandlingProvenance.signals.length <= 8);
+
+  // MAX_PATH_FILES: one signal bucket attributes at most 8 files even when
+  // more changed files carry the vocabulary.
+  const manyFiles = classifyPr({
+    prFiles: Array.from({ length: 10 }, (_, i) => canonicalChangedFile({ filename: `src/filepath_${i}.py` })),
+    diffText: "",
+    linkedIssues: [],
+  });
+  const filenameSignals = manyFiles.pathHandlingProvenance.signals.filter((s) => s.source === "filename");
+  assert.equal(filenameSignals.length, 1);
+  assert.equal(filenameSignals[0]?.files.length, 8);
+});
+
+test("#749: headerless diffs degrade conservatively", () => {
+  const diff = "+HOSTILE = '../../etc/passwd'\n";
+  // Tests-only changed file set: the whole headerless diff is test content.
+  const testsOnly = classifyPr({ prFiles: files("tests/test_x.py"), diffText: diff, linkedIssues: [] });
+  assert.equal(testsOnly.prKind, "app_code");
+  // Any non-test changed file fires conservatively — unknown attribution
+  // keeps scrutiny, never drops it.
+  const withProduction = classifyPr({ prFiles: files("src/x.py"), diffText: diff, linkedIssues: [] });
+  assert.equal(withProduction.prKind, "path_handling_changes");
 });
 
 // ── Specialist role selection (#633 port) ─────────────────────────────────
