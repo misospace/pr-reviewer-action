@@ -17,6 +17,8 @@ export interface ChatRequestInput {
   anthropicVersion: string;
   requestTimeoutSec: number;
   connectTimeoutSec: number;
+  /** Response-byte ceiling; defaults to DEFAULT_MAX_RESPONSE_BYTES (#745). */
+  maxResponseBytes?: number;
 }
 
 export type ChatRequestOutcome =
@@ -35,6 +37,7 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
       requestTimeoutSec: input.requestTimeoutSec,
       connectTimeoutSec: input.connectTimeoutSec,
       stream: streaming,
+      ...(input.maxResponseBytes !== undefined ? { maxResponseBytes: input.maxResponseBytes } : {}),
     });
     if (!streaming) {
       let parsed: unknown;
