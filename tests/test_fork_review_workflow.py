@@ -115,27 +115,60 @@ def test_fork_workflow_label_trigger_is_gated_to_authorization_label(fork_text) 
 
 
 def test_privileged_checkouts_are_trusted_refs_only(fork_text) -> None:
-    """Tests 5/6/7: never check out or execute fork-controlled code."""
-    checkout_blocks = re.findall(
-        r"- name: [^\n]*[Cc]heckout[^\n]*\n(?:\s+#.*\n|\s+uses:[^\n]*\n|\s+with:\n(?:\s+[\w-]+:[^\n]*\n)*)*",
-        fork_text,
+    """Tests 5/6/7: never check out or execute fork-controlled code.
+
+    Line-based scan over EVERY `actions/checkout` step (not a fragile block
+    regex): each must pin exactly one explicit `ref:` and it must be the
+    trusted base commit `${{ github.sha }}`. A future checkout step that
+    omits `ref:` (falling back to the event head) or pins the fork head
+    fails here.
+    """
+    lines = fork_text.splitlines()
+    checkouts: list[tuple[str, str | None]] = []  # (step name, ref value)
+    index = 0
+    while index < len(lines):
+        if re.match(r"\s+uses:\s*actions/checkout@", lines[index]):
+            uses_indent = len(lines[index]) - len(lines[index].lstrip(" "))
+            name = "<unknown>"
+            for back in range(index - 1, max(index - 12, -1), -1):
+                name_match = re.match(r"\s*- name: (.*)$", lines[back])
+                if name_match:
+                    name = name_match.group(1).strip()
+                    break
+            ref: str | None = None
+            scan = index + 1
+            while scan < len(lines):
+                line = lines[scan]
+                indent = len(line) - len(line.lstrip(" "))
+                if line.strip() and (
+                    indent < uses_indent
+                    or (indent == uses_indent and line.lstrip().startswith("- "))
+                ):
+                    break
+                ref_match = re.match(r"\s+ref:\s*(.+)$", line)
+                if ref_match:
+                    assert ref is None, f"checkout step {name!r} pins multiple refs"
+                    ref = _unquote(ref_match.group(1))
+                scan += 1
+            checkouts.append((name, ref))
+        index += 1
+
+    assert len(checkouts) >= 2, (
+        f"expected the gate and review checkouts; found {checkouts!r}"
     )
-    assert checkout_blocks, "the fork workflow must contain checkout steps"
-    for block in checkout_blocks:
-        refs = re.findall(r"^\s+ref:\s*(.+)$", block, re.M)
-        assert refs, "every privileged checkout must pin an explicit ref"
-        for ref in refs:
-            assert _unquote(ref) == "${{ github.sha }}", (
-                f"privileged checkout ref must be the trusted base commit "
-                f"(github.sha), found {ref!r}"
-            )
+    for name, ref in checkouts:
+        assert ref == "${{ github.sha }}", (
+            f"checkout step {name!r} must pin the trusted base commit "
+            f"${{{{ github.sha }}}}; found {ref!r}"
+        )
     # The fork head SHA is untrusted DATA: it may never appear as a ref.
-    assert "workflow_run.head_sha" not in fork_text or not re.search(
-        r"ref:.*head_sha", fork_text
-    ), "the fork head SHA must never be used as a checkout ref"
-    assert "pull_request.head.sha" not in fork_text or not re.search(
-        r"ref:.*pull_request\.head\.sha", fork_text
-    )
+    for line in lines:
+        assert not re.match(r"\s+ref:.*head_sha", line), (
+            "the fork head SHA must never be used as a checkout ref"
+        )
+        assert not re.match(r"\s+ref:.*pull_request\.head\.sha", line), (
+            "a PR head SHA must never be used as a checkout ref"
+        )
 
 
 def test_reviewer_uses_local_trusted_action_code(fork_text) -> None:
@@ -412,6 +445,187 @@ def test_authorization_label_is_registered() -> None:
         "labels.yaml must declare the ai-review-fork label so label-sync "
         "creates it"
     )
+
+
+def test_config_guard_checks_the_scoped_secret(fork_text) -> None:
+    """Blocker fix: a missing FORK_LITELLM_API_KEY must fail loudly.
+
+    `secrets` is not available in step `if:` expressions (actionlint rejects
+    it), so the guard must bind the secret through `env:` and check it in
+    the run body — and the step must have no `if:` at all, so the check can
+    never be skipped.
+    """
+    guard_name = "Require pinned fork model configuration"
+    lines = fork_text.splitlines()
+    index = next(
+        i for i, line in enumerate(lines) if guard_name in line and "- name:" in line
+    )
+    step_indent = len(lines[index]) - len(lines[index].lstrip(" "))
+    body: list[str] = []
+    scan = index + 1
+    while scan < len(lines):
+        line = lines[scan]
+        if line.strip() and (len(line) - len(line.lstrip(" "))) <= step_indent:
+            break
+        body.append(line)
+        scan += 1
+    step_text = "\n".join(body)
+    assert not re.search(r"^\s+if:", step_text, re.M), (
+        "the configuration guard must run unconditionally (no if: skip)"
+    )
+    assert re.search(
+        r"FORK_LITELLM_API_KEY:\s*\$\{\{ secrets\.FORK_LITELLM_API_KEY \}\}", step_text
+    ), "the guard must bind the scoped secret via env to check it"
+    for required in (
+        "FORK_PRIMARY_MODEL",
+        "FORK_PRIMARY_FORMAT",
+        "FORK_SMART_MODEL",
+        "FORK_SMART_FORMAT",
+        "LITELLM_URL",
+        "FORK_LITELLM_API_KEY",
+    ):
+        assert required in step_text, f"the guard must check {required}"
+
+
+def _eval_github_expr(expr: str, ctx: dict[str, object]) -> bool:
+    """Evaluate the restricted GitHub-expression subset used by the dogfood
+    job's `if`: dotted identifiers, 'string' literals, ==/!=, &&/||, !, ().
+
+    Parses the FULL expression into an AST first (a short-circuiting
+    recursive evaluator would silently stop parsing early), then evaluates
+    with GitHub truthiness: a missing (null) value is falsy and unequal to
+    any present value.
+    """
+    tokens = re.findall(
+        r"\s*(&&|\|\||==|!=|\(|\)|!|'[^']*'|[A-Za-z_][A-Za-z0-9_.]*|\d+)\s*",
+        expr,
+    )
+    pos = 0
+
+    def peek() -> str | None:
+        return tokens[pos] if pos < len(tokens) else None
+
+    def take() -> str:
+        nonlocal pos
+        token = tokens[pos]
+        pos += 1
+        return token
+
+    def resolve(token: str) -> object:
+        if token.startswith("'"):
+            return token[1:-1]
+        if token.isdigit():
+            return int(token)
+        if token == "true":
+            return True
+        if token == "false":
+            return False
+        assert token in ctx, f"evaluator context missing for {token!r}"
+        return ctx[token]
+
+    def parse_operand() -> tuple:
+        token = take()
+        if token == "!":
+            return ("not", parse_operand())
+        if token == "(":
+            value = parse_or()
+            assert take() == ")", f"expected ')' in {expr!r}"
+            return value
+        return ("val", resolve(token))
+
+    def parse_cmp() -> tuple:
+        left = parse_operand()
+        if peek() in ("==", "!="):
+            op = take()
+            return (op, left, parse_operand())
+        return left
+
+    def parse_and() -> tuple:
+        node = parse_cmp()
+        while peek() == "&&":
+            take()
+            node = ("and", node, parse_cmp())
+        return node
+
+    def parse_or() -> tuple:
+        node = parse_and()
+        while peek() == "||":
+            take()
+            node = ("or", node, parse_and())
+        return node
+
+    def _truthy(value: object) -> bool:
+        if value is None or value is False or value == "":
+            return False
+        return True
+
+    def evaluate(node: tuple) -> bool:
+        kind = node[0]
+        if kind == "val":
+            return _truthy(node[1])
+        if kind == "not":
+            return not evaluate(node[1])
+        if kind == "and":
+            return evaluate(node[1]) and evaluate(node[2])
+        if kind == "or":
+            return evaluate(node[1]) or evaluate(node[2])
+        left, right = node[1], node[2]
+        left_val = _raw(left)
+        right_val = _raw(right)
+        # GitHub semantics: null (a missing context value) compares unequal
+        # to any present value — plain Python == already gives
+        # None != 111111 and None != 'pull_request', which is all this
+        # expression needs.
+        equal = left_val == right_val
+        return equal if kind == "==" else not equal
+
+    def _raw(node: tuple) -> object:
+        assert node[0] == "val", "comparands must be literals or identifiers"
+        return node[1]
+
+    ast = parse_or()
+    assert pos == len(tokens), f"trailing tokens in expression: {tokens[pos:]!r}"
+    return evaluate(ast)
+
+
+def _dogfood_job_if(text: str) -> str:
+    """Extract the review job's `if:` expression from the dogfood workflow."""
+    match = re.search(r"^  review:\n(?:.*\n)*?    if: \$\{\{ (.+?) \}\}$", text, re.M)
+    assert match, "dogfood review job if: expression not found"
+    return match.group(1)
+
+
+def test_dogfood_job_if_semantics() -> None:
+    """Test 1 (recommended by review): pin both halves of the separation.
+
+    Evaluates the actual expression from the workflow file: same-repo PRs
+    enter the job, fork PRs and drafts skip it, workflow_dispatch still runs.
+    """
+    text = DOGFOOD_WORKFLOW.read_text(encoding="utf-8")
+    expr = _dogfood_job_if(text)
+    repository_id = 111111
+    base = {
+        "github.event_name": "pull_request",
+        "github.event.pull_request.head.repo.id": repository_id,
+        "github.repository_id": repository_id,
+        "github.event.pull_request.draft": False,
+    }
+
+    def ctx(event_name: str, head_repo_id: object, draft: object) -> dict:
+        local = dict(base)
+        local["github.event_name"] = event_name
+        local["github.event.pull_request.head.repo.id"] = head_repo_id
+        local["github.event.pull_request.draft"] = draft
+        return local
+
+    # Same-repo, ready PR → the dogfood reviewer runs.
+    assert _eval_github_expr(expr, ctx("pull_request", repository_id, False)) is True
+    # Fork PR → skipped cleanly (the fork-ai-review workflow owns it).
+    assert _eval_github_expr(expr, ctx("pull_request", 222222, False)) is False
+    # Same-repo draft → skipped (pre-existing behavior preserved).
+    assert _eval_github_expr(expr, ctx("pull_request", repository_id, True)) is False
+    # workflow_dispatch (no PR context at all) → runs.
+    assert _eval_github_expr(expr, ctx("workflow_dispatch", None, None)) is True
 
 
 if __name__ == "__main__":

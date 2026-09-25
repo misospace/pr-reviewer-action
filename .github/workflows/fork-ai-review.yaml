@@ -120,11 +120,30 @@ jobs:
         # The fork reviewer must never silently inherit the org-level
         # PRIMARY_*/SMART_*/FALLBACK_* dogfood configuration (which is not
         # local-model-pinned). Missing pins fail loudly; there is no
-        # fallback path.
-        if: ${{ !vars.FORK_PRIMARY_MODEL || !vars.FORK_PRIMARY_FORMAT || !vars.FORK_SMART_MODEL || !vars.FORK_SMART_FORMAT || !vars.LITELLM_URL }}
+        # fallback path. The check includes FORK_LITELLM_API_KEY: without
+        # the model-scoped secret a review would silently issue unauthenticated
+        # model calls. (`secrets` is not available in step `if:` expressions,
+        # so the whole pre-flight runs here with the secret bound via env.)
+        env:
+          FORK_PRIMARY_MODEL: ${{ vars.FORK_PRIMARY_MODEL }}
+          FORK_PRIMARY_FORMAT: ${{ vars.FORK_PRIMARY_FORMAT }}
+          FORK_SMART_MODEL: ${{ vars.FORK_SMART_MODEL }}
+          FORK_SMART_FORMAT: ${{ vars.FORK_SMART_FORMAT }}
+          LITELLM_URL: ${{ vars.LITELLM_URL }}
+          FORK_LITELLM_API_KEY: ${{ secrets.FORK_LITELLM_API_KEY }}
         run: |
-          echo "::error::Fork AI review is not configured: set the repo variables FORK_PRIMARY_MODEL, FORK_PRIMARY_FORMAT, FORK_SMART_MODEL, FORK_SMART_FORMAT (and LITELLM_URL). The fork reviewer deliberately does not read the org-level PRIMARY_*/SMART_*/FALLBACK_* variables, so a missing pin must fail loudly instead of inheriting the dogfood model policy."
-          exit 1
+          set -euo pipefail
+          missing=0
+          for name in FORK_PRIMARY_MODEL FORK_PRIMARY_FORMAT FORK_SMART_MODEL FORK_SMART_FORMAT LITELLM_URL FORK_LITELLM_API_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Fork AI review is not configured: ${name} is unset."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Set the missing repo variable(s)/secret (FORK_PRIMARY_MODEL, FORK_PRIMARY_FORMAT, FORK_SMART_MODEL, FORK_SMART_FORMAT, LITELLM_URL, FORK_LITELLM_API_KEY — see docs/fork-review.md). The fork reviewer deliberately does not read the org-level PRIMARY_*/SMART_*/FALLBACK_* variables, so a missing pin must fail loudly instead of inheriting the dogfood model policy."
+            exit 1
+          fi
 
       - name: Generate bot token
         # Short-lived installation token for publication; only trusted,

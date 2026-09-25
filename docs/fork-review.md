@@ -94,6 +94,13 @@ The fork reviewer is pinned to the self-hosted LiteLLM endpoint and must
 | No fallback | The workflow passes no `ai_fallback_*` inputs; with `ai_fallback_model` empty the pipeline never attempts a fallback call. An unavailable local model degrades via `on_model_failure: notice` — a visible `request_changes` notice on the PR — and stops |
 | Credential scope | `FORK_LITELLM_API_KEY` is a LiteLLM virtual key scoped to exactly the two fork models, so even a routing mistake cannot bill or reach another model |
 
+The credential-scope row is an **operational** requirement: create the key
+with model scope limited to the two fork models at the LiteLLM side and
+verify it there (e.g. confirm a request for any other model is rejected).
+The repository cannot enforce LiteLLM-side scoping from a workflow; what the
+workflow does enforce is that a *missing* secret fails the review job loudly
+(see the pre-flight guard) instead of issuing unauthenticated model calls.
+
 - Primary: `FORK_PRIMARY_MODEL` (`muse-glimmer`, OpenAI format)
 - Smart/escalation: `FORK_SMART_MODEL` (`qwen3.8-flash-next`, OpenAI format),
   reachable only through the reviewer-requested post-primary escalation

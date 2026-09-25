@@ -378,6 +378,132 @@ def test_gate_uses_argv_only_subprocess(gate, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Adversarial fixtures against the validated fields themselves (#252)
+#
+# The tests above feed hostile PR *text* (title/body/ref). These feed the
+# boundary tokens and hostile shapes directly into the fields the gate is
+# supposed to validate — NUL bytes, shell-metacharacter runs, and traversal
+# segments — pinning that each is rejected by the shape validators BEFORE any
+# subprocess or API call, and that a valid field produces exactly the
+# expected endpoint and nothing else.
+# ---------------------------------------------------------------------------
+
+NUL_40 = "\x00" * 40
+METACHAR_40 = "$(" + ";&|`'\"$ {}" * 4 + "$"  # shell-expansion tokens
+TRAVERSAL_40 = "../" * 13 + "x"
+
+
+def _assert_no_api_call(stub: ApiStub) -> None:
+    assert stub.calls == [], f"validation must reject before any API call: {stub.calls}"
+
+
+def test_gate_rejects_nul_bytes_in_head_sha(gate, tmp_path, monkeypatch) -> None:
+    stub = ApiStub()
+    monkeypatch.setattr(gate, "gh_api", stub)
+    out = _run_gate(gate, _workflow_run_event(sha=NUL_40), tmp_path)
+    assert out["proceed"] == "false"
+    assert out["reason"] == gate.REASON_BAD_HEAD_SHA
+    _assert_no_api_call(stub)
+
+
+def test_gate_rejects_shell_metachar_head_sha(gate, tmp_path, monkeypatch) -> None:
+    stub = ApiStub()
+    monkeypatch.setattr(gate, "gh_api", stub)
+    sha = "$(touch /tmp/pwned)" + "a" * (40 - len("$(touch /tmp/pwned)"))
+    out = _run_gate(gate, _workflow_run_event(sha=sha), tmp_path)
+    assert out["proceed"] == "false"
+    assert out["reason"] == gate.REASON_BAD_HEAD_SHA
+    _assert_no_api_call(stub)
+
+
+def test_gate_rejects_traversal_head_sha(gate, tmp_path, monkeypatch) -> None:
+    stub = ApiStub()
+    monkeypatch.setattr(gate, "gh_api", stub)
+    out = _run_gate(gate, _workflow_run_event(sha=TRAVERSAL_40), tmp_path)
+    assert out["proceed"] == "false"
+    assert out["reason"] == gate.REASON_BAD_HEAD_SHA
+    _assert_no_api_call(stub)
+
+
+def test_gate_valid_head_sha_produces_exact_endpoints(gate, tmp_path, monkeypatch) -> None:
+    """A validated SHA reaches the API inside exactly one expected endpoint."""
+    stub = ApiStub()
+    stub.add("repos/misospace/pr-reviewer-action/pulls/747", _pr())
+    stub.add("repos/misospace/pr-reviewer-action/commits/", [_pr(number=747)])
+    monkeypatch.setattr(gate, "gh_api", stub)
+    out = _run_gate(gate, _workflow_run_event(), tmp_path)
+    assert out["proceed"] == "true"
+    assert stub.calls == [
+        f"repos/{REPO}/commits/{BASE_SHA}/pulls",
+        f"repos/{REPO}/pulls/747",
+    ]
+
+
+def test_gate_rejects_non_integer_pr_numbers(gate, tmp_path, monkeypatch) -> None:
+    """Strings, bools, and floats are all rejected as PR numbers."""
+    for hostile in ("747; rm -rf /", True, 747.0, None, ["747"]):
+        stub = ApiStub()
+        monkeypatch.setattr(gate, "gh_api", stub)
+        event = _labeled_event()
+        event["pull_request"] = {"number": hostile}
+        out = _run_gate(gate, event, tmp_path)
+        assert out["proceed"] == "false"
+        assert out["reason"] == gate.REASON_BAD_PR_NUMBER
+        _assert_no_api_call(stub)
+
+
+def test_gate_valid_pr_number_produces_exact_endpoint(gate, tmp_path, monkeypatch) -> None:
+    stub = ApiStub()
+    stub.add("repos/misospace/pr-reviewer-action/pulls/747", _pr())
+    monkeypatch.setattr(gate, "gh_api", stub)
+    out = _run_gate(gate, _labeled_event(), tmp_path)
+    assert out["proceed"] == "true"
+    assert stub.calls == [f"repos/{REPO}/pulls/747"]
+
+
+def test_repo_resolver_rejects_hostile_repository(gate, monkeypatch) -> None:
+    for hostile in ("../../etc/passwd", "\x00/misospace/x", "", "a/b/c", "a b/c"):
+        # A NUL byte is rejected by os.environ itself (ValueError) before the
+        # gate's own regex ever runs — either rejection is fail-closed.
+        with pytest.raises((gate.GateError, ValueError)):
+            monkeypatch.setenv("GITHUB_REPOSITORY", hostile)
+            gate._repo()
+
+
+def test_verify_rejects_hostile_expected_sha(gate, monkeypatch) -> None:
+    for hostile in (NUL_40, METACHAR_40, TRAVERSAL_40, SHORT_SHA):
+        with pytest.raises(gate.GateError):
+            gate.main(
+                ["verify", "--pr-number", "747", "--expected-sha", hostile]
+            )
+
+
+def test_verify_cli_rejects_non_integer_pr_number_before_any_api_call(
+    gate, monkeypatch
+) -> None:
+    """argparse rejects a hostile --pr-number before gh_api can run."""
+    monkeypatch.setattr(
+        gate, "gh_api", _unstubbed_gh_api  # must never be reached
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    with pytest.raises(SystemExit):
+        gate.main(
+            ["verify", "--pr-number", "747; rm -rf /", "--expected-sha", BASE_SHA]
+        )
+
+
+def test_verify_valid_args_produce_exact_endpoint(gate, monkeypatch) -> None:
+    stub = ApiStub()
+    stub.add("repos/misospace/pr-reviewer-action/pulls/747", _pr())
+    monkeypatch.setattr(gate, "gh_api", stub)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    assert gate.main(
+        ["verify", "--pr-number", "747", "--expected-sha", BASE_SHA]
+    ) == 0
+    assert stub.calls == [f"repos/{REPO}/pulls/747"]
+
+
+# ---------------------------------------------------------------------------
 # verify subcommand (pre-model-work head guard; tests 5/15)
 # ---------------------------------------------------------------------------
 
