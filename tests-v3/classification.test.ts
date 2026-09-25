@@ -391,6 +391,61 @@ test("#749: lexical hygiene — assignment LHS and quoted words are not operands
   ));
 });
 
+test("#749: operands only — comments, sibling statements, and bare filename identifiers cannot donate tokens", () => {
+  // Trailing comment after a static join: `request` in prose is not input.
+  const comment = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+target = os.path.join(BASE, "static")  # request cache path\n',
+    linkedIssues: [],
+  });
+  assert.equal(comment.prKind, "app_code");
+  assert.equal(comment.pathHandlingProvenance.fired, false);
+
+  // A sibling statement after the join is outside the construction's
+  // operands: `audit(request.id)` must not make the static join fire.
+  const sibling = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+const target = path.join(BASE, "static"); audit(request.id);\n',
+    linkedIssues: [],
+  });
+  assert.equal(sibling.prKind, "app_code");
+  assert.equal(sibling.pathHandlingProvenance.fired, false);
+
+  // A BARE `filename` identifier is not a source: a trusted constant named
+  // filename propagated into a path is bookkeeping.
+  const bareFilename = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+filename = "config.json"\n+dest = os.path.join(BASE, filename)\n',
+    linkedIssues: [],
+  });
+  assert.equal(bareFilename.prKind, "app_code");
+  assert.equal(bareFilename.pathHandlingProvenance.fired, false);
+
+  // The `.filename` attribute-access shape still fires — and proves
+  // `file.filename` is the reason, not upload vocabulary in the target.
+  const attrFilename = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+dest = os.path.join(base, file.filename)\n",
+    linkedIssues: [],
+  });
+  assert.equal(attrFilename.prKind, "path_handling_changes");
+  assert.ok(attrFilename.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
+
+  // A formatted multi-line join keeps its operand surface: the open call
+  // accumulates its continuation lines (bounded).
+  const multiline = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+target = os.path.join(\n+    BASE,\n+    request.args['p'],\n+)\n",
+    linkedIssues: [],
+  });
+  assert.equal(multiline.prKind, "path_handling_changes");
+  assert.ok(multiline.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],

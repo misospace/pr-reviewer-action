@@ -239,3 +239,42 @@ def test_upload_vocabulary_without_operand_is_clean(tmp_path) -> None:
     )
     assert result["pr_kind"] != "path_handling_changes"
     assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_trailing_comment_and_sibling_statement_are_not_operands(tmp_path) -> None:
+    # Operand isolation: prose and sibling expressions cannot donate tokens.
+    result = _classify(
+        [{"filename": "src/app.py"}, {"filename": "src/app.ts"}],
+        '+target = os.path.join(BASE, "static")  # request cache path\n'
+        '+const t = path.join(BASE, "static"); audit(request.id);\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_bare_filename_identifier_is_not_a_source(tmp_path) -> None:
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        '+filename = "config.json"\n'
+        "+dest = os.path.join(BASE, filename)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_multiline_join_direct_operand_fires(tmp_path) -> None:
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+target = os.path.join(\n"
+        "+    BASE,\n"
+        "+    request.args['p'],\n"
+        "+)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )

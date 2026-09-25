@@ -374,17 +374,45 @@ PATH_HANDLING_CONTENT_CLASSES: list[tuple[str, list[re.Pattern]]] = [
 # line uses. An unrelated request/user/payload token near a constant join
 # never fires. Multi-hop flows through neutral intermediaries are the model
 # reviewer's job, not the lexical classifier's.
-PATH_CONSTRUCTION_PATTERNS = [
-    re.compile(r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b", re.IGNORECASE),
-    re.compile(r"\bPath\s*\("),  # pathlib constructor (case-sensitive)
-    re.compile(r"\bpath\.(?:join|resolve|normalize|dirname|basename)\s*\(", re.IGNORECASE),
-    re.compile(r"\bfilepath\.\w+\s*\(", re.IGNORECASE),
-    re.compile(r"\b(?:open|fopen)\s*\(", re.IGNORECASE),
-    re.compile(r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)\s*\(", re.IGNORECASE),
-    re.compile(r"\b(?:send_file|send_from_directory|sendFile|FileResponse|UploadFile|serveStatic|FileServer|StaticFiles)\b", re.IGNORECASE),
-    re.compile(r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)\b", re.IGNORECASE),
-    re.compile(r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)\b", re.IGNORECASE),
+# Path construction CALLS: head plus its argument list (up to two levels of
+# paren nesting, so join(dirname(__file__), x) shapes match whole). The
+# untrusted-source scan reads ONLY the captured argument list — the operands
+# — never the assignment LHS, trailing comments, or sibling statements, so
+# incidental lexical words outside the construction cannot donate a token.
+# Heads are compiled from (pattern, flags) pairs; the pathlib constructor
+# stays case-sensitive (case-insensitive `path(` would match method names).
+_PATH_CONSTRUCTION_HEADS = [
+    (r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)", re.IGNORECASE),
+    (r"\bpath\.(?:join|resolve|normalize|dirname|basename)", re.IGNORECASE),
+    (r"\bjoinpath", re.IGNORECASE),
+    (r"\bfilepath\.\w+", re.IGNORECASE),
+    (r"\b(?:open|fopen)", re.IGNORECASE),
+    (r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", re.IGNORECASE),
+    (r"\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", re.IGNORECASE),
+    (r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", re.IGNORECASE),
+    (r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)", re.IGNORECASE),
+    (r"\bPath", 0),
 ]
+
+_PATH_CONSTRUCTION_ARGS = r"\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)"
+
+PATH_CONSTRUCTION_CALL_PATTERNS = [
+    re.compile(head + _PATH_CONSTRUCTION_ARGS, flags)
+    for head, flags in _PATH_CONSTRUCTION_HEADS
+]
+
+# A construction call left OPEN across the line break (formatted multi-line
+# argument lists): head + `(` with no closing paren later on the line. Its
+# continuation lines ARE the operand list, so the scanner accumulates them
+# (bounded) instead of losing the surface. Deliberately loose on case; firing
+# still requires untrusted operand text.
+_PATH_CONSTRUCTION_OPEN_CALL = re.compile(
+    r"(?:" + "|".join(head for head, _ in _PATH_CONSTRUCTION_HEADS) + r")\s*\((?![^()]*\))",
+    re.IGNORECASE,
+)
+
+# Cap on continuation lines accumulated for one open construction call.
+MAX_CONSTRUCTION_CONTINUATION_LINES = 3
 
 # Values an attacker plausibly controls when they reach a filesystem path:
 # HTTP request data, user/model input, CLI arguments, and file-object names
@@ -408,7 +436,13 @@ UNTRUSTED_SOURCE_PATTERNS = [
     re.compile(r"\bcookies?\b", re.IGNORECASE),
     re.compile(r"\bstdin\b", re.IGNORECASE),
     re.compile(r"\bargv\b", re.IGNORECASE),
-    re.compile(r"\bfilename\b", re.IGNORECASE),
+    # Attribute-access file-object names — `file.filename`, `f.filename` —
+    # the classic unsafe-upload operand. A BARE `filename` identifier is
+    # deliberately NOT a source: a trusted constant (`filename =
+    # "config.json"`) flowing into a path is bookkeeping, and the identifier
+    # reference alone is not proof of attacker influence.
+    re.compile(r"\.\s*filename\b", re.IGNORECASE),
+    re.compile(r"\boriginalname\b", re.IGNORECASE),
     re.compile(r"untrusted|unsanitized|attacker", re.IGNORECASE),
 ]
 
@@ -495,6 +529,35 @@ def _record_signal(
         entry["samples"].append(sample)
 
 
+def _construction_operand_spans(lines: list[str], index: int) -> str:
+    """The operand text of the path-construction call(s) actually matched on
+    line ``index``: complete one-level-nested argument lists, and — for a
+    call left open across the line break — the dangling remainder plus its
+    bounded continuation lines (which ARE the call's argument list). Static
+    quoted literals are stripped before extraction. Text outside the calls —
+    assignment LHS, trailing comments, sibling statements — is never
+    included, so it cannot donate an untrusted token. Empty string when the
+    line constructs no path."""
+    line = _QUOTED_STATIC_LITERAL.sub('""', lines[index])
+    spans = [
+        m.group(1)
+        for pattern in PATH_CONSTRUCTION_CALL_PATTERNS
+        for m in pattern.finditer(line)
+    ]
+    if not spans:
+        for m in _PATH_CONSTRUCTION_OPEN_CALL.finditer(line):
+            piece = line[m.end():]
+            depth = 1  # the construction call's own open paren
+            for j in range(index + 1, min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, len(lines))):
+                continuation = _QUOTED_STATIC_LITERAL.sub('""', lines[j])
+                piece += "\n" + continuation
+                depth += continuation.count("(") - continuation.count(")")
+                if depth <= 0:
+                    break
+            spans.append(piece)
+    return "\n".join(spans)
+
+
 def evaluate_path_handling_signals(
     filenames: list[str],
     diff_text: str,
@@ -554,20 +617,15 @@ def evaluate_path_handling_signals(
                 )
                 break  # one bucket entry per class per chunk; samples merge below
 
-        # Untrusted-source join: same-line construction with an untrusted
-        # OPERAND fires directly — the scan inspects the construction
-        # expression (the assignment LHS is excluded, so a target named
-        # `request_cache_path` is not evidence of untrusted input), and
-        # static string literals are stripped (a quoted "request" is data).
-        # Adjacent lines fire only on a one-hop def/use edge: the untrusted
-        # line must carry a simple assignment whose exact target identifier
-        # the construction expression uses. Co-occurrence never fires.
+        # Untrusted-source join: the scan reads ONLY the operand text of the
+        # construction call(s) matched on the line — never the assignment
+        # LHS, comments, or sibling statements. Same-line construction with
+        # an untrusted operand fires directly; adjacent lines fire only on a
+        # one-hop def/use edge (the untrusted line's assignment target is
+        # used inside the call's operands). Co-occurrence never fires.
         for index, raw_line in enumerate(lines):
-            neutral = neutralized[index]
-            assign = _UNTRUSTED_ASSIGNMENT.match(neutral)
-            expression = neutral[assign.end():] if assign else neutral
-            flow_text = _QUOTED_STATIC_LITERAL.sub('""', expression)
-            if not any(pat.search(flow_text) for pat in PATH_CONSTRUCTION_PATTERNS):
+            flow_text = _construction_operand_spans(lines, index)
+            if not flow_text:
                 continue
             if any(pat.search(flow_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
                 _record_signal(

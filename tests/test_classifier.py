@@ -889,6 +889,53 @@ class TestPathHandlingSignalModel:
         assert result.pr_kind == "app_code"
         assert result.path_handling_provenance["fired"] is False
 
+    def test_trailing_comment_does_not_donate_untrusted_token(self):
+        # Same-line detection reads the construction's OPERANDS only: the
+        # word "request" in a trailing comment is prose, not input.
+        diff = '+target = os.path.join(BASE, "static")  # request cache path\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_sibling_statement_does_not_donate_untrusted_token(self):
+        # `audit(request.id)` after the join is a sibling expression —
+        # outside the construction's operands — and must not make the static
+        # join fire.
+        diff = '+const target = path.join(BASE, "static"); audit(request.id);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_bare_filename_identifier_is_not_a_source(self):
+        # `.filename` ATTRIBUTE ACCESS is the unsafe-upload operand shape; a
+        # bare `filename` identifier (a trusted constant propagated into a
+        # path) is bookkeeping, not proof of attacker influence.
+        diff = '+filename = "config.json"\n+dest = os.path.join(BASE, filename)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_join_direct_operand_fires(self):
+        # A construction call left open across the line break accumulates its
+        # continuation lines (bounded) — they ARE the operand list.
+        diff = "+target = os.path.join(\n+    BASE,\n+    request.args['p'],\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_string_join_is_not_path_construction(self):
+        # `", ".join(...)` is a string method on delimited text, not a
+        # filesystem path construction.
+        diff = '+csv = ", ".join(request.rows)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_filename_attribute_access_through_one_hop_fires(self):
+        diff = "+name = upload.filename\n+target = path.resolve(__dirname, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
     def test_user_controlled_path_constructor_fires(self):
         diff = "+dest = pathlib.Path(user_input)\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)

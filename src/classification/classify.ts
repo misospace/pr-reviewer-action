@@ -309,35 +309,55 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
   ["path_reference_identifier", [/filepath|pathname/i]],
 ];
 
-/** Untrusted-source join: a path construction/consumption call that reaches a
- * request/user-controlled value. Same-line construction with an untrusted
- * operand fires directly; for ADJACENT-line flow the rule is one-hop def/use,
- * not co-occurrence: the untrusted line must carry a simple assignment
- * (`name = request.args[...]`) whose exact target identifier the construction
- * line uses. An unrelated request/user/payload token near a constant join
- * never fires. Multi-hop flows through neutral intermediaries are the model
- * reviewer's job, not the lexical classifier's. */
-const PATH_CONSTRUCTION_PATTERNS: readonly RegExp[] = [
-  /os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b/i,
-  /\bPath\s*\(/, // pathlib constructor (case-sensitive)
-  /\bpath\.(?:join|resolve|normalize|dirname|basename)\s*\(/i,
-  /\bfilepath\.\w+\s*\(/i,
-  /\b(?:open|fopen)\s*\(/i,
-  /\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)\s*\(/i,
-  /\b(?:send_file|send_from_directory|sendFile|FileResponse|UploadFile|serveStatic|FileServer|StaticFiles)\b/i,
-  /\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)\b/i,
-  /\bos\.(?:mkdir|makedirs|unlink|rename|remove)\b/i,
+/** Path construction CALLS: head plus its argument list (up to two levels of
+ * paren nesting, so join(dirname(__file__), x) shapes match whole). The
+ * untrusted-source scan reads ONLY the captured argument list — the operands
+ * — never the assignment LHS, trailing comments, or sibling statements, so
+ * incidental lexical words outside the construction cannot donate a token.
+ * Heads are compiled from (pattern, flags) pairs; the pathlib constructor
+ * stays case-sensitive (case-insensitive `path(` would match method names).
+ * Used only via matchAll (carries /g). */
+const PATH_CONSTRUCTION_HEADS: readonly (readonly [string, string])[] = [
+  ["os\\.path\\.(?:join|normpath|realpath|abspath|relpath|commonpath)", "i"],
+  ["\\bpath\\.(?:join|resolve|normalize|dirname|basename)", "i"],
+  ["\\bjoinpath", "i"],
+  ["\\bfilepath\\.\\w+", "i"],
+  ["\\b(?:open|fopen)", "i"],
+  ["\\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", "i"],
+  ["\\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", "i"],
+  ["\\bshutil\\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", "i"],
+  ["\\bos\\.(?:mkdir|makedirs|unlink|rename|remove)", "i"],
+  ["\\bPath", ""],
 ];
 
+const PATH_CONSTRUCTION_ARGS = "\\s*\\(((?:[^()]|\\((?:[^()]|\\([^()]*\\))*\\))*)\\)";
+
+const PATH_CONSTRUCTION_CALL_PATTERNS: readonly RegExp[] =
+  PATH_CONSTRUCTION_HEADS.map(([head, flags]) => new RegExp(head + PATH_CONSTRUCTION_ARGS, `${flags}g`));
+
+/** A construction call left OPEN across the line break (formatted multi-line
+ * argument lists): head + `(` with no closing paren later on the line. Its
+ * continuation lines ARE the operand list, so the scanner accumulates them
+ * (bounded) instead of losing the surface. Deliberately loose on case; firing
+ * still requires untrusted operand text. (matchAll-only: carries /g.) */
+const PATH_CONSTRUCTION_OPEN_CALL =
+  new RegExp(`(?:${PATH_CONSTRUCTION_HEADS.map(([head]) => head).join("|")})\\s*\\((?![^()]*\\))`, "gi");
+
+/** Cap on continuation lines accumulated for one open construction call. */
+export const MAX_CONSTRUCTION_CONTINUATION_LINES = 3;
+
 /** Values an attacker plausibly controls when they reach a filesystem path:
- * HTTP request data, user/model input, CLI arguments, and file-object names
- * (`file.filename` — the classic unsafe-upload/join source). Deliberately
- * EXCLUDED: environment variables and process cwd — env/config paths are
- * operator-owned infrastructure (the PR #748 lesson: CI scripts join
- * env-provided output paths constantly and are not attacker surfaces) — and
- * `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous
- * in TRUSTED paths; the upload risk lives in the filename operand, which has
- * its own token. */
+ * HTTP request data, user/model input, CLI arguments, and file-object names —
+ * `.filename` ATTRIBUTE ACCESS (`file.filename`, `f.filename`) is the classic
+ * unsafe-upload operand; a BARE `filename` identifier is deliberately NOT a
+ * source (a trusted constant named filename flowing into a path is
+ * bookkeeping, and the identifier reference alone is not proof of attacker
+ * influence). Deliberately EXCLUDED: environment variables and process cwd —
+ * env/config paths are operator-owned infrastructure (the PR #748 lesson: CI
+ * scripts join env-provided output paths constantly and are not attacker
+ * surfaces) — and `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/`
+ * names are ubiquitous in TRUSTED paths; the upload risk lives in the
+ * filename operand, which has its own shape. */
 const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /request/i,
   /\breq\s*\./i,
@@ -351,7 +371,8 @@ const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /\bcookies?\b/i,
   /\bstdin\b/i,
   /\bargv\b/i,
-  /\bfilename\b/i,
+  /\.\s*filename\b/i,
+  /\boriginalname\b/i,
   /untrusted|unsanitized|attacker/i,
 ];
 
@@ -413,6 +434,38 @@ function pathSample(line: string): string {
     cleaned += code < 0x20 || code === 0x7f ? " " : ch;
   }
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
+}
+
+/** The operand text of the path-construction call(s) actually matched on line
+ * `index`: complete one-level-nested argument lists, and — for a call left
+ * open across the line break — the dangling remainder plus its bounded
+ * continuation lines (which ARE the call's argument list). Static quoted
+ * literals are stripped before extraction. Text outside the calls —
+ * assignment LHS, trailing comments, sibling statements — is never included,
+ * so it cannot donate an untrusted token. Empty string when the line
+ * constructs no path. */
+function constructionOperandSpans(lines: string[], index: number): string {
+  const line = (lines[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
+  const spans: string[] = [];
+  for (const pattern of PATH_CONSTRUCTION_CALL_PATTERNS) {
+    for (const m of line.matchAll(pattern)) {
+      spans.push(m[1] ?? "");
+    }
+  }
+  if (spans.length === 0) {
+    for (const m of line.matchAll(PATH_CONSTRUCTION_OPEN_CALL)) {
+      let piece = line.slice(m.index + m[0].length);
+      let depth = 1; // the construction call's own open paren
+      for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
+        const continuation = (lines[j] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
+        piece += `\n${continuation}`;
+        depth += (continuation.match(/\(/g) ?? []).length - (continuation.match(/\)/g) ?? []).length;
+        if (depth <= 0) break;
+      }
+      spans.push(piece);
+    }
+  }
+  return spans.join("\n");
 }
 
 /** One bounded path-handling signal: the matched class/category, its backing
@@ -511,21 +564,16 @@ export function evaluatePathHandlingSignals(
       }
     }
 
-    // Untrusted-source join: same-line construction with an untrusted
-    // OPERAND fires directly — the scan inspects the construction
-    // expression (the assignment LHS is excluded, so a target named
-    // `request_cache_path` is not evidence of untrusted input), and static
-    // string literals are stripped (a quoted "request" is data). Adjacent
-    // lines fire only on a one-hop def/use edge: the untrusted line must
-    // carry a simple assignment whose exact target identifier the
-    // construction expression uses. Co-occurrence never fires.
+    // Untrusted-source join: the scan reads ONLY the operand text of the
+    // construction call(s) matched on the line — never the assignment LHS,
+    // comments, or sibling statements. Same-line construction with an
+    // untrusted operand fires directly; adjacent lines fire only on a
+    // one-hop def/use edge (the untrusted line's assignment target is used
+    // inside the call's operands). Co-occurrence never fires.
     for (let index = 0; index < lines.length; index++) {
       const rawLine = lines[index] ?? "";
-      const neutral = neutralized[index] ?? "";
-      const assign = UNTRUSTED_ASSIGNMENT.exec(neutral);
-      const matchEnd = assign ? assign.index + assign[0].length : 0;
-      const flowText = neutral.slice(matchEnd).replace(QUOTED_STATIC_LITERAL, '""');
-      if (!matchesAny(flowText, PATH_CONSTRUCTION_PATTERNS)) continue;
+      const flowText = constructionOperandSpans(lines, index);
+      if (!flowText) continue;
       if (matchesAny(flowText, UNTRUSTED_SOURCE_PATTERNS)) {
         recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
         continue;
