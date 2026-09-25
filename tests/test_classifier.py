@@ -207,16 +207,40 @@ class TestPRKindFileServingChanges:
 
 
 class TestPRKindPathHandlingChanges:
+    # #749: positive controls — each of these is a real untrusted-path
+    # surface (traversal literals, containment/sanitization identifiers,
+    # archive extraction, symlink operations) and must keep firing.
     @pytest.mark.parametrize("pattern", [
-        "pathlib",
         "sanitize_path",
         "..\\..\\etc/passwd",
-        "path_join",
+        "os.path.join(base, request.args['p'])",
+        "tarfile",
+        "extractall(dest)",
+        "os.symlink(link, dest)",
+        "realpath",
     ])
     def test_path_handling_in_diff(self, pattern):
         files = [_make_file("utils.py")]
         kind = _classify_pr_kind(files, pattern)
         assert kind == "path_handling_changes"
+
+    # #749: negative controls — trusted path scaffolding and API mentions
+    # with no untrusted input flow must not classify path handling by
+    # themselves (the PR #748 false-positive class).
+    @pytest.mark.parametrize("pattern", [
+        "pathlib",
+        "import pathlib\nROOT = Path(__file__).resolve().parent.parent",
+        "path_join(base, 'static')",
+        "os.path.join(base, 'templates')",
+        'Path("/etc/myapp/config.yaml")',
+        "os.environ.get('OUTPUT_DIR')",
+    ])
+    def test_trusted_path_scaffolding_is_not_path_handling(self, pattern):
+        files = [_make_file("utils.py")]
+        kind = _classify_pr_kind(files, pattern)
+        assert kind == "app_code"
+        flags, _ = _detect_risk_flags(files, pattern, [])
+        assert "path_handling_changes" not in flags
 
     def test_esm_import_specifiers_are_not_traversal(self):
         # #679 review false positive: a cross-directory TypeScript import is
@@ -605,13 +629,208 @@ class TestEdgeCases:
         assert result.linked_issue_labels.count("priority/p1") <= 1
 
 
+class TestPathHandlingSignalModel:
+    """#749: classification requires a real untrusted-path surface.
+
+    Trusted path scaffolding (repository-root discovery, fixture paths,
+    path-library usage with no untrusted input flow) must not classify
+    path_handling_changes; genuine attacker-controlled path behavior must.
+    Every firing decision is explainable from the bounded
+    path_handling_provenance artifact."""
+
+    # -- Negative: the exact PR #748 false-positive shape -------------------
+
+    def test_repo_root_scaffolding_is_not_path_handling(self):
+        # PR #748: ordinary repository-root discovery in test scaffolding
+        # injected path-traversal / edge-case-path must_check items.
+        diff = "\n".join([
+            "+from pathlib import Path",
+            "+",
+            "+_ROOT = Path(__file__).resolve().parent.parent",
+            "+sys.path.insert(0, str(_ROOT))",
+        ])
+        files = [_make_file("scripts/fork_review_gate.py"), _make_file("tests/test_gate.py")]
+        result = classify_pr(files, diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+        assert not any("path traversal" in c for c in result.must_check)
+        assert not any("edge-case paths" in c for c in result.must_check)
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["signals"] == []
+
+    def test_node_repo_root_scaffolding_is_not_path_handling(self):
+        # The JS/TS shape of the same trusted bookkeeping, including a `../`
+        # literal inside a trusted-anchor join (module-relative resolution).
+        diff = "\n".join([
+            "+const templates = path.resolve(__dirname, \"../templates\");",
+            '+export const ROOT = Path(__file__).resolve().parent.parent;',
+            "+const dataFile = os.path.join(os.path.dirname(__file__), \"data.json\");",
+        ])
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+
+    def test_pathlib_import_with_constant_path_is_not_path_handling(self):
+        diff = "+CONFIG = Path('/etc/myapp/config.yaml')\n"
+        result = classify_pr([_make_file("src/config.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+
+    def test_doc_prose_about_sanitization_is_not_path_handling(self):
+        diff = "+Operators must sanitize any configured paths before use.\n"
+        result = classify_pr([_make_file("docs/guide.md")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_constant_join_is_not_path_handling(self):
+        diff = "+layout = os.path.join(base, 'templates')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    # -- Negative: test-file content discount -------------------------------
+
+    def test_traversal_literal_in_test_file_is_discounted(self):
+        # Static fixture paths under test directories are trusted bookkeeping:
+        # a `../` literal only inside tests/test_*.py must not classify path
+        # handling, but it must stay visible as a discounted signal.
+        diff = "\n".join([
+            "diff --git a/tests/test_gate.py b/tests/test_gate.py",
+            "+++ b/tests/test_gate.py",
+            "+HOSTILE = ('../../etc/passwd',)",
+        ])
+        result = classify_pr([_make_file("tests/test_gate.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+        discounted = result.path_handling_provenance["discounted"]
+        assert any(
+            s["signal"] == "traversal_literal" and s["source"] == "diff_test_file"
+            and "tests/test_gate.py" in s["files"]
+            for s in discounted
+        )
+
+    def test_material_signal_in_production_file_still_fires_despite_tests(self):
+        # The discount is per-file: test-file fixture paths never mask a real
+        # untrusted surface in a production chunk of the same PR.
+        diff = "\n".join([
+            "diff --git a/src/upload.py b/src/upload.py",
+            "+++ b/src/upload.py",
+            "+dest = os.path.join(UPLOAD_DIR, request.args['name'])",
+            "diff --git a/tests/test_upload.py b/tests/test_upload.py",
+            "+++ b/tests/test_upload.py",
+            "+FIXTURE = '../../etc/passwd'",
+        ])
+        result = classify_pr(
+            [_make_file("src/upload.py"), _make_file("tests/test_upload.py")],
+            diff_text=diff,
+        )
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(
+            s["signal"] == "untrusted_source_join" and "src/upload.py" in s["files"]
+            for s in fired
+        )
+
+    def test_headerless_diff_is_treated_conservatively(self):
+        # A diff without git headers cannot be attributed per file. When every
+        # changed file is a test file the whole diff is test content
+        # (discounted); any non-test changed file fires conservatively —
+        # unknown attribution keeps scrutiny, never drops it.
+        diff = "+HOSTILE = '../../etc/passwd'\n"
+        result = classify_pr([_make_file("tests/test_x.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"  # tests-only diff discounts
+        raw_kind = _classify_pr_kind([_make_file("src/x.py")], diff)
+        assert raw_kind == "path_handling_changes"  # non-test file fires
+
+    # -- Positive: genuine untrusted-path surfaces --------------------------
+
+    def test_untrusted_join_fires_with_provenance(self):
+        diff = "+target = os.path.join(base, request.args['path'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+        assert any("path traversal" in c for c in result.must_check)
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_untrusted_join_across_adjacent_line_fires(self):
+        diff = "+name = request.args['path']\n+target = os.path.join(base, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_user_controlled_path_constructor_fires(self):
+        diff = "+dest = pathlib.Path(user_input)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_upload_path_composition_fires(self):
+        diff = "+upload_path = os.path.join(UPLOAD_DIR, file.filename)\n"
+        result = classify_pr([_make_file("src/upload.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_containment_check_fires(self):
+        diff = "+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\n+    abort(400)\n"
+        result = classify_pr([_make_file("src/serve.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "path_containment_or_sanitization" for s in fired)
+
+    def test_archive_extraction_fires(self):
+        diff = "+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n"
+        result = classify_pr([_make_file("src/ingest.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_symlink_operation_fires(self):
+        diff = "+os.symlink(target, link_path)\n"
+        result = classify_pr([_make_file("src/fsutil.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_filename_backed_signal_routes_and_attributes(self):
+        result = classify_pr([_make_file("src/path_join.py")], diff_text="")
+        assert result.pr_kind == "path_handling_changes"
+        assert result.risk_flags_with_files.get("path_handling_changes") == ["src/path_join.py"]
+        assert "path_handling_changes" in result.route_signals
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["source"] == "filename" for s in fired)
+
+    def test_filename_backed_signal_in_test_file_is_discounted(self):
+        result = classify_pr([_make_file("tests/test_filepath.py")], diff_text="")
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["discounted"]
+
+    # -- Provenance hygiene -------------------------------------------------
+
+    def test_provenance_samples_are_bounded_and_control_char_free(self):
+        hostile = "+x = os.path.join(base, request.args['p' * 400 + '\\x01\\x02'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=hostile)
+        for signal in result.path_handling_provenance["signals"]:
+            assert len(signal["samples"]) <= 3
+            for sample in signal["samples"]:
+                assert len(sample) <= 160
+                assert not any(ord(ch) < 0x20 and ch != " " for ch in sample)
+                assert "\x7f" not in sample
+
+    def test_provenance_signal_count_is_capped(self):
+        # Many distinct signal classes could flood the artifact; the model
+        # caps total buckets per list. (12 distinct constructions here map
+        # onto 6 classes at most — the cap assertion guards regressions.)
+        lines = [
+            "+a%d = os.path.join(base, request.args['p'])" % i for i in range(40)
+        ]
+        result = classify_pr([_make_file("src/app.py")], diff_text="\n".join(lines) + "\n")
+        assert len(result.path_handling_provenance["signals"]) <= 8
+
+
 class TestRouteSignals:
     """route_signals drives smart routing and must exclude content-only matches
     (the over-escalation fix)."""
 
     def test_content_only_path_match_not_in_route_signals(self):
-        # A diff that merely mentions os.path in an ordinary file must not route.
-        result = classify_pr([_make_file("app.py")], diff_text="x = os.path.join(a, b)")
+        # A genuine untrusted-path join in an ordinary file still flags the PR
+        # for checks, but a content-only match must not route (#159) — routing
+        # stays filename-gated under the #749 signal model.
+        result = classify_pr(
+            [_make_file("app.py")], diff_text="x = os.path.join(a, request.args['p'])"
+        )
         assert "path_handling_changes" in result.risk_flags       # still flagged for checks
         assert result.route_signals == []                          # but not for routing
 

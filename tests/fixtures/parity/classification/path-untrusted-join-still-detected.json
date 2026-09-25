@@ -1,0 +1,9 @@
+{
+  "fixture": "path-untrusted-join-still-detected",
+  "description": "#749 positive control: a request-controlled value reaching os.path.join still classifies path_handling_changes with the flag, the path must_check items, and an untrusted_source_join signal in the provenance artifact. Content-only (no filename vocabulary hit) so route_signals exclude it (#159) and file attribution stays empty.",
+  "pr_files": [
+    { "filename": "src/app/store.py", "status": "modified", "additions": 1 }
+  ],
+  "diff": "+target = os.path.join(base, request.args[\"path\"])\n",
+  "linked_issues": []
+}

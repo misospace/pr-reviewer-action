@@ -60,8 +60,8 @@ test("bare route.ts (Next.js handler name) is not a public route; routes.ts is",
   assert.equal(classifyPr({ prFiles: files("src/routes.ts") }).prKind, "public_route_changes");
 });
 
-test("path handling can match diff content only", () => {
-  const result = classifyPr({ prFiles: files("src/app/store.py"), diffText: "+target = os.path.join(base, p)\n" });
+test("path handling can match diff content only (#749: untrusted input flow)", () => {
+  const result = classifyPr({ prFiles: files("src/app/store.py"), diffText: '+target = os.path.join(base, request.args["p"])\n' });
   assert.equal(result.prKind, "path_handling_changes");
 });
 
@@ -102,7 +102,7 @@ test("file-based flags attribute triggering files; diff-only matches attribute a
   const attributed = classifyPr({ prFiles: files("src/middleware/auth.ts", "readme.md") });
   assert.deepEqual(attributed.riskFlagsWithFiles["auth_changes"], ["src/middleware/auth.ts"]);
 
-  const diffOnly = classifyPr({ prFiles: files("src/store.py"), diffText: "+x = pathlib.Path(p)\n" });
+  const diffOnly = classifyPr({ prFiles: files("src/store.py"), diffText: "+x = pathlib.Path(userInput)\n" });
   assert.deepEqual(diffOnly.riskFlagsWithFiles["path_handling_changes"], []);
 
   // Linked flags never appear in the file attribution map.
@@ -111,7 +111,7 @@ test("file-based flags attribute triggering files; diff-only matches attribute a
 });
 
 test("route signals exclude content-only matches (#159)", () => {
-  const result = classifyPr({ prFiles: files("src/store.py"), diffText: "+p = pathlib.Path(q)\n" });
+  const result = classifyPr({ prFiles: files("src/store.py"), diffText: "+p = pathlib.Path(userInput)\n" });
   assert.deepEqual(result.routeSignals, []);
   assert.ok(result.riskFlags.includes("path_handling_changes"));
 
@@ -238,6 +238,153 @@ test("traversal literals outside module specifiers still classify path handling"
   assert.equal(prose.prKind, "app_code");
 });
 
+// ── Path-handling signal model (#749) ─────────────────────────────────────
+
+test("#749: trusted repo-root scaffolding (the PR #748 false positive) does not classify path handling", () => {
+  const prFiles = [
+    canonicalChangedFile({ filename: "scripts/fork_review_gate.py" }),
+    canonicalChangedFile({ filename: "tests/test_gate.py" }),
+  ];
+  const diff = [
+    "+from pathlib import Path",
+    "+",
+    "+_ROOT = Path(__file__).resolve().parent.parent",
+    "+sys.path.insert(0, str(_ROOT))",
+  ].join("\n");
+  const result = classifyPr({ prFiles, diffText: diff, linkedIssues: normalizeLinkedIssues([]) });
+  assert.notEqual(result.prKind, "path_handling_changes");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+  assert.ok(!result.mustCheck.some((c) => c.includes("path traversal")));
+  assert.ok(!result.mustCheck.some((c) => c.includes("edge-case paths")));
+  assert.equal(result.pathHandlingProvenance.fired, false);
+  assert.deepEqual(result.pathHandlingProvenance.signals, []);
+});
+
+test("#749: Node/TS trusted-anchor joins with ../ literals are trusted bookkeeping", () => {
+  const diff = [
+    '+const templates = path.resolve(__dirname, "../templates");',
+    "+export const ROOT = Path(__file__).resolve().parent.parent;",
+    '+const dataFile = os.path.join(os.path.dirname(__file__), "data.json");',
+  ].join("\n");
+  const result = classifyPr({ prFiles: files("src/app.ts"), diffText: diff, linkedIssues: [] });
+  assert.notEqual(result.prKind, "path_handling_changes");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+});
+
+test("#749: pathlib import with a constant path and constant joins are not path handling", () => {
+  const constant = classifyPr({
+    prFiles: files("src/config.py"),
+    diffText: "+CONFIG = Path('/etc/myapp/config.yaml')\n",
+    linkedIssues: [],
+  });
+  assert.equal(constant.prKind, "app_code");
+
+  const join = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+layout = os.path.join(base, 'templates')\n",
+    linkedIssues: [],
+  });
+  assert.equal(join.prKind, "app_code");
+});
+
+test("#749: traversal literals in test files are discounted but stay visible in provenance", () => {
+  const diff = [
+    "diff --git a/tests/test_gate.py b/tests/test_gate.py",
+    "+++ b/tests/test_gate.py",
+    "+HOSTILE = ('../../etc/passwd',)",
+  ].join("\n");
+  const result = classifyPr({
+    prFiles: [canonicalChangedFile({ filename: "tests/test_gate.py" })],
+    diffText: diff,
+    linkedIssues: [],
+  });
+  assert.equal(result.prKind, "app_code");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+  assert.ok(result.pathHandlingProvenance.discounted.some(
+    (s) => s.signal === "traversal_literal" && s.source === "diff_test_file"
+      && s.files.includes("tests/test_gate.py"),
+  ));
+});
+
+test("#749: the test-file discount never masks a production untrusted surface", () => {
+  const diff = [
+    "diff --git a/src/upload.py b/src/upload.py",
+    "+++ b/src/upload.py",
+    "+dest = os.path.join(UPLOAD_DIR, request.args['name'])",
+    "diff --git a/tests/test_upload.py b/tests/test_upload.py",
+    "+++ b/tests/test_upload.py",
+    "+FIXTURE = '../../etc/passwd'",
+  ].join("\n");
+  const result = classifyPr({
+    prFiles: [
+      canonicalChangedFile({ filename: "src/upload.py" }),
+      canonicalChangedFile({ filename: "tests/test_upload.py" }),
+    ],
+    diffText: diff,
+    linkedIssues: [],
+  });
+  assert.equal(result.prKind, "path_handling_changes");
+  assert.ok(result.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join" && s.files.includes("src/upload.py"),
+  ));
+});
+
+test("#749: genuine untrusted-path surfaces still fire with class-categorized provenance", () => {
+  const cases: [string, string, string][] = [
+    ["untrusted join", '+target = os.path.join(base, request.args["path"])\n', "untrusted_source_join"],
+    ["upload composition", "+upload_path = os.path.join(UPLOAD_DIR, file.filename)\n", "untrusted_source_join"],
+    ["containment", "+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\n+    abort(400)\n", "path_containment_or_sanitization"],
+    ["archive extraction", "+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n", "archive_extraction"],
+    ["symlink", "+os.symlink(target, link_path)\n", "symlink_sensitive"],
+    ["path constructor", "+dest = pathlib.Path(user_input)\n", "untrusted_source_join"],
+  ];
+  for (const [label, diff, expectedSignal] of cases) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", label);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), label);
+    assert.ok(result.pathHandlingProvenance.fired, label);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === expectedSignal),
+      `${label}: expected a ${expectedSignal} signal`,
+    );
+  }
+});
+
+test("#749: filename-backed signals route and attribute; test-file filename hits discount", () => {
+  const fired = classifyPr({ prFiles: files("src/path_join.py"), diffText: "", linkedIssues: [] });
+  assert.equal(fired.prKind, "path_handling_changes");
+  assert.deepEqual(fired.riskFlagsWithFiles["path_handling_changes"], ["src/path_join.py"]);
+  assert.ok(fired.routeSignals.includes("path_handling_changes"));
+  assert.ok(fired.pathHandlingProvenance.signals.some((s) => s.source === "filename"));
+
+  const discounted = classifyPr({ prFiles: files("tests/test_filepath.py"), diffText: "", linkedIssues: [] });
+  assert.equal(discounted.prKind, "app_code");
+  assert.equal(discounted.pathHandlingProvenance.fired, false);
+  assert.ok(discounted.pathHandlingProvenance.discounted.length > 0);
+});
+
+test("#749: provenance samples are bounded and control-character-free", () => {
+  const hostile = `+x = os.path.join(base, request.args['${"p".repeat(400)}\\x01\\x02'])\n`;
+  const result = classifyPr({ prFiles: files("src/app.py"), diffText: hostile, linkedIssues: [] });
+  for (const signal of result.pathHandlingProvenance.signals) {
+    assert.ok(signal.samples.length <= 3);
+    for (const sample of signal.samples) {
+      assert.ok(sample.length <= 160);
+      for (const ch of sample) {
+        const code = ch.codePointAt(0) ?? 0;
+        assert.ok(code >= 0x20 || ch === " ", `control char escaped into sample: ${code}`);
+        assert.notEqual(code, 0x7f);
+      }
+    }
+  }
+});
+
+test("#749: provenance signal buckets are capped", () => {
+  const lines = Array.from({ length: 40 }, (_, i) => `+a${i} = os.path.join(base, request.args['p'])`);
+  const result = classifyPr({ prFiles: files("src/app.py"), diffText: `${lines.join("\n")}\n`, linkedIssues: [] });
+  assert.ok(result.pathHandlingProvenance.signals.length <= 8);
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {
@@ -318,7 +465,7 @@ test("artifact serializers emit the v2 snake_case schema and round-trip", () => 
   const artifact = classificationToArtifact(classification);
   assert.deepEqual(
     Object.keys(artifact),
-    ["pr_kind", "risk_flags", "risk_flags_with_files", "route_signals", "changed_files_summary", "linked_issue_labels", "must_check", "linked_metadata_uncertain", "linked_metadata_uncertainty"],
+    ["pr_kind", "risk_flags", "risk_flags_with_files", "route_signals", "changed_files_summary", "linked_issue_labels", "must_check", "linked_metadata_uncertain", "linked_metadata_uncertainty", "path_handling_provenance"],
   );
   // The deserializer rebuilds an equivalent internal classification from the
   // serialized artifact (camelCase round trip over the snake_case boundary).

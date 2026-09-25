@@ -139,12 +139,37 @@ FILE_SERVING_PATTERNS = [
     re.compile(r"staticfiles?/"),
 ]
 
-# Path handling changes — identifier-shaped patterns over filenames and diff
-# content, plus the traversal-literal pattern (see PATH_TRAVERSAL_PATTERN)
-# which is scanned over module-specifier-filtered diff text.
-PATH_HANDLING_PATTERNS = [
-    re.compile(r"\bpathlib\b", re.IGNORECASE),
-    re.compile(r"\bos\.path\b", re.IGNORECASE),
+# Path handling changes (#749 signal model) — classification requires a real
+# untrusted-path surface. The former model scanned raw diff content for broad
+# path-API mentions (`pathlib`, `os.path`, ...), so ordinary trusted path
+# scaffolding classified as path_handling_changes and injected traversal /
+# edge-case-path must_check items into benign PRs (the PR #748 false
+# positive: `ROOT = Path(__file__).resolve().parent.parent` in a test
+# helper). The model below distinguishes:
+#
+#   trusted path bookkeeping (never fires alone)
+#     - repository-root discovery: `Path(__file__).resolve().parent...`,
+#       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
+#     - module resolution specifiers (`from "../x.js"` — kept from #720);
+#     - path-library usage with no untrusted input flow
+#       (`Path("/etc/myapp/config.yaml")`, `path_join(base, "static")`);
+#     - signals found only in test/fixture files (static fixture paths).
+#
+#   material path-handling changes (fire the kind, flag, and must_check)
+#     - traversal literals outside specifiers and trusted-anchor calls;
+#     - path normalization/sanitization/containment logic;
+#     - untrusted (request/user/...) values reaching path construction;
+#     - archive extraction and symlink-sensitive operations;
+#     - identifier-shaped path vocabulary in changed filenames.
+#
+# Every signal is recorded in the `path_handling_provenance` artifact field
+# (bounded, class-categorized — never raw unbounded PR text) so a future
+# false positive is debuggable without reading classifier internals.
+
+# Filename-backed signal vocabulary: identifier-shaped path terms in changed
+# FILENAMES (e.g. `filepath.ts`, `path_join.py`, `sanitize_path.go`). A
+# filename hit means the PR modifies dedicated path-handling code.
+PATH_HANDLING_FILENAME_PATTERNS = [
     re.compile(r"filepath|pathname", re.IGNORECASE),
     # Identifier-shaped joins only (sanitize_path, cleanPath, resolvePath):
     # a prose line like "sanitizes ... paths" in documentation must not read
@@ -153,11 +178,12 @@ PATH_HANDLING_PATTERNS = [
     re.compile(r"path_join|joinpath|resolve[\w]*path|path[\w]*resolve", re.IGNORECASE),
 ]
 
-# Path traversal literals: "../" or "..\". Scanned ONLY over diff text with
-# module-specifier lines removed: an ESM import like
-# `from "../runtime/subprocess.js"` is module resolution, not filesystem
-# traversal, and every cross-directory TypeScript change would otherwise
-# classify as path handling (the #679 review false positive).
+# Path traversal literals: "../" or "..\". Scanned ONLY over neutralized diff
+# text (see _neutralize_path_false_positives): module specifiers and
+# trusted-anchor calls are removed first, so neither an ESM import like
+# `from "../runtime/subprocess.js"` (#679 false positive) nor trusted
+# repository-root joins like `path.resolve(__dirname, "../templates")`
+# count as traversal.
 PATH_TRAVERSAL_PATTERN = re.compile(r"\.\./|\.\.\\", re.IGNORECASE)
 
 # A module specifier is the quoted path inside an ESM/CJS import construct —
@@ -174,27 +200,293 @@ _SPECIFIER_QUOTED = re.compile(
     re.IGNORECASE,
 )
 
+# Trusted path anchors: tokens whose value is the location of the source
+# file itself. Expressions built from them are repository-root discovery,
+# never attacker-controlled path surfaces.
+_TRUSTED_ANCHOR_TOKEN = re.compile(
+    r"""\b(?:__file__|__dirname|__filename)\b"""
+    r"""|\bimport\.meta\.(?:url|dirname|filename)\b""",
+)
 
-def _diff_without_module_specifiers(diff_text: str) -> str:
-    """Diff text with module-specifier literals neutralized, for the
-    path-traversal heuristic only. Line structure is preserved: only the
-    quoted specifier path is replaced, so traversal literals elsewhere on
-    the same line still match."""
-    return "\n".join(
-        _SPECIFIER_QUOTED.sub('""', line)
-        for line in diff_text.splitlines()
+# A `Path(__file__)...` chain: the anchor plus bounded pure-chaining calls
+# (.resolve(), .parent, .parents[N], .joinpath("..."), ...). One level of
+# call arguments is consumed; deeper nesting fails to match and stays in the
+# scanned text (conservative).
+_PATHLIB_ANCHOR_CHAIN = re.compile(
+    r"""\bPath\s*\(\s*(?:__file__|__filename)\s*\)"""
+    r"""(?:\s*\.\s*(?:resolve|absolute|parent|parents\[\d+\]|joinpath|name|stem|as_posix|as_uri|is_dir|is_file|exists|stat)\b\s*(?:\(\s*[^()]*\))?)*"""
+)
+
+# Anchor-anchored path calls: a path construction/resolution call whose FIRST
+# argument is a trusted anchor — `path.resolve(__dirname, "../templates")`,
+# `os.path.join(os.path.dirname(__file__), "data.json")`, `resolve(__file__)`.
+# The whole call is trusted bookkeeping even when later arguments contain
+# `../` literals. Only one argument level is consumed (no nested parens in the
+# tail); unmatched forms stay in the scanned text (conservative).
+_ANCHOR_PATH_CALL = re.compile(
+    r"""(?:[.]|\b)(?:join|resolve|normalize|realpath|abspath|normpath|dirname|basename|joinpath)\s*\(\s*"""
+    r"""(?:__file__|__dirname|__filename|import\.meta\.(?:url|dirname|filename)"""
+    r"""|(?:os\.path\.)?(?:dirname|basename|abspath|realpath)\s*\(\s*(?:__file__|__dirname|__filename)\s*\)"""
+    r"""|Path\s*\(\s*(?:__file__|__filename)\s*\)(?:\.(?:resolve|parent|parents\[\d+\]|absolute)\b)*)"""
+    r"""\s*(?:,\s*[^()]*)?\)"""
+)
+
+
+def _neutralize_path_false_positives(line: str) -> str:
+    """One diff line with trusted path scaffolding neutralized (replaced by
+    an empty literal). Line structure is preserved: neutralization is
+    literal-scoped, so material signals elsewhere on the same line still
+    match."""
+    line = _SPECIFIER_QUOTED.sub('""', line)
+    line = _ANCHOR_PATH_CALL.sub('""', line)
+    line = _PATHLIB_ANCHOR_CHAIN.sub('""', line)
+    line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
+    return line
+
+
+# Material content signal classes: each entry is (signal class, patterns).
+# These are usage-shaped signals — a bare path-library import or API mention
+# matches none of them. Scanned per diff chunk over neutralized text.
+PATH_HANDLING_CONTENT_CLASSES: list[tuple[str, list[re.Pattern]]] = [
+    # Explicit traversal literals (outside specifiers/anchor calls).
+    ("traversal_literal", [PATH_TRAVERSAL_PATTERN]),
+    # Path normalization / sanitization / containment logic: identifier-shaped
+    # sanitize/validate/check vocabulary (kept from #720) plus the containment
+    # and normalization APIs (`commonpath`, `is_relative_to`, `realpath`,
+    # `abspath`, `normpath`, safe-join variants) that appear almost exclusively
+    # in real boundary checks. Trusted anchor calls are neutralized before this
+    # scans, so `os.path.realpath(__file__)` bookkeeping does not fire.
+    ("path_containment_or_sanitization", [
+        re.compile(r"sanitize[\w]*path|path[\w]*sanitize|clean[\w]*path|safe[\w]*path|path[\w]*safe", re.IGNORECASE),
+        re.compile(r"validate[\w]*path|path[\w]*valid|check[\w]*path|path[\w]*check", re.IGNORECASE),
+        re.compile(r"commonpath|is_relative_to", re.IGNORECASE),
+        re.compile(r"realpath|abspath|normpath", re.IGNORECASE),
+        re.compile(r"safe[_\w]*join|safejoin", re.IGNORECASE),
+    ]),
+    # Archive extraction: zip-slip surfaces. Member names are attacker-
+    # influenceable even when the archive path itself is constant.
+    ("archive_extraction", [
+        re.compile(r"extractall|unpack_archive|safe_extract", re.IGNORECASE),
+        re.compile(r"\b(?:zipfile|tarfile)\b", re.IGNORECASE),
+        re.compile(r"\b(?:ZipFile|TarFile)\b", re.IGNORECASE),
+        re.compile(r"\bunzip\s*\(", re.IGNORECASE),
+    ]),
+    # Symlink-sensitive filesystem operations.
+    ("symlink_sensitive", [
+        re.compile(r"symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW", re.IGNORECASE),
+    ]),
+    # Identifier-shaped path references (`filepath`, `pathname`) — variables
+    # and identifiers named after the path they denote. More specific than the
+    # removed `pathlib`/`os.path` mention patterns and kept deliberately.
+    ("path_reference_identifier", [
+        re.compile(r"filepath|pathname", re.IGNORECASE),
+    ]),
+]
+
+# Untrusted-source join: a path construction/consumption call that reaches a
+# request/user-controlled value. Requires BOTH sides within a ±1-line window
+# (deterministic, bounded) so either alone never fires: a constant-path join
+# is trusted bookkeeping, and a request dictionary in unrelated code is not a
+# path surface. Multi-line dataflow through a neutral variable name
+# (`name = request.args["path"]` … `os.path.join(base, name)`) stays within
+# the window; wider flows are the model reviewer's job, not the lexical
+# classifier's.
+PATH_CONSTRUCTION_PATTERNS = [
+    re.compile(r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b", re.IGNORECASE),
+    re.compile(r"\bPath\s*\("),  # pathlib constructor (case-sensitive)
+    re.compile(r"\bpath\.(?:join|resolve|normalize|dirname|basename)\s*\(", re.IGNORECASE),
+    re.compile(r"\bfilepath\.\w+\s*\(", re.IGNORECASE),
+    re.compile(r"\b(?:open|fopen)\s*\(", re.IGNORECASE),
+    re.compile(r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)\s*\(", re.IGNORECASE),
+    re.compile(r"\b(?:send_file|send_from_directory|sendFile|FileResponse|UploadFile|serveStatic|FileServer|StaticFiles)\b", re.IGNORECASE),
+    re.compile(r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)\b", re.IGNORECASE),
+    re.compile(r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)\b", re.IGNORECASE),
+]
+
+# Values an attacker plausibly controls when they reach a filesystem path:
+# HTTP request data, user/model input, CLI arguments, upload metadata.
+# Deliberately EXCLUDED: environment variables and process cwd — env/config
+# paths are operator-owned infrastructure (the PR #748 lesson: CI scripts
+# join env-provided output paths constantly and are not attacker surfaces).
+UNTRUSTED_SOURCE_PATTERNS = [
+    re.compile(r"request", re.IGNORECASE),
+    re.compile(r"\breq\s*\.", re.IGNORECASE),
+    re.compile(r"user", re.IGNORECASE),
+    re.compile(r"\binput", re.IGNORECASE),
+    re.compile(r"query", re.IGNORECASE),
+    re.compile(r"params", re.IGNORECASE),
+    re.compile(r"\bform\b|formdata", re.IGNORECASE),
+    re.compile(r"payload", re.IGNORECASE),
+    re.compile(r"\bheaders?\b", re.IGNORECASE),
+    re.compile(r"\bcookies?\b", re.IGNORECASE),
+    re.compile(r"\bstdin\b", re.IGNORECASE),
+    re.compile(r"\bargv\b", re.IGNORECASE),
+    re.compile(r"upload", re.IGNORECASE),
+    re.compile(r"untrusted|unsanitized|attacker", re.IGNORECASE),
+]
+
+# Test/fixture file conventions, cross-language. Signals found only in test
+# files are fixture construction ("static paths under test directories"),
+# not a shippable untrusted-path surface; they are discounted (recorded in
+# provenance as `diff_test_file`, never fire).
+TEST_FILE_PATTERNS = [
+    re.compile(r"(?:^|/)(?:tests?|testing|spec|specs|__tests__|fixtures?|testdata)/", re.IGNORECASE),
+    re.compile(r"(?:^|/)(?:conftest\.py|test_[^/]*\.py|[^/]*_test\.(?:py|go|rs|rb|java|kt|cs)|[^/]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts))$", re.IGNORECASE),
+]
+
+
+def _is_test_path(path: str) -> bool:
+    """True when a file path follows test/fixture conventions."""
+    return any(pat.search(path) for pat in TEST_FILE_PATTERNS)
+
+
+# Bounded unified-diff chunk header: `diff --git a/<path> b/<path>`. Used to
+# attribute diff content to the file it belongs to so test-file signals can
+# be discounted. Diffs without git headers (raw synthetic text) form a single
+# chunk with an unknown file, which is treated conservatively as non-test.
+_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)\s*$")
+
+
+def _split_diff_chunks(diff_text: str) -> list[tuple[str | None, list[str]]]:
+    """Split a unified diff into (file_path_or_None, lines) chunks on
+    `diff --git` headers. Best-effort: a header line whose paths cannot be
+    parsed is kept as content (conservative mis-attribution only ever keeps
+    scrutiny, never drops it)."""
+    chunks: list[tuple[str | None, list[str]]] = []
+    current_file: str | None = None
+    current: list[str] = []
+    for line in diff_text.splitlines():
+        m = _DIFF_GIT_HEADER.match(line)
+        if m:
+            if current:
+                chunks.append((current_file, current))
+            current_file = m.group(2)
+            current = []
+        else:
+            current.append(line)
+    if current:
+        chunks.append((current_file, current))
+    return chunks
+
+
+# Provenance bounds: attacker-controlled diff text is never emitted raw or
+# unbounded. Samples are control-character-free bounded line excerpts; counts
+# are capped so a pathological diff cannot flood the artifact.
+MAX_PATH_SIGNALS = 8
+MAX_PATH_FILES = 8
+MAX_PATH_SAMPLES = 3
+MAX_PATH_SAMPLE_CHARS = 160
+
+
+def _path_sample(line: str) -> str:
+    """Bounded, control-character-free excerpt of a matched line."""
+    cleaned = "".join(
+        " " if ("\0" <= ch < " " or ch == "\x7f") else ch for ch in line
+    ).strip()
+    return cleaned[:MAX_PATH_SAMPLE_CHARS]
+
+
+def _record_signal(
+    buckets: dict[tuple[str, str], dict],
+    signal: str,
+    source: str,
+    file: str | None,
+    sample: str | None,
+) -> None:
+    """Merge one raw hit into a signal bucket (dedup by class + backing,
+    bounded file/sample lists, stable first-seen order)."""
+    key = (signal, source)
+    entry = buckets.get(key)
+    if entry is None:
+        if len(buckets) >= MAX_PATH_SIGNALS:
+            return
+        entry = {"signal": signal, "source": source, "files": [], "samples": []}
+        buckets[key] = entry
+    if file and file not in entry["files"] and len(entry["files"]) < MAX_PATH_FILES:
+        entry["files"].append(file)
+    if sample and sample not in entry["samples"] and len(entry["samples"]) < MAX_PATH_SAMPLES:
+        entry["samples"].append(sample)
+
+
+def evaluate_path_handling_signals(
+    filenames: list[str],
+    diff_text: str,
+) -> tuple[list[dict], list[dict]]:
+    """Evaluate the #749 path-handling signal model.
+
+    Returns ``(fired, discounted)``: bounded signal dicts with keys
+    ``signal`` (class/category), ``source`` (``filename`` | ``diff`` |
+    ``diff_test_file``), ``files`` (attributed file paths), and ``samples``
+    (bounded line excerpts). ``fired`` drives the kind/flag/must_check;
+    ``discounted`` records trusted-scaffolding and test-file signals that
+    were deliberately not allowed to fire, so a future false positive is
+    debuggable from the artifact alone.
+    """
+    fired_buckets: dict[tuple[str, str], dict] = {}
+    discounted_buckets: dict[tuple[str, str], dict] = {}
+
+    # 1) Filename-backed signals: identifier-shaped path vocabulary in the
+    # changed-file list. Test-file hits are discounted.
+    for name in filenames:
+        if not any(pat.search(name) for pat in PATH_HANDLING_FILENAME_PATTERNS):
+            continue
+        source = "filename" if not _is_test_path(name) else "filename_test_file"
+        _record_signal(
+            discounted_buckets if source == "filename_test_file" else fired_buckets,
+            "path_identifier_filename", source, name, None,
+        )
+
+    # 2) Diff-content signals, attributed per chunk so test-file content can
+    # be discounted. All classes scan neutralized text (trusted scaffolding
+    # removed); only the untrusted-join class adds the ±1-line window.
+    # A chunk without a git-header filename (headerless/synthetic diff) can
+    # still be discounted when EVERY changed file is a test file — the whole
+    # diff is then test content. Mixed or unknown file sets fire
+    # conservatively.
+    all_files_are_tests = bool(filenames) and all(
+        _is_test_path(name) for name in filenames
     )
+    for chunk_file, lines in _split_diff_chunks(diff_text):
+        if not lines:
+            continue
+        neutralized = [_neutralize_path_false_positives(line) for line in lines]
+        if chunk_file is not None:
+            is_test = _is_test_path(chunk_file)
+        else:
+            is_test = all_files_are_tests
+        buckets = discounted_buckets if is_test else fired_buckets
+        source = "diff_test_file" if is_test else "diff"
+
+        for class_name, patterns in PATH_HANDLING_CONTENT_CLASSES:
+            for index, line in enumerate(neutralized):
+                if not any(pat.search(line) for pat in patterns):
+                    continue
+                _record_signal(
+                    buckets, class_name, source, chunk_file,
+                    _path_sample(lines[index]),
+                )
+                break  # one bucket entry per class per chunk; samples merge below
+
+        # Untrusted-source join: construction call + untrusted value in the
+        # same line or an adjacent line.
+        for index, line in enumerate(neutralized):
+            if not any(pat.search(line) for pat in PATH_CONSTRUCTION_PATTERNS):
+                continue
+            window = "\n".join(neutralized[max(0, index - 1):index + 2])
+            if any(pat.search(window) for pat in UNTRUSTED_SOURCE_PATTERNS):
+                _record_signal(
+                    buckets, "untrusted_source_join", source, chunk_file,
+                    _path_sample(lines[index]),
+                )
+
+    return list(fired_buckets.values()), list(discounted_buckets.values())
 
 
 def _is_path_handling(filenames: list[str], diff_text: str) -> bool:
-    """Path-handling kind rule: identifier-shaped patterns over filenames and
-    the raw diff, plus the traversal-literal pattern over module-specifier-
-    filtered diff text."""
-    if any(pat.search(f) for pat in PATH_HANDLING_PATTERNS for f in filenames):
-        return True
-    if any(pat.search(diff_text) for pat in PATH_HANDLING_PATTERNS):
-        return True
-    return PATH_TRAVERSAL_PATTERN.search(_diff_without_module_specifiers(diff_text)) is not None
+    """Path-handling kind rule: fires only when the signal model found a
+    material (non-discounted) untrusted-path surface."""
+    fired, _ = evaluate_path_handling_signals(filenames, diff_text)
+    return bool(fired)
 
 # Secret handling changes
 SECRET_HANDLING_PATTERNS = [
@@ -245,6 +537,12 @@ class PRClassification:
     # failure path for undetermined inputs.
     linked_metadata_uncertain: bool = False
     linked_metadata_uncertainty: list[str] = field(default_factory=list)
+    # #749: bounded provenance for the path-handling signal model — why
+    # path handling fired (class/category, filename vs diff backing, bounded
+    # samples) and which test-file/trusted-scaffolding signals were
+    # deliberately discounted. Empty lists when path handling did not fire.
+    # Never contains unbounded attacker-controlled text.
+    path_handling_provenance: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -395,9 +693,12 @@ LINKED_ISSUE_RULES: list[tuple[frozenset[str], str]] = [
 
 # File-based flags: a flag fires when any changed filename OR the diff content
 # matches the pattern set. Order matters — flags are appended in this order.
+# The path_handling entry uses the #749 signal model (evaluate_path_handling_
+# signals) instead of a plain pattern scan; its pattern list here backs only
+# the filename attribution vocabulary.
 FILE_RISK_RULES: list[tuple[list[re.Pattern], str]] = [
     (FILE_SERVING_PATTERNS, "file_serving_changes"),
-    (PATH_HANDLING_PATTERNS, "path_handling_changes"),
+    (PATH_HANDLING_FILENAME_PATTERNS, "path_handling_changes"),
     (AUTH_PATTERNS, "auth_changes"),
     (SECRET_HANDLING_PATTERNS, "secret_handling_changes"),
 ]
@@ -448,23 +749,28 @@ def _detect_risk_flags(
 
     # File-based risk flags (derived from classification patterns).
     for pat_set, flag in FILE_RISK_RULES:
-        # Collect the specific files that triggered this flag
-        triggering_files = [
-            f for f in filenames
-            if any(pat.search(f) for pat in pat_set)
-        ]
-        # The path-traversal heuristic scans module-specifier-filtered text
-        # (an ESM `from "../x.js"` import is module resolution, not
-        # filesystem traversal), so the path_handling flag gets the filtered
-        # text plus the dedicated traversal pattern.
-        scan_text = diff_text
-        matches_in_diff = any(pat.search(scan_text) for pat in pat_set)
-        if pat_set is PATH_HANDLING_PATTERNS:
-            scan_text = _diff_without_module_specifiers(diff_text)
-            matches_in_diff = (
-                matches_in_diff
-                or PATH_TRAVERSAL_PATTERN.search(scan_text) is not None
-            )
+        if flag == "path_handling_changes":
+            # #749: the path-handling flag uses the untrusted-surface signal
+            # model. Filename attribution keeps the historical semantics —
+            # only filename-backed hits populate the file list (content-only
+            # matches attribute to an empty list), so smart-model routing is
+            # unchanged (#159).
+            fired, _ = evaluate_path_handling_signals(filenames, diff_text)
+            matches_in_diff = any(s["source"] == "diff" for s in fired)
+            triggering_files: list[str] = []
+            for signal in fired:
+                if signal["source"] != "filename":
+                    continue
+                for name in signal["files"]:
+                    if name not in triggering_files:
+                        triggering_files.append(name)
+        else:
+            # Collect the specific files that triggered this flag
+            triggering_files = [
+                f for f in filenames
+                if any(pat.search(f) for pat in pat_set)
+            ]
+            matches_in_diff = any(pat.search(diff_text) for pat in pat_set)
         if triggering_files or matches_in_diff:
             if flag not in flags:
                 flags.append(flag)
@@ -529,7 +835,10 @@ FLAG_CHECKS: dict[str, list[str]] = {
 # drive smart-model routing — only an actual changed filename should.
 _CONTENT_CAPABLE_KINDS: dict[str, list[re.Pattern]] = {
     "file_serving_changes": FILE_SERVING_PATTERNS,
-    "path_handling_changes": PATH_HANDLING_PATTERNS,
+    # #749: the path-handling kind fires from the signal model; routing stays
+    # filename-gated exactly as before — only a filename vocabulary hit (the
+    # same effective subset as the removed mention patterns) may route.
+    "path_handling_changes": PATH_HANDLING_FILENAME_PATTERNS,
 }
 
 
@@ -659,6 +968,17 @@ def classify_pr(
 
     uncertainty = _linked_metadata_uncertainty(metadata_status)
 
+    # #749: evaluate the path-handling signal model once and share it across
+    # the kind rule, the risk-flag rule, and the provenance artifact.
+    path_fired, path_discounted = evaluate_path_handling_signals(
+        [f.get("filename", "") for f in pr_files], diff_text,
+    )
+    path_provenance = {
+        "fired": bool(path_fired),
+        "signals": path_fired,
+        "discounted": path_discounted,
+    }
+
     pr_kind = _classify_pr_kind(pr_files, diff_text)
     risk_flags, risk_flags_with_files = _detect_risk_flags(pr_files, diff_text, linked_issues)
     must_check = _build_must_check(pr_kind, risk_flags)
@@ -688,6 +1008,7 @@ def classify_pr(
         must_check=must_check,
         linked_metadata_uncertain=uncertainty[0],
         linked_metadata_uncertainty=uncertainty[1],
+        path_handling_provenance=path_provenance,
     )
 
 

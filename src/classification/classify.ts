@@ -106,12 +106,37 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
   /staticfiles?\//,
 ];
 
-/** Path handling changes — identifier-shaped patterns over filenames and
- * diff content, plus the traversal-literal pattern (see PATH_TRAVERSAL_PATTERN)
- * which is scanned over module-specifier-filtered diff text. */
-const PATH_HANDLING_PATTERNS: readonly RegExp[] = [
-  /\bpathlib\b/i,
-  /\bos\.path\b/i,
+/** Path handling changes (#749 signal model) — classification requires a real
+ * untrusted-path surface. The former model scanned raw diff content for broad
+ * path-API mentions (`pathlib`, `os.path`, ...), so ordinary trusted path
+ * scaffolding classified as path_handling_changes and injected traversal /
+ * edge-case-path must_check items into benign PRs (the PR #748 false
+ * positive: `ROOT = Path(__file__).resolve().parent.parent` in a test
+ * helper). The model below distinguishes:
+ *
+ *   trusted path bookkeeping (never fires alone)
+ *     - repository-root discovery: `Path(__file__).resolve().parent...`,
+ *       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
+ *     - module resolution specifiers (`from "../x.js"` — kept from #720);
+ *     - path-library usage with no untrusted input flow
+ *       (`Path("/etc/myapp/config.yaml")`, `path_join(base, "static")`);
+ *     - signals found only in test/fixture files (static fixture paths).
+ *
+ *   material path-handling changes (fire the kind, flag, and must_check)
+ *     - traversal literals outside specifiers and trusted-anchor calls;
+ *     - path normalization/sanitization/containment logic;
+ *     - untrusted (request/user/...) values reaching path construction;
+ *     - archive extraction and symlink-sensitive operations;
+ *     - identifier-shaped path vocabulary in changed filenames.
+ *
+ * Every signal is recorded in the `path_handling_provenance` artifact field
+ * (bounded, class-categorized — never raw unbounded PR text) so a future
+ * false positive is debuggable without reading classifier internals. */
+
+/** Filename-backed signal vocabulary: identifier-shaped path terms in changed
+ * FILENAMES (e.g. `filepath.ts`, `path_join.py`, `sanitize_path.go`). A
+ * filename hit means the PR modifies dedicated path-handling code. */
+const PATH_HANDLING_FILENAME_PATTERNS: readonly RegExp[] = [
   /filepath|pathname/i,
   // Identifier-shaped joins only (sanitize_path, cleanPath, resolvePath):
   // a prose line like "sanitizes ... paths" in documentation must not read
@@ -120,11 +145,12 @@ const PATH_HANDLING_PATTERNS: readonly RegExp[] = [
   /path_join|joinpath|resolve[\w]*path|path[\w]*resolve/i,
 ];
 
-/** Path traversal literals: "../" or "..\". Scanned ONLY over diff text with
- * module-specifier lines removed: an ESM import like
- * `from "../runtime/subprocess.js"` is module resolution, not filesystem
- * traversal, and every cross-directory TypeScript change would otherwise
- * classify as path handling (the #679 review false positive). */
+/** Path traversal literals: "../" or "..\". Scanned ONLY over neutralized
+ * diff text (see neutralizePathFalsePositives): module specifiers and
+ * trusted-anchor calls are removed first, so neither an ESM import like
+ * `from "../runtime/subprocess.js"` (#679 false positive) nor trusted
+ * repository-root joins like `path.resolve(__dirname, "../templates")`
+ * count as traversal. */
 const PATH_TRAVERSAL_PATTERN = /\.\.\/|\.\.\\/i;
 
 /** A module specifier is the quoted path inside an ESM/CJS import construct —
@@ -136,20 +162,293 @@ const PATH_TRAVERSAL_PATTERN = /\.\.\/|\.\.\\/i;
 const SPECIFIER_QUOTED =
   /\bfrom\s*(['"])[^'"]*\1|\brequire\s*\(\s*(['"])[^'"]*\2|\bimport\s*\(\s*(['"])[^'"]*\3|\bimport\s+(['"])[^'"]*\4/gi;
 
-function diffWithoutModuleSpecifiers(diffText: string): string {
-  return diffText
-    .split("\n")
-    .map((line) => line.replace(SPECIFIER_QUOTED, '""'))
-    .join("\n");
+/** Trusted path anchors: tokens whose value is the location of the source
+ * file itself. Expressions built from them are repository-root discovery,
+ * never attacker-controlled path surfaces. (Replacement-only: carries /g.) */
+const TRUSTED_ANCHOR_TOKEN =
+  /\b(?:__file__|__dirname|__filename)\b|\bimport\.meta\.(?:url|dirname|filename)\b/g;
+
+/** A `Path(__file__)...` chain: the anchor plus bounded pure-chaining calls
+ * (.resolve(), .parent, .parents[N], .joinpath("..."), ...). One level of
+ * call arguments is consumed; deeper nesting fails to match and stays in the
+ * scanned text (conservative). (Replacement-only: carries /g.) */
+const PATHLIB_ANCHOR_CHAIN =
+  /\bPath\s*\(\s*(?:__file__|__filename)\s*\)(?:\s*\.\s*(?:resolve|absolute|parent|parents\[\d+\]|joinpath|name|stem|as_posix|as_uri|is_dir|is_file|exists|stat)\b\s*(?:\(\s*[^()]*\))?)*/g;
+/** Anchor-anchored path calls: a path construction/resolution call whose FIRST
+ * argument is a trusted anchor — `path.resolve(__dirname, "../templates")`,
+ * `os.path.join(os.path.dirname(__file__), "data.json")`, `resolve(__file__)`.
+ * The whole call is trusted bookkeeping even when later arguments contain
+ * `../` literals. Only one argument level is consumed (no nested parens in the
+ * tail); unmatched forms stay in the scanned text (conservative).
+ * (Replacement-only: carries /g.) */
+const ANCHOR_PATH_CALL =
+  /(?:[.]|\b)(?:join|resolve|normalize|realpath|abspath|normpath|dirname|basename|joinpath)\s*\(\s*(?:__file__|__dirname|__filename|import\.meta\.(?:url|dirname|filename)|(?:os\.path\.)?(?:dirname|basename|abspath|realpath)\s*\(\s*(?:__file__|__dirname|__filename)\s*\)|Path\s*\(\s*(?:__file__|__filename)\s*\)(?:\.(?:resolve|parent|parents\[\d+\]|absolute)\b)*)\s*(?:,\s*[^()]*)?\)/g;
+
+function neutralizePathFalsePositives(line: string): string {
+  /** One diff line with trusted path scaffolding neutralized (replaced by
+   * an empty literal). Line structure is preserved: neutralization is
+   * literal-scoped, so material signals elsewhere on the same line still
+   * match. */
+  return line
+    .replace(SPECIFIER_QUOTED, '""')
+    .replace(ANCHOR_PATH_CALL, '""')
+    .replace(PATHLIB_ANCHOR_CHAIN, '""')
+    .replace(TRUSTED_ANCHOR_TOKEN, '""');
 }
 
-/** Path-handling kind rule: identifier-shaped patterns over filenames and
- * the raw diff, plus the traversal-literal pattern over module-specifier-
- * filtered diff text. */
+/** Material content signal classes: each entry is (signal class, patterns).
+ * These are usage-shaped signals — a bare path-library import or API mention
+ * matches none of them. Scanned per diff chunk over neutralized text. */
+const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp[]])[] = [
+  // Explicit traversal literals (outside specifiers/anchor calls).
+  ["traversal_literal", [PATH_TRAVERSAL_PATTERN]],
+  // Path normalization / sanitization / containment logic: identifier-shaped
+  // sanitize/validate/check vocabulary (kept from #720) plus the containment
+  // and normalization APIs (`commonpath`, `is_relative_to`, `realpath`,
+  // `abspath`, `normpath`, safe-join variants) that appear almost exclusively
+  // in real boundary checks. Trusted anchor calls are neutralized before this
+  // scans, so `os.path.realpath(__file__)` bookkeeping does not fire.
+  ["path_containment_or_sanitization", [
+    /sanitize[\w]*path|path[\w]*sanitize|clean[\w]*path|safe[\w]*path|path[\w]*safe/i,
+    /validate[\w]*path|path[\w]*valid|check[\w]*path|path[\w]*check/i,
+    /commonpath|is_relative_to/i,
+    /realpath|abspath|normpath/i,
+    /safe[_\w]*join|safejoin/i,
+  ]],
+  // Archive extraction: zip-slip surfaces. Member names are attacker-
+  // influenceable even when the archive path itself is constant.
+  ["archive_extraction", [
+    /extractall|unpack_archive|safe_extract/i,
+    /\b(?:zipfile|tarfile)\b/i,
+    /\b(?:ZipFile|TarFile)\b/i,
+    /\bunzip\s*\(/i,
+  ]],
+  // Symlink-sensitive filesystem operations.
+  ["symlink_sensitive", [
+    /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
+  ]],
+  // Identifier-shaped path references (`filepath`, `pathname`) — variables
+  // and identifiers named after the path they denote. More specific than the
+  // removed `pathlib`/`os.path` mention patterns and kept deliberately.
+  ["path_reference_identifier", [/filepath|pathname/i]],
+];
+
+/** Untrusted-source join: a path construction/consumption call that reaches a
+ * request/user-controlled value. Requires BOTH sides within a ±1-line window
+ * (deterministic, bounded) so either alone never fires: a constant-path join
+ * is trusted bookkeeping, and a request dictionary in unrelated code is not a
+ * path surface. Multi-line dataflow through a neutral variable name
+ * (`name = request.args["path"]` … `os.path.join(base, name)`) stays within
+ * the window; wider flows are the model reviewer's job, not the lexical
+ * classifier's. */
+const PATH_CONSTRUCTION_PATTERNS: readonly RegExp[] = [
+  /os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)\b/i,
+  /\bPath\s*\(/, // pathlib constructor (case-sensitive)
+  /\bpath\.(?:join|resolve|normalize|dirname|basename)\s*\(/i,
+  /\bfilepath\.\w+\s*\(/i,
+  /\b(?:open|fopen)\s*\(/i,
+  /\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)\s*\(/i,
+  /\b(?:send_file|send_from_directory|sendFile|FileResponse|UploadFile|serveStatic|FileServer|StaticFiles)\b/i,
+  /\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)\b/i,
+  /\bos\.(?:mkdir|makedirs|unlink|rename|remove)\b/i,
+];
+
+/** Values an attacker plausibly controls when they reach a filesystem path:
+ * HTTP request data, user/model input, CLI arguments, upload metadata.
+ * Deliberately EXCLUDED: environment variables and process cwd — env/config
+ * paths are operator-owned infrastructure (the PR #748 lesson: CI scripts
+ * join env-provided output paths constantly and are not attacker surfaces). */
+const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
+  /request/i,
+  /\breq\s*\./i,
+  /user/i,
+  /\binput/i,
+  /query/i,
+  /params/i,
+  /\bform\b|formdata/i,
+  /payload/i,
+  /\bheaders?\b/i,
+  /\bcookies?\b/i,
+  /\bstdin\b/i,
+  /\bargv\b/i,
+  /upload/i,
+  /untrusted|unsanitized|attacker/i,
+];
+
+/** Test/fixture file conventions, cross-language. Signals found only in test
+ * files are fixture construction ("static paths under test directories"),
+ * not a shippable untrusted-path surface; they are discounted (recorded in
+ * provenance as `diff_test_file`, never fire). */
+const TEST_FILE_PATTERNS: readonly RegExp[] = [
+  /(?:^|\/)(?:tests?|testing|spec|specs|__tests__|fixtures?|testdata)\//i,
+  /(?:^|\/)(?:conftest\.py|test_[^/]*\.py|[^/]*_test\.(?:py|go|rs|rb|java|kt|cs)|[^/]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts))$/i,
+];
+
+function isTestPath(path: string): boolean {
+  /** True when a file path follows test/fixture conventions. */
+  return matchesAny(path, TEST_FILE_PATTERNS);
+}
+
+/** Bounded unified-diff chunk header: `diff --git a/<path> b/<path>`. Used to
+ * attribute diff content to the file it belongs to so test-file signals can
+ * be discounted. Diffs without git headers (raw synthetic text) form a single
+ * chunk with an unknown file, which is treated conservatively as non-test. */
+const DIFF_GIT_HEADER = /^diff --git a\/(\S+) b\/(\S+)\s*$/;
+
+function splitDiffChunks(diffText: string): [string | null, string[]][] {
+  /** Split a unified diff into (filePathOrNull, lines) chunks on
+   * `diff --git` headers. Best-effort: a header line whose paths cannot be
+   * parsed is kept as content (conservative mis-attribution only ever keeps
+   * scrutiny, never drops it). */
+  const chunks: [string | null, string[]][] = [];
+  let currentFile: string | null = null;
+  let current: string[] = [];
+  for (const line of diffText.split("\n")) {
+    const m = DIFF_GIT_HEADER.exec(line);
+    if (m) {
+      if (current.length > 0) chunks.push([currentFile, current]);
+      currentFile = m[2] ?? null;
+      current = [];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) chunks.push([currentFile, current]);
+  return chunks;
+}
+
+/** Provenance bounds: attacker-controlled diff text is never emitted raw or
+ * unbounded. Samples are control-character-free bounded line excerpts; counts
+ * are capped so a pathological diff cannot flood the artifact. */
+export const MAX_PATH_SIGNALS = 8;
+export const MAX_PATH_FILES = 8;
+export const MAX_PATH_SAMPLES = 3;
+export const MAX_PATH_SAMPLE_CHARS = 160;
+
+function pathSample(line: string): string {
+  /** Bounded, control-character-free excerpt of a matched line. */
+  let cleaned = "";
+  for (const ch of line) {
+    const code = ch.codePointAt(0) ?? 0;
+    cleaned += code < 0x20 || code === 0x7f ? " " : ch;
+  }
+  return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
+}
+
+/** One bounded path-handling signal: the matched class/category, its backing
+ * (filename vs diff content vs discounted test-file content), attributed
+ * files, and bounded line excerpts. */
+export interface PathHandlingSignal {
+  signal: string;
+  source: "filename" | "diff" | "diff_test_file" | "filename_test_file";
+  files: string[];
+  samples: string[];
+}
+
+type SignalBucketKey = string; // `${signal}\u0000${source}`
+
+function recordSignal(
+  buckets: Map<SignalBucketKey, PathHandlingSignal>,
+  signal: string,
+  source: PathHandlingSignal["source"],
+  file: string | null,
+  sample: string | null,
+): void {
+  /** Merge one raw hit into a signal bucket (dedup by class + backing,
+   * bounded file/sample lists, stable first-seen order). */
+  const key: SignalBucketKey = `${signal}\u0000${source}`;
+  let entry = buckets.get(key);
+  if (entry === undefined) {
+    if (buckets.size >= MAX_PATH_SIGNALS) return;
+    entry = { signal, source, files: [], samples: [] };
+    buckets.set(key, entry);
+  }
+  if (file && !entry.files.includes(file) && entry.files.length < MAX_PATH_FILES) {
+    entry.files.push(file);
+  }
+  if (sample && !entry.samples.includes(sample) && entry.samples.length < MAX_PATH_SAMPLES) {
+    entry.samples.push(sample);
+  }
+}
+
+/** Bounded provenance for the path-handling signal model — why path handling
+ * fired and which test-file signals were deliberately discounted. */
+export interface PathHandlingProvenance {
+  fired: boolean;
+  signals: PathHandlingSignal[];
+  discounted: PathHandlingSignal[];
+}
+
+export function evaluatePathHandlingSignals(
+  filenames: readonly string[],
+  diffText: string,
+): { fired: PathHandlingSignal[]; discounted: PathHandlingSignal[] } {
+  /** Evaluate the #749 path-handling signal model.
+   *
+   * Returns `{fired, discounted}`: bounded signal lists. `fired` drives the
+   * kind/flag/must_check; `discounted` records trusted-scaffolding and
+   * test-file signals that were deliberately not allowed to fire, so a
+   * future false positive is debuggable from the artifact alone. */
+  const firedBuckets = new Map<SignalBucketKey, PathHandlingSignal>();
+  const discountedBuckets = new Map<SignalBucketKey, PathHandlingSignal>();
+
+  // 1) Filename-backed signals: identifier-shaped path vocabulary in the
+  // changed-file list. Test-file hits are discounted.
+  for (const name of filenames) {
+    if (!matchesAny(name, PATH_HANDLING_FILENAME_PATTERNS)) continue;
+    const isTest = isTestPath(name);
+    recordSignal(
+      isTest ? discountedBuckets : firedBuckets,
+      "path_identifier_filename",
+      isTest ? "filename_test_file" : "filename",
+      name,
+      null,
+    );
+  }
+
+  // 2) Diff-content signals, attributed per chunk so test-file content can
+  // be discounted. All classes scan neutralized text (trusted scaffolding
+  // removed); only the untrusted-join class adds the ±1-line window.
+  // A chunk without a git-header filename (headerless/synthetic diff) can
+  // still be discounted when EVERY changed file is a test file — the whole
+  // diff is then test content. Mixed or unknown file sets fire
+  // conservatively.
+  const allFilesAreTests =
+    filenames.length > 0 && filenames.every((name) => isTestPath(name));
+  for (const [chunkFile, lines] of splitDiffChunks(diffText)) {
+    if (lines.length === 0) continue;
+    const neutralized = lines.map((line) => neutralizePathFalsePositives(line));
+    const isTest =
+      chunkFile !== null ? isTestPath(chunkFile) : allFilesAreTests;
+    const buckets = isTest ? discountedBuckets : firedBuckets;
+    const source: PathHandlingSignal["source"] = isTest ? "diff_test_file" : "diff";
+
+    for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
+      for (let index = 0; index < neutralized.length; index++) {
+        if (!matchesAny(neutralized[index] ?? "", patterns)) continue;
+        recordSignal(buckets, className, source, chunkFile, pathSample(lines[index] ?? ""));
+        break; // one bucket entry per class per chunk; samples merge across chunks
+      }
+    }
+
+    // Untrusted-source join: construction call + untrusted value in the
+    // same line or an adjacent line.
+    for (let index = 0; index < neutralized.length; index++) {
+      if (!matchesAny(neutralized[index] ?? "", PATH_CONSTRUCTION_PATTERNS)) continue;
+      const window = neutralized.slice(Math.max(0, index - 1), index + 2).join("\n");
+      if (matchesAny(window, UNTRUSTED_SOURCE_PATTERNS)) {
+        recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(lines[index] ?? ""));
+      }
+    }
+  }
+
+  return { fired: [...firedBuckets.values()], discounted: [...discountedBuckets.values()] };
+}
+
+/** Path-handling kind rule: fires only when the signal model found a
+ * material (non-discounted) untrusted-path surface. */
 function isPathHandling(filenames: readonly string[], diffText: string): boolean {
-  if (filenames.some((name) => matchesAny(name, PATH_HANDLING_PATTERNS))) return true;
-  if (matchesAny(diffText, PATH_HANDLING_PATTERNS)) return true;
-  return PATH_TRAVERSAL_PATTERN.test(diffWithoutModuleSpecifiers(diffText));
+  return evaluatePathHandlingSignals(filenames, diffText).fired.length > 0;
 }
 
 /** Secret handling changes. */
@@ -202,6 +501,12 @@ export interface PRClassification {
    * uncertainty; unusable status input degrades to not-uncertain. */
   linkedMetadataUncertain: boolean;
   linkedMetadataUncertainty: string[];
+  /** #749: bounded provenance for the path-handling signal model — why path
+   * handling fired (class/category, filename vs diff backing, bounded
+   * samples) and which test-file/trusted-scaffolding signals were
+   * deliberately discounted. Empty lists when path handling did not fire.
+   * Never contains unbounded attacker-controlled text. */
+  pathHandlingProvenance: PathHandlingProvenance;
 }
 
 /** Serialize the internal classification to the persisted v2-identical
@@ -219,6 +524,11 @@ export function classificationToArtifact(classification: PRClassification): Reco
     must_check: classification.mustCheck,
     linked_metadata_uncertain: classification.linkedMetadataUncertain,
     linked_metadata_uncertainty: classification.linkedMetadataUncertainty,
+    path_handling_provenance: {
+      fired: classification.pathHandlingProvenance.fired,
+      signals: classification.pathHandlingProvenance.signals,
+      discounted: classification.pathHandlingProvenance.discounted,
+    },
   };
 }
 
@@ -305,10 +615,13 @@ const LINKED_ISSUE_RULES: readonly { triggerLabels: readonly string[]; flag: str
 ];
 
 /** File-based flags: a flag fires when any changed filename OR the diff
- * content matches the pattern set. Order matters. */
+ * content matches the pattern set. Order matters. The path_handling entry
+ * uses the #749 signal model (evaluatePathHandlingSignals) instead of a plain
+ * pattern scan; its pattern list here backs only the filename attribution
+ * vocabulary. */
 const FILE_RISK_RULES: readonly { patterns: readonly RegExp[]; flag: string }[] = [
   { patterns: FILE_SERVING_PATTERNS, flag: "file_serving_changes" },
-  { patterns: PATH_HANDLING_PATTERNS, flag: "path_handling_changes" },
+  { patterns: PATH_HANDLING_FILENAME_PATTERNS, flag: "path_handling_changes" },
   { patterns: AUTH_PATTERNS, flag: "auth_changes" },
   { patterns: SECRET_HANDLING_PATTERNS, flag: "secret_handling_changes" },
 ];
@@ -348,15 +661,26 @@ function detectRiskFlags(
 
   // File-based risk flags (derived from classification patterns).
   for (const { patterns, flag } of FILE_RISK_RULES) {
-    const triggeringFiles = filenames.filter((name) => matchesAny(name, patterns));
-    let matchesInDiff = matchesAny(diffText, patterns);
-    // The path-traversal heuristic scans module-specifier-filtered text (an
-    // ESM `from "../x.js"` import is module resolution, not filesystem
-    // traversal), so the path_handling flag gets the filtered text plus the
-    // dedicated traversal pattern.
-    if (patterns === PATH_HANDLING_PATTERNS) {
-      const scanText = diffWithoutModuleSpecifiers(diffText);
-      matchesInDiff = matchesInDiff || PATH_TRAVERSAL_PATTERN.test(scanText);
+    let triggeringFiles: string[];
+    let matchesInDiff: boolean;
+    if (flag === "path_handling_changes") {
+      // #749: the path-handling flag uses the untrusted-surface signal
+      // model. Filename attribution keeps the historical semantics — only
+      // filename-backed hits populate the file list (content-only matches
+      // attribute to an empty list), so smart-model routing is unchanged
+      // (#159).
+      const fired = evaluatePathHandlingSignals(filenames, diffText).fired;
+      matchesInDiff = fired.some((s) => s.source === "diff");
+      triggeringFiles = [];
+      for (const signal of fired) {
+        if (signal.source !== "filename") continue;
+        for (const name of signal.files) {
+          if (!triggeringFiles.includes(name)) triggeringFiles.push(name);
+        }
+      }
+    } else {
+      triggeringFiles = filenames.filter((name) => matchesAny(name, patterns));
+      matchesInDiff = matchesAny(diffText, patterns);
     }
     if (triggeringFiles.length > 0 || matchesInDiff) {
       if (!flags.includes(flag)) flags.push(flag);
@@ -418,10 +742,13 @@ const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
 
 /** Kinds whose classification can come from diff CONTENT (the
  * filenameOrDiffMatches rules). A content-only match of these must not drive
- * smart-model routing — only an actual changed filename should. */
+ * smart-model routing — only an actual changed filename should. The
+ * path_handling kind fires from the #749 signal model; routing stays
+ * filename-gated exactly as before — only a filename vocabulary hit (the same
+ * effective subset as the removed mention patterns) may route. */
 const CONTENT_CAPABLE_KINDS: Readonly<Record<string, readonly RegExp[]>> = {
   file_serving_changes: FILE_SERVING_PATTERNS,
-  path_handling_changes: PATH_HANDLING_PATTERNS,
+  path_handling_changes: PATH_HANDLING_FILENAME_PATTERNS,
 };
 
 function buildMustCheck(prKind: string, riskFlags: readonly string[]): string[] {
@@ -536,6 +863,18 @@ export function classifyPr(input: ClassifyInput): PRClassification {
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
 
+  // #749: evaluate the path-handling signal model once and share it across
+  // the kind rule, the risk-flag rule, and the provenance artifact.
+  const pathEvaluation = evaluatePathHandlingSignals(
+    prFiles.map((file) => file.filename),
+    diffText,
+  );
+  const pathHandlingProvenance: PathHandlingProvenance = {
+    fired: pathEvaluation.fired.length > 0,
+    signals: pathEvaluation.fired,
+    discounted: pathEvaluation.discounted,
+  };
+
   const prKind = classifyPrKind(prFiles, diffText);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
   const mustCheck = buildMustCheck(prKind, flags);
@@ -564,5 +903,6 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     mustCheck,
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
+    pathHandlingProvenance,
   };
 }

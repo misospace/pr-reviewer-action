@@ -38,6 +38,8 @@ def run_dataflow_checks() -> list[dict[str, object]]:
         ("github-label-routing", ["bash", str(ROOT / "tests/test_linked_issue_classification.sh")]),
         ("linear-composite-precheck", ["bash", str(ROOT / "tests/test_precheck_linear_fingerprint.sh")]),
         ("corpus-evidence-and-broken-arrow", [sys.executable, "-m", "pytest", "tests/test_issue_662_dataflow.py", "-q"]),
+        # #749: the PR #748 path-classification false positive cannot return.
+        ("path-classification-untrusted-surface", [sys.executable, "-m", "pytest", "tests/test_issue_749_path_classification.py", "-q"]),
     )
     results = []
     for name, argv in checks:

@@ -1,0 +1,11 @@
+{
+  "fixture": "path-containment-symlink-archive-still-detected",
+  "description": "#749 positive controls in one PR: containment/normalization logic (os.path.realpath boundary check), a symlink-sensitive operation, and archive extraction (zip-slip surface) in production chunks each fire their own class-categorized signal; the kind, flag, and path must_check items follow. The provenance artifact carries all three signal classes with bounded samples.",
+  "pr_files": [
+    { "filename": "src/serve.py", "status": "modified", "additions": 2 },
+    { "filename": "src/fsutil.py", "status": "modified", "additions": 1 },
+    { "filename": "src/ingest.py", "status": "modified", "additions": 2 }
+  ],
+  "diff": "diff --git a/src/serve.py b/src/serve.py\n+++ b/src/serve.py\n@@ -1,2 +1,4 @@\n+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\ndiff --git a/src/fsutil.py b/src/fsutil.py\n+++ b/src/fsutil.py\n@@ -1,1 +1,2 @@\n+os.symlink(target, link_path)\ndiff --git a/src/ingest.py b/src/ingest.py\n+++ b/src/ingest.py\n@@ -1,2 +1,4 @@\n+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n",
+  "linked_issues": []
+}

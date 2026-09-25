@@ -1,0 +1,11 @@
+{
+  "fixture": "path-constant-and-prose-not-path-handling",
+  "description": "#749 negative controls: a pathlib constructor with a constant path and path_join with constant arguments are path-library usage with no untrusted input flow (trusted bookkeeping), and documentation prose mentioning path sanitization is not a code signal. Nothing fires; the provenance artifact is empty on both lists.",
+  "pr_files": [
+    { "filename": "src/config.py", "status": "modified", "additions": 1 },
+    { "filename": "src/layout.py", "status": "modified", "additions": 1 },
+    { "filename": "docs/guide.md", "status": "modified", "additions": 1 }
+  ],
+  "diff": "+CONFIG = Path('/etc/myapp/config.yaml')\n+layout = os.path.join(base, 'templates')\n+Operators must sanitize any configured paths before use.\n",
+  "linked_issues": []
+}
