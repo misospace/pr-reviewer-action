@@ -1,0 +1,28 @@
+{
+  "fixture": "path-anchor-untrusted-args-still-detected",
+  "description": "#749 refusal regressions: an anchor-anchored path call is trusted bookkeeping only when its remaining arguments are demonstrably static. Request/user/argv operands, bracket access (req[...]), f-string operands with adjacent quotes, deep nesting (any depth), and pathlib division chaining (Path(__file__).parent / request.args[...]) all REFUSE trusted-neutralization and fire untrusted_source_join: path_handling kind, flag, and provenance. Delimiters nested inside a pathlib division operand (call, subscript, attribute chain) do not terminate the operand scan.",
+  "pr_files": [
+    {
+      "filename": "src/app/serve.py",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "src/app/serve.ts",
+      "status": "modified",
+      "additions": 4
+    },
+    {
+      "filename": "src/app/serve_extra.py",
+      "status": "modified",
+      "additions": 3
+    },
+    {
+      "filename": "src/app/division_ops.py",
+      "status": "modified",
+      "additions": 2
+    }
+  ],
+  "diff": "diff --git a/src/app/serve.py b/src/app/serve.py\n+++ b/src/app/serve.py\n@@ -1,2 +1,4 @@\n+dest = Path(__file__).resolve().parent.joinpath(request.args[\"path\"])\n+target = os.path.join(os.path.dirname(__file__), user_supplied_name)\ndiff --git a/src/app/serve.ts b/src/app/serve.ts\n+++ b/src/app/serve.ts\n@@ -1,3 +1,7 @@\n+const p = path.resolve(__dirname, req.query.path);\n+const uploadName = req.query.name;\n+const dest = path.join(__dirname, uploadName);\n+const arg = path.resolve(__dirname, process.argv[2]);\ndiff --git a/src/app/serve_extra.py b/src/app/serve_extra.py\n+++ b/src/app/serve_extra.py\n@@ -1,3 +1,7 @@\n+joined = os.path.join(base, f'{env}/', request.args['p'])\n+deep = os.path.join(os.path.dirname(os.path.realpath(os.path.join(BASE, 'safe'))), request.args['q'])\n+divided = Path(__file__).parent / request.args['x']\ndiff --git a/src/app/division_ops.py b/src/app/division_ops.py\n+++ b/src/app/division_ops.py\n@@ -1,2 +1,4 @@\n+a = Path(BASE) / transform(request.args[\"p\"])\n+b = Path(BASE) / parts[request.args[\"i\"]]\n",
+  "linked_issues": []
+}

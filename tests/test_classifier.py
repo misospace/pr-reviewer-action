@@ -207,16 +207,40 @@ class TestPRKindFileServingChanges:
 
 
 class TestPRKindPathHandlingChanges:
+    # #749: positive controls — each of these is a real untrusted-path
+    # surface (traversal literals, containment/sanitization identifiers,
+    # archive extraction, symlink operations) and must keep firing.
     @pytest.mark.parametrize("pattern", [
-        "pathlib",
         "sanitize_path",
         "..\\..\\etc/passwd",
-        "path_join",
+        "os.path.join(base, request.args['p'])",
+        "tarfile",
+        "extractall(dest)",
+        "os.symlink(link, dest)",
+        "realpath",
     ])
     def test_path_handling_in_diff(self, pattern):
         files = [_make_file("utils.py")]
         kind = _classify_pr_kind(files, pattern)
         assert kind == "path_handling_changes"
+
+    # #749: negative controls — trusted path scaffolding and API mentions
+    # with no untrusted input flow must not classify path handling by
+    # themselves (the PR #748 false-positive class).
+    @pytest.mark.parametrize("pattern", [
+        "pathlib",
+        "import pathlib\nROOT = Path(__file__).resolve().parent.parent",
+        "path_join(base, 'static')",
+        "os.path.join(base, 'templates')",
+        'Path("/etc/myapp/config.yaml")',
+        "os.environ.get('OUTPUT_DIR')",
+    ])
+    def test_trusted_path_scaffolding_is_not_path_handling(self, pattern):
+        files = [_make_file("utils.py")]
+        kind = _classify_pr_kind(files, pattern)
+        assert kind == "app_code"
+        flags, _ = _detect_risk_flags(files, pattern, [])
+        assert "path_handling_changes" not in flags
 
     def test_esm_import_specifiers_are_not_traversal(self):
         # #679 review false positive: a cross-directory TypeScript import is
@@ -605,13 +629,670 @@ class TestEdgeCases:
         assert result.linked_issue_labels.count("priority/p1") <= 1
 
 
+class TestPathHandlingSignalModel:
+    """#749: classification requires a real untrusted-path surface.
+
+    Trusted path scaffolding (repository-root discovery, fixture paths,
+    path-library usage with no untrusted input flow) must not classify
+    path_handling_changes; genuine attacker-controlled path behavior must.
+    Every firing decision is explainable from the bounded
+    path_handling_provenance artifact."""
+
+    # -- Negative: the exact PR #748 false-positive shape -------------------
+
+    def test_repo_root_scaffolding_is_not_path_handling(self):
+        # PR #748: ordinary repository-root discovery in test scaffolding
+        # injected path-traversal / edge-case-path must_check items.
+        diff = "\n".join([
+            "+from pathlib import Path",
+            "+",
+            "+_ROOT = Path(__file__).resolve().parent.parent",
+            "+sys.path.insert(0, str(_ROOT))",
+        ])
+        files = [_make_file("scripts/fork_review_gate.py"), _make_file("tests/test_gate.py")]
+        result = classify_pr(files, diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+        assert not any("path traversal" in c for c in result.must_check)
+        assert not any("edge-case paths" in c for c in result.must_check)
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["signals"] == []
+
+    def test_node_repo_root_scaffolding_is_not_path_handling(self):
+        # The JS/TS shape of the same trusted bookkeeping, including a `../`
+        # literal inside a trusted-anchor join (module-relative resolution).
+        diff = "\n".join([
+            "+const templates = path.resolve(__dirname, \"../templates\");",
+            '+export const ROOT = Path(__file__).resolve().parent.parent;',
+            "+const dataFile = os.path.join(os.path.dirname(__file__), \"data.json\");",
+        ])
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+
+    def test_anchor_join_with_static_arguments_is_not_path_handling(self):
+        # Anchor + demonstrably static arguments = trusted bookkeeping, even
+        # when a static directory name contains a word from the untrusted
+        # vocabulary ("uploads") — quoted literals are static data.
+        diff = "\n".join([
+            '+const uploadsDir = path.join(__dirname, "uploads");',
+            '+const up = os.path.join(__dirname, "../uploads");',
+            '+const tpl = path.resolve(__dirname, `templates`, "base.html");',
+        ])
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+
+    # -- Refusal: anchor + untrusted operand is a real surface --------------
+
+    def test_anchor_join_with_request_arg_fires(self):
+        diff = '+target = os.path.join(__dirname, request.args["path"])\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_anchor_call_with_express_query_fires(self):
+        diff = '+const p = path.resolve(__dirname, req.query.path);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_anchor_call_with_user_input_fires(self):
+        diff = '+dest = os.path.join(__dirname, user_supplied_name)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_anchor_call_with_upload_operand_fires_via_direct_flow(self):
+        # The one-hop upload case (line above) has a direct-operand sibling:
+        # an untrusted request operand inside the anchor call fires directly.
+        diff = '+const dest = path.join(__dirname, req.query.name);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_anchor_call_with_argv_fires(self):
+        diff = '+const target = path.resolve(__dirname, process.argv[2]);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_chain_joinpath_with_untrusted_arg_fires(self):
+        # The pathlib anchor chain neutralizes only static joinpath arguments.
+        diff = '+out = Path(__file__).resolve().parent.joinpath(user_name)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_interpolated_literal_arg_fails_toward_detection(self):
+        # An interpolation-shaped quoted argument is NOT treated as static:
+        # its inner text stays visible to the untrusted-token check.
+        diff = '+dest = path.join(__dirname, f"{user_path}")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_import_with_constant_path_is_not_path_handling(self):
+        diff = "+CONFIG = Path('/etc/myapp/config.yaml')\n"
+        result = classify_pr([_make_file("src/config.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+
+    def test_doc_prose_about_sanitization_is_not_path_handling(self):
+        diff = "+Operators must sanitize any configured paths before use.\n"
+        result = classify_pr([_make_file("docs/guide.md")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_constant_join_is_not_path_handling(self):
+        diff = "+layout = os.path.join(base, 'templates')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    # -- Negative: test-file content discount -------------------------------
+
+    def test_traversal_literal_in_test_file_is_discounted(self):
+        # Static fixture paths under test directories are trusted bookkeeping:
+        # a `../` literal only inside tests/test_*.py must not classify path
+        # handling, but it must stay visible as a discounted signal.
+        diff = "\n".join([
+            "diff --git a/tests/test_gate.py b/tests/test_gate.py",
+            "+++ b/tests/test_gate.py",
+            "+HOSTILE = ('../../etc/passwd',)",
+        ])
+        result = classify_pr([_make_file("tests/test_gate.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+        discounted = result.path_handling_provenance["discounted"]
+        assert any(
+            s["signal"] == "traversal_literal" and s["source"] == "diff_test_file"
+            and "tests/test_gate.py" in s["files"]
+            for s in discounted
+        )
+
+    def test_material_signal_in_production_file_still_fires_despite_tests(self):
+        # The discount is per-file: test-file fixture paths never mask a real
+        # untrusted surface in a production chunk of the same PR.
+        diff = "\n".join([
+            "diff --git a/src/upload.py b/src/upload.py",
+            "+++ b/src/upload.py",
+            "+dest = os.path.join(UPLOAD_DIR, request.args['name'])",
+            "diff --git a/tests/test_upload.py b/tests/test_upload.py",
+            "+++ b/tests/test_upload.py",
+            "+FIXTURE = '../../etc/passwd'",
+        ])
+        result = classify_pr(
+            [_make_file("src/upload.py"), _make_file("tests/test_upload.py")],
+            diff_text=diff,
+        )
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(
+            s["signal"] == "untrusted_source_join" and "src/upload.py" in s["files"]
+            for s in fired
+        )
+
+    def test_headerless_diff_is_treated_conservatively(self):
+        # A diff without git headers cannot be attributed per file. When every
+        # changed file is a test file the whole diff is test content
+        # (discounted); any non-test changed file fires conservatively —
+        # unknown attribution keeps scrutiny, never drops it.
+        diff = "+HOSTILE = '../../etc/passwd'\n"
+        result = classify_pr([_make_file("tests/test_x.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"  # tests-only diff discounts
+        raw_kind = _classify_pr_kind([_make_file("src/x.py")], diff)
+        assert raw_kind == "path_handling_changes"  # non-test file fires
+
+    # -- Positive: genuine untrusted-path surfaces --------------------------
+
+    def test_untrusted_join_fires_with_provenance(self):
+        diff = "+target = os.path.join(base, request.args['path'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+        assert any("path traversal" in c for c in result.must_check)
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_untrusted_join_across_adjacent_line_fires(self):
+        diff = "+name = request.args['path']\n+target = os.path.join(base, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    # -- One-hop def/use into trusted-anchor constructions -------------------
+
+    def test_anchor_call_with_adjacent_one_hop_variable_fires(self):
+        # The anchor call must NOT be neutralized when one of its operands is
+        # assigned by an adjacent untrusted-source line: the construction
+        # must survive to be detected.
+        diff = "+name = request.args['path']\n+target = path.resolve(__dirname, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_anchor_join_with_adjacent_one_hop_variable_fires(self):
+        diff = "+name = request.args['path']\n+target = os.path.join(os.path.dirname(__file__), name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_pathlib_chain_with_adjacent_one_hop_variable_fires(self):
+        diff = "+name = request.args['path']\n+out = Path(__file__).resolve().parent.joinpath(name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_trusted_anchor_with_non_untrusted_adjacent_identifier_stays_clean(self):
+        # The adjacent assignment exists but its line carries no untrusted
+        # token — no one-hop edge, the anchor call stays trusted bookkeeping.
+        diff = "+title = config['title']\n+templates = path.resolve(__dirname, title)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    # -- Adjacency is not flow (co-occurrence false positive) ----------------
+
+    def test_unrelated_adjacent_request_line_does_not_fire(self):
+        # `request_id` is assigned from a request one line above, but the
+        # constant join never uses it — adjacency alone is not flow.
+        diff = "+request_id = request.args['id']\n+target = os.path.join(base, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert "path_handling_changes" not in result.risk_flags
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["signals"] == []
+
+    def test_unrelated_adjacent_token_without_assignment_does_not_fire(self):
+        # An untrusted token nearby with no assignment target yields no
+        # one-hop edge either.
+        diff = "+log.info('request received: %s', sid)\n+target = os.path.join(base, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_same_line_quoted_untrusted_word_does_not_fire(self):
+        # A static string literal containing untrusted vocabulary is data,
+        # not an operand.
+        diff = '+target = os.path.join(base, "request")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_lhs_lexical_request_word_does_not_fire(self):
+        # Same-line detection inspects the construction EXPRESSION, not the
+        # assignment target: `request_cache_path` is the LHS being bound, not
+        # an untrusted operand.
+        diff = '+request_cache_path = os.path.join(BASE, "static")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_quoted_adjacent_label_does_not_create_flow(self):
+        # `label = "request"` is a static quoted word: the adjacent one-hop
+        # check reads the assignment and tests the quote-stripped RHS, so no
+        # def/use edge exists.
+        diff = '+label = "request"\n+target = path.resolve(__dirname, label)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_trailing_comment_does_not_donate_untrusted_token(self):
+        # Same-line detection reads the construction's OPERANDS only: the
+        # word "request" in a trailing comment is prose, not input.
+        diff = '+target = os.path.join(BASE, "static")  # request cache path\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_sibling_statement_does_not_donate_untrusted_token(self):
+        # `audit(request.id)` after the join is a sibling expression —
+        # outside the construction's operands — and must not make the static
+        # join fire.
+        diff = '+const target = path.join(BASE, "static"); audit(request.id);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_bare_filename_identifier_is_not_a_source(self):
+        # `.filename` ATTRIBUTE ACCESS is the unsafe-upload operand shape; a
+        # bare `filename` identifier (a trusted constant propagated into a
+        # path) is bookkeeping, not proof of attacker influence.
+        diff = '+filename = "config.json"\n+dest = os.path.join(BASE, filename)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_join_direct_operand_fires(self):
+        # A construction call left open across the line break accumulates its
+        # continuation lines (bounded) — they ARE the operand list.
+        diff = "+target = os.path.join(\n+    BASE,\n+    request.args['p'],\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_multiline_closer_line_comment_is_clean(self):
+        # Continuation lines are scanned only through the closing paren: a
+        # trailing comment after the closer cannot donate a token.
+        diff = "+target = os.path.join(\n+    BASE,\n+)  # request cache path\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_sibling_statement_after_closer_is_clean(self):
+        diff = '+const target = path.join(\n+  BASE,\n+); audit(request.id);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_head_line_comment_is_clean(self):
+        diff = "+target = os.path.join(  # request cache\n+    BASE,\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_multiline_nested_construction_fires(self):
+        # Nested parens are tracked: a nested call closing mid-list never
+        # ends the scan while outer operands (a later untrusted argument)
+        # remain.
+        diff = ("+target = os.path.join(\n"
+                "+    os.path.dirname(__file__),\n"
+                "+    request.args['name'],\n"
+                "+)\n")
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_multiline_opening_line_nested_paren_depth(self):
+        # The opening line's REMAINDER contributes its paren balance to the
+        # initial depth: the nested `foo(` means the `safe)` closer must not
+        # terminate the scan before the later untrusted operand.
+        diff = "+target = os.path.join(foo(\n+    safe), request.args['x']\n+)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    # -- Adversarial-review regressions (F1-F8) ------------------------------
+
+    def test_fstring_adjacent_quotes_still_fire(self):
+        # The static-literal lexer pairs quotes correctly: the span between
+        # two adjacent quotes must not swallow `, request.args[`.
+        diff = "+ target = os.path.join(base, f'{x}', request.args['p'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_deep_nesting_one_liner_fires(self):
+        # Balanced-paren extraction has no nesting-depth limit: the OUTER
+        # call's operands are scanned through any number of nested calls.
+        diff = "+ x = os.path.join(os.path.dirname(os.path.realpath(os.path.join(BASE, 'safe'))), request.args['p'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_division_fires(self):
+        # `/` is pathlib's path-join operator: Path(__file__).parent /
+        # request.args['p'] is a real untrusted-path surface. The anchor
+        # chain refuses neutralization so the Path( head survives, and the
+        # operand scan extends through the division.
+        diff = "+ x = Path(__file__).parent / request.args['p']\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_pathlib_division_non_anchor_fires(self):
+        diff = "+ p = Path(BASE) / request.args['x']\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_division_one_hop_fires(self):
+        diff = "+name = request.args['p']\n+x = Path(__file__).parent / name\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_trusted_division_is_clean(self):
+        diff = '+ x = Path(__file__).parent / "static"\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_req_bracket_access_fires(self):
+        # Express.js bracket access: `req` is a request object in either
+        # access form.
+        diff = "+ const target = path.join(base, req['path']);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_vocabulary_near_misses_are_clean(self):
+        # Word-bounded source vocabulary: benign identifier near-misses are
+        # not untrusted sources.
+        for operand in ("requester_id", "username", "queryset", "payloads", "params_dict", "userdata"):
+            diff = f"+ x = os.path.join(base, {operand})\n"
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "app_code", operand
+            assert result.path_handling_provenance["fired"] is False, operand
+
+    def test_user_prefix_identifier_conservative_fire(self):
+        # `user_id`/`user_input`-shaped operands stay sources (user-owned
+        # path components are the classic traversal surface).
+        diff = "+ x = os.path.join(base, user_id)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_declaration_keyword_prefixes_are_identifiers(self):
+        # Declaration keywords must be separate tokens: `value`, `variable`,
+        # `constant`, `localpath` are plain identifiers, so the one-hop
+        # target is the full name, not a keyword+suffix fragment.
+        for name in ("value", "variable", "constant", "localpath", "values", "ours", "mything"):
+            diff = f"+{name} = request.args['p']\n+target = os.path.join(base, {name})\n"
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", name
+            fired = result.path_handling_provenance["signals"]
+            assert any(s["signal"] == "untrusted_source_join" for s in fired), name
+
+    def test_division_operand_isolation(self):
+        # The `/` division operand ends at the statement boundary: a sibling
+        # expression cannot donate untrusted tokens to a static division.
+        diff = '+x = Path(BASE) / "static"; audit(request.id)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_division_operand_shapes(self):
+        # Direct untrusted operand, chained division, and an operand inside
+        # an enclosing call all still fire.
+        for diff in (
+            '+x = Path(BASE) / request.args["p"]\n',
+            '+x = Path(BASE) / "static" / request.args["p"]\n',
+            "+foo(Path(BASE) / request.args['p'])\n",
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
+    def test_division_sibling_expressions_cannot_donate(self):
+        # The division operand ends at the operand's own nesting level: a
+        # sibling expression after a top-level `,`/`;` — in a tuple, list,
+        # dict, call argument, or statement sequence — is not part of the
+        # path-division expression and cannot donate untrusted tokens.
+        for diff in (
+            '+x = (Path(BASE) / "static", request.id)\n',
+            '+x = [Path(BASE) / "static", request.id]\n',
+            '+x = {"path": Path(BASE) / "static", "audit": request.id}\n',
+            '+foo(Path(BASE) / "static", request.id)\n',
+            '+render(Path(BASE) / "static", {"id": request.id})\n',
+            '+d = {"a": 1, "b": Path(BASE) / "static", "c": request.id}\n',
+            '+foo((Path(BASE) / "static", request.id))\n',
+            '+x = Path(BASE) / "static"; y = request.args["p"]\n',
+            '+x = Path(BASE) / a[0], request.args["p"]\n',
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_division_nested_operand_expressions_still_fire(self):
+        # Delimiters nested inside the operand itself — a call, subscript,
+        # attribute chain, container, or string interpolation — do not
+        # terminate the operand scan, so real untrusted operands still fire.
+        for diff in (
+            '+x = Path(BASE) / transform(request.args["p"])\n',
+            '+x = Path(BASE) / parts[request.args["i"]]\n',
+            '+x = Path(BASE) / obj.attr[request.args["i"]]\n',
+            '+d = {"a": 1, "b": Path(BASE) / request.args["p"]}\n',
+            "+x = Path(BASE) / f\"{request.args['p']}\"\n",
+            "+x = Path(BASE) / (request.args['p'])\n",
+            '+x = Path(BASE) / {"k": request.args["p"]}\n',
+            '+x = parts[Path(BASE) / request.args["i"]]\n',
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
+    def test_comment_vocabulary_is_not_code_signal(self):
+        # Comments and string contents are prose, not executable code: the
+        # lexical material classes (containment/sanitization, path reference
+        # identifiers) do not fire from them.
+        for diff, filename in (
+            ("+# sanitize_path handles configured paths\n", "src/app.py"),
+            ("+x = 1  # sanitize_path later\n", "src/app.py"),
+            ("+x = 1  # the filepath is logged\n", "src/app.py"),
+            ("+// sanitize_path helper\n", "src/app.ts"),
+            ("+const x = 1; // pathname docs\n", "src/app.ts"),
+            ('+log.info("sanitize_path ran")\n', "src/app.py"),
+            ('+log.info("filepath is shown")\n', "src/app.py"),
+            ('+log.info(f"sanitize_path ran for {x}")\n', "src/app.py"),
+            ('+_ROOT = Path(__file__).resolve()  # like abspath\n', "src/app.py"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_documentation_files_skip_lexical_classes(self):
+        # Documentation-only files (.md/.rst/.txt/...) carry no executable
+        # context: prose mentioning sanitization/path vocabulary is not a
+        # code signal. A headerless chunk is docs-skipped only when EVERY
+        # changed file is documentation.
+        for diff, filename in (
+            ("+Use sanitize_path before opening files.\n", "docs/guide.md"),
+            ("+The `filepath` value is displayed to the user.\n", "docs/guide.md"),
+            ("+The pathname field is informational.\n", "docs/ref.rst"),
+            ("+Run sanitize_path first.\n", "NOTES.txt"),
+            ("+Use sanitize_path before opening files.\n", "README.md"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "app_code", diff
+            assert result.path_handling_provenance["fired"] is False, diff
+
+    def test_code_context_same_vocabulary_still_fires(self):
+        # Paired controls: the EXACT vocabulary that is prose in comments and
+        # docs is a real signal in executable source.
+        for diff, filename in (
+            ("+def sanitize_path(p):\n    return os.path.commonpath([p])\n", "src/app.py"),
+            ('+filepath = request.args["path"]\n', "src/app.py"),
+            ("+p = commonpath([base, user_input])\n", "src/app.py"),
+            ('+p = os.path.realpath(request.args["p"])\n', "src/app.py"),
+            ("+function sanitizePath(p) {}\n", "src/app.ts"),
+            ("+x = sanitize_path(p)  # filepath helper\n", "src/app.py"),
+            ("+if is_relative_to(base, p):\n    pass\n", "src/app.py"),
+        ):
+            result = classify_pr([_make_file(filename)], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
+    def test_typed_annotation_one_hop_fires(self):
+        diff = "+ name: str = request.args['p']\n+ x = os.path.join(base, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_typed_const_ts_one_hop_fires(self):
+        diff = "+ const n: string = request.query.x;\n+ const t = path.join(base, n);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_four_plus_operand_multiline_fires(self):
+        # The continuation cap (8 lines) is a boundedness horizon, not a
+        # precision filter: operands beyond the third line still fire.
+        diff = "+ x = os.path.join(\n+     BASE,\n+     'a',\n+     'b',\n+     request.args['p'],\n+ )\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_deep_nested_multiline_fires(self):
+        diff = ("+ x = os.path.join(\n"
+                "+     os.path.dirname(\n"
+                "+         os.path.realpath(__file__),\n"
+                "+     ),\n"
+                "+     request.args['p'],\n"
+                "+ )\n")
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_string_join_is_not_path_construction(self):
+        # `", ".join(...)` is a string method on delimited text, not a
+        # filesystem path construction.
+        diff = '+csv = ", ".join(request.rows)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+
+    def test_filename_attribute_access_through_one_hop_fires(self):
+        diff = "+name = upload.filename\n+target = path.resolve(__dirname, name)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_user_controlled_path_constructor_fires(self):
+        diff = "+dest = pathlib.Path(user_input)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_upload_filename_operand_fires(self):
+        # `file.filename` is the untrusted operand — the reason this fires —
+        # not upload vocabulary in the assignment target or directory name.
+        diff = "+dest = os.path.join(base, file.filename)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_upload_vocabulary_without_operand_is_clean(self):
+        # `upload`-named targets/directories are trusted bookkeeping: without
+        # an untrusted operand the join never fires.
+        diff = "+upload_path = os.path.join(UPLOAD_DIR, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_anchor_call_with_upload_operand_fires_via_flow(self):
+        # An upload-named OPERAND fires through the one-hop def/use edge, not
+        # through the lexical `upload` word.
+        diff = "+const uploadName = req.query.name;\n+const dest = path.join(__dirname, uploadName);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_containment_check_fires(self):
+        diff = "+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\n+    abort(400)\n"
+        result = classify_pr([_make_file("src/serve.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "path_containment_or_sanitization" for s in fired)
+
+    def test_archive_extraction_fires(self):
+        diff = "+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n"
+        result = classify_pr([_make_file("src/ingest.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_symlink_operation_fires(self):
+        diff = "+os.symlink(target, link_path)\n"
+        result = classify_pr([_make_file("src/fsutil.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_filename_backed_signal_routes_and_attributes(self):
+        result = classify_pr([_make_file("src/path_join.py")], diff_text="")
+        assert result.pr_kind == "path_handling_changes"
+        assert result.risk_flags_with_files.get("path_handling_changes") == ["src/path_join.py"]
+        assert "path_handling_changes" in result.route_signals
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["source"] == "filename" for s in fired)
+
+    def test_filename_backed_signal_in_test_file_is_discounted(self):
+        result = classify_pr([_make_file("tests/test_filepath.py")], diff_text="")
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+        assert result.path_handling_provenance["discounted"]
+
+    # -- Provenance hygiene -------------------------------------------------
+
+    def test_provenance_samples_are_bounded_and_control_char_free(self):
+        hostile = "+x = os.path.join(base, request.args['p' * 400 + '\\x00\\x01\\x02'])\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=hostile)
+        for signal in result.path_handling_provenance["signals"]:
+            assert len(signal["samples"]) <= 3
+            for sample in signal["samples"]:
+                assert len(sample) <= 160
+                assert not any(ord(ch) < 0x20 and ch != " " for ch in sample)
+                assert "\x7f" not in sample
+
+    def test_provenance_signal_count_is_capped(self):
+        # Many distinct signal classes could flood the artifact; the model
+        # caps total buckets per list. (12 distinct constructions here map
+        # onto 6 classes at most — the cap assertion guards regressions.)
+        lines = [
+            "+a%d = os.path.join(base, request.args['p'])" % i for i in range(40)
+        ]
+        result = classify_pr([_make_file("src/app.py")], diff_text="\n".join(lines) + "\n")
+        assert len(result.path_handling_provenance["signals"]) <= 8
+
+    def test_provenance_files_per_signal_capped(self):
+        # MAX_PATH_FILES: one signal bucket attributes at most 8 files even
+        # when more changed files carry the vocabulary.
+        files = [_make_file(f"src/filepath_{i}.py") for i in range(10)]
+        result = classify_pr(files)
+        signals = result.path_handling_provenance["signals"]
+        assert len(signals) == 1
+        assert len(signals[0]["files"]) == 8
+
+
 class TestRouteSignals:
     """route_signals drives smart routing and must exclude content-only matches
     (the over-escalation fix)."""
 
     def test_content_only_path_match_not_in_route_signals(self):
-        # A diff that merely mentions os.path in an ordinary file must not route.
-        result = classify_pr([_make_file("app.py")], diff_text="x = os.path.join(a, b)")
+        # A genuine untrusted-path join in an ordinary file still flags the PR
+        # for checks, but a content-only match must not route (#159) — routing
+        # stays filename-gated under the #749 signal model.
+        result = classify_pr(
+            [_make_file("app.py")], diff_text="x = os.path.join(a, request.args['p'])"
+        )
         assert "path_handling_changes" in result.risk_flags       # still flagged for checks
         assert result.route_signals == []                          # but not for routing
 

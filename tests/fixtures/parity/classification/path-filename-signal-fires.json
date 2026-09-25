@@ -1,0 +1,9 @@
+{
+  "fixture": "path-filename-signal-fires",
+  "description": "#749 filename-backed signal: a changed file whose NAME carries identifier-shaped path vocabulary (path_join) fires the path_handling kind and flag, attributes the file, and routes (filename-backed signals are route-eligible, content-only ones are not).",
+  "pr_files": [
+    { "filename": "src/utils/path_join.py", "status": "added", "additions": 5 }
+  ],
+  "diff": "+def path_join(*parts):\n+    return '/'.join(parts)\n",
+  "linked_issues": []
+}
