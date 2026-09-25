@@ -774,5 +774,63 @@ class TestRevisionFidelity:
         assert run.verdict == "request_changes"
 
 
+PROMPT_OVERRIDE_SNAPSHOT_TEMPLATE = """#!/usr/bin/env bash
+set -u
+python3 - <<'PY'
+import json, os
+snap = {
+    k: os.environ.get(k)
+    for k in ("SYSTEM_PROMPT", "SYSTEM_PROMPT_FILE", "SYSTEM_PROMPT_MODE")
+}
+with open("env-snapshot.json", "w", encoding="utf-8") as f:
+    json.dump(snap, f)
+PY
+exit 0
+"""
+
+
+class TestPromptOverrideArms:
+    """#757 A/B arm override: the pinned prompt reaches run_review.sh verbatim."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_prompt_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in ("SYSTEM_PROMPT", "SYSTEM_PROMPT_FILE", "SYSTEM_PROMPT_MODE"):
+            monkeypatch.delenv(key, raising=False)
+
+    def _run_with(self, tmp_path: Path, config_extra: dict) -> dict:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = tmp_path / "fake_prompt_probe.sh"
+        script.write_text(PROMPT_OVERRIDE_SNAPSHOT_TEMPLATE, encoding="utf-8")
+        script.chmod(0o755)
+        config = dict(MODEL_CONFIG, **config_extra)
+        run = run_review_for_pr(
+            PR_ENTRY, "tools_off", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+        assert run.error is None
+        return _read_snapshot(repo_path)
+
+    def test_system_prompt_file_pins_replace_mode(self, tmp_path: Path) -> None:
+        prompt_file = tmp_path / "baseline-prompt.txt"
+        prompt_file.write_text("BASELINE PROMPT", encoding="utf-8")
+        snap = self._run_with(tmp_path, {"system_prompt_file": str(prompt_file)})
+        assert snap["SYSTEM_PROMPT_FILE"] == str(prompt_file)
+        assert snap["SYSTEM_PROMPT_MODE"] == "replace"
+        # The file content must never be inlined into the env.
+        assert snap["SYSTEM_PROMPT"] in (None, "")
+
+    def test_system_prompt_inline_pins_replace_mode(self, tmp_path: Path) -> None:
+        snap = self._run_with(tmp_path, {"system_prompt": "BASELINE PROMPT"})
+        assert snap["SYSTEM_PROMPT"] == "BASELINE PROMPT"
+        assert snap["SYSTEM_PROMPT_MODE"] == "replace"
+        assert snap["SYSTEM_PROMPT_FILE"] in (None, "")
+
+    def test_no_override_leaves_prompt_env_unset(self, tmp_path: Path) -> None:
+        snap = self._run_with(tmp_path, {})
+        assert snap["SYSTEM_PROMPT"] in (None, "")
+        assert snap["SYSTEM_PROMPT_FILE"] in (None, "")
+        assert snap["SYSTEM_PROMPT_MODE"] in (None, "")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
