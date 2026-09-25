@@ -45,10 +45,9 @@ def test_full_parity_run_passes_with_migration_gates():
                     continue
                 keys = [d.get("key") for d in fixture.get("divergences", [])][:8]
                 fixture_failures.append(f"{boundary['id']}/{fixture['fixture']}: {fixture['status']} {keys}")
-        pytest.fail(
+        raise AssertionError(
             f"parity harness failed: gates={gate_failures} "
-            f"fixtures={fixture_failures[:12]}",
-            pytrace=False,
+            f"fixtures={fixture_failures[:12]}"
         )
     assert report["schema_version"] == 1
     gate_ids = {gate["id"] for gate in report["gates"]}
