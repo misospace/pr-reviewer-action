@@ -1034,6 +1034,36 @@ class TestPathHandlingSignalModel:
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
+    def test_declaration_keyword_prefixes_are_identifiers(self):
+        # Declaration keywords must be separate tokens: `value`, `variable`,
+        # `constant`, `localpath` are plain identifiers, so the one-hop
+        # target is the full name, not a keyword+suffix fragment.
+        for name in ("value", "variable", "constant", "localpath", "values", "ours", "mything"):
+            diff = f"+{name} = request.args['p']\n+target = os.path.join(base, {name})\n"
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", name
+            fired = result.path_handling_provenance["signals"]
+            assert any(s["signal"] == "untrusted_source_join" for s in fired), name
+
+    def test_division_operand_isolation(self):
+        # The `/` division operand ends at the statement boundary: a sibling
+        # expression cannot donate untrusted tokens to a static division.
+        diff = '+x = Path(BASE) / "static"; audit(request.id)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_division_operand_shapes(self):
+        # Direct untrusted operand, chained division, and an operand inside
+        # an enclosing call all still fire.
+        for diff in (
+            '+x = Path(BASE) / request.args["p"]\n',
+            '+x = Path(BASE) / "static" / request.args["p"]\n',
+            "+foo(Path(BASE) / request.args['p'])\n",
+        ):
+            result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+            assert result.pr_kind == "path_handling_changes", diff
+
     def test_typed_annotation_one_hop_fires(self):
         diff = "+ name: str = request.args['p']\n+ x = os.path.join(base, name)\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)

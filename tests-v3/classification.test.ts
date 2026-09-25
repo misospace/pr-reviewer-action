@@ -561,6 +561,52 @@ test("#749: adversarial-review regressions (lexer, nesting, division, vocab boun
   assert.equal(trustedDivision.pathHandlingProvenance.fired, false);
 });
 
+test("#749: keyword-prefix identifiers and division operand isolation", () => {
+  // Declaration keywords must be separate tokens: `value`, `variable`,
+  // `constant`, `localpath` are plain identifiers — the one-hop target is
+  // the full name, not a keyword+suffix fragment.
+  for (const name of ["value", "variable", "constant", "localpath", "values", "ours", "mything"]) {
+    const result = classifyPr({
+      prFiles: files("src/app.py"),
+      diffText: `+${name} = request.args['p']\n+target = os.path.join(base, ${name})\n`,
+      linkedIssues: [],
+    });
+    assert.equal(result.prKind, "path_handling_changes", name);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+      `${name}: expected untrusted_source_join`,
+    );
+  }
+  // Real declaration keywords still work.
+  const keyword = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: "+const n = request.args['p'];\n+const t = path.join(base, n);\n",
+    linkedIssues: [],
+  });
+  assert.equal(keyword.prKind, "path_handling_changes");
+
+  // The `/` division operand ends at the statement boundary: a sibling
+  // expression cannot donate untrusted tokens to a static division.
+  const sibling = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+x = Path(BASE) / "static"; audit(request.id)\n',
+    linkedIssues: [],
+  });
+  assert.equal(sibling.prKind, "app_code");
+  assert.equal(sibling.pathHandlingProvenance.fired, false);
+
+  // Operand shapes that must still fire: direct, chained division, and an
+  // operand inside an enclosing call.
+  for (const diff of [
+    '+x = Path(BASE) / request.args["p"]\n',
+    '+x = Path(BASE) / "static" / request.args["p"]\n',
+    "+foo(Path(BASE) / request.args['p'])\n",
+  ]) {
+    const result = classifyPr({ prFiles: files("src/app.py"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],

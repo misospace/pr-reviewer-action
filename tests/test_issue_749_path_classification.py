@@ -371,6 +371,32 @@ def test_forged_anchor_with_untrusted_tail_fires(tmp_path) -> None:
     )
 
 
+def test_keyword_prefix_and_division_isolation(tmp_path) -> None:
+    # Declaration keywords are separate tokens: `variable`/`value` etc. are
+    # plain identifiers, so the one-hop target is the full name.
+    fired = _classify(
+        [{"filename": "src/app.py"}],
+        "+variable = request.args['p']\n"
+        "+target = os.path.join(base, variable)\n",
+        tmp_path,
+    )
+    assert fired["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in fired["path_handling_provenance"]["signals"]
+    )
+
+    # The `/` division operand ends at the statement boundary: a sibling
+    # expression cannot donate untrusted tokens to a static division.
+    clean = _classify(
+        [{"filename": "src/app.py"}],
+        '+x = Path(BASE) / "static"; audit(request.id)\n',
+        tmp_path,
+    )
+    assert clean["pr_kind"] != "path_handling_changes"
+    assert clean["path_handling_provenance"]["fired"] is False
+
+
 def test_multiline_opening_line_nested_paren_depth_fires(tmp_path) -> None:
     # The opening line's remainder (foo() contributes its paren balance to
     # the initial depth: the `safe)` closer must not end the scan before the

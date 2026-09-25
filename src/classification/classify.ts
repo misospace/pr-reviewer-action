@@ -255,7 +255,27 @@ function stripStaticStringLiterals(line: string): string {
  * assignments are idiomatic modern Python/TS, not exotic lvalues. Tuples,
  * subscripts, and attribute targets still yield no one-hop edge. `==`
  * comparisons never match. */
-const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)/;
+/** Declaration keywords must be separate TOKENS (trailing `\s+`) so
+ * `variable`/`constant`/`localpath`/`values` are identifiers, never
+ * keyword+suffix. */
+const UNTRUSTED_ASSIGNMENT =
+  /^[+\-]?\s*(?:(?:const|let|var|final|val|my|our|local)\s+)?\s*([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)/;
+
+/** Operand expression after a `/` division operator: to the first statement
+ * separator (`;`) or unbalanced `)` — sibling statements and enclosing-call
+ * closers are not part of the operand and cannot donate untrusted tokens. */
+function divisionOperand(text: string): string {
+  let depth = 0;
+  for (let pos = 0; pos < text.length; pos++) {
+    const ch = text[pos];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      if (depth === 0) return text.slice(0, pos);
+      depth--;
+    } else if (ch === ";") return text.slice(0, pos);
+  }
+  return text;
+}
 
 /** Assignment-target identifier of a line whose QUOTE-STRIPPED RHS reaches an
  * untrusted source (a one-hop def/use candidate). Null when the line is not a
@@ -318,9 +338,11 @@ function neutralizePathFalsePositives(
     const refused = refuse(match);
     if (refused !== '""') return refused;
     const staticTail = stripStaticStringLiterals(line.slice(offset + match.length));
-    if (pathlibDivisionTail(staticTail) === null) return refused;
-    if (matchesAny(staticTail, UNTRUSTED_SOURCE_PATTERNS)) return match;
-    if (oneHop.some((ident) => mentionsIdentifier(staticTail, ident))) return match;
+    const tailEnd = pathlibDivisionTail(staticTail);
+    if (tailEnd === null) return refused;
+    const tailOperand = divisionOperand(staticTail.slice(tailEnd));
+    if (matchesAny(tailOperand, UNTRUSTED_SOURCE_PATTERNS)) return match;
+    if (oneHop.some((ident) => mentionsIdentifier(tailOperand, ident))) return match;
     return '""';
   };
   return line
@@ -600,7 +622,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
         if (isPathlib) {
           const tailEnd = pathlibDivisionTail(line, close + 1);
           if (tailEnd !== null) {
-            operand += "/" + line.slice(tailEnd);
+            operand += "/" + divisionOperand(line.slice(tailEnd));
           }
         }
         spans.push(operand);

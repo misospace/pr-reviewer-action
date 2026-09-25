@@ -285,16 +285,35 @@ def _strip_static_string_literals(line: str) -> str:
     return "".join(out)
 
 # Simple assignment target: a leading identifier bound with `=` or `:=`
-# (const/let/var-style prefixes tolerated; the unified-diff `+`/`-`/space
-# marker is skipped). A BOUNDED type annotation is allowed between the
-# target and the `=` (`name: str = ...`, `const n: string = ...`) — typed
-# assignments are idiomatic modern Python/TS, not exotic lvalues. Tuples,
-# subscripts, and attribute targets still yield no one-hop edge. `==`
-# comparisons never match.
+# (declaration keywords must be separate TOKENS — a trailing `\s+` — so
+# `variable`/`constant`/`localpath` are identifiers, never keyword+suffix;
+# the unified-diff `+`/`-`/space marker is skipped). A BOUNDED type
+# annotation is allowed between the target and the `=` (`name: str = ...`,
+# `const n: string = ...`) — typed assignments are idiomatic modern
+# Python/TS, not exotic lvalues. Tuples, subscripts, and attribute targets
+# still yield no one-hop edge. `==` comparisons never match.
 _UNTRUSTED_ASSIGNMENT = re.compile(
-    r"^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*"
+    r"^[+\-]?\s*(?:(?:const|let|var|final|val|my|our|local)\s+)?\s*"
     r"([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)"
 )
+
+
+def _division_operand(text: str) -> str:
+    """Operand expression after a `/` division operator: to the first
+    statement separator (`;`) or unbalanced `)` — sibling statements and
+    enclosing-call closers are not part of the operand and cannot donate
+    untrusted tokens."""
+    depth = 0
+    for pos, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return text[:pos]
+            depth -= 1
+        elif ch == ";":
+            return text[:pos]
+    return text
 
 
 def _untrusted_assignment_target(line: str) -> str | None:
@@ -354,10 +373,12 @@ def _neutralize_path_false_positives(
         if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
             return text
         static_tail = _strip_static_string_literals(line[match.end():])
-        if _pathlib_division_tail(static_tail) is not None:
-            if any(pat.search(static_tail) for pat in UNTRUSTED_SOURCE_PATTERNS):
+        tail_end = _pathlib_division_tail(static_tail)
+        if tail_end is not None:
+            tail_operand = _division_operand(static_tail[tail_end:])
+            if any(pat.search(tail_operand) for pat in UNTRUSTED_SOURCE_PATTERNS):
                 return text
-            if any(re.search(rf"\b{re.escape(ident)}\b", static_tail) for ident in one_hop):
+            if any(re.search(rf"\b{re.escape(ident)}\b", tail_operand) for ident in one_hop):
                 return text
         return '""'
 
@@ -702,7 +723,7 @@ def _construction_operand_spans(lines: list[str], index: int) -> str:
                 if is_pathlib:
                     tail_end = _pathlib_division_tail(line, close + 1)
                     if tail_end is not None:
-                        operand += "/" + line[tail_end:]
+                        operand += "/" + _division_operand(line[tail_end:])
                 spans.append(operand)
     return "\n".join(spans)
 
