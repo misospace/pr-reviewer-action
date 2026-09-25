@@ -1355,7 +1355,7 @@ def test_661_report_telemetry_carries_disposition_counts() -> None:
     assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
     assert calibration_counts[DISPOSITION_INVALID_REMEDIATION] == 3
     assert calibration_counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 1
-    assert calibration_counts[DISPOSITION_NOT_FOUND] == 1
+    assert calibration_counts[DISPOSITION_NOT_FOUND] == 2
     assert calibration_counts[DISPOSITION_CORRECT] == 3
     assert report["summary"]["calibration_fixture_runs"] == sum(calibration_counts.values())
     assert report["summary"]["disposition_calibration_rate"] == 1.0

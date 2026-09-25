@@ -307,6 +307,59 @@ class TestEvaluateStructuredCoverage:
         assert outcome["status"] == "complete"
 
 
+class TestParserToCoverageEndToEnd:
+    """#750: full parser → coverage chain for the tri-state and the
+    malformed-duplicate hole."""
+
+    PATH_CHECK = "review for path traversal vulnerabilities"
+
+    def _parse(self, raw_output):
+        from pr_reviewer.response_parser import parse_response
+        return parse_response({
+            "choices": [{"message": {"content": json.dumps(raw_output)}, "finish_reason": "stop"}]
+        })
+
+    def test_malformed_duplicate_cannot_collapse_coverage_to_complete(self):
+        # The hole: a valid disposition followed by a malformed retraction
+        # of the same check. If the parser dropped the malformed entry, the
+        # single valid answer would mark coverage complete. The preserved
+        # "invalid" entry forces the duplicate/malformed invalidation.
+        parsed = self._parse({
+            "verdict": "approve",
+            "review_markdown": "x",
+            "required_check_dispositions": [
+                {"check": self.PATH_CHECK, "status": "satisfied", "rationale": "bounded"},
+                {"check": self.PATH_CHECK, "status": "N/A", "rationale": "retraction attempt"},
+            ],
+        })
+        assert [d["status"] for d in parsed["required_check_dispositions"]] == ["satisfied", "invalid"]
+        outcome = evaluate_structured_coverage([self.PATH_CHECK], parsed["required_check_dispositions"])
+        assert outcome["status"] == "incomplete"
+        assert outcome["checks"][0]["reason"] == "malformed-disposition"
+        assert outcome["checks"][0]["status"] == "unresolved"
+
+    def test_explicit_null_field_is_structured_incomplete_end_to_end(self):
+        parsed = self._parse({
+            "verdict": "approve",
+            "review_markdown": "The path checks are N/A, not applicable, skipped.",
+            "required_check_dispositions": None,
+        })
+        # Key present with None: not absence — coverage must NOT fall back
+        # to keyword matching (which this prose would partially satisfy).
+        outcome = structured_coverage_from_output([self.PATH_CHECK], parsed)
+        assert outcome is not None
+        assert outcome["status"] == "incomplete"
+        assert outcome["structured"] is False
+
+    def test_absent_field_is_the_only_legacy_fallback_end_to_end(self):
+        parsed = self._parse({
+            "verdict": "approve",
+            "review_markdown": "x",
+        })
+        assert "required_check_dispositions" not in parsed
+        assert structured_coverage_from_output([self.PATH_CHECK], parsed) is None
+
+
 class TestApplyRequiredCheckValidationStructured:
     """#750: the coexistence bridge — structured-first, legacy fallback."""
 
@@ -357,18 +410,52 @@ class TestApplyRequiredCheckValidationStructured:
         assert data["verdict"] == "approve"
         assert PATH_CHECKS[1] in data["review_markdown"]
 
-    def test_null_dispositions_fall_back_to_legacy_keyword_matching(self, tmp_path, monkeypatch):
+    def test_absent_field_falls_back_to_legacy_keyword_matching(self, tmp_path, monkeypatch):
+        # True key absence is the ONLY state that may use the legacy path.
         review = (
             "Sanitization via realpath; traversal through ../ rejected. "
             "Null byte and symlink handling is not reachable from this change."
         )
         self._setup(tmp_path, monkeypatch, PATH_CHECKS, {
             "verdict": "approve", "review_markdown": review,
-            "required_check_dispositions": None,
         })
         assert apply_required_check_validation("auto", "warn") == "complete"
         result = json.loads((tmp_path / "completeness.json").read_text())
         assert result["structured"] is False
+        assert "checks" not in result
+
+    def test_explicit_null_is_conservative_structured_incomplete_not_legacy(self, tmp_path, monkeypatch):
+        # A model that emitted the key as null engaged with the contract and
+        # produced no usable coverage: fail conservatively (structured,
+        # every check unresolved) — never the legacy keyword fallback, even
+        # though the prose below mentions the right keywords.
+        review = (
+            "Sanitization via realpath; traversal through ../ rejected. "
+            "Null byte and symlink handling is not reachable from this change."
+        )
+        self._setup(tmp_path, monkeypatch, PATH_CHECKS, {
+            "verdict": "approve",
+            "review_markdown": review,
+            "required_check_dispositions": None,
+        })
+        assert apply_required_check_validation("auto", "fail") == "incomplete"
+        data = json.loads((tmp_path / "ai-output.json").read_text())
+        assert data["verdict"] == "request_changes"
+        result = json.loads((tmp_path / "completeness.json").read_text())
+        assert result["structured"] is False
+        assert result["status"] == "incomplete"
+        assert set(result["missing"]) == set(PATH_CHECKS)
+        assert all(row["reason"] == "no-structured-dispositions" for row in result["checks"])
+
+    def test_type_confused_field_is_conservative_structured_incomplete(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, PATH_CHECKS, {
+            "verdict": "approve",
+            "review_markdown": "Approving.",
+            "required_check_dispositions": "N/A, all fine",
+        })
+        assert apply_required_check_validation("auto", "fail") == "incomplete"
+        data = json.loads((tmp_path / "ai-output.json").read_text())
+        assert data["verdict"] == "request_changes"
 
     def test_null_dispositions_legacy_incomplete(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch, PATH_CHECKS, {

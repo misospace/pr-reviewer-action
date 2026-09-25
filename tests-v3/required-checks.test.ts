@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { parseVerdictResponse } from "../src/model/verdict.js";
 import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
+
+/** OpenAI-shaped response wrapper, mirroring tests-v3/verdict.test.ts. */
+function openaiResponse(content: string): Record<string, unknown> {
+  return {
+    choices: [{ message: { content }, finish_reason: "stop" }],
+    usage: { completion_tokens: 10 },
+  };
+}
 
 function d(check: string, status: string, rationale?: string | null): NormalizedRequiredCheckDisposition {
   return { check, status: status as NormalizedRequiredCheckDisposition["status"], rationale: rationale ?? null };
@@ -190,4 +199,38 @@ test("#750: the snake_case artifact serializer matches the v2 shape", () => {
     checks: [{ check: "check a", status: "not_applicable", rationale: "grounded", reason: "ok" }],
     dropped_unknown: [],
   });
+});
+
+test("#750 end-to-end: parser output with a preserved malformed duplicate folds to incomplete", () => {
+  // Full chain: parseVerdictResponse → evaluateRequiredCheckCoverage. The
+  // second (malformed) answer must survive normalization as "invalid" so
+  // the duplicate invalidates the check instead of collapsing into the
+  // first valid disposition.
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: "review for path traversal vulnerabilities", status: "satisfied", rationale: "bounded" },
+      { check: "review for path traversal vulnerabilities", status: "N/A", rationale: "retraction attempt" },
+    ],
+  })));
+  const coverage = evaluateRequiredCheckCoverage(
+    ["review for path traversal vulnerabilities"],
+    verdict.requiredCheckDispositions,
+  );
+  assert.equal(coverage.status, "incomplete");
+  assert.equal(coverage.checks[0]!.reason, "malformed-disposition");
+  assert.equal(coverage.checks[0]!.status, "unresolved");
+
+  // Tri-state end to end: an explicitly emitted null is conservative
+  // structured-incomplete, while true absence is the only state that may
+  // use the legacy path (which the v3 enforcement seam does not have).
+  const emittedNull = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", required_check_dispositions: null,
+  })));
+  assert.equal(emittedNull.requiredCheckDispositionsEmitted, true);
+  const nullCoverage = evaluateRequiredCheckCoverage(PATH_CHECKS, emittedNull.requiredCheckDispositions);
+  assert.equal(nullCoverage.structured, false);
+  assert.equal(nullCoverage.status, "incomplete");
+  assert.ok(nullCoverage.checks.every((row) => row.reason === "no-structured-dispositions"));
 });

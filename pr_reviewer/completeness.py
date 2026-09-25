@@ -273,16 +273,22 @@ def evaluate_structured_coverage(
 def structured_coverage_from_output(must_check: list[str], output: object) -> dict | None:
     """Return the structured coverage artifact for a parsed review output.
 
-    None when the output carries no structured dispositions at all (the
-    legacy keyword path applies). Shared by the completeness bridge and the
-    escalation telemetry so both read the same contract.
+    Tri-state by key presence (#750): ``None`` only when the output does not
+    carry the key at all — true absence, where the legacy keyword path still
+    applies. A key explicitly emitted as ``null``/a non-array (the parser
+    preserves the key with a ``None`` value for that case) is NOT absence:
+    it returns the conservative structured artifact (every check
+    unresolved). Shared by the completeness bridge and the escalation
+    telemetry so both read the same contract.
     """
     if not isinstance(output, dict):
         return None
-    dispositions = output.get("required_check_dispositions")
-    if not isinstance(dispositions, list):
+    if "required_check_dispositions" not in output:
         return None
-    return evaluate_structured_coverage(must_check, dispositions)
+    dispositions = output["required_check_dispositions"]
+    return evaluate_structured_coverage(
+        must_check, dispositions if isinstance(dispositions, list) else None
+    )
 
 
 def apply_required_check_validation(
@@ -327,19 +333,21 @@ def apply_required_check_validation(
     else:
         structured = structured_coverage_from_output(must_check, data)
         if structured is not None:
-            # #750: the model engaged with the structured disposition
-            # contract — the structured evaluation is authoritative and no
-            # keyword mention can substitute for a missing or malformed
-            # disposition. A resolved check (satisfied, or grounded
-            # not_applicable) is complete; anything else is unresolved and
-            # reported as such.
+            # #750: the model addressed the structured disposition contract
+            # (the key is present) — the structured evaluation is
+            # authoritative and no keyword mention can substitute for a
+            # missing or malformed disposition. A resolved check (satisfied,
+            # or grounded not_applicable) is complete; anything else —
+            # including an explicitly emitted null — is unresolved and
+            # reported as such. `structured` mirrors the artifact: False
+            # when the emitted value carried no usable array.
             status = structured["status"]
             unresolved = [row["check"] for row in structured["checks"] if row["status"] == "unresolved"]
             resolved = [row["check"] for row in structured["checks"] if row["status"] != "unresolved"]
             result = {
                 "status": status,
                 "mode": mode,
-                "structured": True,
+                "structured": structured["structured"],
                 "missing": unresolved,
                 "addressed": resolved,
                 "checks": structured["checks"],

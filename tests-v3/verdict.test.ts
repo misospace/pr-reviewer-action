@@ -281,16 +281,24 @@ test("#750: structured required-check dispositions normalize onto the parsed ver
   assert.equal("required_check_dispositions" in verdict.extra, false);
 });
 
-test("#750: absent/null/non-array dispositions normalize to null (legacy coexistence path)", () => {
-  for (const raw of [undefined, null, "not a list", 42, {}]) {
-    const payload: Record<string, unknown> = { verdict: "approve", review_markdown: "x" };
-    if (raw !== undefined) payload.required_check_dispositions = raw;
-    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
-    assert.equal(verdict.requiredCheckDispositions, null, JSON.stringify(raw));
+test("#750: tri-state — true absence is distinguishable from an explicit null", () => {
+  const absent = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "x"}'));
+  assert.equal(absent.requiredCheckDispositionsEmitted, false);
+  assert.equal(absent.requiredCheckDispositions, null);
+  assert.equal("required_check_dispositions" in absent.extra, false);
+
+  for (const raw of [null, "not a list", 42, {}]) {
+    const payload: Record<string, unknown> = { verdict: "approve", review_markdown: "x", required_check_dispositions: raw };
+    const present = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
+    // Present-but-unusable is NOT absence: emitted stays true with a null
+    // array so the coverage layer fails conservatively instead of falling
+    // back to the legacy keyword path.
+    assert.equal(present.requiredCheckDispositionsEmitted, true, JSON.stringify(raw));
+    assert.equal(present.requiredCheckDispositions, null, JSON.stringify(raw));
   }
 });
 
-test("#750: malformed disposition entries are dropped, never credited", () => {
+test("#750: unattributable junk entries are dropped; attributable malformed ones are preserved as invalid", () => {
   const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve",
     review_markdown: "x",
@@ -307,9 +315,26 @@ test("#750: malformed disposition entries are dropped, never credited", () => {
     ],
   })));
   assert.deepEqual(verdict.requiredCheckDispositions, [
+    { check: "check a", status: "invalid", rationale: null },
+    { check: "check b", status: "invalid", rationale: null },
+    { check: "check c", status: "invalid", rationale: null },
+    { check: "check d", status: "invalid", rationale: null },
     { check: "check e", status: "satisfied", rationale: null },
     { check: "check f", status: "unresolved", rationale: "explicitly unresolved stays" },
   ]);
+});
+
+test("#750: a malformed duplicate cannot collapse a valid answer into complete coverage", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: "review for path traversal vulnerabilities", status: "satisfied", rationale: "bounded" },
+      { check: "review for path traversal vulnerabilities", status: "N/A", rationale: "second answer retracts it" },
+    ],
+  })));
+  assert.equal(verdict.requiredCheckDispositions!.length, 2);
+  assert.equal(verdict.requiredCheckDispositions![1]!.status, "invalid");
 });
 
 test("#750: check identities and rationales are sanitized and bounded", () => {

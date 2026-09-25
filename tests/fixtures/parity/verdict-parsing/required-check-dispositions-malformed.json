@@ -1,6 +1,6 @@
 {
   "fixture": "required-check-dispositions-malformed",
-  "description": "#750: hostile/malformed disposition entries are dropped deterministically (bad status, wrong types, N/A without rationale, overlong check echo, control characters collapsed, overlong rationale bounded) and a non-array field normalizes to null.",
+  "description": "#750: hostile/malformed disposition entries are handled deterministically (unattributable junk dropped; attributable malformed entries preserved as status invalid; control characters collapsed, overlong rationale bounded; non-array field normalizes to null).",
   "response": {
     "choices": [
       {

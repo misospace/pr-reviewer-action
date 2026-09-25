@@ -341,14 +341,22 @@ _REQUIRED_CHECK_STATUSES = ("satisfied", "not_applicable", "unresolved")
 def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] | None:
     """Normalise the model's structured required-check dispositions (#750).
 
-    Tolerant by design: a null/absent/non-array field stays ``None`` (the v2
-    coexistence fallback in :mod:`pr_reviewer.completeness` owns that case),
-    and an entry that is not a usable disposition object is dropped — the
-    deterministic coverage evaluation then reports the affected check as
-    unresolved, so dropping is conservative, never lenient. The check text
-    is the identity the model must echo; it is sanitised and bounded but
-    otherwise unaltered, and ``not_applicable`` without a usable rationale
-    is dropped (an ungrounded N/A is never a completed disposition).
+    Tri-state with key presence: :func:`parse_response` only writes this key
+    when the model emitted it, so callers can distinguish true absence (the
+    v2 coexistence fallback in :mod:`pr_reviewer.completeness` owns that
+    case) from an explicitly emitted ``null``/invalid type (conservatively
+    structured-incomplete, never the fallback).
+
+    Entries are preserved, never silently collapsed. An entry that cannot be
+    attributed to any check identity (non-object, non-string/empty/oversized
+    check text) is dropped; an attributable but malformed one — unknown
+    status prose alias, ``not_applicable`` without a usable rationale — is
+    preserved as ``{"check", "status": "invalid", "rationale": None}`` so
+    the deterministic coverage evaluation invalidates the check (the same
+    fail-conservative precedent as requirement_coverage.py normalizing
+    unusable claims to ``unknown``). Dropping a malformed duplicate must
+    never turn a valid+malformed double answer into a single valid
+    disposition.
     """
     if not isinstance(value, list):
         return None
@@ -368,6 +376,9 @@ def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] |
         raw_status = item.get("status")
         status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
         if status not in _REQUIRED_CHECK_STATUSES:
+            dispositions.append({"check": check, "status": "invalid", "rationale": None})
+            if len(dispositions) >= _MAX_REQUIRED_CHECKS:
+                break
             continue
 
         rationale = item.get("rationale")
@@ -379,6 +390,9 @@ def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] |
         else:
             rationale = None
         if status == "not_applicable" and rationale is None:
+            dispositions.append({"check": check, "status": "invalid", "rationale": None})
+            if len(dispositions) >= _MAX_REQUIRED_CHECKS:
+                break
             continue
 
         dispositions.append({"check": check, "status": status, "rationale": rationale})
@@ -600,13 +614,17 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     # model (typically a weaker local one) does not produce them.
     parsed["findings"] = _normalize_findings(parsed.get("findings"))
 
-    # Structured required-check dispositions (#750): normalized
-    # unconditionally so downstream consumers always see the canonical shape
-    # (None when the model did not emit the field; unusable entries dropped,
-    # which the deterministic coverage evaluation reports as unresolved).
-    parsed["required_check_dispositions"] = _normalize_required_check_dispositions(
-        parsed.get("required_check_dispositions")
-    )
+    # Structured required-check dispositions (#750): normalized only when
+    # the model emitted the key, so absence stays distinguishable from an
+    # explicitly emitted null — absence may use the temporary legacy keyword
+    # fallback; present-but-null/malformed fails conservatively as
+    # structured-incomplete. Attributable malformed entries are preserved
+    # with status "invalid" so a malformed duplicate cannot be collapsed
+    # into a single valid disposition.
+    if "required_check_dispositions" in parsed:
+        parsed["required_check_dispositions"] = _normalize_required_check_dispositions(
+            parsed["required_check_dispositions"]
+        )
 
     # Structured reviewer-requested smart escalation (#721): normalized
     # unconditionally so a malformed or absent field can never masquerade as

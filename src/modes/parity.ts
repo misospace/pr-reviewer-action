@@ -95,16 +95,20 @@ export function runVerdictParserMode(responsePath: string): void {
       }),
     };
     if (verdict.requirementCoverage !== undefined) parsed.requirement_coverage = verdict.requirementCoverage;
-    // #750 structured required-check dispositions: emitted explicitly
-    // (snake_case) so the parity comparison pins the normalized field, not
-    // raw extras. Null when the model did not emit the field at all.
-    parsed.required_check_dispositions = verdict.requiredCheckDispositions === null
-      ? null
-      : verdict.requiredCheckDispositions.map((disposition) => ({
-        check: disposition.check,
-        status: disposition.status,
-        rationale: disposition.rationale,
-      }));
+    // #750 structured required-check dispositions, tri-state with key
+    // presence: the key is mirrored only when the model emitted it (value:
+    // the normalized list, or null when it carried no usable array), so
+    // absence stays distinguishable from an explicit null in the parity
+    // comparison exactly as in the parsed dicts.
+    if (verdict.requiredCheckDispositionsEmitted) {
+      parsed.required_check_dispositions = verdict.requiredCheckDispositions === null
+        ? null
+        : verdict.requiredCheckDispositions.map((disposition) => ({
+          check: disposition.check,
+          status: disposition.status,
+          rationale: disposition.rationale,
+        }));
+    }
     // #721 structured escalation request: emitted explicitly (snake_case)
     // so the parity comparison pins the normalized fields, not raw extras.
     parsed.smart_review_requested = verdict.smartReviewRequested;

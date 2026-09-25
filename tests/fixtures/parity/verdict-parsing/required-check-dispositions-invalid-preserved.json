@@ -1,0 +1,15 @@
+{
+  "fixture": "required-check-dispositions-invalid-preserved",
+  "description": "#750: an attributable malformed duplicate (status prose alias over an already-satisfied check) is preserved as status invalid with rationale null — parser normalization must not collapse a valid+malformed double answer into a single valid disposition.",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Review\\n\\nBody.\", \"required_check_dispositions\": [{\"check\": \"review for path traversal vulnerabilities\", \"status\": \"satisfied\", \"rationale\": \"bounded to the data root\"}, {\"check\": \"review for path traversal vulnerabilities\", \"status\": \"N/A\", \"rationale\": \"second answer retracts it\"}]}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": { "completion_tokens": 60 }
+  }
+}

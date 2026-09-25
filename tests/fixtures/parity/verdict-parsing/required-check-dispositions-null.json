@@ -1,0 +1,15 @@
+{
+  "fixture": "required-check-dispositions-null",
+  "description": "#750 tri-state: an explicitly emitted null is present-but-unusable — the parsed verdict keeps the key with null (never absence, so the legacy keyword fallback must not apply).",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"approve\", \"review_markdown\": \"## Review\\n\\nBody.\", \"required_check_dispositions\": null}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": { "completion_tokens": 30 }
+  }
+}

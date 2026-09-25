@@ -110,7 +110,15 @@ export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
 export interface NormalizedRequiredCheckDisposition {
   /** The check text as the model echoed it (sanitized, bounded). */
   check: string;
-  status: RequiredCheckStatus;
+  /**
+   * One of the three reviewer dispositions, or the internal-only
+   * `"invalid"` marker: the model attributed an answer to this check but
+   * the answer was unusable (unknown status alias, ungrounded
+   * not_applicable). The coverage evaluation treats it as
+   * malformed and leaves the check unresolved; it is never a valid
+   * disposition and never appears in the wire schema.
+   */
+  status: RequiredCheckStatus | "invalid";
   /** Bounded control-char-free rationale; null when absent/empty. */
   rationale: string | null;
 }
@@ -132,12 +140,16 @@ export interface ParsedReviewVerdict {
   findings: NormalizedFinding[];
   requirementCoverage: unknown;
   /**
-   * #750: structured dispositions for the deterministic must_check items.
-   * Null when the model did not emit the field at all (legacy coexistence
-   * path); malformed/unknown entries are dropped by the parser and surface
-   * as unresolved coverage in the deterministic completeness evaluation.
+   * #750: structured dispositions for the deterministic must_check items —
+   * the normalized array when the model emitted a usable one, null when the
+   * key was present but carried no usable array. Tri-state with
+   * `requiredCheckDispositionsEmitted`: only true key absence may use the
+   * legacy coexistence path; an explicitly emitted null/malformed value
+   * fails conservatively as structured-incomplete.
    */
   requiredCheckDispositions: NormalizedRequiredCheckDisposition[] | null;
+  /** True iff the model emitted the `required_check_dispositions` key at all. */
+  requiredCheckDispositionsEmitted: boolean;
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;

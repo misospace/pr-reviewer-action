@@ -43,6 +43,27 @@ mandatory checks, duplicate one check to satisfy another (duplicates
 deterministically invalidate the check), or alter the deterministic text and
 still count it as covered.
 
+**Attributable malformed entries are preserved, never collapsed.** A
+disposition whose check identity is usable but whose answer is not — an
+unknown status prose alias (`"N/A"`), a `not_applicable` without a usable
+rationale — is kept by the parser as `{check, status: "invalid",
+rationale: null}` (internal-only marker, never in the wire schema; the same
+fail-conservative precedent as `requirement_coverage` normalizing unusable
+claims to `unknown`). The coverage evaluator treats it as malformed and
+leaves the check unresolved, so a valid answer followed by a malformed
+"retraction" of the same check can never fold into a single valid
+disposition and complete coverage. Only entries with no attributable
+identity (non-object, non-string/empty/oversized check text) are dropped.
+
+**Tri-state with key presence.** True absence of the
+`required_check_dispositions` key — the only state that may use the
+temporary legacy keyword fallback — is distinct from an explicitly emitted
+`null` or another invalid type: the parser preserves a present-but-unusable
+key with a `null` value, and the bridge treats it as structured coverage
+with no usable array (every check unresolved). `#678` reads the same
+tri-state (`requiredCheckDispositions` + `requiredCheckDispositionsEmitted`
+in `src/model/types.ts`).
+
 ### When `not_applicable` is legitimate
 
 Grounded in the actual change, for example: there is no attacker-controlled
