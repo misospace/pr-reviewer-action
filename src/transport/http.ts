@@ -19,23 +19,109 @@ import type { ApiFormat } from "../model/types.js";
  * 4xx/5xx errors) is a typed http_status failure with the body preserved,
  * exactly like v2's `curl` exit-22 path, so a "context length exceeded"
  * body survives.
+ *
+ * Response-byte ceiling (#745): receipt is bounded by bytes as well as time.
+ * Every response — successful non-streamed, streamed/SSE, and non-2xx error
+ * bodies — is counted in received bytes as chunks arrive; once the byte
+ * budget (`DEFAULT_MAX_RESPONSE_BYTES`, overridable per call via
+ * `maxResponseBytes`) is exceeded, the request is destroyed immediately and
+ * a typed `response_too_large` failure is returned. The cap sits below the
+ * SSE reassembler, so an oversized body never reaches `sse.ts`. The budget
+ * counts actual received bytes (Buffers, UTF-8-safe across chunk
+ * boundaries), never decoded string lengths, and no Content-Length
+ * pre-check is used: byte counting is the only authority, so a lying
+ * header cannot bypass it.
  */
 
-export type TransportFailureKind = "connect_timeout" | "request_timeout" | "network" | "http_status";
+export type TransportFailureKind =
+  | "connect_timeout"
+  | "request_timeout"
+  | "network"
+  | "http_status"
+  | "response_too_large";
+
+/**
+ * Finite response-byte ceiling for model calls (#745). The timeout bounds
+ * duration, not bytes, so an endless or hostile endpoint could otherwise
+ * buffer unboundedly before the deadline fires. 32 MiB leaves roughly an
+ * order of magnitude of headroom above any legitimate model response — a
+ * 1M-token completion is a few MiB of raw text at most, and SSE protocol
+ * framing adds only overhead — while capping worst-case buffering at a
+ * bounded allocation. Provider-agnostic by design: no model- or
+ * vendor-specific limit. Not a public Action input; callers (the #678
+ * orchestrator) may override per call via `maxResponseBytes`.
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Bounded diagnostic prefix retained from an oversized non-2xx body (#745):
+ * provider error text that arrived early (e.g. a context-length message)
+ * stays available for routing/retry diagnostics without retaining the
+ * oversized body. Truncation is always made explicit in the carried body.
+ */
+export const OVERSIZE_ERROR_BODY_PREFIX_BYTES = 2048;
+
+const OVERSIZE_BODY_MARKER =
+  "…[error body truncated: response exceeded the transport response-byte limit]";
 
 export class TransportFailure extends Error {
   readonly kind: TransportFailureKind;
   readonly status?: number;
-  /** Preserved response body for http_status failures (never truncated). */
+  /**
+   * Preserved response body: the full body for http_status failures (never
+   * truncated), or a bounded prefix plus an explicit truncation marker for
+   * oversized non-2xx bodies (#745).
+   */
   readonly body?: string;
+  /** Configured response-byte ceiling (#745, response_too_large only). */
+  readonly maxResponseBytes?: number;
+  /** Bytes observed before the abort, including the chunk that crossed the limit. */
+  readonly bytesReceived?: number;
 
-  constructor(kind: TransportFailureKind, message: string, options: { status?: number; body?: string; cause?: unknown } = {}) {
+  constructor(
+    kind: TransportFailureKind,
+    message: string,
+    options: {
+      status?: number;
+      body?: string;
+      maxResponseBytes?: number;
+      bytesReceived?: number;
+      cause?: unknown;
+    } = {},
+  ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "TransportFailure";
     this.kind = kind;
     if (options.status !== undefined) this.status = options.status;
     if (options.body !== undefined) this.body = options.body;
+    if (options.maxResponseBytes !== undefined) this.maxResponseBytes = options.maxResponseBytes;
+    if (options.bytesReceived !== undefined) this.bytesReceived = options.bytesReceived;
   }
+}
+
+function oversizeFailure(
+  status: number,
+  observed: number,
+  maxResponseBytes: number,
+  prefixChunks: Buffer[],
+): TransportFailure {
+  const options: {
+    status?: number;
+    body?: string;
+    maxResponseBytes: number;
+    bytesReceived: number;
+  } = { maxResponseBytes, bytesReceived: observed };
+  if (status !== 0) options.status = status;
+  if (status < 200 || status >= 300) {
+    // Non-2xx: preserve the bounded prefix plus an explicit truncation
+    // marker. The full body is never retained (#745).
+    options.body = `${Buffer.concat(prefixChunks).toString("utf8")}${OVERSIZE_BODY_MARKER}`;
+  }
+  return new TransportFailure(
+    "response_too_large",
+    `model response exceeded the ${maxResponseBytes}-byte response limit (received at least ${observed} bytes)`,
+    options,
+  );
 }
 
 const NETWORK_ERROR_CODES = new Set([
@@ -64,6 +150,8 @@ export interface HttpCallInput {
   requestTimeoutSec: number;
   connectTimeoutSec: number;
   stream: boolean;
+  /** Response-byte ceiling; defaults to DEFAULT_MAX_RESPONSE_BYTES (#745). */
+  maxResponseBytes?: number;
 }
 
 export interface HttpCallResult {
@@ -86,6 +174,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
   const url = resolveEndpoint(input.baseUrl, input.apiFormat);
   const secure = url.protocol === "https:";
   const transport = secure ? https : http;
+  const maxResponseBytes = input.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (input.apiFormat === "anthropic") {
@@ -121,11 +210,47 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         headers,
       },
       (response) => {
+        const status = response.statusCode ?? 0;
         const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        // Bounded diagnostic prefix, accumulated independently so an
+        // oversized body can be abandoned without retaining it (#745).
+        const prefixChunks: Buffer[] = [];
+        let prefixBytes = 0;
+        let received = 0;
+        let abandoned = false;
+
+        response.on("data", (chunk: Buffer) => {
+          if (abandoned) return;
+          // Bounded diagnostic prefix first: it is capped at
+          // OVERSIZE_ERROR_BODY_PREFIX_BYTES regardless of outcome, so it is
+          // always safe to retain — including from the chunk that crosses
+          // the limit (a one-chunk error body still keeps its prefix).
+          if (prefixBytes < OVERSIZE_ERROR_BODY_PREFIX_BYTES) {
+            // Copy, don't subarray: a subarray would pin the parent chunk
+            // buffer alive after the body is abandoned.
+            const take = Math.min(chunk.length, OVERSIZE_ERROR_BODY_PREFIX_BYTES - prefixBytes);
+            prefixChunks.push(Buffer.from(chunk.subarray(0, take)));
+            prefixBytes += take;
+          }
+          if (received + chunk.length > maxResponseBytes) {
+            // Byte budget exceeded mid-receipt: latch the typed failure,
+            // drop the accumulated body (only the bounded prefix survives),
+            // and tear the request down immediately. Destroyed without a
+            // synthetic error so no later socket failure can race this
+            // one; settle() has already latched, so any subsequent
+            // error/close events on the request or response no-op.
+            abandoned = true;
+            chunks.length = 0;
+            const observed = received + chunk.length;
+            settle(() => reject(oversizeFailure(status, observed, maxResponseBytes, prefixChunks)));
+            request.destroy();
+            return;
+          }
+          received += chunk.length;
+          chunks.push(chunk);
+        });
         response.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
-          const status = response.statusCode ?? 0;
           if (status < 200 || status >= 300) {
             settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, { status, body })));
             return;
