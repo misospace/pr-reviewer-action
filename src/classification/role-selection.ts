@@ -192,6 +192,9 @@ export function classificationFromArtifact(raw: unknown): PRClassification | nul
     mustCheck: cleanStrList(rec.must_check),
     linkedMetadataUncertain: rec.linked_metadata_uncertain === true,
     linkedMetadataUncertainty: uncertainty,
+    // #749 provenance is a diagnostic, not a selection input: the persisted
+    // artifact's provenance is not consumed here.
+    pathHandlingProvenance: { fired: false, signals: [], discounted: [] },
   };
 }
 

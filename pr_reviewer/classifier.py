@@ -139,12 +139,37 @@ FILE_SERVING_PATTERNS = [
     re.compile(r"staticfiles?/"),
 ]
 
-# Path handling changes — identifier-shaped patterns over filenames and diff
-# content, plus the traversal-literal pattern (see PATH_TRAVERSAL_PATTERN)
-# which is scanned over module-specifier-filtered diff text.
-PATH_HANDLING_PATTERNS = [
-    re.compile(r"\bpathlib\b", re.IGNORECASE),
-    re.compile(r"\bos\.path\b", re.IGNORECASE),
+# Path handling changes (#749 signal model) — classification requires a real
+# untrusted-path surface. The former model scanned raw diff content for broad
+# path-API mentions (`pathlib`, `os.path`, ...), so ordinary trusted path
+# scaffolding classified as path_handling_changes and injected traversal /
+# edge-case-path must_check items into benign PRs (the PR #748 false
+# positive: `ROOT = Path(__file__).resolve().parent.parent` in a test
+# helper). The model below distinguishes:
+#
+#   trusted path bookkeeping (never fires alone)
+#     - repository-root discovery: `Path(__file__).resolve().parent...`,
+#       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
+#     - module resolution specifiers (`from "../x.js"` — kept from #720);
+#     - path-library usage with no untrusted input flow
+#       (`Path("/etc/myapp/config.yaml")`, `path_join(base, "static")`);
+#     - signals found only in test/fixture files (static fixture paths).
+#
+#   material path-handling changes (fire the kind, flag, and must_check)
+#     - traversal literals outside specifiers and trusted-anchor calls;
+#     - path normalization/sanitization/containment logic;
+#     - untrusted (request/user/...) values reaching path construction;
+#     - archive extraction and symlink-sensitive operations;
+#     - identifier-shaped path vocabulary in changed filenames.
+#
+# Every signal is recorded in the `path_handling_provenance` artifact field
+# (bounded, class-categorized — never raw unbounded PR text) so a future
+# false positive is debuggable without reading classifier internals.
+
+# Filename-backed signal vocabulary: identifier-shaped path terms in changed
+# FILENAMES (e.g. `filepath.ts`, `path_join.py`, `sanitize_path.go`). A
+# filename hit means the PR modifies dedicated path-handling code.
+PATH_HANDLING_FILENAME_PATTERNS = [
     re.compile(r"filepath|pathname", re.IGNORECASE),
     # Identifier-shaped joins only (sanitize_path, cleanPath, resolvePath):
     # a prose line like "sanitizes ... paths" in documentation must not read
@@ -153,11 +178,12 @@ PATH_HANDLING_PATTERNS = [
     re.compile(r"path_join|joinpath|resolve[\w]*path|path[\w]*resolve", re.IGNORECASE),
 ]
 
-# Path traversal literals: "../" or "..\". Scanned ONLY over diff text with
-# module-specifier lines removed: an ESM import like
-# `from "../runtime/subprocess.js"` is module resolution, not filesystem
-# traversal, and every cross-directory TypeScript change would otherwise
-# classify as path handling (the #679 review false positive).
+# Path traversal literals: "../" or "..\". Scanned ONLY over neutralized diff
+# text (see _neutralize_path_false_positives): module specifiers and
+# trusted-anchor calls are removed first, so neither an ESM import like
+# `from "../runtime/subprocess.js"` (#679 false positive) nor trusted
+# repository-root joins like `path.resolve(__dirname, "../templates")`
+# count as traversal.
 PATH_TRAVERSAL_PATTERN = re.compile(r"\.\./|\.\.\\", re.IGNORECASE)
 
 # A module specifier is the quoted path inside an ESM/CJS import construct —
@@ -174,27 +200,736 @@ _SPECIFIER_QUOTED = re.compile(
     re.IGNORECASE,
 )
 
+# Trusted path anchors: tokens whose value is the location of the source
+# file itself. Expressions built from them are repository-root discovery,
+# never attacker-controlled path surfaces.
+_TRUSTED_ANCHOR_TOKEN = re.compile(
+    r"""\b(?:__file__|__dirname|__filename)\b"""
+    r"""|\bimport\.meta\.(?:url|dirname|filename)\b""",
+)
 
-def _diff_without_module_specifiers(diff_text: str) -> str:
-    """Diff text with module-specifier literals neutralized, for the
-    path-traversal heuristic only. Line structure is preserved: only the
-    quoted specifier path is replaced, so traversal literals elsewhere on
-    the same line still match."""
-    return "\n".join(
-        _SPECIFIER_QUOTED.sub('""', line)
-        for line in diff_text.splitlines()
+# A `Path(__file__)...` chain: the anchor plus bounded pure-chaining calls
+# (.resolve(), .parent, .parents[N], .joinpath("..."), ...). One level of
+# call arguments is consumed; deeper nesting fails to match and stays in the
+# scanned text (conservative). joinpath arguments go through the same
+# untrusted-refusal check as anchor calls (see
+# _refuse_untrusted_anchor_neutralization).
+_PATHLIB_ANCHOR_CHAIN = re.compile(
+    r"""\bPath\s*\(\s*(?:__file__|__filename)\s*\)"""
+    r"""(?:\s*\.\s*(?:resolve|absolute|parent|parents\[\d+\]|joinpath|name|stem|as_posix|as_uri|is_dir|is_file|exists|stat)\b\s*(?:\(\s*[^()]*\))?)*"""
+)
+
+# Anchor-anchored path calls: a path construction/resolution call whose FIRST
+# argument is a trusted anchor — `path.resolve(__dirname, "../templates")`,
+# `os.path.join(os.path.dirname(__file__), "data.json")`, `resolve(__file__)`.
+# The whole call is trusted bookkeeping ONLY when the remaining arguments are
+# demonstrably static (string literals or plain identifiers from the bounded
+# trusted vocabulary): an untrusted operand anywhere in the call REFUSES
+# neutralization so the untrusted-join signal can fire on it
+# (`path.resolve(__dirname, request.args["path"])` is a real surface).
+# Only one argument level is consumed (no nested parens in the tail);
+# unmatched forms stay in the scanned text (conservative).
+_ANCHOR_PATH_CALL = re.compile(
+    r"""(?:[.]|\b)(?:join|resolve|normalize|realpath|abspath|normpath|dirname|basename|joinpath)\s*\(\s*"""
+    r"""(?:__file__|__dirname|__filename|import\.meta\.(?:url|dirname|filename)"""
+    r"""|(?:os\.path\.)?(?:dirname|basename|abspath|realpath)\s*\(\s*(?:__file__|__dirname|__filename)\s*\)"""
+    r"""|Path\s*\(\s*(?:__file__|__filename)\s*\)(?:\.(?:resolve|parent|parents\[\d+\]|absolute)\b)*)"""
+    r"""\s*(?:,\s*[^()]*)?\)"""
+)
+
+# A quoted string literal with NO interpolation marker (`{`, `$`, `%`): its
+# content is static data. Interpolation-shaped literals are deliberately NOT
+# stripped, so `f"{user}"` / `` `${x}` `` keep their inner text visible to the
+# untrusted-token check (fail toward detection).
+# Static string-literal lexer: replaces STATIC literal contents with an
+# empty literal while preserving interpolation-shaped ones (`f"{x}"`,
+# `` `${y}` ``, `%`-forms), whose inner text stays visible to the
+# untrusted-token check (fail toward detection). A paired-quote char walk
+# (escape-aware) replaces the former regex approximation, which could
+# consume code between two ADJACENT quotes — `f'{x}', request.args['p']`
+# lost its `request` operand to the span between the quotes.
+def _strip_static_string_literals(line: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            content: list[str] = []
+            closed = False
+            while j < n:
+                c = line[j]
+                if c == "\\" and j + 1 < n:
+                    content.append(line[j:j + 2])
+                    j += 2
+                    continue
+                if c == ch:
+                    closed = True
+                    break
+                content.append(c)
+                j += 1
+            if closed:
+                text = "".join(content)
+                if "{" in text or "$" in text or "%" in text:
+                    out.append(ch + text + ch)
+                else:
+                    out.append(ch + ch)
+                i = j + 1
+            else:
+                out.append(ch + "".join(content))
+                i = n
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+# Simple assignment target: a leading identifier bound with `=` or `:=`
+# (declaration keywords must be separate TOKENS — a trailing `\s+` — so
+# `variable`/`constant`/`localpath` are identifiers, never keyword+suffix;
+# the unified-diff `+`/`-`/space marker is skipped). A BOUNDED type
+# annotation is allowed between the target and the `=` (`name: str = ...`,
+# `const n: string = ...`) — typed assignments are idiomatic modern
+# Python/TS, not exotic lvalues. Tuples, subscripts, and attribute targets
+# still yield no one-hop edge. `==` comparisons never match.
+_UNTRUSTED_ASSIGNMENT = re.compile(
+    r"^[+\-]?\s*(?:(?:const|let|var|final|val|my|our|local)\s+)?\s*"
+    r"([A-Za-z_]\w*)\s*(?::\s*[^=()]{0,60})?=(?!=)"
+)
+
+
+# Closing brackets mapped to their openers, for division-operand scanning.
+_DIVISION_OPERAND_CLOSER = {")": "(", "]": "[", "}": "{"}
+
+
+def _division_operand(text: str) -> str:
+    """The expression belonging to a `/` path-division: scanned from the
+    operand start to the end of THAT expression, at the operand's starting
+    nesting level. Terminates on the first top-level ``,`` or ``;``, or on
+    an unmatched closing bracket (one that closes an enclosing context the
+    operand did not open). Bracket nesting is tracked per type (`()`, `[]`,
+    `{}`) and quoted spans are skipped whole (escape-aware), so delimiters
+    inside a call/subscript/container — or inside a string literal — that
+    belong to the operand never terminate it, while sibling expressions at
+    the operand's own level cannot donate untrusted tokens. Operates on the
+    already quote-lexed representation; surviving quotes are
+    interpolation-shaped literals."""
+    out: list[str] = []
+    depth = {"(": 0, "[": 0, "{": 0}
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            while j < n:
+                c = text[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == ch:
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1 if j < n else n
+            continue
+        if ch in depth:
+            depth[ch] += 1
+        elif ch in _DIVISION_OPERAND_CLOSER:
+            opener = _DIVISION_OPERAND_CLOSER[ch]
+            if depth[opener] == 0:
+                break  # closes an enclosing context: not part of the operand
+            depth[opener] -= 1
+        elif ch in (",", ";") and not any(depth.values()):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _untrusted_assignment_target(line: str) -> str | None:
+    """Assignment-target identifier of a line whose QUOTE-STRIPPED RHS
+    reaches an untrusted source (a one-hop def/use candidate). None when the
+    line is not a simple assignment or its RHS carries no untrusted token —
+    static quoted words like ``label = "request"`` are data, not flow, and
+    never create an edge."""
+    m = _UNTRUSTED_ASSIGNMENT.match(line)
+    if not m:
+        return None
+    rhs = _strip_static_string_literals(line[m.end():])
+    if any(pat.search(rhs) for pat in UNTRUSTED_SOURCE_PATTERNS):
+        return m.group(1)
+    return None
+
+
+def _one_hop_untrusted_targets(prev_line: str, next_line: str) -> list[str]:
+    """Assignment-target identifiers carried by adjacent untrusted-source
+    lines: the one-hop def/use candidates for the line being neutralized or
+    scanned. Bounded by construction (at most two neighbors)."""
+    targets: list[str] = []
+    for line in (prev_line, next_line):
+        ident = _untrusted_assignment_target(line)
+        if ident and ident not in targets:
+            targets.append(ident)
+    return targets
+
+
+def _neutralize_path_false_positives(
+    line: str,
+    prev_line: str = "",
+    next_line: str = "",
+) -> str:
+    """One diff line with trusted path scaffolding neutralized (replaced by
+    an empty literal). Line structure is preserved: neutralization is
+    literal-scoped, so material signals elsewhere on the same line still
+    match. The adjacent RAW lines feed the one-hop def/use check: an anchor
+    call is NOT neutralized when one of its operands is a variable that an
+    adjacent untrusted-source line assigns — otherwise
+    `name = request.args["path"]` / `path.resolve(__dirname, name)` would
+    lose its construction call before the untrusted-join scan sees it."""
+    one_hop = _one_hop_untrusted_targets(prev_line, next_line)
+
+    def _refuse_chain(match: re.Match, line: str) -> str:
+        """Refusal for the `Path(__file__)...` anchor chain. Beyond the usual
+        untrusted/one-hop operand checks, the chain is also NOT neutralized
+        when it continues into a `/` division whose tail reaches an
+        untrusted source or a one-hop target —
+        `Path(__file__).parent / request.args['p']` is a real untrusted-path
+        surface, and neutralizing the chain would delete the `Path(` head
+        the operand scanner needs."""
+        text = match.group(0)
+        static_text = _strip_static_string_literals(text)
+        if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            return text
+        if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
+            return text
+        static_tail = _strip_static_string_literals(line[match.end():])
+        tail_end = _pathlib_division_tail(static_tail)
+        if tail_end is not None:
+            tail_operand = _division_operand(static_tail[tail_end:])
+            if any(pat.search(tail_operand) for pat in UNTRUSTED_SOURCE_PATTERNS):
+                return text
+            if any(re.search(rf"\b{re.escape(ident)}\b", tail_operand) for ident in one_hop):
+                return text
+        return '""'
+
+    def _refuse(match: re.Match) -> str:
+        text = match.group(0)
+        static_text = _strip_static_string_literals(text)
+        if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+            return text
+        if any(re.search(rf"\b{re.escape(ident)}\b", static_text) for ident in one_hop):
+            return text
+        return '""'
+
+    line = _SPECIFIER_QUOTED.sub('""', line)
+    line = _ANCHOR_PATH_CALL.sub(_refuse, line)
+    line = _PATHLIB_ANCHOR_CHAIN.sub(lambda m: _refuse_chain(m, line), line)
+    line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
+    return line
+
+
+# Lexical code-only material classes: identifier/path vocabulary that only
+# carries signal in EXECUTABLE source. Documentation files and comments
+# mention or describe these words (`# sanitize_path handles configured
+# paths`, `Use sanitize_path before opening files.`) without constructing
+# any path, so these classes are skipped for documentation-only files and
+# scanned over comment-stripped code text. Deliberately NOT a phrase
+# blacklist: the distinction is executable-vs-prose context. All other
+# classes keep their existing semantics (traversal literals, archive and
+# symlink operations are meaningful even in comments/docs shapes and are
+# not globally erased).
+LEXICAL_CODE_ONLY_CLASSES = frozenset({
+    "path_containment_or_sanitization",
+    "path_reference_identifier",
+})
+
+# Documentation-only file types: prose, not executable source.
+_DOCUMENTATION_EXTENSIONS = (".md", ".rst", ".rest", ".txt", ".adoc")
+
+
+def _is_documentation_path(path: str) -> bool:
+    """True when a file is documentation-only prose (.md/.rst/.txt/...)."""
+    return path.lower().endswith(_DOCUMENTATION_EXTENSIONS)
+
+
+def _neutralize_chunk_lines(lines: list[str]) -> list[str]:
+    """Neutralize a diff chunk line by line, feeding each line its adjacent
+    RAW neighbors for the one-hop untrusted-flow refusal."""
+    return [
+        _neutralize_path_false_positives(
+            line,
+            lines[index - 1] if index > 0 else "",
+            lines[index + 1] if index + 1 < len(lines) else "",
+        )
+        for index, line in enumerate(lines)
+    ]
+
+
+# Material content signal classes: each entry is (signal class, patterns).
+# These are usage-shaped signals — a bare path-library import or API mention
+# matches none of them. Scanned per diff chunk over neutralized text.
+PATH_HANDLING_CONTENT_CLASSES: list[tuple[str, list[re.Pattern]]] = [
+    # Explicit traversal literals (outside specifiers/anchor calls).
+    ("traversal_literal", [PATH_TRAVERSAL_PATTERN]),
+    # Path normalization / sanitization / containment logic: identifier-shaped
+    # sanitize/validate/check vocabulary (kept from #720) plus the containment
+    # and normalization APIs (`commonpath`, `is_relative_to`, `realpath`,
+    # `abspath`, `normpath`, safe-join variants) that appear almost exclusively
+    # in real boundary checks. Trusted anchor calls are neutralized before this
+    # scans, so `os.path.realpath(__file__)` bookkeeping does not fire.
+    ("path_containment_or_sanitization", [
+        re.compile(r"sanitize[\w]*path|path[\w]*sanitize|clean[\w]*path|safe[\w]*path|path[\w]*safe", re.IGNORECASE),
+        re.compile(r"validate[\w]*path|path[\w]*valid|check[\w]*path|path[\w]*check", re.IGNORECASE),
+        re.compile(r"commonpath|is_relative_to", re.IGNORECASE),
+        re.compile(r"realpath|abspath|normpath", re.IGNORECASE),
+        re.compile(r"safe[_\w]*join|safejoin", re.IGNORECASE),
+    ]),
+    # Archive extraction: zip-slip surfaces. Member names are attacker-
+    # influenceable even when the archive path itself is constant.
+    ("archive_extraction", [
+        re.compile(r"extractall|unpack_archive|safe_extract", re.IGNORECASE),
+        re.compile(r"\b(?:zipfile|tarfile)\b", re.IGNORECASE),
+        re.compile(r"\b(?:ZipFile|TarFile)\b", re.IGNORECASE),
+        re.compile(r"\bunzip\s*\(", re.IGNORECASE),
+    ]),
+    # Symlink-sensitive filesystem operations.
+    ("symlink_sensitive", [
+        re.compile(r"symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW", re.IGNORECASE),
+    ]),
+    # Identifier-shaped path references (`filepath`, `pathname`) — variables
+    # and identifiers named after the path they denote. More specific than the
+    # removed `pathlib`/`os.path` mention patterns and kept deliberately.
+    ("path_reference_identifier", [
+        re.compile(r"filepath|pathname", re.IGNORECASE),
+    ]),
+]
+
+# Untrusted-source join: a path construction/consumption call that reaches a
+# request/user-controlled value. Same-line construction with an untrusted
+# operand fires directly; for ADJACENT-line flow the rule is one-hop def/use,
+# not co-occurrence: the untrusted line must carry a simple assignment
+# (`name = request.args[...]`) whose exact target identifier the construction
+# line uses. An unrelated request/user/payload token near a constant join
+# never fires. Multi-hop flows through neutral intermediaries are the model
+# reviewer's job, not the lexical classifier's.
+# Path construction heads: a callee that opens a filesystem-path
+# construction call. The untrusted-source scan reads ONLY the call's
+# argument list — extracted with the balanced-paren scanner at ANY nesting
+# depth — never the assignment LHS, trailing comments, or sibling
+# statements, so incidental lexical words outside the construction cannot
+# donate a token. Heads are compiled from (pattern, flags, is_pathlib)
+# triples; the pathlib constructor stays case-sensitive (case-insensitive
+# `path(` would match method names) and is the only head whose operands
+# continue through `/` division chaining (pathlib's path-join operator).
+_PATH_CONSTRUCTION_HEADS = [
+    (r"os\.path\.(?:join|normpath|realpath|abspath|relpath|commonpath)", re.IGNORECASE, False),
+    (r"\bpath\.(?:join|resolve|normalize|dirname|basename)", re.IGNORECASE, False),
+    (r"\bjoinpath", re.IGNORECASE, False),
+    (r"\bfilepath\.\w+", re.IGNORECASE, False),
+    (r"\b(?:open|fopen)", re.IGNORECASE, False),
+    (r"\b(?:readFile|writeFile|readFileSync|writeFileSync|appendFile|createReadStream|createWriteStream|openSync)", re.IGNORECASE, False),
+    (r"\b(?:send_file|send_from_directory|sendFile|FileResponse|serveStatic|FileServer|StaticFiles)", re.IGNORECASE, False),
+    (r"\bshutil\.(?:copy|copy2|copyfile|copytree|move|rmtree|unpack_archive)", re.IGNORECASE, False),
+    (r"\bos\.(?:mkdir|makedirs|unlink|rename|remove)", re.IGNORECASE, False),
+    (r"\bPath", 0, True),
+]
+
+PATH_CONSTRUCTION_HEADS = [
+    re.compile(head + r"\s*\(", flags)
+    for head, flags, _ in _PATH_CONSTRUCTION_HEADS
+]
+
+# Cap on continuation lines accumulated for one open construction call.
+# Continuation lines are operand-list text by construction (the call is
+# still open), so this is a boundedness horizon, not a precision filter.
+MAX_CONSTRUCTION_CONTINUATION_LINES = 8
+
+# Values an attacker plausibly controls when they reach a filesystem path:
+# HTTP request data, user/model input, CLI arguments, and file-object names
+# (`file.filename` — the classic unsafe-upload/join source). Deliberately
+# EXCLUDED: environment variables and process cwd — env/config paths are
+# operator-owned infrastructure (the PR #748 lesson: CI scripts join
+# env-provided output paths constantly and are not attacker surfaces) — and
+# `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous
+# in TRUSTED paths; the upload risk lives in the filename operand, which has
+# its own token.
+# Values an attacker plausibly controls when they reach a filesystem path:
+# HTTP request data, user/model input, CLI arguments, and file-object names —
+# `.filename` ATTRIBUTE ACCESS (`file.filename`, `f.filename`) is the classic
+# unsafe-upload operand; a BARE `filename` identifier is deliberately NOT a
+# source (a trusted constant named filename flowing into a path is
+# bookkeeping, and the identifier reference alone is not proof of attacker
+# influence). Sources are word-bounded so benign identifier near-misses
+# (`requester_id`, `username`, `queryset`, `payloads`) never fire; the
+# `user_` prefix form stays a source (`user_input`, `user_supplied`) and
+# real one-hop flow covers every renamed variant. Deliberately EXCLUDED:
+# environment variables and process cwd — env/config paths are operator-owned
+# infrastructure (the PR #748 lesson: CI scripts join env-provided output
+# paths constantly and are not attacker surfaces) — and `upload` directory
+# vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous in TRUSTED paths;
+# the upload risk lives in the filename operand, which has its own shape.
+UNTRUSTED_SOURCE_PATTERNS = [
+    re.compile(r"\brequest\b", re.IGNORECASE),
+    re.compile(r"\breq\b", re.IGNORECASE),
+    re.compile(r"\buser\b|\buser_", re.IGNORECASE),
+    re.compile(r"\binput", re.IGNORECASE),
+    re.compile(r"\bquery\b", re.IGNORECASE),
+    re.compile(r"\bparams\b", re.IGNORECASE),
+    re.compile(r"\bform\b|formdata", re.IGNORECASE),
+    re.compile(r"\bpayload\b", re.IGNORECASE),
+    re.compile(r"\bheaders?\b", re.IGNORECASE),
+    re.compile(r"\bcookies?\b", re.IGNORECASE),
+    re.compile(r"\bstdin\b", re.IGNORECASE),
+    re.compile(r"\bargv\b", re.IGNORECASE),
+    re.compile(r"\.\s*filename\b", re.IGNORECASE),
+    re.compile(r"\boriginalname\b", re.IGNORECASE),
+    re.compile(r"\buntrusted|\bunsanitized|\battacker", re.IGNORECASE),
+]
+
+# Test/fixture file conventions, cross-language. Signals found only in test
+# files are fixture construction ("static paths under test directories"),
+# not a shippable untrusted-path surface; they are discounted (recorded in
+# provenance as `diff_test_file`, never fire).
+TEST_FILE_PATTERNS = [
+    re.compile(r"(?:^|/)(?:tests?|testing|spec|specs|__tests__|fixtures?|testdata)/", re.IGNORECASE),
+    re.compile(r"(?:^|/)(?:conftest\.py|test_[^/]*\.py|[^/]*_test\.(?:py|go|rs|rb|java|kt|cs)|[^/]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts))$", re.IGNORECASE),
+]
+
+
+def _is_test_path(path: str) -> bool:
+    """True when a file path follows test/fixture conventions."""
+    return any(pat.search(path) for pat in TEST_FILE_PATTERNS)
+
+
+# Bounded unified-diff chunk header: `diff --git a/<path> b/<path>`. Used to
+# attribute diff content to the file it belongs to so test-file signals can
+# be discounted. Diffs without git headers (raw synthetic text) form a single
+# chunk with an unknown file, which is treated conservatively as non-test.
+_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)\s*$")
+
+
+def _split_diff_chunks(diff_text: str) -> list[tuple[str | None, list[str]]]:
+    """Split a unified diff into (file_path_or_None, lines) chunks on
+    `diff --git` headers. Best-effort: a header line whose paths cannot be
+    parsed is kept as content (conservative mis-attribution only ever keeps
+    scrutiny, never drops it)."""
+    chunks: list[tuple[str | None, list[str]]] = []
+    current_file: str | None = None
+    current: list[str] = []
+    for line in diff_text.splitlines():
+        m = _DIFF_GIT_HEADER.match(line)
+        if m:
+            if current:
+                chunks.append((current_file, current))
+            current_file = m.group(2)
+            current = []
+        else:
+            current.append(line)
+    if current:
+        chunks.append((current_file, current))
+    return chunks
+
+
+# Provenance bounds: attacker-controlled diff text is never emitted raw or
+# unbounded. Samples are control-character-free bounded line excerpts; counts
+# are capped so a pathological diff cannot flood the artifact.
+MAX_PATH_SIGNALS = 8
+MAX_PATH_FILES = 8
+MAX_PATH_SAMPLES = 3
+MAX_PATH_SAMPLE_CHARS = 160
+
+
+def _path_sample(line: str) -> str:
+    """Bounded, control-character-free excerpt of a matched line."""
+    cleaned = "".join(
+        " " if ("\0" <= ch < " " or ch == "\x7f") else ch for ch in line
+    ).strip()
+    return cleaned[:MAX_PATH_SAMPLE_CHARS]
+
+
+def _record_signal(
+    buckets: dict[tuple[str, str], dict],
+    signal: str,
+    source: str,
+    file: str | None,
+    sample: str | None,
+) -> None:
+    """Merge one raw hit into a signal bucket (dedup by class + backing,
+    bounded file/sample lists, stable first-seen order)."""
+    key = (signal, source)
+    entry = buckets.get(key)
+    if entry is None:
+        if len(buckets) >= MAX_PATH_SIGNALS:
+            return
+        entry = {"signal": signal, "source": source, "files": [], "samples": []}
+        buckets[key] = entry
+    if file and file not in entry["files"] and len(entry["files"]) < MAX_PATH_FILES:
+        entry["files"].append(file)
+    if sample and sample not in entry["samples"] and len(entry["samples"]) < MAX_PATH_SAMPLES:
+        entry["samples"].append(sample)
+
+
+# Truncate a quote-stripped line at its first comment marker (`#` or `//`).
+# String literals are already stripped, so a residual marker is a real
+# comment; interpolation-shaped literals may retain one (conservative
+# truncation of contrived content only).
+def _strip_line_comment(line: str) -> str:
+    cut = len(line)
+    for marker in ("#", "//"):
+        pos = line.find(marker)
+        if pos != -1 and pos < cut:
+            cut = pos
+    return line[:cut]
+
+
+def _strip_code_comments(line: str) -> str:
+    """Line reduced to its executable-code text for the LEXICAL code-only
+    material classes: quoted spans are blanked whole (escape-aware — a `#`
+    or `//` inside a string literal is data, not a comment marker, and
+    string contents — including interpolation-shaped literals — are data,
+    not code identifiers), and the line is truncated at the first comment
+    marker (`#` or `//`) outside quotes. The distinction these classes need
+    is executable-vs-prose context: `def sanitize_path(p):` is code,
+    `# sanitize_path handles configured paths` and
+    `log.info("sanitize_path ran")` are prose."""
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch in ("'", '"', "`"):
+            j = i + 1
+            while j < n:
+                c = line[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == ch:
+                    break
+                j += 1
+            out.append(ch + ch)
+            i = j + 1 if j < n else n
+            continue
+        if ch == "#" or (ch == "/" and i + 1 < n and line[i + 1] == "/"):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _balanced_close(text: str, depth: int, start: int = 0) -> int | None:
+    """Index of the `)` that closes a construction call opened `depth` paren
+    levels up, scanning from ``start``, or None when the text ends with the
+    call still open. Nested parens are tracked, so a nested call closing
+    inside the line never terminates the scan early — only the paren that
+    returns the depth to zero does."""
+    for pos in range(start, len(text)):
+        ch = text[pos]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth <= 0:
+                return pos
+    return None
+
+
+# Pathlib division chaining: after a complete `Path(...)` call, an operand
+# may continue through attribute/method chains and one or more `/`
+# path-join divisions (`Path(__file__).parent / request.args['p']`).
+# Hand-scanned rather than a regex: the equivalent pattern
+# (`\s*(?:\.\s*[\w\[\]]+(?:\(\s*[^()]*\))?\s*)*/`) is backtrack-prone on
+# adversarial input and the scanned text is attacker-controlled PR diff
+# content (CodeQL py/js redos).
+def _pathlib_division_tail(line: str, start: int = 0) -> int | None:
+    """End index (exclusive) of a division-chain tail beginning at or after
+    ``start`` — optional whitespace, then zero or more attribute/method
+    chain links (``.name``, ``.name(args)``, ``.name[0]``) — terminated by
+    the `/` division operator. None when the text does not form one."""
+    i = start
+    n = len(line)
+    while i < n and line[i] in " \t":
+        i += 1
+    while i < n and line[i] == ".":
+        j = i + 1
+        while j < n and (line[j].isalnum() or line[j] in "_[]"):
+            j += 1
+        if j == i + 1:
+            return None  # a bare `.` with no name is not a chain link
+        i = j
+        if i < n and line[i] == "(":
+            k = line.find(")", i + 1)
+            if k == -1:
+                return None
+            i = k + 1
+        while i < n and line[i] in " \t":
+            i += 1
+    if i < n and line[i] == "/":
+        return i + 1
+    return None
+
+
+def _construction_operand_spans(lines: list[str], index: int) -> str:
+    """The operand text of the path-construction call(s) actually matched on
+    line ``index``: balanced-paren argument lists at ANY nesting depth, and —
+    for a call left open across the line break — the bounded continuation
+    lines through the paren that closes the call. Only call arguments are
+    included: trailing comments (cut at the first `#`/`//`) and sibling
+    statements after the closer are excluded, and nested parentheses are
+    tracked so an inner `)` never ends the scan while outer operands remain.
+    Static string literals are lexed out (interpolation-shaped literals keep
+    their content). A complete `Path(...)` call extends through `/` division
+    chaining — pathlib's path-join operator — so
+    ``Path(__file__).parent / request.args['p']`` keeps its untrusted
+    operand. Empty string when the line constructs no path."""
+    line = _strip_line_comment(_strip_static_string_literals(lines[index]))
+    spans: list[str] = []
+    for head, (_, _, is_pathlib) in zip(PATH_CONSTRUCTION_HEADS, _PATH_CONSTRUCTION_HEADS):
+        for m in head.finditer(line):
+            close = _balanced_close(line, 1, start=m.end())
+            if close is None:
+                # Open call: the continuation lines ARE the operand list.
+                # The opening-line remainder's own paren balance seeds the
+                # depth (`os.path.join(foo(`), so a nested call's `)` cannot
+                # close the scan before later operands.
+                piece = line[m.end():]
+                depth = 1 + piece.count("(") - piece.count(")")
+                for j in range(index + 1, min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, len(lines))):
+                    continuation = _strip_line_comment(
+                        _strip_static_string_literals(lines[j])
+                    )
+                    c = _balanced_close(continuation, depth)
+                    if c is None:
+                        piece += "\n" + continuation
+                        depth += continuation.count("(") - continuation.count(")")
+                    else:
+                        piece += "\n" + continuation[:c + 1]
+                        depth = 0
+                        break
+                spans.append(piece)
+            else:
+                operand = line[m.end():close + 1]
+                if is_pathlib:
+                    tail_end = _pathlib_division_tail(line, close + 1)
+                    if tail_end is not None:
+                        operand += "/" + _division_operand(line[tail_end:])
+                spans.append(operand)
+    return "\n".join(spans)
+
+
+def evaluate_path_handling_signals(
+    filenames: list[str],
+    diff_text: str,
+) -> tuple[list[dict], list[dict]]:
+    """Evaluate the #749 path-handling signal model.
+
+    Returns ``(fired, discounted)``: bounded signal dicts with keys
+    ``signal`` (class/category), ``source`` (``filename`` | ``diff`` |
+    ``diff_test_file``), ``files`` (attributed file paths), and ``samples``
+    (bounded line excerpts). ``fired`` drives the kind/flag/must_check;
+    ``discounted`` records trusted-scaffolding and test-file signals that
+    were deliberately not allowed to fire, so a future false positive is
+    debuggable from the artifact alone.
+    """
+    fired_buckets: dict[tuple[str, str], dict] = {}
+    discounted_buckets: dict[tuple[str, str], dict] = {}
+
+    # 1) Filename-backed signals: identifier-shaped path vocabulary in the
+    # changed-file list. Test-file hits are discounted.
+    for name in filenames:
+        if not any(pat.search(name) for pat in PATH_HANDLING_FILENAME_PATTERNS):
+            continue
+        source = "filename" if not _is_test_path(name) else "filename_test_file"
+        _record_signal(
+            discounted_buckets if source == "filename_test_file" else fired_buckets,
+            "path_identifier_filename", source, name, None,
+        )
+
+    # 2) Diff-content signals, attributed per chunk so test-file content can
+    # be discounted. All classes scan neutralized text (trusted scaffolding
+    # removed); only the untrusted-join class adds the ±1-line window.
+    # A chunk without a git-header filename (headerless/synthetic diff) can
+    # still be discounted when EVERY changed file is a test file — the whole
+    # diff is then test content. Mixed or unknown file sets fire
+    # conservatively.
+    all_files_are_tests = bool(filenames) and all(
+        _is_test_path(name) for name in filenames
     )
+    for chunk_file, lines in _split_diff_chunks(diff_text):
+        if not lines:
+            continue
+        neutralized = _neutralize_chunk_lines(lines)
+        if chunk_file is not None:
+            is_test = _is_test_path(chunk_file)
+        else:
+            is_test = all_files_are_tests
+        buckets = discounted_buckets if is_test else fired_buckets
+        source = "diff_test_file" if is_test else "diff"
+        # Documentation-only chunks carry no executable context. A headerless
+        # chunk is treated like the test discount: docs-skip only when EVERY
+        # changed file is documentation; mixed or unknown sets stay
+        # conservative (lexical classes still scan).
+        if chunk_file is not None:
+            is_documentation = _is_documentation_path(chunk_file)
+        else:
+            is_documentation = bool(filenames) and all(
+                _is_documentation_path(name) for name in filenames
+            )
+
+        for class_name, patterns in PATH_HANDLING_CONTENT_CLASSES:
+            code_only = class_name in LEXICAL_CODE_ONLY_CLASSES
+            if code_only and is_documentation:
+                continue
+            for index, line in enumerate(neutralized):
+                scan_line = (
+                    _strip_code_comments(line)
+                    if code_only
+                    else line
+                )
+                if not any(pat.search(scan_line) for pat in patterns):
+                    continue
+                _record_signal(
+                    buckets, class_name, source, chunk_file,
+                    _path_sample(lines[index]),
+                )
+                break  # one bucket entry per class per chunk; samples merge below
+
+        # Untrusted-source join: the scan reads ONLY the operand text of the
+        # construction call(s) matched on the line — never the assignment
+        # LHS, comments, or sibling statements. Same-line construction with
+        # an untrusted operand fires directly; adjacent lines fire only on a
+        # one-hop def/use edge (the untrusted line's assignment target is
+        # used inside the call's operands). Co-occurrence never fires.
+        for index, raw_line in enumerate(lines):
+            flow_text = _construction_operand_spans(lines, index)
+            if not flow_text:
+                continue
+            if any(pat.search(flow_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+                _record_signal(
+                    buckets, "untrusted_source_join", source, chunk_file,
+                    _path_sample(raw_line),
+                )
+                continue
+            for adj_index in (index - 1, index + 1):
+                if not 0 <= adj_index < len(lines):
+                    continue
+                target = _untrusted_assignment_target(lines[adj_index])
+                if target and re.search(rf"\b{re.escape(target)}\b", flow_text):
+                    _record_signal(
+                        buckets, "untrusted_source_join", source, chunk_file,
+                        _path_sample(raw_line),
+                    )
+                    break
+
+    return list(fired_buckets.values()), list(discounted_buckets.values())
 
 
 def _is_path_handling(filenames: list[str], diff_text: str) -> bool:
-    """Path-handling kind rule: identifier-shaped patterns over filenames and
-    the raw diff, plus the traversal-literal pattern over module-specifier-
-    filtered diff text."""
-    if any(pat.search(f) for pat in PATH_HANDLING_PATTERNS for f in filenames):
-        return True
-    if any(pat.search(diff_text) for pat in PATH_HANDLING_PATTERNS):
-        return True
-    return PATH_TRAVERSAL_PATTERN.search(_diff_without_module_specifiers(diff_text)) is not None
+    """Path-handling kind rule: fires only when the signal model found a
+    material (non-discounted) untrusted-path surface."""
+    fired, _ = evaluate_path_handling_signals(filenames, diff_text)
+    return bool(fired)
 
 # Secret handling changes
 SECRET_HANDLING_PATTERNS = [
@@ -245,6 +980,12 @@ class PRClassification:
     # failure path for undetermined inputs.
     linked_metadata_uncertain: bool = False
     linked_metadata_uncertainty: list[str] = field(default_factory=list)
+    # #749: bounded provenance for the path-handling signal model — why
+    # path handling fired (class/category, filename vs diff backing, bounded
+    # samples) and which test-file/trusted-scaffolding signals were
+    # deliberately discounted. Empty lists when path handling did not fire.
+    # Never contains unbounded attacker-controlled text.
+    path_handling_provenance: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -395,9 +1136,12 @@ LINKED_ISSUE_RULES: list[tuple[frozenset[str], str]] = [
 
 # File-based flags: a flag fires when any changed filename OR the diff content
 # matches the pattern set. Order matters — flags are appended in this order.
+# The path_handling entry uses the #749 signal model (evaluate_path_handling_
+# signals) instead of a plain pattern scan; its pattern list here backs only
+# the filename attribution vocabulary.
 FILE_RISK_RULES: list[tuple[list[re.Pattern], str]] = [
     (FILE_SERVING_PATTERNS, "file_serving_changes"),
-    (PATH_HANDLING_PATTERNS, "path_handling_changes"),
+    (PATH_HANDLING_FILENAME_PATTERNS, "path_handling_changes"),
     (AUTH_PATTERNS, "auth_changes"),
     (SECRET_HANDLING_PATTERNS, "secret_handling_changes"),
 ]
@@ -448,23 +1192,28 @@ def _detect_risk_flags(
 
     # File-based risk flags (derived from classification patterns).
     for pat_set, flag in FILE_RISK_RULES:
-        # Collect the specific files that triggered this flag
-        triggering_files = [
-            f for f in filenames
-            if any(pat.search(f) for pat in pat_set)
-        ]
-        # The path-traversal heuristic scans module-specifier-filtered text
-        # (an ESM `from "../x.js"` import is module resolution, not
-        # filesystem traversal), so the path_handling flag gets the filtered
-        # text plus the dedicated traversal pattern.
-        scan_text = diff_text
-        matches_in_diff = any(pat.search(scan_text) for pat in pat_set)
-        if pat_set is PATH_HANDLING_PATTERNS:
-            scan_text = _diff_without_module_specifiers(diff_text)
-            matches_in_diff = (
-                matches_in_diff
-                or PATH_TRAVERSAL_PATTERN.search(scan_text) is not None
-            )
+        if flag == "path_handling_changes":
+            # #749: the path-handling flag uses the untrusted-surface signal
+            # model. Filename attribution keeps the historical semantics —
+            # only filename-backed hits populate the file list (content-only
+            # matches attribute to an empty list), so smart-model routing is
+            # unchanged (#159).
+            fired, _ = evaluate_path_handling_signals(filenames, diff_text)
+            matches_in_diff = any(s["source"] == "diff" for s in fired)
+            triggering_files: list[str] = []
+            for signal in fired:
+                if signal["source"] != "filename":
+                    continue
+                for name in signal["files"]:
+                    if name not in triggering_files:
+                        triggering_files.append(name)
+        else:
+            # Collect the specific files that triggered this flag
+            triggering_files = [
+                f for f in filenames
+                if any(pat.search(f) for pat in pat_set)
+            ]
+            matches_in_diff = any(pat.search(diff_text) for pat in pat_set)
         if triggering_files or matches_in_diff:
             if flag not in flags:
                 flags.append(flag)
@@ -529,7 +1278,10 @@ FLAG_CHECKS: dict[str, list[str]] = {
 # drive smart-model routing — only an actual changed filename should.
 _CONTENT_CAPABLE_KINDS: dict[str, list[re.Pattern]] = {
     "file_serving_changes": FILE_SERVING_PATTERNS,
-    "path_handling_changes": PATH_HANDLING_PATTERNS,
+    # #749: the path-handling kind fires from the signal model; routing stays
+    # filename-gated exactly as before — only a filename vocabulary hit (the
+    # same effective subset as the removed mention patterns) may route.
+    "path_handling_changes": PATH_HANDLING_FILENAME_PATTERNS,
 }
 
 
@@ -659,6 +1411,17 @@ def classify_pr(
 
     uncertainty = _linked_metadata_uncertainty(metadata_status)
 
+    # #749: evaluate the path-handling signal model once and share it across
+    # the kind rule, the risk-flag rule, and the provenance artifact.
+    path_fired, path_discounted = evaluate_path_handling_signals(
+        [f.get("filename", "") for f in pr_files], diff_text,
+    )
+    path_provenance = {
+        "fired": bool(path_fired),
+        "signals": path_fired,
+        "discounted": path_discounted,
+    }
+
     pr_kind = _classify_pr_kind(pr_files, diff_text)
     risk_flags, risk_flags_with_files = _detect_risk_flags(pr_files, diff_text, linked_issues)
     must_check = _build_must_check(pr_kind, risk_flags)
@@ -688,6 +1451,7 @@ def classify_pr(
         must_check=must_check,
         linked_metadata_uncertain=uncertainty[0],
         linked_metadata_uncertainty=uncertainty[1],
+        path_handling_provenance=path_provenance,
     )
 
 

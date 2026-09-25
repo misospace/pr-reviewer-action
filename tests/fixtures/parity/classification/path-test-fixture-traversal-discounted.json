@@ -1,0 +1,10 @@
+{
+  "fixture": "path-test-fixture-traversal-discounted",
+  "description": "#749 negative control for the test-file discount: traversal literals that appear only inside tests/test_*.py chunks (static fixture paths under test directories) do not classify path_handling_changes, but they stay visible as discounted diff_test_file signals in path_handling_provenance so the decision is explainable from the artifact alone. The production chunk with an env-provided output path stays clean (env/config paths are operator-owned, not attacker surfaces).",
+  "pr_files": [
+    { "filename": "scripts/fork_review_gate.py", "status": "modified", "additions": 2 },
+    { "filename": "tests/test_fork_review_gate.py", "status": "modified", "additions": 2 }
+  ],
+  "diff": "diff --git a/scripts/fork_review_gate.py b/scripts/fork_review_gate.py\n+++ b/scripts/fork_review_gate.py\n@@ -1,2 +1,4 @@\n+output_path = os.environ.get(\"GITHUB_OUTPUT\")\n+with open(output_path, \"a\", encoding=\"utf-8\") as handle:\ndiff --git a/tests/test_fork_review_gate.py b/tests/test_fork_review_gate.py\n+++ b/tests/test_fork_review_gate.py\n@@ -10,2 +12,4 @@\n+TRAVERSAL_40 = \"../\" * 13 + \"x\"\n+for hostile in (\"../../etc/passwd\", \"a/b/c\"):\n",
+  "linked_issues": []
+}

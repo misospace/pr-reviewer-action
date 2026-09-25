@@ -375,6 +375,7 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert payload["per_scenario_summary"]["7481"]["false_positive_rate"] == 0.0
     assert {item["name"] for item in payload["production_dataflow_checks"]} == {
         "github-label-routing", "linear-composite-precheck", "corpus-evidence-and-broken-arrow",
+        "path-classification-untrusted-surface",
     }
     assert all(item["passed"] for item in payload["production_dataflow_checks"])
     assert payload["per_scenario_summary"]["6451"]["false_positive_rate"] == 0.0

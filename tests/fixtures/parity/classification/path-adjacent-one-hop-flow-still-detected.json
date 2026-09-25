@@ -1,0 +1,33 @@
+{
+  "fixture": "path-adjacent-one-hop-flow-still-detected",
+  "description": "#749 one-hop def/use regressions: an untrusted-source assignment one line above a path construction must fire even when the construction is a trusted-anchor call (path.resolve(__dirname, name), os.path.join(os.path.dirname(__file__), name), a pathlib chain joinpath) — the anchor neutralization must be refused so the construction survives to be scanned. The plain non-anchor one-hop join keeps firing under the tightened def/use rule, and a formatted multi-line join with nested calls keeps its operand surface (the balanced-paren accumulator tracks nesting and scans through to the outer close). Declaration keywords are separate tokens (value/variable/constant/localpath one-hop fire), and division operands are isolated from sibling statements.",
+  "pr_files": [
+    {
+      "filename": "src/app/flow.py",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "src/app/flow.ts",
+      "status": "modified",
+      "additions": 2
+    },
+    {
+      "filename": "src/app/flow_formatted.py",
+      "status": "modified",
+      "additions": 4
+    },
+    {
+      "filename": "src/app/flow_open.py",
+      "status": "modified",
+      "additions": 3
+    },
+    {
+      "filename": "src/app/flow_keywords.py",
+      "status": "modified",
+      "additions": 2
+    }
+  ],
+  "diff": "diff --git a/src/app/flow.py b/src/app/flow.py\n+++ b/src/app/flow.py\n@@ -1,2 +1,4 @@\n+name = request.args[\"path\"]\n+target = os.path.join(os.path.dirname(__file__), name)\ndiff --git a/src/app/flow.ts b/src/app/flow.ts\n+++ b/src/app/flow.ts\n@@ -1,2 +1,4 @@\n+const requested = req.query.path;\n+const resolved = path.resolve(__dirname, requested);\ndiff --git a/src/app/flow_formatted.py b/src/app/flow_formatted.py\n+++ b/src/app/flow_formatted.py\n@@ -1,4 +1,8 @@\n+target = os.path.join(\n+    os.path.dirname(__file__),\n+    request.args[\"name\"],\n+)\ndiff --git a/src/app/flow_open.py b/src/app/flow_open.py\n+++ b/src/app/flow_open.py\n@@ -1,3 +1,6 @@\n+target = os.path.join(foo(\n+    safe), request.args[\"x\"]\n+)\ndiff --git a/src/app/flow_keywords.py b/src/app/flow_keywords.py\n+++ b/src/app/flow_keywords.py\n@@ -1,2 +1,4 @@\n+value = request.args['p']\n+target = os.path.join(base, value)\n",
+  "linked_issues": []
+}

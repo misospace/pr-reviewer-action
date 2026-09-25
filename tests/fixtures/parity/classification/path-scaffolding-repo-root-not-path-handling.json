@@ -1,0 +1,10 @@
+{
+  "fixture": "path-scaffolding-repo-root-not-path-handling",
+  "description": "#749 negative control, the PR #748 false positive pinned: ordinary trusted repository-root discovery (`Path(__file__).resolve().parent.parent`, `os.path.dirname(os.path.abspath(__file__))`) plus a bare pathlib import must not classify path_handling_changes, must not set the risk flag, and must not inject the traversal / edge-case-path must_check items. The provenance artifact records fired=false with no signals.",
+  "pr_files": [
+    { "filename": "scripts/fork_review_gate.py", "status": "added", "additions": 4 },
+    { "filename": "tests/test_fork_review_gate.py", "status": "added", "additions": 2 }
+  ],
+  "diff": "+from pathlib import Path\n+_ROOT = Path(__file__).resolve().parent.parent\n+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n+sys.path.insert(0, str(_ROOT))\n context line\n",
+  "linked_issues": []
+}
