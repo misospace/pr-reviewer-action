@@ -2,7 +2,7 @@ import { validateContract } from "./config/contract.js";
 import { loadConfig } from "./config/load-config.js";
 import { toJSON } from "./config/types.js";
 import { assertSupportedNode } from "./runtime/node-version.js";
-import { runRequestBuilderMode, runToolBudgetMode, runVerdictParserMode } from "./modes/parity.js";
+import { runRequestBuilderMode, runRequiredCheckCoverageMode, runToolBudgetMode, runVerdictParserMode } from "./modes/parity.js";
 import { classificationFixtureMain } from "./classification/fixture.js";
 import { runPrecheckFixture } from "./precheck/index.js";
 import { requirementLedgerFixtureMain } from "./requirements/fixture.js";
@@ -102,6 +102,8 @@ if (require.main === module) {
       process.stderr.write(`v3 corpus fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
+  } else if (firstArg === "required-check-coverage-fixture") {
+    runRequiredCheckCoverageMode(argv[1] ?? "");
   } else if (mode === "v3-request-builder" && firstArg) {
     runRequestBuilderMode(firstArg);
   } else if (mode === "v3-verdict-parser" && firstArg) {

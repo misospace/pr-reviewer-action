@@ -1,0 +1,20 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "malformed-duplicate-invalidated",
+  "description": "#750: the parser preserves an attributable malformed duplicate as status invalid; the evaluator invalidates the check so a valid+malformed double answer can never fold into complete coverage.",
+  "must_check": [
+    "review for path traversal vulnerabilities"
+  ],
+  "dispositions": [
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "satisfied",
+      "rationale": "bounded to the data root"
+    },
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "invalid",
+      "rationale": null
+    }
+  ]
+}

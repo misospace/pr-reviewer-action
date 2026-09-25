@@ -1,0 +1,34 @@
+{
+ "schema": 1,
+ "scenario": 7481,
+ "provenance": {
+  "historical_pr": 748,
+  "issue": 750,
+  "state": "synthetic-clean-counterpart",
+  "source": "#750: the PR #748 shape itself — a docs-only change with no untrusted filesystem-path surface, where a grounded not_applicable is a completed review obligation and must not be flagged"
+ },
+ "pr_json": {
+  "number": 7481,
+  "title": "docs(readme): document the download endpoint parameters",
+  "body": "Documentation only; request handling is unchanged.",
+  "head": {
+   "sha": "7481bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "base": {
+   "sha": "fixture-base"
+  }
+ },
+ "pr_files": [
+  {
+   "filename": "README.md",
+   "status": "modified"
+  }
+ ],
+ "diff": "diff --git a/README.md b/README.md\nindex f80c50c..b31cafe 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,8 @@\n # Share Service\n \n Serves files from the share root to authenticated users.\n+\n+## Downloads\n+\n+The `/download` endpoint name and its parameters are documented in\n+docs/downloads.md; nothing in this change alters request handling.\n",
+ "files": [
+  {
+   "path": "README.md",
+   "content": "# Share Service\n\nServes files from the share root to authenticated users.\n\n## Downloads\n\nThe `/download` endpoint name and its parameters are documented in\ndocs/downloads.md; nothing in this change alters request handling.\n"
+  }
+ ]
+}

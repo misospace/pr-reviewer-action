@@ -12,6 +12,8 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * findings. `smart_review_requested`/`smart_review_reason` (#721) are the
  * reviewer's structured request for a smart-tier second pass; the parser
  * normalizes them so only the JSON boolean `true` requests one.
+ * `required_check_dispositions` (#750) carries one disposition per
+ * deterministic must_check item, echoed by exact check text.
  */
 export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
   type: "json_schema",
@@ -66,8 +68,26 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
             additionalProperties: false,
           },
         },
+        // #750: one structured disposition per deterministic must_check item.
+        // Identity is the EXACT deterministic check text echoed back; the
+        // parser/coverage layers validate it against the supplied list, so
+        // the model cannot invent, omit, duplicate, or reword mandatory
+        // checks. `not_applicable` must carry a grounded rationale.
+        required_check_dispositions: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              check: { type: "string" },
+              status: { type: "string", enum: ["satisfied", "not_applicable", "unresolved"] },
+              rationale: { type: ["string", "null"] },
+            },
+            required: ["check", "status", "rationale"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
       additionalProperties: false,
     },
   },

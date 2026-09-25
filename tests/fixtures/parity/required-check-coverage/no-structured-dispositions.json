@@ -1,0 +1,9 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "no-structured-dispositions",
+  "description": "No structured coverage at all: the artifact records structured=false with every check unresolved (the conservative v3 semantics; the v2 bridge may fall back to legacy keyword matching in exactly this case).",
+  "must_check": [
+    "review for path traversal vulnerabilities"
+  ],
+  "dispositions": null
+}

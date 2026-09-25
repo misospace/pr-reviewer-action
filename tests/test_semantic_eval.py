@@ -359,8 +359,14 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    assert payload["scenarios_evaluated"] == 22
-    assert {"6551", "6552", "6553", "6891", "6892"} <= payload["per_scenario_summary"].keys()
+    # #750 adds scenarios 7480 (ungrounded-N/A converse) and 7481 (grounded-N/A
+    # clean-shape negative control) to the historical corpus.
+    assert payload["scenarios_evaluated"] == 24
+    assert {"6551", "6552", "6553", "6891", "6892", "7480", "7481"} <= payload["per_scenario_summary"].keys()
+    assert payload["per_scenario_summary"]["7480"]["pass_rate"] == 1.0
+    assert payload["per_scenario_summary"]["7480"]["disposition_calibration_rate"] == 1.0
+    assert payload["per_scenario_summary"]["7481"]["negative_control"] is True
+    assert payload["per_scenario_summary"]["7481"]["false_positive_rate"] == 0.0
     assert {item["name"] for item in payload["production_dataflow_checks"]} == {
         "github-label-routing", "linear-composite-precheck", "corpus-evidence-and-broken-arrow",
     }
@@ -1349,7 +1355,7 @@ def test_661_report_telemetry_carries_disposition_counts() -> None:
     assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
     assert calibration_counts[DISPOSITION_INVALID_REMEDIATION] == 3
     assert calibration_counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 1
-    assert calibration_counts[DISPOSITION_NOT_FOUND] == 1
+    assert calibration_counts[DISPOSITION_NOT_FOUND] == 2
     assert calibration_counts[DISPOSITION_CORRECT] == 3
     assert report["summary"]["calibration_fixture_runs"] == sum(calibration_counts.values())
     assert report["summary"]["disposition_calibration_rate"] == 1.0

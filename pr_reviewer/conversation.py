@@ -469,7 +469,8 @@ APPROX_BYTES_PER_TOKEN = 4
 VERDICT_USER_INSTRUCTION = (
     "Produce the final review verdict now as a single JSON object. "
     "Do not issue any tool calls. "
-    "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated."
+    "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated. "
+    "Emit 'required_check_dispositions' as null unless required checks appear in the context; then one disposition entry per required check, echoing the check text exactly, with status satisfied, not_applicable, or unresolved. Use not_applicable only when you can ground it in the actual change (a concise rationale is required); do not request changes merely because a checklist names a test that is absent — request changes only when the underlying applicable risk is unresolved; never invent additional checks."
 )
 
 # Placeholder emitted for a corpus section dropped by dedupe_verdict_corpus.
@@ -1339,8 +1340,30 @@ _OPENAI_VERDICT_JSON_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                     },
                 },
+                # #750: one structured disposition per deterministic
+                # must_check item. Identity is the EXACT deterministic check
+                # text echoed back; the parser/coverage layers validate it
+                # against the supplied list, so the model cannot invent,
+                # omit, duplicate, or reword mandatory checks.
+                # ``not_applicable`` must carry a grounded rationale.
+                "required_check_dispositions": {
+                    "type": ["array", "null"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "check": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["satisfied", "not_applicable", "unresolved"],
+                            },
+                            "rationale": {"type": ["string", "null"]},
+                        },
+                        "required": ["check", "status", "rationale"],
+                        "additionalProperties": False,
+                    },
+                },
             },
-            "required": ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage"],
+            "required": ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
             "additionalProperties": False,
         },
     },

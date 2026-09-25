@@ -50,8 +50,14 @@ if flags:
 checks = [str(check) for check in (data.get("must_check") or []) if check]
 if checks:
     parts.append(
-        "Required checks — explicitly address EACH of these in the review "
-        "(state what you verified, or why the check does not apply):"
+        "Required checks — disposition EACH of these review questions in the "
+        "structured 'required_check_dispositions' array (echo each check text "
+        "exactly; status satisfied, not_applicable, or unresolved; a "
+        "not_applicable needs a concise rationale grounded in the actual "
+        "change). A check is a mandatory review question, not automatically "
+        "an implementation requirement: do not request changes merely because "
+        "a checklist names a test that is absent, and never invent additional "
+        "checks. Also address each one in review_markdown."
     )
     parts.extend(f"- {check}" for check in checks[:12])
 print("\n".join(parts), end="")

@@ -1,0 +1,21 @@
+{
+  "contract": "required-check-coverage/v1",
+  "fixture": "path-checks-grounded-na",
+  "description": "#750 PR #748 regression: deterministic path-handling must_check items over a change with no untrusted filesystem-path surface; the reviewer grounds not_applicable for both. Coverage is complete and the absent null-byte/symlink tests do not block.",
+  "must_check": [
+    "review for path traversal vulnerabilities",
+    "test with edge-case paths (null bytes, symlinks)"
+  ],
+  "dispositions": [
+    {
+      "check": "review for path traversal vulnerabilities",
+      "status": "not_applicable",
+      "rationale": "The diff touches only workflow trigger wiring and documentation; no code resolves or opens filesystem paths, and no attacker-controlled path reaches a file operation."
+    },
+    {
+      "check": "test with edge-case paths (null bytes, symlinks)",
+      "status": "not_applicable",
+      "rationale": "No path handling exists in the changed surface, so null-byte and symlink test cases have nothing to exercise; the underlying risk is absent."
+    }
+  ]
+}

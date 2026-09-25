@@ -1,0 +1,34 @@
+{
+ "schema": 1,
+ "scenario": 7480,
+ "provenance": {
+  "historical_pr": 748,
+  "issue": 750,
+  "state": "synthetic-vulnerable-counterpart",
+  "source": "#750: the ungrounded-N/A converse of the PR #748 required-check failure — a real attacker-controlled path surface that a not_applicable waiver must not be able to hide"
+ },
+ "pr_json": {
+  "number": 7480,
+  "title": "feat(server): stream share downloads through the app",
+  "body": "Adds a /download endpoint that serves files from the share root by name.",
+  "head": {
+   "sha": "7480aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "base": {
+   "sha": "fixture-base"
+  }
+ },
+ "pr_files": [
+  {
+   "filename": "download.py",
+   "status": "modified"
+  }
+ ],
+ "diff": "diff --git a/download.py b/download.py\nindex 7f90ea1..47da12d 100644\n--- a/download.py\n+++ b/download.py\n@@ -1,4 +1,6 @@\n-from flask import Flask, request, send_from_directory\n+import os\n+\n+from flask import Flask, request, send_file\n \n DATA_ROOT = \"/srv/share\"\n \n@@ -7,4 +9,4 @@ app = Flask(__name__)\n @app.get(\"/download\")\n def download():\n     name = request.args.get(\"name\", \"\")\n-    return send_from_directory(DATA_ROOT, name)\n+    return send_file(os.path.join(DATA_ROOT, name))\n",
+ "files": [
+  {
+   "path": "download.py",
+   "content": "import os\n\nfrom flask import Flask, request, send_file\n\nDATA_ROOT = \"/srv/share\"\n\napp = Flask(__name__)\n\n@app.get(\"/download\")\ndef download():\n    name = request.args.get(\"name\", \"\")\n    return send_file(os.path.join(DATA_ROOT, name))\n"
+  }
+ ]
+}
