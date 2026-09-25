@@ -109,6 +109,17 @@ def env_int_bounded(name, default_value, min_value, max_value):
     return max(min_value, min(max_value, value))
 
 
+def _planning_temperature():
+    """Temperature for native-loop planning and summarizer turns.
+
+    Planning stays at 0.0 for determinism, but an empty ``AI_TEMPERATURE`` means
+    "omit the field" (``ai_temperature: ""``, for models that reject any
+    non-default value), read the same way the verdict turn reads it. ``None``
+    makes ``to_request_payload`` leave the field out.
+    """
+    return None if not os.getenv("AI_TEMPERATURE", "").strip() else 0.0
+
+
 def _accumulate_usage(acc, response, api_format):
     """Fold a turn's token usage into the loop accumulator (telemetry).
 
@@ -1408,6 +1419,7 @@ def run_native_loop(
     # (a summarizer call costs latency + tokens); off → the driver blunt-
     # truncates as before. The digest call rides the loop's post_fn so its spend
     # is counted in usage_acc and it gets the same streamed-turn fallback.
+    planning_temperature = _planning_temperature()
     summarize_fn = None
     if os.getenv("TOOL_LOOP_SUMMARIZE", "false").strip().lower() == "true":
         summarize_max_tokens = env_int_bounded(
@@ -1422,7 +1434,7 @@ def run_native_loop(
                 model,
                 stream=False,
                 max_tokens=summarize_max_tokens,
-                temperature=0.0,
+                temperature=planning_temperature,
                 tokens_param=tokens_param,
             )
             _, summary = extract_tool_calls(post_fn(payload), api_format)
@@ -1436,6 +1448,7 @@ def run_native_loop(
         model=model,
         budgets=budgets,
         max_tokens=max_tokens_per_turn,
+        temperature=planning_temperature,
         stream=stream,
         tokens_param=tokens_param,
         cache_prefix=True,

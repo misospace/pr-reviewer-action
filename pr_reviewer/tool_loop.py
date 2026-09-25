@@ -249,7 +249,7 @@ def drive_tool_loop(
     model: str,
     budgets: LoopBudgets | None = None,
     max_tokens: int = 1024,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     stream: bool = False,
     tokens_param: str = "max_tokens",
     cache_prefix: bool = False,
@@ -261,7 +261,8 @@ def drive_tool_loop(
     ``post_fn`` takes a wire-ready request payload and returns the parsed
     response JSON (raising on transport failure). When ``stream`` is set the
     payload carries ``stream: true`` and ``post_fn`` owns SSE reassembly,
-    handing back the same non-streaming response shape. ``execute_fn`` takes
+    handing back the same non-streaming response shape. ``temperature=None``
+    omits the field from every round's payload. ``execute_fn`` takes
     ``(tool_name, args)`` and returns the executor result dict
     ``{"tool", "status", "result"}`` — in production this is
     ``run_tool_harness.execute_tool_request`` with allowlists/caps bound in.

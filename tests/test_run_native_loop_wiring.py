@@ -399,7 +399,7 @@ def test_native_loop_degrades_writes_nothing(monkeypatch, tmp_path):
     assert not (tmp_path / "tool-harness.md").exists()
 
 
-def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled):
+def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled, api_format="openai"):
     """Run run_native_loop with drive_tool_loop stubbed to capture the
     summarize_fn kwarg, so we can assert the result-summarization wiring
     without forcing a real 24k-token conversation overflow."""
@@ -427,7 +427,7 @@ def _capture_summarize_fn(monkeypatch, tmp_path, *, enabled):
         "tool_results": [],
     }
     handled = rth.run_native_loop(
-        "owner/repo", "http://model.local/v1", "openai", "mock-model", "key",
+        "owner/repo", "http://model.local/v1", api_format, "mock-model", "key",
         "# PR Corpus\nbumps kubelet image",
         {"owner/repo"}, ["talos.dev"], str(tmp_path),
         12000, 15, 4, 45, 400, result,
@@ -445,6 +445,67 @@ def test_summarize_fn_absent_by_default(monkeypatch, tmp_path):
     summarize_fn = _capture_summarize_fn(monkeypatch, tmp_path, enabled=False)
     assert summarize_fn is None
 
+
+_ANTHROPIC_TEXT = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "No tools needed."}]}
+
+
+@pytest.mark.parametrize("api_format", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    ("ai_temperature", "expected"),
+    [("", None), ("0.1", 0.0), (None, None)],
+    ids=["empty-omits", "set-keeps-zero", "unset-omits"],
+)
+@pytest.mark.parametrize("tier", ["primary", "smart"])
+def test_planning_turn_temperature_follows_ai_temperature(
+    monkeypatch, tmp_path, api_format, ai_temperature, expected, tier
+):
+    """Planning turns send 0.0 unless AI_TEMPERATURE is empty or unset, read
+    the way the verdict turn reads it. An empty ai_temperature is the
+    documented escape for models that reject any non-default temperature;
+    sending 0.0 anyway 400s every planning call and degrades the loop."""
+    if ai_temperature is None:
+        monkeypatch.delenv("AI_TEMPERATURE", raising=False)
+    else:
+        monkeypatch.setenv("AI_TEMPERATURE", ai_temperature)
+    response = _openai_text("No tools needed.") if api_format == "openai" else _ANTHROPIC_TEXT
+    _handled, _result, payloads = _run_capturing(
+        monkeypatch, tmp_path, api_format, [response], tier=tier
+    )
+    assert payloads, "the planning turn never reached the transport"
+    if expected is None:
+        assert "temperature" not in payloads[0]
+    else:
+        assert payloads[0]["temperature"] == expected
+
+
+@pytest.mark.parametrize("api_format", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    ("ai_temperature", "expected"), [("", None), ("0.1", 0.0)], ids=["empty-omits", "set-keeps-zero"]
+)
+def test_summarizer_turn_temperature_follows_ai_temperature(
+    monkeypatch, tmp_path, api_format, ai_temperature, expected
+):
+    """The opt-in summarizer is a planning-side request too, so it follows the
+    same rule. Invokes the real summarize_fn so its actual payload is seen."""
+    monkeypatch.setenv("AI_TEMPERATURE", ai_temperature)
+    summarize_fn = _capture_summarize_fn(
+        monkeypatch, tmp_path, enabled=True, api_format=api_format
+    )
+    payloads = []
+
+    def fake_request(base_url, fmt, payload, api_key, timeout_sec):
+        payloads.append(payload)
+        if fmt == "anthropic":
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "digest"}]}
+        return _openai_text("digest")
+
+    monkeypatch.setattr(rth, "run_chat_request", fake_request)
+    assert summarize_fn("tool result block") == "digest"
+    assert len(payloads) == 1
+    if expected is None:
+        assert "temperature" not in payloads[0]
+    else:
+        assert payloads[0]["temperature"] == expected
 
 def _openai_text_with_usage(text, *, prompt, completion, cached=0):
     resp = _openai_text(text)
@@ -509,7 +570,7 @@ def test_native_loop_request_error_records_usage_and_error(monkeypatch, tmp_path
     assert result["native_loop_usage"]["cache_hit_ratio"] == 0.0
 
 
-def _run_capturing(monkeypatch, tmp_path, api_format, responses):
+def _run_capturing(monkeypatch, tmp_path, api_format, responses, *, tier="primary"):
     """Like _run but records every payload sent, for the verdict-turn tests."""
     queue = list(responses)
     payloads = []
@@ -532,7 +593,7 @@ def _run_capturing(monkeypatch, tmp_path, api_format, responses):
         "owner/repo", "http://model.local/v1", api_format, "mock-model", "key",
         "# PR Corpus\nbumps kubelet image in machineconfig.yaml.j2",
         {"owner/repo"}, ["talos.dev"], str(tmp_path),
-        12000, 15, 4, 45, 400, result,
+        12000, 15, 4, 45, 400, result, tier=tier,
     )
     return handled, result, payloads
 

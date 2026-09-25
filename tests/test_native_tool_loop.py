@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
+
 from pr_reviewer.conversation import Conversation
 from pr_reviewer.tool_loop import (
     STOP_BUDGET,
@@ -633,6 +635,59 @@ def test_payloads_carry_tools_and_history():
     roles = [m["role"] for m in seen_payloads[1]["messages"]]
     assert "tool" in roles
 
+
+@pytest.mark.parametrize("api_format", ["openai", "anthropic"])
+def test_temperature_none_is_omitted_from_every_round(api_format):
+    """temperature=None leaves the field out of every round, both formats.
+
+    An empty ai_temperature asks for exactly that (models that reject any
+    non-default value), and the planning turns must honour it like the
+    verdict turn does.
+    """
+    conv = fresh_conversation()
+    seen_payloads = []
+    if api_format == "openai":
+        responses = [
+            openai_tool_call_response([("c1", "read_file", '{"path": "a.txt"}')]),
+            openai_text_response("done"),
+        ]
+    else:
+        responses = [
+            {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "read_file",
+                     "input": {"path": "a.txt"}},
+                ],
+            },
+            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]},
+        ]
+
+    def post(payload):
+        seen_payloads.append(payload)
+        return responses.pop(0)
+
+    execute, _log = recording_execute()
+    drive_tool_loop(
+        conv, post, execute, api_format=api_format, model="m",
+        budgets=LoopBudgets(), temperature=None,
+    )
+    assert len(seen_payloads) == 2
+    assert all("temperature" not in p for p in seen_payloads)
+
+
+def test_temperature_defaults_to_zero():
+    """Direct callers that pass nothing keep deterministic planning."""
+    conv = fresh_conversation()
+    seen_payloads = []
+
+    def post(payload):
+        seen_payloads.append(payload)
+        return openai_text_response("done")
+
+    execute, _log = recording_execute()
+    drive_tool_loop(conv, post, execute, api_format="openai", model="m", budgets=LoopBudgets())
+    assert seen_payloads[0]["temperature"] == 0.0
 
 def test_hostile_tool_result_is_fenced_before_next_round():
     conv = fresh_conversation()
