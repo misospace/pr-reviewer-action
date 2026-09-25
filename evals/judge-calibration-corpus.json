@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "#661 semantic-judge calibration/adversarial suite: answer-key references copied verbatim from corpus-historical-dogfood.json plus paraphrase fixtures authored strictly from fixture answer-key mechanisms (never from live outputs). The judge must reach 100% disposition agreement on this suite before it is frozen for live A/B use.",
+  "description": "Judge calibration and adversarial suite: offline answer-key references from evals/corpus-historical-dogfood.json copied verbatim, plus paraphrase and near-miss fixtures authored from the answer-key mechanisms (#659 family and the #757 counterexample-falsification family). Rubric language is derived only from these fixtures \u2014 never from live reviewer outputs.",
   "source_corpus": "evals/corpus-historical-dogfood.json",
   "scenarios": [
     {
@@ -1149,6 +1149,1277 @@
             "review_markdown": "if pgrep were missing the fork might still proceed and cleanup could degrade; that is a possible failure mode"
           },
           "source": null
+        }
+      ]
+    },
+    {
+      "number": 7571,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "boundary_scope_leak",
+        "mechanism": "The untrusted-source classifier matches trigger tokens anywhere in the raw statement text, so an assignment target or a comment that merely mentions the tokens classifies as untrusted-path handling with no untrusted operand.",
+        "detection_requires": [
+          "the classifier decides from the raw statement text rather than the consumed path operand",
+          "an assignment target or comment that merely mentions the trigger tokens is classified as untrusted-path handling although nothing untrusted is read",
+          "a concrete nearby input (an invented assignment target or comment) that flips the classification without any untrusted data is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7571-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
+              }
+            ],
+            "review_markdown": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7571,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7571-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The change adds a source guard with unit tests covering both the untrusted and static cases. The classification logic is internally consistent with the guard's resolve() helper, the input/output parity looks right, and CI is green on the exact head. The source-detection boundary matches the design described in the tests: request input touching a path is treated as untrusted. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7571,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "key-7571-3",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I looked for counterexamples around the source-detection boundary and the tests exercise both sides of the classification; parity and CI are green, so the logic holds. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7571,
+            "offline_run": 3
+          }
+        },
+        {
+          "ref_id": "key-7571-4",
+          "origin": "answer-key",
+          "expected_disposition": "suppressed_pre_existing",
+          "response": {
+            "findings": [
+              {
+                "message": "classify_line scans a broader statement than the consumed operand, so a left-hand-side mention of request manufactures the untrusted-path signal. This scanning gap is pre-existing to this commit, so not a merge blocker for this review."
+              }
+            ],
+            "review_markdown": "classify_line scans a broader statement than the consumed operand, so a left-hand-side mention of request manufactures the untrusted-path signal. This scanning gap is pre-existing to this commit, so not a merge blocker for this review."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7571,
+            "offline_run": 4
+          }
+        },
+        {
+          "ref_id": "para-7571-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "classify_line reads the whole line, so both tokens can come from the variable name: `cache = 'request path'` on its own line is reported as untrusted-path handling even though nothing untrusted is read, and the same happens for a trailing comment. The detector must look at the value side of the assignment only."
+              }
+            ],
+            "review_markdown": "classify_line reads the whole line, so both tokens can come from the variable name: `cache = 'request path'` on its own line is reported as untrusted-path handling even though nothing untrusted is read, and the same happens for a trailing comment. The detector must look at the value side of the assignment only."
+          }
+        },
+        {
+          "ref_id": "para-7571-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The positive test only proves the tokens appear in the input string. `classify_line('request_path = STATIC_CONST')` returns untrusted-path although the right-hand side is a constant \u2014 the decision fires on the left-hand side and on comments, so any line that says 'request path' anywhere becomes a finding."
+              }
+            ],
+            "review_markdown": "The positive test only proves the tokens appear in the input string. `classify_line('request_path = STATIC_CONST')` returns untrusted-path although the right-hand side is a constant \u2014 the decision fires on the left-hand side and on comments, so any line that says 'request path' anywhere becomes a finding."
+          }
+        },
+        {
+          "ref_id": "miss-7571",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The classifier is substring-based, which is coarse but matches the documented scope of a line classifier; the unit tests cover both the untrusted and static cases and pass."
+              }
+            ],
+            "review_markdown": "The classifier is substring-based, which is coarse but matches the documented scope of a line classifier; the unit tests cover both the untrusted and static cases and pass."
+          }
+        },
+        {
+          "ref_id": "spec-7571",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "This substring matching might cause false positives in some edge cases; possibly worth a follow-up."
+              }
+            ],
+            "review_markdown": "This substring matching might cause false positives in some edge cases; possibly worth a follow-up."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7572,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "boundary_scope_leak",
+        "mechanism": "Fixed control for scenario 7571: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7572-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The guard now classifies the consumed operand: the text after the assignment separator with comments stripped, so assignment targets and comments no longer manufacture the untrusted-path signal. Tests cover the assignment-target and comment cases directly. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7572,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7572-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The guard now classifies the consumed operand: the text after the assignment separator with comments stripped, so an assignment target no longer manufactures the signal."
+              }
+            ],
+            "review_markdown": "The guard now classifies the consumed operand: the text after the assignment separator with comments stripped, so an assignment target no longer manufactures the signal."
+          }
+        },
+        {
+          "ref_id": "nit-7572",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The module docstring says 'raw text' while the helper is named classify_statement; align the wording."
+              }
+            ],
+            "review_markdown": "The module docstring says 'raw text' while the helper is named classify_statement; align the wording."
+          }
+        },
+        {
+          "ref_id": "spec-7572",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "The operand-only matching could still miss multi-line statements; consider a follow-up."
+              }
+            ],
+            "review_markdown": "The operand-only matching could still miss multi-line statements; consider a follow-up."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7573,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "information_loss_ordering",
+        "mechanism": "resolve() tests '..' on the raw and anchor-stripped text and only percent-decodes afterwards, so encoded traversal is invisible to the check and the decoded value is an unchecked alias.",
+        "detection_requires": [
+          "the traversal test inspects raw or anchor-stripped text before URL-decoding",
+          "a percent-encoded payload therefore passes both checks and decodes to a traversal after them",
+          "a concrete encoded input with its decoded escape is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7573-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The guard's traversal boundary is checked before normalization: resolve() tests '..' on the raw and anchor-stripped text, but the percent-decoded value is the same semantic path through a simple alias and is never inspected. Counterexample: resolve('%2e%2e/secret') passes every check and returns '/srv/app/../secret' \u2014 percent-encoded traversal erases the evidence before the check can see it, because the traversal check runs before normalization. The green tests only feed literal '..' payloads, so the decoded alias is uncovered. Check the decoded value: move the traversal test after unquote()."
+              }
+            ],
+            "review_markdown": "The guard's traversal boundary is checked before normalization: resolve() tests '..' on the raw and anchor-stripped text, but the percent-decoded value is the same semantic path through a simple alias and is never inspected. Counterexample: resolve('%2e%2e/secret') passes every check and returns '/srv/app/../secret' \u2014 percent-encoded traversal erases the evidence before the check can see it, because the traversal check runs before normalization. The green tests only feed literal '..' payloads, so the decoded alias is uncovered. Check the decoded value: move the traversal test after unquote()."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7573,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7573-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The guard canonicalizes trusted anchors and rejects traversal; the unit tests cover literal and base-prefixed traversal plus the plain path, CI is green, and the path-validation boundary matches the documented behavior of resolve(). Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7573,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7573-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I tried to construct counterexamples against the path-validation boundary \u2014 longer payloads, mixed separators, empty strings \u2014 and the guard rejects them; the encoded-input space is covered by unquote's own tests. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7573,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7573-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The guard checks '..' on the raw and stripped strings and only afterwards decodes: `resolve('/srv/app%2e%2e/etc/passwd')` passes both checks because the encoded dots are not a literal '..', and the returned value decodes to a path the filesystem resolves above base. The comparison must happen on the decoded value."
+              }
+            ],
+            "review_markdown": "The check on line 9 inspects the raw input before any decoding, but unquote is applied after the check. Concrete counterexample: resolve('/srv/app%2e%2e/etc/passwd') \u2014 no literal '..' substring, both checks pass, and unquote yields '../etc/passwd', so the function returns '/srv/app/../etc/passwd' which resolves to /etc/passwd. The check must be performed on the decoded path."
+          }
+        },
+        {
+          "ref_id": "para-7573-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Encoding dodges the test: any percent-encoded dots payload walks straight through resolve() since decoding happens after both rejects; the function hands back a path the OS resolves outside base."
+              }
+            ],
+            "review_markdown": "Encoding dodges the test: any percent-encoded dots payload walks straight through resolve() since decoding happens after both rejects; the function hands back a path the OS resolves outside base."
+          }
+        },
+        {
+          "ref_id": "miss-7573",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The module tests literal traversal and base-prefixed traversal and both reject; the ordering matches the docstring's canonicalize-then-check description."
+              }
+            ],
+            "review_markdown": "The module tests literal traversal and base-prefixed traversal and both reject; the ordering matches the docstring's canonicalize-then-check description."
+          }
+        },
+        {
+          "ref_id": "spec-7573",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "URL decoding after validation could be risky in some setups; maybe consider decoding first."
+              }
+            ],
+            "review_markdown": "URL decoding after validation could be risky in some setups; maybe consider decoding first."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7574,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "information_loss_ordering",
+        "mechanism": "Fixed control for scenario 7573: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7574-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The guard now inspects the decoded value, so percent-encoded traversal is rejected alongside literal traversal; the test feeds the encoded payload directly. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7574,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7574-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The guard now decodes first and checks the decoded value, so a percent-encoded payload decodes to '..' and is rejected by the same comparison that catches literal traversal."
+              }
+            ],
+            "review_markdown": "The guard now decodes first and checks the decoded value, so a percent-encoded payload decodes to '..' and is rejected by the same comparison that catches literal traversal."
+          }
+        },
+        {
+          "ref_id": "nit-7574",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The module imports unquote at module scope; moving it into the function would keep the import surface smaller. Style only."
+              }
+            ],
+            "review_markdown": "The module imports unquote at module scope; moving it into the function would keep the import surface smaller. Style only."
+          }
+        },
+        {
+          "ref_id": "spec-7574",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Double-encoding might still be an issue in some proxies; consider adding a test."
+              }
+            ],
+            "review_markdown": "Double-encoding might still be an issue in some proxies; consider adding a test."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7575,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "cooccurrence_false_flow",
+        "mechanism": "The sink audit flags a sink when any line within WINDOW mentions request input, so proximity stands in for dataflow and an unrelated neighbor flags a static sink.",
+        "detection_requires": [
+          "the audit flags a sink from token proximity within the window rather than actual dataflow into the sink",
+          "an unrelated nearby line that mentions request input satisfies the window for a static sink",
+          "a concrete listing where the flagged sink never consumes the request value is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7575-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: ['def run():', \"    eval('1 + 1')\", \"    log.info('request received')\"] flags the static eval \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood."
+              }
+            ],
+            "review_markdown": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: ['def run():', \"    eval('1 + 1')\", \"    log.info('request received')\"] flags the static eval \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7575,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7575-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The audit flags request-driven sinks and skips static ones; the unit tests cover both sides, CI is green, and the reachability boundary matches the documented window semantics. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7575,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7575-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I probed counterexamples around the reachability boundary \u2014 sinks closer than the window, sinks farther away, multiple sinks \u2014 and the audit behaves as documented; CI and parity are green. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7575,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7575-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "audit() decides by neighborhood: put `log.info('request received')` two lines under `eval('1 + 1')` and the sink is reported even though the eval argument is a constant; nothing from the request ever reaches it. The operand of the sink call is what must be inspected."
+              }
+            ],
+            "review_markdown": "The three-line window means any request-shaped word near a sink flags it. A static eval with an unrelated request log line two lines below is reported as request-driven, so co-location is standing in for dataflow; the audit should inspect the sink's actual operand."
+          }
+        },
+        {
+          "ref_id": "para-7575-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The audit matches on proximity, not flow: the window sweep finds the word 'request' in a neighboring log line and flags a sink whose argument is a string literal. Whether request data reaches the sink is never checked."
+              }
+            ],
+            "review_markdown": "The audit matches on proximity, not flow: the window sweep finds the word 'request' in a neighboring log line and flags a sink whose argument is a string literal. Whether request data reaches the sink is never checked."
+          }
+        },
+        {
+          "ref_id": "miss-7575",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The window heuristic is documented and both tests pass; static sinks are correctly ignored when no request line is nearby."
+              }
+            ],
+            "review_markdown": "The window heuristic is documented and both tests pass; static sinks are correctly ignored when no request line is nearby."
+          }
+        },
+        {
+          "ref_id": "spec-7575",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Proximity-based matching may produce noise in larger files; consider tightening the window later."
+              }
+            ],
+            "review_markdown": "Proximity-based matching may produce noise in larger files; consider tightening the window later."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7576,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "cooccurrence_false_flow",
+        "mechanism": "Fixed control for scenario 7575: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7576-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The audit now inspects the sink's operand, so an unrelated request mention nearby no longer flags a static sink; the regression test covers that case directly. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7576,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7576-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The audit now inspects the sink's operand, so an unrelated request mention nearby no longer flags a static sink; the flagged set is exactly the sinks whose argument reads request input."
+              }
+            ],
+            "review_markdown": "The audit now inspects the sink's operand, so an unrelated request mention nearby no longer flags a static sink; the flagged set is exactly the sinks whose argument reads request input."
+          }
+        },
+        {
+          "ref_id": "nit-7576",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The SINKS constant mixes call syntax and module paths; a short comment would clarify the intent."
+              }
+            ],
+            "review_markdown": "The SINKS constant mixes call syntax and module paths; a short comment would clarify the intent."
+          }
+        },
+        {
+          "ref_id": "spec-7576",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Operand-only matching might miss multi-line call expressions; consider a follow-up."
+              }
+            ],
+            "review_markdown": "Operand-only matching might miss multi-line call expressions; consider a follow-up."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7577,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "incidental_positive_fixture",
+        "mechanism": "The classifier triggers on tokens appearing anywhere in the line, and the positive fixture's trigger tokens live in the declared handler name, so the test passes for the wrong reason and the claimed untrusted-content signal is never exercised.",
+        "detection_requires": [
+          "the detector triggers on tokens appearing anywhere in the line, including the declared handler name",
+          "the positive fixture's trigger tokens are incidental to the claimed semantics (the untrusted content parameter)",
+          "a rename or probe (a metrics handler named upload_* or a blob handler without trigger words) flips the outcome without changing the semantics"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7577-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The detection boundary the tests pin is the implementation's trigger vocabulary, not the claimed semantics: the positive fixture's 'upload' and 'file' tokens are the incidental token occurrences inside the declared name of the handler, so the test passes for the wrong reason. Counterexample: is_upload_handler('def upload_metrics():') returns true with no file content, while is_upload_handler('def save_blob(store):') \u2014 a handler consuming untrusted content \u2014 returns false. Renaming the trigger (the handler name) or removing the incidental tokens would flip the result without changing the intended semantics: the fixture proves vocabulary, not the untrusted-content boundary. Detect on the consumed parameter list, not on the line's identifiers."
+              }
+            ],
+            "review_markdown": "The detection boundary the tests pin is the implementation's trigger vocabulary, not the claimed semantics: the positive fixture's 'upload' and 'file' tokens are the incidental token occurrences inside the declared name of the handler, so the test passes for the wrong reason. Counterexample: is_upload_handler('def upload_metrics():') returns true with no file content, while is_upload_handler('def save_blob(store):') \u2014 a handler consuming untrusted content \u2014 returns false. Renaming the trigger (the handler name) or removing the incidental tokens would flip the result without changing the intended semantics: the fixture proves vocabulary, not the untrusted-content boundary. Detect on the consumed parameter list, not on the line's identifiers."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7577,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7577-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The classifier detects upload handlers and skips plain ones; both unit tests pass, CI is green, and the classification boundary matches the documented trigger list. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7577,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7577-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I tried counterexamples around the classification boundary \u2014 handlers with mixed-case names, empty parameter lists, nested decorators \u2014 and the trigger list behaves consistently; CI is green. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7577,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7577-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The test's positive case is `def upload_attachment_handler(file_storage):` \u2014 the words upload and file are in the function's name, so the test proves the name matches, not that a file-consuming handler is detected. `is_upload_handler('def upload_metrics():')` reports a handler with no content at all, while a `save_blob(store)` handler consuming untrusted content is missed."
+              }
+            ],
+            "review_markdown": "Detection keys on identifiers anywhere in the line: a metrics endpoint that happens to be named upload_metrics classifies as an upload handler, and the same detector misses a handler that takes file content under a different name. The parameter list is the actual signal."
+          }
+        },
+        {
+          "ref_id": "para-7577-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Rename the handler and the result flips: a metrics function whose name contains 'upload' is classified as serving untrusted content, while a handler that actually consumes a file parameter but is named save_blob is not detected. The test proves vocabulary, not the claimed boundary."
+              }
+            ],
+            "review_markdown": "Rename the handler and the result flips: a metrics function whose name contains 'upload' is classified as serving untrusted content, while a handler that actually consumes a file parameter but is named save_blob is not detected. The test proves vocabulary, not the claimed boundary."
+          }
+        },
+        {
+          "ref_id": "miss-7577",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Both fixtures behave as named; the trigger list is explicit in the module and the negative case is covered."
+              }
+            ],
+            "review_markdown": "Both fixtures behave as named; the trigger list is explicit in the module and the negative case is covered."
+          }
+        },
+        {
+          "ref_id": "spec-7577",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "There might be naming collisions with these tokens in larger codebases; maybe restrict the matching later."
+              }
+            ],
+            "review_markdown": "There might be naming collisions with these tokens in larger codebases; maybe restrict the matching later."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7578,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "incidental_positive_fixture",
+        "mechanism": "Fixed control for scenario 7577: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7578-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "Detection now consumes the handler's parameter list, so the declared name alone no longer classifies a handler; the test covers the metrics-handler case directly. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7578,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7578-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Detection now consumes the handler's parameter list, so the declared name alone no longer classifies a handler and a metrics function named upload_* is no longer reported."
+              }
+            ],
+            "review_markdown": "Detection now consumes the handler's parameter list, so the declared name alone no longer classifies a handler and a metrics function named upload_* is no longer reported."
+          }
+        },
+        {
+          "ref_id": "nit-7578",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The parameter allowlist tuple is inline in the comparison; a module constant would read better."
+              }
+            ],
+            "review_markdown": "The parameter allowlist tuple is inline in the comparison; a module constant would read better."
+          }
+        },
+        {
+          "ref_id": "spec-7578",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Multi-parameter handlers might behave differently; consider a test."
+              }
+            ],
+            "review_markdown": "Multi-parameter handlers might behave differently; consider a test."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7579,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "information_loss_ordering",
+        "mechanism": "enforce() validates the output of normalize(), so records normalization drops (no string id, or an id duplicating a retained record) never reach the required-field check and a batch containing them validates.",
+        "detection_requires": [
+          "enforcement iterates the normalized records rather than the raw batch",
+          "records that normalization drops (no string id, or an id duplicating a retained record) therefore never reach the required-field check",
+          "a concrete batch containing such a record that still validates is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7579-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Enforcement runs after normalization, so records that normalization drops never reach the required-field check: a record without an id \u2014 or a malformed record whose id duplicates a retained one \u2014 is normalized away before enforcement sees the batch. Counterexample: enforce([{'id': 'a', 'source': 'web'}, {'source': None}]) returns True although the batch contains a record with no id and no source; the duplicate form enforce([{'id': 'a', 'source': 'web'}, {'id': 'a', 'source': None}]) also passes. The batch contract is checked on the post-normalization population only. Enforce over the raw records and keep normalize() for downstream consumers."
+              }
+            ],
+            "review_markdown": "Enforcement runs after normalization, so records that normalization drops never reach the required-field check: a record without an id \u2014 or a malformed record whose id duplicates a retained one \u2014 is normalized away before enforcement sees the batch. Counterexample: enforce([{'id': 'a', 'source': 'web'}, {'source': None}]) returns True although the batch contains a record with no id and no source; the duplicate form enforce([{'id': 'a', 'source': 'web'}, {'id': 'a', 'source': None}]) also passes. The batch contract is checked on the post-normalization population only. Enforce over the raw records and keep normalize() for downstream consumers."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7579,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7579-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The normalizer deduplicates by id and drops malformed entries; enforcement then rejects batches whose records lack a source. Unit tests cover the source-required rejection and the well-formed batch, CI is green, and the enforcement boundary matches the documented pipeline. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7579,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7579-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I attempted counterexamples around the enforcement boundary \u2014 empty batches, records with extra fields, ids of different types \u2014 and enforcement behaves as documented; the normalizer's contract is covered by its tests. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7579,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7579-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "enforce() validates the output of normalize(), so anything normalize() discards is unpoliced: a batch member without an id, or a bad duplicate whose id was already kept, vanishes before the source check and the batch still passes. Run the required-field check over the raw input."
+              }
+            ],
+            "review_markdown": "The pipeline order makes the required-field check blind to exactly the records most likely to be malformed: a record without an id is dropped by normalize and never tested by enforce, which returns True for a batch containing it; a malformed duplicate of a retained id disappears the same way."
+          }
+        },
+        {
+          "ref_id": "para-7579-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The validator only sees the retained population. Submit `{'source': None}` with no id alongside a good record and enforce returns True \u2014 the unattributable record was normalized away before the check ran."
+              }
+            ],
+            "review_markdown": "The validator only sees the retained population. Submit `{'source': None}` with no id alongside a good record and enforce returns True \u2014 the unattributable record was normalized away before the check ran."
+          }
+        },
+        {
+          "ref_id": "miss-7579",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Normalization is documented as dropping malformed entries; enforcement then checks the retained set, and the tests cover the source-required rejection."
+              }
+            ],
+            "review_markdown": "Normalization is documented as dropping malformed entries; enforcement then checks the retained set, and the tests cover the source-required rejection."
+          }
+        },
+        {
+          "ref_id": "spec-7579",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Dropping malformed records before validation might hide issues in some pipelines; consider validating first."
+              }
+            ],
+            "review_markdown": "Dropping malformed records before validation might hide issues in some pipelines; consider validating first."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7580,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "information_loss_ordering",
+        "mechanism": "Fixed control for scenario 7579: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7580-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "Enforcement now sees the raw batch, so records that normalization would drop still fail the required-field check; tests cover both the malformed and the duplicate cases. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7580,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7580-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Enforcement now sees the raw batch, so a record that normalization would drop still fails the required-field check, and a malformed duplicate can no longer ride in behind a retained id."
+              }
+            ],
+            "review_markdown": "Enforcement now sees the raw batch, so a record that normalization would drop still fails the required-field check, and a malformed duplicate can no longer ride in behind a retained id."
+          }
+        },
+        {
+          "ref_id": "nit-7580",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The enforce docstring duplicates the comment above it; trim one."
+              }
+            ],
+            "review_markdown": "The enforce docstring duplicates the comment above it; trim one."
+          }
+        },
+        {
+          "ref_id": "spec-7580",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Very large batches might make raw-batch enforcement slower; consider measuring."
+              }
+            ],
+            "review_markdown": "Very large batches might make raw-batch enforcement slower; consider measuring."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7581,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "boundary_scope_leak",
+        "mechanism": "authorize() resolves the route policy from the client-declared session route and never inspects the requested path, so a benign declared route downgrades the policy of the actual path.",
+        "detection_requires": [
+          "the authorization decision resolves the route policy from session-declared metadata instead of the requested path",
+          "the path parameter is never consulted, so a benign declared route downgrades the policy of the actual path",
+          "a concrete call where the session declares a public route while requesting an admin path authorizes is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7581-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The authorization check scans the wrong object: authorize() resolves the policy from the client-declared session route and never inspects the requested path \u2014 the path parameter is ignored, so the authorization boundary is enforced on what the session claims rather than on the policy resolution of the actual path. Counterexample: authorize({'role': 'viewer', 'route': '/public'}, '/admin') returns true \u2014 a viewer session that declares a public route fetches the admin path. The green tests always pass a session route that matches the requested path, so the divergence is untested. Resolve the policy from the requested path (longest prefix match), not from session metadata."
+              }
+            ],
+            "review_markdown": "The authorization check scans the wrong object: authorize() resolves the policy from the client-declared session route and never inspects the requested path \u2014 the path parameter is ignored, so the authorization boundary is enforced on what the session claims rather than on the policy resolution of the actual path. Counterexample: authorize({'role': 'viewer', 'route': '/public'}, '/admin') returns true \u2014 a viewer session that declares a public route fetches the admin path. The green tests always pass a session route that matches the requested path, so the divergence is untested. Resolve the policy from the requested path (longest prefix match), not from session metadata."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7581,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7581-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "Role ranks gate each route's policy and the unit tests cover admin denial and viewer access; CI is green and the policy resolution matches the documented route table. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7581,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7581-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I probed counterexamples around the authorization boundary \u2014 unknown roles, absent session keys, paths outside the table \u2014 and the rank comparison denies each; CI is green. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7581,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7581-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "authorize() never reads its `path` argument: the policy comes from the session's 'route' key, which the client controls. A viewer session claiming route=/public can request /admin and is authorized, because the declared route, not the request, selects the policy."
+              }
+            ],
+            "review_markdown": "The check validates the wrong object \u2014 the session's self-reported route \u2014 so the requested URL's policy is bypassable by declaring any public route in the session; the path parameter is dead weight."
+          }
+        },
+        {
+          "ref_id": "para-7581-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Authorization is decided from what the session claims, not from what is requested: a viewer with route=/public in the session fetches the admin path successfully, since the policy lookup ignores the path entirely."
+              }
+            ],
+            "review_markdown": "Authorization is decided from what the session claims, not from what is requested: a viewer with route=/public in the session fetches the admin path successfully, since the policy lookup ignores the path entirely."
+          }
+        },
+        {
+          "ref_id": "miss-7581",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Role ranking gates each route's policy and the tests cover admin denial; the route table matches the documented roles."
+              }
+            ],
+            "review_markdown": "Role ranking gates each route's policy and the tests cover admin denial; the route table matches the documented roles."
+          }
+        },
+        {
+          "ref_id": "spec-7581",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Session-based route selection could be problematic in some architectures; possibly worth reviewing."
+              }
+            ],
+            "review_markdown": "Session-based route selection could be problematic in some architectures; possibly worth reviewing."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7582,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "boundary_scope_leak",
+        "mechanism": "Fixed control for scenario 7581: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7582-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "Policy resolution now reads the requested path, so a session-declared route can no longer downgrade the path's policy; the regression test covers the mismatched declaration. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7582,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7582-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Policy resolution now reads the requested path via longest-prefix match, so a session-declared route can no longer downgrade the policy of the path actually being fetched."
+              }
+            ],
+            "review_markdown": "Policy resolution now reads the requested path via longest-prefix match, so a session-declared route can no longer downgrade the policy of the path actually being fetched."
+          }
+        },
+        {
+          "ref_id": "nit-7582",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The sorted() call runs on every authorize(); precomputing the order once would be marginally cheaper."
+              }
+            ],
+            "review_markdown": "The sorted() call runs on every authorize(); precomputing the order once would be marginally cheaper."
+          }
+        },
+        {
+          "ref_id": "spec-7582",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Unusual paths with trailing slashes might behave differently; consider a test."
+              }
+            ],
+            "review_markdown": "Unusual paths with trailing slashes might behave differently; consider a test."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7583,
+      "answer_key": {
+        "kind": "vulnerable",
+        "class": "cooccurrence_false_flow",
+        "mechanism": "persist() treats a truthy store.get(id) as completion, but a failed attempt's put() also leaves the key present when rollback cannot retract an applied write, so a partial write reads as done on retry.",
+        "detection_requires": [
+          "persist() treats a truthy store.get(id) as completion rather than an explicit commit acknowledgement",
+          "a failed attempt's put() also leaves the key present when rollback cannot retract an applied write",
+          "a concrete store where a partial write persists and the retry returns done with a partial payload is constructed"
+        ],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7583-0",
+          "origin": "answer-key",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Key presence is mistaken for the success flow: persist() treats a truthy store.get(id) as completion, but the failed attempt's put() also leaves the key present when commit fails and rollback cannot retract an applied write \u2014 the record's presence is not flow through the commit path. Counterexample: a store that applies put() before commit() and whose rollback cannot undo it makes the retry loop return 'done' on the first retry with a partial payload; the green tests' fake rolls back cleanly, so the completion boundary is never exercised against a partial write. Decide completion from the store's commit acknowledgement, not from row presence."
+              }
+            ],
+            "review_markdown": "Key presence is mistaken for the success flow: persist() treats a truthy store.get(id) as completion, but the failed attempt's put() also leaves the key present when commit fails and rollback cannot retract an applied write \u2014 the record's presence is not flow through the commit path. Counterexample: a store that applies put() before commit() and whose rollback cannot undo it makes the retry loop return 'done' on the first retry with a partial payload; the green tests' fake rolls back cleanly, so the completion boundary is never exercised against a partial write. Decide completion from the store's commit acknowledgement, not from row presence."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7583,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "key-7583-1",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "The retry loop bounds attempts at three and returns done after a committed write; the unit tests cover the first-attempt success and the exhausted-retry path, CI is green, and the retry boundary matches the documented idempotency contract. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7583,
+            "offline_run": 1
+          }
+        },
+        {
+          "ref_id": "key-7583-2",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "I tried counterexamples around the retry boundary \u2014 exceptions inside put, exceptions inside begin, a store that always fails get \u2014 and each lands on the documented retry path; CI is green. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7583,
+            "offline_run": 2
+          }
+        },
+        {
+          "ref_id": "para-7583-a",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "Presence of the row is being read as proof the write committed. If the store applies put() before commit and a commit failure leaves the applied row in place, the next attempt's get() sees it and returns 'done' with a half-written record. Completion must come from the store's own commit acknowledgement."
+              }
+            ],
+            "review_markdown": "The retry short-circuits on any truthy get(): a record left behind by the failed attempt (put applied, commit failed) satisfies the guard and the function reports done for a payload that never committed. The tests' fake rolls back cleanly, so this boundary is never exercised."
+          }
+        },
+        {
+          "ref_id": "para-7583-b",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "correct",
+          "response": {
+            "findings": [
+              {
+                "message": "The idempotency guard confuses 'a row with this key exists' with 'this record committed': a partial write from the failed attempt co-occurs with the key and the retry reports done without any committed write."
+              }
+            ],
+            "review_markdown": "The idempotency guard confuses 'a row with this key exists' with 'this record committed': a partial write from the failed attempt co-occurs with the key and the retry reports done without any committed write."
+          }
+        },
+        {
+          "ref_id": "miss-7583",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The loop bounds attempts at three and the retry test passes; the guard matches the docstring's idempotency description."
+              }
+            ],
+            "review_markdown": "The loop bounds attempts at three and the retry test passes; the guard matches the docstring's idempotency description."
+          }
+        },
+        {
+          "ref_id": "spec-7583",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "Key-based idempotency could cause issues with some stores; consider an explicit completion flag."
+              }
+            ],
+            "review_markdown": "Key-based idempotency could cause issues with some stores; consider an explicit completion flag."
+          }
+        }
+      ]
+    },
+    {
+      "number": 7584,
+      "answer_key": {
+        "kind": "negative_control",
+        "class": "cooccurrence_false_flow",
+        "mechanism": "Fixed control for scenario 7583: the defect is removed; no capability attribution may fire on the fixed implementation.",
+        "detection_requires": [],
+        "remediation": null
+      },
+      "references": [
+        {
+          "ref_id": "key-7584-0",
+          "origin": "answer-key",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [],
+            "review_markdown": "Completion now comes from the store's commit acknowledgement, so a partially applied write no longer reads as done; the retry test exercises the acknowledgement contract. Approve."
+          },
+          "source": {
+            "corpus": "corpus-historical-dogfood.json",
+            "scenario": 7584,
+            "offline_run": 0
+          }
+        },
+        {
+          "ref_id": "fix-7584-mechanism",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "Completion now comes from the store's commit acknowledgement, so a partially applied write no longer reads as done and the retry correctly rewrites it."
+              }
+            ],
+            "review_markdown": "Completion now comes from the store's commit acknowledgement, so a partially applied write no longer reads as done and the retry correctly rewrites it."
+          }
+        },
+        {
+          "ref_id": "nit-7584",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "not_found",
+          "response": {
+            "findings": [
+              {
+                "message": "The FakeStore helper key_for reads a private attribute; expose a small accessor instead."
+              }
+            ],
+            "review_markdown": "The FakeStore helper key_for reads a private attribute; expose a small accessor instead."
+          }
+        },
+        {
+          "ref_id": "spec-7584",
+          "origin": "adversarial-paraphrase",
+          "expected_disposition": "speculative_false_positive",
+          "response": {
+            "findings": [
+              {
+                "message": "The acknowledgement contract might vary across store implementations; consider documenting it."
+              }
+            ],
+            "review_markdown": "The acknowledgement contract might vary across store implementations; consider documenting it."
+          }
         }
       ]
     }
