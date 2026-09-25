@@ -21,6 +21,7 @@ import {
   resolveTierBudgets,
   classificationLine,
   prMetadataLine,
+  ProjectionError,
   truncateClean,
   type CorpusWorkspace,
 } from "../src/corpus/index.js";
@@ -133,6 +134,22 @@ test("tier overrides are capped at 166666 usable tokens and keep their own profi
   assert.deepEqual(budgets.smart, resolveTierBudgets({ smartModelContextTokens: "900000", aiMaxTokens: "1000" }).smart);
 });
 
+test("zero tier overrides are rejected as not-positive, like v2", () => {
+  for (const key of ["primaryModelContextTokens", "smartModelContextTokens"] as const) {
+    assert.throws(
+      () => resolveTierBudgets({ [key]: "0", aiMaxTokens: "8192" }),
+      (error: unknown) =>
+        error instanceof BudgetError &&
+        error.message === `Invalid ${key === "primaryModelContextTokens" ? "PRIMARY" : "SMART"}_MODEL_CONTEXT_TOKENS: expected a positive integer`,
+    );
+  }
+  // The legacy GLOBAL override stays lenient: zero falls back to the named
+  // modes exactly like any other non-usable value.
+  assert.deepEqual(resolveTierBudgets({ modelContextTokens: "0" }).primary, {
+    maxCorpus: 220000, maxDiff: 140000, maxFiles: 70000,
+  });
+});
+
 test("invalid tier tokens carry the v2 per-variable message", () => {
   assert.throws(
     () => resolveTierBudgets({ primaryModelContextTokens: "abc" }),
@@ -153,11 +170,11 @@ test("invalid tier tokens carry the v2 per-variable message", () => {
 // ---------------------------------------------------------------------------
 
 test("prMetadataLine projects the documented fields in order", () => {
-  const out = dec(prMetadataLine(JSON.stringify({
+  const out = dec(prMetadataLine(enc(JSON.stringify({
     number: 5, title: "t", author: { login: "alice" }, baseRefName: "main",
     headRefName: "feat", headRefOid: "abc", changedFiles: 1, additions: 2,
     deletions: 3, url: "u", body: "b",
-  })));
+  }))));
   assert.equal(
     out,
     '{"number":5,"title":"t","author":"alice","baseRefName":"main","headRefName":"feat","headRefOid":"abc","changedFiles":1,"additions":2,"deletions":3,"url":"u","body":"b"}\n',
@@ -165,9 +182,9 @@ test("prMetadataLine projects the documented fields in order", () => {
 });
 
 test("prMetadataLine falls back on jq // semantics and slices body by code points", () => {
-  const out = dec(prMetadataLine(JSON.stringify({
+  const out = dec(prMetadataLine(enc(JSON.stringify({
     author: { login: false }, body: "é😀" + "x".repeat(4100),
-  })));
+  }))));
   const parsed = JSON.parse(out) as { author: unknown; body: string };
   // login false → fall back to the whole author object
   assert.deepEqual(parsed.author, { login: false });
@@ -176,36 +193,54 @@ test("prMetadataLine falls back on jq // semantics and slices body by code point
   assert.ok(parsed.body.startsWith("é😀"));
 });
 
-test("prMetadataLine emits nothing at all on a jq failure", () => {
-  assert.equal(dec(prMetadataLine("{not json")), "");
-  assert.equal(dec(prMetadataLine(null)), "");
+test("prMetadataLine fails closed on a jq failure (production aborts the review)", () => {
+  // Malformed JSON, a missing file, and jq type errors all exit nonzero in
+  // production (`set -euo pipefail` aborts) — the port throws, never
+  // swallowing the failure into empty output.
+  assert.throws(() => prMetadataLine(enc("{not json")), ProjectionError);
+  assert.throws(() => prMetadataLine(null), ProjectionError);
   // indexing a string author errors the whole projection
-  assert.equal(dec(prMetadataLine(JSON.stringify({ author: "str" }))), "");
+  assert.throws(() => prMetadataLine(enc(JSON.stringify({ author: "str" }))), ProjectionError);
   // an array root cannot be indexed by key
-  assert.equal(dec(prMetadataLine("[]")), "");
+  assert.throws(() => prMetadataLine(enc("[]")), ProjectionError);
+  // jq rejects invalid UTF-8 input
+  assert.throws(() => prMetadataLine(new Uint8Array([0x7b, 0xff, 0x7d])), ProjectionError);
 });
 
-test("classificationLine byte-caps the compact JSON at 8000 like head -c", () => {
-  const big = JSON.stringify({ pr_kind: "a".repeat(9000), risk_flags: [] });
-  const out = classificationLine(big);
-  assert.equal(out.length, 8000);
-  // the cut can land mid-line: the tail of the JSON is simply gone
-  assert.ok(dec(out).startsWith('{"pr_kind":"aaa'));
+test("prMetadataLine treats an existing empty file as jq's zero-documents success", () => {
+  // jq exits 0 with NO output at all (not even a newline) for empty input.
+  assert.equal(dec(prMetadataLine(new Uint8Array(0))), "");
 });
 
 test("classificationLine slices changed_files_summary to 20 entries and nulls stay null", () => {
-  const out = dec(classificationLine(JSON.stringify({
+  const out = dec(classificationLine(enc(JSON.stringify({
     changed_files_summary: Array.from({ length: 30 }, (_, i) => `f${i}`),
-  })));
+  }))));
   const parsed = JSON.parse(out) as { changed_files_summary: string[] };
   assert.equal(parsed.changed_files_summary.length, 20);
-  assert.equal(dec(classificationLine("{}")), '{"pr_kind":null,"risk_flags":null,"risk_flags_with_files":null,"changed_files_summary":null,"linked_issue_labels":null,"must_check":null}\n');
+  assert.equal(dec(classificationLine(enc("{}"))), '{"pr_kind":null,"risk_flags":null,"risk_flags_with_files":null,"changed_files_summary":null,"linked_issue_labels":null,"must_check":null}\n');
+});
+
+test("classificationLine fails closed on malformed input; empty file is zero-documents success", () => {
+  // A PRESENT but malformed classification.json is a jq failure: production
+  // `set -o pipefail` aborts. A MISSING one never reaches the projection —
+  // corpus.sh guards it with -f and emits the unavailable placeholder.
+  assert.throws(() => classificationLine(enc('{"pr_kind": "docs_only", "risk_flags": []')), ProjectionError);
+  assert.throws(() => classificationLine(enc("{not json")), ProjectionError);
+  assert.throws(() => classificationLine(null), ProjectionError);
+  assert.equal(dec(classificationLine(new Uint8Array(0))), "");
+});
+
+test("classificationLine byte-caps a >8000-byte projection like head -c without a SIGPIPE failure", () => {
+  // Realistic sizes stay far below the 64 KiB pipe buffer, so jq exits 0 and
+  // only `head -c` cuts: the port must not invent a failure here either.
+  const big = JSON.stringify({ pr_kind: "a".repeat(9000) });
+  const out = classificationLine(enc(big));
+  assert.equal(out.length, 8000);
 });
 
 test("hostile __proto__ keys read the JSON value, never the prototype", () => {
-  const out = dec(prMetadataLine('{"number": 1, "__proto__": 5}'));
-  assert.equal(out, '{"number":1}\n' === out ? out : out); // shape check below
-  const parsed = JSON.parse(dec(prMetadataLine('{"number":1,"__proto__":{"x":1}}'))) as Record<string, unknown>;
+  const parsed = JSON.parse(dec(prMetadataLine(enc('{"number":1,"__proto__":{"x":1}}')))) as Record<string, unknown>;
   assert.equal(parsed.number, 1);
 });
 
@@ -453,6 +488,14 @@ test("buildBoundedRepoMap re-frames but never truncates or emits a partial map",
   assert.equal(dec(buildBoundedRepoMap(enc("# Repository Map (v1)\n\n" + "x".repeat(200) + "\n"), 50)), "");
   // Empty/missing source: empty artifact.
   assert.equal(dec(buildBoundedRepoMap(null, 12000)), "");
+});
+
+test("buildBoundedRepoMap fails closed on invalid UTF-8 instead of publishing U+FFFD content", () => {
+  // v2's strict read_text raises and the || true fallback leaves the
+  // pre-truncated empty artifact; the port must do the same, never silently
+  // replace invalid bytes and publish a corrupted map.
+  const invalid = new Uint8Array([0x23, 0x20, 0x52, 0x65, 0x70, 0xff, 0x6f, 0x0a]); // "# Repÿo\n"
+  assert.equal(dec(buildBoundedRepoMap(invalid, 12000)), "");
 });
 
 // ---------------------------------------------------------------------------

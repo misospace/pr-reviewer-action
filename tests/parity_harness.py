@@ -1092,12 +1092,16 @@ def run_v3_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["corpus-fixture"], fixture, workdir)
 
 
-# Error vocabulary for the corpus boundary's budget-resolution failures. The
-# v2 messages arrive prefixed by the common.sh log stamp (scrubbed) and the
+# Error vocabulary for the corpus boundary's failure contracts. The v2
+# messages arrive prefixed by the common.sh log stamp (scrubbed) and the
 # "ERROR: " marker; both sides map onto the same shared categories.
 CORPUS_CATEGORIES = (
     (re.compile(r"expected a positive integer"), "invalid-number"),
     (re.compile(r"cannot fit AI_MAX_TOKENS"), "budget-too-small"),
+    # Projection failures abort the production review (set -euo pipefail):
+    # v2's stderr is jq's own message, the v3 port throws a typed error.
+    (re.compile(r"jq: error|jq: parse error|jq: projection failed"), "projection-failed"),
+    (re.compile(r"exceeds its [0-9]+-byte context budget"), "corpus-over-budget"),
 )
 
 CORPUS_BOUNDARY = Boundary(

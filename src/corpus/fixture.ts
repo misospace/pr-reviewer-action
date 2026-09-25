@@ -19,6 +19,7 @@
 
 import { readFileSync } from "node:fs";
 import { BudgetError, resolveTierBudgets, type TierBudgets } from "./budgets.js";
+import { ProjectionError } from "./projections.js";
 import {
   buildReviewCorpus,
   gateFeatureForForks,
@@ -219,27 +220,37 @@ export function runCorpusFixture(fixturePath: string): { ok: boolean; values?: R
     values[`status:extra:${statusIndex}`] = ok ? "0" : "1";
   };
 
-  // Build #1: the corpus.sh source-time primary (or direct-smart-profile) build.
-  values["status:initial"] = runBuild(profile, "primary") ? "0" : "1";
-  state.set("review-corpus.truncated.md", new Uint8Array(state.get("review-corpus.md") ?? []));
-
+  // Production runs build_review_corpus under `set -euo pipefail`, so a
+  // projection failure (malformed pr.json / classification.json) or a
+  // pipeline-level build failure ABORTS the review — fail closed. The driver
+  // models that by propagating the throw out of the pipeline sequence; only
+  // the explicit extra calls (the escalation call site, which handles a
+  // failed smart build gracefully by keeping the primary review) record a
+  // status instead.
+  const runPipelineBuild = (tier: CorpusTier, slot: CorpusSlot): boolean => runBuild(tier, slot);
   const stopAfter = fixture.stop_after ?? "";
-  if (stopAfter === "initial") {
-    return emitState(values, state);
-  }
 
-  // Rebuild after the review gates resolve (#634): finalized CI evidence and
-  // any usable specialist leads reach the corpus before the final review call.
-  if ((context.ci_gate_active ?? "false") === "true" || nonEmpty(read("specialists.md"))) {
-    values["status:gates"] = runBuild(profile, "primary") ? "0" : "1";
+  try {
+    // Build #1: the corpus.sh source-time primary (or direct-smart-profile) build.
+    values["status:initial"] = runPipelineBuild(profile, "primary") ? "0" : "1";
     state.set("review-corpus.truncated.md", new Uint8Array(state.get("review-corpus.md") ?? []));
-  } else {
-    values["status:gates"] = ABSENT;
-  }
 
-  if (stopAfter === "gates") {
-    return emitState(values, state);
-  }
+    if (stopAfter === "initial") {
+      return emitState(values, state);
+    }
+
+    // Rebuild after the review gates resolve (#634): finalized CI evidence and
+    // any usable specialist leads reach the corpus before the final review call.
+    if ((context.ci_gate_active ?? "false") === "true" || nonEmpty(read("specialists.md"))) {
+      values["status:gates"] = runPipelineBuild(profile, "primary") ? "0" : "1";
+      state.set("review-corpus.truncated.md", new Uint8Array(state.get("review-corpus.md") ?? []));
+    } else {
+      values["status:gates"] = ABSENT;
+    }
+
+    if (stopAfter === "gates") {
+      return emitState(values, state);
+    }
 
   // Tool harness block (corpus.sh lines 530-550): fork gate, then the
   // post-harness rebuild. When the gate does not skip, the simulated harness
@@ -273,19 +284,38 @@ export function runCorpusFixture(fixturePath: string): { ok: boolean; values?: R
     }
     // The post-harness rebuild's status is not pinned (the v2 slice runs it
     // inside the sourced block); its artifacts are what the fixture compares.
-    runBuild(profile, "primary");
+    runPipelineBuild(profile, "primary");
     state.set("review-corpus.truncated.md", new Uint8Array(state.get("review-corpus.md") ?? []));
+  }
+  } catch (error) {
+    if (!(error instanceof ProjectionError)) {
+      throw error;
+    }
+    // Fail closed like production: the review aborts with a jq-class error.
+    return { ok: false, stderr: `ERROR: jq: projection failed: ${error.message}` };
   }
 
   // Extra explicit build calls (escalation/coverage-style slot semantics and
   // the over-budget guard). No `cp` follows: only the corpus.sh source-time
-  // builds refresh review-corpus.truncated.md.
+  // builds refresh review-corpus.truncated.md. These mirror the escalation
+  // call site, which handles a failed smart build gracefully — a thrown
+  // projection failure records status 1 (primary review kept) instead of
+  // aborting the fixture.
   if (stopAfter === "") {
     const extraCalls = fixture.extra_calls ?? [];
     for (const [index, call] of extraCalls.entries()) {
       const tier: CorpusTier = call.tier === "smart" ? "smart" : "primary";
       const slot: CorpusSlot = call.slot === "smart" ? "smart" : "primary";
-      recordStatus(runBuild(tier, slot));
+      let ok: boolean;
+      try {
+        ok = runBuild(tier, slot);
+      } catch (error) {
+        if (!(error instanceof ProjectionError)) {
+          throw error;
+        }
+        ok = false;
+      }
+      recordStatus(ok);
       values[`extra_call:${index + 1}`] = `${tier}/${slot}`;
     }
 

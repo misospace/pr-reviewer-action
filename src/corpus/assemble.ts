@@ -212,14 +212,18 @@ export function gateFeatureForForks(
  * renderer already cut the document to a body budget net of the framing
  * overhead (#599), so the cap is a verified invariant, not a truncation
  * point. A violation (stale/hand-edited artifact, renderer version skew) or
- * an unreadable document emits no map: graceful no-op, never partial data. */
+ * an unreadable document emits no map: graceful no-op, never partial data.
+ * Decoding is strict/fatal UTF-8, matching v2's
+ * `Path.read_text(encoding="utf-8")`: invalid bytes raise and degrade to an
+ * empty `repo-map.capped.md` — never U+FFFD-replaced content that could
+ * publish a corrupted map. */
 export function buildBoundedRepoMap(repoMapMd: Uint8Array | null, repoMapMaxBytes: number): Uint8Array {
-  if (!nonEmpty(repoMapMd)) {
+  if (repoMapMd === null || repoMapMd.length === 0) {
     return new Uint8Array(0);
   }
   let final: string;
   try {
-    final = reframeForCorpus(asUtf8(repoMapMd));
+    final = reframeForCorpus(strictUtf8Decode(repoMapMd));
   } catch {
     return new Uint8Array(0);
   }
@@ -227,6 +231,12 @@ export function buildBoundedRepoMap(repoMapMd: Uint8Array | null, repoMapMaxByte
     return enc(final);
   }
   return new Uint8Array(0);
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+function strictUtf8Decode(data: Uint8Array): string {
+  return strictUtf8.decode(data);
 }
 
 /** build_review_corpus (corpus.sh lines 212-463). */
@@ -292,11 +302,14 @@ export function buildReviewCorpus(
   };
 
   pushSection("# Changed Manifest Context", bytes(ws.manifestContextMd));
-  pushSection("# PR Metadata", prMetadataLine(utf8OrNull(ws.prJson)), "json");
+  pushSection("# PR Metadata", prMetadataLine(ws.prJson), "json");
   pushSection(
     "# PR Classification",
+    // A missing classification.json is the intentional unavailable-placeholder
+    // path (v2 guards it with -f); a PRESENT but malformed one is a jq
+    // failure and throws — production `set -euo pipefail` aborts the review.
     ws.classificationJson !== null
-      ? classificationLine(asUtf8(ws.classificationJson))
+      ? classificationLine(ws.classificationJson)
       : enc("(Classification data unavailable for this review)\n"),
   );
   if (nonEmpty(ws.relatedCodeTruncatedMd)) {
@@ -453,6 +466,3 @@ function indexOfSub(haystack: Uint8Array, needle: Uint8Array): number {
   return Buffer.from(haystack).indexOf(Buffer.from(needle));
 }
 
-function utf8OrNull(value: Uint8Array | null): string | null {
-  return value === null ? null : asUtf8(value);
-}

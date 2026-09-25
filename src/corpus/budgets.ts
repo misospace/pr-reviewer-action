@@ -44,7 +44,9 @@ function positiveIntOrEmpty(value: string | undefined): string | null | undefine
   if (value === undefined || value === "") {
     return undefined; // unset
   }
-  return /^[0-9]+$/.test(value) ? value : null; // null = invalid
+  // v2 validates tier overrides with `! =~ ^[0-9]+$ || -lt 1`: zero is
+  // numeric but NOT positive, so it is rejected with the same error.
+  return /^[0-9]+$/.test(value) && Number(value) >= 1 ? value : null; // null = invalid
 }
 
 function applyContextLimits(

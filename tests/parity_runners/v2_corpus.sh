@@ -8,11 +8,13 @@
 # its exact invocation seam, and the resulting workspace artifacts are
 # compared byte-for-byte with the v3 TypeScript assembly.
 #
-# Divergence from production (documented in the fixture matrix): run_review.sh
-# executes the pipeline under `set -euo pipefail`, so the first failed build
-# aborts the review; this runner records each build's status instead so one
-# fixture can pin several builds, and the over-budget guard is pinned on an
-# explicit extra call.
+# Failure semantics are production-faithful: run_review.sh executes the
+# corpus pipeline under `set -euo pipefail`, so a failed pipeline build
+# (malformed pr.json / classification.json, jq type error) aborts the review —
+# the runner models that with fail-closed subshells and reports the captured
+# stderr instead of artifacts. Only the explicit extra calls — which model the
+# escalation call site, where a failed smart build gracefully keeps the
+# primary review — record a status, including the over-budget guard.
 #
 # Usage: v2_corpus.sh <fixture.json>   → prints one JSON line {ok, values, stderr}
 set -uo pipefail
@@ -138,6 +140,19 @@ fi
 read -r PRIMARY_MAX_CORPUS PRIMARY_MAX_DIFF PRIMARY_MAX_FILES \
         SMART_MAX_CORPUS SMART_MAX_DIFF SMART_MAX_FILES <<<"$BUDGET_OUT"
 
+# A failed pipeline build aborts the production review; report the captured
+# stderr as the failure artifact instead of any workspace state.
+emit_failure() {
+  PIPELINE_STDERR="$PIPELINE_STDERR" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+stderr = Path(os.environ["PIPELINE_STDERR"]).read_text(encoding="utf-8", errors="replace").strip()
+print(json.dumps({"ok": False, "stderr": stderr[-2000:]}, ensure_ascii=False))
+PY
+}
+
 # ---------------------------------------------------------------------------
 # Emit the values JSON: final workspace state, statuses, budgets, swap.
 # ---------------------------------------------------------------------------
@@ -254,10 +269,34 @@ run_build() {
   fi
 }
 
-BUILD_STATUS=0
-run_build "${REVIEW_CONTEXT_PROFILE:-primary}" primary
-STATUS_INITIAL="$BUILD_STATUS"
-cp review-corpus.md review-corpus.truncated.md 2>/dev/null || true
+PIPELINE_STDOUT="$WORK/pipeline_stdout.txt"
+PIPELINE_STDERR="$WORK/pipeline_stderr.txt"
+: > "$PIPELINE_STDOUT"
+: > "$PIPELINE_STDERR"
+PIPELINE_FAILED=0
+
+# Production corpus.sh runs under `set -euo pipefail`: the first failing
+# command inside build_review_corpus (jq parse/type error, missing required
+# input) aborts the review. Modeled fail-closed: the subshell dies on the
+# first failure and its stderr is the failure artifact.
+# (The subshell runs as a plain statement, NOT inside an if-condition:
+# bash ignores `set -e` inside a tested subshell, which would silently
+# re-enable the errexit the contract depends on.)
+(
+  set -e
+  build_review_corpus "${REVIEW_CONTEXT_PROFILE:-primary}" primary
+  cp review-corpus.md review-corpus.truncated.md
+) >>"$PIPELINE_STDOUT" 2>>"$PIPELINE_STDERR"
+BUILD_RC=$?
+STATUS_INITIAL=0
+if [ "$BUILD_RC" -ne 0 ]; then
+  PIPELINE_FAILED=1
+fi
+
+if [ "$PIPELINE_FAILED" = "1" ]; then
+  emit_failure
+  exit 0
+fi
 
 STOP_AFTER="${STOP_AFTER:-}"
 if [ "$STOP_AFTER" = "initial" ]; then
@@ -267,13 +306,24 @@ if [ "$STOP_AFTER" = "initial" ]; then
   exit 0
 fi
 
-# Rebuild after the review gates resolve (#634).
+# Rebuild after the review gates resolve (#634) — also fail-closed.
 if [ "${CI_GATE_ACTIVE:-false}" == "true" ] || [ -s specialists.md ]; then
-  run_build "${REVIEW_CONTEXT_PROFILE:-primary}" primary
-  STATUS_GATES="$BUILD_STATUS"
-  cp review-corpus.md review-corpus.truncated.md 2>/dev/null || true
+  (
+    set -e
+    build_review_corpus "${REVIEW_CONTEXT_PROFILE:-primary}" primary
+    cp review-corpus.md review-corpus.truncated.md
+  ) >>"$PIPELINE_STDOUT" 2>>"$PIPELINE_STDERR"
+  if [ "$?" -ne 0 ]; then
+    PIPELINE_FAILED=1
+  fi
+  STATUS_GATES=0
 else
   STATUS_GATES="__absent__"
+fi
+
+if [ "$PIPELINE_FAILED" = "1" ]; then
+  emit_failure
+  exit 0
 fi
 
 if [ "$STOP_AFTER" = "gates" ]; then
@@ -301,9 +351,21 @@ if [ "$(printf '%s' "${TOOL_MODE:-}" | tr '[:upper:]' '[:lower:]')" = "native_lo
     fi
     command python3 "$@"
   }
-  # shellcheck source=/dev/null
-  source "$SLICES/tool_harness_block.sh"
+  # The block (fork gate, simulated harness seam, failure artifacts,
+  # post-harness rebuild) is production top-level corpus.sh code: fail-closed.
+  (
+    set -e
+    # shellcheck source=/dev/null
+    source "$SLICES/tool_harness_block.sh"
+  ) >>"$PIPELINE_STDOUT" 2>>"$PIPELINE_STDERR"
+  if [ "$?" -ne 0 ]; then
+    PIPELINE_FAILED=1
+  fi
   unset -f python3
+  if [ "$PIPELINE_FAILED" = "1" ]; then
+    emit_failure
+    exit 0
+  fi
 fi
 
 # Extra explicit build calls (escalation/coverage-style slot semantics and

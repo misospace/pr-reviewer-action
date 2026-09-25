@@ -70,8 +70,13 @@ def main() -> int:
         "truncate.sh": slice_between(
             config, "truncate_clean() {", '\nif [[ -z "$REPO"', "truncate"
         ),
-        # common.sh log/error helpers (through the end of error()).
-        "log_error.sh": common[common.index("log() {") : next_def(common, common.index("log() {"))],
+        # common.sh log/error helpers: log() through the end of error() —
+        # the next def AFTER error()'s own start, not after log()'s.
+        "log_error.sh": common[
+            common.index("log() {") : next_def(
+                common, common.index("error() {")
+            )
+        ],
         "gate_forks.sh": common[
             common.index("gate_feature_for_forks() {") : next_def(
                 common, common.index("gate_feature_for_forks() {")

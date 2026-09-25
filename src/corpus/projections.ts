@@ -8,11 +8,17 @@
  *    risk_flags_with_files, changed_files_summary: (.changed_files_summary |
  *    .[0:20]), linked_issue_labels, must_check}` piped through `head -c 8000`.
  *
+ * Failure semantics are the production contract, not jq-lenient ones:
+ * production executes `build_review_corpus` under `set -euo pipefail`, so a
+ * jq parse error, a missing input file, or a jq type error inside the
+ * projection ABORTS the review (fail-closed). These helpers therefore throw
+ * `ProjectionError` in exactly the cases jq would exit nonzero, and the
+ * corpus builder treats that as a build failure. The one non-error shape is
+ * an existing-but-EMPTY input file: jq receives zero input documents, exits
+ * 0, and writes nothing at all — modeled as empty output bytes, never a bare
+ * newline.
+ *
  * Semantics pinned empirically against jq (1.8.2) and encoded here:
- * - a parse error or a type error inside the projection (indexing a number /
- *   string / array with a string key, slicing a non-sliceable) yields EMPTY
- *   output, matching jq's failed run (stderr goes to the log, stdout is
- *   empty, the pipeline's exit status is `head`'s);
  * - `a // b` falls back to `b` only when `a` is `null` or `false`;
  * - string slices cut by Unicode code points (not UTF-16 units), array
  *   slices cut by elements, and `null | .[0:n]` stays `null`;
@@ -108,24 +114,23 @@ function projectPrMetadata(parsed: Json): string {
 
 /** `jq -c '{number, title, author: (.author.login // .author), baseRefName,
  * headRefName, headRefOid, changedFiles, additions, deletions, url,
- * body: ((.body // "")[0:4000])}' pr.json` — empty output on any jq error.
- * Returns the exact stdout bytes (one compact line plus jq's trailing
- * newline). */
-export function prMetadataLine(prJsonText: string | null): Uint8Array {
-  let line: string;
-  try {
-    if (prJsonText === null) {
-      // Missing file: jq itself fails ("No such file"), stdout empty.
-      throw new ProjectionError("missing input");
-    }
-    line = projectPrMetadata(parseJson(prJsonText));
-  } catch (error) {
-    if (!(error instanceof ProjectionError)) {
-      throw error;
-    }
-    // jq failed: no stdout at all, not even a newline.
+ * body: ((.body // "")[0:4000])}' pr.json`.
+ *
+ * `null` input (missing file), invalid UTF-8, or a parse/type failure throws
+ * `ProjectionError` — under production `set -euo pipefail` that aborts the
+ * review, so the port fails closed the same way. An empty (zero-byte) input
+ * file is jq's zero-documents success: empty output bytes. Success returns
+ * the exact stdout bytes (one compact line plus jq's trailing newline). */
+export function prMetadataLine(prJsonText: Uint8Array | null): Uint8Array {
+  if (prJsonText === null) {
+    // Missing file: jq exits 2 ("No such file"), the review aborts.
+    throw new ProjectionError("missing input");
+  }
+  if (prJsonText.length === 0) {
+    // Existing but empty file: zero input documents, exit 0, no output.
     return new Uint8Array(0);
   }
+  const line = projectPrMetadata(parseJson(strictUtf8Decode(prJsonText)));
   return Buffer.from(`${line}\n`, "utf8");
 }
 
@@ -143,26 +148,39 @@ function projectClassification(parsed: Json): string {
 
 /** `jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary:
  * (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}'
- * classification.json | head -c 8000` — the byte cap may cut the compact JSON
- * mid-escape or mid-character, exactly like `head -c`. Empty output on any jq
- * error. Returns the exact stdout bytes. */
-export function classificationLine(classificationText: string | null): Uint8Array {
-  let line: string | null = null;
-  try {
-    if (classificationText === null) {
-      throw new ProjectionError("missing input");
-    }
-    line = projectClassification(parseJson(classificationText));
-  } catch (error) {
-    if (!(error instanceof ProjectionError)) {
-      throw error;
-    }
-    // jq failed: no stdout at all, not even a newline.
+ * classification.json | head -c 8000`.
+ *
+ * A parse/type failure throws `ProjectionError` (production `set -o pipefail`
+ * propagates jq's nonzero exit and aborts the review); a missing file is
+ * NEVER seen here — corpus.sh guards it with `[ -f classification.json ]`
+ * and emits the explicit unavailable placeholder instead, which stays the
+ * intentional unavailable path. An empty (zero-byte) input file is jq's
+ * zero-documents success: empty output bytes. Success returns the exact
+ * piped bytes: the compact line plus jq's trailing newline, cut at 8000
+ * bytes (possibly mid-line or mid-escape, exactly like `head -c`). */
+export function classificationLine(classificationText: Uint8Array | null): Uint8Array {
+  if (classificationText === null) {
+    // Unreachable from build_review_corpus (guarded by -f); fail closed.
+    throw new ProjectionError("missing input");
+  }
+  if (classificationText.length === 0) {
+    // Existing but empty file: zero input documents, exit 0, no output.
     return new Uint8Array(0);
   }
-  // jq emits the compact line plus a trailing newline; `head -c 8000` cuts
-  // that byte stream (possibly mid-line or mid-escape).
+  const line = projectClassification(parseJson(strictUtf8Decode(classificationText)));
   return Buffer.concat([Buffer.from(line, "utf8"), Buffer.from("\n", "utf8")]).subarray(0, 8000);
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** jq rejects input that is not valid UTF-8; so does this port — surfaced as
+ * the same ProjectionError a parse failure would be. */
+function strictUtf8Decode(data: Uint8Array): string {
+  try {
+    return strictUtf8.decode(data);
+  } catch {
+    throw new ProjectionError("invalid UTF-8 input");
+  }
 }
 
 /** Compact jq-compatible serialization for the JSON shapes these projections
