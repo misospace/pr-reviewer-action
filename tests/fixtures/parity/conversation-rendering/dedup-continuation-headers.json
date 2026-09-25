@@ -1,0 +1,13 @@
+{
+  "ops": [],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    }
+  ],
+  "dedup": {
+    "corpus": "# Related Code Context\n## anchor intro\n# Related Code (1)\nfile a.ts\n# Related Code (2)\nfile b.ts\n# PR Diff\nhunks",
+    "planning": "# Related Code Context\n# Related Code (1)\nfile a.ts\n# PR Diff\nhunks"
+  }
+}

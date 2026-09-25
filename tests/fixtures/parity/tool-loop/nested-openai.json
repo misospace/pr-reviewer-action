@@ -1,0 +1,59 @@
+{
+  "budgets": {
+    "max_rounds": 2,
+    "max_tool_calls": 3,
+    "wall_clock_sec": 60,
+    "max_conversation_tokens": 24000,
+    "truncated_result_bytes": 2000,
+    "summarize_keep_newest": 1
+  },
+  "turns": [
+    {
+      "response": {
+        "choices": [
+          {
+            "message": {
+              "tool_calls": [
+                {
+                  "id": "a",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"x\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "exec_results": [
+        {
+          "tool": "read_file",
+          "status": "ok",
+          "result": {}
+        }
+      ]
+    },
+    {
+      "response": {
+        "choices": [
+          {
+            "message": {
+              "content": "done"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "apiFormat": "openai",
+  "model": "m",
+  "options": {
+    "maxTokens": 1024,
+    "temperature": 0,
+    "stream": false,
+    "tokensParam": "max_tokens",
+    "cachePrefix": false
+  }
+}

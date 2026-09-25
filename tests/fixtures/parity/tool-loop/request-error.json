@@ -1,0 +1,26 @@
+{
+  "budgets": {
+    "max_rounds": 2,
+    "max_tool_calls": 3,
+    "wall_clock_sec": 60,
+    "max_conversation_tokens": 24000,
+    "truncated_result_bytes": 2000,
+    "summarize_keep_newest": 1
+  },
+  "turns": [
+    {
+      "response": {
+        "raise": "network failed"
+      }
+    }
+  ],
+  "apiFormat": "openai",
+  "model": "m",
+  "options": {
+    "maxTokens": 1024,
+    "temperature": 0,
+    "stream": false,
+    "tokensParam": "max_tokens",
+    "cachePrefix": false
+  }
+}

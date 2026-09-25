@@ -1,0 +1,13 @@
+{
+  "ops": [],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    }
+  ],
+  "dedup": {
+    "corpus": "no headers at all\njust a blob\nmatching the planning context verbatim",
+    "planning": "no headers at all\njust a blob\nmatching the planning context verbatim"
+  }
+}

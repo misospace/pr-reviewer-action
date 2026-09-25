@@ -1,0 +1,13 @@
+{
+  "ops": [],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    }
+  ],
+  "dedup": {
+    "corpus": "# PR Diff\n@@ full hunk body that is longer than the planning excerpt @@\n# Summary\nshort",
+    "planning": "# PR Diff (head)\n@@ first 40 bytes of the hunk only @@\n# Summary\nshort"
+  }
+}

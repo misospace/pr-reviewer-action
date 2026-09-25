@@ -1,0 +1,10 @@
+{
+  "output": {
+    "smart_review_requested": true,
+    "smart_review_reason": "Need another look"
+  },
+  "classification": {},
+  "evidence": {},
+  "harness": {},
+  "flags": {}
+}

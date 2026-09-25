@@ -1,0 +1,21 @@
+{
+  "output": {
+    "review_markdown": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "classification": {},
+  "evidence": {},
+  "harness": {
+    "executed_request_count": 2,
+    "tool_results": [
+      {
+        "status": "error"
+      }
+    ],
+    "planning_error": "failed"
+  },
+  "flags": {
+    "on_blockers": true,
+    "on_planning_failure": true,
+    "on_low_confidence": false
+  }
+}
