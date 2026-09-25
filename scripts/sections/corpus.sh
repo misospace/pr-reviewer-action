@@ -251,7 +251,14 @@ build_review_corpus() {
 
     echo "# PR Classification"
     if [ -f classification.json ]; then
-      jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json | head -c 8000
+      # Materialize the projection before cutting: `jq | head -c` races a
+      # SIGPIPE abort whenever the compact projection exceeds the cap
+      # (jq dies writing into a closed pipe, and pipefail then aborts the
+      # review), nondeterministically. Emitting to a file and cutting from
+      # it produces byte-identical output deterministically, and jq's own
+      # nonzero exit still fails the build under set -e.
+      jq -c '{pr_kind, risk_flags, risk_flags_with_files, changed_files_summary: (.changed_files_summary | .[0:20]), linked_issue_labels, must_check}' classification.json > classification.compact.json
+      head -c 8000 classification.compact.json
     else
       echo "(Classification data unavailable for this review)"
     fi
