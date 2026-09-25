@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -48,7 +49,7 @@ from pr_reviewer.semantic_eval import (
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
-from eval_harness import ReviewRun
+from eval_harness import BenchmarkResult, ReviewRun, evaluate_live_semantics
 
 CORPUS = ROOT / "evals" / "corpus-historical-dogfood.json"
 RUNNER = ROOT / "scripts" / "run_semantic_eval_ci.py"
@@ -1737,6 +1738,60 @@ def test_757_schema_rejects_falsification_contract_on_negative_control() -> None
     corpus = SemanticCorpus(scenarios=[SemanticScenario.from_dict(entry)])
     with pytest.raises(SemanticCorpusError):
         validate_semantic_corpus(corpus)
+
+
+def test_757_live_semantics_falsification_block_matches_offline() -> None:
+    """The live path (evaluate_live_semantics) must produce the same
+    summary.falsification block as the offline gate for the same outputs —
+    the A/B compares arms through the live path, so a shape drift between
+    the two evaluators would silently invalidate the comparison."""
+    corpus = SemanticCorpus.from_file(CORPUS)
+    offline = evaluate_semantic_corpus(corpus)
+    # Feed each offline REVIEWER run back through the live path. Calibration
+    # (answer-key) fixtures are excluded: the live path never sees
+    # expected_disposition, so it would count answer keys as reviewer misses
+    # — comparing those populations would be meaningless, not a drift.
+    results = []
+    for item in corpus.scenarios:
+        runs = []
+        for fixture in item.offline_runs:
+            if "expected_disposition" in fixture:
+                continue
+            run = ReviewRun(mode=fixture.get("mode", "standard"), pr_number=item.number,
+                            repo_full_name=item.repo_full_name)
+            run.review_markdown = fixture.get("review_markdown", "")
+            run.findings = fixture.get("findings", [])
+            run.tool_calls = fixture.get("tool_calls", [])
+            run.stage = fixture.get("stage", "primary")
+            run.route = fixture.get("route", "primary")
+            runs.append(run)
+        results.append(BenchmarkResult(pr_number=item.number, repo_full_name=item.repo_full_name, runs=runs))
+    live = evaluate_live_semantics(corpus, results)
+    assert live["summary"]["falsification"] == offline["summary"]["falsification"]
+
+
+def test_757_fixtures_pass_their_own_test_suites() -> None:
+    """The #756 premise is 'supplied tests are green, the defect is nearby'.
+
+    A fixture whose bundled tests FAIL breaks that premise: a reviewer run
+    against it would file the failing test as the finding instead of
+    constructing the counterexample the scenario targets. Every #757
+    fixture must therefore pass its own tests (the negative controls are
+    the FIXED implementations and must pass too).
+    """
+    for number in sorted(POSITIVE_757) + sorted(NEGATIVE_757):
+        fixture = json.loads((ROOT / "evals" / "historical-dogfood" / f"{number}.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(prefix=f"fixture-{number}-") as directory:
+            repo = Path(directory)
+            for entry in fixture["files"]:
+                target = repo / entry["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(entry["content"], encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests", "-q", "--no-header", "-x"],
+                cwd=repo, capture_output=True, text=True, timeout=120,
+            )
+            assert result.returncode == 0, (number, result.stdout[-2000:])
 
 
 def test_757_falsification_rates_are_none_without_a_contract() -> None:

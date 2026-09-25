@@ -652,6 +652,13 @@ apply_system_prompt_fragments() {
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/$rn}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{FALSIFICATION_GUIDANCE\}\}/$fg}"
+  else
+    # No classification for this run: the kind-gated placeholders must never
+    # leak into the prompt (the same contract the verbosity dial documents).
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{FALSIFICATION_GUIDANCE\}\}/}"
   fi
   # append mode: compose the supplied prompt onto the assembled default as a
   # repo-specific addendum, so a consumer adds conventions without copying (and

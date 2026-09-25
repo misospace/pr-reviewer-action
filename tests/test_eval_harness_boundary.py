@@ -825,6 +825,15 @@ class TestPromptOverrideArms:
         assert snap["SYSTEM_PROMPT_MODE"] == "replace"
         assert snap["SYSTEM_PROMPT_FILE"] in (None, "")
 
+    def test_ambient_append_mode_cannot_dilute_an_inline_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ambient SYSTEM_PROMPT_MODE=append must not turn the pinned arm
+        # into an addendum on top of the bundled default.
+        monkeypatch.setenv("SYSTEM_PROMPT_MODE", "append")
+        snap = self._run_with(tmp_path, {"system_prompt": "BASELINE PROMPT"})
+        assert snap["SYSTEM_PROMPT_MODE"] == "replace"
+
     def test_no_override_leaves_prompt_env_unset(self, tmp_path: Path) -> None:
         snap = self._run_with(tmp_path, {})
         assert snap["SYSTEM_PROMPT"] in (None, "")

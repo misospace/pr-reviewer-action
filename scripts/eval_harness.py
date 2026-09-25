@@ -1487,7 +1487,10 @@ def run_review_for_pr(
             env["SYSTEM_PROMPT_MODE"] = "replace"
         if model_config.get("system_prompt"):
             env["SYSTEM_PROMPT"] = model_config["system_prompt"]
-            env.setdefault("SYSTEM_PROMPT_MODE", "replace")
+            # Force replace like the file arm: an ambient SYSTEM_PROMPT_MODE=append
+            # must not silently turn the pinned arm into an addendum on top of the
+            # bundled default (that would dilute the A/B arm).
+            env["SYSTEM_PROMPT_MODE"] = "replace"
         # Production helpers prefer GITHUB_WORKSPACE over cwd: pin it to this
         # run's temp clone so an ambient Actions value cannot steer the
         # orchestrator at the workflow checkout.

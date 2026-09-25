@@ -1341,6 +1341,11 @@ def _falsification_summary(scored: list[dict[str, Any]], negative_controls: list
         "finding_correct_rate": round(sum(block["finding_correct_rate"] for block in blocks) / len(blocks), 4) if blocks else None,
     }
     controls_with_runs = [item for item in negative_controls if item["runs"]]
+    # Reads the per-scenario `false_positive_rate`, which for a negative
+    # control IS the reviewer-run forbidden-capability rate. Valid because
+    # validate_semantic_corpus rejects falsification_expectations on negative
+    # controls, so no other signal can enter this rate; revisit if that
+    # schema constraint is ever relaxed.
     summary["clean_control_preserved_rate"] = (
         round(sum(1 for item in controls_with_runs if item["false_positive_rate"] == 0.0) / len(controls_with_runs), 4)
         if controls_with_runs

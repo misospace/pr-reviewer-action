@@ -2032,9 +2032,10 @@
           "source classification boundary"
         ],
         "counterexample_any_of": [
-          "cache_label",
-          "left-hand side of the assignment",
-          "comment mentioning the request path"
+          "cache_label = 'request",
+          "cache_label = \"request",
+          "'# handles the request path'",
+          "\"# handles the request path\""
         ]
       },
       "offline_runs": [
@@ -2045,10 +2046,10 @@
           "findings": [
             {
               "stage": "primary",
-              "message": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
+              "message": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
             }
           ],
-          "review_markdown": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text.",
+          "review_markdown": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text.",
           "tool_calls": [
             {
               "stage": "primary",
@@ -2067,10 +2068,10 @@
           "findings": [
             {
               "stage": "specialist",
-              "message": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
+              "message": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text."
             }
           ],
-          "review_markdown": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text.",
+          "review_markdown": "The source guard scans a broader statement than the consumed path operand: classify_line matches the tokens 'request' and 'path' anywhere in the raw line text, so the assignment target manufactures the untrusted-path signal. Counterexample: classify_line(\"request_cache_path = os.path.join(BASE, 'static')\") returns 'untrusted-path' because the trigger sits in the left-hand side of the assignment, and classify_line('# handles the request path') returns 'untrusted-path' from a comment mentioning the request path; the invented assignment cache_label = 'request path' classifies the same way with no untrusted operand. Moving the tokens to an irrelevant syntactic position flips the classification with no untrusted data, so the source-detection boundary the tests pin is raw statement text, not the operand; the positive test passes for the wrong reason. Classify the consumed operand (the RHS after the assignment separator, comments stripped) instead of the statement text.",
           "tool_calls": [
             {
               "stage": "specialist",
@@ -2213,7 +2214,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/7573.json",
-        "sha256": "3e98581bd3e64cedc91884f2db3ee481a242f0fac0abae5b18338cbd570717eb"
+        "sha256": "3682d34114e905288bed2d7391bc4a67639b8ae5924ac93f784fa049fdb8db6a"
       },
       "falsification_expectations": {
         "boundary_any_of": [
@@ -2223,9 +2224,10 @@
           "the guard's boundary"
         ],
         "counterexample_any_of": [
-          "%2e%2e",
-          "percent-encoded",
-          "decoded traversal"
+          "%2e%2e/secret",
+          "/srv/app/../secret",
+          "resolve('%2e%2e",
+          "resolve(\"%2e%2e"
         ]
       },
       "offline_runs": [
@@ -2296,7 +2298,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/7574.json",
-        "sha256": "192994abf5561ba1cecf3609f3f9b0ea35ec856b51532e29960b72de76653844"
+        "sha256": "c01fad37eacdb2b958d2fc50e81f43b98a24f6843104ad64b1b2c3c61f931c5f"
       },
       "falsification_expectations": {},
       "offline_runs": [
@@ -2365,10 +2367,10 @@
           "reachability boundary"
         ],
         "counterexample_any_of": [
-          "logging line",
-          "log line",
-          "request received",
-          "eval never receives"
+          "log.info('request received')",
+          "log.info(\"request received\")",
+          "request received')",
+          "request received\")"
         ]
       },
       "offline_runs": [
@@ -2379,10 +2381,10 @@
           "findings": [
             {
               "stage": "primary",
-              "message": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: a static eval with an adjacent logging line that merely mentions request \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood."
+              "message": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: ['def run():', \"    eval('1 + 1')\", \"    log.info('request received')\"] flags the static eval \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood."
             }
           ],
-          "review_markdown": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: a static eval with an adjacent logging line that merely mentions request \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood.",
+          "review_markdown": "The audit's flow boundary is lexical proximity, not dataflow: any line within WINDOW of a sink that mentions 'request' flags the sink, so this is co-occurrence mistaken for flow. Counterexample: ['def run():', \"    eval('1 + 1')\", \"    log.info('request received')\"] flags the static eval \u2014 an adjacent line satisfies the window although the request mention never reaches the sink and eval never receives request data; presence is not flow. The green tests never place an unrelated request-shaped line near a static sink. Check the sink's actual operand for the request value instead of its neighborhood.",
           "tool_calls": [
             {
               "stage": "primary",
@@ -2521,10 +2523,8 @@
           "the claimed signal"
         ],
         "counterexample_any_of": [
-          "upload_metrics",
-          "save_blob",
-          "declared name",
-          "function name"
+          "def upload_metrics()",
+          "def save_blob("
         ]
       },
       "offline_runs": [
@@ -2664,10 +2664,8 @@
           "validation boundary"
         ],
         "counterexample_any_of": [
-          "record without an id",
-          "no id",
-          "duplicates a retained",
-          "{'source': none}"
+          "{'source': none}",
+          "{'id': 'a', 'source': none}"
         ]
       },
       "offline_runs": [
@@ -2807,10 +2805,8 @@
           "trust boundary"
         ],
         "counterexample_any_of": [
-          "session-declared",
-          "client-declared",
-          "path parameter is ignored",
-          "declares a public route"
+          "'route': '/public'}, '/admin'",
+          "\"route\": \"/public\"}, \"/admin\""
         ]
       },
       "offline_runs": [
@@ -2881,7 +2877,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/7582.json",
-        "sha256": "06a576f05642b02df2303425ba70ed42f6281177598ffe4d42a086578fbc9a55"
+        "sha256": "4ca02a8db338e9efb153db1c399dec28e58c6254cd8f43df2bdd9ae714821221"
       },
       "falsification_expectations": {},
       "offline_runs": [
@@ -2940,7 +2936,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/7583.json",
-        "sha256": "5fb210729ee4ae0bc3c376ba94f0248943ad119a597b185a4de669f04163909e"
+        "sha256": "3cc2b69dc5ad5f6d977c30d7fe87c0d84a478023716b3d99fbf1a1597a9faa5c"
       },
       "falsification_expectations": {
         "boundary_any_of": [
@@ -2950,10 +2946,9 @@
           "success boundary"
         ],
         "counterexample_any_of": [
-          "partial write",
-          "partial payload",
-          "rollback cannot undo",
-          "applies put() before commit"
+          "'done' on the first retry",
+          "\"done\" on the first retry",
+          "put() before commit() and whose rollback"
         ]
       },
       "offline_runs": [
@@ -3024,7 +3019,7 @@
       },
       "fixture": {
         "path": "historical-dogfood/7584.json",
-        "sha256": "93fbc54c21f85a75d18a135dfb59c7d8125567a255bba0cd17373b8f1b776b88"
+        "sha256": "fbe7d70a069796a0c7d4d89894b50250d0176f0d8e777fb5fb57f103686c8241"
       },
       "falsification_expectations": {},
       "offline_runs": [
