@@ -360,9 +360,14 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
     # #750 adds scenarios 7480 (ungrounded-N/A converse) and 7481 (grounded-N/A
-    # clean-shape negative control) to the historical corpus.
-    assert payload["scenarios_evaluated"] == 24
+    # clean-shape negative control) to the historical corpus; #757 adds the
+    # counterexample-falsification family 7571-7584.
+    assert payload["scenarios_evaluated"] == 38
     assert {"6551", "6552", "6553", "6891", "6892", "7480", "7481"} <= payload["per_scenario_summary"].keys()
+    assert {"7571", "7572", "7573", "7574", "7575", "7576", "7577", "7578",
+            "7579", "7580", "7581", "7582", "7583", "7584"} <= payload["per_scenario_summary"].keys()
+    assert payload["per_scenario_summary"]["7571"]["pass_rate"] == 1.0
+    assert payload["summary"]["falsification"]["counterexample_found_rate"] == 1.0
     assert payload["per_scenario_summary"]["7480"]["pass_rate"] == 1.0
     assert payload["per_scenario_summary"]["7480"]["disposition_calibration_rate"] == 1.0
     assert payload["per_scenario_summary"]["7481"]["negative_control"] is True
@@ -1352,10 +1357,12 @@ def test_661_report_telemetry_carries_disposition_counts() -> None:
     assert counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 0
     assert counts[DISPOSITION_CORRECT] > 0
     # The answer key itself is reported separately, fully recognized.
-    assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
+    # (#757 adds a second suppressed answer key and fourteen not-found
+    # coherence-only / attempted-not-found calibration fixtures.)
+    assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 2
     assert calibration_counts[DISPOSITION_INVALID_REMEDIATION] == 3
     assert calibration_counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 1
-    assert calibration_counts[DISPOSITION_NOT_FOUND] == 2
+    assert calibration_counts[DISPOSITION_NOT_FOUND] == 16
     assert calibration_counts[DISPOSITION_CORRECT] == 3
     assert report["summary"]["calibration_fixture_runs"] == sum(calibration_counts.values())
     assert report["summary"]["disposition_calibration_rate"] == 1.0
