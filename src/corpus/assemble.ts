@@ -118,8 +118,6 @@ const enc = (text: string): Uint8Array => Buffer.from(text, "utf8");
 const bytes = (value: Uint8Array | null | undefined): Uint8Array => value ?? new Uint8Array(0);
 const nonEmpty = (value: Uint8Array | null | undefined): boolean =>
   value !== null && value !== undefined && value.length > 0;
-const asUtf8 = (value: Uint8Array | null | undefined): string =>
-  Buffer.from(bytes(value)).toString("utf8");
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   return Buffer.concat(parts.map((part) => Buffer.from(part)));
