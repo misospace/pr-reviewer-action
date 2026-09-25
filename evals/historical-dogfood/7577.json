@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/upload_scan.py",
+      "content": "\"\"\"Classify handler lines that serve untrusted upload content.\"\"\"\n\nTRIGGER_TOKENS = (\"upload\", \"file\", \"attachment\")\n\n\ndef is_upload_handler(line):\n    \"\"\"True when the line handles uploaded files.\"\"\"\n    lowered = line.lower()\n    return any(token in lowered for token in TRIGGER_TOKENS)\n"
+    },
+    {
+      "path": "tests/test_upload_scan.py",
+      "content": "from src.upload_scan import is_upload_handler\n\n\ndef test_upload_handler_is_detected():\n    assert is_upload_handler(\"def upload_attachment_handler(file_storage):\")\n\n\ndef test_plain_handler_is_not_detected():\n    assert not is_upload_handler(\"def health_check():\")\n"
+    }
+  ],
+  "diff": "diff --git a/src/upload_scan.py b/src/upload_scan.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..fa723a7819adbe64e26e75903e3bc3d78d395501\n--- /dev/null\n+++ b/src/upload_scan.py\n@@ -0,0 +1,9 @@\n+\"\"\"Classify handler lines that serve untrusted upload content.\"\"\"\n+\n+TRIGGER_TOKENS = (\"upload\", \"file\", \"attachment\")\n+\n+\n+def is_upload_handler(line):\n+    \"\"\"True when the line handles uploaded files.\"\"\"\n+    lowered = line.lower()\n+    return any(token in lowered for token in TRIGGER_TOKENS)\ndiff --git a/tests/test_upload_scan.py b/tests/test_upload_scan.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..f14f5667279713017ebd97d7289a1bc88e4ecf44\n--- /dev/null\n+++ b/tests/test_upload_scan.py\n@@ -0,0 +1,9 @@\n+from src.upload_scan import is_upload_handler\n+\n+\n+def test_upload_handler_is_detected():\n+    assert is_upload_handler(\"def upload_attachment_handler(file_storage):\")\n+\n+\n+def test_plain_handler_is_not_detected():\n+    assert not is_upload_handler(\"def health_check():\")\n"
+}

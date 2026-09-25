@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/upload_scan.py",
+      "content": "\"\"\"Classify handler lines that consume untrusted file parameters.\"\"\"\n\n\ndef is_upload_handler(line):\n    \"\"\"True when the handler consumes an untrusted file-like parameter.\"\"\"\n    params = line.split(\"(\", 1)[-1].rsplit(\")\", 1)[0]\n    names = [part.strip().lower() for part in params.split(\",\")]\n    return any(\n        name in (\"file\", \"upload\", \"attachment\", \"stream\") for name in names\n    )\n"
+    },
+    {
+      "path": "tests/test_upload_scan.py",
+      "content": "from src.upload_scan import is_upload_handler\n\n\ndef test_upload_handler_is_detected():\n    assert is_upload_handler(\"def save_blob(file):\")\n\n\ndef test_trigger_in_the_declared_name_is_not_enough():\n    assert not is_upload_handler(\"def upload_metrics():\")\n\n\ndef test_plain_handler_is_not_detected():\n    assert not is_upload_handler(\"def health_check():\")\n"
+    }
+  ],
+  "diff": "diff --git a/src/upload_scan.py b/src/upload_scan.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..3ed9b92fba0a40f818179f52e881e27a51ebb8c1\n--- /dev/null\n+++ b/src/upload_scan.py\n@@ -0,0 +1,10 @@\n+\"\"\"Classify handler lines that consume untrusted file parameters.\"\"\"\n+\n+\n+def is_upload_handler(line):\n+    \"\"\"True when the handler consumes an untrusted file-like parameter.\"\"\"\n+    params = line.split(\"(\", 1)[-1].rsplit(\")\", 1)[0]\n+    names = [part.strip().lower() for part in params.split(\",\")]\n+    return any(\n+        name in (\"file\", \"upload\", \"attachment\", \"stream\") for name in names\n+    )\ndiff --git a/tests/test_upload_scan.py b/tests/test_upload_scan.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..badf0a39548903c8788310ceaa76b840952e5ce7\n--- /dev/null\n+++ b/tests/test_upload_scan.py\n@@ -0,0 +1,13 @@\n+from src.upload_scan import is_upload_handler\n+\n+\n+def test_upload_handler_is_detected():\n+    assert is_upload_handler(\"def save_blob(file):\")\n+\n+\n+def test_trigger_in_the_declared_name_is_not_enough():\n+    assert not is_upload_handler(\"def upload_metrics():\")\n+\n+\n+def test_plain_handler_is_not_detected():\n+    assert not is_upload_handler(\"def health_check():\")\n"
+}

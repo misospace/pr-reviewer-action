@@ -365,6 +365,34 @@ only) — explains *why* the run found or missed the defect:
 Live runs never declare `expected_disposition`, so every live run is a
 reviewer run; its disposition is telemetry.
 
+### Counterexample-falsification scoring (#757)
+
+Scenarios may declare a `falsification_expectations` contract:
+`boundary_any_of` (needles showing the reviewer named the changed decision
+boundary) and `counterexample_any_of` (needles showing a concrete falsifying
+input for THIS scenario was constructed). The scorer emits per-run telemetry —
+`boundary_understood`, `counterexample_attempted` (found, or a generic attempt
+cue fired), `counterexample_found`, `finding_correct` — and on vulnerable
+scenarios **passes a run only when `counterexample_found` is true**: restating
+the intended design, citing green tests, or observing parity hits the boundary
+needles but is never a pass (the #756 verification-by-coherence failure).
+`counterexample_attempted` stays telemetry so a treatment-vs-baseline A/B can
+measure attempt rate separately from success. Four capability classes carry
+the failure mechanisms: `boundary_scope_leak`, `information_loss_ordering`,
+`cooccurrence_false_flow`, `incidental_positive_fixture`. The report summary's
+`falsification` block aggregates the rates (scenarios without a contract
+contribute nothing, never a zero) plus `clean_control_preserved_rate` (the
+fraction of negative-control scenarios with zero false attributions). The
+#757 fixtures in `evals/corpus-historical-dogfood.json` (7571–7584) cover the
+four PR #756-derived path-domain classes plus parser/normalizer, auth/policy,
+and state/retry cross-domain pairs, each with a fixed negative control; the
+prompt treatment itself (`scripts/prompt_fragments/falsification.txt`,
+gated on code-touching pr_kinds) must be measured by a live A/B over this
+corpus — `scripts/eval_harness.py --system-prompt-file` pins an arm's prompt
+verbatim (replace mode, no fragment substitution) so both arms run the same
+corpus through the same harness — and reverted if it does not clear the bar,
+per the #666 precedent.
+
 ### Semantic judge instrument (on-demand; never in normal CI)
 
 The deterministic scorer above stays the CI regression gate. Because a curated

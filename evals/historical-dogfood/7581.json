@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/policy.py",
+      "content": "\"\"\"Route authorization: enforce the policy of the matched route.\"\"\"\n\nROUTE_POLICY = {\n    \"/admin\": \"admin\",\n    \"/billing\": \"editor\",\n    \"/public\": \"viewer\",\n}\n\nROLE_RANK = {\"viewer\": 0, \"editor\": 1, \"admin\": 2}\n\n\ndef authorize(session, path):\n    \"\"\"Allow the request when its role satisfies the matched route policy.\"\"\"\n    matched = session.get(\"route\", \"/public\")\n    required = ROUTE_POLICY.get(matched, \"viewer\")\n    return ROLE_RANK.get(session.get(\"role\", \"viewer\"), 0) >= ROLE_RANK[required]\n"
+    },
+    {
+      "path": "tests/test_policy.py",
+      "content": "from src.policy import authorize\n\n\ndef test_admin_requires_admin_role():\n    assert not authorize({\"role\": \"viewer\", \"route\": \"/admin\"}, \"/admin\")\n\n\ndef test_public_allows_viewer():\n    assert authorize({\"role\": \"viewer\", \"route\": \"/public\"}, \"/public\")\n"
+    }
+  ],
+  "diff": "diff --git a/src/policy.py b/src/policy.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..892cc7154b1f496cbf6d97f9942cdc1ac994d718\n--- /dev/null\n+++ b/src/policy.py\n@@ -0,0 +1,16 @@\n+\"\"\"Route authorization: enforce the policy of the matched route.\"\"\"\n+\n+ROUTE_POLICY = {\n+    \"/admin\": \"admin\",\n+    \"/billing\": \"editor\",\n+    \"/public\": \"viewer\",\n+}\n+\n+ROLE_RANK = {\"viewer\": 0, \"editor\": 1, \"admin\": 2}\n+\n+\n+def authorize(session, path):\n+    \"\"\"Allow the request when its role satisfies the matched route policy.\"\"\"\n+    matched = session.get(\"route\", \"/public\")\n+    required = ROUTE_POLICY.get(matched, \"viewer\")\n+    return ROLE_RANK.get(session.get(\"role\", \"viewer\"), 0) >= ROLE_RANK[required]\ndiff --git a/tests/test_policy.py b/tests/test_policy.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..fa28aa74a1522dd483dbc4b19fd69b211209f386\n--- /dev/null\n+++ b/tests/test_policy.py\n@@ -0,0 +1,9 @@\n+from src.policy import authorize\n+\n+\n+def test_admin_requires_admin_role():\n+    assert not authorize({\"role\": \"viewer\", \"route\": \"/admin\"}, \"/admin\")\n+\n+\n+def test_public_allows_viewer():\n+    assert authorize({\"role\": \"viewer\", \"route\": \"/public\"}, \"/public\")\n"
+}

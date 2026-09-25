@@ -24,6 +24,11 @@ DETERMINISTIC_SCENARIOS = frozenset(
         6541, 6542, 6543, 6544, 6545, 6546, 6547, 6548, 6549, 6550,
         # PR #655 producer/artifact/consumer and PR #689 evidence transport (#662).
         6551, 6552, 6553, 6891, 6892,
+        # PR #756 counterexample-falsification failure classes (#757): four
+        # path-domain classes plus three cross-domain classes, each with a
+        # fixed negative control.
+        7571, 7572, 7573, 7574, 7575, 7576, 7577, 7578,
+        7579, 7580, 7581, 7582, 7583, 7584,
     }
 )
 

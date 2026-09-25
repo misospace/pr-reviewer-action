@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/sink_audit.py",
+      "content": "\"\"\"Audit helper: flag dangerous sinks that consume request data.\"\"\"\n\nSINKS = (\"eval(\", \"os.system\", \"subprocess.\")\n\n\ndef audit(lines):\n    \"\"\"Return indexes of sink lines whose operand reads request input.\"\"\"\n    flagged = []\n    for index, line in enumerate(lines):\n        if not any(sink in line for sink in SINKS):\n            continue\n        operand = line.split(\"(\", 1)[-1].rsplit(\")\", 1)[0].lower()\n        if \"request\" in operand or \"req.\" in operand:\n            flagged.append(index)\n    return flagged\n"
+    },
+    {
+      "path": "tests/test_sink_audit.py",
+      "content": "from src.sink_audit import audit\n\n\ndef test_request_driven_sink_is_flagged():\n    code = [\n        \"def handler(req):\",\n        \"    eval(req.args['expr'])\",\n    ]\n    assert audit(code) == [1]\n\n\ndef test_static_sink_near_a_request_line_is_not_flagged():\n    code = [\n        \"def run():\",\n        \"    eval('1 + 1')\",\n        \"    log.info('request received')\",\n    ]\n    assert audit(code) == []\n"
+    }
+  ],
+  "diff": "diff --git a/src/sink_audit.py b/src/sink_audit.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..177b95c8f304a137649ee8f5af879bd3c05db6eb\n--- /dev/null\n+++ b/src/sink_audit.py\n@@ -0,0 +1,15 @@\n+\"\"\"Audit helper: flag dangerous sinks that consume request data.\"\"\"\n+\n+SINKS = (\"eval(\", \"os.system\", \"subprocess.\")\n+\n+\n+def audit(lines):\n+    \"\"\"Return indexes of sink lines whose operand reads request input.\"\"\"\n+    flagged = []\n+    for index, line in enumerate(lines):\n+        if not any(sink in line for sink in SINKS):\n+            continue\n+        operand = line.split(\"(\", 1)[-1].rsplit(\")\", 1)[0].lower()\n+        if \"request\" in operand or \"req.\" in operand:\n+            flagged.append(index)\n+    return flagged\ndiff --git a/tests/test_sink_audit.py b/tests/test_sink_audit.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..3eec8589aa433f92c7a9d3ff28ffd15dcef29468\n--- /dev/null\n+++ b/tests/test_sink_audit.py\n@@ -0,0 +1,18 @@\n+from src.sink_audit import audit\n+\n+\n+def test_request_driven_sink_is_flagged():\n+    code = [\n+        \"def handler(req):\",\n+        \"    eval(req.args['expr'])\",\n+    ]\n+    assert audit(code) == [1]\n+\n+\n+def test_static_sink_near_a_request_line_is_not_flagged():\n+    code = [\n+        \"def run():\",\n+        \"    eval('1 + 1')\",\n+        \"    log.info('request received')\",\n+    ]\n+    assert audit(code) == []\n"
+}

@@ -95,6 +95,21 @@ check_contains "digest PR includes release-notes guidance" "$OUT" "upstream rele
 check_not_contains "digest PR drops HOST PLATFORM block" "$OUT" "HOST PLATFORM"
 check_not_contains "no placeholder remains" "$OUT" "{{"
 
+echo "=== #757 falsification guidance: code-touching kinds carry the counterexample obligation ==="
+OUT="$(assemble app_code)"
+check_contains "app_code includes falsification guidance" "$OUT" "concrete counterexample"
+check_contains "falsification guidance keeps the evidence-not-proof framing" "$OUT" \
+  "evidence about the intended design, not proof of a new decision boundary"
+check_contains "falsification guidance keeps the smallest-relevant-set dial" "$OUT" \
+  "smallest relevant challenge set"
+
+echo "=== #757 falsification guidance: declarative bump/manifest kinds stay lean ==="
+for kind in k8s_manifest dependency_upgrade renovate_digest_only; do
+  OUT="$(assemble "$kind")"
+  check_not_contains "$kind drops falsification guidance" "$OUT" "concrete counterexample"
+  check_not_contains "$kind leaves no placeholder" "$OUT" "{{"
+done
+
 echo "=== review_verbosity=concise adds the brevity fragment ==="
 OUT="$( cd "$WORK"
   printf '{"pr_kind":"app_code"}' > classification.json
@@ -195,6 +210,7 @@ RC="$(<"$SCRIPT_DIR/prompt_fragments/related_code.txt") "
 PT="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
 RL="$(<"$SCRIPT_DIR/prompt_fragments/requirement_ledger.txt") "
 SL="$(<"$SCRIPT_DIR/prompt_fragments/specialist_leads.txt")"
+FG="$(<"$SCRIPT_DIR/prompt_fragments/falsification.txt") "
 [[ -n "$SL" ]] || { echo "FAIL: specialist_leads.txt fragment is empty"; FAIL=$((FAIL+1)); }
 RECON="${BASE/\{\{RELATED_CODE_GUIDANCE\}\}/$RC}"
 RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
@@ -204,6 +220,7 @@ RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 RECON="${RECON/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$RL}"
 RECON="${RECON/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/$SL}"
+RECON="${RECON/\{\{FALSIFICATION_GUIDANCE\}\}/$FG}"
 check_contains "reconstructed prompt has requirement-ledger block" "$RECON" "requirement_coverage"
 check_contains "reconstructed prompt has specialist-leads block" "$RECON" "Specialist Review Leads"
 check_contains "reconstructed prompt has both guidance blocks" "$RECON" "HOST PLATFORM"

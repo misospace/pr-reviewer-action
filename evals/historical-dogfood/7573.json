@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/path_guard.py",
+      "content": "\"\"\"Path guard: canonicalize trusted anchors, then reject traversal.\"\"\"\n\nfrom urllib.parse import unquote\n\n\ndef resolve(raw, base=\"/srv/app\"):\n    \"\"\"Resolve raw under base, rejecting traversal attempts.\"\"\"\n    stripped = raw.replace(base, \"\")\n    if \"..\" in stripped or \"..\" in raw:\n        raise ValueError(\"untrusted path\")\n    value = unquote(stripped)\n    return base + value\n"
+    },
+    {
+      "path": "tests/test_path_guard.py",
+      "content": "import pytest\n\nfrom src.path_guard import resolve\n\n\ndef test_literal_traversal_is_rejected():\n    with pytest.raises(ValueError):\n        resolve(\"../../etc/passwd\")\n\n\ndef test_prefixed_traversal_is_rejected():\n    with pytest.raises(ValueError):\n        resolve(\"/srv/app/../../etc/passwd\")\n\n\ndef test_plain_path_resolves():\n    assert resolve(\"docs/readme\") == \"/srv/app/docs/readme\"\n"
+    }
+  ],
+  "diff": "diff --git a/src/path_guard.py b/src/path_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..396ba594d15b9f11a02f313e2e199ede8cdb7fd9\n--- /dev/null\n+++ b/src/path_guard.py\n@@ -0,0 +1,12 @@\n+\"\"\"Path guard: canonicalize trusted anchors, then reject traversal.\"\"\"\n+\n+from urllib.parse import unquote\n+\n+\n+def resolve(raw, base=\"/srv/app\"):\n+    \"\"\"Resolve raw under base, rejecting traversal attempts.\"\"\"\n+    stripped = raw.replace(base, \"\")\n+    if \"..\" in stripped or \"..\" in raw:\n+        raise ValueError(\"untrusted path\")\n+    value = unquote(stripped)\n+    return base + value\ndiff --git a/tests/test_path_guard.py b/tests/test_path_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..09ce0c8c9558686b57902932ca6e04e4ecfa336e\n--- /dev/null\n+++ b/tests/test_path_guard.py\n@@ -0,0 +1,17 @@\n+import pytest\n+\n+from src.path_guard import resolve\n+\n+\n+def test_literal_traversal_is_rejected():\n+    with pytest.raises(ValueError):\n+        resolve(\"../../etc/passwd\")\n+\n+\n+def test_prefixed_traversal_is_rejected():\n+    with pytest.raises(ValueError):\n+        resolve(\"/srv/app/../../etc/passwd\")\n+\n+\n+def test_plain_path_resolves():\n+    assert resolve(\"docs/readme\") == \"/srv/app/docs/readme\"\n"
+}

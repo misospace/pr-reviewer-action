@@ -677,9 +677,13 @@ def test_prompt_fragments_exist_on_disk():
 
 
 def test_prompt_fragments_are_small_for_cache_friendliness():
+    # Each fragment must stay compact (well under a single screen). The
+    # correctness lane carries the #757 counterexample-falsification
+    # obligation on top of the #625 failure-path contract, so it alone gets
+    # extra headroom (2500); every other role keeps the original 2000 cap.
+    max_chars = {"correctness": 2500}
     for role in sorted(SPECIALIST_ROLES):
-        # Each fragment must stay compact (well under a single screen).
-        assert len(load_specialist_prompt(role)) < 2000, role
+        assert len(load_specialist_prompt(role)) < max_chars.get(role, 2000), role
 
 
 def test_prompt_fragments_contain_trust_framing():

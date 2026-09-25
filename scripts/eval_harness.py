@@ -40,6 +40,7 @@ from pr_reviewer.semantic_eval import (
     MERGE_SAFETY_DISPOSITIONS_ORDER,
     SEMANTIC_EVAL_VERSION,
     _collect_signals_from_run,
+    _falsification_summary,
     aggregate_semantic_runs,
     evaluate_semantic_capability as evaluate_semantic_run,
     validate_semantic_corpus,
@@ -1477,6 +1478,16 @@ def run_review_for_pr(
         env["AI_BASE_URL"] = model_config.get("base_url", "")
         env["AI_MODEL"] = model_config.get("model", "")
         env["AI_API_KEY"] = model_config.get("api_key", "")
+        # #757 A/B arm override: replace-mode prompt substitution, verbatim
+        # (config.sh applies no bundled default and no fragment substitution
+        # in replace mode), so both arms run the same corpus through the same
+        # pipeline with only the prompt text differing.
+        if model_config.get("system_prompt_file"):
+            env["SYSTEM_PROMPT_FILE"] = model_config["system_prompt_file"]
+            env["SYSTEM_PROMPT_MODE"] = "replace"
+        if model_config.get("system_prompt"):
+            env["SYSTEM_PROMPT"] = model_config["system_prompt"]
+            env.setdefault("SYSTEM_PROMPT_MODE", "replace")
         # Production helpers prefer GITHUB_WORKSPACE over cwd: pin it to this
         # run's temp clone so an ambient Actions value cannot steer the
         # orchestrator at the workflow checkout.
@@ -1694,6 +1705,8 @@ def evaluate_live_semantics(
                 disposition: sum(item["merge_safety_disposition_counts"].get(disposition, 0) for item in scored)
                 for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
             },
+            # #757 counterexample-driven falsification telemetry.
+            "falsification": _falsification_summary(scored, negative_controls),
         },
         "incomplete_scenarios": incomplete_scenarios,
         "negative_control_summary": {
@@ -2095,6 +2108,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help=(
+            "Override the review system prompt inline (SYSTEM_PROMPT, "
+            "SYSTEM_PROMPT_MODE=replace: used verbatim, no bundled default, "
+            "no fragment substitution). Intended for A/B arms (#757): run "
+            "both arms over the same corpus with the same harness and "
+            "compare the report's falsification telemetry."
+        ),
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        type=Path,
+        default=None,
+        help=(
+            "Override the review system prompt from a file (SYSTEM_PROMPT_FILE, "
+            "SYSTEM_PROMPT_MODE=replace: used verbatim, no bundled default, "
+            "no fragment substitution — pre-resolve any {{...}} placeholders "
+            "when materializing a baseline arm). Same A/B contract as "
+            "--system-prompt."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned runs without executing",
@@ -2141,6 +2178,13 @@ def main() -> int:
         "api_key": args.api_key,
         "github_token": args.github_token,
     }
+    if args.system_prompt is not None:
+        model_config["system_prompt"] = args.system_prompt
+    if args.system_prompt_file is not None:
+        if not args.system_prompt_file.exists():
+            print(f"Error: system prompt file not found: {args.system_prompt_file}", file=sys.stderr)
+            return 1
+        model_config["system_prompt_file"] = str(args.system_prompt_file)
 
     print(f"Loaded {len(corpus.prs)} PRs from corpus, running {len(prs)}...", file=sys.stderr)
     print(f"Modes: {args.modes}", file=sys.stderr)

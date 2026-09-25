@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/source_guard.py",
+      "content": "\"\"\"Trust guard for filesystem path handling in request handlers.\"\"\"\n\n\ndef classify_line(line):\n    \"\"\"Classify a source line as untrusted-path handling or static.\"\"\"\n    text = line.strip().lower()\n    untrusted = \"request\" in text or \"req.\" in text\n    touches_path = \"path\" in text\n    if untrusted and touches_path:\n        return \"untrusted-path\"\n    return \"static\"\n\n\ndef resolve(line, base=\"/var/lib/app\"):\n    \"\"\"Resolve the path operand of an untrusted-path line under base.\"\"\"\n    if classify_line(line) != \"untrusted-path\":\n        return None\n    operand = line.split(\"=\", 1)[-1].strip().strip(\"'\\\"\")\n    return base + \"/\" + operand\n"
+    },
+    {
+      "path": "tests/test_source_guard.py",
+      "content": "from src.source_guard import classify_line\n\n\ndef test_request_path_is_untrusted():\n    assert classify_line(\"save(request.args['path'])\") == \"untrusted-path\"\n\n\ndef test_static_assignment_is_not_flagged():\n    assert classify_line(\"base_dir = '/var/lib/app/static'\") == \"static\"\n"
+    }
+  ],
+  "diff": "diff --git a/src/source_guard.py b/src/source_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..7583b3fb2e661b9681b00313e1ff8f4ecacd9112\n--- /dev/null\n+++ b/src/source_guard.py\n@@ -0,0 +1,19 @@\n+\"\"\"Trust guard for filesystem path handling in request handlers.\"\"\"\n+\n+\n+def classify_line(line):\n+    \"\"\"Classify a source line as untrusted-path handling or static.\"\"\"\n+    text = line.strip().lower()\n+    untrusted = \"request\" in text or \"req.\" in text\n+    touches_path = \"path\" in text\n+    if untrusted and touches_path:\n+        return \"untrusted-path\"\n+    return \"static\"\n+\n+\n+def resolve(line, base=\"/var/lib/app\"):\n+    \"\"\"Resolve the path operand of an untrusted-path line under base.\"\"\"\n+    if classify_line(line) != \"untrusted-path\":\n+        return None\n+    operand = line.split(\"=\", 1)[-1].strip().strip(\"'\\\"\")\n+    return base + \"/\" + operand\ndiff --git a/tests/test_source_guard.py b/tests/test_source_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..2c3ebb8bb6b019dcbac58a9dce6e72747c932c1f\n--- /dev/null\n+++ b/tests/test_source_guard.py\n@@ -0,0 +1,9 @@\n+from src.source_guard import classify_line\n+\n+\n+def test_request_path_is_untrusted():\n+    assert classify_line(\"save(request.args['path'])\") == \"untrusted-path\"\n+\n+\n+def test_static_assignment_is_not_flagged():\n+    assert classify_line(\"base_dir = '/var/lib/app/static'\") == \"static\"\n"
+}

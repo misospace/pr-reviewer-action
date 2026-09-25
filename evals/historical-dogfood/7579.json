@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "src/ingest.py",
+      "content": "\"\"\"Normalize ingestion records, then enforce required fields.\"\"\"\n\n\ndef normalize(records):\n    \"\"\"Keep the first well-formed entry per id; drop anything malformed.\"\"\"\n    seen = set()\n    kept = []\n    for record in records:\n        if not isinstance(record, dict) or not isinstance(record.get(\"id\"), str):\n            continue\n        if record[\"id\"] in seen:\n            continue\n        seen.add(record[\"id\"])\n        kept.append(record)\n    return kept\n\n\ndef enforce(records):\n    \"\"\"Reject the batch unless every retained record declares a source.\"\"\"\n    for record in normalize(records):\n        if not record.get(\"source\"):\n            raise ValueError(\"missing source\")\n    return True\n"
+    },
+    {
+      "path": "tests/test_ingest.py",
+      "content": "import pytest\n\nfrom src.ingest import enforce\n\n\ndef test_batch_without_source_is_rejected():\n    with pytest.raises(ValueError):\n        enforce([{\"id\": \"a\", \"source\": \"\"}])\n\n\ndef test_well_formed_batch_passes():\n    assert enforce([{\"id\": \"a\", \"source\": \"web\"}])\n"
+    }
+  ],
+  "diff": "diff --git a/src/ingest.py b/src/ingest.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..8763c4e224d09dfc6b21a89f5c5efca6a8b5d284\n--- /dev/null\n+++ b/src/ingest.py\n@@ -0,0 +1,23 @@\n+\"\"\"Normalize ingestion records, then enforce required fields.\"\"\"\n+\n+\n+def normalize(records):\n+    \"\"\"Keep the first well-formed entry per id; drop anything malformed.\"\"\"\n+    seen = set()\n+    kept = []\n+    for record in records:\n+        if not isinstance(record, dict) or not isinstance(record.get(\"id\"), str):\n+            continue\n+        if record[\"id\"] in seen:\n+            continue\n+        seen.add(record[\"id\"])\n+        kept.append(record)\n+    return kept\n+\n+\n+def enforce(records):\n+    \"\"\"Reject the batch unless every retained record declares a source.\"\"\"\n+    for record in normalize(records):\n+        if not record.get(\"source\"):\n+            raise ValueError(\"missing source\")\n+    return True\ndiff --git a/tests/test_ingest.py b/tests/test_ingest.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..f2283be71d528d0b20916724b1b06f3ba7d8721f\n--- /dev/null\n+++ b/tests/test_ingest.py\n@@ -0,0 +1,12 @@\n+import pytest\n+\n+from src.ingest import enforce\n+\n+\n+def test_batch_without_source_is_rejected():\n+    with pytest.raises(ValueError):\n+        enforce([{\"id\": \"a\", \"source\": \"\"}])\n+\n+\n+def test_well_formed_batch_passes():\n+    assert enforce([{\"id\": \"a\", \"source\": \"web\"}])\n"
+}
