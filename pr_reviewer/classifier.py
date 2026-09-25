@@ -256,17 +256,30 @@ _UNTRUSTED_ASSIGNMENT = re.compile(
 )
 
 
+def _untrusted_assignment_target(line: str) -> str | None:
+    """Assignment-target identifier of a line whose QUOTE-STRIPPED RHS
+    reaches an untrusted source (a one-hop def/use candidate). None when the
+    line is not a simple assignment or its RHS carries no untrusted token —
+    static quoted words like ``label = "request"`` are data, not flow, and
+    never create an edge."""
+    m = _UNTRUSTED_ASSIGNMENT.match(line)
+    if not m:
+        return None
+    rhs = _QUOTED_STATIC_LITERAL.sub('""', line[m.end():])
+    if any(pat.search(rhs) for pat in UNTRUSTED_SOURCE_PATTERNS):
+        return m.group(1)
+    return None
+
+
 def _one_hop_untrusted_targets(prev_line: str, next_line: str) -> list[str]:
     """Assignment-target identifiers carried by adjacent untrusted-source
     lines: the one-hop def/use candidates for the line being neutralized or
     scanned. Bounded by construction (at most two neighbors)."""
     targets: list[str] = []
     for line in (prev_line, next_line):
-        if not any(pat.search(line) for pat in UNTRUSTED_SOURCE_PATTERNS):
-            continue
-        m = _UNTRUSTED_ASSIGNMENT.match(line)
-        if m and m.group(1) not in targets:
-            targets.append(m.group(1))
+        ident = _untrusted_assignment_target(line)
+        if ident and ident not in targets:
+            targets.append(ident)
     return targets
 
 
@@ -374,10 +387,14 @@ PATH_CONSTRUCTION_PATTERNS = [
 ]
 
 # Values an attacker plausibly controls when they reach a filesystem path:
-# HTTP request data, user/model input, CLI arguments, upload metadata.
-# Deliberately EXCLUDED: environment variables and process cwd — env/config
-# paths are operator-owned infrastructure (the PR #748 lesson: CI scripts
-# join env-provided output paths constantly and are not attacker surfaces).
+# HTTP request data, user/model input, CLI arguments, and file-object names
+# (`file.filename` — the classic unsafe-upload/join source). Deliberately
+# EXCLUDED: environment variables and process cwd — env/config paths are
+# operator-owned infrastructure (the PR #748 lesson: CI scripts join
+# env-provided output paths constantly and are not attacker surfaces) — and
+# `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous
+# in TRUSTED paths; the upload risk lives in the filename operand, which has
+# its own token.
 UNTRUSTED_SOURCE_PATTERNS = [
     re.compile(r"request", re.IGNORECASE),
     re.compile(r"\breq\s*\.", re.IGNORECASE),
@@ -391,7 +408,7 @@ UNTRUSTED_SOURCE_PATTERNS = [
     re.compile(r"\bcookies?\b", re.IGNORECASE),
     re.compile(r"\bstdin\b", re.IGNORECASE),
     re.compile(r"\bargv\b", re.IGNORECASE),
-    re.compile(r"upload", re.IGNORECASE),
+    re.compile(r"\bfilename\b", re.IGNORECASE),
     re.compile(r"untrusted|unsanitized|attacker", re.IGNORECASE),
 ]
 
@@ -537,14 +554,19 @@ def evaluate_path_handling_signals(
                 )
                 break  # one bucket entry per class per chunk; samples merge below
 
-        # Untrusted-source join: same-line construction + untrusted operand
-        # fires directly; adjacent lines fire only on a one-hop def/use edge
-        # (the untrusted line's assignment target is used by the
-        # construction). Checks run on quote-stripped text (static string
-        # literals are not untrusted data; interpolation-shaped literals stay
-        # visible). Co-occurrence alone never fires.
+        # Untrusted-source join: same-line construction with an untrusted
+        # OPERAND fires directly — the scan inspects the construction
+        # expression (the assignment LHS is excluded, so a target named
+        # `request_cache_path` is not evidence of untrusted input), and
+        # static string literals are stripped (a quoted "request" is data).
+        # Adjacent lines fire only on a one-hop def/use edge: the untrusted
+        # line must carry a simple assignment whose exact target identifier
+        # the construction expression uses. Co-occurrence never fires.
         for index, raw_line in enumerate(lines):
-            flow_text = _QUOTED_STATIC_LITERAL.sub('""', neutralized[index])
+            neutral = neutralized[index]
+            assign = _UNTRUSTED_ASSIGNMENT.match(neutral)
+            expression = neutral[assign.end():] if assign else neutral
+            flow_text = _QUOTED_STATIC_LITERAL.sub('""', expression)
             if not any(pat.search(flow_text) for pat in PATH_CONSTRUCTION_PATTERNS):
                 continue
             if any(pat.search(flow_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
@@ -556,11 +578,8 @@ def evaluate_path_handling_signals(
             for adj_index in (index - 1, index + 1):
                 if not 0 <= adj_index < len(lines):
                     continue
-                adj_line = lines[adj_index]
-                if not any(pat.search(adj_line) for pat in UNTRUSTED_SOURCE_PATTERNS):
-                    continue
-                m = _UNTRUSTED_ASSIGNMENT.match(adj_line)
-                if m and re.search(rf"\b{re.escape(m.group(1))}\b", flow_text):
+                target = _untrusted_assignment_target(lines[adj_index])
+                if target and re.search(rf"\b{re.escape(target)}\b", flow_text):
                     _record_signal(
                         buckets, "untrusted_source_join", source, chunk_file,
                         _path_sample(raw_line),

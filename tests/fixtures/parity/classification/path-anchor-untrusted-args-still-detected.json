@@ -1,10 +1,10 @@
 {
   "fixture": "path-anchor-untrusted-args-still-detected",
-  "description": "#749 refusal regressions: an anchor-anchored path call is trusted bookkeeping only when its remaining arguments are demonstrably static. A pathlib anchor chain whose joinpath argument is request-controlled, an anchor call whose tail argument is user-controlled, __dirname + req.query, anchor + upload/argv operands — all REFUSE trusted-neutralization and fire untrusted_source_join: path_handling kind, flag, and provenance.",
+  "description": "#749 refusal regressions: an anchor-anchored path call is trusted bookkeeping only when its remaining arguments are demonstrably static. A pathlib anchor chain whose joinpath argument is request-controlled, an anchor call whose tail argument is user-controlled, __dirname + req.query, req.query/argv operands, and an upload-named operand bound by an adjacent untrusted assignment (one-hop def/use) — all REFUSE trusted-neutralization and fire untrusted_source_join: path_handling kind, flag, and provenance.",
   "pr_files": [
     { "filename": "src/app/serve.py", "status": "modified", "additions": 2 },
-    { "filename": "src/app/serve.ts", "status": "modified", "additions": 3 }
+    { "filename": "src/app/serve.ts", "status": "modified", "additions": 4 }
   ],
-  "diff": "diff --git a/src/app/serve.py b/src/app/serve.py\n+++ b/src/app/serve.py\n@@ -1,2 +1,4 @@\n+dest = Path(__file__).resolve().parent.joinpath(request.args[\"path\"])\n+target = os.path.join(os.path.dirname(__file__), user_supplied_name)\ndiff --git a/src/app/serve.ts b/src/app/serve.ts\n+++ b/src/app/serve.ts\n@@ -1,3 +1,6 @@\n+const p = path.resolve(__dirname, req.query.path);\n+const dest = path.join(__dirname, uploadName);\n+const arg = path.resolve(__dirname, process.argv[2]);\n",
+  "diff": "diff --git a/src/app/serve.py b/src/app/serve.py\n+++ b/src/app/serve.py\n@@ -1,2 +1,4 @@\n+dest = Path(__file__).resolve().parent.joinpath(request.args[\"path\"])\n+target = os.path.join(os.path.dirname(__file__), user_supplied_name)\ndiff --git a/src/app/serve.ts b/src/app/serve.ts\n+++ b/src/app/serve.ts\n@@ -1,3 +1,7 @@\n+const p = path.resolve(__dirname, req.query.path);\n+const uploadName = req.query.name;\n+const dest = path.join(__dirname, uploadName);\n+const arg = path.resolve(__dirname, process.argv[2]);\n",
   "linked_issues": []
 }

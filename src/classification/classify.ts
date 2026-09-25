@@ -202,15 +202,27 @@ const QUOTED_STATIC_LITERAL = /"[^"$%{}]*"|'[^'$%{}]*'|`[^`$%{}]*`/g;
  * subscripts, and attribute targets yield no one-hop edge. */
 const UNTRUSTED_ASSIGNMENT = /^[+\-]?\s*(?:const|let|var|final|val|my|our|local)?\s*([A-Za-z_]\w*)\s*:?=/;
 
+/** Assignment-target identifier of a line whose QUOTE-STRIPPED RHS reaches an
+ * untrusted source (a one-hop def/use candidate). Null when the line is not a
+ * simple assignment or its RHS carries no untrusted token — static quoted
+ * words like `label = "request"` are data, not flow, and never create an
+ * edge. */
+function untrustedAssignmentTarget(line: string): string | null {
+  const m = UNTRUSTED_ASSIGNMENT.exec(line);
+  if (!m || !m[1]) return null;
+  const rhs = line.slice(m.index + m[0].length).replace(QUOTED_STATIC_LITERAL, '""');
+  if (matchesAny(rhs, UNTRUSTED_SOURCE_PATTERNS)) return m[1];
+  return null;
+}
+
 /** Assignment-target identifiers carried by adjacent untrusted-source lines:
  * the one-hop def/use candidates for the line being neutralized or scanned.
  * Bounded by construction (at most two neighbors). */
 function oneHopUntrustedTargets(prevLine: string, nextLine: string): string[] {
   const targets: string[] = [];
   for (const line of [prevLine, nextLine]) {
-    if (!matchesAny(line, UNTRUSTED_SOURCE_PATTERNS)) continue;
-    const m = UNTRUSTED_ASSIGNMENT.exec(line);
-    if (m && m[1] && !targets.includes(m[1])) targets.push(m[1]);
+    const ident = untrustedAssignmentTarget(line);
+    if (ident && !targets.includes(ident)) targets.push(ident);
   }
   return targets;
 }
@@ -318,10 +330,14 @@ const PATH_CONSTRUCTION_PATTERNS: readonly RegExp[] = [
 ];
 
 /** Values an attacker plausibly controls when they reach a filesystem path:
- * HTTP request data, user/model input, CLI arguments, upload metadata.
- * Deliberately EXCLUDED: environment variables and process cwd — env/config
- * paths are operator-owned infrastructure (the PR #748 lesson: CI scripts
- * join env-provided output paths constantly and are not attacker surfaces). */
+ * HTTP request data, user/model input, CLI arguments, and file-object names
+ * (`file.filename` — the classic unsafe-upload/join source). Deliberately
+ * EXCLUDED: environment variables and process cwd — env/config paths are
+ * operator-owned infrastructure (the PR #748 lesson: CI scripts join
+ * env-provided output paths constantly and are not attacker surfaces) — and
+ * `upload` directory vocabulary: `UPLOAD_DIR`/`uploads/` names are ubiquitous
+ * in TRUSTED paths; the upload risk lives in the filename operand, which has
+ * its own token. */
 const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /request/i,
   /\breq\s*\./i,
@@ -335,7 +351,7 @@ const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /\bcookies?\b/i,
   /\bstdin\b/i,
   /\bargv\b/i,
-  /upload/i,
+  /\bfilename\b/i,
   /untrusted|unsanitized|attacker/i,
 ];
 
@@ -495,15 +511,20 @@ export function evaluatePathHandlingSignals(
       }
     }
 
-    // Untrusted-source join: same-line construction + untrusted operand
-    // fires directly; adjacent lines fire only on a one-hop def/use edge
-    // (the untrusted line's assignment target is used by the construction).
-    // Checks run on quote-stripped text (static string literals are not
-    // untrusted data; interpolation-shaped literals stay visible).
-    // Co-occurrence alone never fires.
+    // Untrusted-source join: same-line construction with an untrusted
+    // OPERAND fires directly — the scan inspects the construction
+    // expression (the assignment LHS is excluded, so a target named
+    // `request_cache_path` is not evidence of untrusted input), and static
+    // string literals are stripped (a quoted "request" is data). Adjacent
+    // lines fire only on a one-hop def/use edge: the untrusted line must
+    // carry a simple assignment whose exact target identifier the
+    // construction expression uses. Co-occurrence never fires.
     for (let index = 0; index < lines.length; index++) {
       const rawLine = lines[index] ?? "";
-      const flowText = (neutralized[index] ?? "").replace(QUOTED_STATIC_LITERAL, '""');
+      const neutral = neutralized[index] ?? "";
+      const assign = UNTRUSTED_ASSIGNMENT.exec(neutral);
+      const matchEnd = assign ? assign.index + assign[0].length : 0;
+      const flowText = neutral.slice(matchEnd).replace(QUOTED_STATIC_LITERAL, '""');
       if (!matchesAny(flowText, PATH_CONSTRUCTION_PATTERNS)) continue;
       if (matchesAny(flowText, UNTRUSTED_SOURCE_PATTERNS)) {
         recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
@@ -511,10 +532,8 @@ export function evaluatePathHandlingSignals(
       }
       for (const adjIndex of [index - 1, index + 1]) {
         if (adjIndex < 0 || adjIndex >= lines.length) continue;
-        const adjLine = lines[adjIndex] ?? "";
-        if (!matchesAny(adjLine, UNTRUSTED_SOURCE_PATTERNS)) continue;
-        const m = UNTRUSTED_ASSIGNMENT.exec(adjLine);
-        if (m && m[1] && mentionsIdentifier(flowText, m[1])) {
+        const target = untrustedAssignmentTarget(lines[adjIndex] ?? "");
+        if (target && mentionsIdentifier(flowText, target)) {
           recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
           break;
         }

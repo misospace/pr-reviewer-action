@@ -189,3 +189,53 @@ def test_unrelated_adjacent_request_line_does_not_fire(tmp_path) -> None:
     assert result["pr_kind"] != "path_handling_changes"
     assert "path_handling_changes" not in result["risk_flags"]
     assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_assignment_lhs_vocabulary_is_not_an_operand(tmp_path) -> None:
+    # Same-line detection reads the construction expression, not the LHS:
+    # `request_cache_path` is the target being bound, not untrusted input.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        '+request_cache_path = os.path.join(BASE, "static")\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_quoted_adjacent_label_creates_no_flow(tmp_path) -> None:
+    # `label = "request"` — the quote-stripped RHS has no untrusted token,
+    # so the adjacent anchor call stays trusted bookkeeping.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        '+label = "request"\n'
+        "+target = path.resolve(__dirname, label)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_upload_filename_operand_fires(tmp_path) -> None:
+    # `file.filename` is the reason this fires (the classic unsafe-upload
+    # source), not upload vocabulary in the target or directory name.
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+dest = os.path.join(base, file.filename)\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )
+
+
+def test_upload_vocabulary_without_operand_is_clean(tmp_path) -> None:
+    result = _classify(
+        [{"filename": "src/app.py"}],
+        "+upload_path = os.path.join(UPLOAD_DIR, 'static')\n",
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert result["path_handling_provenance"]["fired"] is False

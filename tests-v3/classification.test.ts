@@ -337,12 +337,66 @@ test("#749: adjacency is not flow — unrelated request line near a constant joi
   assert.equal(nonUntrusted.pathHandlingProvenance.fired, false);
 });
 
+test("#749: lexical hygiene — assignment LHS and quoted words are not operands", () => {
+  // Same-line detection inspects the construction EXPRESSION: the LHS being
+  // bound (`request_cache_path`) is not an untrusted operand.
+  const lhs = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+request_cache_path = os.path.join(BASE, "static")\n',
+    linkedIssues: [],
+  });
+  assert.equal(lhs.prKind, "app_code");
+  assert.equal(lhs.pathHandlingProvenance.fired, false);
+
+  // `label = "request"` is a static quoted word: the adjacent one-hop check
+  // reads the assignment and tests the quote-stripped RHS — no edge.
+  const quotedAdjacent = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: '+label = "request"\n+target = path.resolve(__dirname, label)\n',
+    linkedIssues: [],
+  });
+  assert.equal(quotedAdjacent.prKind, "app_code");
+  assert.equal(quotedAdjacent.pathHandlingProvenance.fired, false);
+
+  // `file.filename` is the reason an upload join fires — not upload
+  // vocabulary in the target or directory name.
+  const filenameOperand = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+dest = os.path.join(base, file.filename)\n",
+    linkedIssues: [],
+  });
+  assert.equal(filenameOperand.prKind, "path_handling_changes");
+  assert.ok(filenameOperand.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
+
+  // Without an untrusted operand, upload vocabulary alone never fires.
+  const uploadVocab = classifyPr({
+    prFiles: files("src/app.py"),
+    diffText: "+upload_path = os.path.join(UPLOAD_DIR, 'static')\n",
+    linkedIssues: [],
+  });
+  assert.equal(uploadVocab.prKind, "app_code");
+  assert.equal(uploadVocab.pathHandlingProvenance.fired, false);
+
+  // An upload-named OPERAND fires through the one-hop def/use edge.
+  const uploadFlow = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: "+const uploadName = req.query.name;\n+const dest = path.join(__dirname, uploadName);\n",
+    linkedIssues: [],
+  });
+  assert.equal(uploadFlow.prKind, "path_handling_changes");
+  assert.ok(uploadFlow.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "untrusted_source_join",
+  ));
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],
     ["req.query", '+const p = path.resolve(__dirname, req.query.path);\n'],
     ["user input", '+dest = os.path.join(__dirname, user_supplied_name)\n'],
-    ["upload name", '+const dest = path.join(__dirname, uploadName);\n'],
+    ["req.query operand", '+const dest = path.join(__dirname, req.query.name);\n'],
     ["argv", '+const target = path.resolve(__dirname, process.argv[2]);\n'],
     ["pathlib joinpath", '+out = Path(__file__).resolve().parent.joinpath(user_name)\n'],
     ["interpolated literal", '+dest = path.join(__dirname, f"{user_path}")\n'],
@@ -419,7 +473,7 @@ test("#749: the test-file discount never masks a production untrusted surface", 
 test("#749: genuine untrusted-path surfaces still fire with class-categorized provenance", () => {
   const cases: [string, string, string][] = [
     ["untrusted join", '+target = os.path.join(base, request.args["path"])\n', "untrusted_source_join"],
-    ["upload composition", "+upload_path = os.path.join(UPLOAD_DIR, file.filename)\n", "untrusted_source_join"],
+    ["upload composition (filename operand)", "+dest = os.path.join(base, file.filename)\n", "untrusted_source_join"],
     ["containment", "+resolved = os.path.realpath(target)\n+if not resolved.startswith(BASE):\n+    abort(400)\n", "path_containment_or_sanitization"],
     ["archive extraction", "+with tarfile.open(archive) as tf:\n+    tf.extractall(dest)\n", "archive_extraction"],
     ["symlink", "+os.symlink(target, link_path)\n", "symlink_sensitive"],

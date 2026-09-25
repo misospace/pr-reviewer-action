@@ -703,8 +703,10 @@ class TestPathHandlingSignalModel:
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
-    def test_anchor_call_with_upload_name_fires(self):
-        diff = '+const dest = path.join(__dirname, uploadName);\n'
+    def test_anchor_call_with_upload_operand_fires_via_direct_flow(self):
+        # The one-hop upload case (line above) has a direct-operand sibling:
+        # an untrusted request operand inside the anchor call fires directly.
+        diff = '+const dest = path.join(__dirname, req.query.name);\n'
         result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
@@ -869,14 +871,51 @@ class TestPathHandlingSignalModel:
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
         assert result.pr_kind == "app_code"
 
+    def test_lhs_lexical_request_word_does_not_fire(self):
+        # Same-line detection inspects the construction EXPRESSION, not the
+        # assignment target: `request_cache_path` is the LHS being bound, not
+        # an untrusted operand.
+        diff = '+request_cache_path = os.path.join(BASE, "static")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_quoted_adjacent_label_does_not_create_flow(self):
+        # `label = "request"` is a static quoted word: the adjacent one-hop
+        # check reads the assignment and tests the quote-stripped RHS, so no
+        # def/use edge exists.
+        diff = '+label = "request"\n+target = path.resolve(__dirname, label)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
     def test_user_controlled_path_constructor_fires(self):
         diff = "+dest = pathlib.Path(user_input)\n"
         result = classify_pr([_make_file("src/app.py")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
-    def test_upload_path_composition_fires(self):
-        diff = "+upload_path = os.path.join(UPLOAD_DIR, file.filename)\n"
-        result = classify_pr([_make_file("src/upload.py")], diff_text=diff)
+    def test_upload_filename_operand_fires(self):
+        # `file.filename` is the untrusted operand — the reason this fires —
+        # not upload vocabulary in the assignment target or directory name.
+        diff = "+dest = os.path.join(base, file.filename)\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_upload_vocabulary_without_operand_is_clean(self):
+        # `upload`-named targets/directories are trusted bookkeeping: without
+        # an untrusted operand the join never fires.
+        diff = "+upload_path = os.path.join(UPLOAD_DIR, 'static')\n"
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "app_code"
+        assert result.path_handling_provenance["fired"] is False
+
+    def test_anchor_call_with_upload_operand_fires_via_flow(self):
+        # An upload-named OPERAND fires through the one-hop def/use edge, not
+        # through the lexical `upload` word.
+        diff = "+const uploadName = req.query.name;\n+const dest = path.join(__dirname, uploadName);\n"
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
         assert result.pr_kind == "path_handling_changes"
 
     def test_containment_check_fires(self):
