@@ -271,6 +271,40 @@ test("#749: Node/TS trusted-anchor joins with ../ literals are trusted bookkeepi
   assert.ok(!result.riskFlags.includes("path_handling_changes"));
 });
 
+test("#749: anchor joins with demonstrably static arguments are trusted bookkeeping", () => {
+  // Quoted literals are static data even when a directory name contains a
+  // word from the untrusted vocabulary ("uploads").
+  const diff = [
+    '+const uploadsDir = path.join(__dirname, "uploads");',
+    '+const up = os.path.join(__dirname, "../uploads");',
+    '+const tpl = path.resolve(__dirname, `templates`, "base.html");',
+  ].join("\n");
+  const result = classifyPr({ prFiles: files("src/app.ts"), diffText: diff, linkedIssues: [] });
+  assert.notEqual(result.prKind, "path_handling_changes");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+});
+
+test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
+  const cases: [string, string][] = [
+    ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],
+    ["req.query", '+const p = path.resolve(__dirname, req.query.path);\n'],
+    ["user input", '+dest = os.path.join(__dirname, user_supplied_name)\n'],
+    ["upload name", '+const dest = path.join(__dirname, uploadName);\n'],
+    ["argv", '+const target = path.resolve(__dirname, process.argv[2]);\n'],
+    ["pathlib joinpath", '+out = Path(__file__).resolve().parent.joinpath(user_name)\n'],
+    ["interpolated literal", '+dest = path.join(__dirname, f"{user_path}")\n'],
+  ];
+  for (const [label, diff] of cases) {
+    const result = classifyPr({ prFiles: files("src/app.ts"), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", label);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), label);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+      `${label}: expected an untrusted_source_join signal`,
+    );
+  }
+});
+
 test("#749: pathlib import with a constant path and constant joins are not path handling", () => {
   const constant = classifyPr({
     prFiles: files("src/config.py"),

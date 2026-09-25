@@ -171,18 +171,41 @@ const TRUSTED_ANCHOR_TOKEN =
 /** A `Path(__file__)...` chain: the anchor plus bounded pure-chaining calls
  * (.resolve(), .parent, .parents[N], .joinpath("..."), ...). One level of
  * call arguments is consumed; deeper nesting fails to match and stays in the
- * scanned text (conservative). (Replacement-only: carries /g.) */
+ * scanned text (conservative). joinpath arguments go through the same
+ * untrusted-refusal check as anchor calls (see
+ * refuseUntrustedAnchorNeutralization). (Replacement-only: carries /g.) */
 const PATHLIB_ANCHOR_CHAIN =
   /\bPath\s*\(\s*(?:__file__|__filename)\s*\)(?:\s*\.\s*(?:resolve|absolute|parent|parents\[\d+\]|joinpath|name|stem|as_posix|as_uri|is_dir|is_file|exists|stat)\b\s*(?:\(\s*[^()]*\))?)*/g;
 /** Anchor-anchored path calls: a path construction/resolution call whose FIRST
  * argument is a trusted anchor — `path.resolve(__dirname, "../templates")`,
  * `os.path.join(os.path.dirname(__file__), "data.json")`, `resolve(__file__)`.
- * The whole call is trusted bookkeeping even when later arguments contain
- * `../` literals. Only one argument level is consumed (no nested parens in the
- * tail); unmatched forms stay in the scanned text (conservative).
+ * The whole call is trusted bookkeeping ONLY when the remaining arguments are
+ * demonstrably static (string literals or plain identifiers from the bounded
+ * trusted vocabulary): an untrusted operand anywhere in the call REFUSES
+ * neutralization so the untrusted-join signal can fire on it
+ * (`path.resolve(__dirname, request.args["path"])` is a real surface).
+ * Only one argument level is consumed (no nested parens in the tail);
+ * unmatched forms stay in the scanned text (conservative).
  * (Replacement-only: carries /g.) */
 const ANCHOR_PATH_CALL =
   /(?:[.]|\b)(?:join|resolve|normalize|realpath|abspath|normpath|dirname|basename|joinpath)\s*\(\s*(?:__file__|__dirname|__filename|import\.meta\.(?:url|dirname|filename)|(?:os\.path\.)?(?:dirname|basename|abspath|realpath)\s*\(\s*(?:__file__|__dirname|__filename)\s*\)|Path\s*\(\s*(?:__file__|__filename)\s*\)(?:\.(?:resolve|parent|parents\[\d+\]|absolute)\b)*)\s*(?:,\s*[^()]*)?\)/g;
+
+/** A quoted string literal with NO interpolation marker (`{`, `$`, `%`): its
+ * content is static data. Interpolation-shaped literals are deliberately NOT
+ * stripped, so `f"{user}"` / `` `${x}` `` keep their inner text visible to the
+ * untrusted-token check (fail toward detection). */
+const QUOTED_STATIC_LITERAL = /"[^"$%{}]*"|'[^'$%{}]*'|`[^`$%{}]*`/g;
+
+/** Replacement callback for the trusted-anchor call patterns: neutralize the
+ * matched call only when no untrusted-source token appears OUTSIDE its quoted
+ * string literals. A call like
+ * `os.path.join(__dirname, request.args["path"])` is an untrusted-path
+ * surface and must stay in the scanned text. */
+function refuseUntrustedAnchorNeutralization(match: string): string {
+  const staticText = match.replace(QUOTED_STATIC_LITERAL, '""');
+  if (matchesAny(staticText, UNTRUSTED_SOURCE_PATTERNS)) return match;
+  return '""';
+}
 
 function neutralizePathFalsePositives(line: string): string {
   /** One diff line with trusted path scaffolding neutralized (replaced by
@@ -191,8 +214,8 @@ function neutralizePathFalsePositives(line: string): string {
    * match. */
   return line
     .replace(SPECIFIER_QUOTED, '""')
-    .replace(ANCHOR_PATH_CALL, '""')
-    .replace(PATHLIB_ANCHOR_CHAIN, '""')
+    .replace(ANCHOR_PATH_CALL, (m) => refuseUntrustedAnchorNeutralization(m))
+    .replace(PATHLIB_ANCHOR_CHAIN, (m) => refuseUntrustedAnchorNeutralization(m))
     .replace(TRUSTED_ANCHOR_TOKEN, '""');
 }
 

@@ -211,7 +211,9 @@ _TRUSTED_ANCHOR_TOKEN = re.compile(
 # A `Path(__file__)...` chain: the anchor plus bounded pure-chaining calls
 # (.resolve(), .parent, .parents[N], .joinpath("..."), ...). One level of
 # call arguments is consumed; deeper nesting fails to match and stays in the
-# scanned text (conservative).
+# scanned text (conservative). joinpath arguments go through the same
+# untrusted-refusal check as anchor calls (see
+# _refuse_untrusted_anchor_neutralization).
 _PATHLIB_ANCHOR_CHAIN = re.compile(
     r"""\bPath\s*\(\s*(?:__file__|__filename)\s*\)"""
     r"""(?:\s*\.\s*(?:resolve|absolute|parent|parents\[\d+\]|joinpath|name|stem|as_posix|as_uri|is_dir|is_file|exists|stat)\b\s*(?:\(\s*[^()]*\))?)*"""
@@ -220,9 +222,13 @@ _PATHLIB_ANCHOR_CHAIN = re.compile(
 # Anchor-anchored path calls: a path construction/resolution call whose FIRST
 # argument is a trusted anchor — `path.resolve(__dirname, "../templates")`,
 # `os.path.join(os.path.dirname(__file__), "data.json")`, `resolve(__file__)`.
-# The whole call is trusted bookkeeping even when later arguments contain
-# `../` literals. Only one argument level is consumed (no nested parens in the
-# tail); unmatched forms stay in the scanned text (conservative).
+# The whole call is trusted bookkeeping ONLY when the remaining arguments are
+# demonstrably static (string literals or plain identifiers from the bounded
+# trusted vocabulary): an untrusted operand anywhere in the call REFUSES
+# neutralization so the untrusted-join signal can fire on it
+# (`path.resolve(__dirname, request.args["path"])` is a real surface).
+# Only one argument level is consumed (no nested parens in the tail);
+# unmatched forms stay in the scanned text (conservative).
 _ANCHOR_PATH_CALL = re.compile(
     r"""(?:[.]|\b)(?:join|resolve|normalize|realpath|abspath|normpath|dirname|basename|joinpath)\s*\(\s*"""
     r"""(?:__file__|__dirname|__filename|import\.meta\.(?:url|dirname|filename)"""
@@ -231,6 +237,29 @@ _ANCHOR_PATH_CALL = re.compile(
     r"""\s*(?:,\s*[^()]*)?\)"""
 )
 
+# A quoted string literal with NO interpolation marker (`{`, `$`, `%`): its
+# content is static data. Interpolation-shaped literals are deliberately NOT
+# stripped, so `f"{user}"` / `` `${x}` `` keep their inner text visible to the
+# untrusted-token check (fail toward detection).
+_QUOTED_STATIC_LITERAL = re.compile(
+    r'"[^"$%{}]*"'
+    r"|'[^'$%{}]*'"
+    r"|`[^`$%{}]*`"
+)
+
+
+def _refuse_untrusted_anchor_neutralization(match: re.Match) -> str:
+    """Replacement callback for the trusted-anchor call patterns: neutralize
+    the matched call only when no untrusted-source token appears OUTSIDE its
+    quoted string literals. A call like
+    `os.path.join(__dirname, request.args["path"])` is an untrusted-path
+    surface and must stay in the scanned text."""
+    text = match.group(0)
+    static_text = _QUOTED_STATIC_LITERAL.sub('""', text)
+    if any(pat.search(static_text) for pat in UNTRUSTED_SOURCE_PATTERNS):
+        return text
+    return '""'
+
 
 def _neutralize_path_false_positives(line: str) -> str:
     """One diff line with trusted path scaffolding neutralized (replaced by
@@ -238,8 +267,8 @@ def _neutralize_path_false_positives(line: str) -> str:
     literal-scoped, so material signals elsewhere on the same line still
     match."""
     line = _SPECIFIER_QUOTED.sub('""', line)
-    line = _ANCHOR_PATH_CALL.sub('""', line)
-    line = _PATHLIB_ANCHOR_CHAIN.sub('""', line)
+    line = _ANCHOR_PATH_CALL.sub(_refuse_untrusted_anchor_neutralization, line)
+    line = _PATHLIB_ANCHOR_CHAIN.sub(_refuse_untrusted_anchor_neutralization, line)
     line = _TRUSTED_ANCHOR_TOKEN.sub('""', line)
     return line
 

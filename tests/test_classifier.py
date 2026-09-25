@@ -670,6 +670,62 @@ class TestPathHandlingSignalModel:
         assert result.pr_kind != "path_handling_changes"
         assert "path_handling_changes" not in result.risk_flags
 
+    def test_anchor_join_with_static_arguments_is_not_path_handling(self):
+        # Anchor + demonstrably static arguments = trusted bookkeeping, even
+        # when a static directory name contains a word from the untrusted
+        # vocabulary ("uploads") — quoted literals are static data.
+        diff = "\n".join([
+            '+const uploadsDir = path.join(__dirname, "uploads");',
+            '+const up = os.path.join(__dirname, "../uploads");',
+            '+const tpl = path.resolve(__dirname, `templates`, "base.html");',
+        ])
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind != "path_handling_changes"
+        assert "path_handling_changes" not in result.risk_flags
+
+    # -- Refusal: anchor + untrusted operand is a real surface --------------
+
+    def test_anchor_join_with_request_arg_fires(self):
+        diff = '+target = os.path.join(__dirname, request.args["path"])\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        fired = result.path_handling_provenance["signals"]
+        assert any(s["signal"] == "untrusted_source_join" for s in fired)
+
+    def test_anchor_call_with_express_query_fires(self):
+        diff = '+const p = path.resolve(__dirname, req.query.path);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+        assert "path_handling_changes" in result.risk_flags
+
+    def test_anchor_call_with_user_input_fires(self):
+        diff = '+dest = os.path.join(__dirname, user_supplied_name)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_anchor_call_with_upload_name_fires(self):
+        diff = '+const dest = path.join(__dirname, uploadName);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_anchor_call_with_argv_fires(self):
+        diff = '+const target = path.resolve(__dirname, process.argv[2]);\n'
+        result = classify_pr([_make_file("src/app.ts")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_pathlib_chain_joinpath_with_untrusted_arg_fires(self):
+        # The pathlib anchor chain neutralizes only static joinpath arguments.
+        diff = '+out = Path(__file__).resolve().parent.joinpath(user_name)\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
+    def test_interpolated_literal_arg_fails_toward_detection(self):
+        # An interpolation-shaped quoted argument is NOT treated as static:
+        # its inner text stays visible to the untrusted-token check.
+        diff = '+dest = path.join(__dirname, f"{user_path}")\n'
+        result = classify_pr([_make_file("src/app.py")], diff_text=diff)
+        assert result.pr_kind == "path_handling_changes"
+
     def test_pathlib_import_with_constant_path_is_not_path_handling(self):
         diff = "+CONFIG = Path('/etc/myapp/config.yaml')\n"
         result = classify_pr([_make_file("src/config.py")], diff_text=diff)

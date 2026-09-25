@@ -131,3 +131,32 @@ def test_node_trusted_anchor_join_is_not_traversal(tmp_path) -> None:
     )
     assert result["pr_kind"] != "path_handling_changes"
     assert "path_handling_changes" not in result["risk_flags"]
+
+
+def test_anchor_join_with_static_arguments_is_not_path_handling(tmp_path) -> None:
+    # Anchor + static string literals = trusted bookkeeping, even when a
+    # directory name contains a word from the untrusted vocabulary.
+    result = _classify(
+        [{"filename": "src/app.ts"}],
+        '+const uploadsDir = path.join(__dirname, "uploads");\n'
+        '+const templates = path.resolve(__dirname, "../templates");\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] != "path_handling_changes"
+    assert "path_handling_provenance" in result
+    assert result["path_handling_provenance"]["fired"] is False
+
+
+def test_anchor_join_with_untrusted_operand_fires(tmp_path) -> None:
+    # The anchor refusal: `path.resolve(__dirname, request.args[...])` must
+    # NOT be neutralized as trusted bookkeeping — it is a real surface.
+    result = _classify(
+        [{"filename": "src/app.ts"}],
+        '+const p = path.resolve(__dirname, request.args["path"]);\n',
+        tmp_path,
+    )
+    assert result["pr_kind"] == "path_handling_changes"
+    assert any(
+        signal["signal"] == "untrusted_source_join"
+        for signal in result["path_handling_provenance"]["signals"]
+    )
