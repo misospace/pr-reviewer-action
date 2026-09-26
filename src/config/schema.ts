@@ -3,7 +3,7 @@ export const BOOLEAN_INPUTS = new Set([
   "escalate-on-fast-request-changes", "escalate-on-fast-low-confidence", "escalate-on-tool-or-evidence-blockers",
   "escalate-on-tool-planning-failure", "ai-stream", "related-code-context", "linear-enable-for-forks",
   "ai-fallback-stream",
-  "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context",
+  "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
   "tool-enable-for-forks", "forgejo-skip-permission-preflight", "skip-if-diff-unchanged", "force-review",
   "ci-status-check", "ci-skip-on-timeout",
@@ -12,7 +12,7 @@ export const BOOLEAN_INPUTS = new Set([
 export const INTEGER_INPUTS = new Set([
   "pr-number", "ai-max-tokens", "ai-primary-retries", "ai-primary-retry-delay-sec", "inline-findings-max",
   "related-code-max-bytes", "linear-issue-timeout-sec", "model-context-tokens", "primary-model-context-tokens",
-  "smart-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "deep-review-timeout-sec",
+  "smart-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
   "deep-review-max-tokens", "deep-review-corpus-max-bytes", "enrichment-budget-sec", "image-digest-budget-sec",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",
   "evidence-provider-parallelism", "tool-loop-wall-clock-sec", "tool-loop-summarize-max-tokens", "tool-max-requests",

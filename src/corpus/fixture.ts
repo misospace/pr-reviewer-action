@@ -201,6 +201,7 @@ export function runCorpusFixture(fixturePath: string): { ok: boolean; values?: R
     relatedCodeTruncatedMd: read("related-code.truncated.md"),
     repoMapMd: read("repo-map.md"),
     prThreadMd: read("pr-thread.md"),
+    reviewThreadsMd: read("review-threads.md"),
     linkedIssuesMd: read("linked-issues.md"),
     ciChecksContent: env.ci_checks_file ? read(env.ci_checks_file) : null,
     versionHintsTruncatedTxt: read("version-hints.truncated.txt"),

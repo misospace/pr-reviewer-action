@@ -134,6 +134,15 @@ export interface NormalizedRequiredCheckDisposition {
  * request — the fields are read from the parsed verdict object, never from
  * review markdown.
  */
+/** #766: one per unresolved review thread the corpus listed. `invalid`
+ * marks an attributable entry whose disposition word was not recognized;
+ * the v2 enforcement pass treats it as missing. */
+export interface NormalizedThreadDisposition {
+  threadId: string;
+  disposition: "fixed" | "open" | "disputed" | "invalid";
+  evidence: string | null;
+}
+
 export interface ParsedReviewVerdict {
   verdict: VerdictValue;
   reviewMarkdown: string;
@@ -150,6 +159,9 @@ export interface ParsedReviewVerdict {
   requiredCheckDispositions: NormalizedRequiredCheckDisposition[] | null;
   /** True iff the model emitted the `required_check_dispositions` key at all. */
   requiredCheckDispositionsEmitted: boolean;
+  /** #766: same tri-state as the required-check dispositions. */
+  threadDispositions: NormalizedThreadDisposition[] | null;
+  threadDispositionsEmitted: boolean;
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;

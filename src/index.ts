@@ -10,6 +10,7 @@ import {
   runEnrichmentFixture,
   runImageProvenanceFixture,
   runPrThreadFixture,
+  runReviewThreadsFixture,
   runRelatedCodeFixture,
   runRepoMapFixture,
 } from "./context/fixture.js";
@@ -71,6 +72,7 @@ async function contextFixtureMain(mode: string, fixturePath: string): Promise<vo
   const result = await (mode === "enrichment-fixture" ? Promise.resolve(runEnrichmentFixture(fixturePath))
     : mode === "repo-map-fixture" ? Promise.resolve(runRepoMapFixture(fixturePath))
     : mode === "pr-thread-fixture" ? Promise.resolve(runPrThreadFixture(fixturePath))
+    : mode === "review-threads-fixture" ? Promise.resolve(runReviewThreadsFixture(fixturePath))
     : mode === "related-code-fixture" ? runRelatedCodeFixture(fixturePath)
     : runImageProvenanceFixture(fixturePath));
   process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -95,7 +97,7 @@ if (require.main === module) {
       process.stderr.write(`v3 requirement-ledger fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
-  } else if (["enrichment-fixture", "repo-map-fixture", "pr-thread-fixture", "related-code-fixture", "image-provenance-fixture"].includes(firstArg)) {
+  } else if (["enrichment-fixture", "repo-map-fixture", "pr-thread-fixture", "review-threads-fixture", "related-code-fixture", "image-provenance-fixture"].includes(firstArg)) {
     contextFixtureMain(firstArg, argv[1] ?? "").catch((error: unknown) => {
       process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;

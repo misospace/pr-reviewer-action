@@ -283,6 +283,14 @@ build_review_corpus() {
       echo
     fi
 
+    # review-threads.md carries its own trust-framed "# Unresolved Review
+    # Threads" header (review_threads.py) and is empty when no unresolved
+    # thread fits, so the same gate applies.
+    if [ -s review-threads.md ]; then
+      cat review-threads.md
+      echo
+    fi
+
     # context.sh leaves linked-issues.md empty when there's no linked issue
     # (#399/#400) so the model sees no section boundary to react to. Gate
     # the header the same way, matching the CI Check Results pattern below.

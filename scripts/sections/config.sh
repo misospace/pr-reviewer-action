@@ -588,6 +588,11 @@ apply_system_prompt_fragments() {
       pt="$(<"$SCRIPT_DIR/prompt_fragments/pr_thread.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{PR_THREAD_GUIDANCE\}\}/$pt}"
+    local rt=""
+    if [[ -s review-threads-present.txt ]]; then
+      rt="$(<"$SCRIPT_DIR/prompt_fragments/review_threads.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{REVIEW_THREADS_GUIDANCE\}\}/$rt}"
     # The requirement-ledger guidance is substituted only when a non-empty
     # requirement ledger was built for this run (requirement-ledger-present.txt
     # is written by the ledger build in context.sh, before this function runs);

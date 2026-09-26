@@ -255,6 +255,7 @@ const baseWorkspace = (): CorpusWorkspace => ({
   relatedCodeTruncatedMd: null,
   repoMapMd: null,
   prThreadMd: null,
+  reviewThreadsMd: null,
   linkedIssuesMd: null,
   ciChecksContent: null,
   versionHintsTruncatedTxt: null,

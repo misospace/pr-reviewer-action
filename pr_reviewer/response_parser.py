@@ -452,6 +452,62 @@ def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] |
     return dispositions
 
 
+_THREAD_DISPOSITION_ALIASES = {
+    "fixed": "fixed",
+    "resolved": "fixed",
+    "addressed": "fixed",
+    "open": "open",
+    "still_open": "open",
+    "still-open": "open",
+    "unresolved": "open",
+    "disputed": "disputed",
+    "disagree": "disputed",
+    "rejected": "disputed",
+}
+_MAX_THREAD_DISPOSITIONS = 100
+_MAX_THREAD_ID_CHARS = 200
+_MAX_THREAD_EVIDENCE_CHARS = 1000
+
+
+def _normalize_thread_dispositions(value: Any) -> list[dict[str, Any]] | None:
+    """Normalise the model's per-thread dispositions (#766).
+
+    Same tri-state-by-key-presence contract as the required-check
+    dispositions. An entry with no usable thread id is dropped; an
+    attributable entry with an unknown disposition is preserved as
+    ``"invalid"`` so the enforcement pass treats it as missing rather than
+    letting a malformed duplicate collapse into a valid answer.
+    """
+    if not isinstance(value, list):
+        return None
+
+    dispositions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("thread_id")
+        if not isinstance(raw_id, str):
+            continue
+        thread_id = _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", raw_id).strip()
+        if not thread_id or len(thread_id) > _MAX_THREAD_ID_CHARS:
+            continue
+        raw_disposition = item.get("disposition")
+        key = raw_disposition.strip().lower() if isinstance(raw_disposition, str) else ""
+        disposition = _THREAD_DISPOSITION_ALIASES.get(key, "invalid")
+        evidence = item.get("evidence")
+        if isinstance(evidence, str):
+            evidence = (
+                _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", evidence).strip()[:_MAX_THREAD_EVIDENCE_CHARS]
+                or None
+            )
+        else:
+            evidence = None
+        dispositions.append({"thread_id": thread_id, "disposition": disposition, "evidence": evidence})
+        if len(dispositions) >= _MAX_THREAD_DISPOSITIONS:
+            break
+    return dispositions
+
+
 def _normalize_findings(value: Any) -> list[dict[str, Any]]:
     """Normalise an optional model-provided findings array.
 
@@ -675,6 +731,11 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
         parsed["required_check_dispositions"] = _normalize_required_check_dispositions(
             parsed["required_check_dispositions"]
         )
+
+    # Review-thread dispositions (#766): same tri-state as the required-check
+    # dispositions — normalized only when the model emitted the key.
+    if "thread_dispositions" in parsed:
+        parsed["thread_dispositions"] = _normalize_thread_dispositions(parsed["thread_dispositions"])
 
     # Structured reviewer-requested smart escalation (#721): normalized
     # unconditionally so a malformed or absent field can never masquerade as

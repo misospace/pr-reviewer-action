@@ -354,6 +354,16 @@ inputs:
     required: false
     default: "8000"
     description: "Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)"
+  - id: review-threads-context
+    v2_id: review_threads_context
+    required: false
+    default: "true"
+    description: "Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus; the reviewer must disposition each listed thread"
+  - id: review-threads-max-bytes
+    v2_id: review_threads_max_bytes
+    required: false
+    default: "8000"
+    description: "Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)"
   - id: deep-review
     v2_id: deep_review
     required: false
