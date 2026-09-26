@@ -183,11 +183,14 @@ resolve_superseded_review_threads() {
   fi
   local threads_json
   if ! threads_json="$(platform_graphql \
-      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }' \
+      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }' \
       -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" 2>/dev/null)" \
      || ! printf '%s' "$threads_json" | jq -e '.data.repository.pullRequest.reviewThreads.nodes | type == "array"' >/dev/null 2>&1; then
     echo "  WARN: Could not list review threads for #$PR_NUMBER; superseded threads left open" >&2
     return 0
+  fi
+  if printf '%s' "$threads_json" | jq -e '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage == true' >/dev/null 2>&1; then
+    echo "  WARN: More than 100 review threads on #$PR_NUMBER; only the first 100 were checked" >&2
   fi
   local thread_ids
   thread_ids="$(printf '%s' "$threads_json" | jq -r --argjson ids "$ids_json" \

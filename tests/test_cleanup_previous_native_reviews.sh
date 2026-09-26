@@ -429,6 +429,28 @@ LIST_FAIL_OUTPUT="$(
 )"
 check_contains "failed thread listing warns" "$LIST_FAIL_OUTPUT" "WARN: Could not list review threads for #9"
 check_contains "failed thread listing never aborts cleanup" "$LIST_FAIL_OUTPUT" "CLEANUP_DONE"
+
+# Seam-level cases: platform functions overridden after sourcing the helper.
+seam_run() {
+  local platform="$1" graphql_body="$2"
+  PLATFORM="$platform" GRAPHQL_BODY="$graphql_body" GQL_LOG="$THREADS_TMP/gql.log" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=9 COMMENT_MARKER="<!-- my-marker -->" REVIEWS_JSON="$THREADS_TMP/reviews.json" \
+  bash -c 'set -euo pipefail; source "'"$HELPER_SCRIPT"'"
+    platform_resolve() { echo "$PLATFORM"; }
+    platform_pr_reviews() { cat "$REVIEWS_JSON"; }
+    platform_review_dismiss() { echo 1; }
+    platform_graphql() { echo "$*" >> "$GQL_LOG"; case "$*" in *reviewThreads*) printf "%s" "$GRAPHQL_BODY" ;; *) echo "{}" ;; esac; }
+    cleanup_native_reviews true; echo CLEANUP_DONE' 2>&1
+}
+: > "$THREADS_TMP/gql.log"
+FORGEJO_OUTPUT="$(seam_run forgejo '')"
+check_contains "forgejo skips thread resolution with a note" "$FORGEJO_OUTPUT" "Skipping review-thread resolution (platform=forgejo"
+check "forgejo never lists threads" "$(grep -c reviewThreads "$THREADS_TMP/gql.log" || true)" "0"
+check_contains "forgejo cleanup still completes" "$FORGEJO_OUTPUT" "CLEANUP_DONE"
+SHAPE_OUTPUT="$(seam_run github '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":"oops"}}}}}')"
+check_contains "non-array thread payload warns" "$SHAPE_OUTPUT" "WARN: Could not list review threads for #9"
+PAGED_OUTPUT="$(seam_run github '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true},"nodes":[]}}}}}')"
+check_contains "more than 100 threads warns" "$PAGED_OUTPUT" "WARN: More than 100 review threads on #9"
 rm -rf "$THREADS_TMP"
 
 echo ""
