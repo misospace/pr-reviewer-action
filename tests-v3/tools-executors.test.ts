@@ -4,8 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  ALLOWED_COMMANDS, allowlistedHost, executeToolRequest, findFiles, ghApi,
-  listTree, resolveWorkspacePath, runCommand, validateEndpoint,
+  ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, executeToolRequest, findFiles, ghApi, gitGrep,
+  listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
@@ -149,3 +149,51 @@ test("web_search treats non-2xx as errors even when the body is a valid JSON err
   const ok = await webSearch("x", context(200, JSON.stringify({ results: [{ title: "t", url: "https://a.test/x", content: "s" }] })));
   assert.deepEqual(ok, { results: [{ title: "t", url: "https://a.test/x", snippet: "s" }] });
 });
+
+function scriptedProcess(exitCodes: number[], stdout = "") {
+  const argvs: string[][] = [];
+  const runProcess = async (options: any) => {
+    argvs.push([options.file, ...options.args]);
+    const exitCode = exitCodes[Math.min(argvs.length, exitCodes.length) - 1]!;
+    return { status: "exited", exitCode, signal: null, stdout: Buffer.from(exitCode === 0 ? stdout : ""), stderr: Buffer.from(exitCode > 1 ? "fatal: Unmatched (" : ""), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null } as any;
+  };
+  return { argvs, deps: { env: {}, runProcess } as any };
+}
+
+test("git grep uses extended regex and retries an invalid pattern as a fixed string", async () => fixture(async (root) => {
+  fs.mkdirSync(path.join(root, "sub"));
+  fs.writeFileSync(path.join(root, "a.sh"), "apply() {\n"); fs.writeFileSync(path.join(root, "a.py"), "x = foo(1)\n");
+  const ok = scriptedProcess([0], "a.sh\0" + "1\0" + "apply() {\n");
+  const res = await gitGrep("A|B", { workspaceRoot: root, deps: ok.deps });
+  assert.deepEqual(res, { matches: ["a.sh:1:apply() {"] });
+  assert.deepEqual(ok.argvs, [["git", "grep", "-n", "-z", "-E", "--", "A|B", "."]]);
+  const retry = scriptedProcess([128, 0], "a.py\0" + "1\0" + "x = foo(1)\n");
+  const scoped = await gitGrep("foo(", { workspaceRoot: root, deps: retry.deps }, "sub");
+  assert.equal(retry.argvs.length, 2);
+  assert.deepEqual(retry.argvs[0]!.slice(0, 7), ["git", "grep", "-n", "-z", "-E", "--", "foo("]);
+  assert.deepEqual(retry.argvs[1], retry.argvs[0]!.map((a) => (a === "-E" ? "-F" : a)));
+  assert.equal(retry.argvs[1]![7], "--");
+  assert.deepEqual(scoped, { matches: ["a.py:1:x = foo(1)"], note: "pattern is not a valid extended regex; searched as a fixed string" });
+  const dispatched = await executeToolRequest("git_grep", { pattern: "foo(" }, { workspaceRoot: root, deps: scriptedProcess([128, 0], "a.py\0" + "1\0" + "x = foo(1)\n").deps });
+  assert.equal(dispatched.result.note, "pattern is not a valid extended regex; searched as a fixed string");
+  const failed = await gitGrep("foo(", { workspaceRoot: root, deps: scriptedProcess([128, 128]).deps });
+  assert.match(failed.error, /git grep failed: fatal: Unmatched/);
+}));
+
+test("workspace tools expose only the committed tree when a tracked index is present", async () => fixture(async (root) => {
+  fs.mkdirSync(path.join(root, "src")); fs.mkdirSync(path.join(root, "scratch"));
+  fs.writeFileSync(path.join(root, "src", "app.py"), "x = 1\n");
+  fs.writeFileSync(path.join(root, "pr.json"), "{}\n");
+  fs.writeFileSync(path.join(root, "scratch", "review-corpus.md"), "x\n");
+  const trackedIndex = buildTrackedIndex("src/app.py\0");
+  assert.deepEqual([...trackedIndex.dirs], ["src"]);
+  const tracked = ctx(root, { trackedIndex });
+  assert.deepEqual(listTree(".", tracked).entries, [{ path: "src", type: "dir" }, { path: "src/app.py", type: "file" }]);
+  assert.deepEqual(findFiles("*", tracked).files, ["src/app.py"]);
+  assert.equal(listTree("pr.json", tracked).error, UNTRACKED_PATH_ERROR);
+  assert.equal((await readFile("pr.json", tracked)).error, UNTRACKED_PATH_ERROR);
+  assert.equal((await readFile("src/app.py", tracked)).content, "x = 1\n");
+  const unfiltered = ctx(root);
+  assert.deepEqual(findFiles("*.json", unfiltered).files, ["pr.json"]);
+  assert.equal((await readFile("pr.json", unfiltered)).content, "{}\n");
+}));

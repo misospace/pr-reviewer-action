@@ -211,3 +211,17 @@ test("the strict verdict schema literal stays contractually identical", () => {
   assert.deepEqual(dispositions.items.properties.status.enum, ["satisfied", "not_applicable", "unresolved"]);
   assert.equal(WEB_SEARCH_SCHEMA.name, "web_search");
 });
+
+test("anthropic verdict turn after tool results joins the pending tool_result message", () => {
+  const c = new Conversation();
+  c.system = "sys";
+  c.addUser("planning context");
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: "{}" }]);
+  c.addToolResult("a", { content: "line 1\n" });
+  c.addUser("Produce the final review verdict now.");
+  const messages = c.renderAnthropicMessages() as Array<{ role: string; content: unknown }>;
+  assert.deepEqual(messages.map((m) => m.role), ["user", "assistant", "user"]);
+  const last = messages[2]!.content as Array<Record<string, unknown>>;
+  assert.deepEqual(last.map((b) => b.type), ["tool_result", "text"]);
+  assert.equal(last[1]!.text, "Produce the final review verdict now.");
+});

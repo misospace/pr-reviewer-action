@@ -138,7 +138,8 @@ def _accumulate_usage(acc, response, api_format):
             return 0
 
     acc["requests"] += 1
-    if api_format == "anthropic":
+    # Streamed Anthropic turns are reassembled into OpenAI shape.
+    if api_format == "anthropic" and "prompt_tokens" not in usage:
         acc["prompt_tokens"] += _int(usage.get("input_tokens"))
         acc["completion_tokens"] += _int(usage.get("output_tokens"))
         acc["cached_prompt_tokens"] += _int(usage.get("cache_read_input_tokens"))
@@ -330,6 +331,11 @@ def normalize_api_format(value):
 PLANNING_DIFF_HEAD_MIN = 2000
 PLANNING_BUDGET_MARGIN = 200
 _PLANNING_RESERVE = PLANNING_DIFF_HEAD_MIN + PLANNING_BUDGET_MARGIN
+_PLANNING_NOTES = (
+    "# Planning Notes\n"
+    "Do not re-fetch what is already below; spend tool calls on file "
+    "contents, callers, and tests. Already provided: "
+)
 
 _STANDARDS_REQUIREMENT_RE = re.compile(
     r"(?i)\b(?:must|always|never|required|verify|confirm|cite|"
@@ -496,7 +502,7 @@ def build_planning_context(max_bytes, corpus_path=None):
         bounds = starts + [len(lines)]
         for i in range(len(starts)):
             title = lines[starts[i]][2:].strip()
-            if title in ("PR Classification", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"):
+            if title in ("PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"):
                 regions.setdefault(title, "\n".join(lines[starts[i]:bounds[i + 1]]).rstrip())
         if lines[0].startswith("# Repository Standards and Conventions"):
             end = corpus_text.find("\n# Changed Manifest Context")
@@ -654,9 +660,71 @@ def build_planning_context(max_bytes, corpus_path=None):
         if sp_section is not None:
             sections.append(sp_section)
 
+    def _pr_metadata_excerpt(cap):
+        """Compact PR identity + body for the planner when the corpus section
+        does not fit: the same projection the corpus renders, minus nothing
+        the planner needs. Without it the model spends tool calls re-fetching
+        the PR and its linked issues over the API."""
+        nonlocal any_clipped
+        body = _read_stripped("pr.json")
+        if body is None:
+            return None
+        try:
+            pr = json.loads(body)
+        except ValueError:
+            return _excerpt("PR Metadata", "pr.json", cap, "json")
+        if not isinstance(pr, dict):
+            return None
+        author = pr.get("author")
+        if isinstance(author, dict):
+            author = author.get("login")
+        compact = {
+            key: pr.get(key)
+            for key in ("number", "title", "baseRefName", "headRefName", "changedFiles", "additions", "deletions")
+            if key in pr
+        }
+        compact["author"] = author
+        pr_body = str(pr.get("body") or "")
+        room = cap - len(json.dumps(compact, ensure_ascii=False).encode("utf-8")) - 60
+        if pr_body and room > 0:
+            raw = pr_body.encode("utf-8")
+            if len(raw) > room:
+                any_clipped = True
+            compact["body"] = raw[:room].decode("utf-8", errors="ignore")
+        return "# PR Metadata\n```json\n" + json.dumps(compact, ensure_ascii=False) + "\n```"
+
+    def _related_code_excerpt(title, path, cap):
+        """Related-code excerpt that drops changed files carrying no symbol or
+        test references (data/fixture files): a stub per such file costs the
+        planner budget without giving it anything to act on."""
+        nonlocal any_clipped
+        body = _read_stripped(path)
+        if body is None:
+            return None
+        blocks = re.split(r"(?m)^(?=### )", body)
+        head, files = blocks[0], blocks[1:]
+        kept = [
+            block for block in files
+            if not ("- Symbols: none" in block and "- Tests: none" in block)
+        ]
+        parts = [head.rstrip()] + [block.rstrip() for block in kept]
+        dropped = len(files) - len(kept)
+        if dropped:
+            parts.append(f"_({dropped} changed file(s) with no symbol or test references omitted)_")
+        text = "\n\n".join(part for part in parts if part)
+        raw = text.encode("utf-8")
+        if len(raw) > cap:
+            text = raw[:cap].decode("utf-8", errors="ignore") + "\n[truncated]"
+            any_clipped = True
+        if text.startswith(f"# {title}"):
+            return text
+        return f"# {title}\n{text}"
+
     plan = [
+        ("PR Metadata", "PR Metadata", "pr.json", 4500, "json"),
         ("PR Classification", "PR Classification", "classification.json", 4000, "json"),
-        ("Related Code Context", "Related Code Context", "related-code.truncated.md", 16000, None),
+        ("Linked Issue Context", "Linked Issue Context", "linked-issues.md", 3000, None),
+        ("Related Code Context", "Related Code Context", "related-code.truncated.md", 10000, None),
         ("PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"),
         ("Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"),
         ("standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, None),
@@ -674,6 +742,10 @@ def build_planning_context(max_bytes, corpus_path=None):
         if section is None:
             if region_key == "standards":
                 section = _standards_excerpt(title, excerpt_path, region_cap)
+            elif region_key == "PR Metadata":
+                section = _pr_metadata_excerpt(region_cap)
+            elif region_key == "Related Code Context":
+                section = _related_code_excerpt(title, excerpt_path, region_cap)
             else:
                 section = _excerpt(title, excerpt_path, region_cap, fence)
         if section is not None:
@@ -706,10 +778,18 @@ def build_planning_context(max_bytes, corpus_path=None):
         # Whatever budget remains goes to the head of the diff. The diff head
         # is never embedded from the corpus — a prefix of the full diff can't
         # be deduped byte-exactly.
-        diff_cap = max(PLANNING_DIFF_HEAD_MIN, max_bytes - _used() - PLANNING_BUDGET_MARGIN)
+        diff_cap = max(PLANNING_DIFF_HEAD_MIN, max_bytes - _used() - PLANNING_BUDGET_MARGIN - len(_PLANNING_NOTES.encode("utf-8")) - 2)
         diff_section = _excerpt("PR Diff (head)", "pr.diff.truncated", diff_cap, "diff")
         if diff_section is not None:
             sections.append(diff_section)
+        # Tell the planner what it already holds so its calls go to file
+        # contents rather than re-fetching PR/issue metadata over the API.
+        present = [
+            section.split("\n", 1)[0][2:]
+            for section in sections
+            if section.startswith("# ")
+        ]
+        sections.insert(0, _PLANNING_NOTES + "; ".join(present) + ".")
         text, clipped = mask_and_truncate("\n\n".join(sections), max_bytes)
         return text, clipped or any_clipped
 
@@ -1542,12 +1622,12 @@ def run_native_loop(
     # `native_loop_verdict_produced` is set (#637), so a recoverable streamed
     # failure consumes the non-streamed retry instead of silently forcing a
     # second full synthesis, while a truly unusable verdict leaves the flag unset
-    # and lets run_review.sh fall back to the standard corpus review. OpenAI only: an
-    # Anthropic verdict turn after trailing tool_result (user-role) blocks would
-    # create adjacent user turns (a 400), and native_loop runs on the OpenAI
-    # primary in practice. Skipped when no reviewer prompt resolved (loop_system
-    # fell back to the tool-only NATIVE_LOOP_SYSTEM, which can't render a verdict).
-    if api_format == "openai" and review_system:
+    # and lets run_review.sh fall back to the standard corpus review. On the
+    # Anthropic format the closing instruction rides in the same user message
+    # as the trailing tool_result blocks (adjacent user turns are a 400).
+    # Skipped when no reviewer prompt resolved (loop_system fell back to the
+    # tool-only NATIVE_LOOP_SYSTEM, which can't render a verdict).
+    if review_system:
         try:
             corpus_file = Path("review-corpus.smart.truncated.md" if tier == "smart" else "review-corpus.truncated.md")
             verdict_corpus = (

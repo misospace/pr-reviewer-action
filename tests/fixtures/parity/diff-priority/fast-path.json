@@ -1,0 +1,6 @@
+{
+ "fixture": "fast-path",
+ "description": "Diff fits the budget: returned verbatim, no reordering, no marker.",
+ "diff": "diff --git a/src/app.py b/src/app.py\nindex 1111111..2222222 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,0 +1,8 @@\n+0000 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0001 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0002 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0003 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0004 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0005 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0006 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0007 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\ndiff --git a/docs/readme.md b/docs/readme.md\nindex 1111111..2222222 100644\n--- a/docs/readme.md\n+++ b/docs/readme.md\n@@ -1,0 +1,4 @@\n+0000 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0001 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0002 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n+0003 yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n",
+ "budget": 824
+}

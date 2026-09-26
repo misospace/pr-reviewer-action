@@ -927,3 +927,30 @@ class TestDedupeVerdictCorpus:
 
 if __name__ == "__main__":
     unittest_main()
+
+
+class TestVerdictAfterToolResults:
+    def test_anthropic_verdict_turn_joins_trailing_tool_results(self):
+        c = Conversation(system="sys")
+        c.add_user("planning context")
+        c.add_assistant_tool_calls([{"id": "a", "name": "read_file", "arguments": "{}"}])
+        c.add_tool_result("a", {"content": "line 1\n"})
+        c.add_user("Produce the final review verdict now.")
+        p = c.to_request_payload(
+            "anthropic", "m", verdict_turn=True, keep_full_history_on_verdict=True
+        )
+        roles = [m["role"] for m in p["messages"]]
+        assert roles == ["user", "assistant", "user"]
+        last = p["messages"][-1]["content"]
+        assert [b["type"] for b in last] == ["tool_result", "text"]
+        assert last[-1]["text"] == "Produce the final review verdict now."
+        assert "tools" not in p
+
+    def test_user_turn_without_pending_results_is_standalone(self):
+        c = Conversation(system="sys")
+        c.add_user("first")
+        c.add_assistant_text("reply")
+        c.add_user("second")
+        p = c.to_request_payload("anthropic", "m")
+        assert [m["role"] for m in p["messages"]] == ["user", "assistant", "user"]
+        assert p["messages"][-1]["content"] == "second"

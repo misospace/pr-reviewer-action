@@ -122,10 +122,11 @@ def test_dogfood_runs_all_specialists() -> None:
 
 
 def test_dogfood_native_loop_budget() -> None:
-    """The dogfood loop must keep the #565 budget: 4 rounds / 8 requests / 600s.
+    """The dogfood loop keeps the #565 rounds/wall-clock and the #701 tier budget.
 
-    Fails if the workflow silently falls back to the old 2-round / 4-request /
-    300s profile, which is too shallow for repository-level reconnaissance.
+    tool_max_requests must stay unset: an explicit value outranks the #701
+    tier resolver, so the old "8" pin silently capped smart and escalated
+    reviews at 8 requests instead of 16/20.
     """
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
 
@@ -135,8 +136,9 @@ def test_dogfood_native_loop_budget() -> None:
     assert values.get("tool_max_rounds") == "4", (
         f"dogfood tool_max_rounds must stay \"4\" (issue #565); found {values.get('tool_max_rounds')!r}"
     )
-    assert values.get("tool_max_requests") == "8", (
-        f"dogfood tool_max_requests must stay \"8\" (issue #565); found {values.get('tool_max_requests')!r}"
+    assert values.get("tool_max_requests") in (None, ""), (
+        "dogfood tool_max_requests must stay unset so the #701 tier budget "
+        f"applies; found {values.get('tool_max_requests')!r}"
     )
     assert values.get("tool_loop_wall_clock_sec") == "600", (
         f"dogfood tool_loop_wall_clock_sec must stay \"600\" (issue #565); "
@@ -155,8 +157,10 @@ def test_dogfood_untouched_inputs_stay_put() -> None:
     assert values.get("tool_turn_timeout_sec") == "300", (
         f"dogfood tool_turn_timeout_sec must stay \"300\"; found {values.get('tool_turn_timeout_sec')!r}"
     )
-    assert values.get("tool_corpus_max_bytes") == "15000", (
-        f"dogfood tool_corpus_max_bytes must stay \"15000\"; found {values.get('tool_corpus_max_bytes')!r}"
+    # Unset inherits the 50000 action default; 15000 starved the planning
+    # turns of the diff on large PRs (see build_planning_context).
+    assert values.get("tool_corpus_max_bytes") in (None, ""), (
+        f"dogfood tool_corpus_max_bytes must stay unset; found {values.get('tool_corpus_max_bytes')!r}"
     )
     assert values.get("tool_max_tokens_per_turn") == "16000", (
         f"dogfood tool_max_tokens_per_turn must stay \"16000\"; "

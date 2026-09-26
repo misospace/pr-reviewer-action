@@ -317,7 +317,7 @@ def test_git_grep_default_argv_preserved(git_repo):
         res = tool_executors.git_grep("pattern", str(git_repo))
     assert res == {"matches": []}
     mock_run.assert_called_once_with(
-        ["git", "grep", "-n", "-z", "--", "pattern", "."],
+        ["git", "grep", "-n", "-z", "-E", "--", "pattern", "."],
         cwd=str(git_repo),
         capture_output=True,
         text=True,
@@ -333,14 +333,14 @@ def test_git_grep_double_dash_argv_with_path(git_repo):
     with mock.patch("subprocess.run", return_value=mock_result) as mock_run:
         tool_executors.git_grep("p", str(git_repo), 15, path="sub")
     args = mock_run.call_args[0][0]
-    assert args[:6] == ["git", "grep", "-n", "-z", "--", "p"]
-    assert args[6] == "--"  # pathspec separator: a dash-leading path is safe
+    assert args[:7] == ["git", "grep", "-n", "-z", "-E", "--", "p"]
+    assert args[7] == "--"  # pathspec separator: a dash-leading path is safe
     expected = [
         "sub",
         (git_repo / "sub").resolve().as_posix(),
         str(git_repo / "sub"),
     ]
-    assert args[7] in expected
+    assert args[8] in expected
     assert "shell" not in mock_run.call_args[1]
 
 
@@ -418,6 +418,39 @@ def test_git_grep_no_match_ok_empty(git_repo):
     assert res["status"] == "ok"
     assert res["result"]["matches"] == []
 
+
+
+def test_git_grep_alternation_matches_either_branch(tmp_path):
+    # Models write ERE: "A|B" must alternate. Under basic regex the pipe was a
+    # literal and this returned nothing, which reviewers read as "symbol absent".
+    repo = _grep_repo(tmp_path, {"a.sh": "apply_fragments() {\n", "b.txt": "{{FALSIFICATION_GUIDANCE}}\n"})
+    res = _exec("git_grep", {"pattern": "FALSIFICATION_GUIDANCE|apply_fragments"}, repo)
+    assert res["status"] == "ok"
+    assert sorted(_split_match(m)[0] for m in res["result"]["matches"]) == ["a.sh", "b.txt"]
+    assert "note" not in res["result"]
+
+
+def test_git_grep_invalid_ere_falls_back_to_fixed_string(tmp_path):
+    # "foo(" is literal under basic regex but an unbalanced group under ERE;
+    # it must still find the call site rather than error.
+    repo = _grep_repo(tmp_path, {"a.py": "x = foo(1)\n", "b.py": "foo = 2\n"})
+    res = _exec("git_grep", {"pattern": "foo("}, repo)
+    assert res["status"] == "ok"
+    assert [_split_match(m) for m in res["result"]["matches"]] == [("a.py", "1", "x = foo(1)")]
+    assert "fixed string" in res["result"]["note"]
+
+
+def test_git_grep_fixed_string_retry_keeps_separators(git_repo):
+    # The retry swaps only the dialect flag; both ``--`` separators stay put.
+    fail = mock.Mock(returncode=128, stderr="fatal: Unmatched (", stdout="")
+    ok = mock.Mock(returncode=1, stderr="", stdout="")
+    with mock.patch("subprocess.run", side_effect=[fail, ok]) as mock_run:
+        res = tool_executors.git_grep("foo(", str(git_repo), 15, path="sub")
+    first, retry = (c[0][0] for c in mock_run.call_args_list)
+    assert retry == ["-F" if a == "-E" else a for a in first]
+    assert retry[:7] == ["git", "grep", "-n", "-z", "-F", "--", "foo("]
+    assert retry[7] == "--"
+    assert res["matches"] == [] and "fixed string" in res["note"]
 
 # ── git_grep redaction + byte-bounding regressions (#568) ───────────────────
 #
@@ -515,3 +548,58 @@ def test_git_grep_newline_named_normal_file_preserves_provenance(tmp_path):
 
     raw = tool_executors.git_grep(marker, str(repo))
     assert raw == {"matches": [f"{filename}:1:{marker}"]}
+
+
+# ── workspace tools expose the committed tree only ───────────────────────────
+def test_list_tree_hides_untracked_scratch(git_repo):
+    (git_repo / "pr.json").write_text("{}\n", encoding="utf-8")
+    (git_repo / "scratch").mkdir()
+    (git_repo / "scratch" / "review-corpus.md").write_text("x\n", encoding="utf-8")
+    res = _exec("list_tree", {"path": "."}, git_repo)
+    assert res["status"] == "ok"
+    assert [e["path"] for e in res["result"]["entries"]] == ["app.py"]
+
+
+def test_find_files_hides_untracked_scratch(git_repo):
+    (git_repo / "tool-harness.json").write_text("{}\n", encoding="utf-8")
+    res = _exec("find_files", {"pattern": "*.json"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["files"] == []
+
+
+def test_read_file_rejects_untracked_scratch(git_repo):
+    (git_repo / "pr.diff").write_text("diff\n", encoding="utf-8")
+    res = _exec("read_file", {"path": "pr.diff"}, git_repo)
+    assert res["status"] == "error"
+    assert res["result"]["error"] == tool_executors.UNTRACKED_PATH_ERROR
+    ok = _exec("read_file", {"path": "app.py"}, git_repo)
+    assert ok["status"] == "ok" and ok["result"]["content"].startswith("line 1")
+
+
+def test_workspace_tools_unfiltered_outside_git(tmp_path):
+    (tmp_path / "notes.md").write_text("n\n", encoding="utf-8")
+    assert _exec("read_file", {"path": "notes.md"}, tmp_path)["status"] == "ok"
+    assert _exec("find_files", {"pattern": "*.md"}, tmp_path)["result"]["files"] == ["notes.md"]
+
+
+def test_list_tree_keeps_tracked_subdirectories(git_repo):
+    (git_repo / "sub").mkdir()
+    (git_repo / "sub" / "deep.py").write_text("x = 1\n", encoding="utf-8")
+    _git(["add", "sub/deep.py"], git_repo)
+    _git(["commit", "-q", "-m", "add sub"], git_repo)
+    (git_repo / "sub" / "notes.tmp").write_text("scratch\n", encoding="utf-8")
+    res = _exec("list_tree", {"path": ".", "depth": 3}, git_repo)
+    assert [e["path"] for e in res["result"]["entries"]] == ["app.py", "sub", "sub/deep.py"]
+
+
+def test_tracked_index_unavailable_leaves_tools_unfiltered(git_repo):
+    # git missing or hanging: the index is unavailable and every tool falls
+    # back to the on-disk view rather than hiding everything.
+    (git_repo / "pr.json").write_text("{}\n", encoding="utf-8")
+    with mock.patch("subprocess.run", side_effect=OSError("git not found")):
+        assert tool_executors._tracked_index(str(git_repo)) is None
+        res = _exec("read_file", {"path": "pr.json"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["content"] == "{}\n"
+    listed = _exec("list_tree", {"path": "."}, git_repo)
+    assert "pr.json" not in [e["path"] for e in listed["result"]["entries"]]

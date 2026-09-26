@@ -1,0 +1,13 @@
+{
+  "system": "sys",
+  "ops": [
+    {"op": "add_user", "content": "planning context"},
+    {"op": "add_assistant_tool_calls", "calls": [{"id": "a", "name": "read_file", "arguments": "{\"path\": \"x\"}"}]},
+    {"op": "add_tool_result", "call_id": "a", "result": {"content": "line 1\n"}},
+    {"op": "add_user", "content": "Produce the final review verdict now."}
+  ],
+  "emit": [
+    {"apiFormat": "anthropic", "model": "m", "options": {"verdictTurn": true, "keepFullHistoryOnVerdict": true}},
+    {"apiFormat": "openai", "model": "m", "options": {"verdictTurn": true, "keepFullHistoryOnVerdict": true, "responseFormat": "json_object"}}
+  ]
+}

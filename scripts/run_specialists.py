@@ -127,6 +127,12 @@ RETRY_DELAY_SEC = 5.0
 #: Floor for a per-attempt curl timeout. curl --max-time 0 means *unlimited*,
 #: so a nonpositive remaining budget must never reach the transport.
 MIN_ATTEMPT_TIMEOUT_SEC = 0.1
+#: Ceiling for the one-shot completion-budget retry. A reasoning-capable
+#: model can spend the whole DEEP_REVIEW_MAX_TOKENS budget on its hidden
+#: reasoning and return an empty body (finish_reason "length"); the retry
+#: raises the budget once so the lead set is not silently lost.
+OVERRUN_RETRY_MULTIPLIER = 4
+OVERRUN_RETRY_CEILING = 32768
 
 #: Specialist-phase execution shapes for the #635 benchmark. The default
 #: (``three_call``) is the production architecture and is the ONLY value the
@@ -366,6 +372,18 @@ def _extract_usage(response: Any) -> Optional[dict[str, Optional[int]]]:
         total = prompt + completion
     if prompt is None and completion is None and total is None and cached is None:
         return None
+    reasoning: Optional[int] = None
+    completion_details = usage.get("completion_tokens_details")
+    if isinstance(completion_details, dict):
+        reasoning = _int(completion_details.get("reasoning_tokens"))
+    if reasoning is not None:
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cached_tokens": cached,
+            "reasoning_tokens": reasoning,
+            "total_tokens": total,
+        }
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -421,6 +439,33 @@ class _RequestMeter:
                 self.usage[key] = current + value
 
 
+def _completion_overrun(response: Any) -> bool:
+    """True when the provider cut the completion at the token budget: OpenAI
+    ``choices[0].finish_reason == "length"`` (also what the SSE reassembler
+    emits for a streamed Anthropic turn) or Anthropic ``stop_reason ==
+    "max_tokens"``. Wire-level only — no model or provider names."""
+    if not isinstance(response, dict):
+        return False
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        if choices[0].get("finish_reason") == "length":
+            return True
+    return response.get("stop_reason") == "max_tokens"
+
+
+def _overrun_retry_payload(payload: dict[str, Any], max_tokens: int) -> Optional[dict[str, Any]]:
+    """Copy of *payload* with the completion budget raised for the one-shot
+    overrun retry, or ``None`` when the budget is already at the ceiling."""
+    retry_tokens = max(max_tokens, min(max_tokens * OVERRUN_RETRY_MULTIPLIER, OVERRUN_RETRY_CEILING))
+    if retry_tokens <= max_tokens:
+        return None
+    retry = dict(payload)
+    for field in ("max_tokens", "max_completion_tokens"):
+        if field in retry:
+            retry[field] = retry_tokens
+    return retry
+
+
 def _status_of(result: dict[str, Any]) -> str:
     """ok / degraded for a contract artifact the model actually answered.
 
@@ -447,6 +492,8 @@ def _role_entry(
     elapsed_sec: float,
     usage: Optional[dict[str, Optional[int]]] = None,
     request_bytes: Optional[int] = None,
+    overrun_retry: bool = False,
+    retry_max_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
     leads = artifact.get("leads")
     errors = artifact.get("errors")
@@ -461,6 +508,10 @@ def _role_entry(
         # #635: serialized request-body size (bytes) for request-shape A/B
         # telemetry. None when no request was built (input/guard failures).
         "request_bytes": request_bytes,
+        # Completion-budget overrun retry: whether the one-shot retry ran and
+        # the raised budget it used.
+        "overrun_retry": overrun_retry,
+        "retry_max_tokens": retry_max_tokens,
     }
 
 
@@ -547,6 +598,9 @@ def _run_role(
     # that point (including deadline-timeout entries) carries the size.
     request_bytes_cell: list[int] = []
 
+    # Set by the overrun retry so every entry finish() publishes carries it.
+    overrun_cell: list[int] = []
+
     def finish(
         artifact: dict[str, Any],
         *,
@@ -557,6 +611,8 @@ def _run_role(
         request_bytes = (
             request_bytes_cell[0] if request_bytes_cell else None
         )
+        overrun_retry = bool(overrun_cell)
+        retry_max_tokens = overrun_cell[0] if overrun_cell else None
         if cancel.is_set():
             return _role_entry(
                 role, artifact, status="error",
@@ -564,6 +620,8 @@ def _run_role(
                 elapsed_sec=time.monotonic() - started,
                 usage=usage,
                 request_bytes=request_bytes,
+                overrun_retry=overrun_retry,
+                retry_max_tokens=retry_max_tokens,
             )
         if not _guarded_write(
             workspace_root, f"specialist-{role}.json", _json_text(artifact),
@@ -577,6 +635,8 @@ def _run_role(
                     elapsed_sec=time.monotonic() - started,
                     usage=usage,
                     request_bytes=request_bytes,
+                    overrun_retry=overrun_retry,
+                    retry_max_tokens=retry_max_tokens,
                 )
             guard_artifact = _empty_artifact(role)
             guard_artifact["errors"].append(
@@ -593,12 +653,16 @@ def _run_role(
                 elapsed_sec=time.monotonic() - started,
                 usage=usage,
                 request_bytes=request_bytes,
+                overrun_retry=overrun_retry,
+                retry_max_tokens=retry_max_tokens,
             )
         return _role_entry(
             role, artifact, status=status, error_kind=error_kind,
             elapsed_sec=time.monotonic() - started,
             usage=usage,
             request_bytes=request_bytes,
+            overrun_retry=overrun_retry,
+            retry_max_tokens=retry_max_tokens,
         )
 
     try:
@@ -683,6 +747,32 @@ def _run_role(
 
             text = _extract_text(response)
             artifact = parse_specialist_response(text, role=role)
+            # Budget overrun with nothing usable: retry once with a raised
+            # completion budget. A "length" cut on a complete lead set is a
+            # long answer, not an overrun, and is kept as-is.
+            if _completion_overrun(response) and artifact.get("errors") and not artifact.get("leads"):
+                retry_payload = _overrun_retry_payload(payload, max_tokens)
+                remaining = deadline - time.monotonic()
+                if retry_payload is not None and not cancel.is_set() and remaining >= MIN_ATTEMPT_TIMEOUT_SEC:
+                    retry_tokens = retry_payload.get("max_tokens") or retry_payload.get("max_completion_tokens")
+                    overrun_cell.append(int(retry_tokens))
+                    try:
+                        retried = request_fn(
+                            base_url, api_format, retry_payload, api_key,
+                            min(float(role_timeout_sec), remaining),
+                        )
+                    except Exception:  # noqa: BLE001 - keep the original degraded result
+                        retried = None
+                    if isinstance(retried, dict) and not retried.get("error"):
+                        retried_artifact = parse_specialist_response(_extract_text(retried), role=role)
+                        if not retried_artifact.get("errors"):
+                            _guarded_write(
+                                workspace_root,
+                                f"specialist-{role}.response.json",
+                                _json_text(retried),
+                                abort=cancel,
+                            )
+                            response, artifact = retried, retried_artifact
             return finish(
                 artifact,
                 status=_status_of(artifact),
@@ -1298,6 +1388,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f" cached={usage.get('cached_tokens')}"
             )
         reason = f" — {entry['reason']}" if entry.get("reason") else ""
+        if entry.get("overrun_retry"):
+            usage_note += f" overrun-retry(max_tokens={entry.get('retry_max_tokens')})"
         print(
             f"specialist {entry['role']}: {entry['status']}{suffix}{reason} — "
             f"{entry['lead_count']} lead(s), {entry['errors_count']} error(s), "

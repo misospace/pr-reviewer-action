@@ -1013,6 +1013,38 @@ REPO_MAP_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# Boundary: diff priority (class-aware diff truncation)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_diff_priority.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["diff-priority-fixture"], fixture, workdir)
+
+
+DIFF_PRIORITY_BOUNDARY = Boundary(
+    id="diff-priority",
+    description=(
+        "Diff-priority parity: the v2 class-aware, size-fair diff truncation "
+        "(per-file chunking, source/bulk/generated ranking, water-filled "
+        "budget within a rank, newline-safe clips with per-file notes, "
+        "omit-below-minimum, bounded omitted-files manifest, truncate_clean "
+        "fallback for header-less input and tiny budgets) versus the v3 "
+        "TypeScript port. Outputs compare as base64 so invalid UTF-8 survives."
+    ),
+    fixtures_dir="diff-priority",
+    run=lambda fixture, workdir: (run_v2_diff_priority(fixture, workdir), run_v3_diff_priority(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
 # Boundary: PR thread context (#675)
 # ---------------------------------------------------------------------------
 
@@ -1197,7 +1229,7 @@ NEW_BOUNDARIES = (
     Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

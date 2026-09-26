@@ -286,3 +286,21 @@ test("openai nested function form and fragmentary arguments are preserved", () =
   );
   assert.deepEqual(calls, [{ id: "z", name: "t", arguments: '{"a":' }]);
 });
+
+test("streamed anthropic turns reassembled into OpenAI shape still yield tool calls", () => {
+  const { calls, text } = extractToolCalls(
+    {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "Reading.",
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "list_tree", arguments: '{"path": "."}' } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    },
+    "anthropic",
+  );
+  assert.equal(text, "Reading.");
+  assert.deepEqual(calls, [{ id: "call_1", name: "list_tree", arguments: '{"path": "."}' }]);
+});
