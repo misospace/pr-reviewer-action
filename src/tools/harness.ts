@@ -413,6 +413,7 @@ const STANDARDS_PATH_RE =
 const CORPUS_TITLES = new Set([
   "Changed Manifest Context", "PR Metadata", "PR Classification",
   "Related Code Context", "Repository Map", "Linked Issue Context", "Unresolved Review Threads",
+  "Outstanding Human Change Requests",
   "PR Files (truncated)", "Version Hints from Diff", "PR Diff (truncated)",
   "Tool Harness Findings", "Evidence Providers", "CI Check Results",
   "Image Digest Provenance", "Linked Sources", "Repository Impact Scan",
