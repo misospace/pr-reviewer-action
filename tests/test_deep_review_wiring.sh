@@ -80,9 +80,13 @@ deep_gate_line="$(grep -n 'if \[\[ "\$_DEEP_MODE" != "true" && "\$_DEEP_MODE" !=
 launch_line="$(grep -n 'specialist_command >"\$SPECIALIST_GATE_LOG" 2>&1 &' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
 check "launch is inside the deep_review gate (gate precedes launch)" \
   "$([ -n "$deep_gate_line" ] && [ -n "$launch_line" ] && [ "$launch_line" -gt "$deep_gate_line" ] && echo yes || echo no)" "yes"
-# #632: the compact specialist corpus is built once, inside the gate, before launch.
-check "exactly one specialist-corpus build in gating.sh" \
-  "$(grep -c 'build_specialist_corpus.py' "$GATING_SH" || true)" "1"
+# #632: the compact specialist corpus is built once, inside the gate, before
+# launch. #758 adds the optional adversarial-correctness corpus build (also
+# inside the gate) — two references total.
+check "exactly two specialist-corpus builds in gating.sh (standard + #758 adversarial)" \
+  "$(grep -c 'build_specialist_corpus.py' "$GATING_SH" || true)" "2"
+check_contains "adversarial corpus build passes the adversarial mode" "$GATING" \
+  '--mode adversarial_correctness'
 check_not_contains "corpus.sh no longer builds the specialist corpus directly (#634)" \
   "$CORPUS" 'build_specialist_corpus.py'
 build_line="$(grep -n 'if ! build_specialist_corpus_command;' "$GATING_SH" | head -1 | cut -d: -f1 || true)"
