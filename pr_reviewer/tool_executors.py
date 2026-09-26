@@ -108,6 +108,41 @@ def _resolve_workspace_path(path, workspace_root):
 
     return resolved, None
 
+def _tracked_index(workspace_root):
+    """Committed files and their directories, or None outside a git checkout.
+
+    The workspace tools expose only what the PR commits: the review pipeline
+    writes its own scratch artifacts into the checkout, and a model that
+    lists or reads those spends evidence budget on text it already has.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--cached"],
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    files = {p for p in result.stdout.split("\0") if p}
+    dirs = set()
+    for rel in files:
+        parts = rel.split("/")
+        for depth in range(1, len(parts)):
+            dirs.add("/".join(parts[:depth]))
+    return files, dirs
+
+
+def _workspace_rel(resolved, workspace_root):
+    return resolved.relative_to(Path(workspace_root).resolve()).as_posix()
+
+
+UNTRACKED_PATH_ERROR = "Path is not part of the repository checkout"
+
+
 def read_file(path, workspace_root, offset=None, limit=None):
     """Read a file, optionally a 1-based line window, with path protection.
 
@@ -118,6 +153,9 @@ def read_file(path, workspace_root, offset=None, limit=None):
     resolved, err = _resolve_workspace_path(path, workspace_root)
     if err:
         return {"error": err}
+    tracked = _tracked_index(workspace_root)
+    if tracked is not None and _workspace_rel(resolved, workspace_root) not in tracked[0]:
+        return {"error": UNTRACKED_PATH_ERROR}
 
     try:
         content = resolved.read_text(encoding="utf-8", errors="replace")
@@ -195,6 +233,7 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
     cap = max(1, min(cap, FIND_FILES_MAX_CAP))
 
     matches: list[str] = []
+    tracked = _tracked_index(workspace_root)
     # followlinks=False: a symlinked directory (even one pointing outside the
     # workspace) is never descended into, so the walk cannot escape.
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
@@ -207,6 +246,8 @@ def find_files(pattern, workspace_root, path=".", max_results=FIND_FILES_DEFAULT
             if full.is_symlink():
                 continue
             rel = full.relative_to(root).as_posix()
+            if tracked is not None and rel not in tracked[0]:
+                continue
             if fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(name, pattern):
                 matches.append(rel)
 
@@ -314,9 +355,12 @@ def list_tree(path, workspace_root, depth=2, max_entries=200):
     except Exception:
         return {"error": "Invalid depth or max_entries"}
 
+    tracked = _tracked_index(workspace_root)
     if not resolved.is_dir():
         # A file is a valid single-row listing, consistent with read_file's
         # behaviour of reading the file rather than erroring on a file path.
+        if tracked is not None and _workspace_rel(resolved, workspace_root) not in tracked[0]:
+            return {"error": UNTRACKED_PATH_ERROR}
         return {
             "entries": [
                 {
@@ -358,6 +402,8 @@ def list_tree(path, workspace_root, depth=2, max_entries=200):
             if child.is_symlink():
                 continue
             is_dir = child.is_dir()
+            if tracked is not None and rel(child) not in tracked[1 if is_dir else 0]:
+                continue
             child_type = "dir" if is_dir else "file"
             entries.append({"path": rel(child), "type": child_type})
             if is_dir:

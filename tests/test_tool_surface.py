@@ -548,3 +548,35 @@ def test_git_grep_newline_named_normal_file_preserves_provenance(tmp_path):
 
     raw = tool_executors.git_grep(marker, str(repo))
     assert raw == {"matches": [f"{filename}:1:{marker}"]}
+
+
+# ── workspace tools expose the committed tree only ───────────────────────────
+def test_list_tree_hides_untracked_scratch(git_repo):
+    (git_repo / "pr.json").write_text("{}\n", encoding="utf-8")
+    (git_repo / "scratch").mkdir()
+    (git_repo / "scratch" / "review-corpus.md").write_text("x\n", encoding="utf-8")
+    res = _exec("list_tree", {"path": "."}, git_repo)
+    assert res["status"] == "ok"
+    assert [e["path"] for e in res["result"]["entries"]] == ["app.py"]
+
+
+def test_find_files_hides_untracked_scratch(git_repo):
+    (git_repo / "tool-harness.json").write_text("{}\n", encoding="utf-8")
+    res = _exec("find_files", {"pattern": "*.json"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["files"] == []
+
+
+def test_read_file_rejects_untracked_scratch(git_repo):
+    (git_repo / "pr.diff").write_text("diff\n", encoding="utf-8")
+    res = _exec("read_file", {"path": "pr.diff"}, git_repo)
+    assert res["status"] == "error"
+    assert res["result"]["error"] == tool_executors.UNTRACKED_PATH_ERROR
+    ok = _exec("read_file", {"path": "app.py"}, git_repo)
+    assert ok["status"] == "ok" and ok["result"]["content"].startswith("line 1")
+
+
+def test_workspace_tools_unfiltered_outside_git(tmp_path):
+    (tmp_path / "notes.md").write_text("n\n", encoding="utf-8")
+    assert _exec("read_file", {"path": "notes.md"}, tmp_path)["status"] == "ok"
+    assert _exec("find_files", {"pattern": "*.md"}, tmp_path)["result"]["files"] == ["notes.md"]
