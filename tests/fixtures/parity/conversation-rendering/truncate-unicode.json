@@ -1,0 +1,34 @@
+{
+  "ops": [
+    {
+      "op": "add_assistant_tool_calls",
+      "calls": [
+        {
+          "id": "c",
+          "name": "x",
+          "arguments": "{}"
+        }
+      ]
+    },
+    {
+      "op": "add_tool_result",
+      "call_id": "c",
+      "result": {
+        "text": "é漢\nline2\nline3"
+      }
+    },
+    {
+      "op": "truncate_oldest_tool_results",
+      "max_bytes": 7
+    }
+  ],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    }
+  ],
+  "introspect": {
+    "approx_tokens": true
+  }
+}

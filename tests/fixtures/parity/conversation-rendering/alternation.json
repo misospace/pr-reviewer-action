@@ -1,0 +1,39 @@
+{
+  "system": "system",
+  "ops": [
+    {
+      "op": "add_user",
+      "content": "hello"
+    },
+    {
+      "op": "add_assistant_text",
+      "content": "hi"
+    },
+    {
+      "op": "add_user",
+      "content": "again"
+    }
+  ],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m",
+      "options": {
+        "temperature": null
+      }
+    },
+    {
+      "apiFormat": "anthropic",
+      "model": "m",
+      "options": {
+        "temperature": 0.2,
+        "cachePrefix": true
+      }
+    }
+  ],
+  "introspect": {
+    "turns": true,
+    "open_tool_call_ids": true,
+    "approx_tokens": true
+  }
+}

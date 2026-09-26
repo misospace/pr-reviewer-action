@@ -1,0 +1,16 @@
+{
+  "output": {
+    "review_markdown": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "classification": {
+    "must_check": [
+      "run full test suite after upgrade"
+    ]
+  },
+  "evidence": {},
+  "harness": {},
+  "flags": {
+    "on_incomplete": true,
+    "on_low_confidence": false
+  }
+}

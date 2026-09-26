@@ -37,3 +37,23 @@ export function redactText(text: string | null | undefined): string {
   }
   return redacted;
 }
+
+/**
+ * Port of `scripts/redact.py`'s `mask_and_truncate`: redact secrets, then
+ * truncate to *maxBytes* UTF-8 bytes with a visible `\n[truncated]` marker.
+ * Truncation happens after masking so the byte length reflects the redacted
+ * content. The tool-executor layer applies this to every tool result before
+ * it reaches the conversation or the corpus, mirroring the v2 call sites.
+ */
+export function maskAndTruncate(
+  text: string | null | undefined,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  const masked = redactText(text);
+  const raw = Buffer.from(masked, "utf8");
+  if (raw.length <= maxBytes) {
+    return { text: masked, truncated: false };
+  }
+  const clipped = raw.subarray(0, maxBytes).toString("utf8");
+  return { text: clipped + "\n[truncated]", truncated: true };
+}
