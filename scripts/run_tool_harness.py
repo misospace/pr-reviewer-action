@@ -1163,7 +1163,8 @@ def resolve_tool_budget(tier):
     """Resolve the effective request budget WITH its provenance (#702).
 
     Returns ``{"route", "budget", "source", "configured"}`` where ``source``
-    names the winning budget input — ``"smart-override"``
+    names the winning budget input — ``"primary-override"``
+    (PRIMARY_TOOL_MAX_REQUESTS on the primary route), ``"smart-override"``
     (SMART_TOOL_MAX_REQUESTS on a smart/escalated route), ``"explicit"``
     (TOOL_MAX_REQUESTS), or ``"tier-default"`` — and ``configured`` is the
     winning explicit integer (None for the tier default). This is the
@@ -1182,15 +1183,19 @@ def resolve_tool_budget(tier):
         except ValueError:
             return None
 
-    if route != "primary":
-        tier_override = _clamped(os.getenv("SMART_TOOL_MAX_REQUESTS", "").strip())
-        if tier_override is not None:
-            return {
-                "route": route,
-                "budget": tier_override,
-                "source": "smart-override",
-                "configured": tier_override,
-            }
+    tier_var, tier_source = (
+        ("PRIMARY_TOOL_MAX_REQUESTS", "primary-override")
+        if route == "primary"
+        else ("SMART_TOOL_MAX_REQUESTS", "smart-override")
+    )
+    tier_override = _clamped(os.getenv(tier_var, "").strip())
+    if tier_override is not None:
+        return {
+            "route": route,
+            "budget": tier_override,
+            "source": tier_source,
+            "configured": tier_override,
+        }
     explicit = _clamped(os.getenv("TOOL_MAX_REQUESTS", "").strip())
     if explicit is not None:
         return {
@@ -1211,7 +1216,8 @@ def resolve_tool_max_requests(tier):
     """Resolve the effective native-loop request budget for this run (#701).
 
     See ``tool_budget_route`` for the tier mapping. Precedence:
-    SMART_TOOL_MAX_REQUESTS (smart/escalated only) > TOOL_MAX_REQUESTS > the
+    PRIMARY_TOOL_MAX_REQUESTS (primary only) or SMART_TOOL_MAX_REQUESTS
+    (smart/escalated only) > TOOL_MAX_REQUESTS > the
     route's tier default. Every explicit value is clamped to
     1..TOOL_REQUEST_HARD_MAX; an unparsable value falls through to the next
     source, never widening the budget.

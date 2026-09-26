@@ -140,6 +140,9 @@ def test_dogfood_native_loop_budget() -> None:
         "dogfood tool_max_requests must stay unset so the #701 tier budget "
         f"applies; found {values.get('tool_max_requests')!r}"
     )
+    assert values.get("primary_tool_max_requests") == "16", (
+        f"dogfood primary_tool_max_requests must be \"16\"; found {values.get('primary_tool_max_requests')!r}"
+    )
     assert values.get("tool_loop_wall_clock_sec") == "600", (
         f"dogfood tool_loop_wall_clock_sec must stay \"600\" (issue #565); "
         f"found {values.get('tool_loop_wall_clock_sec')!r}"

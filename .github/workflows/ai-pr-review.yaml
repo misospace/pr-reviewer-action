@@ -88,6 +88,7 @@ jobs:
           deep_review: "true"
           tool_mode: native_loop
           tool_max_rounds: "4"
+          primary_tool_max_requests: "16"
           tool_loop_wall_clock_sec: "600"
           tool_turn_timeout_sec: "300"
           tool_max_tokens_per_turn: "16000"

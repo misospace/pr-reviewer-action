@@ -139,6 +139,8 @@ _EXACT_CONFIG_KEYS = frozenset((
     "EVIDENCE_ENABLE_FOR_FORKS",
     "TOOL_MODE",
     "TOOL_MAX_REQUESTS",
+    "PRIMARY_TOOL_MAX_REQUESTS",
+    "SMART_TOOL_MAX_REQUESTS",
     "TOOL_MAX_ROUNDS",
     # #540: renamed from TOOL_PLANNING_* (the plan_execute planner they were
     # named for was removed in #304). The legacy names stay in the allowlist
