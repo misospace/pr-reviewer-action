@@ -543,8 +543,9 @@ def git_grep(pattern, workspace_root, request_timeout=15, path=None, max_results
         )
         note = None
         if result.returncode not in (0, 1):
+            fixed_args = ["-F" if a == "-E" else a for a in args]
             fixed = subprocess.run(
-                [*args[:4], "-F", *args[5:]],
+                fixed_args,
                 cwd=workspace_root,
                 capture_output=True,
                 text=True,

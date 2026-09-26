@@ -439,6 +439,19 @@ def test_git_grep_invalid_ere_falls_back_to_fixed_string(tmp_path):
     assert [_split_match(m) for m in res["result"]["matches"]] == [("a.py", "1", "x = foo(1)")]
     assert "fixed string" in res["result"]["note"]
 
+
+def test_git_grep_fixed_string_retry_keeps_separators(git_repo):
+    # The retry swaps only the dialect flag; both ``--`` separators stay put.
+    fail = mock.Mock(returncode=128, stderr="fatal: Unmatched (", stdout="")
+    ok = mock.Mock(returncode=1, stderr="", stdout="")
+    with mock.patch("subprocess.run", side_effect=[fail, ok]) as mock_run:
+        res = tool_executors.git_grep("foo(", str(git_repo), 15, path="sub")
+    first, retry = (c[0][0] for c in mock_run.call_args_list)
+    assert retry == ["-F" if a == "-E" else a for a in first]
+    assert retry[:7] == ["git", "grep", "-n", "-z", "-F", "--", "foo("]
+    assert retry[7] == "--"
+    assert res["matches"] == [] and "fixed string" in res["note"]
+
 # ── git_grep redaction + byte-bounding regressions (#568) ───────────────────
 #
 # The -z change makes a whole-worktree grep match *tracked* sensitive
