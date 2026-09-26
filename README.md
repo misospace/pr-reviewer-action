@@ -392,7 +392,9 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `tool_mode` | Tool harness mode: `off` or `native_loop` (the `plan_execute_*` planner modes were removed in 2.0) | No | `off` |
-| `tool_max_requests` | Maximum tool requests executed in one harness run (total across the loop). Empty resolves a tier-aware budget from the review route: ~8 primary, ~16 smart route, up to 20 escalated. Precedence: `SMART_TOOL_MAX_REQUESTS` (smart/escalated runs) > this input > tier default; explicit values are bounded to 1–20 | No | empty (tier-aware) |
+| `tool_max_requests` | Maximum tool requests executed in one harness run (total across the loop). Empty resolves a tier-aware budget from the review route: ~8 primary, ~16 smart route, up to 20 escalated. Precedence: `primary_tool_max_requests` (primary route) or `smart_tool_max_requests` (smart/escalated routes) > this input > tier default; explicit values are bounded to 1–20 | No | empty (tier-aware) |
+| `primary_tool_max_requests` | Request budget for the primary route only (1–20); outranks `tool_max_requests` on that route | No | empty (tier default) |
+| `smart_tool_max_requests` | Request budget for the smart and escalated routes only (1–20); outranks `tool_max_requests` on those routes | No | empty (tier defaults) |
 | `tool_max_rounds` | Round budget for `tool_mode=native_loop`: up to twice this (capped at 8) since a round is one model turn | No | `3` |
 | `tool_loop_wall_clock_sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `120` |
 | `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
