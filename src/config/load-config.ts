@@ -10,6 +10,8 @@ const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Obje
   // #701: the tool request budget is bounded by the same hard ceiling the v2
   // harness clamps to — an out-of-range explicit value can never widen it.
   "tool-max-requests": [1, 20],
+  "primary-tool-max-requests": [1, 20],
+  "smart-tool-max-requests": [1, 20],
 });
 
 export type RawInputs = Readonly<Record<string, string | undefined>>;

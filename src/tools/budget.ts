@@ -24,11 +24,11 @@ export type ToolBudgetTier = "primary" | "smart" | "escalated";
 
 /**
  * Where the effective ceiling came from (#702 budget provenance). Part of
- * the telemetry contract the parity fixture pins: smart-override >
+ * the telemetry contract the parity fixture pins: primary-override / smart-override >
  * explicit > tier-default, matching resolve_tool_budget in
  * scripts/run_tool_harness.py.
  */
-export type ToolBudgetSource = "smart-override" | "explicit" | "tier-default";
+export type ToolBudgetSource = "primary-override" | "smart-override" | "explicit" | "tier-default";
 
 export const TOOL_REQUEST_HARD_MAX = 20;
 
@@ -74,7 +74,8 @@ export function toolBudgetRoute(tier: string, env: EnvLike): ToolBudgetTier {
 
 /**
  * Resolve the effective native-loop request budget for one harness run.
- * Precedence: SMART_TOOL_MAX_REQUESTS (smart/escalated only) >
+ * Precedence: PRIMARY_TOOL_MAX_REQUESTS (primary only) or
+ * SMART_TOOL_MAX_REQUESTS (smart/escalated only) >
  * TOOL_MAX_REQUESTS > the route's tier default. The `source` reports which
  * input won and `configured` echoes the winning explicit integer (null for
  * the tier default) — the #702 provenance fields the loop telemetry
@@ -85,11 +86,12 @@ export function resolveToolMaxRequests(
   env: EnvLike,
 ): { route: ToolBudgetTier; budget: number; source: ToolBudgetSource; configured: number | null } {
   const route = toolBudgetRoute(tier, env);
-  if (route !== "primary") {
-    const tierOverride = clampedPositive(env.SMART_TOOL_MAX_REQUESTS);
-    if (tierOverride !== null) {
-      return { route, budget: tierOverride, source: "smart-override", configured: tierOverride };
-    }
+  const [tierVar, tierSource]: [string | undefined, ToolBudgetSource] = route === "primary"
+    ? [env.PRIMARY_TOOL_MAX_REQUESTS, "primary-override"]
+    : [env.SMART_TOOL_MAX_REQUESTS, "smart-override"];
+  const tierOverride = clampedPositive(tierVar);
+  if (tierOverride !== null) {
+    return { route, budget: tierOverride, source: tierSource, configured: tierOverride };
   }
   const explicit = clampedPositive(env.TOOL_MAX_REQUESTS);
   if (explicit !== null) {
