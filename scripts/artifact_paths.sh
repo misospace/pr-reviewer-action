@@ -33,6 +33,7 @@ assert_safe_artifact_paths() {
     repo-map.json repo-map.md repo-map.capped.md
     pr-thread.json pr-thread.md
     review-threads.raw.json review-threads.json review-threads.md review-threads-present.txt
+    human-reviews.raw.json human-reviews.json human-reviews.md human-reviews-present.txt
     specialist-correctness.request.json specialist-security.request.json specialist-tests.request.json
     specialist-correctness.response.json specialist-security.response.json specialist-tests.response.json
     specialist-correctness.json specialist-security.json specialist-tests.json

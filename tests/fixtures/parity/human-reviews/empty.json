@@ -1,0 +1,6 @@
+{
+  "fixture": "empty",
+  "description": "No reviews at all renders an empty markdown, an empty rendered set, and an empty enforcement view.",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviews": []
+}

@@ -143,6 +143,16 @@ export interface NormalizedThreadDisposition {
   evidence: string | null;
 }
 
+/** One per outstanding human change-request review the corpus listed.
+ * Unlike thread dispositions there is no alias table: only the two literal
+ * words survive; anything else is `invalid` and the v2 enforcement pass
+ * treats it as missing. */
+export interface NormalizedHumanReviewDisposition {
+  reviewId: string;
+  disposition: "addressed" | "not_addressed" | "invalid";
+  evidence: string | null;
+}
+
 export interface ParsedReviewVerdict {
   verdict: VerdictValue;
   reviewMarkdown: string;
@@ -162,6 +172,9 @@ export interface ParsedReviewVerdict {
   /** #766: same tri-state as the required-check dispositions. */
   threadDispositions: NormalizedThreadDisposition[] | null;
   threadDispositionsEmitted: boolean;
+  /** Same tri-state as the thread dispositions. */
+  humanReviewDispositions: NormalizedHumanReviewDisposition[] | null;
+  humanReviewDispositionsEmitted: boolean;
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;

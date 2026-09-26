@@ -1,4 +1,4 @@
-import type { NormalizedFinding, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
 
 /**
@@ -59,6 +59,13 @@ const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDispos
 const MAX_THREAD_DISPOSITIONS = 100;
 const MAX_THREAD_ID_CHARS = 200;
 const MAX_THREAD_EVIDENCE_CHARS = 1000;
+
+// Human-review-request dispositions: no alias table — only the two literal
+// words survive; anything else is `invalid`.
+const HUMAN_REVIEW_DISPOSITION_VALUES = new Set<string>(["addressed", "not_addressed"]);
+const MAX_HUMAN_REVIEW_DISPOSITIONS = 100;
+const MAX_HUMAN_REVIEW_ID_CHARS = 200;
+const MAX_HUMAN_REVIEW_EVIDENCE_CHARS = 1000;
 
 /**
  * #750: normalize the model's structured required-check dispositions.
@@ -147,6 +154,37 @@ function normalizeThreadDispositions(
     }
     dispositions.push({ threadId, disposition, evidence });
     if (dispositions.length >= MAX_THREAD_DISPOSITIONS) break;
+  }
+  return { present: true, dispositions };
+}
+
+/** Port of `_normalize_human_review_dispositions` — tri-state by key
+ * presence, entries without a usable review id dropped, unknown
+ * disposition words preserved as `invalid`. No alias table: only the two
+ * literal words survive. */
+function normalizeHumanReviewDispositions(
+  value: unknown,
+  present: boolean,
+): { present: boolean; dispositions: NormalizedHumanReviewDisposition[] | null } {
+  if (!present) return { present: false, dispositions: null };
+  if (!Array.isArray(value)) return { present: true, dispositions: null };
+  const dispositions: NormalizedHumanReviewDisposition[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const rawId = item.review_id;
+    if (typeof rawId !== "string") continue;
+    const reviewId = rawId.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
+    if (reviewId === "" || codepointLength(reviewId) > MAX_HUMAN_REVIEW_ID_CHARS) continue;
+    const key = typeof item.disposition === "string" ? item.disposition.trim().toLowerCase() : "";
+    const disposition = HUMAN_REVIEW_DISPOSITION_VALUES.has(key)
+      ? (key as NormalizedHumanReviewDisposition["disposition"])
+      : "invalid";
+    let evidence: string | null = null;
+    if (typeof item.evidence === "string") {
+      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_HUMAN_REVIEW_EVIDENCE_CHARS) || null;
+    }
+    dispositions.push({ reviewId, disposition, evidence });
+    if (dispositions.length >= MAX_HUMAN_REVIEW_DISPOSITIONS) break;
   }
   return { present: true, dispositions };
 }
@@ -598,6 +636,7 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
       && key !== "smart_review_requested" && key !== "smart_review_reason"
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
+      && key !== "human_review_dispositions"
     ) {
       extra[key] = value;
     }
@@ -611,6 +650,10 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
     parsed.thread_dispositions,
     "thread_dispositions" in parsed,
   );
+  const humanReviewDispositions = normalizeHumanReviewDispositions(
+    parsed.human_review_dispositions,
+    "human_review_dispositions" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
@@ -620,6 +663,8 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
     requiredCheckDispositionsEmitted: dispositions.present,
     threadDispositions: threadDispositions.dispositions,
     threadDispositionsEmitted: threadDispositions.present,
+    humanReviewDispositions: humanReviewDispositions.dispositions,
+    humanReviewDispositionsEmitted: humanReviewDispositions.present,
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
     extra,

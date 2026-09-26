@@ -291,6 +291,14 @@ build_review_corpus() {
       echo
     fi
 
+    # human-reviews.md carries its own trust-framed "# Outstanding Human
+    # Change Requests" header (human_reviews.py) and is empty when no
+    # outstanding change request fits, so the same gate applies.
+    if [ -s human-reviews.md ]; then
+      cat human-reviews.md
+      echo
+    fi
+
     # context.sh leaves linked-issues.md empty when there's no linked issue
     # (#399/#400) so the model sees no section boundary to react to. Gate
     # the header the same way, matching the CI Check Results pattern below.
