@@ -459,6 +459,8 @@ function surfaceStreamError(response: Record<string, unknown>): void {
   throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${msg}`);
 }
 
+const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2, info: 3 };
+
 function normalizeFindings(value: unknown): NormalizedFinding[] {
   if (!Array.isArray(value)) return [];
   const findings: NormalizedFinding[] = [];
@@ -505,8 +507,11 @@ function normalizeFindings(value: unknown): NormalizedFinding[] {
     findings.push(finding);
     if (findings.length >= MAX_FINDINGS) break;
   }
-  return findings;
+  // Most decisive first (port of the v2 sort); Array.prototype.sort is stable,
+  // so the model's own order survives within a severity.
+  return findings.sort((a, b) => (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3));
 }
+
 
 export interface ParsedResponse {
   verdict: ParsedReviewVerdict;
