@@ -27,8 +27,6 @@ python scripts/eval_harness.py \
     --runs-per-mode 10 \
     --model "$AI_MODEL" \
     --base-url "$AI_BASE_URL" \
-    --api-key "$AI_API_KEY" \
-    --github-token "$GITHUB_TOKEN" \
     --output eval-report/eval-report.json
 ```
 
@@ -139,22 +137,33 @@ contribute nothing, never a zero) plus `clean_control_preserved_rate` (the
 fraction of negative-control scenarios with zero false attributions). The
 #757 fixtures in `evals/corpus-historical-dogfood.json` (7571–7584) cover the
 four PR #756-derived path-domain classes plus parser/normalizer, auth/policy,
-and state/retry cross-domain pairs, each with a fixed negative control; the
-prompt treatment (`scripts/prompt_fragments/falsification.txt`, gated on
-code-touching pr_kinds) was measured by a live A/B over this corpus
-(#758, MiniMax-M3-chat, tools_off, 3 reps x 14 scenarios per arm, 84
-reviewer runs) with the calibrated judge instrument: vulnerable-fixture
-detection 23.8% -> 42.9% (+19.1pp, `counterexample_attempted` 0% -> 71%)
-while the negative-control false-positive rate fell 47.6% -> 42.9% —
-so the treatment shipped; re-run the A/B before changing the fragment.
-The A/B arms run the same corpus through the same harness;
-`scripts/eval_harness.py --system-prompt-file` pins an arm's prompt
-verbatim (replace mode, no fragment substitution). The baseline arm must
-therefore be
-**main's fully assembled prompt for the eval conditions** — not the raw
-placeholder-stripped file, which would silently drop the related-code and
-PR-thread guidance the treatment arm keeps and make the comparison invalid.
-Materialize it through main's own assembler:
+and state/retry cross-domain pairs, each with a fixed negative control.
+
+**Measured result (2026-09-26, `qwen3.8-flash-next`, 1 rep per arm, 38
+scenarios, 7 vulnerable fixtures).** No prompt-level treatment improved
+detection, so none ships:
+
+| Arm | Pass rate | Counterexample found | Attempted | Negative-control FP |
+| --- | --- | --- | --- | --- |
+| A: main's assembled prompt, `tools_off` | 41.7% | 2/7 | 29% | 0% |
+| B: + falsification guidance fragment | 41.7% | 2/7 | 86% | 0% |
+| C: A + adversarial correctness specialist (`--deep-review true`, `DEEP_REVIEW_ADVERSARIAL_CORRECTNESS=true`) | 38.2% | 1/7 | 14% | 6.7% |
+
+B raised the attempt rate without finding one more counterexample, and C was
+slightly worse on every axis at 2.5x the latency, the third time (after #666)
+a prompt treatment moved how the review is written rather than what it
+detects. The scorer, fixtures, and the default-off adversarial arm remain as
+the measurement instrument. An earlier MiniMax A/B recorded here is void: an
+LLM-proxy response cache replayed identical requests, so its "3 reps" were one
+sample each. Before trusting reps, confirm repeated runs of one scenario
+return different responses.
+
+To re-run an arm comparison, pin arm A's prompt with `--system-prompt-file`
+(replace mode, no fragment substitution). It must be **main's fully assembled
+prompt for the eval conditions**, not the raw placeholder-stripped file, which
+would silently drop the related-code and PR-thread guidance and make the
+comparison invalid. Materialize it through main's own assembler. Credentials
+come from the environment (`AI_API_KEY`, `GITHUB_TOKEN`), never argv:
 
 ```bash
 git worktree add /tmp/757-baseline main
@@ -168,15 +177,17 @@ git worktree add /tmp/757-baseline main
   apply_system_prompt_fragments
   printf '%s' "$SYSTEM_PROMPT" > /tmp/baseline-prompt.txt )
 git worktree remove /tmp/757-baseline
-# treatment arm: no override (the branch's bundled prompt assembles itself)
+export AI_API_KEY=... GITHUB_TOKEN=...   # read by the harness; never pass on argv
+export EVAL_REVIEW_TIMEOUT_SEC=900         # slow local models overrun the 300s default
+# arm A
 python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
-    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
-    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" --output eval-report/treatment.json
-# baseline arm: same corpus, same harness, prompt pinned to main's assembly
-python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
-    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
-    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" \
-    --system-prompt-file /tmp/baseline-prompt.txt --output eval-report/baseline.json
+    --modes tools_off --runs-per-mode 1 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --system-prompt-file /tmp/baseline-prompt.txt --output eval-report/armA.json
+# arm C: same prompt, adversarial correctness specialist on
+DEEP_REVIEW_ADVERSARIAL_CORRECTNESS=true python scripts/eval_harness.py \
+    --corpus evals/corpus-historical-dogfood.json --modes tools_off --runs-per-mode 1 \
+    --model "$AI_MODEL" --base-url "$AI_BASE_URL" --deep-review true \
+    --system-prompt-file /tmp/baseline-prompt.txt --output eval-report/armC.json
 ```
 
 Compare the reports' `summary.falsification` blocks
@@ -215,8 +226,10 @@ CI and never affects a review verdict.
   ```bash
   python3 scripts/run_judge_calibration.py \
       --judge-model "$JUDGE_MODEL" --base-url "$JUDGE_BASE_URL" \
-      --api-key "$JUDGE_API_KEY" --output judge-calibration-report.json
+      --output judge-calibration-report.json
   ```
+
+  The judge key is read from `JUDGE_API_KEY`; never pass it on argv.
 
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
@@ -299,8 +312,6 @@ python scripts/eval_harness.py \
     --runs-per-mode 10 \
     --model "$AI_MODEL" \
     --base-url "$AI_BASE_URL" \
-    --api-key "$AI_API_KEY" \
-    --github-token "$GITHUB_TOKEN" \
     --output eval-report/eval-report-specialists.json
 ```
 

@@ -650,29 +650,15 @@ apply_system_prompt_fragments() {
     if [[ "$kind" == "dependency_upgrade" || "$kind" == "k8s_manifest" || "$kind" == "renovate_digest_only" ]]; then
       rn="$(<"$SCRIPT_DIR/prompt_fragments/release_notes.txt") "
     fi
-    # #757 counterexample-falsification guidance: gated on code-touching
-    # kinds. The declarative bump/manifest kinds change pinned upstream
-    # configuration, not novel decision logic, so the falsification obligation
-    # would be pure prompt weight there; every other kind can carry materially
-    # changed deterministic behavior. Compact and gated by design — #666
-    # measured that a long unconditional adversarial paragraph REGRESSES
-    # detection, so this fragment ships only behind a measured A/B and must
-    # stay a few sentences.
-    case "$kind" in
-      renovate_digest_only|dependency_upgrade|k8s_manifest) fg="" ;;
-      *) fg="$(<"$SCRIPT_DIR/prompt_fragments/falsification.txt") " ;;
-    esac
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/$vb}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/$rn}"
-    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{FALSIFICATION_GUIDANCE\}\}/$fg}"
   else
     # No classification for this run: the kind-gated placeholders must never
     # leak into the prompt (the same contract the verbosity dial documents).
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/}"
-    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{FALSIFICATION_GUIDANCE\}\}/}"
   fi
   # append mode: compose the supplied prompt onto the assembled default as a
   # repo-specific addendum, so a consumer adds conventions without copying (and
