@@ -382,6 +382,14 @@ inputs:
     description: Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)
     required: false
     default: "8000"
+  review_threads_context:
+    description: Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus; the reviewer must disposition each listed thread
+    required: false
+    default: "true"
+  review_threads_max_bytes:
+    description: Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)
+    required: false
+    default: "8000"
 
   # Deep review: opt-in specialist leads. 'true' runs all three fixed
   # specialist roles (correctness / security / tests — pr_reviewer/specialists.py)
@@ -852,6 +860,8 @@ runs:
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
         PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
+        REVIEW_THREADS_CONTEXT: ${{ inputs.review_threads_context }}
+        REVIEW_THREADS_MAX_BYTES: ${{ inputs.review_threads_max_bytes }}
         DEEP_REVIEW: ${{ inputs.deep_review }}
         DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
         DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
@@ -952,6 +962,8 @@ runs:
           REPO_MAP_MAX_BYTES
           PR_THREAD_CONTEXT
           PR_THREAD_MAX_BYTES
+          REVIEW_THREADS_CONTEXT
+          REVIEW_THREADS_MAX_BYTES
           DEEP_REVIEW
           DEEP_REVIEW_TIMEOUT_SEC
           DEEP_REVIEW_MAX_TOKENS

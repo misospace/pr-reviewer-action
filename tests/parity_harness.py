@@ -1045,6 +1045,37 @@ DIFF_PRIORITY_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# Boundary: unresolved review threads (#766)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_review_threads.py")],
+        workdir,
+        timeout=120,
+        stdin_text=json.dumps(fixture),
+    )
+
+
+def run_v3_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["review-threads-fixture"], fixture, workdir)
+
+
+REVIEW_THREADS_BOUNDARY = Boundary(
+    id="review-threads",
+    description=(
+        "#766 review-thread parity: the v2 unresolved review-thread builder "
+        "(own-finding recognition, unresolved filtering, newest-first "
+        "ordering, per-body hygiene, whole-thread byte budget, enforcement "
+        "view) versus the v3 TypeScript port."
+    ),
+    fixtures_dir="review-threads",
+    run=lambda fixture, workdir: (run_v2_review_threads(fixture, workdir), run_v3_review_threads(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
 # Boundary: PR thread context (#675)
 # ---------------------------------------------------------------------------
 
@@ -1229,7 +1260,7 @@ NEW_BOUNDARIES = (
     Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

@@ -143,6 +143,11 @@ def build_comments(findings, diff_text: str, max_comments: int = 20):
         if not isinstance(finding, dict):
             skipped += 1
             continue
+        # A finding re-emitted from an unresolved review thread (#766) already
+        # has its inline thread; posting it again would duplicate it.
+        if finding.get("thread_id"):
+            skipped += 1
+            continue
         path = finding.get("file")
         line = finding.get("line")
         if (

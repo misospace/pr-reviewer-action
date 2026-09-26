@@ -386,3 +386,32 @@ test("an invalid escape inside review_markdown does not let a nested finding pos
   assert.equal(verdict.verdict, "approve");
   assert.match(verdict.reviewMarkdown, /snake\\_case/);
 });
+
+test("thread_dispositions normalize aliases and bounds, tri-state by key presence (#766)", () => {
+  const absent = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok"}'));
+  assert.equal(absent.threadDispositionsEmitted, false);
+  assert.equal(absent.threadDispositions, null);
+  const parsed = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "ok",
+    thread_dispositions: [
+      { thread_id: " PRRT_1\n", disposition: "Resolved", evidence: "a.py:10\tnow guards None" },
+      { thread_id: "PRRT_2", disposition: "OPEN" },
+      { thread_id: "PRRT_3", disposition: "maybe", evidence: "" },
+      { thread_id: "", disposition: "fixed" },
+      { disposition: "fixed" },
+      "junk",
+      { thread_id: "PRRT_4", disposition: "disagree", evidence: "x".repeat(2000) },
+    ],
+  })));
+  assert.equal(parsed.threadDispositionsEmitted, true);
+  assert.deepEqual(parsed.threadDispositions, [
+    { threadId: "PRRT_1", disposition: "fixed", evidence: "a.py:10 now guards None" },
+    { threadId: "PRRT_2", disposition: "open", evidence: null },
+    { threadId: "PRRT_3", disposition: "invalid", evidence: null },
+    { threadId: "PRRT_4", disposition: "disputed", evidence: "x".repeat(1000) },
+  ]);
+  const nonList = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok", "thread_dispositions": "none"}'));
+  assert.equal(nonList.threadDispositionsEmitted, true);
+  assert.equal(nonList.threadDispositions, null);
+});

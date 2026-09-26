@@ -63,6 +63,19 @@ export {
   timestampSortKeyForTest,
 } from "./pr-thread.js";
 export {
+  FINDING_TRAILER,
+  MAX_BYTES_DEFAULT as REVIEW_THREADS_MAX_BYTES_DEFAULT,
+  MAX_THREADS_DEFAULT,
+  SECTION_HEADER as REVIEW_THREADS_SECTION_HEADER,
+  enforcementView,
+  normalizeThread,
+  prepareThreads,
+  renderReviewThreads,
+  selectUnresolved,
+  type ReviewThread,
+  type ReviewThreadView,
+} from "./review-threads.js";
+export {
   DEFAULT_GIT_TIMEOUT_SEC,
   MAX_JSON_BYTES,
   MAX_MARKDOWN_BYTES,

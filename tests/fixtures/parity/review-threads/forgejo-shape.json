@@ -1,0 +1,39 @@
+{
+  "fixture": "forgejo-shape",
+  "description": "Forgejo grouping output: numeric ids, string user, string line values, offset timestamps, missing original_line.",
+  "threads": [
+    {
+      "thread_id": "a.py:12",
+      "path": "a.py",
+      "line": "12",
+      "comments": [
+        {
+          "id": 3,
+          "user": "carol",
+          "created_at": "2026-03-02T10:00:00+02:00",
+          "body": "**Info:** consider a guard\n\n_Automated finding from AI PR review._"
+        },
+        {
+          "id": 4,
+          "user": "dave",
+          "created_at": "2026-03-02T11:00:00+02:00",
+          "body": "done in 1234abc"
+        }
+      ]
+    },
+    {
+      "thread_id": "b.py:1",
+      "path": "b.py",
+      "line": 1,
+      "resolved": true,
+      "comments": [
+        {
+          "id": 5,
+          "user": "carol",
+          "created_at": "2026-03-02T12:00:00+02:00",
+          "body": "**Major:** x\n\n_Automated finding from AI PR review._"
+        }
+      ]
+    }
+  ]
+}
