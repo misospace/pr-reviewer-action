@@ -81,6 +81,8 @@ that cutover.
 | `repo_map_max_bytes` | `repo-map-max-bytes` |
 | `pr_thread_context` | `pr-thread-context` |
 | `pr_thread_max_bytes` | `pr-thread-max-bytes` |
+| `review_threads_context` | `review-threads-context` |
+| `review_threads_max_bytes` | `review-threads-max-bytes` |
 | `deep_review` | `deep-review` |
 | `deep_review_timeout_sec` | `deep-review-timeout-sec` |
 | `deep_review_max_tokens` | `deep-review-max-tokens` |

@@ -162,6 +162,8 @@ _EXACT_CONFIG_KEYS = frozenset((
     "REPO_MAP_MAX_BYTES",
     "PR_THREAD_CONTEXT",
     "PR_THREAD_MAX_BYTES",
+    "REVIEW_THREADS_CONTEXT",
+    "REVIEW_THREADS_MAX_BYTES",
     # #608: deep-review toggle. Enabling it changes what runs over the corpus,
     # so a toggle must invalidate a stale comment. The phase deadline is
     # fingerprinted too: a shorter deadline can turn advisory leads into

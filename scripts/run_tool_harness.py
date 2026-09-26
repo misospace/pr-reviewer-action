@@ -473,6 +473,7 @@ def build_planning_context(max_bytes, corpus_path=None):
             "Related Code Context",
             "Repository Map",
             "Linked Issue Context",
+            "Unresolved Review Threads",
             "PR Files (truncated)",
             "Version Hints from Diff",
             "PR Diff (truncated)",

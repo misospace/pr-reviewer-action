@@ -326,6 +326,42 @@ build_requirement_ledger() {
 
 build_requirement_ledger
 
+build_review_threads() {
+  # Unresolved inline review threads (#766): fetched from the forge on every
+  # run and rendered by review_threads.py. The presence signal gates the
+  # prompt fragment the same way the requirement ledger's does.
+  local enabled max_bytes
+  : > review-threads.raw.json
+  : > review-threads.md
+  : > review-threads.json
+  : > review-threads-present.txt
+  enabled="$(printf '%s' "${REVIEW_THREADS_CONTEXT:-true}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$enabled" == "true" ]] || return 0
+  max_bytes="${REVIEW_THREADS_MAX_BYTES:-8000}"
+  if [[ ! "$max_bytes" =~ ^[0-9]+$ || "$max_bytes" -lt 1 || "$max_bytes" -gt 200000 ]]; then
+    error "Invalid REVIEW_THREADS_MAX_BYTES '$max_bytes'; defaulting to 8000"
+    max_bytes=8000
+  fi
+  if ! platform_review_threads "$REPO" "$PR_NUMBER" > review-threads.raw.json 2>/dev/null; then
+    log "WARNING: review-thread fetch failed; continuing without review-thread context"
+    : > review-threads.raw.json
+    return 0
+  fi
+  if ! python3 -m pr_reviewer.review_threads \
+      --threads review-threads.raw.json \
+      --output review-threads.md \
+      --json review-threads.json \
+      --presence review-threads-present.txt \
+      --max-bytes "$max_bytes"; then
+    log "WARNING: review-thread context generation failed; continuing without review-thread context"
+    : > review-threads.md
+    : > review-threads.json
+    : > review-threads-present.txt
+  fi
+}
+
+build_review_threads
+
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
 # by scripts/run_enrichment.py which runs in the enrichment section below.
 # This avoids brittle grep pipelines under set -euo pipefail (#7892).
