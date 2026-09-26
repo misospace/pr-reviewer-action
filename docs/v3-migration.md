@@ -31,6 +31,7 @@ that cutover.
 | `on_model_failure` | `on-model-failure` |
 | `fail_on_request_changes` | `fail-on-request-changes` |
 | `verdict_policy` | `verdict-policy` |
+| `non_blocking_finding_categories` | `non-blocking-finding-categories` |
 | `inline_findings` | `inline-findings` |
 | `inline_findings_max` | `inline-findings-max` |
 | `validate_required_checks` | `validate-required-checks` |

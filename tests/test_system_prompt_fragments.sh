@@ -229,6 +229,21 @@ OUT_RT_ON="$( cd "$WORK"
 check_contains "threads present: review-thread guidance present" "$OUT_RT_ON" "$RT_CONTENT"
 check_not_contains "threads present: no placeholder remains" "$OUT_RT_ON" "{{REVIEW_THREADS_GUIDANCE}}"
 
+echo "=== outstanding-human-change-request guidance is gated on the presence signal ==="
+HR_CONTENT="$(<"$SCRIPT_DIR/prompt_fragments/human_reviews.txt")"
+OUT_HR_OFF="$(assemble k8s_manifest)"
+check_not_contains "no outstanding requests: guidance dropped" "$OUT_HR_OFF" "$HR_CONTENT"
+check_not_contains "no outstanding requests: no placeholder remains" "$OUT_HR_OFF" "{{HUMAN_REVIEWS_GUIDANCE}}"
+OUT_HR_ON="$( cd "$WORK"
+  printf '{"pr_kind":"k8s_manifest"}' > classification.json
+  printf '1\n' > human-reviews-present.txt
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  rm -f human-reviews-present.txt
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "outstanding requests present: guidance present" "$OUT_HR_ON" "$HR_CONTENT"
+check_not_contains "outstanding requests present: no placeholder remains" "$OUT_HR_ON" "{{HUMAN_REVIEWS_GUIDANCE}}"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
@@ -247,6 +262,8 @@ RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
 RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
 RT="$(<"$SCRIPT_DIR/prompt_fragments/review_threads.txt") "
 RECON="${RECON/\{\{REVIEW_THREADS_GUIDANCE\}\}/$RT}"
+HR="$(<"$SCRIPT_DIR/prompt_fragments/human_reviews.txt") "
+RECON="${RECON/\{\{HUMAN_REVIEWS_GUIDANCE\}\}/$HR}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 RECON="${RECON/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$RL}"
 RECON="${RECON/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/$SL}"

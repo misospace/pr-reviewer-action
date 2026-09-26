@@ -1,0 +1,58 @@
+{
+  "fixture": "byte-caps",
+  "description": "Five outstanding reviewers with large bodies and a byte budget small enough to drop whole oldest entries, reporting the omission and 'Showing N of 5' note.",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "max_bytes": 1500,
+  "reviews": [
+    {
+      "id": 1,
+      "user": {
+        "login": "user1"
+      },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-01T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. "
+    },
+    {
+      "id": 2,
+      "user": {
+        "login": "user2"
+      },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-02T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. "
+    },
+    {
+      "id": 3,
+      "user": {
+        "login": "user3"
+      },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-03T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. "
+    },
+    {
+      "id": 4,
+      "user": {
+        "login": "user4"
+      },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-04T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. "
+    },
+    {
+      "id": 5,
+      "user": {
+        "login": "user5"
+      },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-05T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. This is a substantial change request body. "
+    }
+  ]
+}

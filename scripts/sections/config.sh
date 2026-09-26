@@ -593,6 +593,15 @@ apply_system_prompt_fragments() {
       rt="$(<"$SCRIPT_DIR/prompt_fragments/review_threads.txt") "
     fi
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{REVIEW_THREADS_GUIDANCE\}\}/$rt}"
+    # Same treatment for the outstanding-human-change-request guidance: gated
+    # on human-reviews-present.txt, the same way review-threads-present.txt
+    # gates the block above — the presence signal is written by context.sh's
+    # build_human_reviews before this function runs.
+    local hr=""
+    if [[ -s human-reviews-present.txt ]]; then
+      hr="$(<"$SCRIPT_DIR/prompt_fragments/human_reviews.txt") "
+    fi
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{HUMAN_REVIEWS_GUIDANCE\}\}/$hr}"
     # The requirement-ledger guidance is substituted only when a non-empty
     # requirement ledger was built for this run (requirement-ledger-present.txt
     # is written by the ledger build in context.sh, before this function runs);

@@ -51,6 +51,7 @@ export interface CorpusWorkspace {
   repoMapMd: Uint8Array | null;
   prThreadMd: Uint8Array | null;
   reviewThreadsMd: Uint8Array | null;
+  humanReviewsMd: Uint8Array | null;
   linkedIssuesMd: Uint8Array | null;
   /** Content of the file named by $CI_CHECKS_FILE (null = unset/absent). */
   ciChecksContent: Uint8Array | null;
@@ -333,6 +334,11 @@ export function buildReviewCorpus(
     // review-threads.md carries its own trust-framed header (#766) and is
     // empty when no unresolved thread fits: same gate.
     pushSection(undefined, bytes(ws.reviewThreadsMd));
+  }
+  if (nonEmpty(ws.humanReviewsMd)) {
+    // human-reviews.md carries its own trust-framed header and is empty
+    // when no outstanding human change request fits: same gate.
+    pushSection(undefined, bytes(ws.humanReviewsMd));
   }
   if (nonEmpty(ws.linkedIssuesMd)) {
     // context.sh leaves linked-issues.md empty when there's no linked issue

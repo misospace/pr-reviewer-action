@@ -84,9 +84,9 @@ test("findings normalization: severity/category aliases, junk dropped, defaults 
   assert.deepEqual(verdict.findings, [
     { severity: "blocker", category: "security", file: "src/a.py", line: 12, message: "boom", preliminaryFinding: 3 },
     { severity: "major", category: "other", file: "src/b.py", line: 7, message: "hi" },
-    { severity: "info", category: "bug", file: "c.py", line: null, message: "line-bool-dropped" },
     { severity: "minor", category: "style", file: "d.py", line: null, message: "half-line" },
     { severity: "minor", category: "other", file: "e.py", line: null, message: "path-key, zero-line" },
+    { severity: "info", category: "bug", file: "c.py", line: null, message: "line-bool-dropped" },
     { severity: "info", category: "other", file: null, line: null, message: "summary-key message" },
   ]);
 });
@@ -414,4 +414,33 @@ test("thread_dispositions normalize aliases and bounds, tri-state by key presenc
   const nonList = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok", "thread_dispositions": "none"}'));
   assert.equal(nonList.threadDispositionsEmitted, true);
   assert.equal(nonList.threadDispositions, null);
+});
+
+test("human_review_dispositions bounds, tri-state by key presence, no alias table", () => {
+  const absent = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok"}'));
+  assert.equal(absent.humanReviewDispositionsEmitted, false);
+  assert.equal(absent.humanReviewDispositions, null);
+  const parsed = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "ok",
+    human_review_dispositions: [
+      { review_id: " 42\n", disposition: "Addressed", evidence: "a.py:10\tnow guards None" },
+      { review_id: "43", disposition: "NOT_ADDRESSED" },
+      { review_id: "44", disposition: "fixed", evidence: "" },
+      { review_id: "", disposition: "addressed" },
+      { disposition: "addressed" },
+      "junk",
+      { review_id: "45", disposition: "addressed", evidence: "x".repeat(2000) },
+    ],
+  })));
+  assert.equal(parsed.humanReviewDispositionsEmitted, true);
+  assert.deepEqual(parsed.humanReviewDispositions, [
+    { reviewId: "42", disposition: "addressed", evidence: "a.py:10 now guards None" },
+    { reviewId: "43", disposition: "not_addressed", evidence: null },
+    { reviewId: "44", disposition: "invalid", evidence: null },
+    { reviewId: "45", disposition: "addressed", evidence: "x".repeat(1000) },
+  ]);
+  const nonList = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok", "human_review_dispositions": "none"}'));
+  assert.equal(nonList.humanReviewDispositionsEmitted, true);
+  assert.equal(nonList.humanReviewDispositions, null);
 });

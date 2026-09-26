@@ -362,6 +362,39 @@ build_review_threads() {
 
 build_review_threads
 
+build_human_reviews() {
+  # Outstanding human CHANGES_REQUESTED reviews: fetched from the forge on
+  # every run (#617: nothing persists between runs) and rendered by
+  # human_reviews.py. The failure this closes: a maintainer's still-
+  # unaddressed review is silently overridden by a later approval once more
+  # commits land. The presence signal gates the prompt fragment the same
+  # way the requirement ledger's and review-threads' do.
+  local head_sha
+  : > human-reviews.raw.json
+  : > human-reviews.md
+  : > human-reviews.json
+  : > human-reviews-present.txt
+  head_sha="$(jq -r '.headRefOid // empty' pr.json 2>/dev/null)"
+  if ! platform_pr_reviews "$REPO" "$PR_NUMBER" paginate > human-reviews.raw.json 2>/dev/null; then
+    log "WARNING: PR review fetch failed; continuing without human-review context"
+    : > human-reviews.raw.json
+    return 0
+  fi
+  if ! python3 -m pr_reviewer.human_reviews \
+      --reviews human-reviews.raw.json \
+      --head-sha "$head_sha" \
+      --output human-reviews.md \
+      --json human-reviews.json \
+      --presence human-reviews-present.txt; then
+    log "WARNING: human-review context generation failed; continuing without human-review context"
+    : > human-reviews.md
+    : > human-reviews.json
+    : > human-reviews-present.txt
+  fi
+}
+
+build_human_reviews
+
 # Extraction (URLs, version hints, GHCR images, compare SHAs) is now handled
 # by scripts/run_enrichment.py which runs in the enrichment section below.
 # This avoids brittle grep pipelines under set -euo pipefail (#7892).

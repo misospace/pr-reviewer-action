@@ -323,6 +323,8 @@ def _normalize_verdict(value: Any) -> str | None:
 # Findings normalisation
 # ---------------------------------------------------------------------------
 
+_SEVERITY_RANK = {"blocker": 0, "major": 1, "minor": 2, "info": 3}
+
 _SEVERITY_ALIASES = {
     "blocker": "blocker", "critical": "blocker",
     "major": "major", "high": "major", "error": "major",
@@ -366,7 +368,7 @@ def _normalize_smart_review_request(parsed: dict[str, Any]) -> None:
     parsed["smart_review_reason"] = reason
 
 _FINDING_CATEGORIES = {
-    "bug", "security", "performance", "style", "docs", "question", "other",
+    "bug", "security", "performance", "style", "docs", "tests", "question", "other",
 }
 
 _MAX_FINDINGS = 50
@@ -508,6 +510,53 @@ def _normalize_thread_dispositions(value: Any) -> list[dict[str, Any]] | None:
     return dispositions
 
 
+_HUMAN_REVIEW_DISPOSITION_VALUES = frozenset(("addressed", "not_addressed"))
+_MAX_HUMAN_REVIEW_DISPOSITIONS = 100
+_MAX_HUMAN_REVIEW_ID_CHARS = 200
+_MAX_HUMAN_REVIEW_EVIDENCE_CHARS = 1000
+
+
+def _normalize_human_review_dispositions(value: Any) -> list[dict[str, Any]] | None:
+    """Normalise the model's per-human-review-request dispositions.
+
+    Same tri-state-by-key-presence contract as the thread dispositions
+    (#766): an entry with no usable ``review_id`` is dropped; an
+    attributable entry whose ``disposition`` is not exactly ``addressed``
+    or ``not_addressed`` is preserved as ``"invalid"`` so enforcement
+    (:func:`pr_reviewer.enforcement.apply_human_review_enforcement`) treats
+    it as missing rather than letting a malformed duplicate collapse into a
+    valid answer.
+    """
+    if not isinstance(value, list):
+        return None
+
+    dispositions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("review_id")
+        if not isinstance(raw_id, str):
+            continue
+        review_id = _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", raw_id).strip()
+        if not review_id or len(review_id) > _MAX_HUMAN_REVIEW_ID_CHARS:
+            continue
+        raw_disposition = item.get("disposition")
+        key = raw_disposition.strip().lower() if isinstance(raw_disposition, str) else ""
+        disposition = key if key in _HUMAN_REVIEW_DISPOSITION_VALUES else "invalid"
+        evidence = item.get("evidence")
+        if isinstance(evidence, str):
+            evidence = (
+                _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", evidence).strip()[:_MAX_HUMAN_REVIEW_EVIDENCE_CHARS]
+                or None
+            )
+        else:
+            evidence = None
+        dispositions.append({"review_id": review_id, "disposition": disposition, "evidence": evidence})
+        if len(dispositions) >= _MAX_HUMAN_REVIEW_DISPOSITIONS:
+            break
+    return dispositions
+
+
 def _normalize_findings(value: Any) -> list[dict[str, Any]]:
     """Normalise an optional model-provided findings array.
 
@@ -577,6 +626,10 @@ def _normalize_findings(value: Any) -> list[dict[str, Any]]:
         if len(findings) >= _MAX_FINDINGS:
             break
 
+    # Most decisive first: a reader (or an agent fixing the PR) meets the
+    # finding that sets the verdict before the nits. Stable, so the model's
+    # own order survives within a severity.
+    findings.sort(key=lambda f: _SEVERITY_RANK[f["severity"]])
     return findings
 
 
@@ -736,6 +789,13 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
     # dispositions — normalized only when the model emitted the key.
     if "thread_dispositions" in parsed:
         parsed["thread_dispositions"] = _normalize_thread_dispositions(parsed["thread_dispositions"])
+
+    # Human-review-request dispositions: same tri-state as the review-thread
+    # dispositions — normalized only when the model emitted the key.
+    if "human_review_dispositions" in parsed:
+        parsed["human_review_dispositions"] = _normalize_human_review_dispositions(
+            parsed["human_review_dispositions"]
+        )
 
     # Structured reviewer-requested smart escalation (#721): normalized
     # unconditionally so a malformed or absent field can never masquerade as
