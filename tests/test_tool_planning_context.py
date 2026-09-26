@@ -323,7 +323,8 @@ class TestCorpusSectionEmbedding:
         )
         text, truncated = build_planning_context(50000)
         assert truncated is False
-        assert text.startswith("# Related Code Context\n")
+        assert text.startswith("# Planning Notes\n")
+        assert "\n\n# Related Code Context\n" in text
         assert "source fallback" in text
 
     def test_standards_prefix_includes_internal_headers(self, tmp_path, monkeypatch):
@@ -424,3 +425,65 @@ class TestCorpusSectionEmbedding:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPlannerSeesPrIdentity:
+    """The planner must hold the PR's own identity and linked issues so its
+    tool calls go to file contents instead of re-fetching them over the API."""
+
+    def test_metadata_and_linked_issues_lead_the_plan(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        (tmp_path / "pr.json").write_text(
+            '{"number": 7, "title": "Fix parser", "author": {"login": "dev"}, '
+            '"body": "Handles empty input.", "files": [{"path": "big"}]}'
+        )
+        (tmp_path / "linked-issues.md").write_text("## owner/repo#12\nParser crashes on empty input.\n")
+        text, truncated = build_planning_context(50000)
+        assert truncated is False
+        order = [
+            text.index("# Planning Notes"),
+            text.index("# PR Metadata"),
+            text.index("# PR Classification"),
+            text.index("# Linked Issue Context"),
+            text.index("# PR Diff (head)"),
+        ]
+        assert order == sorted(order)
+        assert '"title": "Fix parser"' in text
+        assert '"author": "dev"' in text
+        assert '"files"' not in text
+        assert "Parser crashes on empty input." in text
+        notes = text[: text.index("# PR Metadata")]
+        assert "Already provided: PR Metadata; PR Classification; " in notes
+        assert "Linked Issue Context" in notes and "PR Diff (head)." in notes
+
+    def test_metadata_body_clipped_to_cap(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        (tmp_path / "pr.json").write_text('{"number": 7, "title": "t", "body": "' + "b" * 20000 + '"}')
+        text, truncated = build_planning_context(50000)
+        assert truncated is True
+        start = text.index("# PR Metadata")
+        end = text.index("# PR Classification")
+        assert len(text[start:end].encode("utf-8")) <= 4500 + 2
+
+    def test_corpus_metadata_section_embedded_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        corpus_path, corpus = _write_corpus(tmp_path)
+        text, _ = build_planning_context(50000, corpus_path)
+        assert '# PR Metadata\n```json\n{"number":7}\n```' in text
+        deduped = dedupe_verdict_corpus(corpus, text)
+        assert '{"number":7}' not in deduped
+
+    def test_related_code_excerpt_drops_files_without_references(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        stub = "- Symbols: none\n- Tests: none\n- Manifests (nearest first): `package.json`\n"
+        body = "# Related Code (v1)\n\n## Changed Files\n\n"
+        body += "### `src/app.py`\n\n- `main`: no references\n\n"
+        body += "".join(f"### `fixtures/{i}.json`\n\n{stub}\n" for i in range(200))
+        (tmp_path / "related-code.truncated.md").write_text(body)
+        text, _ = build_planning_context(50000)
+        assert "### `src/app.py`" in text
+        assert "fixtures/3.json" not in text
+        assert "200 changed file(s) with no symbol or test references omitted" in text

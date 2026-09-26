@@ -705,3 +705,106 @@ test("a slow but within-limit stream still succeeds (byte cap does not alter tim
     await server.close();
   }
 });
+
+// ── retry on transient statuses ─────────────────────────────────────────────
+
+function retryServer(statuses: number[], retryAfter?: string) {
+  let requests = 0;
+  return startMockServer((_req, _body, res) => {
+    const status = statuses[Math.min(requests, statuses.length - 1)]!;
+    requests++;
+    res.statusCode = status;
+    if (retryAfter !== undefined) res.setHeader("Retry-After", retryAfter);
+    res.end(status < 400
+      ? JSON.stringify({ id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] })
+      : JSON.stringify({ error: { message: "slow down" } }));
+  }).then((server) => ({ server, count: () => requests }));
+}
+
+function retryInput(baseUrl: string, slept: number[]) {
+  return {
+    baseUrl,
+    apiFormat: "openai" as const,
+    payload: payload({ model: "m", stream: false }),
+    apiKey: "",
+    anthropicVersion: "2023-06-01",
+    requestTimeoutSec: 5,
+    connectTimeoutSec: 5,
+    sleep: async (ms: number) => { slept.push(ms); },
+  };
+}
+
+test("429 with Retry-After 0 is retried once and then succeeds", async () => {
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(server.url, slept));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 2);
+    assert.deepEqual(slept, [0]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("5xx without Retry-After backs off 1s then 2s", async () => {
+  const { server, count } = await retryServer([503, 503, 200]);
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(server.url, slept));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 3);
+    assert.deepEqual(slept, [1000, 2000]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a persistent 429 gives up after three attempts with the status preserved", async () => {
+  const { server, count } = await retryServer([429], "0");
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(server.url, slept));
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 429);
+    assert.equal(outcome.failure.retryAfterSec, 0);
+    assert.equal(count(), 3);
+  } finally {
+    await server.close();
+  }
+});
+
+test("client errors are never retried", async () => {
+  const { server, count } = await retryServer([400]);
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(server.url, slept));
+    assert.equal(outcome.status, "failure");
+    assert.equal(count(), 1);
+    assert.deepEqual(slept, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Retry-After is capped at the maximum delay; HTTP-date forms are ignored", async () => {
+  const { server } = await retryServer([429, 200], "600");
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(server.url, slept));
+    assert.equal(outcome.status, "ok");
+    assert.deepEqual(slept, [30000]);
+  } finally {
+    await server.close();
+  }
+  const dated = await retryServer([429, 200], "Wed, 21 Oct 2026 07:28:00 GMT");
+  const slept2: number[] = [];
+  try {
+    await runChatRequest(retryInput(dated.server.url, slept2));
+    assert.deepEqual(slept2, [1000]);
+  } finally {
+    await dated.server.close();
+  }
+});

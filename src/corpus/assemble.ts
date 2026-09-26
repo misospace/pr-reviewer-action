@@ -35,6 +35,7 @@
 import { reframeForCorpus } from "../context/repo-map.js";
 import { classificationLine, prMetadataLine } from "./projections.js";
 import { truncateClean } from "./truncate.js";
+import { prioritizeDiff, type PrioritizeDiffOptions } from "./diff-priority.js";
 
 export type CorpusTier = "primary" | "smart";
 export type CorpusSlot = "primary" | "smart";
@@ -88,6 +89,9 @@ export interface CorpusBuildOptions {
   ciChecksFile: string;
   /** v2 guard condition: tier==smart, or PRIMARY_/MODEL_CONTEXT_TOKENS set. */
   budgetGuard: boolean;
+  /** Paths carrying `linguist-generated` (scripts/prioritize_diff.py reads
+   * them with `git check-attr`); ranked last when the diff is truncated. */
+  generatedPaths?: ReadonlySet<string>;
 }
 
 export interface CorpusBuildResult {
@@ -263,7 +267,9 @@ export function buildReviewCorpus(
     filesFile = "pr-files.smart.truncated.json";
     // Smart rebuild: fresh truncation of the RAW sources under the smart
     // budgets — never a re-truncation of the primary's truncated artifacts.
-    write(diffFile, truncateClean(bytes(ws.prDiff), opts.diffBudget, DIFF_MARKER));
+    const diffOptions: PrioritizeDiffOptions = { marker: enc(DIFF_MARKER) };
+    if (opts.generatedPaths !== undefined) diffOptions.generated = opts.generatedPaths;
+    write(diffFile, prioritizeDiff(bytes(ws.prDiff), opts.diffBudget, diffOptions));
     write(filesFile, truncateClean(bytes(ws.prFilesJson), opts.filesBudget, FILES_MARKER));
     if (opts.slot === "smart") {
       harnessFile = "tool-harness.smart.md";

@@ -141,6 +141,28 @@ def test_extract_anthropic_tool_use_blocks():
     assert text == "I will read the file. "
 
 
+
+def test_extract_streamed_anthropic_reassembled_to_openai_shape():
+    # The SSE reassembler returns OpenAI shape for a streamed Anthropic turn;
+    # reading it as native Anthropic blocks dropped every call ("no-tool-calls").
+    resp = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "Reading.",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_tree", "arguments": "{\"path\": \".\"}"},
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }
+    calls, text = extract_tool_calls(resp, "anthropic")
+    assert [(c["id"], c["name"]) for c in calls] == [("call_1", "list_tree")]
+    assert text == "Reading."
+
 def test_extract_malformed_response_is_empty():
     calls, text = extract_tool_calls({"unexpected": True}, "openai")
     assert calls == []

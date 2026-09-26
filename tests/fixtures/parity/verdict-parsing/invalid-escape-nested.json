@@ -1,0 +1,16 @@
+{
+  "fixture": "invalid-escape-nested",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "```json\n{\n  \"verdict\": \"approve\",\n  \"review_markdown\": \"## Recommendation\\nApprove. Uses `snake\\_case` names.\",\n  \"findings\": [{\"severity\": \"minor\", \"file\": \"a.py\", \"line\": 3, \"message\": \"x\"}]\n}\n```"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 50
+    }
+  }
+}

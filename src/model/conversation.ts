@@ -289,18 +289,19 @@ export const TOOL_SCHEMAS: readonly ToolSchema[] = Object.freeze([
     description:
       "Search the repository's file contents with git grep. Returns up " +
       "to 60 matching lines as file:lineno:content (fewer when " +
-      "max_results is set, at most 200). Patterns use basic-regex " +
-      "semantics, so metacharacters such as '.' and '*' are active — " +
-      "escape them (e.g. '\\.env') to search literally. The optional " +
-      "path scopes the search to a repository subtree.",
+      "max_results is set, at most 200). Patterns are extended " +
+      "regular expressions ('a|b' alternates; escape '.', '(' etc. " +
+      "to match literally); an invalid regex is retried as a fixed " +
+      "string. The optional path scopes the search to a repository " +
+      "subtree.",
     parameters: {
       type: "object",
       properties: {
         pattern: {
           type: "string",
           description:
-            "Basic-regex pattern (metacharacters such as '.' and " +
-            "'*' are active; escape them for a literal search).",
+            "Extended-regex pattern ('a|b' alternates; escape " +
+            "metacharacters for a literal search).",
         },
         path: {
           type: "string",
@@ -988,8 +989,14 @@ export class Conversation {
 
     for (const e of this.events) {
       if (e.kind === "user") {
-        flushToolResults();
-        messages.push({ role: "user", content: e.content });
+        // A user turn straight after tool results (the verdict turn) rides in
+        // the same message as a trailing text block — Anthropic rejects
+        // adjacent user turns.
+        if (pendingToolResults.length > 0) {
+          pendingToolResults.push({ type: "text", text: e.content });
+        } else {
+          messages.push({ role: "user", content: e.content });
+        }
       } else if (e.kind === "assistant_text") {
         flushToolResults();
         messages.push({

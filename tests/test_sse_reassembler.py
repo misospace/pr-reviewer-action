@@ -87,6 +87,15 @@ class TestReassembleAnthropic:
         result = reassemble_sse("\n".join(lines), "anthropic")
         assert result["choices"][0]["message"]["content"] == "OK"
 
+    def test_message_delta_top_level_usage_is_counted(self):
+        # Spec shape: message_delta carries usage beside delta, not inside it.
+        lines = [
+            _make_sse_line({"type": "message_start", "message": {"id": "m", "model": "x", "usage": {"input_tokens": 3, "output_tokens": 0}}}),
+            _make_sse_line({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 65}}),
+        ]
+        result = reassemble_sse("\n".join(lines), "anthropic")
+        assert result["usage"]["completion_tokens"] == 65
+
     def test_output_tokens_accumulated_from_message_delta(self):
         lines = [
             _make_sse_line({"type": "message_start", "message": {"id": "m", "model": "c", "usage": {"input_tokens": 5, "output_tokens": 3}}}),
