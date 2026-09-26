@@ -857,3 +857,16 @@ class TestInvalidEscapeRecovery(TestCase):
         parsed = parse_response(resp)
         self.assertEqual(parsed["verdict"], "approve")
         self.assertIn("snake\\_case", parsed["review_markdown"])
+
+
+class TestFindingOrder(TestCase):
+    def test_findings_sorted_most_decisive_first_and_stable(self):
+        body = json.dumps({"verdict": "request_changes", "review_markdown": "R", "findings": [
+            {"severity": "minor", "category": "style", "message": "m1"},
+            {"severity": "major", "category": "bug", "message": "M1"},
+            {"severity": "info", "category": "question", "message": "i1"},
+            {"severity": "blocker", "category": "security", "message": "B1"},
+            {"severity": "major", "category": "bug", "message": "M2"},
+        ]})
+        resp = {"choices": [{"message": {"content": body}, "finish_reason": "stop"}], "usage": {"completion_tokens": 9}}
+        self.assertEqual([f["message"] for f in parse_response(resp)["findings"]], ["B1", "M1", "M2", "m1", "i1"])

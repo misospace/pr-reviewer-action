@@ -323,6 +323,8 @@ def _normalize_verdict(value: Any) -> str | None:
 # Findings normalisation
 # ---------------------------------------------------------------------------
 
+_SEVERITY_RANK = {"blocker": 0, "major": 1, "minor": 2, "info": 3}
+
 _SEVERITY_ALIASES = {
     "blocker": "blocker", "critical": "blocker",
     "major": "major", "high": "major", "error": "major",
@@ -366,7 +368,7 @@ def _normalize_smart_review_request(parsed: dict[str, Any]) -> None:
     parsed["smart_review_reason"] = reason
 
 _FINDING_CATEGORIES = {
-    "bug", "security", "performance", "style", "docs", "question", "other",
+    "bug", "security", "performance", "style", "docs", "tests", "question", "other",
 }
 
 _MAX_FINDINGS = 50
@@ -624,6 +626,10 @@ def _normalize_findings(value: Any) -> list[dict[str, Any]]:
         if len(findings) >= _MAX_FINDINGS:
             break
 
+    # Most decisive first: a reader (or an agent fixing the PR) meets the
+    # finding that sets the verdict before the nits. Stable, so the model's
+    # own order survives within a severity.
+    findings.sort(key=lambda f: _SEVERITY_RANK[f["severity"]])
     return findings
 
 

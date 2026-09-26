@@ -84,9 +84,9 @@ test("findings normalization: severity/category aliases, junk dropped, defaults 
   assert.deepEqual(verdict.findings, [
     { severity: "blocker", category: "security", file: "src/a.py", line: 12, message: "boom", preliminaryFinding: 3 },
     { severity: "major", category: "other", file: "src/b.py", line: 7, message: "hi" },
-    { severity: "info", category: "bug", file: "c.py", line: null, message: "line-bool-dropped" },
     { severity: "minor", category: "style", file: "d.py", line: null, message: "half-line" },
     { severity: "minor", category: "other", file: "e.py", line: null, message: "path-key, zero-line" },
+    { severity: "info", category: "bug", file: "c.py", line: null, message: "line-bool-dropped" },
     { severity: "info", category: "other", file: null, line: null, message: "summary-key message" },
   ]);
 });

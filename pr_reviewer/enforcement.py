@@ -235,6 +235,59 @@ def normalize_enforced_review_markdown(
         Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+# Finding categories that describe polish rather than a defect: under
+# findings_severity_gated they are capped at minor, so a review cannot keep
+# requesting changes on coverage, wording, or style asks alone. A PR that
+# carries a security risk flag is exempt — a missing test on auth or path
+# handling can still block.
+NON_BLOCKING_CATEGORIES = frozenset({"tests", "docs", "style", "question"})
+SECURITY_RISK_FLAGS = frozenset({
+    "auth_changes", "public_route_changes", "file_serving_changes",
+    "path_handling_changes", "secret_handling_changes", "db_or_migration_changes",
+    "linked_security_issue",
+})
+
+
+def _security_risk_flagged(classification_path: str = "classification.json") -> bool:
+    try:
+        data = json.loads(Path(classification_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    flags = data.get("risk_flags") if isinstance(data, dict) else None
+    return isinstance(flags, list) and any(flag in SECURITY_RISK_FLAGS for flag in flags)
+
+
+def _cap_non_blocking_findings(findings: list, data: dict) -> bool:
+    """Cap blocker/major findings in NON_BLOCKING_CATEGORIES at minor, in
+    place, recording the original severity. Returns whether anything changed."""
+    if _security_risk_flagged():
+        return False
+    capped = False
+    for finding in findings:
+        if (
+            isinstance(finding, dict)
+            and finding.get("category") in NON_BLOCKING_CATEGORIES
+            and finding.get("severity") in ("blocker", "major")
+        ):
+            finding["capped_from"] = finding["severity"]
+            finding["severity"] = "minor"
+            capped = True
+    return capped
+
+
+def _no_blocking_findings(findings: list) -> bool:
+    return not any(
+        isinstance(f, dict) and f.get("severity") in ("blocker", "major") for f in findings
+    )
+
+
+def _has_unresolved_required_check(data: dict) -> bool:
+    rows = data.get("required_check_dispositions")
+    return isinstance(rows, list) and any(
+        isinstance(r, dict) and r.get("status") == "unresolved" for r in rows
+    )
+
+
 def apply_verdict_policy(
     policy: str = "model",
     output_path: str = "ai-output.json",
@@ -243,9 +296,12 @@ def apply_verdict_policy(
 
     ``model`` (default) leaves the model's verdict untouched. With
     ``findings_severity_gated`` the policy only escalates an ``approve`` to
-    ``request_changes`` when blocker-severity findings exist. Non-blocker
-    findings never downgrade a model ``request_changes`` to ``approve``, and
-    non-blocker findings never change the verdict source from the model. When
+    ``request_changes`` when blocker-severity findings exist. Blocker/major
+    findings in NON_BLOCKING_CATEGORIES are first capped at minor (unless the
+    PR carries a security risk flag); when that cap leaves nothing blocking, no
+    required check is unresolved, and the model asked for changes, the verdict
+    is relaxed to ``approve`` — the one downgrade this policy makes. Otherwise
+    non-blocker findings never downgrade a model ``request_changes``. When
     the model produced no findings the policy falls back to the model verdict,
     so weaker models degrade gracefully. Enforcement overlays (evidence
     blockers, tool-harness failure) run after this and can still force
@@ -259,6 +315,17 @@ def apply_verdict_policy(
     source = "model"
 
     if policy == "findings_severity_gated" and isinstance(findings, list):
+        if _cap_non_blocking_findings(findings, data) and _no_blocking_findings(findings) \
+                and data.get("verdict") == "request_changes" \
+                and not _has_unresolved_required_check(data):
+            data["review_markdown"] = str(data.get("review_markdown") or "") + (
+                "\n\n_Verdict relaxed from structured findings "
+                "(verdict_policy=findings_severity_gated): every blocking finding "
+                "was a test, docs, style, or question item, which cannot request "
+                "changes on its own; they remain listed above._"
+            )
+            data["verdict"] = "approve"
+            source = "findings"
         blockers = [
             finding
             for finding in findings
