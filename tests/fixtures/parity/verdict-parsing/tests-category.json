@@ -1,0 +1,16 @@
+{
+  "fixture": "tests-category",
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "{\"verdict\": \"request_changes\", \"review_markdown\": \"## Review\\n\\nCoverage gap.\", \"findings\": [{\"severity\": \"major\", \"category\": \"tests\", \"file\": \"a.py\", \"line\": 4, \"message\": \"No test covers the empty-input path.\"}, {\"severity\": \"minor\", \"category\": \"TESTS\", \"file\": null, \"line\": null, \"message\": \"Case-folded category.\"}, {\"severity\": \"minor\", \"category\": \"coverage\", \"file\": null, \"line\": null, \"message\": \"Unknown category falls back to other.\"}]}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "completion_tokens": 40
+    }
+  }
+}
