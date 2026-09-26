@@ -1622,12 +1622,12 @@ def run_native_loop(
     # `native_loop_verdict_produced` is set (#637), so a recoverable streamed
     # failure consumes the non-streamed retry instead of silently forcing a
     # second full synthesis, while a truly unusable verdict leaves the flag unset
-    # and lets run_review.sh fall back to the standard corpus review. OpenAI only: an
-    # Anthropic verdict turn after trailing tool_result (user-role) blocks would
-    # create adjacent user turns (a 400), and native_loop runs on the OpenAI
-    # primary in practice. Skipped when no reviewer prompt resolved (loop_system
-    # fell back to the tool-only NATIVE_LOOP_SYSTEM, which can't render a verdict).
-    if api_format == "openai" and review_system:
+    # and lets run_review.sh fall back to the standard corpus review. On the
+    # Anthropic format the closing instruction rides in the same user message
+    # as the trailing tool_result blocks (adjacent user turns are a 400).
+    # Skipped when no reviewer prompt resolved (loop_system fell back to the
+    # tool-only NATIVE_LOOP_SYSTEM, which can't render a verdict).
+    if review_system:
         try:
             corpus_file = Path("review-corpus.smart.truncated.md" if tier == "smart" else "review-corpus.truncated.md")
             verdict_corpus = (

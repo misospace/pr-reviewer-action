@@ -989,8 +989,14 @@ export class Conversation {
 
     for (const e of this.events) {
       if (e.kind === "user") {
-        flushToolResults();
-        messages.push({ role: "user", content: e.content });
+        // A user turn straight after tool results (the verdict turn) rides in
+        // the same message as a trailing text block — Anthropic rejects
+        // adjacent user turns.
+        if (pendingToolResults.length > 0) {
+          pendingToolResults.push({ type: "text", text: e.content });
+        } else {
+          messages.push({ role: "user", content: e.content });
+        }
       } else if (e.kind === "assistant_text") {
         flushToolResults();
         messages.push({

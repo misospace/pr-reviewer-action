@@ -1367,10 +1367,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   }
 
   // ── In-conversation verdict (#205, Option 1) ─────────────────────────────
-  // OpenAI only: an Anthropic verdict turn after trailing tool_result
-  // (user-role) blocks would create adjacent user turns (a 400). Skipped when
-  // no reviewer prompt resolved.
-  if (input.apiFormat === "openai" && reviewSystem) {
+  // On the Anthropic format the closing instruction rides in the same user
+  // message as the trailing tool_result blocks (adjacent user turns are a
+  // 400). Skipped when no reviewer prompt resolved.
+  if (reviewSystem) {
     try {
       const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
       let verdictCorpus = deps.readText(corpusName) ?? "";

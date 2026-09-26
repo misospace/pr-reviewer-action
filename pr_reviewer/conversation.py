@@ -988,8 +988,13 @@ class Conversation:
         for e in self.events:
             kind = e["kind"]
             if kind == "user":
-                _flush_tool_results()
-                messages.append({"role": "user", "content": e["content"]})
+                # A user turn straight after tool results (the verdict turn)
+                # rides in the same message as a trailing text block —
+                # Anthropic rejects adjacent user turns.
+                if pending_tool_results:
+                    pending_tool_results.append({"type": "text", "text": e["content"]})
+                else:
+                    messages.append({"role": "user", "content": e["content"]})
             elif kind == "assistant_text":
                 _flush_tool_results()
                 messages.append(
