@@ -45,20 +45,19 @@ def test_no_op_without_outstanding_requests(tmp_path):
     assert _read(output_path)["verdict"] == "approve"
 
 
-def test_outstanding_request_and_approve_without_disposition_forces_request_changes(tmp_path):
+def test_approve_without_disposition_is_kept_and_states_the_request(tmp_path):
     reviews_path, output_path = _write(tmp_path, {"verdict": "approve", "review_markdown": "ok"})
-    ok, reason = apply_human_review_enforcement(reviews_path, output_path)
-    assert ok and "1 outstanding change request(s) not shown addressed" in reason
+    assert apply_human_review_enforcement(reviews_path, output_path) == (False, "")
     data = _read(output_path)
-    assert data["verdict"] == "request_changes"
-    assert data["verdict_source"] == "human_review"
+    assert data["verdict"] == "approve"
+    assert "verdict_source" not in data
     assert data["human_review_dispositions"] == [
         {"review_id": "501", "disposition": "not_addressed", "evidence": None},
     ]
-    assert "@alice's change request on 5690b16 is outstanding and not shown addressed at this head" in data["review_markdown"]
+    assert "@alice's change request (5690b16, head moved since) is not shown addressed at this head" in data["review_markdown"]
 
 
-def test_addressed_with_code_citing_evidence_stays_approve_with_explicit_line(tmp_path):
+def test_addressed_with_code_citing_evidence_states_it(tmp_path):
     reviews_path, output_path = _write(tmp_path, {
         "verdict": "approve",
         "review_markdown": "ok",
@@ -66,17 +65,13 @@ def test_addressed_with_code_citing_evidence_stays_approve_with_explicit_line(tm
             {"review_id": "501", "disposition": "addressed", "evidence": "pr_reviewer/tool_executors.py:596 now guards the missing branch"},
         ],
     })
-    ok, reason = apply_human_review_enforcement(reviews_path, output_path)
-    assert ok and "all outstanding change requests judged addressed" in reason
+    apply_human_review_enforcement(reviews_path, output_path)
     data = _read(output_path)
     assert data["verdict"] == "approve"
-    assert data["human_review_dispositions"] == [
-        {"review_id": "501", "disposition": "addressed", "evidence": "pr_reviewer/tool_executors.py:596 now guards the missing branch"},
-    ]
-    assert "Human change request by @alice (5690b16) judged addressed: pr_reviewer/tool_executors.py:596 now guards the missing branch" in data["review_markdown"]
+    assert "@alice's change request (5690b16, head moved since) judged addressed at this head: pr_reviewer/tool_executors.py:596 now guards the missing branch" in data["review_markdown"]
 
 
-def test_addressed_without_code_citation_forces_request_changes(tmp_path):
+def test_addressed_without_code_citation_is_reported_not_addressed(tmp_path):
     reviews_path, output_path = _write(tmp_path, {
         "verdict": "approve",
         "review_markdown": "ok",
@@ -84,24 +79,26 @@ def test_addressed_without_code_citation_forces_request_changes(tmp_path):
             {"review_id": "501", "disposition": "addressed", "evidence": "the author says it is fine now"},
         ],
     })
-    ok, reason = apply_human_review_enforcement(reviews_path, output_path)
-    assert ok
+    apply_human_review_enforcement(reviews_path, output_path)
     data = _read(output_path)
-    assert data["verdict"] == "request_changes"
+    assert data["verdict"] == "approve"
     assert data["human_review_dispositions"][0]["disposition"] == "not_addressed"
+    assert "is not shown addressed at this head" in data["review_markdown"]
 
 
-def test_request_changes_verdict_is_untouched(tmp_path):
+def test_request_changes_verdict_also_states_the_request(tmp_path):
     reviews_path, output_path = _write(tmp_path, {"verdict": "request_changes", "review_markdown": "ok"})
-    ok, reason = apply_human_review_enforcement(reviews_path, output_path)
-    assert ok is False and reason == ""
+    apply_human_review_enforcement(reviews_path, output_path)
     data = _read(output_path)
     assert data["verdict"] == "request_changes"
-    assert data["review_markdown"] == "ok"
-    # Dispositions are still recorded even though nothing else changes.
-    assert data["human_review_dispositions"] == [
-        {"review_id": "501", "disposition": "not_addressed", "evidence": None},
-    ]
+    assert "@alice's change request (5690b16, head moved since) is not shown addressed" in data["review_markdown"]
+
+
+def test_head_unchanged_is_stated(tmp_path):
+    review = dict(REVIEW, head_moved=False)
+    reviews_path, output_path = _write(tmp_path, {"verdict": "approve", "review_markdown": "ok"}, reviews=(review,))
+    apply_human_review_enforcement(reviews_path, output_path)
+    assert "(5690b16, head unchanged since)" in _read(output_path)["review_markdown"]
 
 
 def test_no_outstanding_requests_is_a_no_op(tmp_path):
@@ -115,12 +112,14 @@ def test_missing_commit_id_degrades_to_unknown_commit_display(tmp_path):
     reviews_path, output_path = _write(tmp_path, {"verdict": "approve", "review_markdown": "ok"}, reviews=(review,))
     apply_human_review_enforcement(reviews_path, output_path)
     data = _read(output_path)
-    assert "unknown commit" in data["review_markdown"]
+    assert "(unknown commit)" in data["review_markdown"]
 
 
-def test_apply_all_enforcement_runs_human_review_pass(tmp_path, monkeypatch):
+def test_apply_all_enforcement_never_changes_the_verdict_for_human_reviews(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _write(tmp_path, {"verdict": "approve", "review_markdown": "ok"})
     applied = apply_all_enforcement(output_path=str(tmp_path / "ai-output.json"))
-    assert applied == 1
-    assert _read(tmp_path / "ai-output.json")["verdict"] == "request_changes"
+    assert applied == 0
+    data = _read(tmp_path / "ai-output.json")
+    assert data["verdict"] == "approve"
+    assert "Outstanding Human Change Requests" in data["review_markdown"]
