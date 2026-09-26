@@ -462,6 +462,19 @@ def apply_review_thread_enforcement(
 HUMAN_REVIEW_DISPOSITIONS = ("addressed", "not_addressed")
 
 
+def _inline_code(text: str | None, cap: int = 300) -> str:
+    """Render model-written text as one bounded inline code span: whitespace
+    collapsed, capped, and fenced by a backtick run longer than any inside it,
+    so it cannot open markdown structure or ping an @mention."""
+    body = " ".join(str(text or "").split())
+    if len(body) > cap:
+        body = body[: cap - 1] + "…"
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if body.startswith("`") or body.endswith("`") else ""
+    return f"{fence}{pad}{body}{pad}{fence}"
+
+
 def apply_human_review_enforcement(
     reviews_path: str = "human-reviews.json",
     output_path: str = "ai-output.json",
@@ -530,7 +543,7 @@ def apply_human_review_enforcement(
             where += ", head unchanged since"
         who = f"@{review.get('login') or 'unknown'}"
         if record["disposition"] == "addressed":
-            lines.append(f"- {who}'s change request ({where}) judged addressed at this head: {record['evidence']}")
+            lines.append(f"- {who}'s change request ({where}) judged addressed at this head: {_inline_code(record['evidence'])}")
         else:
             lines.append(f"- {who}'s change request ({where}) is not shown addressed at this head; it needs the reviewer's own re-review.")
     data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)

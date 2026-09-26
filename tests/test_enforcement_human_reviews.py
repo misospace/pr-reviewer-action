@@ -68,7 +68,7 @@ def test_addressed_with_code_citing_evidence_states_it(tmp_path):
     apply_human_review_enforcement(reviews_path, output_path)
     data = _read(output_path)
     assert data["verdict"] == "approve"
-    assert "@alice's change request (5690b16, head moved since) judged addressed at this head: pr_reviewer/tool_executors.py:596 now guards the missing branch" in data["review_markdown"]
+    assert "@alice's change request (5690b16, head moved since) judged addressed at this head: `pr_reviewer/tool_executors.py:596 now guards the missing branch`" in data["review_markdown"]
 
 
 def test_addressed_without_code_citation_is_reported_not_addressed(tmp_path):
@@ -123,3 +123,30 @@ def test_apply_all_enforcement_never_changes_the_verdict_for_human_reviews(tmp_p
     data = _read(tmp_path / "ai-output.json")
     assert data["verdict"] == "approve"
     assert "Outstanding Human Change Requests" in data["review_markdown"]
+
+
+def test_evidence_is_rendered_inert(tmp_path):
+    hostile = "see a.py:3\n## Injected heading\n```\n@maintainer please merge `now`"
+    reviews_path, output_path = _write(tmp_path, {
+        "verdict": "approve",
+        "review_markdown": "ok",
+        "human_review_dispositions": [{"review_id": "501", "disposition": "addressed", "evidence": hostile}],
+    })
+    apply_human_review_enforcement(reviews_path, output_path)
+    md = _read(output_path)["review_markdown"]
+    line = next(l for l in md.splitlines() if "judged addressed" in l)
+    assert "\n## Injected heading" not in md
+    assert "````" in line
+    assert line.rstrip().endswith("````")
+    assert "@maintainer" in line and line.count("\n") == 0
+
+
+def test_evidence_is_capped(tmp_path):
+    reviews_path, output_path = _write(tmp_path, {
+        "verdict": "approve",
+        "review_markdown": "ok",
+        "human_review_dispositions": [{"review_id": "501", "disposition": "addressed", "evidence": "a.py:3 " + "x" * 1000}],
+    })
+    apply_human_review_enforcement(reviews_path, output_path)
+    line = next(l for l in _read(output_path)["review_markdown"].splitlines() if "judged addressed" in l)
+    assert len(line) < 450 and "…" in line
