@@ -81,6 +81,8 @@ that cutover.
 | `repo_map_max_bytes` | `repo-map-max-bytes` |
 | `pr_thread_context` | `pr-thread-context` |
 | `pr_thread_max_bytes` | `pr-thread-max-bytes` |
+| `review_threads_context` | `review-threads-context` |
+| `review_threads_max_bytes` | `review-threads-max-bytes` |
 | `deep_review` | `deep-review` |
 | `deep_review_timeout_sec` | `deep-review-timeout-sec` |
 | `deep_review_max_tokens` | `deep-review-max-tokens` |
@@ -100,6 +102,8 @@ that cutover.
 | `tool_loop_summarize` | `tool-loop-summarize` |
 | `tool_loop_summarize_max_tokens` | `tool-loop-summarize-max-tokens` |
 | `tool_max_requests` | `tool-max-requests` |
+| `primary_tool_max_requests` | `primary-tool-max-requests` |
+| `smart_tool_max_requests` | `smart-tool-max-requests` |
 | `tool_max_rounds` | `tool-max-rounds` |
 | `tool_turn_timeout_sec` | `tool-turn-timeout-sec` |
 | `tool_corpus_max_bytes` | `tool-corpus-max-bytes` |
@@ -286,6 +290,68 @@ stored marker), so both sides' hash half is normalized to a shared
 placeholder while the diff half and the forced-review decision still compare
 as-is. Error cases compare through the boundary's category table
 (missing input, unsupported platform, Forgejo permission refusal modes).
+
+### The `conversation-rendering` boundary (#678)
+
+Pins the v3 `Conversation` port (`src/model/conversation.ts`) against
+`pr_reviewer.conversation`. Fixtures are declarative op scripts
+(`add_user` / `add_assistant_text` / `add_assistant_tool_calls` /
+`add_tool_result` / `add_system_note` / `add_turn_note` /
+`truncate_oldest_tool_results` / `summarize_oldest_tool_results`) with
+`emit` (per-API `toRequestPayload` options) and `introspect` (turns, open
+tool-call ids, approx tokens). Both sides (`tests/parity_runners/v2_conversation.py`
+and `node dist/index.js conversation-fixture`) replay the identical script
+and dump one JSON: payloads, introspection, and — when the fixture carries
+`dedup` — the `dedupe_verdict_corpus` result (byte-duplicate drop, partial
+overlap non-drop, Related Code continuation headers, headerless blobs).
+Everything is deterministic; nothing is scrubbed.
+
+### The `escalation-decision` boundary (#678)
+
+Compares the v2 `pr_reviewer.escalation` (run over temp-file artifacts,
+exactly as production invokes it) against the v3 in-memory ports in
+`src/routing/escalation.ts`. Each fixture carries the four production dicts
+(`output` / `classification` / `evidence` / `harness`) plus the five
+telemetry flags, and both sides emit `requested` / `reason` / `escalate` /
+`reasons` / `low_confidence`. Covers the #721 strict-boolean contract
+(string `"true"`, `1`, and prose never request), reason kept vs dropped,
+each telemetry reason firing in isolation, the #750 structured-coverage
+path (grounded `not_applicable` is not incomplete; `unresolved` is), the
+legacy keyword fallback, environmental-only vs substantive Unknowns, stub
+reviews, evidence blockers, all-failed tool results, and planning failure.
+
+### The `tool-loop` boundary (#678)
+
+Drives the v2 `pr_reviewer.tool_loop.drive_tool_loop` and the v3
+`driveToolLoop` over the same scripted transcript: a queue of raw model
+responses (including a `{"raise": ...}` transport-error form), per-call
+executor results, an optional summarizer queue, and an explicit `clock`
+array replacing `time.monotonic` so wall-clock stops are deterministic.
+Both sides print the same `{outcome, messages, payload_last}` JSON;
+`elapsed_sec` is intentionally not emitted. Fixtures cover no-tool-call
+degradation, model-stop after calls, max-rounds exhaustion, mid-round
+budget exhaustion, duplicate-call dedup, malformed arguments, mixed
+error/dup/exec rounds, wall-clock stop, request error, compaction
+(truncate path, summarize path, summarize-fail → truncate fallback),
+Anthropic `tool_use` extraction, and OpenAI nested function form.
+
+### What #678 removed from the required Python runtime surface
+
+With the routing/escalation/conversation/tool-loop ports, the entire
+native-loop review runtime now exists in TypeScript (`src/routing/`,
+`src/model/conversation.ts`, `src/tools/`): tier profiles, direct smart
+routing, the #721 reviewer-requested escalation contract, the fallback
+availability path, the conversation state machine, the read-only executor
+catalogue with its guards, the MCP client, the loop driver, the planning
+context, the in-conversation verdict turn, and the #702 telemetry object.
+The Python side of these modules is now a temporary oracle for the parity
+boundaries above; production wiring still invokes the v2 scripts until the
+#681 orchestrator cutover. Remaining Python-only runtime after #678 (the
+#680/#706 backlog): the deep-review specialist runner/corpus
+(`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py` — the
+specialist-leads renderer is already an injected seam in `src/tools/harness.ts`),
+the v2 publish/precheck shell pipeline, and the platform `gh` subprocess
+seams behind `scripts/platform_api.sh`.
 
 ## Workflow examples
 

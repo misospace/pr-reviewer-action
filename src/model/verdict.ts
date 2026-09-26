@@ -1,4 +1,4 @@
-import type { NormalizedFinding, NormalizedRequiredCheckDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
 
 /**
@@ -44,6 +44,21 @@ const MAX_REQUIRED_CHECK_CHARS = 400;
 const MAX_RATIONALE_CHARS = 500;
 
 const REQUIRED_CHECK_STATUSES = new Set<string>(["satisfied", "not_applicable", "unresolved"]);
+const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDisposition["disposition"]>> = Object.freeze({
+  fixed: "fixed",
+  resolved: "fixed",
+  addressed: "fixed",
+  open: "open",
+  still_open: "open",
+  "still-open": "open",
+  unresolved: "open",
+  disputed: "disputed",
+  disagree: "disputed",
+  rejected: "disputed",
+});
+const MAX_THREAD_DISPOSITIONS = 100;
+const MAX_THREAD_ID_CHARS = 200;
+const MAX_THREAD_EVIDENCE_CHARS = 1000;
 
 /**
  * #750: normalize the model's structured required-check dispositions.
@@ -95,6 +110,43 @@ function normalizeRequiredCheckDispositions(
 
     dispositions.push({ check, status: rawStatus as RequiredCheckStatus, rationale });
     if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
+  }
+  return { present: true, dispositions };
+}
+
+function codepointLength(text: string): number {
+  return Array.from(text).length;
+}
+
+function codepointSlice(text: string, n: number): string {
+  const points = Array.from(text);
+  return points.length <= n ? text : points.slice(0, n).join("");
+}
+
+/** #766: port of `_normalize_thread_dispositions` — tri-state by key
+ * presence, entries without a usable thread id dropped, unknown
+ * disposition words preserved as `invalid`. */
+function normalizeThreadDispositions(
+  value: unknown,
+  present: boolean,
+): { present: boolean; dispositions: NormalizedThreadDisposition[] | null } {
+  if (!present) return { present: false, dispositions: null };
+  if (!Array.isArray(value)) return { present: true, dispositions: null };
+  const dispositions: NormalizedThreadDisposition[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const rawId = item.thread_id;
+    if (typeof rawId !== "string") continue;
+    const threadId = rawId.replace(SMART_REVIEW_REASON_CONTROL, " ").trim();
+    if (threadId === "" || codepointLength(threadId) > MAX_THREAD_ID_CHARS) continue;
+    const key = typeof item.disposition === "string" ? item.disposition.trim().toLowerCase() : "";
+    const disposition = THREAD_DISPOSITION_ALIASES[key] ?? "invalid";
+    let evidence: string | null = null;
+    if (typeof item.evidence === "string") {
+      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_THREAD_EVIDENCE_CHARS) || null;
+    }
+    dispositions.push({ threadId, disposition, evidence });
+    if (dispositions.length >= MAX_THREAD_DISPOSITIONS) break;
   }
   return { present: true, dispositions };
 }
@@ -321,10 +373,59 @@ function scanJsonValues(text: string): unknown {
   return null;
 }
 
+/** Double a backslash that starts no valid JSON escape inside a string
+ * (port of `_escape_invalid_backslashes`): a model's `\\_` or `\\*` breaks
+ * the outer object and the scanner would harvest nested findings instead. */
+function escapeInvalidBackslashes(text: string): string {
+  let result = "";
+  let inString = false;
+  let i = 0;
+  const length = text.length;
+  const isHex = (s: string): boolean => s.length === 4 && /^[0-9a-fA-F]{4}$/.test(s);
+  while (i < length) {
+    const ch = text[i]!;
+    if (inString && ch === "\\") {
+      const nxt = i + 1 < length ? text[i + 1]! : "";
+      if (nxt && '"\\/bfnrt'.includes(nxt)) {
+        result += ch + nxt;
+        i += 2;
+        continue;
+      }
+      if (nxt === "u" && isHex(text.slice(i + 2, i + 6))) {
+        result += text.slice(i, i + 6);
+        i += 6;
+        continue;
+      }
+      result += "\\\\";
+      i += 1;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+    result += ch;
+    i += 1;
+  }
+  return result;
+}
+
+function isCompleteVerdict(value: unknown): boolean {
+  return isRecord(value) && "verdict" in value && "review_markdown" in value;
+}
+
 function tryDecodeJson(text: string): unknown {
-  const parsed = scanJsonValues(text);
-  if (parsed !== null) return parsed;
-  return scanJsonValues(escapeRawNewlinesInStrings(text));
+  // Each repair pass runs only when the previous one found no complete
+  // verdict: a partial or nested candidate must not pre-empt a complete
+  // object that a repair would recover.
+  const first = scanJsonValues(text);
+  if (isCompleteVerdict(first)) return first;
+  const unwrapped = escapeRawNewlinesInStrings(text);
+  const second = scanJsonValues(unwrapped);
+  if (isCompleteVerdict(second)) return second;
+  const third = scanJsonValues(escapeInvalidBackslashes(unwrapped));
+  if (isCompleteVerdict(third)) return third;
+  for (const candidate of [first, second, third]) {
+    if (candidate !== null) return candidate;
+  }
+  return null;
 }
 
 function finishReasonOf(response: Record<string, unknown>): string | null {
@@ -491,6 +592,7 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
       && key !== "requirement_coverage"
       && key !== "smart_review_requested" && key !== "smart_review_reason"
       && key !== "required_check_dispositions"
+      && key !== "thread_dispositions"
     ) {
       extra[key] = value;
     }
@@ -500,6 +602,10 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
     parsed.required_check_dispositions,
     "required_check_dispositions" in parsed,
   );
+  const threadDispositions = normalizeThreadDispositions(
+    parsed.thread_dispositions,
+    "thread_dispositions" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
@@ -507,6 +613,8 @@ export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
     requirementCoverage: parsed.requirement_coverage,
     requiredCheckDispositions: dispositions.dispositions,
     requiredCheckDispositionsEmitted: dispositions.present,
+    threadDispositions: threadDispositions.dispositions,
+    threadDispositionsEmitted: threadDispositions.present,
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
     extra,

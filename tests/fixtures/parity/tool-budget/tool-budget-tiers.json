@@ -197,6 +197,44 @@
         "budget": 16,
         "source": "tier-default"
       }
+    },
+    {
+      "name": "primary-override-precedence",
+      "tier": "primary",
+      "env": {
+        "PRIMARY_TOOL_MAX_REQUESTS": "12",
+        "TOOL_MAX_REQUESTS": "3"
+      },
+      "expected": {
+        "route": "primary",
+        "budget": 12,
+        "source": "primary-override"
+      }
+    },
+    {
+      "name": "primary-override-ignored-on-smart",
+      "tier": "smart",
+      "env": {
+        "PRIMARY_TOOL_MAX_REQUESTS": "12"
+      },
+      "expected": {
+        "route": "smart",
+        "budget": 16,
+        "source": "tier-default"
+      }
+    },
+    {
+      "name": "invalid-primary-override-falls-to-explicit",
+      "tier": "primary",
+      "env": {
+        "PRIMARY_TOOL_MAX_REQUESTS": "abc",
+        "TOOL_MAX_REQUESTS": "7"
+      },
+      "expected": {
+        "route": "primary",
+        "budget": 7,
+        "source": "explicit"
+      }
     }
   ]
 }

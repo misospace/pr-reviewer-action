@@ -136,6 +136,7 @@ class Boundary:
     run: Callable[[dict[str, Any], Path], tuple[SideResult, SideResult]]
     error_categories: tuple[tuple[re.Pattern[str], str], ...] = ()
     key_mapping: dict[str, str] = field(default_factory=dict)  # v3 key -> v2 key
+    canonical_json_keys: set[str] = field(default_factory=set)  # keys compared as canonical JSON (sorted keys)
     secret_keys: set[str] = field(default_factory=set)  # v3 keys (secrets)
     numeric_keys: set[str] = field(default_factory=set)  # v3 keys declared numeric
     scope_rule: str | None = None  # "config": mechanical v2-transport scope
@@ -228,7 +229,13 @@ class Boundary:
         return left == right
 
     def normalize_key(self, key: str, value: Any) -> str:
-        text = canonical(value)
+        if key in self.canonical_json_keys and isinstance(value, (dict, list)):
+            # Boundary-local convention: compare the full structured value as
+            # canonical JSON (sorted keys) — deterministic end to end, so
+            # nothing else is scrubbed.
+            text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = canonical(value)
         if key in self.secret_keys:
             return "[REDACTED]" if text != "" else ""
         return scrub(text)
@@ -1006,6 +1013,69 @@ REPO_MAP_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# Boundary: diff priority (class-aware diff truncation)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_diff_priority.py"), str(_fixture_path(fixture))],
+        workdir,
+        timeout=120,
+    )
+
+
+def run_v3_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["diff-priority-fixture"], fixture, workdir)
+
+
+DIFF_PRIORITY_BOUNDARY = Boundary(
+    id="diff-priority",
+    description=(
+        "Diff-priority parity: the v2 class-aware, size-fair diff truncation "
+        "(per-file chunking, source/bulk/generated ranking, water-filled "
+        "budget within a rank, newline-safe clips with per-file notes, "
+        "omit-below-minimum, bounded omitted-files manifest, truncate_clean "
+        "fallback for header-less input and tiny budgets) versus the v3 "
+        "TypeScript port. Outputs compare as base64 so invalid UTF-8 survives."
+    ),
+    fixtures_dir="diff-priority",
+    run=lambda fixture, workdir: (run_v2_diff_priority(fixture, workdir), run_v3_diff_priority(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
+# Boundary: unresolved review threads (#766)
+# ---------------------------------------------------------------------------
+
+
+def run_v2_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_review_threads.py")],
+        workdir,
+        timeout=120,
+        stdin_text=json.dumps(fixture),
+    )
+
+
+def run_v3_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_fixture_mode(["review-threads-fixture"], fixture, workdir)
+
+
+REVIEW_THREADS_BOUNDARY = Boundary(
+    id="review-threads",
+    description=(
+        "#766 review-thread parity: the v2 unresolved review-thread builder "
+        "(own-finding recognition, unresolved filtering, newest-first "
+        "ordering, per-body hygiene, whole-thread byte budget, enforcement "
+        "view) versus the v3 TypeScript port."
+    ),
+    fixtures_dir="review-threads",
+    run=lambda fixture, workdir: (run_v2_review_threads(fixture, workdir), run_v3_review_threads(fixture, workdir)),
+)
+
+
+# ---------------------------------------------------------------------------
 # Boundary: PR thread context (#675)
 # ---------------------------------------------------------------------------
 
@@ -1163,7 +1233,34 @@ CORPUS_BOUNDARY = Boundary(
     error_categories=CORPUS_CATEGORIES,
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY)
+def _run_new_boundary(runner: str, cli: str, fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    old = run_json_runner([sys.executable, str(ROOT / "tests" / "parity_runners" / runner), str(_fixture_path(fixture))], workdir, timeout=120)
+    new = run_json_runner([node, "dist/index.js", cli, str(_fixture_path(fixture))], workdir, timeout=120, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)})
+    return old, new
+
+
+def _conversation_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_conversation.py", "conversation-fixture", fixture, workdir)
+
+
+def _escalation_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_escalation.py", "escalation-fixture", fixture, workdir)
+
+
+def _tool_loop_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_tool_loop.py", "tool-loop-fixture", fixture, workdir)
+
+
+NEW_BOUNDARIES = (
+    Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
+    Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
+    Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
+)
+
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

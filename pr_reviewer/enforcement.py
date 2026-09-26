@@ -8,6 +8,7 @@ Ported from the enforcement section in ``scripts/run_review.sh``.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -281,6 +282,116 @@ def apply_verdict_policy(
     return source
 
 
+THREAD_DISPOSITIONS = ("fixed", "open", "disputed")
+_EVIDENCE_LOCATION_RE = re.compile(r"(?:^|[\s`(])[\w./-]+\.\w+(?::\d+|\s+line\s+\d+)|\bline\s+\d+", re.IGNORECASE)
+
+
+def _evidence_cites_code(evidence: str | None, path: str | None) -> bool:
+    text = (evidence or "").strip()
+    if not text:
+        return False
+    if path and path in text:
+        return True
+    return bool(_EVIDENCE_LOCATION_RE.search(text))
+
+
+def apply_review_thread_enforcement(
+    threads_path: str = "review-threads.json",
+    output_path: str = "ai-output.json",
+    verdict_policy: str = "model",
+) -> tuple[bool, str]:
+    """Settle every unresolved review thread the corpus listed (#766).
+
+    A listed thread the model did not disposition, or marked ``fixed``
+    without evidence that cites current code, is downgraded to
+    ``open``. Every ``open``/``disputed`` thread is re-emitted as
+    a finding carrying ``thread_id`` (the publish step skips those inline —
+    the thread already exists). Under ``findings_severity_gated`` a
+    re-emitted blocker escalates the verdict like any other blocker.
+    """
+    threads_file = Path(threads_path)
+    if not threads_file.is_file():
+        return False, ""
+    try:
+        threads = json.loads(threads_file.read_text(encoding="utf-8", errors="replace") or "[]")
+    except json.JSONDecodeError:
+        return False, ""
+    if not isinstance(threads, list) or not threads:
+        return False, ""
+
+    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
+    given: dict[str, dict] = {}
+    for entry in data.get("thread_dispositions") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("thread_id"), str):
+            given.setdefault(entry["thread_id"], entry)
+    findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
+    known_thread_ids = {f.get("thread_id") for f in findings if f.get("thread_id")}
+
+    settled: list[dict] = []
+    downgraded = 0
+    reemitted: list[dict] = []
+    for thread in threads:
+        if not isinstance(thread, dict) or not isinstance(thread.get("thread_id"), str):
+            continue
+        thread_id = thread["thread_id"]
+        entry = given.get(thread_id) or {}
+        disposition = entry.get("disposition")
+        evidence = entry.get("evidence") if isinstance(entry.get("evidence"), str) else None
+        note = None
+        if disposition not in THREAD_DISPOSITIONS:
+            disposition, note = "open", "no disposition given"
+        elif disposition == "fixed" and not _evidence_cites_code(evidence, thread.get("path")):
+            disposition, note = "open", "fixed without evidence citing current code"
+        record = {"thread_id": thread_id, "disposition": disposition, "evidence": evidence}
+        if note:
+            record["enforced"] = note
+            downgraded += 1
+        settled.append(record)
+        if disposition != "fixed" and thread_id not in known_thread_ids:
+            finding = {
+                "severity": thread.get("severity") or "minor",
+                "category": "other",
+                "file": thread.get("path"),
+                "line": thread.get("line"),
+                "message": f"{thread.get('message') or 'Unresolved review thread'} (review thread {thread_id}: {disposition})",
+                "thread_id": thread_id,
+            }
+            findings.append(finding)
+            reemitted.append(finding)
+
+    if not settled:
+        return False, ""
+    data["thread_dispositions"] = settled
+    data["findings"] = findings
+    changed = bool(downgraded or reemitted)
+    if changed:
+        lines = ["", "", "## Unresolved Review Threads", ""]
+        for record in settled:
+            suffix = f" — {record['enforced']}" if record.get("enforced") else ""
+            lines.append(f"- `{record['thread_id']}`: {record['disposition']}{suffix}")
+        data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
+        blockers = [f for f in reemitted if f.get("severity") == "blocker"]
+        if (
+            verdict_policy == "findings_severity_gated"
+            and blockers
+            and data.get("verdict") != "request_changes"
+        ):
+            data["review_markdown"] += (
+                "\n\n_Verdict escalated from unresolved review threads "
+                f"(verdict_policy=findings_severity_gated): {len(blockers)} blocker thread(s) "
+                f"still open; model verdict was '{data.get('verdict')}'._"
+            )
+            data["verdict"] = "request_changes"
+            data["verdict_source"] = "findings"
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not changed:
+        return False, ""
+    return True, (
+        f"review threads: {downgraded} disposition(s) downgraded, "
+        f"{len(reemitted)} finding(s) re-emitted"
+    )
+
+
 def apply_all_enforcement(
     evidence_blocker_enabled: bool = False,
     tool_failure_enabled: bool = False,
@@ -328,6 +439,14 @@ def apply_all_enforcement(
             if ok:
                 applied += 1
                 reasons.append(reason)
+
+    ok, reason = apply_review_thread_enforcement(
+        output_path=output_path,
+        verdict_policy=os.environ.get("VERDICT_POLICY", "model"),
+    )
+    if ok:
+        applied += 1
+        reasons.append(reason)
 
     if applied > 0:
         normalize_enforced_review_markdown(output_path, reasons if reasons else None)

@@ -1108,6 +1108,77 @@ def list_pr_reviews(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]
     return data if isinstance(data, list) else []
 
 
+def list_review_threads(repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
+    """Inline review threads normalised for review_threads.py (#766).
+
+    Forgejo has no thread object: review comments are grouped by path and
+    original position, and a group counts as resolved when any comment in it
+    carries a resolver. GitHub mode is served by GraphQL in platform_api.sh.
+    """
+    owner, repo = _parse_repo(repo_full_name)
+    if not _is_forgejo_mode():
+        return []
+    status_code, body_text = _curl(
+        "GET",
+        f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+    )
+    if status_code != 200:
+        return []
+    reviews = _json_decode(body_text)
+    if not isinstance(reviews, list):
+        return []
+    groups: dict[tuple[str, Any], dict[str, Any]] = {}
+    for review in reviews:
+        review_id = review.get("id") if isinstance(review, dict) else None
+        if not isinstance(review_id, int):
+            continue
+        status_code, body_text = _curl(
+            "GET",
+            f"{FORGEJO_API_URL}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/comments",
+        )
+        if status_code != 200:
+            continue
+        comments = _json_decode(body_text)
+        if not isinstance(comments, list):
+            continue
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            path = str(comment.get("path") or "")
+            original = comment.get("original_position")
+            position = comment.get("position")
+            anchor = original if isinstance(original, int) else position
+            group = groups.setdefault(
+                (path, anchor),
+                {
+                    "thread_id": f"{path}:{anchor}",
+                    "path": path,
+                    "line": position if isinstance(position, int) else None,
+                    "original_line": original if isinstance(original, int) else None,
+                    "resolved": False,
+                    "outdated": False,
+                    "comments": [],
+                },
+            )
+            if comment.get("resolver"):
+                group["resolved"] = True
+            user = comment.get("user")
+            group["comments"].append(
+                {
+                    "id": comment.get("id"),
+                    "user": str(user.get("login") or "") if isinstance(user, dict) else "",
+                    "created_at": str(comment.get("created_at") or ""),
+                    "updated_at": str(comment.get("updated_at") or ""),
+                    "body": str(comment.get("body") or ""),
+                }
+            )
+    threads = list(groups.values())
+    for thread in threads:
+        thread["comments"].sort(key=lambda c: (c["created_at"], str(c["id"])))
+    threads.sort(key=lambda t: (t["comments"][0]["created_at"], str(t["comments"][0]["id"])))
+    return threads
+
+
 def _forgejo_review_to_github(review: dict[str, Any]) -> dict[str, Any]:
     state = str(review.get("state") or review.get("event") or "COMMENT").upper()
     if state == "APPROVE":
@@ -1419,6 +1490,10 @@ def main() -> None:
     p_reviews.add_argument("repo")
     p_reviews.add_argument("pr_number", type=int)
 
+    p_threads = sub.add_parser("list-review-threads")
+    p_threads.add_argument("repo")
+    p_threads.add_argument("pr_number", type=int)
+
     p_review_json = sub.add_parser("create-review-json")
     p_review_json.add_argument("repo")
     p_review_json.add_argument("pr_number", type=int)
@@ -1488,6 +1563,8 @@ def main() -> None:
         print(json.dumps(result, indent=2))
     elif args.command == "list-pr-reviews":
         print(json.dumps(list_pr_reviews(args.repo, args.pr_number), indent=2))
+    elif args.command == "list-review-threads":
+        print(json.dumps(list_review_threads(args.repo, args.pr_number), indent=2))
     elif args.command == "create-review-json":
         result = create_pr_review_from_file(args.repo, args.pr_number, args.payload_file)
         print(json.dumps(result, indent=2) if result else "null")

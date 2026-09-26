@@ -382,6 +382,14 @@ inputs:
     description: Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)
     required: false
     default: "8000"
+  review_threads_context:
+    description: Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus; the reviewer must disposition each listed thread
+    required: false
+    default: "true"
+  review_threads_max_bytes:
+    description: Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)
+    required: false
+    default: "8000"
 
   # Deep review: opt-in specialist leads. 'true' runs all three fixed
   # specialist roles (correctness / security / tests — pr_reviewer/specialists.py)
@@ -507,6 +515,20 @@ inputs:
       route (#701): ~8 for the primary route, ~16 for the smart route, and up
       to 20 for the escalated (deep) path — never above the hard ceiling of 20.
       An explicit value overrides every tier and is bounded to 1..20.
+    required: false
+    default: ""
+  primary_tool_max_requests:
+    description: >-
+      Request budget for the primary route only, bounded to 1..20. Outranks
+      tool_max_requests on that route and leaves the smart/escalated tiers
+      untouched. Empty (the default) keeps the tier default.
+    required: false
+    default: ""
+  smart_tool_max_requests:
+    description: >-
+      Request budget for the smart and escalated routes only, bounded to 1..20.
+      Outranks tool_max_requests on those routes and leaves the primary tier
+      untouched. Empty (the default) keeps the tier defaults.
     required: false
     default: ""
   tool_max_rounds:
@@ -852,6 +874,8 @@ runs:
         REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
         PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
         PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
+        REVIEW_THREADS_CONTEXT: ${{ inputs.review_threads_context }}
+        REVIEW_THREADS_MAX_BYTES: ${{ inputs.review_threads_max_bytes }}
         DEEP_REVIEW: ${{ inputs.deep_review }}
         DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
         DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
@@ -874,6 +898,8 @@ runs:
         TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
         TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
         TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
+        PRIMARY_TOOL_MAX_REQUESTS: ${{ inputs.primary_tool_max_requests }}
+        SMART_TOOL_MAX_REQUESTS: ${{ inputs.smart_tool_max_requests }}
         TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
         # #540: new names take precedence; the deprecated tool_planning_* inputs
         # still work as a fallback for one release (removed in v3.0.0).
@@ -952,6 +978,8 @@ runs:
           REPO_MAP_MAX_BYTES
           PR_THREAD_CONTEXT
           PR_THREAD_MAX_BYTES
+          REVIEW_THREADS_CONTEXT
+          REVIEW_THREADS_MAX_BYTES
           DEEP_REVIEW
           DEEP_REVIEW_TIMEOUT_SEC
           DEEP_REVIEW_MAX_TOKENS
@@ -974,6 +1002,8 @@ runs:
           TOOL_LOOP_SUMMARIZE
           TOOL_LOOP_SUMMARIZE_MAX_TOKENS
           TOOL_MAX_REQUESTS
+          PRIMARY_TOOL_MAX_REQUESTS
+          SMART_TOOL_MAX_REQUESTS
           TOOL_MAX_ROUNDS
           TOOL_TURN_TIMEOUT_SEC
           TOOL_CORPUS_MAX_BYTES

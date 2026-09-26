@@ -127,6 +127,40 @@ def _escape_raw_newlines_in_strings(text: str) -> str:
     return "".join(result)
 
 
+def _escape_invalid_backslashes(text: str) -> str:
+    """Double a backslash that starts no valid JSON escape inside a string.
+
+    Markdown-heavy fields (``review_markdown``) often carry ``\\_`` or
+    ``\\*`` from a model escaping emphasis. One such sequence breaks the
+    outer object, and the scanner then harvests the *nested* findings
+    objects instead, none of which carries ``verdict``.
+    """
+    result: list[str] = []
+    in_string = False
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if in_string and ch == "\\":
+            nxt = text[i + 1] if i + 1 < length else ""
+            if nxt and nxt in '"\\/bfnrt':
+                result.append(ch + nxt)
+                i += 2
+                continue
+            if nxt == "u" and all(c in "0123456789abcdefABCDEF" for c in text[i + 2:i + 6]) and len(text[i + 2:i + 6]) == 4:
+                result.append(text[i:i + 6])
+                i += 6
+                continue
+            result.append("\\\\")
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _try_decode_json(text: str) -> Any | None:
     """Attempt to decode a JSON object/list from *text*.
 
@@ -214,10 +248,26 @@ def _try_decode_json(text: str) -> Any | None:
                 return cand
         return None
 
-    parsed = _scan(text)
-    if parsed is not None:
-        return parsed
-    return _scan(_escape_raw_newlines_in_strings(text))
+    def _complete(value: Any) -> bool:
+        return isinstance(value, dict) and "verdict" in value and "review_markdown" in value
+
+    # Each repair pass runs only when the previous one found no complete
+    # verdict: a partial or nested candidate must not pre-empt a complete
+    # object that a repair would recover.
+    first = _scan(text)
+    if _complete(first):
+        return first
+    unwrapped = _escape_raw_newlines_in_strings(text)
+    second = _scan(unwrapped)
+    if _complete(second):
+        return second
+    third = _scan(_escape_invalid_backslashes(unwrapped))
+    if _complete(third):
+        return third
+    for candidate in (first, second, third):
+        if candidate is not None:
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +449,62 @@ def _normalize_required_check_dispositions(value: Any) -> list[dict[str, Any]] |
         if len(dispositions) >= _MAX_REQUIRED_CHECKS:
             break
 
+    return dispositions
+
+
+_THREAD_DISPOSITION_ALIASES = {
+    "fixed": "fixed",
+    "resolved": "fixed",
+    "addressed": "fixed",
+    "open": "open",
+    "still_open": "open",
+    "still-open": "open",
+    "unresolved": "open",
+    "disputed": "disputed",
+    "disagree": "disputed",
+    "rejected": "disputed",
+}
+_MAX_THREAD_DISPOSITIONS = 100
+_MAX_THREAD_ID_CHARS = 200
+_MAX_THREAD_EVIDENCE_CHARS = 1000
+
+
+def _normalize_thread_dispositions(value: Any) -> list[dict[str, Any]] | None:
+    """Normalise the model's per-thread dispositions (#766).
+
+    Same tri-state-by-key-presence contract as the required-check
+    dispositions. An entry with no usable thread id is dropped; an
+    attributable entry with an unknown disposition is preserved as
+    ``"invalid"`` so the enforcement pass treats it as missing rather than
+    letting a malformed duplicate collapse into a valid answer.
+    """
+    if not isinstance(value, list):
+        return None
+
+    dispositions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("thread_id")
+        if not isinstance(raw_id, str):
+            continue
+        thread_id = _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", raw_id).strip()
+        if not thread_id or len(thread_id) > _MAX_THREAD_ID_CHARS:
+            continue
+        raw_disposition = item.get("disposition")
+        key = raw_disposition.strip().lower() if isinstance(raw_disposition, str) else ""
+        disposition = _THREAD_DISPOSITION_ALIASES.get(key, "invalid")
+        evidence = item.get("evidence")
+        if isinstance(evidence, str):
+            evidence = (
+                _SMART_REVIEW_REASON_CONTROL_RE.sub(" ", evidence).strip()[:_MAX_THREAD_EVIDENCE_CHARS]
+                or None
+            )
+        else:
+            evidence = None
+        dispositions.append({"thread_id": thread_id, "disposition": disposition, "evidence": evidence})
+        if len(dispositions) >= _MAX_THREAD_DISPOSITIONS:
+            break
     return dispositions
 
 
@@ -625,6 +731,11 @@ def parse_response(response: dict[str, Any]) -> dict[str, Any]:
         parsed["required_check_dispositions"] = _normalize_required_check_dispositions(
             parsed["required_check_dispositions"]
         )
+
+    # Review-thread dispositions (#766): same tri-state as the required-check
+    # dispositions — normalized only when the model emitted the key.
+    if "thread_dispositions" in parsed:
+        parsed["thread_dispositions"] = _normalize_thread_dispositions(parsed["thread_dispositions"])
 
     # Structured reviewer-requested smart escalation (#721): normalized
     # unconditionally so a malformed or absent field can never masquerade as

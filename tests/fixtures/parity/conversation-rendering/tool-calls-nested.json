@@ -1,0 +1,36 @@
+{
+  "system": "s",
+  "ops": [
+    {
+      "op": "add_assistant_text",
+      "content": "thinking"
+    },
+    {
+      "op": "add_assistant_tool_calls",
+      "calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": "{\"path\":\"a\"}"
+          }
+        }
+      ]
+    }
+  ],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    },
+    {
+      "apiFormat": "anthropic",
+      "model": "m"
+    }
+  ],
+  "introspect": {
+    "turns": true,
+    "open_tool_call_ids": true
+  }
+}

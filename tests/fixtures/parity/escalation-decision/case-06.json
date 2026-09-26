@@ -1,0 +1,23 @@
+{
+  "output": {
+    "review_markdown": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "required_check_dispositions": [
+      {
+        "check": "test suite",
+        "status": "not_applicable",
+        "rationale": "Not applicable because there are no tests"
+      }
+    ]
+  },
+  "classification": {
+    "must_check": [
+      "test suite"
+    ]
+  },
+  "evidence": {},
+  "harness": {},
+  "flags": {
+    "on_incomplete": true,
+    "on_low_confidence": false
+  }
+}

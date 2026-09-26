@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
@@ -163,3 +164,73 @@ def test_redact_text_replaces_github_pat() -> None:
     out = transport.redact_text(text)
     assert "[REDACTED]" in out
     assert "ghp_abcdefghijklmnopqrstuvwxyz1234567890" not in out
+
+
+# ---------------------------------------------------------------------------
+# HTTP retry (429/5xx with Retry-After)
+# ---------------------------------------------------------------------------
+
+
+def _headers_writer(statuses: list, retry_after: str | None = None):
+    """subprocess.run stand-in that writes curl's -D header dump per call."""
+    calls: list = []
+
+    def fake_run(cmd, *args: Any, **kwargs: Any):
+        calls.append(list(cmd))
+        status = statuses[len(calls) - 1]
+        headers_path = cmd[cmd.index("-D") + 1]
+        lines = [f"HTTP/1.1 {status} X"]
+        if retry_after is not None:
+            lines.append(f"Retry-After: {retry_after}")
+        Path(headers_path).write_text("\r\n".join(lines) + "\r\n\r\n", encoding="utf-8")
+        body = '{"ok": true}' if status < 400 else '{"error": {"message": "slow down"}}'
+        return _completed(stdout=body)
+
+    return fake_run, calls
+
+
+def test_run_chat_request_retries_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run, calls = _headers_writer([429, 200], retry_after="0")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    slept: list = []
+    monkeypatch.setattr(transport.time, "sleep", lambda s: slept.append(s))
+    res = transport.run_chat_request("https://example.test/v1", "openai", {"model": "m"}, "sk-test", 5)
+    assert res == {"ok": True}
+    assert len(calls) == 2
+    assert slept == [0.0]
+
+
+def test_run_chat_request_backs_off_without_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run, calls = _headers_writer([503, 503, 200])
+    monkeypatch.setattr("subprocess.run", fake_run)
+    slept: list = []
+    monkeypatch.setattr(transport.time, "sleep", lambda s: slept.append(s))
+    res = transport.run_chat_request("https://example.test/v1", "openai", {"model": "m"}, "sk-test", 5)
+    assert res == {"ok": True}
+    assert slept == [1.0, 2.0]
+
+
+def test_run_chat_request_gives_up_after_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run, calls = _headers_writer([429, 429, 429], retry_after="0")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(transport.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        transport.run_chat_request("https://example.test/v1", "openai", {"model": "m"}, "sk-test", 5)
+    assert len(calls) == transport.HTTP_RETRY_ATTEMPTS
+
+
+def test_run_chat_request_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run, calls = _headers_writer([400])
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        transport.run_chat_request("https://example.test/v1", "openai", {"model": "m"}, "sk-test", 5)
+    assert len(calls) == 1
+
+
+def test_run_chat_request_caps_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run, _ = _headers_writer([429, 200], retry_after="600")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    slept: list = []
+    monkeypatch.setattr(transport.time, "sleep", lambda s: slept.append(s))
+    transport.run_chat_request("https://example.test/v1", "openai", {"model": "m"}, "sk-test", 5)
+    assert slept == [transport.HTTP_RETRY_MAX_DELAY_SEC]

@@ -1,0 +1,11 @@
+{
+  "output": {
+    "review_markdown": "# Unknowns\nCI tests are unavailable and not configured in this environment; no substantive code uncertainty was found."
+  },
+  "classification": {},
+  "evidence": {},
+  "harness": {},
+  "flags": {
+    "on_low_confidence": true
+  }
+}

@@ -249,3 +249,13 @@ class TestActionWiring:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_thread_findings_are_not_posted_inline():
+    findings = [
+        {"severity": "major", "file": "app/serve.py", "line": 12, "message": "re-emitted", "thread_id": "PRRT_1"},
+        {"severity": "major", "file": "app/serve.py", "line": 13, "message": "fresh"},
+    ]
+    comments, skipped = build_comments(findings, DIFF)
+    assert [c["line"] for c in comments] == [13]
+    assert skipped == 1

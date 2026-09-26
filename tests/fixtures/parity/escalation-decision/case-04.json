@@ -1,0 +1,13 @@
+{
+  "output": {
+    "verdict": "request_changes",
+    "review_markdown": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "classification": {},
+  "evidence": {},
+  "harness": {},
+  "flags": {
+    "on_request_changes": true,
+    "on_low_confidence": false
+  }
+}

@@ -223,7 +223,7 @@ build_review_corpus() {
       output="review-corpus.smart.truncated.md"
     fi
     diff_file="pr.diff.smart.truncated"; files_file="pr-files.smart.truncated.json"
-    truncate_clean pr.diff "$diff_file" "$diff_budget" '…[diff truncated to fit context budget]'
+    python3 "$SCRIPT_DIR/prioritize_diff.py" pr.diff "$diff_file" "$diff_budget" '…[diff truncated to fit context budget]'
     truncate_clean pr-files.json "$files_file" "$files_budget" '…[file list truncated]'
     if [[ "$slot" == smart ]]; then
       harness_file="tool-harness.smart.md"
@@ -280,6 +280,14 @@ build_review_corpus() {
     # gate hides the section entirely rather than publishing a placeholder.
     if [ -s pr-thread.md ]; then
       cat pr-thread.md
+      echo
+    fi
+
+    # review-threads.md carries its own trust-framed "# Unresolved Review
+    # Threads" header (review_threads.py) and is empty when no unresolved
+    # thread fits, so the same gate applies.
+    if [ -s review-threads.md ]; then
+      cat review-threads.md
       echo
     fi
 

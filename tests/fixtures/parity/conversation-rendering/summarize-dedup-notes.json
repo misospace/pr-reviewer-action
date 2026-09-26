@@ -1,0 +1,81 @@
+{
+  "system": "s",
+  "ops": [
+    {
+      "op": "add_assistant_tool_calls",
+      "calls": [
+        {
+          "id": "1",
+          "name": "x",
+          "arguments": "{}"
+        },
+        {
+          "id": "2",
+          "name": "x",
+          "arguments": "{}"
+        },
+        {
+          "id": "3",
+          "name": "x",
+          "arguments": "{}"
+        }
+      ]
+    },
+    {
+      "op": "add_tool_result",
+      "call_id": "1",
+      "result": {
+        "v": "old"
+      },
+      "max_bytes": 10000
+    },
+    {
+      "op": "add_tool_result",
+      "call_id": "2",
+      "result": {
+        "v": "older"
+      },
+      "max_bytes": 10000
+    },
+    {
+      "op": "add_tool_result",
+      "call_id": "3",
+      "result": {
+        "v": "new"
+      },
+      "max_bytes": 10000
+    },
+    {
+      "op": "summarize_oldest_tool_results",
+      "digest": "digest",
+      "keep_newest": 1
+    },
+    {
+      "op": "summarize_oldest_tool_results",
+      "digest": "second",
+      "keep_newest": 1
+    },
+    {
+      "op": "add_turn_note",
+      "content": "trusted note"
+    }
+  ],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m"
+    },
+    {
+      "apiFormat": "anthropic",
+      "model": "m"
+    }
+  ],
+  "introspect": {
+    "turns": true,
+    "approx_tokens": true
+  },
+  "dedup": {
+    "corpus": "# A\nbody\n# B\nother",
+    "planning": "prefix\n# A\nbody"
+  }
+}

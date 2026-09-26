@@ -481,6 +481,89 @@ export function renderRepoMapJson(map: RepoMap, indent = 2): string {
   return `${pyJsonDump(repoMapToArtifact(map), indent)}\n`;
 }
 
+/**
+ * Tolerant deserializer of the version-1 snake_case artifact back into the
+ * typed map — lets consumers re-render an existing `repo-map.json` at a
+ * different byte budget (the #599 planning-context excerpt) without re-running
+ * git. Returns null when the payload is not a usable version-1 artifact so
+ * callers omit the map rather than emitting a misleading partial.
+ */
+export function repoMapFromArtifact(value: unknown): RepoMap | null {
+  if (value === null || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const version = raw.version;
+  const source = raw.source;
+  const summary = raw.summary;
+  if (typeof version !== "number" || typeof source !== "string" || summary === null || typeof summary !== "object") {
+    return null;
+  }
+  const summaryObj = summary as Record<string, unknown>;
+  const trackedFiles = summaryObj.tracked_files;
+  const directories = summaryObj.directories;
+  const languages = summaryObj.languages;
+  if (typeof trackedFiles !== "number" || typeof directories !== "number" || languages === null || typeof languages !== "object") {
+    return null;
+  }
+  const stringList = (input: unknown): string[] | null =>
+    Array.isArray(input) && input.every((item) => typeof item === "string") ? (input as string[]) : null;
+  const rootsRaw = raw.roots;
+  if (!Array.isArray(rootsRaw)) return null;
+  const roots: RepoMapRoot[] = [];
+  for (const entry of rootsRaw) {
+    if (entry === null || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.path !== "string" || typeof e.files !== "number") return null;
+    roots.push({ path: e.path, files: e.files });
+  }
+  const recordOfLists = (input: unknown, keys: readonly string[]): Record<string, string[]> | null => {
+    if (input === null || typeof input !== "object") return null;
+    const out: Record<string, string[]> = {};
+    for (const key of keys) {
+      const list = stringList((input as Record<string, unknown>)[key]);
+      if (list === null) return null;
+      out[key] = list;
+    }
+    return out;
+  };
+  const importantFiles = recordOfLists(raw.important_files, IMPORTANT_KEYS);
+  const categories = recordOfLists(raw.categories, CATEGORY_KEYS);
+  const tree = stringList(raw.tree);
+  const truncationRaw = raw.truncation;
+  if (importantFiles === null || categories === null || tree === null || truncationRaw === null || typeof truncationRaw !== "object") {
+    return null;
+  }
+  const t = truncationRaw as Record<string, unknown>;
+  const num = (input: unknown): number | null => (typeof input === "number" ? input : null);
+  const reasons = stringList(t.reasons);
+  if (
+    typeof t.truncated !== "boolean" ||
+    reasons === null ||
+    num(t.omitted_entries) === null ||
+    num(t.omitted_category_files) === null ||
+    num(t.omitted_important_files) === null ||
+    num(t.omitted_roots) === null
+  ) {
+    return null;
+  }
+  return {
+    version,
+    source,
+    summary: { trackedFiles, directories, languages: { ...(languages as Record<string, number>) } },
+    roots,
+    importantFiles,
+    categories,
+    tree,
+    truncation: {
+      truncated: t.truncated,
+      reasons,
+      omittedEntries: num(t.omitted_entries)!,
+      omittedCategoryFiles: num(t.omitted_category_files)!,
+      omittedImportantFiles: num(t.omitted_important_files)!,
+      omittedRoots: num(t.omitted_roots)!,
+    },
+  };
+}
+
 function escapeControl(ch: string): string {
   if (ch === "\n") return "\\n";
   if (ch === "\t") return "\\t";

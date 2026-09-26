@@ -1,0 +1,13 @@
+{
+  "output": {
+    "review_markdown": "LGTM."
+  },
+  "classification": {},
+  "evidence": {
+    "has_blocker": true
+  },
+  "harness": {},
+  "flags": {
+    "on_blockers": true
+  }
+}

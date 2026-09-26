@@ -214,6 +214,21 @@ OUT_PT_OFF="$(assemble k8s_manifest true false)"
 check_not_contains "off: PR-thread guidance dropped" "$OUT_PT_OFF" "$PT_CONTENT"
 check_not_contains "off: no PR-thread placeholder remains" "$OUT_PT_OFF" "{{PR_THREAD_GUIDANCE}}"
 
+echo "=== review-thread guidance is gated on the presence signal ==="
+RT_CONTENT="$(<"$SCRIPT_DIR/prompt_fragments/review_threads.txt")"
+OUT_RT_OFF="$(assemble k8s_manifest)"
+check_not_contains "no threads: review-thread guidance dropped" "$OUT_RT_OFF" "$RT_CONTENT"
+check_not_contains "no threads: no placeholder remains" "$OUT_RT_OFF" "{{REVIEW_THREADS_GUIDANCE}}"
+OUT_RT_ON="$( cd "$WORK"
+  printf '{"pr_kind":"k8s_manifest"}' > classification.json
+  printf '2\n' > review-threads-present.txt
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  rm -f review-threads-present.txt
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_contains "threads present: review-thread guidance present" "$OUT_RT_ON" "$RT_CONTENT"
+check_not_contains "threads present: no placeholder remains" "$OUT_RT_ON" "{{REVIEW_THREADS_GUIDANCE}}"
+
 echo "=== bump path is byte-identical to the pre-split prompt ==="
 VB="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
 DG="$(<"$SCRIPT_DIR/prompt_fragments/image_digest.txt") "
@@ -230,6 +245,8 @@ RECON="${RECON/\{\{VERSION_BUMP_GUIDANCE\}\}/$VB}"
 RECON="${RECON/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$DG}"
 RECON="${RECON/\{\{RELEASE_NOTES_GUIDANCE\}\}/$RN}"
 RECON="${RECON/\{\{PR_THREAD_GUIDANCE\}\}/$PT}"
+RT="$(<"$SCRIPT_DIR/prompt_fragments/review_threads.txt") "
+RECON="${RECON/\{\{REVIEW_THREADS_GUIDANCE\}\}/$RT}"
 RECON="${RECON/\{\{VERBOSITY_GUIDANCE\}\}/$CN}"
 RECON="${RECON/\{\{REQUIREMENT_LEDGER_GUIDANCE\}\}/$RL}"
 RECON="${RECON/\{\{SPECIALIST_LEADS_GUIDANCE\}\}/$SL}"

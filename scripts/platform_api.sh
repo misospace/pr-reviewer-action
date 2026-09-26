@@ -239,6 +239,28 @@ platform_pr_review_comments() {
   fi
 }
 
+platform_review_threads() {
+  # $1=repo $2=pr_number → up to the 100 most recent inline review threads,
+  # normalized to {thread_id,path,line,original_line,resolved,outdated,
+  # comments:[{id,user,created_at,updated_at,body}]} for review_threads.py
+  # (#766). GitHub exposes threads and their resolution state only through
+  # GraphQL; Forgejo groups review comments by path and position instead.
+  if _platform_fixture_enabled; then
+    printf '[]\n'
+    return 0
+  fi
+  if _platform_is_forgejo; then
+    _forgejo_py list-review-threads "$1" "$2"
+  else
+    local repo="$1" num="$2"
+    local owner="${repo%%/*}" name="${repo#*/}"
+    platform_graphql \
+      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }' \
+      -f owner="$owner" -f name="$name" -F number="$num" |
+      jq '[.data.repository.pullRequest.reviewThreads.nodes[] | {thread_id: .id, path: (.path // ""), line: .line, original_line: .originalLine, resolved: (.isResolved // false), outdated: (.isOutdated // false), comments: [.comments.nodes[] | {id: .databaseId, user: (.author.login // ""), created_at: (.createdAt // ""), updated_at: (.updatedAt // ""), body: (.body // "")}]}]'
+  fi
+}
+
 platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
   if _platform_fixture_enabled; then

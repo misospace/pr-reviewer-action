@@ -369,10 +369,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": (
             "Search the repository's file contents with git grep. Returns up "
             "to 60 matching lines as file:lineno:content (fewer when "
-            "max_results is set, at most 200). Patterns use basic-regex "
-            "semantics, so metacharacters such as '.' and '*' are active — "
-            "escape them (e.g. '\\.env') to search literally. The optional "
-            "path scopes the search to a repository subtree."
+            "max_results is set, at most 200). Patterns are extended "
+            "regular expressions ('a|b' alternates; escape '.', '(' etc. "
+            "to match literally); an invalid regex is retried as a fixed "
+            "string. The optional path scopes the search to a repository "
+            "subtree."
         ),
         "parameters": {
             "type": "object",
@@ -380,8 +381,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "pattern": {
                     "type": "string",
                     "description": (
-                        "Basic-regex pattern (metacharacters such as '.' and "
-                        "'*' are active; escape them for a literal search)."
+                        "Extended-regex pattern ('a|b' alternates; escape "
+                        "metacharacters for a literal search)."
                     ),
                 },
                 "path": {
@@ -987,8 +988,13 @@ class Conversation:
         for e in self.events:
             kind = e["kind"]
             if kind == "user":
-                _flush_tool_results()
-                messages.append({"role": "user", "content": e["content"]})
+                # A user turn straight after tool results (the verdict turn)
+                # rides in the same message as a trailing text block —
+                # Anthropic rejects adjacent user turns.
+                if pending_tool_results:
+                    pending_tool_results.append({"type": "text", "text": e["content"]})
+                else:
+                    messages.append({"role": "user", "content": e["content"]})
             elif kind == "assistant_text":
                 _flush_tool_results()
                 messages.append(

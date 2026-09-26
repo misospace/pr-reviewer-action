@@ -1,0 +1,40 @@
+{
+  "system": "sys",
+  "ops": [
+    {
+      "op": "add_user",
+      "content": "context"
+    },
+    {
+      "op": "add_turn_note",
+      "content": "budget note"
+    },
+    {
+      "op": "add_assistant_text",
+      "content": "review"
+    }
+  ],
+  "emit": [
+    {
+      "apiFormat": "openai",
+      "model": "m",
+      "options": {
+        "verdictTurn": true,
+        "keepFullHistoryOnVerdict": false,
+        "responseFormat": "json_object",
+        "tokensParam": "max_completion_tokens",
+        "temperature": null
+      }
+    },
+    {
+      "apiFormat": "openai",
+      "model": "m",
+      "options": {
+        "verdictTurn": true,
+        "keepFullHistoryOnVerdict": true,
+        "responseFormat": "json_schema",
+        "temperature": 0.1
+      }
+    }
+  ]
+}
