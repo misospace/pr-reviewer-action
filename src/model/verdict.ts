@@ -321,10 +321,59 @@ function scanJsonValues(text: string): unknown {
   return null;
 }
 
+/** Double a backslash that starts no valid JSON escape inside a string
+ * (port of `_escape_invalid_backslashes`): a model's `\\_` or `\\*` breaks
+ * the outer object and the scanner would harvest nested findings instead. */
+function escapeInvalidBackslashes(text: string): string {
+  let result = "";
+  let inString = false;
+  let i = 0;
+  const length = text.length;
+  const isHex = (s: string): boolean => s.length === 4 && /^[0-9a-fA-F]{4}$/.test(s);
+  while (i < length) {
+    const ch = text[i]!;
+    if (inString && ch === "\\") {
+      const nxt = i + 1 < length ? text[i + 1]! : "";
+      if (nxt && '"\\/bfnrt'.includes(nxt)) {
+        result += ch + nxt;
+        i += 2;
+        continue;
+      }
+      if (nxt === "u" && isHex(text.slice(i + 2, i + 6))) {
+        result += text.slice(i, i + 6);
+        i += 6;
+        continue;
+      }
+      result += "\\\\";
+      i += 1;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+    result += ch;
+    i += 1;
+  }
+  return result;
+}
+
+function isCompleteVerdict(value: unknown): boolean {
+  return isRecord(value) && "verdict" in value && "review_markdown" in value;
+}
+
 function tryDecodeJson(text: string): unknown {
-  const parsed = scanJsonValues(text);
-  if (parsed !== null) return parsed;
-  return scanJsonValues(escapeRawNewlinesInStrings(text));
+  // Each repair pass runs only when the previous one found no complete
+  // verdict: a partial or nested candidate must not pre-empt a complete
+  // object that a repair would recover.
+  const first = scanJsonValues(text);
+  if (isCompleteVerdict(first)) return first;
+  const unwrapped = escapeRawNewlinesInStrings(text);
+  const second = scanJsonValues(unwrapped);
+  if (isCompleteVerdict(second)) return second;
+  const third = scanJsonValues(escapeInvalidBackslashes(unwrapped));
+  if (isCompleteVerdict(third)) return third;
+  for (const candidate of [first, second, third]) {
+    if (candidate !== null) return candidate;
+  }
+  return null;
 }
 
 function finishReasonOf(response: Record<string, unknown>): string | null {
