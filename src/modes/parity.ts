@@ -109,6 +109,16 @@ export function runVerdictParserMode(responsePath: string): void {
           rationale: disposition.rationale,
         }));
     }
+    // #766 thread dispositions: same tri-state mirroring as above.
+    if (verdict.threadDispositionsEmitted) {
+      parsed.thread_dispositions = verdict.threadDispositions === null
+        ? null
+        : verdict.threadDispositions.map((disposition) => ({
+          thread_id: disposition.threadId,
+          disposition: disposition.disposition,
+          evidence: disposition.evidence,
+        }));
+    }
     // #721 structured escalation request: emitted explicitly (snake_case)
     // so the parity comparison pins the normalized fields, not raw extras.
     parsed.smart_review_requested = verdict.smartReviewRequested;

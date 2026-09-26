@@ -31,6 +31,7 @@ import {
   trustFramingOverhead,
 } from "./repo-map.js";
 import { renderPrThread } from "./pr-thread.js";
+import { enforcementView, prepareThreads, renderReviewThreads } from "./review-threads.js";
 import {
   buildRelatedContext,
   MAX_MARKDOWN_BYTES as MAX_MARKDOWN_BYTES_DEFAULT,
@@ -149,6 +150,29 @@ export function runPrThreadFixture(fixturePath: string): { ok: boolean; values?:
     "max_bytes" in fixture ? (fixture.max_bytes as number) : undefined,
   );
   return { ok: true, values: { markdown } };
+}
+
+// --- Review threads (#766) ---------------------------------------------------
+
+interface ReviewThreadsFixture extends FixtureRecord {
+  threads?: unknown[];
+  marker?: string;
+  max_threads?: number;
+  max_bytes?: number;
+}
+
+export function runReviewThreadsFixture(fixturePath: string): { ok: boolean; values?: Record<string, string>; stderr?: string } {
+  const fixture = loadFixture(fixturePath) as ReviewThreadsFixture;
+  const threads = prepareThreads(
+    Array.isArray(fixture.threads) ? fixture.threads : [],
+    "marker" in fixture ? (fixture.marker as string) : undefined,
+  );
+  const [markdown, rendered] = renderReviewThreads(
+    threads,
+    "max_threads" in fixture ? (fixture.max_threads as number) : undefined,
+    "max_bytes" in fixture ? (fixture.max_bytes as number) : undefined,
+  );
+  return { ok: true, values: { markdown, view: pythonJsonStringify(enforcementView(rendered)) } };
 }
 
 // --- Related code -------------------------------------------------------------------

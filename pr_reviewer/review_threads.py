@@ -51,7 +51,7 @@ SECTION_HEADER = "# Unresolved Review Threads"
 # "**🛑 Blocker (bug):** message" — the inline-comment shape
 # build_review_comments.py emits. The label word is what carries severity.
 _FINDING_LABEL_RE = re.compile(
-    r"^\*\*[^\w*]*(blocker|major|minor|info)\b[^*]*\*\*:?\s*", re.IGNORECASE
+    r"^\*\*[^A-Za-z0-9_*]*(blocker|major|minor|info)(?![A-Za-z0-9_])[^*]*\*\*:?\s*", re.IGNORECASE
 )
 _MAX_MESSAGE_CHARS = 500
 
@@ -221,7 +221,7 @@ def enforcement_view(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for thread in threads:
         root = thread["comments"][0]
         if root["own"]:
-            severity, message = _finding_fields(root["body"])
+            severity, message = _finding_fields(_clean_body(root["body"]))
         else:
             severity, message = "minor", " ".join(_clean_body(root["body"]).split())[:_MAX_MESSAGE_CHARS]
         view.append(

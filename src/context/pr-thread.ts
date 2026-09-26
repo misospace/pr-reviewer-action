@@ -21,7 +21,7 @@ export const MAX_BYTES_DEFAULT = 8000;
  * cannot be forged. */
 export const DEFAULT_MANAGED_MARKER = "<!-- ai-pr-review";
 
-const MANAGED_MARKER_RE = /<!--(?:\s|\u200b)*ai-pr-review/;
+export const MANAGED_MARKER_RE = /<!--(?:\s|\u200b)*ai-pr-review/;
 const MARKER_LINE_RE = /<!--(?:\s|\u200b)*ai-pr-review[^>]*-->/g;
 const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
@@ -37,14 +37,14 @@ export interface PrThreadComment {
   body: string;
 }
 
-function headerField(value: unknown): string {
+export function headerField(value: unknown): string {
   let text = String(value ?? "");
   text = text.replaceAll("\r\n", " ").replaceAll("\r", " ").replaceAll("\n", " ");
   text = text.replace(CONTROL_RE, "");
   return text.trim().slice(0, HEADER_FIELD_MAX_CHARS);
 }
 
-interface SortKey {
+export interface SortKey {
   parsed: 0 | 1;
   moment: number;
   raw: string;
@@ -56,7 +56,7 @@ interface SortKey {
  * the raw string. Failures degrade deterministically: every unparseable
  * stamp sorts after parseable ones, tie-broken by the raw string. Naive
  * stamps (no timezone) are read as UTC, like the v2 module. */
-function parseTimestamp(value: unknown): SortKey {
+export function parseTimestamp(value: unknown): SortKey {
   const text = String(value ?? "").trim();
   if (text !== "") {
     const normalized = text.replace(/Z$/, "+00:00");
@@ -67,7 +67,7 @@ function parseTimestamp(value: unknown): SortKey {
   return { parsed: 1, moment: 0, raw: text };
 }
 
-function compareKeys(a: SortKey, b: SortKey): number {
+export function compareKeys(a: SortKey, b: SortKey): number {
   if (a.parsed !== b.parsed) return a.parsed - b.parsed;
   if (a.parsed === 0) {
     if (a.moment !== b.moment) return a.moment - b.moment;
@@ -78,7 +78,7 @@ function compareKeys(a: SortKey, b: SortKey): number {
 }
 
 /** Project one raw comment (GitHub or Forgejo shape) to the builder shape. */
-function normalizeComment(raw: unknown): PrThreadComment | null {
+export function normalizeComment(raw: unknown): PrThreadComment | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const rec = raw as Record<string, unknown>;
   const user = rec.user;
@@ -100,7 +100,7 @@ function normalizeComment(raw: unknown): PrThreadComment | null {
   };
 }
 
-function idSortString(id: unknown): string {
+export function idSortString(id: unknown): string {
   // Python `str(None)` is "None"; ids arrive from JSON as numbers/strings.
   if (id === null || id === undefined) return "None";
   if (typeof id === "boolean") return id ? "True" : "False";
@@ -138,7 +138,7 @@ export function filterComments(comments: readonly PrThreadComment[], marker: str
   return comments.filter((c) => !isManaged(c.body) && c.body.trim() !== "");
 }
 
-function cleanBody(body: string): string {
+export function cleanBody(body: string): string {
   let cleaned = body.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   cleaned = cleaned.replace(MARKER_LINE_RE, "");
   cleaned = cleaned.replace(CONTROL_RE, "");
@@ -154,7 +154,7 @@ function truncateBody(body: string): string {
 }
 
 /** Wrap body in a fence its own backtick runs cannot terminate. */
-function fence(body: string): string {
+export function fence(body: string): string {
   let longest = 0;
   for (const run of body.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
   const delimiter = "`".repeat(Math.max(3, longest + 1));
