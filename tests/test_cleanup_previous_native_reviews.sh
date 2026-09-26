@@ -412,6 +412,15 @@ check "resolve mutation runs for T4" "$(grep -c 'resolveReviewThread.*-f id=T4' 
 check "already-resolved thread is skipped" "$(grep -c 'resolveReviewThread.*-f id=T2' "$THREAD_LOG" || true)" "0"
 check "human thread is never touched" "$(grep -c 'resolveReviewThread.*-f id=T3' "$THREAD_LOG" || true)" "0"
 check "one thread listing query" "$(grep -c 'reviewThreads' "$THREAD_LOG" || true)" "1"
+sed -i.bak 's/  \*resolveReviewThread\*) echo .*/  *resolveReviewThread*) exit 1 ;;/' "$THREADS_TMP/bin/gh"
+FAIL_OUTPUT="$(
+  PATH="$THREADS_TMP/bin:$PATH" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=9 COMMENT_MARKER="<!-- my-marker -->" \
+  bash -c 'set -euo pipefail; source "'"$HELPER_SCRIPT"'"; cleanup_native_reviews true; echo CLEANUP_DONE' 2>&1
+)"
+check_contains "failed resolve warns" "$FAIL_OUTPUT" "WARN: Could not resolve review thread T1"
+check_contains "failed resolve never aborts cleanup" "$FAIL_OUTPUT" "CLEANUP_DONE"
+check_not_contains "no success count when every resolve fails" "$FAIL_OUTPUT" "superseded review thread(s)"
 rm -rf "$THREADS_TMP"
 
 echo ""
