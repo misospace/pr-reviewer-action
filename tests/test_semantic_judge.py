@@ -579,7 +579,11 @@ class TestLoadCalibrationCorpus:
     def test_real_file(self):
         corpus = load_calibration_corpus(CORPUS_PATH)
         assert corpus["version"] == 1
-        assert len(corpus["scenarios"]) == 10
+        # #659 family (6541-6550) plus the #757 falsification family (7571-7584).
+        assert len(corpus["scenarios"]) == 24
+        numbers = {s["number"] for s in corpus["scenarios"]}
+        assert {6541, 6550} <= numbers
+        assert {7571, 7584} <= numbers
 
     def test_bad_json_raises_semantic_judge_error(self, tmp_path):
         bad = tmp_path / "corpus.json"

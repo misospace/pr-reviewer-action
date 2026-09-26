@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -48,7 +49,7 @@ from pr_reviewer.semantic_eval import (
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
-from eval_harness import ReviewRun
+from eval_harness import BenchmarkResult, ReviewRun, evaluate_live_semantics
 
 CORPUS = ROOT / "evals" / "corpus-historical-dogfood.json"
 RUNNER = ROOT / "scripts" / "run_semantic_eval_ci.py"
@@ -360,9 +361,14 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
     # #750 adds scenarios 7480 (ungrounded-N/A converse) and 7481 (grounded-N/A
-    # clean-shape negative control) to the historical corpus.
-    assert payload["scenarios_evaluated"] == 24
+    # clean-shape negative control) to the historical corpus; #757 adds the
+    # counterexample-falsification family 7571-7584.
+    assert payload["scenarios_evaluated"] == 38
     assert {"6551", "6552", "6553", "6891", "6892", "7480", "7481"} <= payload["per_scenario_summary"].keys()
+    assert {"7571", "7572", "7573", "7574", "7575", "7576", "7577", "7578",
+            "7579", "7580", "7581", "7582", "7583", "7584"} <= payload["per_scenario_summary"].keys()
+    assert payload["per_scenario_summary"]["7571"]["pass_rate"] == 1.0
+    assert payload["summary"]["falsification"]["counterexample_found_rate"] == 1.0
     assert payload["per_scenario_summary"]["7480"]["pass_rate"] == 1.0
     assert payload["per_scenario_summary"]["7480"]["disposition_calibration_rate"] == 1.0
     assert payload["per_scenario_summary"]["7481"]["negative_control"] is True
@@ -1353,10 +1359,12 @@ def test_661_report_telemetry_carries_disposition_counts() -> None:
     assert counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 0
     assert counts[DISPOSITION_CORRECT] > 0
     # The answer key itself is reported separately, fully recognized.
-    assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 1
+    # (#757 adds a second suppressed answer key and fourteen not-found
+    # coherence-only / attempted-not-found calibration fixtures.)
+    assert calibration_counts[DISPOSITION_SUPPRESSED_PRE_EXISTING] == 2
     assert calibration_counts[DISPOSITION_INVALID_REMEDIATION] == 3
     assert calibration_counts[DISPOSITION_SPECULATIVE_FALSE_POSITIVE] == 1
-    assert calibration_counts[DISPOSITION_NOT_FOUND] == 2
+    assert calibration_counts[DISPOSITION_NOT_FOUND] == 16
     assert calibration_counts[DISPOSITION_CORRECT] == 3
     assert report["summary"]["calibration_fixture_runs"] == sum(calibration_counts.values())
     assert report["summary"]["disposition_calibration_rate"] == 1.0
@@ -1485,3 +1493,316 @@ def test_661_matching_is_punctuation_robust_but_not_paraphrase_permissive() -> N
         "looks fine, cleanup is probably handled elsewhere",
     ):
         assert classify_signal(paraphrase) is None, paraphrase
+
+
+# ---------------------------------------------------------------------------
+# #757 counterexample-driven falsification
+# ---------------------------------------------------------------------------
+
+POSITIVE_757 = {
+    7571: "boundary_scope_leak",
+    7573: "information_loss_ordering",
+    7575: "cooccurrence_false_flow",
+    7577: "incidental_positive_fixture",
+    7579: "information_loss_ordering",
+    7581: "boundary_scope_leak",
+    7583: "cooccurrence_false_flow",
+}
+NEGATIVE_757 = {
+    7572: "boundary_scope_leak",
+    7574: "information_loss_ordering",
+    7576: "cooccurrence_false_flow",
+    7578: "incidental_positive_fixture",
+    7580: "information_loss_ordering",
+    7582: "boundary_scope_leak",
+    7584: "cooccurrence_false_flow",
+}
+
+
+def _evaluate_757_run(item, run: dict):
+    """Evaluate one offline run of a #757 scenario through the real signals."""
+    signals = _collect_signals_from_run({
+        "stage": run.get("stage", "primary"),
+        "route": run.get("route", "primary"),
+        "review_markdown": run.get("review_markdown", ""),
+        "findings": run.get("findings", []),
+        "tool_calls": run.get("tool_calls", []),
+    })
+    metadata = {
+        "mode": run.get("mode", "standard"),
+        "route": run.get("route", "primary"),
+        "stage": run.get("stage", "primary"),
+    }
+    if "expected_disposition" in run:
+        metadata["expected_disposition"] = run["expected_disposition"]
+    return evaluate_semantic_capability(item, signals, metadata)
+
+
+def test_757_capability_classes_are_registered() -> None:
+    from pr_reviewer.semantic_eval import KNOWN_CAPABILITY_CLASSES
+
+    assert set(POSITIVE_757.values()) <= KNOWN_CAPABILITY_CLASSES
+    corpus = SemanticCorpus.from_file(CORPUS)
+    numbers = {item.number for item in corpus.scenarios}
+    assert set(POSITIVE_757) | set(NEGATIVE_757) <= numbers
+    for item in corpus.scenarios:
+        if item.number in NEGATIVE_757:
+            assert item.negative_control is True
+            assert item.forbidden_capabilities == [NEGATIVE_757[item.number]]
+            assert item.expected_capabilities == []
+            # #757: negative controls cannot declare a falsification
+            # contract — their success state is the absence of a false
+            # attribution, not a counterexample.
+            assert item.falsification_expectations == {}
+        if item.number in POSITIVE_757:
+            assert item.expected_capabilities == [POSITIVE_757[item.number]]
+            assert set(item.falsification_expectations) == {"boundary_any_of", "counterexample_any_of"}
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_757))
+def test_757_good_runs_pass_and_construct_the_counterexample(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        if "expected_disposition" in run:
+            continue
+        result = _evaluate_757_run(item, run)
+        assert result.passed, (number, result.falsification_violations, result.disposition)
+        assert result.disposition == DISPOSITION_CORRECT
+        assert result.boundary_understood is True
+        assert result.counterexample_attempted is True
+        assert result.counterexample_found is True
+        assert result.finding_correct is True
+        assert POSITIVE_757[number] in result.capability_hits
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_757))
+def test_757_coherence_only_approval_is_never_a_pass(number: int) -> None:
+    """Restating the design with green tests must not satisfy the scenario."""
+    item = scenario(number)
+    coherence = [
+        run for run in item.offline_runs
+        if run.get("expected_disposition") == DISPOSITION_NOT_FOUND
+    ]
+    assert coherence, number
+    for run in coherence:
+        result = _evaluate_757_run(item, run)
+        assert result.calibration_run is True
+        assert result.disposition_calibration_pass is True, (number, result.disposition)
+        assert result.disposition == DISPOSITION_NOT_FOUND
+        assert result.passed is False
+        if "counterexamples" not in run["review_markdown"] and "counterexample" not in run["review_markdown"]:
+            assert result.counterexample_attempted is False, number
+        assert result.counterexample_found is False, number
+
+
+@pytest.mark.parametrize("number", sorted(POSITIVE_757))
+def test_757_generic_attempt_without_the_concrete_counterexample_fails(number: int) -> None:
+    """Attempt cues alone are telemetry: found stays False and the run misses."""
+    item = scenario(number)
+    needles = item.falsification_expectations["counterexample_any_of"]
+    review = (
+        "I tried counterexamples around the changed boundary and the tests cover"
+        " both sides; CI is green and parity holds. Approve."
+    )
+    result = _evaluate_757_run(item, {
+        "mode": "standard", "stage": "primary", "route": "primary",
+        "review_markdown": review,
+    })
+    assert result.counterexample_attempted is True
+    assert result.counterexample_found is False
+    assert result.passed is False
+    assert result.falsification_violations == ["counterexample_not_found"]
+    # The needles genuinely do not appear, so the fixture is honest about it.
+    assert not any(needle in review.casefold() for needle in needles)
+
+
+def test_757_boundary_comprehension_alone_records_but_does_not_pass() -> None:
+    item = scenario(7571)
+    boundary_needles = item.falsification_expectations["boundary_any_of"]
+    review = (
+        "The source-detection boundary is the classification of untrusted path"
+        " operands; the unit tests cover the untrusted and static sides, CI is"
+        " green, and the parity of inputs and outputs matches the design."
+        " Approve."
+    )
+    assert any(needle in review.casefold() for needle in boundary_needles)
+    result = _evaluate_757_run(item, {
+        "mode": "standard", "stage": "primary", "route": "primary",
+        "review_markdown": review,
+    })
+    assert result.boundary_understood is True
+    assert result.counterexample_found is False
+    assert result.passed is False
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_757))
+def test_757_fixed_controls_stay_clean(number: int) -> None:
+    item = scenario(number)
+    for run in item.offline_runs:
+        result = _evaluate_757_run(item, run)
+        assert result.passed, (number, result.forbidden_violations)
+        assert result.forbidden_violations == []
+        assert result.boundary_understood is None
+        assert result.counterexample_found is None
+
+
+@pytest.mark.parametrize("number", sorted(NEGATIVE_757))
+def test_757_controls_reject_their_vulnerability(number: int) -> None:
+    vulnerable = _run_finding_text(scenario(number - 1))
+    result = evaluate_semantic_capability(
+        scenario(number),
+        [ReviewSignal(SIGNAL_KIND_FINDING, "primary", vulnerable)],
+        {"mode": "standard", "route": "primary", "stage": "primary"},
+    )
+    assert not result.passed
+    assert NEGATIVE_757[number] in result.capability_hits
+
+
+def test_757_suppressed_pre_existing_stays_a_miss_under_falsification() -> None:
+    item = scenario(7571)
+    run = next(
+        run for run in item.offline_runs
+        if run.get("expected_disposition") == DISPOSITION_SUPPRESSED_PRE_EXISTING
+    )
+    result = _evaluate_757_run(item, run)
+    assert result.disposition_calibration_pass is True
+    assert result.disposition == DISPOSITION_SUPPRESSED_PRE_EXISTING
+    assert result.passed is False
+
+
+def test_757_counterexample_matching_is_punctuation_robust() -> None:
+    item = scenario(7573)
+    review = (
+        "The traversal boundary is checked before normalization. Counterexample:"
+        " resolve(`%2e%2e/secret`) escapes the base — the percent-encoded payload"
+        " decodes after the check."
+    )
+    result = _evaluate_757_run(item, {
+        "mode": "standard", "stage": "primary", "route": "primary",
+        "review_markdown": review,
+    })
+    assert result.counterexample_found is True
+    assert result.boundary_understood is True
+
+
+def test_757_report_summary_carries_falsification_telemetry() -> None:
+    report = evaluate_semantic_corpus(SemanticCorpus.from_file(CORPUS))
+    falsification = report["summary"]["falsification"]
+    assert falsification["scenarios"] == len(POSITIVE_757)
+    for key in (
+        "boundary_understood_rate", "counterexample_attempted_rate",
+        "counterexample_found_rate", "finding_correct_rate",
+    ):
+        assert falsification[key] == 1.0, key
+    assert falsification["clean_control_preserved_rate"] == 1.0
+    # Per-scenario aggregates carry the same block; control scenarios None.
+    by_number = {item["scenario_number"]: item for item in report["scenarios"]}
+    assert by_number[7571]["falsification"]["counterexample_found_rate"] == 1.0
+    assert by_number[7572]["falsification"] is None
+
+
+def test_757_schema_rejects_bad_falsification_expectations() -> None:
+    from pr_reviewer.semantic_eval import SemanticCorpusError
+
+    good = {
+        "number": 9001, "repo_full_name": "o/r", "url": "https://example/pull/1",
+        "title": "t", "provenance": {"pr_url": "https://example/pull/1", "issue": 1},
+        "class": "boundary_scope_leak", "expected_capabilities": ["boundary_scope_leak"],
+        "expected_evidence_anchors": [{"id": "a", "kind": "finding", "any_of": ["x"]}],
+        "repo": None,
+    }
+
+    def validate(expectations):
+        entry = dict(good)
+        entry["falsification_expectations"] = expectations
+        scenario_obj = SemanticScenario.from_dict(entry)
+        corpus = SemanticCorpus(scenarios=[scenario_obj])
+        with pytest.raises(SemanticCorpusError):
+            validate_semantic_corpus(corpus)
+
+    validate({"boundary_any_of": ["x"]})                      # missing counterexample key
+    validate({"counterexample_any_of": ["x"]})                # missing boundary key
+    validate({"boundary_any_of": [], "counterexample_any_of": ["x"]})   # empty list
+    validate({"boundary_any_of": ["x"], "counterexample_any_of": ["x"], "extra": ["y"]})  # unknown key
+    validate({"boundary_any_of": ["x"], "counterexample_any_of": [{}]})  # non-string entry
+
+
+def test_757_schema_rejects_falsification_contract_on_negative_control() -> None:
+    entry = {
+        "number": 9002, "repo_full_name": "o/r", "url": "https://example/pull/1",
+        "title": "t", "provenance": {"pr_url": "https://example/pull/1", "issue": 1},
+        "class": "negative_control", "expected_capabilities": [],
+        "forbidden_capabilities": ["boundary_scope_leak"],
+        "negative_control": True,
+        "falsification_expectations": {"boundary_any_of": ["x"], "counterexample_any_of": ["y"]},
+    }
+    corpus = SemanticCorpus(scenarios=[SemanticScenario.from_dict(entry)])
+    with pytest.raises(SemanticCorpusError):
+        validate_semantic_corpus(corpus)
+
+
+def test_757_live_semantics_falsification_block_matches_offline() -> None:
+    """The live path (evaluate_live_semantics) must produce the same
+    summary.falsification block as the offline gate for the same outputs —
+    the A/B compares arms through the live path, so a shape drift between
+    the two evaluators would silently invalidate the comparison."""
+    corpus = SemanticCorpus.from_file(CORPUS)
+    offline = evaluate_semantic_corpus(corpus)
+    # Feed each offline REVIEWER run back through the live path. Calibration
+    # (answer-key) fixtures are excluded: the live path never sees
+    # expected_disposition, so it would count answer keys as reviewer misses
+    # — comparing those populations would be meaningless, not a drift.
+    results = []
+    for item in corpus.scenarios:
+        runs = []
+        for fixture in item.offline_runs:
+            if "expected_disposition" in fixture:
+                continue
+            run = ReviewRun(mode=fixture.get("mode", "standard"), pr_number=item.number,
+                            repo_full_name=item.repo_full_name)
+            run.review_markdown = fixture.get("review_markdown", "")
+            run.findings = fixture.get("findings", [])
+            run.tool_calls = fixture.get("tool_calls", [])
+            run.stage = fixture.get("stage", "primary")
+            run.route = fixture.get("route", "primary")
+            runs.append(run)
+        results.append(BenchmarkResult(pr_number=item.number, repo_full_name=item.repo_full_name, runs=runs))
+    live = evaluate_live_semantics(corpus, results)
+    assert live["summary"]["falsification"] == offline["summary"]["falsification"]
+
+
+def test_757_fixtures_pass_their_own_test_suites() -> None:
+    """The #756 premise is 'supplied tests are green, the defect is nearby'.
+
+    A fixture whose bundled tests FAIL breaks that premise: a reviewer run
+    against it would file the failing test as the finding instead of
+    constructing the counterexample the scenario targets. Every #757
+    fixture must therefore pass its own tests (the negative controls are
+    the FIXED implementations and must pass too).
+    """
+    for number in sorted(POSITIVE_757) + sorted(NEGATIVE_757):
+        fixture = json.loads((ROOT / "evals" / "historical-dogfood" / f"{number}.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(prefix=f"fixture-{number}-") as directory:
+            repo = Path(directory)
+            for entry in fixture["files"]:
+                target = repo / entry["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(entry["content"], encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests", "-q", "--no-header", "-x"],
+                cwd=repo, capture_output=True, text=True, timeout=120,
+            )
+            assert result.returncode == 0, (number, result.stdout[-2000:])
+
+
+def test_757_falsification_rates_are_none_without_a_contract() -> None:
+    item = scenario(623)  # pre-#757 scenario: no falsification contract
+    result = _evaluate_757_run(item, item.offline_runs[0])
+    assert result.boundary_understood is None
+    assert result.counterexample_attempted is None
+    assert result.counterexample_found is None
+    # finding_correct is disposition-derived and computed on every vulnerable
+    # scenario, contract or not.
+    assert result.finding_correct is True
+    aggregate = aggregate_semantic_runs(item, [result])
+    assert aggregate["falsification"] is None

@@ -119,6 +119,70 @@ only) — explains *why* the run found or missed the defect:
 Live runs never declare `expected_disposition`, so every live run is a
 reviewer run; its disposition is telemetry.
 
+## Counterexample-falsification scoring (#757)
+
+Scenarios may declare a `falsification_expectations` contract:
+`boundary_any_of` (needles showing the reviewer named the changed decision
+boundary) and `counterexample_any_of` (needles showing a concrete falsifying
+input for THIS scenario was constructed). The scorer emits per-run telemetry —
+`boundary_understood`, `counterexample_attempted` (found, or a generic attempt
+cue fired), `counterexample_found`, `finding_correct` — and on vulnerable
+scenarios **passes a run only when `counterexample_found` is true**: restating
+the intended design, citing green tests, or observing parity hits the boundary
+needles but is never a pass (the #756 verification-by-coherence failure).
+`counterexample_attempted` stays telemetry so a treatment-vs-baseline A/B can
+measure attempt rate separately from success. Four capability classes carry
+the failure mechanisms: `boundary_scope_leak`, `information_loss_ordering`,
+`cooccurrence_false_flow`, `incidental_positive_fixture`. The report summary's
+`falsification` block aggregates the rates (scenarios without a contract
+contribute nothing, never a zero) plus `clean_control_preserved_rate` (the
+fraction of negative-control scenarios with zero false attributions). The
+#757 fixtures in `evals/corpus-historical-dogfood.json` (7571–7584) cover the
+four PR #756-derived path-domain classes plus parser/normalizer, auth/policy,
+and state/retry cross-domain pairs, each with a fixed negative control; the
+prompt treatment (`scripts/prompt_fragments/falsification.txt`, gated on
+code-touching pr_kinds) was measured by a live A/B over this corpus
+(#758, MiniMax-M3-chat, tools_off, 3 reps x 14 scenarios per arm, 84
+reviewer runs) with the calibrated judge instrument: vulnerable-fixture
+detection 23.8% -> 42.9% (+19.1pp, `counterexample_attempted` 0% -> 71%)
+while the negative-control false-positive rate fell 47.6% -> 42.9% —
+so the treatment shipped; re-run the A/B before changing the fragment.
+The A/B arms run the same corpus through the same harness;
+`scripts/eval_harness.py --system-prompt-file` pins an arm's prompt
+verbatim (replace mode, no fragment substitution). The baseline arm must
+therefore be
+**main's fully assembled prompt for the eval conditions** — not the raw
+placeholder-stripped file, which would silently drop the related-code and
+PR-thread guidance the treatment arm keeps and make the comparison invalid.
+Materialize it through main's own assembler:
+
+```bash
+git worktree add /tmp/757-baseline main
+( cd /tmp/757-baseline
+  SCRIPT_DIR=/tmp/757-baseline/scripts
+  sed -n '/^apply_system_prompt_fragments()/,/^}/p' "$SCRIPT_DIR/sections/config.sh" > /tmp/asm.sh
+  printf '{"pr_kind":"app_code"}' > classification.json
+  source /tmp/asm.sh
+  SYSTEM_PROMPT="$(<scripts/default_system_prompt.txt)" SYSTEM_PROMPT_IS_DEFAULT=1 \
+    RELATED_CODE_CONTEXT=true PR_THREAD_CONTEXT=true REVIEW_VERBOSITY=normal
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" > /tmp/baseline-prompt.txt )
+git worktree remove /tmp/757-baseline
+# treatment arm: no override (the branch's bundled prompt assembles itself)
+python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
+    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" --output eval-report/treatment.json
+# baseline arm: same corpus, same harness, prompt pinned to main's assembly
+python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
+    --modes tools_off --runs-per-mode 5 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --api-key "$AI_API_KEY" --github-token "$GITHUB_TOKEN" \
+    --system-prompt-file /tmp/baseline-prompt.txt --output eval-report/baseline.json
+```
+
+Compare the reports' `summary.falsification` blocks
+(`counterexample_attempted_rate`, `counterexample_found_rate`,
+`finding_correct_rate`) and the negative-control `false_positive_rate`.
+
 ## Semantic judge instrument (on-demand; never in normal CI)
 
 The deterministic scorer above stays the CI regression gate. Because a curated

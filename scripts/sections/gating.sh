@@ -154,7 +154,8 @@ SPECIALIST_GATE_LOG="specialists.phase.log"
 
 # Overridable branch entrypoint (tests substitute a fake-delay stub).
 specialist_command() {
-  python3 "$SCRIPT_DIR/run_specialists.py" --corpus specialist-corpus.md
+  python3 "$SCRIPT_DIR/run_specialists.py" --corpus specialist-corpus.md \
+    ${_ADVERSARIAL_CORPUS_ARGS:-}
 }
 
 # Overridable specialist-corpus build (tests substitute a no-op stub). Fail-soft:
@@ -165,6 +166,21 @@ build_specialist_corpus_command() {
     --workspace "${GITHUB_WORKSPACE:-$(pwd)}" \
     --output specialist-corpus.md \
     --max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES"
+}
+
+# #758: optional author-blinded adversarial corpus for the correctness role.
+# Benchmark-only knob (default off, never set by any action input): when
+# truthy, a second corpus is built in adversarial_correctness mode and handed
+# to run_specialists.py, which runs the CORRECTNESS role blinded (title/goal,
+# classification, changed files, diff, related code — no PR body, author,
+# linked-issue/ledger prose, standards, or CI/evidence) with the adversarial
+# prompt variant. Security/tests keep the standard corpus either way.
+build_adversarial_corpus_command() {
+  python3 "$SCRIPT_DIR/build_specialist_corpus.py" \
+    --workspace "${GITHUB_WORKSPACE:-$(pwd)}" \
+    --output specialist-corpus-adversarial.md \
+    --max-bytes "$DEEP_REVIEW_CORPUS_MAX_BYTES" \
+    --mode adversarial_correctness
 }
 
 # Build the compact #632 pre-final specialist corpus, then fork the selected
@@ -190,6 +206,15 @@ fork_specialist_gate() {
   if ! build_specialist_corpus_command; then
     error "specialist corpus build failed; specialists will record an input error"
     : > specialist-corpus.md
+  fi
+  _ADVERSARIAL_CORPUS_ARGS=""
+  if [[ "$(printf '%s' "${DEEP_REVIEW_ADVERSARIAL_CORRECTNESS:-false}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+    if build_adversarial_corpus_command; then
+      _ADVERSARIAL_CORPUS_ARGS="--adversarial-corpus specialist-corpus-adversarial.md"
+      log "deep_review: adversarial correctness corpus built — the correctness role runs blinded (title/goal, diff, changed files, related code)"
+    else
+      log "deep_review: adversarial corpus build failed; the correctness role falls back to the standard corpus"
+    fi
   fi
   specialist_command >"$SPECIALIST_GATE_LOG" 2>&1 &
   SPECIALIST_GATE_PID=$!

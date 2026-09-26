@@ -585,6 +585,8 @@ def _run_role(
     deadline: float,
     cancel: threading.Event,
     request_fn: Callable[..., Any],
+    system_variant: str = "",
+    corpus_source: str = "standard",
 ) -> dict[str, Any]:
     """Run one specialist role end-to-end and return its aggregate entry.
 
@@ -613,8 +615,15 @@ def _run_role(
         )
         overrun_retry = bool(overrun_cell)
         retry_max_tokens = overrun_cell[0] if overrun_cell else None
+
+        def tagged(entry: dict[str, Any]) -> dict[str, Any]:
+            # #758: which corpus (and prompt family) this role ran against —
+            # telemetry only, never a behavior switch downstream.
+            entry["corpus_source"] = corpus_source
+            return entry
+
         if cancel.is_set():
-            return _role_entry(
+            return tagged(_role_entry(
                 role, artifact, status="error",
                 error_kind=error_kind or "timeout",
                 elapsed_sec=time.monotonic() - started,
@@ -622,7 +631,7 @@ def _run_role(
                 request_bytes=request_bytes,
                 overrun_retry=overrun_retry,
                 retry_max_tokens=retry_max_tokens,
-            )
+            ))
         if not _guarded_write(
             workspace_root, f"specialist-{role}.json", _json_text(artifact),
             abort=cancel,
@@ -630,14 +639,14 @@ def _run_role(
             if cancel.is_set():
                 # The reaper won the race for this write and recorded the
                 # timeout; not a guard refusal.
-                return _role_entry(
+                return tagged(_role_entry(
                     role, artifact, status="error", error_kind="timeout",
                     elapsed_sec=time.monotonic() - started,
                     usage=usage,
                     request_bytes=request_bytes,
                     overrun_retry=overrun_retry,
                     retry_max_tokens=retry_max_tokens,
-                )
+                ))
             guard_artifact = _empty_artifact(role)
             guard_artifact["errors"].append(
                 "refused to write the role artifact: workspace escape or symlink"
@@ -648,26 +657,30 @@ def _run_role(
                 # Cannot even record the refusal (path itself is hostile);
                 # the entry still reports it.
                 pass
-            return _role_entry(
+            return tagged(_role_entry(
                 role, guard_artifact, status="error", error_kind="guard",
                 elapsed_sec=time.monotonic() - started,
                 usage=usage,
                 request_bytes=request_bytes,
                 overrun_retry=overrun_retry,
                 retry_max_tokens=retry_max_tokens,
-            )
-        return _role_entry(
+            ))
+        return tagged(_role_entry(
             role, artifact, status=status, error_kind=error_kind,
             elapsed_sec=time.monotonic() - started,
             usage=usage,
             request_bytes=request_bytes,
             overrun_retry=overrun_retry,
             retry_max_tokens=retry_max_tokens,
-        )
+        ))
 
     try:
         try:
-            system = load_specialist_prompt(role)
+            system = (
+                load_specialist_prompt(role, system_variant)
+                if system_variant
+                else load_specialist_prompt(role)
+            )
         except (OSError, ValueError) as exc:
             raise _RoleFailure("input", f"role prompt fragment unavailable: {redact_text(str(exc))}")
 
@@ -1110,6 +1123,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Bounded specialist corpus handed to every specialist role.",
     )
     parser.add_argument(
+        "--adversarial-corpus",
+        default="",
+        help=(
+            "#758: author-blinded adversarial corpus (built with "
+            "build_specialist_corpus.py --mode adversarial_correctness). When "
+            "non-empty and readable, the CORRECTNESS role runs against this "
+            "corpus with the adversarial prompt variant; security/tests keep "
+            "the standard corpus. Empty (default) keeps every role on the "
+            "standard corpus and the default prompts."
+        ),
+    )
+    parser.add_argument(
         "--workspace-root",
         default="",
         help="Root for all artifact writes (default: $GITHUB_WORKSPACE or cwd).",
@@ -1213,6 +1238,33 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     entries: list[dict[str, Any]] = []
     corpus, corpus_error, corpus_bytes = _read_corpus(args.corpus)
+    # #758: the adversarial-correctness corpus is optional and fail-soft — an
+    # unreadable/empty adversarial corpus keeps the correctness role on the
+    # standard corpus and the default prompt (never blocks the phase).
+    adversarial_corpus, adversarial_error, adversarial_bytes = ("", None, 0)
+    adversarial_active = False
+    if args.adversarial_corpus:
+        adversarial_corpus, adversarial_error, adversarial_bytes = _read_corpus(
+            args.adversarial_corpus
+        )
+        adversarial_active = bool(adversarial_corpus)
+        if adversarial_error and not adversarial_corpus:
+            print(
+                f"WARNING: adversarial corpus unreadable ({adversarial_error}); "
+                "correctness falls back to the standard corpus",
+                flush=True,
+            )
+    if adversarial_active and execution == "combined_scout":
+        # The #635 scout shares ONE call across roles with one user message;
+        # a per-role corpus cannot be expressed in that shape. Degrade loudly
+        # to three_call rather than silently feeding the correctness role the
+        # standard corpus.
+        execution = "three_call"
+        print(
+            "WARNING: adversarial correctness corpus is incompatible with "
+            "DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call",
+            flush=True,
+        )
     if corpus is None:
         # No corpus means no calls at all: every SELECTED role is recorded as
         # a soft input failure and skipped roles keep their skip telemetry;
@@ -1292,10 +1344,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                     )
 
             def _run_role_inner(role: str) -> dict[str, Any]:
-                return _run_role(
+                # #758: the correctness role runs blinded (adversarial corpus +
+                # adversarial prompt variant) when the adversarial corpus is
+                # active; security/tests always see the standard corpus and
+                # the default prompt.
+                role_user_message = user_message
+                system_variant = ""
+                corpus_source = "standard"
+                if role == "correctness" and adversarial_active:
+                    role_user_message = f"{_USER_PREFIX}\n\n{adversarial_corpus}"
+                    system_variant = "adversarial"
+                    corpus_source = "adversarial"
+                entry = _run_role(
                     role,
                     workspace_root=workspace_root,
-                    user_message=user_message,
+                    user_message=role_user_message,
+                    system_variant=system_variant,
+                    corpus_source=corpus_source,
                     base_url=base_url,
                     api_format=api_format,
                     model=model,
@@ -1310,6 +1375,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     cancel=cancels[role],
                     request_fn=metered_request_fn,
                 )
+                return entry
 
             threads_by_role: dict[str, threading.Thread] = {}
             for role in roles_to_run:
@@ -1418,6 +1484,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         "model": f"{model}@{base_url} ({api_format})",
         "aggregate_elapsed_sec": round(aggregate_elapsed, 3),
         "specialist_corpus_bytes": corpus_bytes,
+        # #758: whether the adversarial-correctness arm was active and which
+        # corpus the correctness role actually ran against.
+        "adversarial_correctness_active": adversarial_active,
+        "adversarial_corpus_bytes": adversarial_bytes if adversarial_active else None,
         "specialist_max_tokens": max_tokens,
         "total_leads": sum(entry["lead_count"] for entry in entries),
         # Skipped roles are telemetry, not failures: they never set
