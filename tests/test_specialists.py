@@ -894,3 +894,145 @@ def test_cli_rejects_output_outside_workspace(tmp_path):
     )
     assert rc == 1
     assert not outside.exists()
+
+
+# ── #758 adversarial-correctness contract ──────────────────────────────
+
+
+def test_major_lead_requires_trigger_and_consequence():
+    ok = normalize_specialist_output(
+        {"role": "correctness", "contract": "adversarial", "leads": [{
+            "severity": "major", "category": "bug", "file": "a.py", "line": 3,
+            "message": "m", "trigger": "input(x)", "consequence": "wrong(y)",
+        }]},
+        role="correctness",
+    )
+    assert ok["errors"] == []
+    assert ok["leads"][0]["trigger"] == "input(x)"
+    assert ok["leads"][0]["consequence"] == "wrong(y)"
+
+    missing = normalize_specialist_output(
+        {"role": "correctness", "contract": "adversarial", "leads": [
+            {"severity": "major", "category": "bug", "message": "no fields"},
+            {"severity": "major", "category": "bug", "message": "only trigger",
+             "trigger": "t"},
+        ]},
+        role="correctness",
+    )
+    assert all(lead["severity"] == "minor" for lead in missing["leads"])
+    assert len(missing["errors"]) == 2
+    assert "downgraded to minor" in missing["errors"][0]
+
+
+def test_default_contract_never_demotes_major_leads():
+    # The standard prompts do not request trigger/consequence, so majors
+    # without them must survive untouched.
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [
+            {"severity": "major", "message": "no fields"},
+        ]},
+        role="correctness",
+    )
+    assert result["leads"][0]["severity"] == "major"
+    assert result["errors"] == []
+    assert "trigger" not in result["leads"][0]
+
+
+def test_minor_lead_may_carry_trigger_and_consequence():
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [{
+            "severity": "minor", "message": "m", "trigger": "t",
+        }]},
+        role="correctness",
+    )
+    assert result["leads"][0]["trigger"] == "t"
+    assert "consequence" not in result["leads"][0]
+    assert result["errors"] == []
+
+
+def test_trigger_and_consequence_are_sanitized_and_bounded():
+    hostile = "x\rexploit" + "y" * 3000
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [{
+            "severity": "major", "message": "m",
+            "trigger": hostile, "consequence": "c",
+        }]},
+        role="correctness",
+    )
+    lead = result["leads"][0]
+    assert "\r" not in lead["trigger"]
+    assert len(lead["trigger"]) <= 2000
+
+
+def test_boundaries_challenged_clean_result():
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [], "boundaries_challenged": [
+            "path boundary: constant and comment probes held (RHS-only rule)",
+        ]},
+        role="correctness",
+    )
+    assert result["boundaries_challenged"] == [
+        "path boundary: constant and comment probes held (RHS-only rule)"
+    ]
+    assert result["errors"] == []
+
+
+def test_boundaries_challenged_dropped_when_leads_exist():
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [{"severity": "minor", "message": "m"}],
+         "boundaries_challenged": ["b"]},
+        role="correctness",
+    )
+    assert "boundaries_challenged" not in result
+    assert "only meaningful with no leads" in result["errors"][0]
+
+
+def test_boundaries_challenged_capped_visibly():
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [],
+         "boundaries_challenged": [f"b{i}" for i in range(10)]},
+        role="correctness",
+    )
+    assert len(result["boundaries_challenged"]) == 6
+    assert result["truncated"] is True
+    assert result["truncation"]["omitted_boundaries_challenged"] == 4
+
+
+def test_boundary_report_renders_fence_safe():
+    hostile = "boundary\twith\x1bcontrol and ``` backticks"
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [], "boundaries_challenged": [hostile]},
+        role="correctness",
+    )
+    doc = render_specialist_markdown(result)
+    # The hostile entry lands inside the fence with control chars escaped.
+    assert "```markdown" in doc
+    assert any("control" in line for line in doc.splitlines())
+    assert "\x1b" not in doc
+    assert "\t" not in doc
+
+
+def test_lead_line_renders_trigger_and_consequence():
+    result = normalize_specialist_output(
+        {"role": "correctness", "leads": [{
+            "severity": "major", "message": "m", "trigger": "t()", "consequence": "c()",
+        }]},
+        role="correctness",
+    )
+    line = render_specialist_markdown(result)
+    assert "[trigger: t()]" in line
+    assert "[consequence: c()]" in line
+
+
+def test_load_specialist_prompt_variant():
+    from pr_reviewer.specialists import load_specialist_prompt, prompt_fragment_path
+
+    assert "adversarial" not in load_specialist_prompt("correctness").lower()
+    adversarial = load_specialist_prompt("correctness", "adversarial")
+    assert "Defect-hunting is your only job" in adversarial
+    assert '"trigger"' in adversarial and '"consequence"' in adversarial
+    assert prompt_fragment_path("correctness", "adversarial").name == (
+        "specialist_correctness_adversarial.txt"
+    )
+    with pytest.raises(ValueError):
+        load_specialist_prompt("nope")
