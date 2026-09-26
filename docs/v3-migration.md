@@ -102,6 +102,8 @@ that cutover.
 | `tool_loop_summarize` | `tool-loop-summarize` |
 | `tool_loop_summarize_max_tokens` | `tool-loop-summarize-max-tokens` |
 | `tool_max_requests` | `tool-max-requests` |
+| `primary_tool_max_requests` | `primary-tool-max-requests` |
+| `smart_tool_max_requests` | `smart-tool-max-requests` |
 | `tool_max_rounds` | `tool-max-rounds` |
 | `tool_turn_timeout_sec` | `tool-turn-timeout-sec` |
 | `tool_corpus_max_bytes` | `tool-corpus-max-bytes` |

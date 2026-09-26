@@ -166,6 +166,21 @@ class TestTierAwareRequestBudget(TestCase):
             self._resolve({"SMART_TOOL_MAX_REQUESTS": "10"}), 8
         )
 
+    def test_primary_override_wins_on_primary_only(self):
+        self.assertEqual(
+            self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "12", "TOOL_MAX_REQUESTS": "3"}), 12
+        )
+        self.assertEqual(
+            self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "12"}, tier="smart"), 16
+        )
+        with mock.patch.dict(os.environ, {"PRIMARY_TOOL_MAX_REQUESTS": "12"}, clear=True):
+            self.assertEqual(self.mod.resolve_tool_budget("primary")["source"], "primary-override")
+
+    def test_invalid_primary_override_falls_to_explicit(self):
+        self.assertEqual(
+            self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "abc", "TOOL_MAX_REQUESTS": "7"}), 7
+        )
+
     def test_invalid_explicit_value_falls_back_to_tier_default(self):
         self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "abc"}), 8)
         self.assertEqual(
