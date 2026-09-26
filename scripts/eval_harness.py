@@ -1268,9 +1268,41 @@ def _load_semantic_fixture(corpus: SemanticCorpus, fixture_ref: dict[str, Any]) 
     return data, fixture_path
 
 
+def _review_timeout_sec() -> int:
+    """Per-review wall clock (EVAL_REVIEW_TIMEOUT_SEC, default 300s). Slow
+    local models need longer; a timed-out run is scored as an error, which
+    silently drops the longest reviews from an A/B."""
+    try:
+        return max(30, int(os.getenv("EVAL_REVIEW_TIMEOUT_SEC", "300")))
+    except ValueError:
+        return 300
+
+
+def _fixture_pr_object(pr_json: dict[str, Any], repo_full_name: str | None) -> dict[str, Any]:
+    """Give a fixture PR object the head/base repo identity it usually omits.
+
+    `derive_is_fork_pr` fails closed on a missing head repo, so a fixture
+    without one was reviewed as a fork and the tool loop was skipped: every
+    native_loop run over the semantic corpus silently ran tools-off. Default
+    both sides to the scenario's own repository (the dogfood fixtures are
+    same-repo PRs); a fixture that states its head or base keeps it.
+    """
+    if not repo_full_name:
+        return pr_json
+    pr = dict(pr_json)
+    for side in ("head", "base"):
+        ref = dict(pr.get(side) or {})
+        repo = dict(ref.get("repo") or {})
+        repo.setdefault("full_name", repo_full_name)
+        ref["repo"] = repo
+        pr[side] = ref
+    return pr
+
+
 def _materialize_semantic_fixture(
     repo_path: Path,
     fixture: dict[str, Any],
+    repo_full_name: str | None = None,
 ) -> str:
     repo_path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(repo_path), "init"], check=True, capture_output=True)
@@ -1289,7 +1321,9 @@ def _materialize_semantic_fixture(
     subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True)
     api_root = repo_path / ".semantic-fixture"
     api_root.mkdir()
-    (api_root / "pr.json").write_text(json.dumps(fixture["pr_json"]), encoding="utf-8")
+    (api_root / "pr.json").write_text(
+        json.dumps(_fixture_pr_object(fixture["pr_json"], repo_full_name)), encoding="utf-8"
+    )
     (api_root / "diff").write_text(str(fixture["diff"]), encoding="utf-8")
     (api_root / "files.json").write_text(json.dumps(fixture["pr_files"]), encoding="utf-8")
     result = subprocess.run(
@@ -1417,7 +1451,9 @@ def run_review_for_pr(
         if semantic_fixture is not None:
             repo_path = Path(tempfile.mkdtemp(prefix=f"semantic-{pr_number}-", dir=work_dir))
             fixture_data = semantic_fixture[0]
-            run.commit_sha = _materialize_semantic_fixture(repo_path, fixture_data)
+            run.commit_sha = _materialize_semantic_fixture(
+                repo_path, fixture_data, pr_entry.get("repo_full_name")
+            )
         else:
             repo_path = work_dir / repo_full_name.replace("/", "-")
             if not repo_path.exists():
@@ -1515,7 +1551,7 @@ def run_review_for_pr(
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 min per PR per mode
+                timeout=_review_timeout_sec(),
             )
             run.wall_clock_sec = time.monotonic() - start
 
@@ -1561,7 +1597,7 @@ def run_review_for_pr(
 
     except subprocess.TimeoutExpired:
         run.wall_clock_sec = time.monotonic() - start
-        run.error = "Review timed out after 300s"
+        run.error = f"Review timed out after {_review_timeout_sec()}s"
     except Exception as exc:
         run.wall_clock_sec = time.monotonic() - start
         run.error = f"Review error: {exc}"
