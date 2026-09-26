@@ -140,13 +140,17 @@ fraction of negative-control scenarios with zero false attributions). The
 #757 fixtures in `evals/corpus-historical-dogfood.json` (7571–7584) cover the
 four PR #756-derived path-domain classes plus parser/normalizer, auth/policy,
 and state/retry cross-domain pairs, each with a fixed negative control; the
-prompt treatment itself (`scripts/prompt_fragments/falsification.txt`,
-gated on code-touching pr_kinds) must be measured by a live A/B over this
-corpus and reverted if it does not clear the bar, per the #666 precedent.
-
+prompt treatment (`scripts/prompt_fragments/falsification.txt`, gated on
+code-touching pr_kinds) was measured by a live A/B over this corpus
+(#758, MiniMax-M3-chat, tools_off, 3 reps x 14 scenarios per arm, 84
+reviewer runs) with the calibrated judge instrument: vulnerable-fixture
+detection 23.8% -> 42.9% (+19.1pp, `counterexample_attempted` 0% -> 71%)
+while the negative-control false-positive rate fell 47.6% -> 42.9% —
+so the treatment shipped; re-run the A/B before changing the fragment.
 The A/B arms run the same corpus through the same harness;
-`scripts/eval_harness.py --system-prompt-file` pins an arm's prompt verbatim
-(replace mode, no fragment substitution). The baseline arm must therefore be
+`scripts/eval_harness.py --system-prompt-file` pins an arm's prompt
+verbatim (replace mode, no fragment substitution). The baseline arm must
+therefore be
 **main's fully assembled prompt for the eval conditions** — not the raw
 placeholder-stripped file, which would silently drop the related-code and
 PR-thread guidance the treatment arm keeps and make the comparison invalid.

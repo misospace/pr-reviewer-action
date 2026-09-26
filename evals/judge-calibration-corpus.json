@@ -1276,10 +1276,10 @@
           "response": {
             "findings": [
               {
-                "message": "This substring matching might cause false positives in some edge cases; possibly worth a follow-up."
+                "message": "The resolver might follow symlinks outside the base directory because it never calls realpath, which could let a caller escape the sandbox."
               }
             ],
-            "review_markdown": "This substring matching might cause false positives in some edge cases; possibly worth a follow-up."
+            "review_markdown": "The resolver might follow symlinks outside the base directory because it never calls realpath, which could let a caller escape the sandbox."
           }
         }
       ]
@@ -1455,10 +1455,10 @@
           "response": {
             "findings": [
               {
-                "message": "URL decoding after validation could be risky in some setups; maybe consider decoding first."
+                "message": "The guard might be bypassable with null bytes embedded in the encoded path, which could trick downstream containment checks; worth hardening before merge."
               }
             ],
-            "review_markdown": "URL decoding after validation could be risky in some setups; maybe consider decoding first."
+            "review_markdown": "The guard might be bypassable with null bytes embedded in the encoded path, which could trick downstream containment checks; worth hardening before merge."
           }
         }
       ]
@@ -1634,10 +1634,10 @@
           "response": {
             "findings": [
               {
-                "message": "Proximity-based matching may produce noise in larger files; consider tightening the window later."
+                "message": "The audit could miss sinks reached through variable indirection across function boundaries, which might let real injections slip through in larger files."
               }
             ],
-            "review_markdown": "Proximity-based matching may produce noise in larger files; consider tightening the window later."
+            "review_markdown": "The audit could miss sinks reached through variable indirection across function boundaries, which might let real injections slip through in larger files."
           }
         }
       ]
@@ -1813,10 +1813,10 @@
           "response": {
             "findings": [
               {
-                "message": "There might be naming collisions with these tokens in larger codebases; maybe restrict the matching later."
+                "message": "The detector might misclassify handlers in frameworks that pass files as keyword arguments, which could cause silent misses in production."
               }
             ],
-            "review_markdown": "There might be naming collisions with these tokens in larger codebases; maybe restrict the matching later."
+            "review_markdown": "The detector might misclassify handlers in frameworks that pass files as keyword arguments, which could cause silent misses in production."
           }
         }
       ]
@@ -1878,10 +1878,10 @@
           "response": {
             "findings": [
               {
-                "message": "Multi-parameter handlers might behave differently; consider a test."
+                "message": "The detector might misclassify handlers in frameworks that pass files as keyword arguments, which could cause silent misses in production."
               }
             ],
-            "review_markdown": "Multi-parameter handlers might behave differently; consider a test."
+            "review_markdown": "The detector might misclassify handlers in frameworks that pass files as keyword arguments, which could cause silent misses in production."
           }
         }
       ]
@@ -1992,10 +1992,10 @@
           "response": {
             "findings": [
               {
-                "message": "Dropping malformed records before validation might hide issues in some pipelines; consider validating first."
+                "message": "The normalizer might be vulnerable to key-collision corruption that could silently rewrite the retained record set."
               }
             ],
-            "review_markdown": "Dropping malformed records before validation might hide issues in some pipelines; consider validating first."
+            "review_markdown": "The normalizer might be vulnerable to key-collision corruption that could silently rewrite the retained record set."
           }
         }
       ]
@@ -2171,10 +2171,10 @@
           "response": {
             "findings": [
               {
-                "message": "Session-based route selection could be problematic in some architectures; possibly worth reviewing."
+                "message": "The policy lookup might accept a route alias containing encoded separators, which could route a protected path to a public policy."
               }
             ],
-            "review_markdown": "Session-based route selection could be problematic in some architectures; possibly worth reviewing."
+            "review_markdown": "The policy lookup might accept a route alias containing encoded separators, which could route a protected path to a public policy."
           }
         }
       ]
@@ -2236,10 +2236,10 @@
           "response": {
             "findings": [
               {
-                "message": "Unusual paths with trailing slashes might behave differently; consider a test."
+                "message": "Unusual paths with a trailing separator might behave differently under the prefix match, which could mis-route a protected path."
               }
             ],
-            "review_markdown": "Unusual paths with trailing slashes might behave differently; consider a test."
+            "review_markdown": "Unusual paths with a trailing separator might behave differently under the prefix match, which could mis-route a protected path."
           }
         }
       ]
@@ -2350,10 +2350,10 @@
           "response": {
             "findings": [
               {
-                "message": "Key-based idempotency could cause issues with some stores; consider an explicit completion flag."
+                "message": "A concurrent writer might race the retry loop between get() and begin(), which could duplicate the record."
               }
             ],
-            "review_markdown": "Key-based idempotency could cause issues with some stores; consider an explicit completion flag."
+            "review_markdown": "A concurrent writer might race the retry loop between get() and begin(), which could duplicate the record."
           }
         }
       ]
@@ -2415,10 +2415,10 @@
           "response": {
             "findings": [
               {
-                "message": "The acknowledgement contract might vary across store implementations; consider documenting it."
+                "message": "The acknowledgement contract might not cover store replicas, which could still read stale rows as committed."
               }
             ],
-            "review_markdown": "The acknowledgement contract might vary across store implementations; consider documenting it."
+            "review_markdown": "The acknowledgement contract might not cover store replicas, which could still read stale rows as committed."
           }
         }
       ]
