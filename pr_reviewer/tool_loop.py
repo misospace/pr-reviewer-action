@@ -174,7 +174,10 @@ def extract_tool_calls(
     calls: list[dict[str, Any]] = []
     text_parts: list[str] = []
 
-    if api_format == "anthropic":
+    # A streamed Anthropic turn comes back from the SSE reassembler in OpenAI
+    # shape (``choices``), so parse by shape, not by api_format alone —
+    # otherwise every streamed Anthropic tool call reads as "no tool calls".
+    if api_format == "anthropic" and not isinstance(response.get("choices"), list):
         content = response.get("content")
         if isinstance(content, list):
             for block in content:

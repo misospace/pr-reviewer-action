@@ -138,7 +138,8 @@ def _accumulate_usage(acc, response, api_format):
             return 0
 
     acc["requests"] += 1
-    if api_format == "anthropic":
+    # Streamed Anthropic turns are reassembled into OpenAI shape.
+    if api_format == "anthropic" and "prompt_tokens" not in usage:
         acc["prompt_tokens"] += _int(usage.get("input_tokens"))
         acc["completion_tokens"] += _int(usage.get("output_tokens"))
         acc["cached_prompt_tokens"] += _int(usage.get("cache_read_input_tokens"))

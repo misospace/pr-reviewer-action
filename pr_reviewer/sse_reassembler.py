@@ -219,7 +219,8 @@ def _reassemble_anthropic(
         elif etype == "message_delta":
             delta = event.get("delta", {}) or {}
             stop_reason = delta.get("stop_reason")
-            usage = delta.get("usage", {})
+            # Anthropic puts message_delta usage at the event top level.
+            usage = event.get("usage") or delta.get("usage") or {}
             if usage:
                 output_tokens += usage.get("output_tokens", 0)
         elif etype == "message_stop":
