@@ -259,7 +259,7 @@ export function evaluateNativeVerdict(response: unknown): VerdictEvaluation {
   const error = res.error;
   if (error) {
     const detail =
-      typeof error === "object" && error !== null
+      typeof error === "object"
         ? (((error as Record<string, unknown>).message as string) ?? JSON.stringify(error))
         : String(error);
     return { ok: false, reason: "transport", detail };
@@ -331,7 +331,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   let streamFailureDetail = "";
   let response: unknown;
   let ok = false;
-  let reason: NativeVerdictOutcome["reason"] = "transport";
+  let reason: NativeVerdictOutcome["reason"];
   let detail = "";
 
   const firstAttempt = await request(first);
@@ -933,9 +933,9 @@ export function resolveReviewSystemPrompt(deps: HarnessDeps): string {
 export function defaultReadText(cwd: string): (name: string) => string | null {
   return (name: string) => {
     try {
-      const p = path.resolve(cwd, name);
-      fs.statSync(p);
-      return fs.readFileSync(p, "utf8");
+      // readFileSync is the existence check — a stat-then-read would be a
+      // TOCTOU race and a pointless extra syscall.
+      return fs.readFileSync(path.resolve(cwd, name), "utf8");
     } catch {
       return null;
     }

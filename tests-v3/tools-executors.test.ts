@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   ALLOWED_COMMANDS, allowlistedHost, executeToolRequest, findFiles, ghApi,
-  listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
+  listTree, resolveWorkspacePath, runCommand, validateEndpoint,
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
