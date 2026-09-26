@@ -368,7 +368,7 @@ def _normalize_smart_review_request(parsed: dict[str, Any]) -> None:
     parsed["smart_review_reason"] = reason
 
 _FINDING_CATEGORIES = {
-    "bug", "security", "performance", "style", "docs", "question", "other",
+    "bug", "security", "performance", "style", "docs", "tests", "question", "other",
 }
 
 _MAX_FINDINGS = 50
