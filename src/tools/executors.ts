@@ -86,8 +86,34 @@ export type ToolDeps = {
   runProcess?: (options: Parameters<typeof runProcess>[0]) => Promise<ProcessResult>;
 };
 
+/** Committed files and their directories (`git ls-files -z --cached`). The
+ * workspace tools expose only what the PR commits: the review pipeline writes
+ * its own scratch artifacts into the checkout, and a model that lists or reads
+ * those spends evidence budget on text it already has. Absent/null = the
+ * workspace is not a git checkout; nothing is filtered (port of
+ * `_tracked_index`). */
+export interface TrackedIndex {
+  files: Set<string>;
+  dirs: Set<string>;
+}
+
+export const UNTRACKED_PATH_ERROR = "Path is not part of the repository checkout";
+
+export function buildTrackedIndex(lsFilesStdout: string): TrackedIndex {
+  const files = new Set<string>();
+  const dirs = new Set<string>();
+  for (const rel of lsFilesStdout.split("\0")) {
+    if (!rel) continue;
+    files.add(rel);
+    const parts = rel.split("/");
+    for (let depth = 1; depth < parts.length; depth++) dirs.add(parts.slice(0, depth).join("/"));
+  }
+  return { files, dirs };
+}
+
 export type ToolContext = {
   workspaceRoot: string;
+  trackedIndex?: TrackedIndex | null;
   allowedGhRepos?: readonly string[];
   currentRepo?: string;
   allowedHosts?: readonly string[];
@@ -468,6 +494,9 @@ export async function repoContents(
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
   const guarded = resolveWorkspacePath(input, ctx.workspaceRoot);
   if (guarded.error) return { error: guarded.error };
+  if (ctx.trackedIndex && !ctx.trackedIndex.files.has(workspaceRel(guarded.path!, ctx.workspaceRoot))) {
+    return { error: UNTRACKED_PATH_ERROR };
+  }
   let content: string;
   try {
     content = fs.readFileSync(guarded.path!, "utf8");
@@ -586,6 +615,7 @@ export function findFiles(pattern: string, ctx: ToolContext, scope = ".", maxRes
         walk(abs);
       } else if (ent.isFile() && !ent.isSymbolicLink()) {
         const rel = path.relative(root, abs).split(path.sep).join("/");
+        if (ctx.trackedIndex && !ctx.trackedIndex.files.has(rel)) continue;
         if (fnmatchCase(rel, pattern) || fnmatchCase(ent.name, pattern)) matches.push(rel);
       }
     }
@@ -612,6 +642,9 @@ export function listTree(input: unknown, ctx: ToolContext, depthValue: unknown =
   const cap = Math.max(1, Math.min(optInt(maxValue) ?? 200, 500));
   if (!fs.statSync(resolved).isDirectory()) {
     // A file is a valid single-row listing, consistent with read_file.
+    if (ctx.trackedIndex && !ctx.trackedIndex.files.has(workspaceRel(resolved, ctx.workspaceRoot))) {
+      return { error: UNTRACKED_PATH_ERROR };
+    }
     return {
       entries: [{ path: path.relative(root, resolved).split(path.sep).join("/"), type: "file" }],
       total: 1,
@@ -639,12 +672,17 @@ export function listTree(input: unknown, ctx: ToolContext, depthValue: unknown =
       if (child.isSymbolicLink()) continue; // never followed or listed
       const abs = path.join(dir, child.name);
       const isDir = child.isDirectory();
+      if (ctx.trackedIndex && !(isDir ? ctx.trackedIndex.dirs : ctx.trackedIndex.files).has(relOf(abs))) continue;
       entries.push({ path: relOf(abs), type: isDir ? "dir" : "file" });
       if (isDir) walk(abs, level + 1);
     }
   };
   walk(resolved, 1);
   return { entries, total: entries.length, truncated };
+}
+
+function workspaceRel(resolved: string, workspaceRoot: string): string {
+  return path.relative(fs.realpathSync(workspaceRoot), resolved).split(path.sep).join("/");
 }
 
 /** Turn a resolved path into a git pathspec: repo-relative when possible. */
@@ -714,7 +752,11 @@ export function redactGrepRecord(
 
 export async function gitGrep(pattern: string, ctx: ToolContext, scope?: unknown, maxResults: unknown = GIT_GREP_DEFAULT_MAX_RESULTS): Promise<Obj> {
   const cap = clampGrepMaxResults(maxResults);
-  const argv = ["git", "grep", "-n", "-z", "--", pattern];
+  // Extended regex: `a|b` alternates, the dialect models write. Under git's
+  // basic-regex default `FOO|BAR` silently matched nothing. A pattern that is
+  // not a valid ERE (`foo(`) is retried once as a fixed string, noted in the
+  // result (port of `git_grep`).
+  const argv = ["git", "grep", "-n", "-z", "-E", "--", pattern];
   if (scope === null || scope === undefined) {
     // No explicit path: preserve the historical whole-worktree invocation
     // byte-for-byte (single `--` before the pattern, `.` pathspec).
@@ -731,17 +773,27 @@ export async function gitGrep(pattern: string, ctx: ToolContext, scope?: unknown
     }
   }
   const timeout = ctx.requestTimeout ?? 15;
-  const r = await processOutput(ctx, argv, timeout);
+  let r = await processOutput(ctx, argv, timeout);
   if (r.status === "timeout") return { error: `git grep timed out after ${timeout}s` };
   if (r.status === "spawn_error") return { error: r.launchError ?? "git grep failed to start" };
+  let note: string | null = null;
   if (r.exitCode !== 0 && r.exitCode !== 1) {
-    return { error: `git grep failed: ${toText(r.stderr).trim()}` };
+    const fixed = await processOutput(ctx, argv.map((a) => (a === "-E" ? "-F" : a)), timeout);
+    if (fixed.status === "timeout") return { error: `git grep timed out after ${timeout}s` };
+    if (fixed.status === "spawn_error") return { error: fixed.launchError ?? "git grep failed to start" };
+    if (fixed.exitCode !== 0 && fixed.exitCode !== 1) {
+      return { error: `git grep failed: ${toText(r.stderr).trim()}` };
+    }
+    r = fixed;
+    note = "pattern is not a valid extended regex; searched as a fixed string";
   }
   // Parse all raw -z records before applying max_results: a path may contain
   // a newline, so line-splitting first could break a record before redaction.
   const records = parseGrepZRecords(toText(r.stdout));
   const matches = records.map((rec) => redactGrepRecord(rec, ctx.workspaceRoot));
-  return { matches: matches.slice(0, cap) };
+  const out: Obj = { matches: matches.slice(0, cap) };
+  if (note) out.note = note;
+  return out;
 }
 
 export function clampGrepMaxResults(value: unknown, defaultValue = GIT_GREP_DEFAULT_MAX_RESULTS): number {
@@ -994,6 +1046,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (res.error) throw new Error(res.error);
         const joined = maskAndTruncate(res.matches.join("\n"), cap);
         result = { matches: joined.text.split(/\r?\n/), truncated: joined.truncated };
+        if (res.note) result.note = res.note;
         break;
       }
       case "repo_contents": {

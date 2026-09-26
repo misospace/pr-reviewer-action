@@ -46,7 +46,9 @@ import {
   type LoopOutcome,
 } from "./loop.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
-import { executeToolRequest, type ToolContext } from "./executors.js";
+import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
+import { runProcess } from "../runtime/subprocess.js";
+import { decodeUtf8Ignore } from "../corpus/truncate.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,7 +212,8 @@ export function accumulateUsage(acc: UsageAccumulator, response: unknown, apiFor
     return Number.isFinite(n) && n !== 0 ? Math.trunc(n) : 0;
   };
   acc.requests += 1;
-  if (apiFormat === "anthropic") {
+  // Streamed Anthropic turns are reassembled into OpenAI shape.
+  if (apiFormat === "anthropic" && !("prompt_tokens" in u)) {
     acc.prompt_tokens += intOf(u.input_tokens);
     acc.completion_tokens += intOf(u.output_tokens);
     acc.cached_prompt_tokens += intOf(u.cache_read_input_tokens);
@@ -397,6 +400,10 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 export const PLANNING_DIFF_HEAD_MIN = 2000;
 export const PLANNING_BUDGET_MARGIN = 200;
 export const PLANNING_RESERVE = PLANNING_DIFF_HEAD_MIN + PLANNING_BUDGET_MARGIN;
+export const PLANNING_NOTES =
+  "# Planning Notes\n" +
+  "Do not re-fetch what is already below; spend tool calls on file " +
+  "contents, callers, and tests. Already provided: ";
 
 const STANDARDS_REQUIREMENT_RE =
   /\b(?:must|always|never|required|verify|confirm|cite|search|fetch|consult|read|inspect|before approving|do not approve)\b/i;
@@ -432,7 +439,7 @@ export function extractCorpusRegions(corpusText: string): Record<string, string>
   const bounds = [...starts, lines.length];
   for (let i = 0; i < starts.length; i++) {
     const title = (lines[starts[i]!] ?? "").slice(2).trim();
-    if (["PR Classification", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"].includes(title)) {
+    if (["PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"].includes(title)) {
       if (regions[title] === undefined) {
         regions[title] = lines.slice(starts[i]!, bounds[i + 1] ?? lines.length).join("\n").replace(/\s+$/, "");
       }
@@ -485,6 +492,60 @@ export function buildPlanningContext(
     if (fence) return `# ${title}\n\`\`\`${fence}\n${out}\n\`\`\``;
     if (out.startsWith(`# ${title}`)) return out; // self-titled source
     return `# ${title}\n${out}`;
+  };
+
+  // Compact PR identity + body for the planner when the corpus section does
+  // not fit: the same projection the corpus renders. Without it the model
+  // spends tool calls re-fetching the PR and its linked issues over the API.
+  const prMetadataExcerpt = (cap: number): string | null => {
+    const body = readStripped("pr.json");
+    if (body === null) return null;
+    let pr: unknown;
+    try {
+      pr = JSON.parse(body);
+    } catch {
+      return excerpt("PR Metadata", "pr.json", cap, "json");
+    }
+    if (pr === null || typeof pr !== "object" || Array.isArray(pr)) return null;
+    const record = pr as Record<string, unknown>;
+    let author = record.author;
+    if (author !== null && typeof author === "object") author = (author as Record<string, unknown>).login;
+    const compact: Record<string, unknown> = {};
+    for (const key of ["number", "title", "baseRefName", "headRefName", "changedFiles", "additions", "deletions"]) {
+      if (key in record) compact[key] = record[key] ?? null;
+    }
+    compact.author = author ?? null;
+    const prBody = record.body === null || record.body === undefined || record.body === "" ? "" : String(record.body);
+    const room = cap - Buffer.byteLength(pyDumps(compact), "utf8") - 60;
+    if (prBody && room > 0) {
+      const raw = Buffer.from(prBody, "utf8");
+      if (raw.length > room) anyClipped = true;
+      compact.body = decodeUtf8Ignore(raw.subarray(0, room));
+    }
+    return "# PR Metadata\n```json\n" + pyDumps(compact) + "\n```";
+  };
+
+  // Related-code excerpt that drops changed files carrying no symbol or test
+  // references (data/fixture files): a stub per such file costs the planner
+  // budget without giving it anything to act on.
+  const relatedCodeExcerpt = (title: string, p: string, cap: number): string | null => {
+    const body = readStripped(p);
+    if (body === null) return null;
+    const blocks = body.split(/^(?=### )/m);
+    const head = blocks[0] ?? "";
+    const files = blocks.slice(1);
+    const kept = files.filter((block) => !(block.includes("- Symbols: none") && block.includes("- Tests: none")));
+    const parts = [head.replace(/\s+$/, ""), ...kept.map((block) => block.replace(/\s+$/, ""))];
+    const dropped = files.length - kept.length;
+    if (dropped > 0) parts.push(`_(${dropped} changed file(s) with no symbol or test references omitted)_`);
+    let text = parts.filter((part) => part).join("\n\n");
+    const raw = Buffer.from(text, "utf8");
+    if (raw.length > cap) {
+      text = decodeUtf8Ignore(raw.subarray(0, cap)) + "\n[truncated]";
+      anyClipped = true;
+    }
+    if (text.startsWith(`# ${title}`)) return text;
+    return `# ${title}\n${text}`;
   };
 
   const standardsExcerpt = (title: string, p: string, cap: number): string | null => {
@@ -630,8 +691,10 @@ export function buildPlanningContext(
   }
 
   const plan: Array<[string, string, string, number, string | null]> = [
+    ["PR Metadata", "PR Metadata", "pr.json", 4500, "json"],
     ["PR Classification", "PR Classification", "classification.json", 4000, "json"],
-    ["Related Code Context", "Related Code Context", "related-code.truncated.md", 16000, null],
+    ["Linked Issue Context", "Linked Issue Context", "linked-issues.md", 3000, null],
+    ["Related Code Context", "Related Code Context", "related-code.truncated.md", 10000, null],
     ["PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"],
     ["Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"],
     ["standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, null],
@@ -647,9 +710,10 @@ export function buildPlanningContext(
       section = region;
     }
     if (section === null) {
-      section = regionKey === "standards"
-        ? standardsExcerpt(title, excerptPath, regionCap)
-        : excerpt(title, excerptPath, regionCap, fence);
+      if (regionKey === "standards") section = standardsExcerpt(title, excerptPath, regionCap);
+      else if (regionKey === "PR Metadata") section = prMetadataExcerpt(regionCap);
+      else if (regionKey === "Related Code Context") section = relatedCodeExcerpt(title, excerptPath, regionCap);
+      else section = excerpt(title, excerptPath, regionCap, fence);
     }
     if (section !== null) sections.push(section);
   }
@@ -675,9 +739,16 @@ export function buildPlanningContext(
     // Whatever budget remains goes to the head of the diff. The diff head is
     // never embedded from the corpus — a prefix of the full diff can't be
     // deduped byte-exactly.
-    const diffCap = Math.max(PLANNING_DIFF_HEAD_MIN, maxBytes - used() - PLANNING_BUDGET_MARGIN);
+    const diffCap = Math.max(
+      PLANNING_DIFF_HEAD_MIN,
+      maxBytes - used() - PLANNING_BUDGET_MARGIN - Buffer.byteLength(PLANNING_NOTES, "utf8") - 2,
+    );
     const diffSection = excerpt("PR Diff (head)", "pr.diff.truncated", diffCap, "diff");
     if (diffSection !== null) sections.push(diffSection);
+    // Tell the planner what it already holds so its calls go to file
+    // contents rather than re-fetching PR/issue metadata over the API.
+    const present = sections.filter((s) => s.startsWith("# ")).map((s) => s.split("\n")[0]!.slice(2));
+    sections.unshift(PLANNING_NOTES + present.join("; ") + ".");
     const joined = maskAndTruncate(sections.join("\n\n"), maxBytes);
     return { text: joined.text, truncated: joined.truncated || anyClipped };
   }
@@ -1108,8 +1179,28 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     return response;
   };
 
+  // Committed files only: the pipeline writes its scratch into the checkout,
+  // and a model that lists or reads it spends evidence budget on text it
+  // already has. Outside a git checkout the tools stay unfiltered.
+  let trackedIndex: TrackedIndex | null = null;
+  try {
+    const listed = await runProcess({
+      file: "git",
+      args: ["ls-files", "-z", "--cached"],
+      cwd: input.workspaceRoot,
+      env: env as NodeJS.ProcessEnv,
+      timeoutMs: 15000,
+    }).result;
+    if (listed.status === "exited" && listed.exitCode === 0) {
+      trackedIndex = buildTrackedIndex(listed.stdout.toString("utf8"));
+    }
+  } catch {
+    trackedIndex = null;
+  }
+
   const toolCtx: ToolContext = {
     workspaceRoot: input.workspaceRoot,
+    trackedIndex,
     allowedGhRepos: [...input.allowedGhApiRepos],
     currentRepo: input.repo,
     allowedHosts: input.allowedHosts,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
@@ -233,4 +233,45 @@ test("harness-findings section substitution and tool-request normalization helpe
     args: { pattern: "x", max_results: 5 },
   });
   assert.deepEqual(normalizeToolRequest("junk"), { tool: "", args: {} });
+});
+
+test("planner leads with PR metadata and linked issues and lists what it already holds", () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "classification.json"), '{"pr_kind": "app_code", "risk_flags": []}');
+  fs.writeFileSync(path.join(root, "pr.json"), '{"number": 7, "title": "Fix parser", "author": {"login": "dev"}, "body": "Handles empty input.", "files": [{"path": "big"}]}');
+  fs.writeFileSync(path.join(root, "linked-issues.md"), "## owner/repo#12\nParser crashes on empty input.\n");
+  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
+  const { text, truncated } = buildPlanningContext(50000, deps());
+  assert.equal(truncated, false);
+  const order = ["# Planning Notes", "# PR Metadata", "# PR Classification", "# Linked Issue Context", "# PR Diff (head)"].map((h) => text.indexOf(h));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.ok(order.every((i) => i >= 0));
+  assert.match(text, /"title": "Fix parser"/);
+  assert.match(text, /"author": "dev"/);
+  assert.doesNotMatch(text, /"files"/);
+  assert.match(text, /Parser crashes on empty input\./);
+  const notes = text.slice(0, text.indexOf("# PR Metadata"));
+  assert.ok(notes.startsWith(PLANNING_NOTES + "PR Metadata; PR Classification; "));
+  assert.match(notes, /PR Diff \(head\)\.$/m);
+});
+
+test("planner related-code excerpt drops files without symbol or test references", () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "classification.json"), '{"pr_kind": "app_code"}');
+  const stub = "- Symbols: none\n- Tests: none\n- Manifests (nearest first): `package.json`\n";
+  let body = "# Related Code (v1)\n\n## Changed Files\n\n### `src/app.py`\n\n- `main`: no references\n\n";
+  for (let i = 0; i < 200; i++) body += "### `fixtures/" + i + ".json`\n\n" + stub + "\n";
+  fs.writeFileSync(path.join(root, "related-code.truncated.md"), body);
+  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
+  const { text } = buildPlanningContext(50000, deps());
+  assert.match(text, /### `src\/app\.py`/);
+  assert.doesNotMatch(text, /fixtures\/3\.json/);
+  assert.match(text, /200 changed file\(s\) with no symbol or test references omitted/);
+});
+
+test("usage accounting reads the OpenAI shape a streamed anthropic turn reassembles into", () => {
+  const acc = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(acc, { usage: { prompt_tokens: 10, completion_tokens: 4 } }, "anthropic");
+  accumulateUsage(acc, { usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 2 } }, "anthropic");
+  assert.deepEqual(acc, { requests: 2, prompt_tokens: 15, completion_tokens: 5, cached_prompt_tokens: 2 });
 });

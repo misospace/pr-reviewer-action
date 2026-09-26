@@ -77,6 +77,8 @@ export class TransportFailure extends Error {
   readonly maxResponseBytes?: number;
   /** Bytes observed before the abort, including the chunk that crossed the limit. */
   readonly bytesReceived?: number;
+  /** `Retry-After` in seconds when the response carried a numeric one (http_status only). */
+  readonly retryAfterSec?: number;
 
   constructor(
     kind: TransportFailureKind,
@@ -86,6 +88,7 @@ export class TransportFailure extends Error {
       body?: string;
       maxResponseBytes?: number;
       bytesReceived?: number;
+      retryAfterSec?: number;
       cause?: unknown;
     } = {},
   ) {
@@ -94,6 +97,7 @@ export class TransportFailure extends Error {
     this.kind = kind;
     if (options.status !== undefined) this.status = options.status;
     if (options.body !== undefined) this.body = options.body;
+    if (options.retryAfterSec !== undefined) this.retryAfterSec = options.retryAfterSec;
     if (options.maxResponseBytes !== undefined) this.maxResponseBytes = options.maxResponseBytes;
     if (options.bytesReceived !== undefined) this.bytesReceived = options.bytesReceived;
   }
@@ -122,6 +126,15 @@ function oversizeFailure(
     `model response exceeded the ${maxResponseBytes}-byte response limit (received at least ${observed} bytes)`,
     options,
   );
+}
+
+/** Numeric `Retry-After` seconds; the HTTP-date form is ignored. */
+export function parseRetryAfter(value: string | string[] | undefined): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw === undefined) return undefined;
+  const text = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(text)) return undefined;
+  return Number(text);
 }
 
 const NETWORK_ERROR_CODES = new Set([
@@ -252,7 +265,12 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         response.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
           if (status < 200 || status >= 300) {
-            settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, { status, body })));
+            const retryAfterSec = parseRetryAfter(response.headers["retry-after"]);
+            settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, {
+              status,
+              body,
+              ...(retryAfterSec !== undefined ? { retryAfterSec } : {}),
+            })));
             return;
           }
           settle(() => resolve({ status, body }));

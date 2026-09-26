@@ -19,13 +19,47 @@ export interface ChatRequestInput {
   connectTimeoutSec: number;
   /** Response-byte ceiling; defaults to DEFAULT_MAX_RESPONSE_BYTES (#745). */
   maxResponseBytes?: number;
+  /** Backoff sleep, injectable for tests; defaults to a setTimeout wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type ChatRequestOutcome =
   | { status: "ok"; response: NormalizedModelResponse; raw: unknown }
   | { status: "failure"; failure: TransportFailure };
 
+/**
+ * Transient upstream statuses worth another try (port of the v2 transport's
+ * RETRYABLE_HTTP_STATUSES): 429 and 503 are what a rate-limited or
+ * cooling-down gateway returns, the rest are gateway hiccups. Anything else
+ * 4xx/5xx is final. `Retry-After` is honoured when present, otherwise the
+ * backoff is 1s then 2s, both capped at HTTP_RETRY_MAX_DELAY_SEC.
+ */
+export const RETRYABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
+export const HTTP_RETRY_ATTEMPTS = 3;
+export const HTTP_RETRY_MAX_DELAY_SEC = 30;
+
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function runChatRequest(input: ChatRequestInput): Promise<ChatRequestOutcome> {
+  const sleep = input.sleep ?? defaultSleep;
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await runChatRequestOnce(input);
+    if (
+      outcome.status === "failure"
+      && outcome.failure.kind === "http_status"
+      && outcome.failure.status !== undefined
+      && RETRYABLE_HTTP_STATUSES.has(outcome.failure.status)
+      && attempt < HTTP_RETRY_ATTEMPTS
+    ) {
+      const delaySec = outcome.failure.retryAfterSec ?? 2 ** (attempt - 1);
+      await sleep(Math.max(0, Math.min(delaySec, HTTP_RETRY_MAX_DELAY_SEC)) * 1000);
+      continue;
+    }
+    return outcome;
+  }
+}
+
+async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {
   const streaming = input.payload.body.stream === true;
   try {
     const result = await runHttpRequest({

@@ -157,7 +157,10 @@ export function extractToolCalls(
   const textParts: string[] = [];
   const res = (response ?? {}) as Record<string, unknown>;
 
-  if (apiFormat === "anthropic") {
+  // A streamed Anthropic turn arrives from the SSE reassembler in OpenAI shape
+  // (`choices`), so parse by shape, not api format alone — otherwise every
+  // streamed Anthropic tool call reads as "no tool calls".
+  if (apiFormat === "anthropic" && !Array.isArray(res.choices)) {
     const content = res.content;
     if (Array.isArray(content)) {
       for (const raw of content) {
