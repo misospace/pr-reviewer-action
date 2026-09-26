@@ -119,6 +119,16 @@ export function runVerdictParserMode(responsePath: string): void {
           evidence: disposition.evidence,
         }));
     }
+    // Human-review-request dispositions: same tri-state mirroring as above.
+    if (verdict.humanReviewDispositionsEmitted) {
+      parsed.human_review_dispositions = verdict.humanReviewDispositions === null
+        ? null
+        : verdict.humanReviewDispositions.map((disposition) => ({
+          review_id: disposition.reviewId,
+          disposition: disposition.disposition,
+          evidence: disposition.evidence,
+        }));
+    }
     // #721 structured escalation request: emitted explicitly (snake_case)
     // so the parity comparison pins the normalized fields, not raw extras.
     parsed.smart_review_requested = verdict.smartReviewRequested;

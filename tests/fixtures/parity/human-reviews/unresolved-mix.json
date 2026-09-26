@@ -1,0 +1,63 @@
+{
+  "fixture": "unresolved-mix",
+  "description": "A CHANGES_REQUESTED-shaped review is excluded by marker even though it looks eligible (dave has no other review, so he is absent entirely, not present-but-not-outstanding); CHANGES_REQUESTED superseded by a later APPROVED is not outstanding; DISMISSED latest is not outstanding; COMMENTED is ignored and does not reset an outstanding CHANGES_REQUESTED; two distinct outstanding reviewers render newest first.",
+  "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "reviews": [
+    {
+      "id": 1,
+      "user": { "login": "alice" },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-01T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "This code path is never reached when the flag is off."
+    },
+    {
+      "id": 2,
+      "user": { "login": "alice" },
+      "state": "APPROVED",
+      "submitted_at": "2026-09-03T00:00:00Z",
+      "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "Looks good now."
+    },
+    {
+      "id": 3,
+      "user": { "login": "bob" },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-02T00:00:00Z",
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "Please add a test for the retry path."
+    },
+    {
+      "id": 4,
+      "user": { "login": "bob" },
+      "state": "COMMENTED",
+      "submitted_at": "2026-09-04T00:00:00Z",
+      "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "Any update on this?"
+    },
+    {
+      "id": 5,
+      "user": { "login": "carol" },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-05T00:00:00Z",
+      "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "This needs a migration guard."
+    },
+    {
+      "id": 6,
+      "user": { "login": "carol" },
+      "state": "DISMISSED",
+      "submitted_at": "2026-09-06T00:00:00Z",
+      "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "Dismissing, no longer applies."
+    },
+    {
+      "id": 7,
+      "user": { "login": "dave" },
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-09-07T00:00:00Z",
+      "commit_id": "5690b16fabcdef0123456789abcdef0123456789",
+      "body": "<!-- ai-pr-reviewer -->\n## AI Review\nApproved from an account that also left this managed review."
+    }
+  ]
+}

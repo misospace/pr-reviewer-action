@@ -76,6 +76,20 @@ export {
   type ReviewThreadView,
 } from "./review-threads.js";
 export {
+  MAX_BYTES_DEFAULT as HUMAN_REVIEWS_MAX_BYTES_DEFAULT,
+  MAX_REQUESTS_DEFAULT,
+  SECTION_HEADER as HUMAN_REVIEWS_SECTION_HEADER,
+  enforcementView as humanReviewEnforcementView,
+  latestPerReviewer,
+  normalizeReview,
+  prepareReviews,
+  renderOutstanding,
+  selectOutstanding,
+  type HumanReview,
+  type HumanReviewView,
+  type OutstandingHumanReview,
+} from "./human-reviews.js";
+export {
   DEFAULT_GIT_TIMEOUT_SEC,
   MAX_JSON_BYTES,
   MAX_MARKDOWN_BYTES,
