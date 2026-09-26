@@ -53,7 +53,7 @@ if [[ -s pr.diff ]]; then
 else
   platform_pr_diff "$REPO" "$PR_NUMBER" > pr.diff
 fi
-truncate_clean pr.diff pr.diff.truncated "$MAX_DIFF" '…[diff truncated to fit context budget]'
+python3 "$SCRIPT_DIR/prioritize_diff.py" pr.diff pr.diff.truncated "$MAX_DIFF" '…[diff truncated to fit context budget]'
 
 # One bounded page instead of --paginate: 100 files is far beyond what the
 # MAX_FILES byte budget keeps anyway, and unbounded pagination on huge PRs

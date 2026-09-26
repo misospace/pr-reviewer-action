@@ -17,6 +17,7 @@
  * (values use the "!absent" sentinel to distinguish that from an empty
  * file). */
 
+import { prioritizeDiff, type PrioritizeDiffOptions } from "./diff-priority.js";
 import { readFileSync } from "node:fs";
 import { BudgetError, resolveTierBudgets, type TierBudgets } from "./budgets.js";
 import { ProjectionError } from "./projections.js";
@@ -107,6 +108,32 @@ const decodeContent = (value: FixtureContent): Uint8Array => {
   }
   return Buffer.from(value.text ?? "", "utf8");
 };
+
+interface DiffPriorityFixture {
+  fixture: string;
+  diff?: FixtureContent;
+  budget?: number;
+  generated?: string[];
+  marker?: string;
+}
+
+/** Fixture-mode diff-priority CLI for the parity harness: `node dist/index.js
+ * diff-priority-fixture <fixture.json>` prints `{ok, values}` with the
+ * prioritized diff (base64, so invalid UTF-8 survives the JSON round trip). */
+export function runDiffPriorityFixture(fixturePath: string): { ok: boolean; values?: Record<string, string>; stderr?: string } {
+  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as DiffPriorityFixture;
+  const diff = fixture.diff === undefined ? new Uint8Array(0) : decodeContent(fixture.diff);
+  const options: PrioritizeDiffOptions = { generated: new Set(fixture.generated ?? []) };
+  if (typeof fixture.marker === "string") options.marker = Buffer.from(fixture.marker, "utf8");
+  const output = prioritizeDiff(diff, typeof fixture.budget === "number" ? fixture.budget : 0, options);
+  return {
+    ok: true,
+    values: {
+      output_b64: Buffer.from(output).toString("base64"),
+      output_bytes: String(output.length),
+    },
+  };
+}
 
 export function runCorpusFixture(fixturePath: string): { ok: boolean; values?: Record<string, string>; stderr?: string } {
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as CorpusFixture;
