@@ -174,13 +174,21 @@ cleanup_native_reviews() {
 # qualifies only when its first comment belongs to a managed review.
 # Args: $1 = newline-separated managed review ids
 resolve_superseded_review_threads() {
+  [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] || return 0
   local ids_json
   ids_json="$(printf '%s\n' "$1" | jq -R 'select(length > 0) | tonumber? // empty' 2>/dev/null | jq -s '.' 2>/dev/null || echo '[]')"
-  [ -n "$ids_json" ] && [ "$ids_json" != "[]" ] || return 0
+  if [ -z "$ids_json" ] || [ "$ids_json" = "[]" ]; then
+    echo "  WARN: Could not parse managed review ids; skipping review-thread resolution" >&2
+    return 0
+  fi
   local threads_json
-  threads_json="$(platform_graphql \
-    -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }' \
-    -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" 2>/dev/null || echo '{}')"
+  if ! threads_json="$(platform_graphql \
+      -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }' \
+      -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" 2>/dev/null)" \
+     || ! printf '%s' "$threads_json" | jq -e '.data.repository.pullRequest.reviewThreads.nodes | type == "array"' >/dev/null 2>&1; then
+    echo "  WARN: Could not list review threads for #$PR_NUMBER; superseded threads left open" >&2
+    return 0
+  fi
   local thread_ids
   thread_ids="$(printf '%s' "$threads_json" | jq -r --argjson ids "$ids_json" \
     '[.data.repository.pullRequest.reviewThreads.nodes[]?

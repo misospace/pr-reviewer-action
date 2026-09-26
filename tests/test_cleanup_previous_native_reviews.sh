@@ -421,6 +421,14 @@ FAIL_OUTPUT="$(
 check_contains "failed resolve warns" "$FAIL_OUTPUT" "WARN: Could not resolve review thread T1"
 check_contains "failed resolve never aborts cleanup" "$FAIL_OUTPUT" "CLEANUP_DONE"
 check_not_contains "no success count when every resolve fails" "$FAIL_OUTPUT" "superseded review thread(s)"
+sed -i.bak 's/  \*reviewThreads\*) cat .*/  *reviewThreads*) exit 1 ;;/' "$THREADS_TMP/bin/gh"
+LIST_FAIL_OUTPUT="$(
+  PATH="$THREADS_TMP/bin:$PATH" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=9 COMMENT_MARKER="<!-- my-marker -->" \
+  bash -c 'set -euo pipefail; source "'"$HELPER_SCRIPT"'"; cleanup_native_reviews true; echo CLEANUP_DONE' 2>&1
+)"
+check_contains "failed thread listing warns" "$LIST_FAIL_OUTPUT" "WARN: Could not list review threads for #9"
+check_contains "failed thread listing never aborts cleanup" "$LIST_FAIL_OUTPUT" "CLEANUP_DONE"
 rm -rf "$THREADS_TMP"
 
 echo ""
