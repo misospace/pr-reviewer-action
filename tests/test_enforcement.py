@@ -465,6 +465,7 @@ class TestApplyVerdictPolicy:
 
     def test_coverage_only_blockers_are_capped_and_relax_the_verdict(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         out = self._write(tmp_path, "request_changes", [
             self._finding("major", "tests"), self._finding("blocker", "docs"), self._minor(),
         ])
@@ -474,10 +475,11 @@ class TestApplyVerdictPolicy:
         assert data["verdict"] == "approve"
         assert [f["severity"] for f in data["findings"]] == ["minor", "minor", "minor"]
         assert [f.get("capped_from") for f in data["findings"]] == ["major", "blocker", None]
-        assert "Verdict relaxed from structured findings" in data["review_markdown"]
+        assert "non_blocking_finding_categories" in data["review_markdown"]
 
     def test_a_real_defect_keeps_request_changes(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         out = self._write(tmp_path, "request_changes", [
             self._finding("major", "tests"), self._finding("major", "bug"),
         ])
@@ -489,6 +491,7 @@ class TestApplyVerdictPolicy:
 
     def test_security_risk_flag_exempts_coverage_findings(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         (tmp_path / "classification.json").write_text(json.dumps({"risk_flags": ["auth_changes"]}))
         out = self._write(tmp_path, "request_changes", [self._finding("major", "tests")])
         source = apply_verdict_policy("findings_severity_gated", str(out))
@@ -499,6 +502,7 @@ class TestApplyVerdictPolicy:
 
     def test_unresolved_required_check_keeps_request_changes(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         out = tmp_path / "ai-output.json"
         out.write_text(json.dumps({
             "verdict": "request_changes", "review_markdown": "R.",
@@ -512,6 +516,7 @@ class TestApplyVerdictPolicy:
 
     def test_capped_blocker_no_longer_escalates_an_approve(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         out = self._write(tmp_path, "approve", [self._finding("blocker", "tests")])
         source = apply_verdict_policy("findings_severity_gated", str(out))
         data = json.loads(out.read_text())
@@ -520,11 +525,32 @@ class TestApplyVerdictPolicy:
 
     def test_model_policy_never_caps(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "tests,docs,style,question")
         out = self._write(tmp_path, "request_changes", [self._finding("major", "tests")])
         apply_verdict_policy("model", str(out))
         data = json.loads(out.read_text())
         assert data["verdict"] == "request_changes"
         assert data["findings"][0]["severity"] == "major"
+
+    def test_categories_unset_keeps_pre_opt_in_behaviour(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("NON_BLOCKING_FINDING_CATEGORIES", raising=False)
+        out = self._write(tmp_path, "request_changes", [self._finding("major", "tests")])
+        source = apply_verdict_policy("findings_severity_gated", str(out))
+        data = json.loads(out.read_text())
+        assert source == "model"
+        assert data["verdict"] == "request_changes"
+        assert data["findings"][0]["severity"] == "major"
+
+    def test_security_can_never_be_declared_non_blocking(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NON_BLOCKING_FINDING_CATEGORIES", "security, Tests")
+        out = self._write(tmp_path, "request_changes", [self._finding("blocker", "security"), self._finding("major", "tests")])
+        apply_verdict_policy("findings_severity_gated", str(out))
+        data = json.loads(out.read_text())
+        assert data["verdict"] == "request_changes"
+        assert data["findings"][0]["severity"] == "blocker"
+        assert data["findings"][1]["severity"] == "minor"
 
     def test_unchanged_verdict_adds_no_note(self, tmp_path):
         out = self._write(tmp_path, "request_changes", [self._blocker()])

@@ -104,6 +104,11 @@ inputs:
     required: false
     default: "model"
     description: "How the final verdict is decided. 'model' (default) uses the model's own verdict. 'findings_severity_gated' preserves request_changes from the model and escalates approve to request_changes when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes."
+  - id: non-blocking-finding-categories
+    v2_id: non_blocking_finding_categories
+    required: false
+    default: ""
+    description: "Comma-separated finding categories (from tests, docs, style, question, performance, bug, other; security is never allowed) that cannot request changes on their own under verdict_policy=findings_severity_gated. Their blocker/major findings are capped at minor, and a model request_changes backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under verdict_policy=model. Empty (the default) disables it."
   - id: inline-findings
     v2_id: inline_findings
     required: false

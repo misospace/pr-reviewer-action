@@ -235,12 +235,18 @@ def normalize_enforced_review_markdown(
         Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-# Finding categories that describe polish rather than a defect: under
-# findings_severity_gated they are capped at minor, so a review cannot keep
-# requesting changes on coverage, wording, or style asks alone. A PR that
-# carries a security risk flag is exempt — a missing test on auth or path
-# handling can still block.
-NON_BLOCKING_CATEGORIES = frozenset({"tests", "docs", "style", "question"})
+# Categories a consumer may declare non-blocking (NON_BLOCKING_FINDING_CATEGORIES,
+# opt-in, empty by default): under findings_severity_gated their findings are
+# capped at minor so a review cannot keep requesting changes on those asks
+# alone. security is never eligible, and a PR carrying a security risk flag is
+# exempt — a missing test on auth or path handling can still block.
+NON_BLOCKING_ELIGIBLE = frozenset({"tests", "docs", "style", "question", "performance", "bug", "other"})
+
+
+def _non_blocking_categories() -> frozenset:
+    raw = os.environ.get("NON_BLOCKING_FINDING_CATEGORIES", "")
+    wanted = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    return frozenset(wanted & NON_BLOCKING_ELIGIBLE)
 SECURITY_RISK_FLAGS = frozenset({
     "auth_changes", "public_route_changes", "file_serving_changes",
     "path_handling_changes", "secret_handling_changes", "db_or_migration_changes",
@@ -260,13 +266,14 @@ def _security_risk_flagged(classification_path: str = "classification.json") -> 
 def _cap_non_blocking_findings(findings: list, data: dict) -> bool:
     """Cap blocker/major findings in NON_BLOCKING_CATEGORIES at minor, in
     place, recording the original severity. Returns whether anything changed."""
-    if _security_risk_flagged():
+    categories = _non_blocking_categories()
+    if not categories or _security_risk_flagged():
         return False
     capped = False
     for finding in findings:
         if (
             isinstance(finding, dict)
-            and finding.get("category") in NON_BLOCKING_CATEGORIES
+            and finding.get("category") in categories
             and finding.get("severity") in ("blocker", "major")
         ):
             finding["capped_from"] = finding["severity"]
@@ -296,9 +303,10 @@ def apply_verdict_policy(
 
     ``model`` (default) leaves the model's verdict untouched. With
     ``findings_severity_gated`` the policy only escalates an ``approve`` to
-    ``request_changes`` when blocker-severity findings exist. Blocker/major
-    findings in NON_BLOCKING_CATEGORIES are first capped at minor (unless the
-    PR carries a security risk flag); when that cap leaves nothing blocking, no
+    ``request_changes`` when blocker-severity findings exist. When the consumer
+    opts in via NON_BLOCKING_FINDING_CATEGORIES, blocker/major findings in those
+    categories are first capped at minor (unless the PR carries a security risk
+    flag); when that cap leaves nothing blocking, no
     required check is unresolved, and the model asked for changes, the verdict
     is relaxed to ``approve`` — the one downgrade this policy makes. Otherwise
     non-blocker findings never downgrade a model ``request_changes``. When
@@ -321,8 +329,8 @@ def apply_verdict_policy(
             data["review_markdown"] = str(data.get("review_markdown") or "") + (
                 "\n\n_Verdict relaxed from structured findings "
                 "(verdict_policy=findings_severity_gated): every blocking finding "
-                "was a test, docs, style, or question item, which cannot request "
-                "changes on its own; they remain listed above._"
+                "was in a category this repository marks non-blocking "
+                "(non_blocking_finding_categories); they remain listed above._"
             )
             data["verdict"] = "approve"
             source = "findings"
