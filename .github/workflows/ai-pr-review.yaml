@@ -99,5 +99,6 @@ jobs:
           on_model_failure: notice
           inline_findings: "true"
           verdict_policy: findings_severity_gated
+          non_blocking_finding_categories: tests,docs,style,question
           publish_mode: review_verdict
           allow_approve: "true"
