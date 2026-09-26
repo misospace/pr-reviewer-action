@@ -364,6 +364,57 @@ USER_CALLS="$(grep -c '^api user' "$CALL_LOG" || true)"
 check "no /user lookup is made" "$USER_CALLS" "0"
 
 echo ""
+echo "=== Functional: superseded review threads are resolved ==="
+THREADS_TMP="$(mktemp -d)"
+mkdir -p "$THREADS_TMP/bin"
+THREAD_LOG="$THREADS_TMP/gh-calls.log"
+: > "$THREAD_LOG"
+cat > "$THREADS_TMP/reviews.json" <<'JSONEOF'
+[
+  {"id": 11, "node_id": "PRR_node11", "state": "CHANGES_REQUESTED", "user": {"login": "test-bot"},
+   "body": "<!-- my-marker -->\nold review"},
+  {"id": 33, "node_id": "PRR_node33", "state": "COMMENTED", "user": {"login": "human"},
+   "body": "human review"}
+]
+JSONEOF
+# Threads: T1 open, from the managed review; T2 already resolved; T3 open but
+# from the human review; T4 open, from the managed review.
+cat > "$THREADS_TMP/threads.json" <<'JSONEOF'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+  {"id":"T1","isResolved":false,"comments":{"nodes":[{"pullRequestReview":{"databaseId":11}}]}},
+  {"id":"T2","isResolved":true,"comments":{"nodes":[{"pullRequestReview":{"databaseId":11}}]}},
+  {"id":"T3","isResolved":false,"comments":{"nodes":[{"pullRequestReview":{"databaseId":33}}]}},
+  {"id":"T4","isResolved":false,"comments":{"nodes":[{"pullRequestReview":{"databaseId":11}}]}}
+]}}}}}
+JSONEOF
+cat > "$THREADS_TMP/bin/gh" <<SHELLEOF
+#!/usr/bin/env bash
+echo "\$*" >> "$THREAD_LOG"
+case "\$*" in
+  *"/reviews --paginate"*) cat "$THREADS_TMP/reviews.json" ;;
+  *dismissals*) echo '{"id": 1}' ;;
+  *reviewThreads*) cat "$THREADS_TMP/threads.json" ;;
+  *resolveReviewThread*) echo '{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}' ;;
+  *"api graphql"*) echo '{"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}' ;;
+esac
+exit 0
+SHELLEOF
+chmod +x "$THREADS_TMP/bin/gh"
+THREADS_OUTPUT="$(
+  PATH="$THREADS_TMP/bin:$PATH" \
+  GH_TOKEN=test REPO="test/repo" PR_NUMBER=9 COMMENT_MARKER="<!-- my-marker -->" \
+  bash -c 'source "'"$HELPER_SCRIPT"'"; cleanup_native_reviews true' 2>&1
+)"
+check_contains "two superseded threads are resolved" \
+  "$THREADS_OUTPUT" "Resolved 2 superseded review thread(s)"
+check "resolve mutation runs for T1" "$(grep -c 'resolveReviewThread.*-f id=T1' "$THREAD_LOG" || true)" "1"
+check "resolve mutation runs for T4" "$(grep -c 'resolveReviewThread.*-f id=T4' "$THREAD_LOG" || true)" "1"
+check "already-resolved thread is skipped" "$(grep -c 'resolveReviewThread.*-f id=T2' "$THREAD_LOG" || true)" "0"
+check "human thread is never touched" "$(grep -c 'resolveReviewThread.*-f id=T3' "$THREAD_LOG" || true)" "0"
+check "one thread listing query" "$(grep -c 'reviewThreads' "$THREAD_LOG" || true)" "1"
+rm -rf "$THREADS_TMP"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ "$FAIL" -gt 0 ]]; then

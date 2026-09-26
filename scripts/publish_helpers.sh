@@ -154,8 +154,52 @@ cleanup_native_reviews() {
         fi
       fi
     done <<< "$PREV_REVIEWS"
+    if [ "$_platform" = "github" ]; then
+      resolve_superseded_review_threads "$(printf '%s\n' "$PREV_REVIEWS" | cut -f1)"
+    else
+      echo "  NOTE: Skipping review-thread resolution (platform=$_platform; no GraphQL API)" >&2
+    fi
   else
     echo "  No previous managed native reviews to clean up for #$PR_NUMBER"
+  fi
+}
+
+# Resolve the inline review threads that superseded managed reviews opened.
+# Dismissal strikes the verdict and minimisation hides the body, but a thread
+# stays open on the Files tab and re-anchors to the new head, where a reader
+# — or a coding agent taking the PR over — sees a finding about code that no
+# longer exists. Runs before the new review is posted, so still-open findings
+# come back as fresh threads. Thread state is GraphQL-only, hence GitHub-only;
+# bounded to the first 100 threads. Human threads are never touched: a thread
+# qualifies only when its first comment belongs to a managed review.
+# Args: $1 = newline-separated managed review ids
+resolve_superseded_review_threads() {
+  local ids_json
+  ids_json="$(printf '%s\n' "$1" | jq -R 'select(length > 0) | tonumber? // empty' 2>/dev/null | jq -s '.' 2>/dev/null || echo '[]')"
+  [ -n "$ids_json" ] && [ "$ids_json" != "[]" ] || return 0
+  local threads_json
+  threads_json="$(platform_graphql \
+    -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }' \
+    -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" 2>/dev/null || echo '{}')"
+  local thread_ids
+  thread_ids="$(printf '%s' "$threads_json" | jq -r --argjson ids "$ids_json" \
+    '[.data.repository.pullRequest.reviewThreads.nodes[]?
+      | select(.isResolved != true)
+      | select((((.comments.nodes[0].pullRequestReview.databaseId) // -1) as $r | $ids | index($r)) != null)
+      | .id] | .[]' 2>/dev/null || echo "")"
+  local resolved=0 tid
+  while IFS= read -r tid; do
+    [ -n "$tid" ] || continue
+    if platform_graphql \
+        -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' \
+        -f id="$tid" >/dev/null 2>&1; then
+      resolved=$((resolved + 1))
+    else
+      echo "  WARN: Could not resolve review thread $tid (may require additional permissions)" >&2
+    fi
+  done <<< "$thread_ids"
+  if [ "$resolved" -gt 0 ]; then
+    echo "  Resolved $resolved superseded review thread(s)"
   fi
 }
 

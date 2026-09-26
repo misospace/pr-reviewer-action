@@ -879,6 +879,7 @@ The cleanup process:
 1. Identifies previous managed AI reviews from the current authenticated actor that carry the `<!-- ai-pr-reviewer -->` marker.
 2. Dismisses old approval or request-changes verdict reviews when permissions allow, so stale verdicts stop counting toward branch protection.
 3. Updates the body of old managed reviews to a compact "Outdated: superseded by a newer automated review." stub.
+4. Resolves the inline review threads those reviews opened (GitHub only), so a stale finding does not stay open against the new head; still-open findings are posted again by the new review. Human threads are never touched.
 
 Old reviews may still exist in the PR timeline, but they are visually minimized and explicitly marked as outdated. Human reviews and unmarked bot reviews are never modified.
 
