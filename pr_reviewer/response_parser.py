@@ -127,6 +127,40 @@ def _escape_raw_newlines_in_strings(text: str) -> str:
     return "".join(result)
 
 
+def _escape_invalid_backslashes(text: str) -> str:
+    """Double a backslash that starts no valid JSON escape inside a string.
+
+    Markdown-heavy fields (``review_markdown``) often carry ``\\_`` or
+    ``\\*`` from a model escaping emphasis. One such sequence breaks the
+    outer object, and the scanner then harvests the *nested* findings
+    objects instead, none of which carries ``verdict``.
+    """
+    result: list[str] = []
+    in_string = False
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if in_string and ch == "\\":
+            nxt = text[i + 1] if i + 1 < length else ""
+            if nxt and nxt in '"\\/bfnrt':
+                result.append(ch + nxt)
+                i += 2
+                continue
+            if nxt == "u" and all(c in "0123456789abcdefABCDEF" for c in text[i + 2:i + 6]) and len(text[i + 2:i + 6]) == 4:
+                result.append(text[i:i + 6])
+                i += 6
+                continue
+            result.append("\\\\")
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _try_decode_json(text: str) -> Any | None:
     """Attempt to decode a JSON object/list from *text*.
 
@@ -214,10 +248,26 @@ def _try_decode_json(text: str) -> Any | None:
                 return cand
         return None
 
-    parsed = _scan(text)
-    if parsed is not None:
-        return parsed
-    return _scan(_escape_raw_newlines_in_strings(text))
+    def _complete(value: Any) -> bool:
+        return isinstance(value, dict) and "verdict" in value and "review_markdown" in value
+
+    # Each repair pass runs only when the previous one found no complete
+    # verdict: a partial or nested candidate must not pre-empt a complete
+    # object that a repair would recover.
+    first = _scan(text)
+    if _complete(first):
+        return first
+    unwrapped = _escape_raw_newlines_in_strings(text)
+    second = _scan(unwrapped)
+    if _complete(second):
+        return second
+    third = _scan(_escape_invalid_backslashes(unwrapped))
+    if _complete(third):
+        return third
+    for candidate in (first, second, third):
+        if candidate is not None:
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------

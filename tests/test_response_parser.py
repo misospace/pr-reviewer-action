@@ -13,6 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from pr_reviewer.response_parser import (  # noqa: E402
+    _escape_invalid_backslashes,
     _escape_raw_newlines_in_strings,
     _extract_content,
     _strip_markdown_code_block,
@@ -837,3 +838,22 @@ class TestRequiredCheckDispositions(TestCase):
 
 if __name__ == "__main__":
     unittest_main()
+
+
+class TestInvalidEscapeRecovery(TestCase):
+    def test_invalid_backslash_repaired_only_inside_strings(self):
+        self.assertEqual(
+            _escape_invalid_backslashes('{"a": "x\\_y \\n \\u00e9 \\q"}'),
+            '{"a": "x\\\\_y \\n \\u00e9 \\\\q"}',
+        )
+
+    def test_nested_findings_do_not_masquerade_as_verdict(self):
+        body = (
+            "```json\n{\n  \"verdict\": \"approve\",\n"
+            "  \"review_markdown\": \"## Recommendation\\nApprove. Uses `snake\\_case` names.\",\n"
+            "  \"findings\": [{\"severity\": \"minor\", \"file\": \"a.py\", \"line\": 3, \"message\": \"x\"}]\n}\n```"
+        )
+        resp = {"choices": [{"message": {"content": body}, "finish_reason": "stop"}], "usage": {"completion_tokens": 50}}
+        parsed = parse_response(resp)
+        self.assertEqual(parsed["verdict"], "approve")
+        self.assertIn("snake\\_case", parsed["review_markdown"])

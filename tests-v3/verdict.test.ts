@@ -379,3 +379,10 @@ test("#750: dispositions never forge or alter the smart-review request (#721 aut
   assert.equal(verdict.smartReviewReason, null);
   assert.equal(verdict.requiredCheckDispositions!.length, 1);
 });
+
+test("an invalid escape inside review_markdown does not let a nested finding pose as the verdict", () => {
+  const body = "```json\n{\n  \"verdict\": \"approve\",\n  \"review_markdown\": \"## Recommendation\\nApprove. Uses `snake\\_case` names.\",\n  \"findings\": [{\"severity\": \"minor\", \"file\": \"a.py\", \"line\": 3, \"message\": \"x\"}]\n}\n```";
+  const verdict = parseVerdictResponse(openaiResponse(body, { usage: { completion_tokens: 50 } }));
+  assert.equal(verdict.verdict, "approve");
+  assert.match(verdict.reviewMarkdown, /snake\\_case/);
+});
