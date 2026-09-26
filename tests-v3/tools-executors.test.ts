@@ -91,3 +91,61 @@ test("MCP verb gate, safe URL parsing, connect advertisement and call-time denia
   const calls: any[] = [], server = new McpToolset("s", "http://mcp", "tok", { postFn: async (_url, payload, _session, _token) => { const req = payload; calls.push({ req }); if (req.method === "initialize") return { result: JSON.parse('{"result":{}}'), sessionId: "sid", error: null }; if (req.method === "tools/list") return { result: JSON.parse(JSON.stringify({ result: { tools: [{ name: "get_item" }, { name: "delete_item" }] } })), sessionId: "sid", error: null }; if (req.method === "tools/call") return { result: JSON.parse(JSON.stringify({ result: { content: [{ type: "text", text: "ok" }] } })), sessionId: "sid", error: null }; return { result: null, sessionId: "sid", error: null }; } });
   assert.equal(await server.connect(), null); assert.deepEqual(server.schemas.map((s) => s.name), ["mcp__s__get_item"]); assert.deepEqual(await server.call("delete_item"), { error: "MCP tool not allowed: delete_item" }); assert.deepEqual(await server.call("get_item"), { content: "ok" }); assert.equal(calls[0].req.id, 1); assert.equal(calls[1].req.method, "notifications/initialized"); assert.equal(calls[1].req.id, undefined); assert.equal(calls.at(-1).req.method, "tools/call");
 });
+
+test("web_fetch treats non-2xx final responses as errors, never evidence", async () => {
+  const context = (status: number, body: string) => ctx("/tmp", {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => ({ status, body }) },
+  });
+  const notFound = await webFetch("https://github.com/missing", context(404, '{"message":"Not Found"}'));
+  assert.equal(notFound.error, "HTTP Error 404: Not Found");
+  assert.equal(notFound.content, undefined);
+  const serverError = await webFetch("https://github.com/boom", context(500, "explode"));
+  assert.equal(serverError.error, "HTTP Error 500: Internal Server Error");
+  // A JSON error body must not leak through as content.
+  assert.equal(serverError.content, undefined);
+  // A 200 body is still evidence.
+  const ok = await webFetch("https://github.com/ok", context(200, "release notes"));
+  assert.deepEqual(ok, { content: "release notes" });
+  // 3xx that is not a redirect (e.g. 304 Not Modified) fails like urllib.
+  const notModified = await webFetch("https://github.com/etag", context(304, ""));
+  assert.equal(notModified.error, "HTTP Error 304: Not Modified");
+});
+
+test("web_fetch preserves success across an allowed redirect and fail-closes on a disallowed one", async () => {
+  let called = 0;
+  const allowed = ctx("/tmp", {
+    allowedHosts: ["github.com", "api.github.com"],
+    deps: {
+      ...deps(),
+      fetch: async (url: string) => {
+        called++;
+        if (called === 1) return { status: 302, headers: { location: "https://api.github.com/real" }, body: "" };
+        assert.equal(url, "https://api.github.com/real");
+        return { status: 200, body: "final body" };
+      },
+    },
+  });
+  assert.deepEqual(await webFetch("https://github.com/start", allowed), { content: "final body" });
+  const disallowed = ctx("/tmp", {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }) },
+  });
+  assert.match((await webFetch("https://github.com/pivot", disallowed)).error!, /Redirect to disallowed host: evil\.example/);
+});
+
+test("web_search treats non-2xx as errors even when the body is a valid JSON error object", async () => {
+  const context = (status: number, body: string) => ctx("/tmp", {
+    searchUrl: "https://search.test/search",
+    deps: { ...deps(), fetch: async () => ({ status, body }) },
+  });
+  const notFound = await webSearch("x", context(404, JSON.stringify({ error: "not found" })));
+  assert.equal(notFound.error, "HTTP Error 404: Not Found");
+  assert.equal(notFound.results, undefined);
+  const serverError = await webSearch("x", context(500, JSON.stringify({ results: [{ title: "poison" }] })));
+  assert.equal(serverError.error, "HTTP Error 500: Internal Server Error");
+  assert.equal(serverError.results, undefined);
+  // 2xx JSON results still parse and sanitize.
+  const ok = await webSearch("x", context(200, JSON.stringify({ results: [{ title: "t", url: "https://a.test/x", content: "s" }] })));
+  assert.deepEqual(ok, { results: [{ title: "t", url: "https://a.test/x", snippet: "s" }] });
+});
