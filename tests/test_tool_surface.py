@@ -580,3 +580,26 @@ def test_workspace_tools_unfiltered_outside_git(tmp_path):
     (tmp_path / "notes.md").write_text("n\n", encoding="utf-8")
     assert _exec("read_file", {"path": "notes.md"}, tmp_path)["status"] == "ok"
     assert _exec("find_files", {"pattern": "*.md"}, tmp_path)["result"]["files"] == ["notes.md"]
+
+
+def test_list_tree_keeps_tracked_subdirectories(git_repo):
+    (git_repo / "sub").mkdir()
+    (git_repo / "sub" / "deep.py").write_text("x = 1\n", encoding="utf-8")
+    _git(["add", "sub/deep.py"], git_repo)
+    _git(["commit", "-q", "-m", "add sub"], git_repo)
+    (git_repo / "sub" / "notes.tmp").write_text("scratch\n", encoding="utf-8")
+    res = _exec("list_tree", {"path": ".", "depth": 3}, git_repo)
+    assert [e["path"] for e in res["result"]["entries"]] == ["app.py", "sub", "sub/deep.py"]
+
+
+def test_tracked_index_unavailable_leaves_tools_unfiltered(git_repo):
+    # git missing or hanging: the index is unavailable and every tool falls
+    # back to the on-disk view rather than hiding everything.
+    (git_repo / "pr.json").write_text("{}\n", encoding="utf-8")
+    with mock.patch("subprocess.run", side_effect=OSError("git not found")):
+        assert tool_executors._tracked_index(str(git_repo)) is None
+        res = _exec("read_file", {"path": "pr.json"}, git_repo)
+    assert res["status"] == "ok"
+    assert res["result"]["content"] == "{}\n"
+    listed = _exec("list_tree", {"path": "."}, git_repo)
+    assert "pr.json" not in [e["path"] for e in listed["result"]["entries"]]
