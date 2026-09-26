@@ -22,7 +22,7 @@ const SEVERITY_ALIASES: Readonly<Record<string, NormalizedFinding["severity"]>> 
   info: "info", note: "info", nit: "info", suggestion: "info",
 };
 
-const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "question", "other"]);
+const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other"]);
 
 const MAX_FINDINGS = 50;
 const MAX_FINDING_MESSAGE_CHARS = 2000;
