@@ -392,6 +392,105 @@ def apply_review_thread_enforcement(
     )
 
 
+HUMAN_REVIEW_DISPOSITIONS = ("addressed", "not_addressed")
+
+
+def apply_human_review_enforcement(
+    reviews_path: str = "human-reviews.json",
+    output_path: str = "ai-output.json",
+) -> tuple[bool, str]:
+    """Never let an approval slip past an outstanding human change request.
+
+    The failure this closes: a maintainer submits a ``CHANGES_REQUESTED``
+    review pointing at a real gap; a later push merges more commits in; the
+    model then approves the new head without ever mentioning the human
+    review, although the flagged gap is still present. ``human-reviews.json``
+    (built by ``pr_reviewer.human_reviews``) lists every request still
+    outstanding at this head. When the verdict is ``approve``, every listed
+    request must have a disposition of ``addressed`` whose evidence cites
+    current-head code (:func:`_evidence_cites_code`); otherwise the verdict
+    is forced to ``request_changes`` naming the reviewer and the commit their
+    review was submitted against. When every request is addressed, the
+    verdict stays ``approve`` and one deterministic line per request is
+    appended instead. A verdict that was already ``request_changes`` is left
+    alone — a human review body is a blocking signal on approval, never a
+    lever to change anything else.
+    """
+    reviews_file = Path(reviews_path)
+    if not reviews_file.is_file():
+        return False, ""
+    try:
+        reviews = json.loads(reviews_file.read_text(encoding="utf-8", errors="replace") or "[]")
+    except json.JSONDecodeError:
+        return False, ""
+    if not isinstance(reviews, list) or not reviews:
+        return False, ""
+
+    by_id: dict[str, dict] = {}
+    for review in reviews:
+        if isinstance(review, dict) and isinstance(review.get("review_id"), str):
+            by_id.setdefault(review["review_id"], review)
+    if not by_id:
+        return False, ""
+
+    data = json.loads(Path(output_path).read_text(encoding="utf-8", errors="replace"))
+    given: dict[str, dict] = {}
+    for entry in data.get("human_review_dispositions") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("review_id"), str):
+            given.setdefault(entry["review_id"], entry)
+
+    settled: list[dict] = []
+    unresolved_ids: list[str] = []
+    for review_id in by_id:
+        entry = given.get(review_id) or {}
+        disposition = entry.get("disposition")
+        evidence = entry.get("evidence") if isinstance(entry.get("evidence"), str) else None
+        if disposition not in HUMAN_REVIEW_DISPOSITIONS:
+            disposition = "not_addressed"
+        elif disposition == "addressed" and not _evidence_cites_code(evidence, None):
+            disposition = "not_addressed"
+        settled.append({"review_id": review_id, "disposition": disposition, "evidence": evidence})
+        if disposition != "addressed":
+            unresolved_ids.append(review_id)
+
+    data["human_review_dispositions"] = settled
+
+    if data.get("verdict") != "approve":
+        Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+        return False, ""
+
+    lines = ["", "", "## Outstanding Human Change Requests", ""]
+    if unresolved_ids:
+        for review_id in unresolved_ids:
+            review = by_id[review_id]
+            commit = review.get("commit_id")
+            commit_display = commit[:7] if commit else "unknown commit"
+            lines.append(
+                f"- Approval withheld: @{review.get('login') or 'unknown'}'s change request on "
+                f"{commit_display} is outstanding and not shown addressed at this head."
+            )
+        data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
+        data["verdict"] = "request_changes"
+        data["verdict_source"] = "human_review"
+        Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+        return True, (
+            f"human review enforcement: {len(unresolved_ids)} outstanding change "
+            "request(s) not shown addressed"
+        )
+
+    for record in settled:
+        review = by_id[record["review_id"]]
+        commit = review.get("commit_id")
+        commit_display = commit[:7] if commit else "unknown commit"
+        lines.append(
+            f"- Human change request by @{review.get('login') or 'unknown'} ({commit_display}) "
+            f"judged addressed: {record['evidence']}"
+        )
+    data["review_markdown"] = str(data.get("review_markdown") or "") + "\n".join(lines)
+    Path(output_path).write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    return True, "human review enforcement: all outstanding change requests judged addressed"
+
+
 def apply_all_enforcement(
     evidence_blocker_enabled: bool = False,
     tool_failure_enabled: bool = False,
@@ -444,6 +543,11 @@ def apply_all_enforcement(
         output_path=output_path,
         verdict_policy=os.environ.get("VERDICT_POLICY", "model"),
     )
+    if ok:
+        applied += 1
+        reasons.append(reason)
+
+    ok, reason = apply_human_review_enforcement(output_path=output_path)
     if ok:
         applied += 1
         reasons.append(reason)
