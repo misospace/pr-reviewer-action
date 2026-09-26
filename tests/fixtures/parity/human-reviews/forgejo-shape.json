@@ -1,0 +1,14 @@
+{
+  "fixture": "forgejo-shape",
+  "description": "Forgejo-normalized review shape: bare-string user, event-only state field, no commit_id — degrades gracefully to head_moved 'unknown' rather than a crash.",
+  "head_sha": "dddddddddddddddddddddddddddddddddddddddd",
+  "reviews": [
+    {
+      "id": 42,
+      "user": "erin",
+      "event": "REQUEST_CHANGES",
+      "submitted_at": "2026-09-10T00:00:00+02:00",
+      "body": "The migration is missing a down step."
+    }
+  ]
+}

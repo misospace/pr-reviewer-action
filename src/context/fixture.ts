@@ -32,6 +32,7 @@ import {
 } from "./repo-map.js";
 import { renderPrThread } from "./pr-thread.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "./review-threads.js";
+import { enforcementView as humanReviewEnforcementView, prepareReviews, renderOutstanding } from "./human-reviews.js";
 import {
   buildRelatedContext,
   MAX_MARKDOWN_BYTES as MAX_MARKDOWN_BYTES_DEFAULT,
@@ -173,6 +174,31 @@ export function runReviewThreadsFixture(fixturePath: string): { ok: boolean; val
     "max_bytes" in fixture ? (fixture.max_bytes as number) : undefined,
   );
   return { ok: true, values: { markdown, view: pythonJsonStringify(enforcementView(rendered)) } };
+}
+
+// --- Human reviews (outstanding change requests) -----------------------------
+
+interface HumanReviewsFixture extends FixtureRecord {
+  reviews?: unknown[];
+  marker?: string;
+  head_sha?: string | null;
+  max_entries?: number;
+  max_bytes?: number;
+}
+
+export function runHumanReviewsFixture(fixturePath: string): { ok: boolean; values?: Record<string, string>; stderr?: string } {
+  const fixture = loadFixture(fixturePath) as HumanReviewsFixture;
+  const reviews = prepareReviews(
+    Array.isArray(fixture.reviews) ? fixture.reviews : [],
+    "marker" in fixture ? (fixture.marker as string) : undefined,
+  );
+  const [markdown, rendered] = renderOutstanding(
+    reviews,
+    "head_sha" in fixture ? (fixture.head_sha as string | null) : undefined,
+    "max_entries" in fixture ? (fixture.max_entries as number) : undefined,
+    "max_bytes" in fixture ? (fixture.max_bytes as number) : undefined,
+  );
+  return { ok: true, values: { markdown, view: pythonJsonStringify(humanReviewEnforcementView(rendered)) } };
 }
 
 // --- Related code -------------------------------------------------------------------
