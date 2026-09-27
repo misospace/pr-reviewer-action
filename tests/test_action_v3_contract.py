@@ -136,7 +136,7 @@ NEVER_REPO_CONFIGURABLE = {
     "linear_api_key", "tool_mcp_token", "forgejo_token",
     "allowed_source_hosts", "tool_mode", "tool_enable_for_forks", "tool_mcp_servers",
     "evidence_enable_for_forks", "linear_enable_for_forks", "allow_approve", "approve_forks",
-    "publish_mode",
+    "publish_mode", "evidence_providers_file", "allow_repo_policy_overrides",
 }
 
 

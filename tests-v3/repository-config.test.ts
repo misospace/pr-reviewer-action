@@ -154,6 +154,14 @@ test("policy inputs are ignored unless the operator opts in; non-policy inputs a
   assert.deepEqual([...allowed.appliedKeys].sort(), ["non-blocking-finding-categories", "review-verbosity", "verdict-policy"]);
 });
 
+test("evidence-providers-file is operator-only: repository config cannot enable command execution", () => {
+  const input = contract.inputs.find((entry) => entry.id === "evidence-providers-file");
+  assert.ok(input && !input["repo-configurable"]);
+  const resolution = applyRepositoryConfig(contract, baseOperatorRaw(), fileOf("evidence-providers-file: .github/providers.json\n"));
+  assert.deepEqual(resolution.appliedKeys, []);
+  assert.equal(resolution.raw["evidence-providers-file"], "");
+});
+
 test("the policy opt-in itself can never come from repository config", () => {
   const file = fileOf("allow-repo-policy-overrides: true\nverdict-policy: findings_severity_gated\n");
   const resolution = applyRepositoryConfig(contract, baseOperatorRaw(), file);

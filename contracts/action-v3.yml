@@ -415,7 +415,6 @@ inputs:
     required: false
     default: ""
     description: "Optional JSON file in the reviewed repository that defines evidence providers to run before review"
-    repo-configurable: true
   - id: sarif-files
     v2_id: sarif_files
     required: false

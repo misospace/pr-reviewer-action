@@ -54,7 +54,7 @@ input that isn't marked) is a no-op with a visible warning, never a crash or
 a partial application of the rest of the file.
 
 Credentials, endpoints/models, network/host allowlists, and anything that
-gates tool/MCP/fork/approval authority are never repo-configurable — those
+gates tool/MCP/command/fork/approval authority (including `evidence-providers-file`, whose providers run commands) are never repo-configurable — those
 stay operator-only workflow inputs. `src/config/contract.ts` enforces this
 structurally: `validateContract` rejects a contract where a `required`
 input, or an input in `SECRET_INPUTS`, is marked `repo-configurable`.
@@ -86,7 +86,6 @@ still also set them as a workflow `with:` input:
 | `deep-review-max-tokens` | integer | ceiling |
 | `enrichment-budget-sec` | integer | ceiling |
 | `image-digest-budget-sec` | integer | ceiling |
-| `evidence-providers-file` | string (path) | operator-explicit wins |
 | `sarif-max-findings` | integer | ceiling |
 | `evidence-provider-timeout-sec` | integer | ceiling |
 | `evidence-provider-max-output-bytes` | integer | ceiling |
