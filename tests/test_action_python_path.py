@@ -20,10 +20,16 @@ def test_runtime_scripts_keep_the_checkout_off_sys_path() -> None:
     for script_name in ("run_review.sh", "check_review_needed.sh"):
         script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
         assert "export PYTHONSAFEPATH=1" in script
-    platform = (ROOT / "scripts" / "platform_api.sh").read_text(encoding="utf-8")
-    # The three Forgejo backend calls: dispatch, enrich-release, enrich-compare.
-    assert platform.count("PYTHONSAFEPATH=1 PYTHONPATH=") == 3
-    assert platform.count('PYTHONPATH="${_PLATFORM_SCRIPT_DIR}') == 3
+
+    # platform_api.sh is sourced by scripts that don't export it, so every
+    # module invocation there must set it inline (on the line or its
+    # continuation above).
+    lines = (ROOT / "scripts" / "platform_api.sh").read_text(encoding="utf-8").splitlines()
+    calls = [i for i, line in enumerate(lines) if "python3 -m pr_reviewer" in line]
+    assert calls
+    for i in calls:
+        command = lines[i] if i == 0 or not lines[i - 1].rstrip().endswith("\\") else lines[i - 1] + lines[i]
+        assert "PYTHONSAFEPATH=1" in command, f"platform_api.sh:{i + 1}"
 
 
 def _run_module_from_shadowed_checkout(tmp_path: Path, safe_path: bool) -> str:
