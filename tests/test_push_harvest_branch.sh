@@ -58,8 +58,8 @@ chmod +x "$TMPDIR/bin/gh"
 make_bare_remote_with_main() {
   # $1: path to the bare remote to create
   local remote="$1" seed="$TMPDIR/seed-$RANDOM"
-  git init --bare -q "$remote"
-  git init -q "$seed"
+  git init --bare -q -b main "$remote"
+  git init -q -b main "$seed"
   (
     cd "$seed"
     git config user.email t@example.com
@@ -80,7 +80,7 @@ seed_existing_bot_branch() {
   # the remote already has that branch before the script runs against a
   # clone that has never seen it (exactly actions/checkout's shape).
   local remote="$1" seed="$TMPDIR/seed-bot-$RANDOM"
-  git clone -q "$remote" "$seed"
+  git clone -q --branch main "$remote" "$seed"
   (
     cd "$seed"
     git config user.email t@example.com
