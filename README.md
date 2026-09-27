@@ -95,7 +95,9 @@ flowchart LR
 Deeper repository documentation for contributors and agents — the per-module
 code map, review-corpus internals, fork-review security, and the eval
 runbooks — lives under [`docs/`](docs), indexed from
-[`AGENTS.md`](AGENTS.md).
+[`AGENTS.md`](AGENTS.md). The planned v3 repository config file (a
+repository may narrow, never widen, the operator's workflow inputs) is
+documented in [`docs/repository-config.md`](docs/repository-config.md).
 
 What it supports:
 

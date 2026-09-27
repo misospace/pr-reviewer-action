@@ -109,6 +109,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/deep-review-execution-shape.md`](docs/architecture/deep-review-execution-shape.md) — specialist execution-shape ADR
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
+- [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
 - [`SECURITY.md`](SECURITY.md) — threat model and operational security guidance
