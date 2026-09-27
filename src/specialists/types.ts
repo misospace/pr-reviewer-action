@@ -74,6 +74,12 @@ export interface SpecialistLead {
   file: string | null;
   line: number | null;
   message: string;
+  /** #758 adversarial-correctness contract: the falsifying input, when the
+   * lead's payload supplied one. */
+  trigger?: string;
+  /** #758 adversarial-correctness contract: the wrong observable the trigger
+   * produces, when the lead's payload supplied one. */
+  consequence?: string;
 }
 
 export interface SpecialistTruncation {
@@ -82,6 +88,9 @@ export interface SpecialistTruncation {
   omitted_leads: number;
   omitted_message_chars: number;
   omitted_errors: number;
+  /** #758: count of `boundaries_challenged` entries dropped past
+   * `MAX_BOUNDARIES_CHALLENGED`. Present only when that cap fired. */
+  omitted_boundaries_challenged?: number;
 }
 
 export interface SpecialistArtifact {
@@ -91,4 +100,17 @@ export interface SpecialistArtifact {
   truncated: boolean;
   truncation: SpecialistTruncation;
   errors: string[];
+  /** #758 adversarial-correctness contract: a clean-result report of the
+   * boundaries attacked and why the attempted counterexamples held. Only
+   * meaningful (and only ever populated) when `leads` is empty. */
+  boundaries_challenged?: string[];
 }
+
+/** #758: cap on the clean-result boundary report so a specialist cannot
+ * flood the artifact with boundary prose. */
+export const MAX_BOUNDARIES_CHALLENGED = 6;
+
+/** #758: the only lead contract that enables the trigger/consequence
+ * major-lead demotion. The adversarial prompt's JSON contract self-declares
+ * `"contract": "adversarial"`; the default (standard) prompts never demote. */
+export const ADVERSARIAL_CONTRACT = "adversarial";

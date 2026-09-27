@@ -15,7 +15,9 @@
  */
 
 import {
+  ADVERSARIAL_CONTRACT,
   ERRORS_TRUNCATED_MARKER,
+  MAX_BOUNDARIES_CHALLENGED,
   MAX_CATEGORY_CHARS,
   MAX_ERRORS,
   MAX_FILE_CHARS,
@@ -112,6 +114,7 @@ function normalizeLead(
   index: number,
   maxMessageChars: number,
   result: SpecialistArtifact,
+  contract: string,
 ): SpecialistLead | null {
   if (!isRecord(item)) {
     addError(result, `leads[${index}] is not an object`);
@@ -162,13 +165,52 @@ function normalizeLead(
     line = parsed > 0 ? parsed : null;
   }
 
-  return {
+  const lead: SpecialistLead = {
     severity: normalizeSeverity(item.severity),
     category,
     file: filePath,
     line,
     message,
   };
+  return normalizeAdversarialFields(item, index, maxMessageChars, result, lead, contract);
+}
+
+/** #758 adversarial-correctness contract: optional `trigger`/`consequence`.
+ * Both fields are free-text accounts of the falsifying input (`trigger`) and
+ * the wrong observable it produces (`consequence`). Enforcement is scoped to
+ * payloads that self-declare `contract: "adversarial"` (the adversarial
+ * prompt's JSON contract): a `major` lead produced under that contract that
+ * lacks either field is downgraded to `minor` with a visible error. Payloads
+ * under the default contract never demote. */
+function normalizeAdversarialFields(
+  item: Record<string, unknown>,
+  index: number,
+  maxMessageChars: number,
+  result: SpecialistArtifact,
+  lead: SpecialistLead,
+  contract: string,
+): SpecialistLead {
+  for (const field of ["trigger", "consequence"] as const) {
+    const raw = item[field];
+    if (typeof raw === "string" && raw.trim()) {
+      lead[field] = boundedText(sanitizeString(raw.trim()), maxMessageChars, "message_chars", result);
+    }
+  }
+  if (contract === ADVERSARIAL_CONTRACT && lead.severity === "major" && (lead.trigger === undefined || lead.consequence === undefined)) {
+    lead.severity = "minor";
+    // Verbatim v2 wording (`pr_reviewer/specialists.py::_normalize_adversarial_fields`):
+    // the primary word is "trigger" whenever trigger is missing (even when
+    // consequence is ALSO missing — the message never lists both in that
+    // case), else "consequence"; the " and consequence" suffix is appended
+    // whenever trigger is present (i.e. only when consequence alone is
+    // missing), which reads oddly ("missing consequence and consequence")
+    // but is v2's actual behavior and is pinned by the parity fixtures.
+    const missingTrigger = lead.trigger === undefined;
+    const which = missingTrigger ? "trigger" : "consequence";
+    const andConsequence = !missingTrigger ? " and consequence" : "";
+    addError(result, `leads[${index}]: major lead missing ${which}${andConsequence}; downgraded to minor`);
+  }
+  return lead;
 }
 
 function leadKey(lead: SpecialistLead): string {
@@ -190,7 +232,7 @@ export function normalizeSpecialistOutput(
   if (!SPECIALIST_ROLES.has(role)) {
     addError(
       result,
-      `unknown specialist role: '${role}'; expected one of [${SPECIALIST_ROLES_ORDER.join(", ")}]`,
+      `unknown specialist role: '${role}'; expected one of [${SPECIALIST_ROLES_ORDER.map((r) => `'${r}'`).join(", ")}]`,
     );
     return result;
   }
@@ -220,9 +262,15 @@ export function normalizeSpecialistOutput(
     rawLeads = [];
   }
 
+  // #758: only a payload that self-declares the adversarial contract gets the
+  // trigger/consequence demotion enforcement (the adversarial prompt emits
+  // "contract": "adversarial").
+  const rawContract = payload.contract;
+  const contract = typeof rawContract === "string" ? rawContract : "";
+
   const candidates: SpecialistLead[] = [];
   (rawLeads as unknown[]).forEach((item, index) => {
-    const lead = normalizeLead(item, index, boundedMaxMessageChars, result);
+    const lead = normalizeLead(item, index, boundedMaxMessageChars, result, contract);
     if (lead !== null) candidates.push(lead);
   });
 
@@ -247,6 +295,42 @@ export function normalizeSpecialistOutput(
   }
 
   result.leads = leads;
+
+  // #758 adversarial-correctness contract: an optional clean-result report of
+  // the boundaries attacked and why the attempted counterexamples held. Only
+  // meaningful with no leads, validated as sanitized bounded strings, and
+  // capped so one specialist cannot flood the artifact.
+  const rawBoundaries = payload.boundaries_challenged;
+  if (rawBoundaries !== undefined && rawBoundaries !== null) {
+    if (!Array.isArray(rawBoundaries)) {
+      addError(result, "boundaries_challenged must be a list of strings");
+    } else {
+      const boundaries: string[] = [];
+      for (let index = 0; index < rawBoundaries.length; index++) {
+        const entry = rawBoundaries[index];
+        if (typeof entry !== "string" || !entry.trim()) {
+          addError(result, `boundaries_challenged[${index}] is not a usable string`);
+          continue;
+        }
+        boundaries.push(boundedText(sanitizeString(entry.trim()), boundedMaxMessageChars, "message_chars", result));
+        if (boundaries.length >= MAX_BOUNDARIES_CHALLENGED) {
+          result.truncated = true;
+          result.truncation.truncated = true;
+          result.truncation.omitted_boundaries_challenged = rawBoundaries.length - MAX_BOUNDARIES_CHALLENGED;
+          if (!result.truncation.reasons.includes("boundary_cap")) {
+            result.truncation.reasons.push("boundary_cap");
+          }
+          break;
+        }
+      }
+      if (boundaries.length > 0 && leads.length > 0) {
+        addError(result, "boundaries_challenged is only meaningful with no leads; dropping it because leads exist");
+      } else {
+        result.boundaries_challenged = boundaries;
+      }
+    }
+  }
+
   return result;
 }
 
@@ -360,7 +444,7 @@ export function parseSpecialistResponse(
     if (!SPECIALIST_ROLES.has(role)) {
       addError(
         result,
-        `unknown specialist role: '${role}'; expected one of [${SPECIALIST_ROLES_ORDER.join(", ")}]`,
+        `unknown specialist role: '${role}'; expected one of [${SPECIALIST_ROLES_ORDER.map((r) => `'${r}'`).join(", ")}]`,
       );
       return result;
     }

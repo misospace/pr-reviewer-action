@@ -20,13 +20,17 @@ export class UnknownSpecialistRoleError extends Error {
   }
 }
 
-export function promptFragmentPath(role: string, repoRoot: string = process.cwd()): string {
+/** `variant` (#758 adversarial-correctness arm) selects
+ * `specialist_<role>_<variant>.txt`; an empty variant keeps the default
+ * `specialist_<role>.txt`. */
+export function promptFragmentPath(role: string, repoRoot: string = process.cwd(), variant = ""): string {
   if (!SPECIALIST_ROLES.has(role)) {
     throw new UnknownSpecialistRoleError(role);
   }
-  return path.join(repoRoot, "scripts", "prompt_fragments", `specialist_${role}.txt`);
+  const name = variant ? `specialist_${role}_${variant}.txt` : `specialist_${role}.txt`;
+  return path.join(repoRoot, "scripts", "prompt_fragments", name);
 }
 
-export function loadSpecialistPrompt(role: string, repoRoot: string = process.cwd()): string {
-  return readFileSync(promptFragmentPath(role, repoRoot), "utf8");
+export function loadSpecialistPrompt(role: string, repoRoot: string = process.cwd(), variant = ""): string {
+  return readFileSync(promptFragmentPath(role, repoRoot, variant), "utf8");
 }

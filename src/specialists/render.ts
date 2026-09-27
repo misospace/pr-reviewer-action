@@ -44,7 +44,7 @@ function safeFence(content: string): [string, string] {
   return [body, fence];
 }
 
-function leadLine(lead: Pick<SpecialistLead, "severity" | "category" | "file" | "line" | "message">): string {
+function leadLine(lead: Pick<SpecialistLead, "severity" | "category" | "file" | "line" | "message" | "trigger" | "consequence">): string {
   const message = escapeControlChars(lead.message ?? "");
   const parts = [`- [${lead.severity ?? "info"}] ${message}`];
   const filePath = lead.file;
@@ -61,6 +61,14 @@ function leadLine(lead: Pick<SpecialistLead, "severity" | "category" | "file" | 
   const category = lead.category;
   if (category) {
     parts.push(` (${category})`);
+  }
+  // #758 adversarial-correctness contract: the falsifying input and the
+  // wrong observable it produces, when the lead carried them.
+  if (lead.trigger) {
+    parts.push(` [trigger: ${escapeControlChars(lead.trigger)}]`);
+  }
+  if (lead.consequence) {
+    parts.push(` [consequence: ${escapeControlChars(lead.consequence)}]`);
   }
   return parts.join("");
 }
@@ -112,6 +120,17 @@ export function renderSpecialistMarkdown(result: SpecialistArtifact, maxBytes = 
   const leads = result.leads ?? [];
   const header = `## Specialist: ${role}`;
   const leadLines = leads.map((lead) => leadLine(lead));
+  if (leadLines.length === 0) {
+    // #758 adversarial-correctness clean-result report.
+    const boundaries = result.boundaries_challenged;
+    if (Array.isArray(boundaries)) {
+      for (const entry of boundaries) {
+        if (typeof entry === "string" && entry.trim()) {
+          leadLines.push(`- ${escapeControlChars(redactText(entry.trim()))}`);
+        }
+      }
+    }
+  }
 
   let doc = assembleSpecialistMarkdown(header, leadLines, null);
   if (!maxBytes) return doc;
@@ -163,13 +182,20 @@ function sanitizeLeadForSection(lead: unknown): SpecialistLead | null {
     category = redactText(category);
   }
   const rawLine = lead.line;
-  return {
+  const sanitized: SpecialistLead = {
     severity: typeof lead.severity === "string" && lead.severity ? lead.severity : "info",
     category: typeof category === "string" ? category : "",
     file: typeof filePath === "string" && filePath ? filePath : null,
     line: typeof rawLine === "number" ? rawLine : null,
     message,
   };
+  for (const field of ["trigger", "consequence"] as const) {
+    const raw = lead[field];
+    if (typeof raw === "string" && raw.trim()) {
+      sanitized[field] = escapeControlChars(redactText(raw));
+    }
+  }
+  return sanitized;
 }
 
 /** Render the aggregate "Specialist Review Leads" corpus section (#609).
@@ -210,6 +236,21 @@ export function renderSpecialistLeadsSection(
         for (const lead of rawLeads) {
           const sanitized = sanitizeLeadForSection(lead);
           if (sanitized !== null) lines.push(leadLine(sanitized));
+        }
+      }
+    }
+    // #758 adversarial-correctness clean-result report: when the pass
+    // produced no leads but named the boundaries it attacked, the boundary
+    // entries ARE the role's content (droppable lines under the byte cap,
+    // like leads). The normalizer drops boundaries when leads exist, so the
+    // two never mix here.
+    if (lines.length === 0 && isRecord(artifact)) {
+      const boundaries = artifact.boundaries_challenged;
+      if (Array.isArray(boundaries)) {
+        for (const entry of boundaries) {
+          if (typeof entry === "string" && entry.trim()) {
+            lines.push(`- ${escapeControlChars(redactText(entry.trim()))}`);
+          }
         }
       }
     }

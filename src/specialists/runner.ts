@@ -73,6 +73,11 @@ export interface SpecialistRoleEntry {
   overrun_retry: boolean;
   retry_max_tokens: number | null;
   reason?: string;
+  /** #758: which corpus (and prompt family) this role ran against —
+   * telemetry only, never a behavior switch downstream. Present only for
+   * roles run through `_run_role`'s three_call/prime_then_fanout path
+   * (combined_scout and skipped roles never carry it, matching v2). */
+  corpus_source?: "standard" | "adversarial";
 }
 
 export interface SpecialistArtifacts {
@@ -118,6 +123,17 @@ export interface SpecialistRunInput {
   /** Opaque #633 selection artifact attached verbatim to the aggregate. */
   selectionArtifact?: unknown;
   deepReviewMode: "true" | "auto";
+  /** #758 adversarial-correctness arm (benchmark-only, default off, never
+   * set by any action input): when set and `corpus` is non-null, the
+   * CORRECTNESS role runs against this author-blinded corpus with the
+   * adversarial prompt variant (`rolePrompts.correctness` must already be
+   * the adversarial variant text when this is active); security/tests keep
+   * the standard corpus. `combined_scout` cannot express a per-role corpus,
+   * so an active adversarial arm forces `three_call` for this run. */
+  adversarial?: {
+    corpus: string | null;
+    corpusBytes: number;
+  };
   /** Monotonic clock in fractional seconds; injectable for deterministic
    * tests. Defaults to `Date.now() / 1000`. */
   now?: () => number;
@@ -132,6 +148,9 @@ export interface SpecialistRunResult {
   artifacts: SpecialistArtifacts;
   specialistsMd: string;
   specialistLeadsPresent: string;
+  /** Fail-soft advisory notices (e.g. the combined_scout→three_call
+   * adversarial downgrade); never affects the exit status. */
+  warnings: string[];
 }
 
 function defaultNow(): number {
@@ -159,6 +178,7 @@ function roleEntry(
     requestBytes?: number | null;
     overrunRetry?: boolean;
     retryMaxTokens?: number | null;
+    corpusSource?: "standard" | "adversarial";
   } = {},
 ): SpecialistRoleEntry {
   return {
@@ -172,6 +192,7 @@ function roleEntry(
     request_bytes: options.requestBytes ?? null,
     overrun_retry: options.overrunRetry ?? false,
     retry_max_tokens: options.retryMaxTokens ?? null,
+    ...(options.corpusSource !== undefined ? { corpus_source: options.corpusSource } : {}),
   };
 }
 
@@ -231,6 +252,8 @@ interface RoleRunOptions {
   sleep: (seconds: number) => Promise<void>;
   requestFn: SpecialistRequestFn;
   cancelled: { value: boolean };
+  /** #758: telemetry-only tag for which corpus this role ran against. */
+  corpusSource: "standard" | "adversarial";
 }
 
 interface RoleRunOutcome {
@@ -241,7 +264,7 @@ interface RoleRunOutcome {
 }
 
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
-  const { role, userMessage, system, config, deadline, now, sleep, requestFn, cancelled } = options;
+  const { role, userMessage, system, config, deadline, now, sleep, requestFn, cancelled, corpusSource } = options;
   const started = now();
   let requestBytes: number | null = null;
   let overrunRetry = false;
@@ -260,6 +283,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       requestBytes,
       overrunRetry,
       retryMaxTokens,
+      corpusSource,
     }),
     request,
     response,
@@ -517,6 +541,23 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
 
   const artifacts: SpecialistArtifacts = { requests: {}, responses: {}, perRole: {} };
   let entries: SpecialistRoleEntry[] = [];
+  const warnings: string[] = [];
+
+  // #758: the adversarial-correctness corpus is optional and fail-soft — an
+  // unreadable/empty adversarial corpus keeps the correctness role on the
+  // standard corpus and the default prompt (never blocks the phase).
+  const adversarialActive = input.adversarial !== undefined && input.adversarial.corpus !== null;
+  let execution = config.execution;
+  if (adversarialActive && execution === "combined_scout") {
+    // The #635 scout shares ONE call across roles with one user message; a
+    // per-role corpus cannot be expressed in that shape. Degrade loudly to
+    // three_call rather than silently feeding the correctness role the
+    // standard corpus.
+    execution = "three_call";
+    warnings.push(
+      "adversarial correctness corpus is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call",
+    );
+  }
 
   if (input.corpus === null) {
     // No corpus means no calls at all: every SELECTED role is recorded as a
@@ -534,7 +575,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
   } else {
     const userMessage = `${USER_PREFIX}\n\n${input.corpus}`;
 
-    if (config.execution === "combined_scout") {
+    if (execution === "combined_scout") {
       const scout = await runSpecialistScout(
         input.rolesToRun,
         userMessage,
@@ -563,11 +604,17 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
       for (const role of input.rolesToRun) roleCancel.set(role, { value: false });
 
       const launch = (role: string): void => {
+        // #758: the correctness role runs blinded (adversarial corpus +
+        // adversarial prompt variant) when the adversarial corpus is active;
+        // security/tests always see the standard corpus and the default
+        // prompt.
+        const useAdversarial = role === "correctness" && adversarialActive;
+        const roleUserMessage = useAdversarial ? `${USER_PREFIX}\n\n${input.adversarial!.corpus}` : userMessage;
         roleWork.set(
           role,
           runSpecialistRole({
             role,
-            userMessage,
+            userMessage: roleUserMessage,
             system: input.rolePrompts[role],
             config,
             deadline,
@@ -575,11 +622,12 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
             sleep,
             requestFn: meteredRequestFn,
             cancelled: roleCancel.get(role)!,
+            corpusSource: useAdversarial ? "adversarial" : "standard",
           }),
         );
       };
 
-      if (config.execution === "prime_then_fanout" && input.rolesToRun.length > 0) {
+      if (execution === "prime_then_fanout" && input.rolesToRun.length > 0) {
         // #635: sequential "prime once, then fan out" — the first selected
         // role (fixed order) completes before the remaining two launch.
         const first = SPECIALIST_ROLES_ORDER.find((role) => input.rolesToRun.includes(role))!;
@@ -639,13 +687,17 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     version: 1,
     enabled: true,
     deep_review_mode: input.deepReviewMode,
-    execution: config.execution,
+    execution,
     request_count: meter.count,
     request_bytes: meter.bytes,
     usage_totals: meter.usage,
     model: `${config.model}@${config.baseUrl} (${config.apiFormat})`,
     aggregate_elapsed_sec: Math.round(aggregateElapsed * 1000) / 1000,
     specialist_corpus_bytes: input.corpusBytes,
+    // #758: whether the adversarial-correctness arm was active and which
+    // corpus the correctness role actually ran against.
+    adversarial_correctness_active: adversarialActive,
+    adversarial_corpus_bytes: adversarialActive ? (input.adversarial?.corpusBytes ?? null) : null,
     specialist_max_tokens: config.maxTokens,
     total_leads: totalLeads,
     any_errors: anyErrors,
@@ -660,7 +712,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
   const specialistsMd = renderSpecialistLeadsSection(artifacts.perRole, sectionMaxBytes, [...skippedSet]);
   const specialistLeadsPresent = specialistsMd ? `${Buffer.byteLength(specialistsMd, "utf8")}\n` : "";
 
-  return { aggregate, artifacts, specialistsMd, specialistLeadsPresent };
+  return { aggregate, artifacts, specialistsMd, specialistLeadsPresent, warnings };
 }
 
 export { DEFAULT_SPECIALIST_MAX_TOKENS };
