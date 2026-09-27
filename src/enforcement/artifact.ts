@@ -30,6 +30,11 @@ export interface ArtifactFinding {
   thread_id?: string;
   /** #775: original severity when the non-blocking category cap reduced it. */
   capped_from?: string;
+  /** v3-only, no v2 counterpart: set by the deterministic outside-diff pass
+   * when the finding's file isn't in the diff, or its line falls outside
+   * every hunk's new-side range. Content-level only — never changes
+   * verdict, requirement coverage, or any other policy input. */
+  outside_diff?: boolean;
 }
 
 export interface ArtifactThreadDisposition {

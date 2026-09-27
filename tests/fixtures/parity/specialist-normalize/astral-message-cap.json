@@ -1,0 +1,15 @@
+{
+  "mode": "normalize",
+  "role": "tests",
+  "max_leads": 3,
+  "max_message_chars": 10,
+  "payload": {
+    "leads": [
+      {
+        "severity": "major",
+        "message": "😀😀😀😀😀😀😀😀tail-text",
+        "file": "src/😀😀😀.ts"
+      }
+    ]
+  }
+}

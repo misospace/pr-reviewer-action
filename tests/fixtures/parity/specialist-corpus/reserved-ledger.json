@@ -1,0 +1,9 @@
+{
+  "mode": "standard",
+  "max_bytes": 6500,
+  "files": {
+    "pr.json": "{\"number\": 1, \"title\": \"t\"}",
+    "pr.diff.truncated": "diff --git a/x b/x\n+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "requirement-ledger.md": "# Requirement Ledger\n\n- REQ-1: the parser must reject empty input\n- REQ-2: the parser must reject oversized input\n"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "api_format": "openai",
+  "model": "gpt-test",
+  "system": "You are a tests specialist.",
+  "user": "corpus text",
+  "max_tokens": 8000,
+  "temperature": null,
+  "response_format": "off",
+  "tokens_param": "max_completion_tokens",
+  "stream": true
+}

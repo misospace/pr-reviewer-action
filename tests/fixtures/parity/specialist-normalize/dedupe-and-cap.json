@@ -1,0 +1,14 @@
+{
+  "mode": "normalize",
+  "role": "tests",
+  "max_leads": 3,
+  "payload": {
+    "leads": [
+      {"severity": "info", "message": "missing edge case"},
+      {"severity": "info", "message": "missing edge case"},
+      {"severity": "info", "message": "no coverage for retries"},
+      {"severity": "minor", "message": "flaky test ordering"},
+      {"severity": "major", "message": "no assertion on error path"}
+    ]
+  }
+}

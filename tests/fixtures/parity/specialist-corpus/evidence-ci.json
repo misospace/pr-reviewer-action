@@ -1,0 +1,9 @@
+{
+  "mode": "standard",
+  "max_bytes": 48000,
+  "files": {
+    "pr.json": "{\"number\": 1, \"title\": \"t\"}",
+    "evidence-providers.md": "# Evidence\nlinter: clean\n"
+  },
+  "ci_checks_file_content": "# CI Checks\nbuild: passed\ntest: passed\n"
+}

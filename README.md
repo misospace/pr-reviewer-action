@@ -59,7 +59,7 @@ jobs:
           publish_review_comment: "true"
 ```
 
-**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3`, and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr_number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
+**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3` (3.11 or newer), and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr_number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
 
 ## 📚 Table of contents
 
@@ -95,7 +95,9 @@ flowchart LR
 Deeper repository documentation for contributors and agents — the per-module
 code map, review-corpus internals, fork-review security, and the eval
 runbooks — lives under [`docs/`](docs), indexed from
-[`AGENTS.md`](AGENTS.md).
+[`AGENTS.md`](AGENTS.md). The planned v3 repository config file (a
+repository may narrow, never widen, the operator's workflow inputs) is
+documented in [`docs/repository-config.md`](docs/repository-config.md).
 
 What it supports:
 
@@ -299,6 +301,7 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 | `publish_review_comment` | Publish or update a managed PR comment | No | `false` |
 | `publish_mode` | Publish mode for the review verdict: `comment` (sticky PR comment, default), `review_comment` (non-blocking native PR review comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `comment` |
 | `allow_approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
+| `allow_repo_policy_overrides` | If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only. | No | `false` |
 | `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
 | `cleanup_previous_native_reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
 | `upstream_link_mode` | How upstream GitHub PR/issue/commit/compare URLs in the published review are handled: `inert` (default) rewrites them to plain text; `togithub` rewrites them to `https://togithub.com/...` so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) are inert in both modes. | No | `inert` |

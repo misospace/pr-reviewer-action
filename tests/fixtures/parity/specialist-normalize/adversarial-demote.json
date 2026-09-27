@@ -1,0 +1,11 @@
+{
+  "mode": "normalize",
+  "role": "correctness",
+  "payload": {
+    "contract": "adversarial",
+    "leads": [
+      {"severity": "major", "message": "claims a race condition but no counterexample given"},
+      {"severity": "major", "message": "empty input crashes the parser", "trigger": "pass an empty string", "consequence": "raises IndexError"}
+    ]
+  }
+}

@@ -67,8 +67,6 @@ jobs:
           npm ci
           npm run typecheck
           npm test
-          npm run build
-          git diff --exit-code HEAD -- dist
 
   validate-python:
     runs-on: ubuntu-latest
@@ -96,6 +94,12 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build v3 bundle
+        # dist/ is not committed; the parity harness runs the built bundle.
+        run: npm ci && npm run build
 
       - name: Check Python scripts
         run: find scripts pr_reviewer tests -name '*.py' -print0 | xargs -0 python3 -m py_compile

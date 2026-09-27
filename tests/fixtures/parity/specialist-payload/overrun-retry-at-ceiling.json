@@ -1,0 +1,11 @@
+{
+  "overrun": {
+    "payload": {
+      "model": "m",
+      "stream": true,
+      "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+      "max_tokens": 32768
+    },
+    "max_tokens": 32768
+  }
+}
