@@ -19,3 +19,10 @@ export {
   type RequirementLedger,
   type RequirementLedgerEntry,
 } from "./ledger.js";
+export {
+  REQUIREMENT_LEDGER_FRAMING_BYTES,
+  REQUIREMENT_LEDGER_HEADER,
+  requirementLedgerFits,
+  requirementLedgerPresence,
+  type LedgerPresenceResult,
+} from "./presence.js";

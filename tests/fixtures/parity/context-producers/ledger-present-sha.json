@@ -1,0 +1,9 @@
+{
+  "fixture": "ledger-present-sha",
+  "description": "A ledger that fits writes its sha as the presence signal.",
+  "producer": "ledger-signal",
+  "ledger_md": "- [R1] Must validate input\n- [R2] Must log errors\n",
+  "ledger_json": "{\"version\": 1, \"sha\": \"abc123def\", \"requirements\": []}",
+  "max_corpus": 10000,
+  "repo_files": {}
+}

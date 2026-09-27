@@ -1,0 +1,19 @@
+{
+  "fixture": "linear-bad-timeout",
+  "description": "A timeout argparse cannot parse as int exits 2: adapter failed.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "ENG-1",
+    "body": ""
+  },
+  "linear": {
+    "api_key": "k",
+    "prefixes": "ENG",
+    "timeout": "20s",
+    "enable_for_forks": "false",
+    "responses": {}
+  },
+  "repo_files": {}
+}

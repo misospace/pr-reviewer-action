@@ -1,0 +1,24 @@
+{
+  "fixture": "linear-invalid-prefix",
+  "description": "An invalid prefix makes the adapter exit 2: the linear-adapter-failed uncertainty marker, no Linear artifacts, linked-issues.json untouched.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "ENG-1",
+    "body": "Fixes #3"
+  },
+  "issues": {
+    "owner/repo#3": {
+      "fail": true
+    }
+  },
+  "linear": {
+    "api_key": "k",
+    "prefixes": "ENG,1BAD",
+    "timeout": "20",
+    "enable_for_forks": "false",
+    "responses": {}
+  },
+  "repo_files": {}
+}

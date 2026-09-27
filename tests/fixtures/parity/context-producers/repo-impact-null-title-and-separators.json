@@ -1,0 +1,19 @@
+{
+  "fixture": "repo-impact-null-title-and-separators",
+  "description": "`jq -r` prints a null title as `null` (a term); `.body // \"\"` drops a false body; non-ASCII characters and leading punctuation split runs (`-lib`, `naïveté`); stopwords and URLs parts drop; 14 terms kept of the byte-sorted list.",
+  "producer": "repo-impact",
+  "pr": {
+    "title": null,
+    "body": false
+  },
+  "version_hints": "Naïveté-lib ..dots __under /slash/path zeta-9 ALPHA.BETA gamma_delta 0.1.0 omega/psi kappa lambda-mu nu.xi omicron pi-rho sigma tau-upsilon phi chi-psi\nhttps://github.com/owner/repo docker ghcr image\n",
+  "repo_files": {
+    "src/a.txt": "kappa sigma\nnull pointer\n"
+  },
+  "commits": [
+    {
+      "message": "null handling for kappa",
+      "files": {}
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "fixture": "linked-none",
+  "description": "No linked refs: Python's `[]`, an empty markdown file, and an all-empty status.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "t",
+    "body": "Refs #9 but not a closing keyword"
+  },
+  "repo_files": {}
+}

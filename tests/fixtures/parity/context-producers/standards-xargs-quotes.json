@@ -1,0 +1,11 @@
+{
+  "fixture": "standards-xargs-quotes",
+  "description": "xargs strips quotes; the joined result is word-split, so a quoted path with a space becomes two words.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "'docs/my rules.md'",
+  "repo_files": {
+    "rules.md": "r\n",
+    "docs/my rules.md": "m\n"
+  }
+}

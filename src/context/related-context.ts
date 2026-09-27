@@ -1644,3 +1644,43 @@ export function renderRelatedContextMarkdown(artifact: Record<string, unknown>, 
   if (chosen.length === 0) return "\n";
   return `${[...chosen, note].join("\n")}\n`;
 }
+
+export const CLIP_MARKER = "[related-code context truncated]\n";
+
+/** Port of `clip_markdown` (`python3 -m pr_reviewer.related_context --clip`,
+ * the corpus.sh truncation step): cut to whole lines so the kept text plus
+ * `marker` fits `maxBytes`, then drop any fenced block the cut would split.
+ * v2 decodes with `surrogateescape`, so every line's size is its raw byte
+ * count; this works on the raw bytes directly and decodes only to find
+ * fences (which are ASCII). Text within the cap is returned unchanged. */
+export function clipMarkdown(data: Uint8Array, maxBytes: number, marker = CLIP_MARKER): Uint8Array {
+  if (data.length <= maxBytes) return data;
+  const markerBytes = Buffer.from(marker, "utf8");
+  const budget = maxBytes - markerBytes.length;
+  const lines: Uint8Array[] = [];
+  let start = 0;
+  for (let i = 0; i < data.length; i += 1) {
+    if (data[i] === 0x0a) {
+      lines.push(data.subarray(start, i + 1));
+      start = i + 1;
+    }
+  }
+  lines.push(data.subarray(start));
+  const kept: Uint8Array[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length > budget) break;
+    kept.push(line);
+    used += line.length;
+  }
+  const safe = fenceSafeLength(kept.map((line) => Buffer.from(line).toString("utf8")));
+  return new Uint8Array(Buffer.concat([...kept.slice(0, safe), markerBytes]));
+}
+
+/** corpus.sh `build_related_code_context`'s clip step: `null` is the CLI's
+ * failure exit (a non-positive `--max-bytes`), after which v2 empties every
+ * related-code artifact. */
+export function clipRelatedCodeMarkdown(markdown: Uint8Array, maxBytes: number): Uint8Array | null {
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0) return null;
+  return clipMarkdown(markdown, maxBytes);
+}

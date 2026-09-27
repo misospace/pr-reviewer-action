@@ -1,0 +1,22 @@
+{
+  "fixture": "linked-projection-error",
+  "description": "A label that is a bare string makes the jq projection raise; under set -euo pipefail the v2 review aborts, and the v3 producer throws.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "t",
+    "body": "Closes #8"
+  },
+  "issues": {
+    "owner/repo#8": {
+      "data": {
+        "number": 8,
+        "labels": [
+          "security"
+        ]
+      }
+    }
+  },
+  "repo_files": {}
+}

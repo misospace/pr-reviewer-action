@@ -1,0 +1,19 @@
+{
+  "fixture": "linear-no-issues-still-rewrites",
+  "description": "Linear configured but no identifier in the title: linear-issues.json is `[]`, and the merge still rewrites linked-issues.json in jq's pretty form.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "no keys here",
+    "body": ""
+  },
+  "linear": {
+    "api_key": "k",
+    "prefixes": "ENG",
+    "timeout": "5",
+    "enable_for_forks": "false",
+    "responses": {}
+  },
+  "repo_files": {}
+}

@@ -518,6 +518,34 @@ raise on aborts the review (`UserMessageBuildError`). Fragments must not
 contain `&` or `\`: v2 inserts them with an unquoted `${var/pattern/$frag}`,
 which bash >= 5.2 expands.
 
+### The `context-producers` boundary (#706)
+
+Pins the deterministic corpus producers that existed only as v2 shell:
+the changed-manifest block (`src/context/manifest-context.ts`), the repo
+impact/history scan (`repo-impact.ts`), the linked-issue fetch loop with the
+Linear adapter, label merge-back and `linked-metadata-status.json`
+(`linked-issue-context.ts`), `resolve_standards_file` (`standards-file.ts`),
+the requirement-ledger presence signal and MAX_CORPUS fit predicate
+(`src/requirements/presence.ts`), and the fence-safe related-code clip
+(`clipMarkdown` in `related-context.ts`). The v2 runner
+(`tests/parity_runners/v2_context_producers.py`) slices each block verbatim
+out of `scripts/sections/` and runs it under `set -euo pipefail` in a
+harness-prepared worktree (`repo_fixture.py`, now with deterministic
+`commits` for `git log`); only external seams are stubbed at their call
+sites (`platform_issue_get`, `urlopen` inside the real `linear_context.py`,
+the ledger/anchor/related-context builders). Every artifact is compared
+byte for byte (`file:<name>`, strict UTF-8 or `!b64:`).
+
+The runner pins the production runner environment: `LC_ALL=C` (the byte
+collation C.UTF-8 gives `sort -u` and bash globs here) and GNU `wc`'s
+unpadded count. Semantics that follow GNU tools rather than the macOS ones
+(`xargs` running `echo` before an unterminated-quote error, `tr` lowercasing
+ASCII only) are not exercised by fixtures, because a macOS oracle would
+disagree with production. Not modeled: NUL bytes in a PR title or body (GNU
+`grep` switches to binary-file mode), issue numbers beyond 2^53, and
+Linear payload shapes that crash the Python adapter (a non-dict `state`,
+`labels` or `data`); v3 treats those as absent fields.
+
 ## What #680 removed from the Python runtime surface
 
 `src/enforcement/`, `src/publish/`, and `src/metadata/` now own the

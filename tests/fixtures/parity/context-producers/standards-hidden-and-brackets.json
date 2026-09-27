@@ -1,0 +1,11 @@
+{
+  "fixture": "standards-hidden-and-brackets",
+  "description": "`*` never matches a leading dot; `.*` does; bracket and `?` patterns.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "*.rules,[xy]?.txt,.*.rules",
+  "repo_files": {
+    ".hidden.rules": "h\n",
+    "za.txt": "z\n"
+  }
+}

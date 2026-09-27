@@ -96,7 +96,10 @@ export {
   MAX_SNIPPET_CHARS,
   MAX_SYMBOLS,
   MAX_TESTS_PER_FILE,
+  CLIP_MARKER,
   buildRelatedContext,
+  clipMarkdown,
+  clipRelatedCodeMarkdown,
   fenceSafeLength,
   gitGrepReferences,
   relatedContextToArtifact,
@@ -118,7 +121,6 @@ export {
   type DigestMeta,
 } from "./image-provenance.js";
 export { redactText } from "./redact.js";
-export { pyJsonDump } from "./py-json.js";
 export {
   ARTIFACT_VERSION as CHANGE_ANCHORS_ARTIFACT_VERSION,
   changeAnchorsCli,
@@ -136,3 +138,45 @@ export {
   type ChangeAnchorSymbol,
   type ExtractChangeAnchorsOptions,
 } from "./change-anchors.js";
+export { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
+export {
+  MANIFEST_LINE_BUDGET,
+  MANIFEST_NAME_RE,
+  buildManifestContext,
+  selectChangedManifests,
+  type ManifestContextResult,
+} from "./manifest-context.js";
+export {
+  HISTORY_MARKER,
+  IMPACT_MARKER,
+  MAX_HITS_PER_TERM,
+  MAX_IMPACT_TERMS,
+  NO_TERMS_NOTICE,
+  REPO_HISTORY_MAX_BYTES,
+  REPO_IMPACT_MAX_BYTES,
+  attributeGrepHits,
+  buildRepoImpactHistory,
+  extractImpactTerms,
+  type RepoImpactInput,
+  type RepoImpactResult,
+} from "./repo-impact.js";
+export {
+  LINEAR_ADAPTER_FAILED,
+  LINKED_ISSUE_EMBED_BYTES,
+  LinkedIssueProjectionError,
+  buildLinkedIssueContext,
+  projectLinkedIssue,
+  pyParseInt,
+  type LinearOptions,
+  type LinkedIssueContextInput,
+  type LinkedIssueContextResult,
+} from "./linked-issue-context.js";
+export {
+  DEFAULT_STANDARDS_FILE_CANDIDATES,
+  expandGlob,
+  isGlobPattern,
+  resolveStandardsFile,
+  xargsEcho,
+  type StandardsFileInput,
+} from "./standards-file.js";
+export { linearIssueToV2, renderLinearMarkdown } from "../precheck/linear.js";

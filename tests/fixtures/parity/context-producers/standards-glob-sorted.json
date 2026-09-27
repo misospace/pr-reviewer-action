@@ -1,0 +1,14 @@
+{
+  "fixture": "standards-glob-sorted",
+  "description": "Globs expand sorted by byte over the whole path (`a-z.md` before `a.md`); a directory match is not a regular file; candidates are xargs-trimmed.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "  docs/*.md  ,  .github/*.txt ",
+  "repo_files": {
+    "docs/b.md": "b\n",
+    "docs/a-z.md": "a\n",
+    "docs/0.md/inner.txt": "d\n",
+    "docs/a.md": "a\n",
+    ".github/x.txt": "x\n"
+  }
+}
