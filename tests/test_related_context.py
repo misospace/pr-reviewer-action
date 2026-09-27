@@ -433,6 +433,16 @@ def test_enclosing_symbol_lists_changed_file_references_after_unchanged(tmp_path
     assert "- `src/prewarm.py`:1 — `fetch_jwt()`" in markdown
 
 
+def test_enclosing_declaration_line_is_never_its_own_reference(tmp_path):
+    # The declaration (line 1) sits outside changed_lines, so only the
+    # own-declaration rule can drop it; the same-file caller (line 7) stays.
+    root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE})
+    result = build_related_context(anchors(_enclosing_file("src/jwt.py", "fetch_jwt", 1, [[2, 3]])), root)
+    refs = [(r["path"], r["line"]) for r in result["files"][0]["symbols"][0]["references"]]
+    assert ("src/jwt.py", 1) not in refs
+    assert ("src/jwt.py", 7) in refs
+
+
 def test_changed_file_references_have_their_own_cap(tmp_path):
     root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE, "tests/test_jwt.py": _JWT_TEST})
     result = build_related_context(

@@ -1394,7 +1394,7 @@ class TestEnclosing:
         assert _enclosing(extract_change_anchors(diff, None, source_root=tmp_path)) == []
 
     def test_unsupported_and_deleted_files_have_no_enclosing(self, tmp_path):
-        diff = _git_diff(
+        _git_diff(
             tmp_path,
             {"a.rb": "def go_now\n  x = 1\nend\n", "gone.py": "def old_fn():\n    return 1\n"},
             {"a.rb": "def go_now\n  x = 2\nend\n"},
