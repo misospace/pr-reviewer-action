@@ -87,7 +87,7 @@ _forgejo_py() {
     echo "platform_api: PLATFORM=forgejo requires FORGEJO_API_URL" >&2
     return 1
   fi
-  PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONSAFEPATH=1 PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 -m pr_reviewer.forgejo_backend "$@"
 }
 
@@ -605,13 +605,13 @@ github_enrich_api() {
 
 forgejo_enrich_release() {
   # $1=host $2=owner/repo $3=tag
-  PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONSAFEPATH=1 PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 -m pr_reviewer.forgejo_backend enrich-release "$1" "$2" "$3"
 }
 
 forgejo_enrich_compare() {
   # $1=host $2=owner/repo $3=base...head
-  PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONSAFEPATH=1 PYTHONPATH="${_PLATFORM_SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}" \
     python3 -m pr_reviewer.forgejo_backend enrich-compare "$1" "$2" "$3"
 }
 

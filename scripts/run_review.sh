@@ -11,6 +11,9 @@ set -euo pipefail
 # established first because every module relies on them.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
+# The working directory is the reviewed checkout; keep `python3 -m`/`-c` from
+# putting it ahead of PYTHONPATH, where a top-level pr_reviewer/ would shadow ours.
+export PYTHONSAFEPATH=1
 
 # Leaf helpers (log/error/sedi/section timers) first: config and every section
 # below call them at source time.

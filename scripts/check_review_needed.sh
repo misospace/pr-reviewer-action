@@ -23,6 +23,9 @@ OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/null}"
 PUBLISH_MODE="${PUBLISH_MODE:-comment}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}/..${PYTHONPATH:+:${PYTHONPATH}}"
+# The working directory is the reviewed checkout; keep `python3 -m`/`-c` from
+# putting it ahead of PYTHONPATH, where a top-level pr_reviewer/ would shadow ours.
+export PYTHONSAFEPATH=1
 export FORCE_REVIEW SKIP_IF_DIFF_UNCHANGED
 # shellcheck source=scripts/platform_api.sh
 source "${SCRIPT_DIR}/platform_api.sh"
