@@ -125,8 +125,6 @@ export function buildInlineComments(options: {
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
 export { resolveCleanupFlag } from "./cleanup.js";
 
-const OUTSIDE_DIFF_PREFIX = "(pre-existing, outside this diff)";
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -142,13 +140,13 @@ function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: Upstr
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
   const message = String(finding.message || "").trim();
-  const line = `- **${label}${suffix}:** ${OUTSIDE_DIFF_PREFIX} ${message}`;
+  const prefix = finding.pre_existing === true ? "(pre-existing, outside this diff)" : "(outside this diff)";
+  const line = `- **${label}${suffix}:** ${prefix} ${message}`;
   return sanitizeMarkdown(redactText(line), linkMode);
 }
 
 /**
- * Render an appendix for findings the deterministic outside-diff pass (or a
- * model-set `pre_existing` flag) marked as not about the reviewed change.
+ * Render an appendix for findings the deterministic outside-diff pass tagged.
  * Inline comments can never anchor these — the anchor line isn't in any
  * diff hunk — so without this section they would otherwise vanish from the
  * published review the moment the model's own prose doesn't happen to
@@ -159,7 +157,7 @@ function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: Upstr
 export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLinkMode): string {
   if (!Array.isArray(findings)) return "";
   const flagged = findings.filter(
-    (item): item is Record<string, unknown> => isRecord(item) && (item.outside_diff === true || item.pre_existing === true),
+    (item): item is Record<string, unknown> => isRecord(item) && item.outside_diff === true,
   );
   if (flagged.length === 0) return "";
   const lines = flagged.map((finding) => renderOutsideDiffLine(finding, linkMode));

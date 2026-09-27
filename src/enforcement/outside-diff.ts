@@ -1,12 +1,10 @@
 /**
  * Deterministic outside-diff tagging (v3-only, no v2 counterpart).
  *
- * An eval showed that with the tool loop on, the reviewer reads code next to
- * the diff and hedges about it — producing speculative false positives on
- * clean PRs. A companion, model-set `pre_existing` flag addresses the part
- * that depends on the model's own judgment; this pass adds the deterministic
- * side that does not: after findings are parsed, any finding whose file/line
- * cannot be anchored inside the PR's diff is content-flagged `outside_diff`.
+ * After findings are parsed, any finding whose file/line cannot be anchored
+ * inside the PR's diff is content-flagged `outside_diff`. That is a location
+ * fact, not a judgment: a finding in unchanged code can still be caused by the
+ * change, so only the model-set `pre_existing` flag demotes a finding.
  *
  * This never changes the verdict, adds model input, or alters existing
  * policy semantics (verdict_source, requirement coverage, enforcement
@@ -37,26 +35,21 @@ export function isOutsideDiff(
   return !(positions.get(file)?.has(line) ?? false);
 }
 
-/** Forward-compatible with the not-yet-merged model-set `pre_existing` flag
- * (checked against `main` at write time: absent). Read defensively by key
- * rather than by type so this keeps working the moment that field lands. */
-function isDeprioritized(finding: ArtifactFinding): boolean {
-  return finding.outside_diff === true || (finding as unknown as Record<string, unknown>).pre_existing === true;
+function isPreExisting(finding: ArtifactFinding): boolean {
+  return (finding as unknown as Record<string, unknown>).pre_existing === true;
 }
 
 /**
- * Stable reorder: findings about the change (in-diff, and any `pre_existing`
- * peer that isn't flagged) sort most-decisive-first by severity exactly as
- * before; outside-diff/pre-existing findings sort the same way among
- * themselves but as a block after every in-diff finding. Ties keep the
- * model's own order (stable sort on the original index).
+ * Stable reorder, most-decisive-first by severity; model-flagged
+ * `pre_existing` findings sort as a block after the rest. `outside_diff` alone
+ * does not demote: a caller the change breaks lives in unchanged code.
  */
-export function sortOutsideDiffLast<T extends ArtifactFinding>(findings: readonly T[]): T[] {
+export function sortPreExistingLast<T extends ArtifactFinding>(findings: readonly T[]): T[] {
   return findings
     .map((finding, index) => ({ finding, index }))
     .sort((a, b) => {
-      const deprioritized = Number(isDeprioritized(a.finding)) - Number(isDeprioritized(b.finding));
-      if (deprioritized !== 0) return deprioritized;
+      const preExisting = Number(isPreExisting(a.finding)) - Number(isPreExisting(b.finding));
+      if (preExisting !== 0) return preExisting;
       const severity = (SEVERITY_RANK[a.finding.severity] ?? 3) - (SEVERITY_RANK[b.finding.severity] ?? 3);
       if (severity !== 0) return severity;
       return a.index - b.index;
@@ -66,7 +59,8 @@ export function sortOutsideDiffLast<T extends ArtifactFinding>(findings: readonl
 
 /**
  * Tag every finding whose file/line falls outside the PR's diff with
- * `outside_diff: true`, then apply the stable reorder above. Mutates
+ * `outside_diff: true`, then apply the stable reorder above. `diffText` must be
+ * the full diff: a file missing from a truncated diff would be tagged. Mutates
  * `artifact.findings` in place (matching the enforcement pass convention in
  * `enforce.ts`) and returns the number of findings newly tagged.
  *
@@ -85,6 +79,6 @@ export function applyOutsideDiffTagging(artifact: ReviewArtifact, diffText: stri
       tagged += 1;
     }
   }
-  artifact.findings = sortOutsideDiffLast(artifact.findings);
+  artifact.findings = sortPreExistingLast(artifact.findings);
   return tagged;
 }
