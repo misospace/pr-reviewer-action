@@ -485,3 +485,28 @@ def test_changed_lines_hostile_paths_are_literal_pathspecs(tmp_path):
     refs = result["files"][0]["symbols"][0]["references"]
     assert [(r["path"], r["line"]) for r in refs] == [("src/x.py", 1), ("src/jwt.py", 7)]
     assert all(r.get("changed_file") is not True for r in refs if r["path"] == "src/x.py")
+
+
+def test_changed_test_files_cannot_crowd_out_production_callers(tmp_path):
+    test_calls = "".join(f"def test_{i}():\n    fetch_jwt()\n" for i in range(4))
+    root = make_repo(tmp_path, {
+        "src/jwt.py": _JWT_MODULE,
+        "src/__tests__/test_jwt.py": test_calls,
+        "src/worker.py": "fetch_jwt()\n",
+    })
+    files = (
+        _enclosing_file("src/jwt.py", "fetch_jwt", 1, [[2, 3]]),
+        _changed("src/__tests__/test_jwt.py", []),
+        _changed("src/worker.py", []),
+    )
+    result = build_related_context(anchors(*files), root, max_changed_references_per_symbol=2)
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [(r["path"], r["line"]) for r in refs] == [("src/jwt.py", 7), ("src/worker.py", 1)]
+    assert result["truncation"]["reasons"] == ["reference_cap"]
+    assert result["truncation"]["omitted_references"] == 1
+
+    result = build_related_context(anchors(*files), root, max_changed_references_per_symbol=3)
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [(r["path"], r["line"]) for r in refs] == [
+        ("src/jwt.py", 7), ("src/worker.py", 1), ("src/__tests__/test_jwt.py", 2),
+    ]

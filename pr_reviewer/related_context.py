@@ -8,8 +8,9 @@ executing repository code or making network/model calls.
 References come from unchanged files. Changed files whose anchor entry carries
 ``changed_lines`` (#764) are searched too, skipping the symbol's own
 declaration line and every added line: those hits are listed, under a separate
-small cap and marked ``changed_file``, for enclosing symbols only; for any other
-symbol with no unchanged-file reference they set ``only_in_changed_files``.
+small cap (non-test files first) and marked ``changed_file``, for enclosing
+symbols only; for any other symbol with no unchanged-file reference they set
+``only_in_changed_files``.
 """
 
 from __future__ import annotations
@@ -442,6 +443,38 @@ def _changed_line_index(
     return index
 
 
+def _changed_file_references(
+    symbol: str,
+    workspace: str | os.PathLike[str],
+    paths: list[str],
+    keep: Callable[[dict[str, Any]], bool],
+    cap: int,
+    timeout: float,
+) -> tuple[list[dict[str, Any]], bool, str | None]:
+    """Search changed files, non-test paths first, so tests cannot crowd out callers."""
+    groups = [
+        [path for path in paths if not _is_test_path(path)],
+        [path for path in paths if _is_test_path(path)],
+    ]
+    rows: list[dict[str, Any]] = []
+    for group in groups:
+        if not group:
+            continue
+        left = cap - len(rows)
+        hits, extra, error = git_grep_references(
+            symbol, workspace, excluded_paths=set(), timeout=timeout,
+            max_hits=max(left, 1), pathspecs=group, keep=keep,
+        )
+        if error:
+            return rows, False, error
+        if left <= 0:
+            return rows, bool(hits) or extra, None
+        rows.extend(hits)
+        if extra:
+            return rows, True, None
+    return rows, False, None
+
+
 def _note_reference_cap(result: dict[str, Any], omitted: int) -> None:
     result["truncated"] = True
     result["truncation"]["truncated"] = True
@@ -605,14 +638,8 @@ def build_related_context(
             changed_extra = False
             changed_error: str | None = None
             if cap > 0:
-                changed_hits, changed_extra, changed_error = git_grep_references(
-                    name,
-                    workspace,
-                    excluded_paths=set(),
-                    timeout=timeout,
-                    max_hits=cap,
-                    pathspecs=list(changed_index),
-                    keep=keep,
+                changed_hits, changed_extra, changed_error = _changed_file_references(
+                    name, workspace, list(changed_index), keep, cap, timeout,
                 )
             if changed_error and changed_error not in errors_seen:
                 result["errors"].append(changed_error)

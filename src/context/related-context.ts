@@ -482,6 +482,35 @@ function changedLineIndex(anchorFiles: Record<string, unknown>[], deletedPaths: 
   return index;
 }
 
+/** Search changed files, non-test paths first, so tests cannot crowd out callers. */
+async function changedFileReferences(
+  symbol: string,
+  workspace: string,
+  paths: string[],
+  keep: (row: GrepRow) => boolean,
+  cap: number,
+  timeoutSec: number,
+): Promise<GrepResult> {
+  const groups = [paths.filter((path) => !isTestPath(path)), paths.filter((path) => isTestPath(path))];
+  const rows: GrepRow[] = [];
+  for (const group of groups) {
+    if (group.length === 0) continue;
+    const left = cap - rows.length;
+    const grep = await gitGrepReferences(symbol, workspace, {
+      excludedPaths: new Set(),
+      timeoutSec,
+      maxHits: Math.max(left, 1),
+      pathspecs: group,
+      keep,
+    });
+    if (grep.error !== null) return { rows, extraHit: false, error: grep.error };
+    if (left <= 0) return { rows, extraHit: grep.rows.length > 0 || grep.extraHit, error: null };
+    rows.push(...grep.rows);
+    if (grep.extraHit) return { rows, extraHit: true, error: null };
+  }
+  return { rows, extraHit: false, error: null };
+}
+
 function noteReferenceCap(result: RelatedContext, omitted: number): void {
   result.truncated = true;
   result.truncation.truncated = true;
@@ -687,13 +716,7 @@ export async function buildRelatedContext(
       let changedExtra = false;
       let changedError: string | null = null;
       if (cap > 0) {
-        const grep = await gitGrepReferences(name, workspace, {
-          excludedPaths: new Set(),
-          timeoutSec: timeout,
-          maxHits: cap,
-          pathspecs: changedSpecs,
-          keep,
-        });
+        const grep = await changedFileReferences(name, workspace, changedSpecs, keep, cap, timeout);
         changedHits = grep.rows;
         changedExtra = grep.extraHit;
         changedError = grep.error;
