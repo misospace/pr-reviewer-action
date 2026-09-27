@@ -1,0 +1,125 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+#
+# Weekly (plus manual dispatch) run of scripts/harvest_human_findings.py
+# (#798): mines maintainer CHANGES_REQUESTED reviews / blocking PR comments,
+# at heads the reviewer bot approved, into evals/corpus-human-findings.json.
+#
+# Repos/maintainers/bots are configured via repo variables or dispatch
+# inputs — never hardcoded here, so this stays repository-agnostic per
+# AGENTS.md. The script only ever reads GitHub; this workflow's only write
+# is a branch + PR opened for human curation. It never pushes to main.
+
+name: Harvest Human Findings
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma-separated owner/repo list (default: vars.HARVEST_REPOS)"
+        required: false
+        default: ""
+        type: string
+      maintainers:
+        description: "Comma-separated maintainer logins (default: vars.HARVEST_MAINTAINERS)"
+        required: false
+        default: ""
+        type: string
+      bots:
+        description: "Comma-separated reviewer-bot logins (default: vars.HARVEST_BOTS)"
+        required: false
+        default: ""
+        type: string
+      since:
+        description: "YYYY-MM-DD lower bound on PR updated_at (blank = no bound)"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    # Weekly Monday 07:00 UTC, offset from the eval-harness 06:00 sweep.
+    - cron: "0 7 * * 1"
+
+permissions: {}
+
+jobs:
+  harvest:
+    name: Harvest human findings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Generate bot token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.MISO_APP_ID }}
+          private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14'
+
+      - name: Run harvest script
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          REPOS="${{ inputs.repos || vars.HARVEST_REPOS }}"
+          MAINTAINERS="${{ inputs.maintainers || vars.HARVEST_MAINTAINERS }}"
+          BOTS="${{ inputs.bots || vars.HARVEST_BOTS }}"
+          SINCE="${{ inputs.since || vars.HARVEST_SINCE || '' }}"
+
+          CMD=(python scripts/harvest_human_findings.py \
+               --repos "$REPOS" --maintainers "$MAINTAINERS" --bots "$BOTS" \
+               --corpus evals/corpus-human-findings.json)
+          if [ -n "$SINCE" ]; then
+            CMD+=(--since "$SINCE")
+          fi
+
+          echo "Running: ${CMD[*]}"
+          "${CMD[@]}"
+
+      - name: Open or update the harvest PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: bot/harvest-human-findings
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- evals/corpus-human-findings.json; then
+            echo "No new findings; nothing to open a PR for."
+            exit 0
+          fi
+
+          git config user.name "miso[bot]"
+          git config user.email "miso[bot]@users.noreply.github.com"
+
+          # checkout ran with persist-credentials: false, so push auth comes
+          # from the app token here, not a persisted default GITHUB_TOKEN.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # The branch only ever carries this one kind of change, so resetting
+          # it to the current main tip each run is equivalent to "update the
+          # existing PR": no manual merge/rebase step, and it never touches main.
+          git checkout -B "$BRANCH"
+          git add evals/corpus-human-findings.json
+          git commit -m "chore(evals): harvest human findings from maintainer reviews"
+          git push --force-with-lease origin "$BRANCH"
+
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            echo "PR for $BRANCH already open; branch push above updated it."
+          else
+            gh pr create \
+              --head "$BRANCH" \
+              --base main \
+              --title "chore(evals): harvest human findings" \
+              --body "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
+          fi

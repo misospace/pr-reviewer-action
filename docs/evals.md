@@ -473,6 +473,33 @@ production review recorded it), anchors the defect to a file (and a line range
 where one could be derived), and records the production reviewer's own verdict
 at that head under `source`.
 
+**Harvesting new findings** (#798): `scripts/harvest_human_findings.py` mines
+this automatically. For each PR in the configured repos, it finds maintainer
+`CHANGES_REQUESTED` reviews (head = the review's own `commit_id`) and
+maintainer PR issue comments that read as blocking ("merge blocker",
+"blocker", "before merge", "request changes" — head = the latest PR commit
+before the comment's timestamp), and keeps a finding only when the reviewer
+bot's own review at that exact head was an approval. That decision reads the
+bot's `ai-pr-reviewer:{...}` metadata marker (`review_result: "clean"`) in
+preference to the review's raw `state`, since the bot dismisses its own
+stale reviews as new heads land — a `state: DISMISSED` review can still have
+recorded an approval in its marker at the time. `defect.file`/`line_range`
+come from an inline review comment when one is attached to the review,
+otherwise from a changed-file path named in the finding text. GitHub reads
+only (`gh api` or `urllib` with a token from the environment); it never
+writes to GitHub. Repos, maintainer logins and bot logins are inputs, never
+hardcoded. A weekly workflow
+(`.github/workflows/harvest-human-findings.yaml`, plus `workflow_dispatch`)
+runs it and opens or updates a single PR with new entries for human
+curation; it never pushes to `main`.
+
+```bash
+export GITHUB_TOKEN=...
+python scripts/harvest_human_findings.py \
+    --repos owner/repo --maintainers alice,bob --bots "review-bot[bot]" \
+    --since 2026-09-01
+```
+
 ### Context-only mode (zero inference)
 
 `--context-only` builds each scenario's review context and stops at the model
