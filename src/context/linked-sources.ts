@@ -13,9 +13,16 @@
  *   consults it, in the same order (the parity harness drives it with a fake
  *   clock), and network work runs concurrently (8 at a time) without
  *   changing the source-ordered output.
- * - Payload shaping reproduces Python semantics on hostile JSON: `.get` on a
- *   non-dict, `in` on a non-container, slicing a dict/None, or `.lower()` on
- *   a non-string raise, which aborts the whole render as in v2.
+ * - Payload shaping reproduces Python semantics on hostile JSON, except
+ *   where v2 raised out of the whole render (`.get` on a non-dict entry,
+ *   slicing None, `.lower()` on a non-string, a URL `urlparse` rejects):
+ *   v3 drops just that entry or URL and renders the rest (approved
+ *   divergence).
+ * - Fetched text is fenced with more backticks than any run it contains
+ *   (approved divergence; v2's fixed three-backtick fence could be closed
+ *   by the page). JSON blocks need no such care: every dumped string starts
+ *   with `"` and has its newlines escaped, so no line can open or close a
+ *   fence.
  * - `json.dumps(..., indent=2)` output (ASCII-escaped) and the per-section
  *   character caps match v2 exactly. JSON is parsed with `JSON.parse`, so
  *   integer-valued floats (`1.0`), integers beyond 2^53 and integer-like
@@ -25,7 +32,7 @@
 import { ForgejoEnrichClient, GitHubEnrichClient } from "../platform/enrich.js";
 import { compareCodePoints } from "../platform/jq.js";
 import { pyFloatRepr, pyTruthy } from "../platform/py.js";
-import { pyUrlHost } from "../platform/py-url.js";
+import { pyUrlHost, PyUrlValueError } from "../platform/py-url.js";
 import {
   DEFAULT_FETCH_HOSTS,
   fetchSource,
@@ -81,12 +88,38 @@ function pyContains(container: unknown, key: string): boolean {
   throw new PyShapeError("TypeError", `argument of type '${pyTypeName(container)}' is not iterable`);
 }
 
-/** `value[:n]`, as an iterable list (a str slices into its characters). */
+/** `value[:n]`, as an iterable list (a str slices into its characters).
+ * Approved divergence: where v2 raised (slicing a dict, None, a number) the
+ * malformed field is treated as empty instead of aborting the render. */
 function pySlice(value: unknown, n: number): unknown[] {
   if (Array.isArray(value)) return value.slice(0, n);
   if (typeof value === "string") return [...value].slice(0, n);
-  if (isDict(value)) throw new PyShapeError("TypeError", "unhashable type: 'slice'");
-  throw new PyShapeError("TypeError", `'${pyTypeName(value)}' object is not subscriptable`);
+  return [];
+}
+
+/** Map list entries, dropping any entry whose v2 expression would raise
+ * (approved divergence: v2 aborted the whole render on the first one). */
+function entries<T>(list: readonly unknown[], fn: (entry: unknown) => T): T[] {
+  const out: T[] = [];
+  for (const entry of list) {
+    try {
+      out.push(fn(entry));
+    } catch (error) {
+      if (!(error instanceof PyShapeError)) throw error;
+    }
+  }
+  return out;
+}
+
+/** A predicate over an entry; an entry whose v2 expression would raise does
+ * not match (approved divergence, as `entries`). */
+function matches(entry: unknown, predicate: (entry: unknown) => boolean): boolean {
+  try {
+    return predicate(entry);
+  } catch (error) {
+    if (error instanceof PyShapeError) return false;
+    throw error;
+  }
 }
 
 /** `(value or "").lower()`. */
@@ -329,8 +362,37 @@ interface Ctx {
   budget: BudgetTracker;
 }
 
+/** Host label rendered for a URL CPython's `urlparse` rejects. */
+export const UNPARSEABLE_URL_HOST = "unparseable URL";
+
+/** `_extract_host(url)`, or null where `urlparse` raises (approved
+ * divergence: v2 aborted the render; v3 skips that one URL). */
+function safeHost(url: string): string | null {
+  try {
+    return pyUrlHost(url);
+  } catch (error) {
+    if (error instanceof PyUrlValueError) return null;
+    throw error;
+  }
+}
+
+async function allowed(ctx: Ctx, url: string): Promise<boolean> {
+  if (safeHost(url) === null) return false;
+  return hostAllowed(url, ctx.input.allowedHosts, ctx.deps.resolver);
+}
+
 function classify(url: string): UrlClassification | null {
+  if (safeHost(url) === null) return null;
   return classifyUrl(url, pyUrlHost);
+}
+
+/** A code fence longer than any backtick run in `text` (approved
+ * divergence: v2 always used three backticks, so fetched text containing
+ * a fence could close it and turn the rest of the corpus into code). */
+export function fenceFor(text: string): string {
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
 }
 
 async function fetchSections(ctx: Ctx): Promise<Map<number, Uint8Array | null>> {
@@ -338,9 +400,9 @@ async function fetchSections(ctx: Ctx): Promise<Map<number, Uint8Array | null>> 
   const fetchUrls: Array<[number, string]> = [];
   for (const [index, url] of input.urls.slice(0, MAX_URLS).entries()) {
     const normalized = normalizeUrl(url);
-    const host = pyUrlHost(normalized);
-    if (SKIP_FETCH_HOSTS.has(host) || host === "github.com") continue;
-    if (await hostAllowed(normalized, input.allowedHosts, deps.resolver)) fetchUrls.push([index + 1, normalized]);
+    const host = safeHost(normalized);
+    if (host === null || SKIP_FETCH_HOSTS.has(host) || host === "github.com") continue;
+    if (await allowed(ctx, normalized)) fetchUrls.push([index + 1, normalized]);
   }
   const fetched = new Map<number, Uint8Array | null>();
   if (fetchUrls.length > 0 && budget.ok()) {
@@ -417,7 +479,7 @@ async function prewarm(ctx: Ctx, endpoints: string[]): Promise<void> {
 
 /** `_commit_summaries(commits, with_author)`. */
 function commitSummaries(commits: unknown[], withAuthor = false): Dict[] {
-  return commits.map((c) => {
+  return entries(commits, (c) => {
     const commit = pyTruthy(pyGet(c, "commit")) ? pyGet(c, "commit") : {};
     const inner: Dict = { message: pyGet(commit, "message") };
     const entry: Dict = { sha: pyGet(c, "sha"), commit: inner };
@@ -431,7 +493,7 @@ function commitSummaries(commits: unknown[], withAuthor = false): Dict[] {
 }
 
 async function renderFetchedContent(ctx: Ctx, lines: string[], normalized: string, host: string, i: number, fetched: Map<number, Uint8Array | null>): Promise<boolean> {
-  if (await hostAllowed(normalized, ctx.input.allowedHosts, ctx.deps.resolver)) {
+  if (await allowed(ctx, normalized)) {
     const body = fetched.get(i);
     if (host === "github.com") {
       lines.push("(Raw HTML fetch skipped for github.com — structured release/compare metadata is captured below when available)");
@@ -440,7 +502,10 @@ async function renderFetchedContent(ctx: Ctx, lines: string[], normalized: strin
       return true;
     } else if (body && body.length > 0) {
       const text = stripSourceToText(body);
-      if (text) lines.push("```text", text, "", "```");
+      if (text) {
+        const fence = fenceFor(text);
+        lines.push(`${fence}text`, text, "", fence);
+      }
       else lines.push("(No content captured from URL)");
     } else {
       lines.push(`(Failed to fetch allowlisted URL content from ${host})`);
@@ -463,7 +528,7 @@ async function renderGithubReleaseMetadata(ctx: Ctx, cls: UrlClassification | nu
   if (budget.ok()) {
     const data = await api.releases(cls.owner, cls.repo);
     if (Array.isArray(data)) {
-      const filtered = data.slice(0, 8).map((r) => pick(r, ["tag_name", "name", "published_at", "html_url"]));
+      const filtered = entries(data.slice(0, 8), (r) => pick(r, ["tag_name", "name", "published_at", "html_url"]));
       lines.push("### Recent Releases");
       jsonBlock(lines, filtered, 3000);
     }
@@ -490,7 +555,7 @@ async function renderGithubCompareMetadata(ctx: Ctx, cls: UrlClassification | nu
   };
   jsonBlock(lines, filtered, 7000);
   const files = pySlice(pyGet(data, "files", []), 30);
-  const fileList = files.map((f) => pick(f, ["filename", "status", "additions", "deletions", "changes", "patch"]));
+  const fileList = entries(files, (f) => pick(f, ["filename", "status", "additions", "deletions", "changes", "patch"]));
   lines.push("### GitHub Compare Files");
   jsonBlock(lines, fileList, 7000);
 }
@@ -515,7 +580,7 @@ async function renderForgejoMetadata(ctx: Ctx, cls: UrlClassification, lines: st
         const filtered: Dict = {
           total_commits: pyGet(data, "total_commits"),
           commits: commitSummaries(pySlice(pyTruthy(commits) ? commits : [], 20)),
-          files: pySlice(pyTruthy(files) ? files : [], 30).map((f) => {
+          files: entries(pySlice(pyTruthy(files) ? files : [], 30), (f) => {
             const row: Dict = {};
             for (const key of ["filename", "status", "additions", "deletions"]) row[key] = pyGet(f, key);
             return row;
@@ -539,7 +604,7 @@ interface Section {
 
 async function renderSourceSection(ctx: Ctx, i: number, url: string, fetched: Map<number, Uint8Array | null>): Promise<Section> {
   const normalized = normalizeUrl(url);
-  const host = pyUrlHost(normalized);
+  const host = safeHost(normalized) ?? UNPARSEABLE_URL_HOST;
   const lines = [`## Source ${i}`, `URL: ${url}`];
   if (normalized !== url) lines.push(`Normalized URL: ${normalized}`);
   lines.push("", "### Fetched Content (truncated)");
@@ -548,7 +613,7 @@ async function renderSourceSection(ctx: Ctx, i: number, url: string, fetched: Ma
   const cls = classify(normalized);
   await renderGithubReleaseMetadata(ctx, cls, lines);
   await renderGithubCompareMetadata(ctx, cls, lines);
-  if (cls && host !== "github.com" && (await hostAllowed(normalized, ctx.input.allowedHosts, ctx.deps.resolver))) {
+  if (cls && host !== "github.com" && (await allowed(ctx, normalized))) {
     await renderForgejoMetadata(ctx, cls, lines);
   }
   return { lines, host, isSkip, enrichStart, repoKey: githubRepoKey(normalized) };
@@ -570,18 +635,18 @@ async function renderReleasesEnrichment(ctx: Ctx, repoCandidates: string[], line
       continue;
     }
     lines.push("#### Recent Releases (tags)");
-    jsonBlock(lines, data.map((r) => pick(r, ["tag_name", "name", "published_at", "html_url"])), 5000);
+    jsonBlock(lines, entries(data, (r) => pick(r, ["tag_name", "name", "published_at", "html_url"])), 5000);
     if (!target) continue;
     const v = target.toLowerCase();
-    const matched = data.filter((r) => {
+    const matched = data.filter((entry) => matches(entry, (r) => {
       if (pyLowerOr(pyGet(r, "tag_name")) === v) return true;
       if (pyLowerOr(pyGet(r, "tag_name")) === `v${v}`) return true;
       if (pyLowerOr(pyGet(r, "tag_name")).includes(v)) return true;
       return pyLowerOr(pyGet(r, "name")).includes(v);
-    }).slice(0, 5);
+    })).slice(0, 5);
     if (matched.length > 0) {
       lines.push(`#### Releases matching target version ${target}`);
-      jsonBlock(lines, matched.map((r) => pick(r, ["tag_name", "name", "published_at", "html_url", "body"])), 8000);
+      jsonBlock(lines, entries(matched, (r) => pick(r, ["tag_name", "name", "published_at", "html_url", "body"])), 8000);
       continue;
     }
     lines.push(`(No release tags matched target version ${target} in ${repoKey})`);
@@ -589,7 +654,7 @@ async function renderReleasesEnrichment(ctx: Ctx, repoCandidates: string[], line
     const tags = await api.get(`repos/${owner}/${repo}/tags?per_page=50`);
     if (Array.isArray(tags)) {
       lines.push("#### Recent Tags");
-      jsonBlock(lines, tags.map((t) => pick(t, ["name", "commit"])), 4000);
+      jsonBlock(lines, entries(tags, (t) => pick(t, ["name", "commit"])), 4000);
     } else {
       lines.push(`(Could not fetch tags list for ${repoKey})`);
     }
@@ -638,7 +703,7 @@ async function renderGhcrLookup(ctx: Ctx, seenRepos: Set<string>, lines: string[
           commits: commitSummaries(pySlice(pyGet(data, "commits", []), 20)),
         };
         jsonBlock(lines, filtered, 6000);
-        const files = pySlice(pyGet(data, "files", []), 30).map((f) => {
+        const files = entries(pySlice(pyGet(data, "files", []), 30), (f) => {
           const row: Dict = {};
           for (const key of ["filename", "status", "additions", "deletions", "changes"]) row[key] = pyGet(f, key);
           return row;

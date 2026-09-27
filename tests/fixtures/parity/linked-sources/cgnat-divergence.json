@@ -26,5 +26,10 @@
     "markdown": "## Source 1\nURL: https://artifacthub.io/cgnat\n\n### Fetched Content (truncated)\n```text\ninternal\n\n```\n\n",
     "requests": "[\"GET https://artifacthub.io/cgnat\"]",
     "budget_warnings": "0"
+  },
+  "v3_golden": {
+    "markdown": "(1 source skipped \u2014 non-allowlisted or non-fetchable hosts: artifacthub.io)\n\n",
+    "requests": "[]",
+    "budget_warnings": "0"
   }
 }

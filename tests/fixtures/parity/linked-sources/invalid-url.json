@@ -19,5 +19,10 @@
   },
   "golden": {
     "error": "ValueError: Invalid IPv6 URL"
+  },
+  "v3_golden": {
+    "markdown": "## Source 2\nURL: https://artifacthub.io/a\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from artifacthub.io)\n\n(1 source skipped \u2014 non-allowlisted or non-fetchable hosts: unparseable URL)\n\n",
+    "requests": "[\"GET https://artifacthub.io/a\"]",
+    "budget_warnings": "0"
   }
 }

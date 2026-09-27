@@ -552,15 +552,21 @@ Approved divergences (all fail closed):
   proxy environment variables are not honored.
 - A URL whose Python hostname and connection target disagree (userinfo,
   backslash tricks, non-ASCII request targets) fails instead of connecting.
+- A URL `urlparse` rejects, or an API entry v2's shaping would raise on
+  (`.get` on a non-dict, slicing `None`, `.lower()` on a non-string), no
+  longer aborts the whole render: v3 drops just that URL (listed as
+  `unparseable URL` in the skipped-hosts summary) or entry. Fixtures whose v3
+  output differs from v2 record it as `v3_golden`, pinned by
+  `tests-v3/linked-sources.test.ts`.
+- Fetched text is fenced with more backticks than any run it contains (the
+  related-code `_fenced` approach), so a page cannot close the fence and turn
+  the rest of the corpus into code.
 
 v2 behavior kept for parity: the raw fetch is effectively limited to
 `ALLOWED_SOURCE_HOSTS` ∩ `{github.com, gitlab.com, registry.terraform.io,
 artifacthub.io}` (v2's `_fetch_sections` never passes its allowlist to
-`fetch_url`), and github.com/gitlab.com are never fetched raw. Hostile
-payload types (`.get` on a non-dict, slicing `None`) and URLs `urlparse`
-rejects abort the whole render. Fetched text is rendered inside a `text`
-fence without fence-safety, and the corpus-level untrusted-data delimiters
-are what contain it. JSON goes through `JSON.parse`, so integer-valued
+`fetch_url`), and github.com/gitlab.com are never fetched raw. JSON goes
+through `JSON.parse`, so integer-valued
 floats, integers beyond 2^53 and integer-like object keys do not round-trip
 byte for byte.
 
