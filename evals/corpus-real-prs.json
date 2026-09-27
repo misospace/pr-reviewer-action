@@ -536,8 +536,11 @@
         },
         "defect": {
           "description": "The reconciliation service added by #121 only classified an issue's currentLane when it was still `null`, so an issue synced with status/backlog (and thus lane=backlog) that was later relabelled to status/ready/in-progress/in-review kept the stale backlog lane forever, making it invisible to normal agent worker queues (which filter out backlog-lane issues) even though it was actually ready to work.",
-          "file": "src/lib/issue-reconciliation.ts",
-          "line_range": null,
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line_range": [
+            156,
+            165
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -664,32 +667,6 @@
         "confidence": "high",
         "evidence": "`git log -S'_JWT_CACHE' -- pr_reviewer/forgejo_backend.py` traces the cache to commit 1cb6bed, resolved via commits/pulls API to PR #457. Tracking issue #538 (quoted in F's linked issue): \"_fetch_authorized_integration_jwt() sets both globals unconditionally, and _get_jwt() reads them with no synchronization... If two concurrent _get_jwt() calls land just past the TTL window, both observe an expired cache and both issue an OIDC token-exchange POST... overwrites the other without serialization.\"",
         "source_file_lines": "pr_reviewer/forgejo_backend.py, module-level _JWT_CACHE/_JWT_CACHE_TIME globals and _get_jwt()/_fetch_authorized_integration_jwt() (~lines 120, ~187), added by #457"
-      },
-      {
-        "id": "pr-reviewer-action-195-551",
-        "repo_full_name": "misospace/pr-reviewer-action",
-        "number": 195,
-        "head_sha": "45886ae0dae8d6ece8afd50bce3ad3211e7f9bc3",
-        "title": "feat: cumulative incremental verdicts via carried-forward findings",
-        "size": {
-          "additions": 678,
-          "deletions": 38,
-          "changedFiles": 14
-        },
-        "defect": {
-          "description": "PR #195's carry-forward mechanism (apply_carry_forward) computed a summary but had no way to force scope back to full when carried findings could no longer be verified from an incremental delta. An intermediate direct patch (commit 42a6dee, addressing tracked issue #536) added summary['needs_full_review'] = bool(unverifiable_items), but no consumer ever read that field: the bash wrapper only printed carried/resolved/open/forced_request_changes, and resolve_review_scope ran before carry-forward, so the scope was already locked to incremental. Net effect: a PR that hit the unverifiable-carried-finding case kept producing incremental reviews on every push, looping forever on stale findings (observed on misospace/llmkube-images#254).",
-          "file": "pr_reviewer/carry_forward.py",
-          "line_range": null,
-          "severity": "major"
-        },
-        "fixing_pr": {
-          "number": 551,
-          "sha": "13f016d933823771606da74f5ec59c13d253a51e",
-          "title": "fix(carry-forward): propagate needs_full_review so unverifiable carried findings trigger a full review next run"
-        },
-        "confidence": "high",
-        "evidence": "`git log -S'def apply_carry_forward' -- pr_reviewer/carry_forward.py` traces the mechanism to commit 28f572f, resolved via commits/pulls API to PR #195. Tracking issue #544: \"The #536 fix (commit 42a6dee...) tracks unverifiable_items separately from open_items, sets summary['needs_full_review']... But no consumer reads it... Net effect: a PR that hits #536 Case 2 still produces an incremental review on every push.\"",
-        "source_file_lines": "pr_reviewer/carry_forward.py (apply_carry_forward, added by #195); scripts/sections/config.sh:520 and scripts/sections/review.sh (never consume needs_full_review, gap present since #195/42a6dee)"
       },
       {
         "id": "pr-reviewer-action-554-597",

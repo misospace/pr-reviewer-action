@@ -21,13 +21,13 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from eval_harness import (
-    REAL_PR_LINE_TOLERANCE,
     RealPRCorpus,
     RealPRDefect,
     RealPRScenario,
     ReviewRun,
     _checkout_pinned_commit,
     generate_real_pr_report,
+    run_real_pr_corpus,
     score_clean_run,
     score_vulnerable_run,
     validate_real_pr_corpus,
@@ -245,6 +245,14 @@ class TestRealPRCorpusFromFile:
         for scenario in corpus.clean:
             assert len(scenario.head_sha) == 40
             assert scenario.expected_clean is True
+
+    def test_max_entries_caps_vulnerable_and_clean_independently(self, tmp_path, capsys):
+        corpus = RealPRCorpus.from_file(CORPUS_PATH)
+        run_real_pr_corpus(corpus, ["tools_off"], tmp_path, {}, max_entries=1, dry_run=True)
+        planned = [line for line in capsys.readouterr().out.splitlines() if "Would run:" in line]
+        assert len(planned) == 2
+        assert "[vulnerable]" in planned[0]
+        assert "[clean]" in planned[1]
 
     def test_every_vulnerable_entry_has_a_distinct_id(self):
         corpus = RealPRCorpus.from_file(CORPUS_PATH)
