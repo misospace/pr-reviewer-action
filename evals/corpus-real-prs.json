@@ -44,7 +44,10 @@
         "defect": {
           "description": "PR #16 added jq expressions in run_review.sh (TOOL_FAILURE_REASON, SUCCESSFUL_TOOL_REQUESTS) that read tool call status from `.tool_results[].result.status`, but run_tool_harness.py writes status at the top level of each result (`.tool_results[].status`), so every successful tool call was miscounted as a failure under fail-closed settings.",
           "file": "scripts/run_review.sh",
-          "line_range": null,
+          "line_range": [
+            780,
+            808
+          ],
           "severity": "blocker"
         },
         "fixing_pr": {
@@ -70,7 +73,10 @@
         "defect": {
           "description": "The new build_metadata_marker() function added by #144 built the marker string as `<!-- ai-pr-reviewer:{...}` without the closing `-->`, so GitHub rendered the entire published review as a hidden HTML comment (blank in the PR UI) despite valid content in the API response.",
           "file": "scripts/publish_helpers.sh",
-          "line_range": null,
+          "line_range": [
+            90,
+            90
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -96,7 +102,10 @@
         "defect": {
           "description": "PR #65 implemented `review_comment` publish mode using `gh pr review --comment`, which creates a COMMENTED PR review; GitHub does not render the body text of COMMENTED reviews in the PR timeline/UI, so the review content was invisible to human reviewers despite being present via the API.",
           "file": "action.yml",
-          "line_range": null,
+          "line_range": [
+            397,
+            397
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -122,7 +131,10 @@
         "defect": {
           "description": "PR #99's wait_for_ci.sh queried the GitHub Checks API with `status=pending`, but the Checks API only ever returns `queued`/`in_progress`/`completed` as status values (never `pending`), so in-progress check runs were invisible to the polling logic on repos that rely on Checks (not legacy commit statuses), causing premature timeouts or proceeding with no real signal.",
           "file": "scripts/wait_for_ci.sh",
-          "line_range": null,
+          "line_range": [
+            86,
+            92
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -148,7 +160,10 @@
         "defect": {
           "description": "PR #15's build_review_corpus assembled the standards/conventions section last (section 13 of the corpus) and then truncated the whole corpus from the head via `head -c \"$MAX_CORPUS\"`, so on large PRs the standards file (the section that matters most for convention enforcement) was the first thing cut off.",
           "file": "scripts/run_review.sh",
-          "line_range": null,
+          "line_range": [
+            659,
+            665
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -174,7 +189,10 @@
         "defect": {
           "description": "PR #107's cleanup_native_reviews resolved the bot's identity with `gh api user --jq .login` to filter which previous reviews to hide, but `/user` returns HTTP 403 for installation tokens (both default GITHUB_TOKEN and GitHub App tokens) in every real deployment, and on that error `gh api` prints the raw JSON error body to stdout (bypassing --jq), so CURRENT_ACTOR was always a non-empty garbage string; the author-match filter therefore matched nothing and the cleanup feature silently never worked since it shipped.",
           "file": "action.yml",
-          "line_range": null,
+          "line_range": [
+            460,
+            464
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -200,7 +218,10 @@
         "defect": {
           "description": "resolve_review_scope (added by #131) never re-triggered a FULL review on demand once any full review had recorded findings: workflow_dispatch takes no PR context, and the force_review label only bypassed the diff-unchanged guard while scope still resolved to incremental whenever a prior managed review existed. Combined with publish_mode: review_verdict's verdict-safety guardrail (only approve on top of a clean full baseline), a PR whose one full review recorded even a stale/false-positive blocker got permanently wedged in \"Request changes\" with no way to force a fresh full review.",
           "file": "scripts/check_review_needed.sh",
-          "line_range": null,
+          "line_range": [
+            210,
+            218
+          ],
           "severity": "blocker"
         },
         "fixing_pr": {
@@ -226,7 +247,10 @@
         "defect": {
           "description": "In the tool-execution branches added by #45 (gh_api, web_fetch, run_command, etc.), `tool_result[\"status\"] = \"ok\"` is set unconditionally right after each call, without checking whether the helper's return dict carries an `error` key (only raised Python exceptions were treated as failures). Tool calls that failed \"softly\" (disallowed repo/host, HTTP error, etc.) were therefore recorded as successful with empty/partial content, in both the direct-model-call and file-based-planning execution paths.",
           "file": "scripts/run_tool_harness.py",
-          "line_range": null,
+          "line_range": [
+            613,
+            671
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -252,7 +276,10 @@
         "defect": {
           "description": "PR #45 introduced git_grep/gh_api/web_fetch/fetch_url/run_command in run_tool_harness.py with hardcoded per-call timeouts (15s/25s/25s/25s/30s via `urllib.request.urlopen(..., timeout=NN)` and subprocess timeout args) instead of threading the action's configurable `tool_request_timeout_sec` input through to them, so that input silently had no effect on the actual network/subprocess calls.",
           "file": "scripts/run_tool_harness.py",
-          "line_range": null,
+          "line_range": [
+            236,
+            409
+          ],
           "severity": "minor"
         },
         "fixing_pr": {
@@ -278,7 +305,10 @@
         "defect": {
           "description": "The in-conversation verdict turn added by #262 runs inside run_tool_harness.py and re-sends review-corpus.truncated.md as it stood before the tool harness ran (still containing the \"Tool harness planning pending\" scaffold), instead of the corpus rebuilt after the harness produced real findings, so every successful native_loop review reported no tool harness findings were produced even when tools were actually run.",
           "file": "scripts/run_tool_harness.py",
-          "line_range": null,
+          "line_range": [
+            1069,
+            1073
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -304,7 +334,10 @@
         "defect": {
           "description": "decideAction (added by #932) closed the first OPEN issue found anywhere in the repo whenever ANY workflow reported healthy (`filed.find(i => i.state === \"open\")`), because the filed-issues list carried no workflow association. A green run of an unrelated workflow (e.g. Release) would close a still-failing issue for a different workflow (e.g. Vulnerability Scan), which then immediately refiled and re-closed on each subsequent pass.",
           "file": "src/lib/ci-failure-ingestion.ts",
-          "line_range": null,
+          "line_range": [
+            159,
+            172
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -330,7 +363,10 @@
         "defect": {
           "description": "acquireLock(syncType) (added by #333) ignored its own `syncType` argument and always used the fixed row id `\"global\"`, so every scheduled sync job (stale-work, groomer, sync, pr-followup, reconcile, etc.) mutually excluded every other job through a single shared lock row instead of one lock per job, causing jobs with shorter intervals to repeatedly starve jobs with longer ones (one job never completed a single run in the observed period).",
           "file": "src/lib/sync-lock.ts",
-          "line_range": null,
+          "line_range": [
+            18,
+            42
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -356,7 +392,10 @@
         "defect": {
           "description": "heartbeat.ts's reconcileClosedIssues (added by #358) called `fetchIssues(repoFullName)` without `{ includeClosed: true }`; since fetchIssues defaults to open-only, the reconciliation pass could never see a cached issue's real (closed) state on GitHub, threw 'Issue #N not found', and silently skipped it — leaving every issue Dispatch had marked status/done permanently stuck at state: \"open\" in the DB.",
           "file": "src/lib/heartbeat.ts",
-          "line_range": null,
+          "line_range": [
+            136,
+            136
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -382,7 +421,10 @@
         "defect": {
           "description": "The groomer's issue selector (added by #462) filtered candidates only by `state: \"open\"` in the DB, so an issue whose GitHub label had moved to status/done but whose cached DB state hadn't yet been reconciled to closed would still be offered by the 'Groom Next' selector, and the run endpoint's guard then rejected it outright ('Cannot groom an issue with status/done label').",
           "file": "src/lib/groomer/selector.ts",
-          "line_range": null,
+          "line_range": [
+            28,
+            31
+          ],
           "severity": "minor"
         },
         "fixing_pr": {
@@ -437,7 +479,10 @@
         "defect": {
           "description": "PR #454 loaded DISPATCH_LANE_CONFIG_JSON via the Next.js instrumentation.ts register() hook, calling setLaneConfig() there. Under the production build (Next.js 16 standalone + Turbopack), instrumentation.js is emitted into a separate chunk graph from the route-handler chunks, so the config mutation never reached the module instance route handlers actually import — every deployed request instead saw the hardcoded default lane list and rejected the real configured lanes.",
           "file": "src/instrumentation.ts",
-          "line_range": null,
+          "line_range": [
+            1,
+            26
+          ],
           "severity": "blocker"
         },
         "fixing_pr": {
@@ -463,7 +508,10 @@
         "defect": {
           "description": "checkPrHealth() (added by #121) read `pr.user?.login` (the PR author's GitHub username) as if it were the review decision, and hardcoded mergeStateStatus to the literal string \"clean\" instead of reading the actual field, so the reconciliation engine reported every linked PR as healthy regardless of its real review state or merge conflicts.",
           "file": "src/lib/issue-reconciliation.ts",
-          "line_range": null,
+          "line_range": [
+            119,
+            120
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -515,7 +563,10 @@
         "defect": {
           "description": "shouldComment() (added by #53) returned `true` (post a re-fire comment immediately) whenever the mirrored GitHub issue's labels ALREADY contained the current severity label (i.e. severity unchanged), and only fell back to the interval-based check otherwise — the exact inverse of the intended behavior, which should comment immediately on a real severity change and gate unchanged-severity re-fires on the interval.",
           "file": "github.go",
-          "line_range": null,
+          "line_range": [
+            131,
+            146
+          ],
           "severity": "major"
         },
         "fixing_pr": {
@@ -541,7 +592,10 @@
         "defect": {
           "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
           "file": "internal/controller/observer.go",
-          "line_range": null,
+          "line_range": [
+            37,
+            55
+          ],
           "severity": "blocker"
         },
         "fixing_pr": {
@@ -567,7 +621,10 @@
         "defect": {
           "description": "PR #163 introduced PATH_HANDLING_PATTERNS as raw mention-based regexes (\\bpathlib\\b, \\bos\\.path\\b, filepath|pathname, identifier-shaped sanitize/join names) scanning diff content, so any mere mention of a path-handling API (not an actual untrusted-path surface) classified the PR as path_handling_changes and injected merge-blocking must_check guidance (\"review for path traversal vulnerabilities\"). This was first partially patched for ESM-specifier/prose mentions by #720, then more completely fixed by #756 after PR #748's ordinary trusted repo-root discovery (`Path(__file__).resolve().parent.parent`) tripped the same false positive.",
           "file": "pr_reviewer/classifier.py",
-          "line_range": null,
+          "line_range": [
+            132,
+            140
+          ],
           "severity": "minor"
         },
         "fixing_pr": {
