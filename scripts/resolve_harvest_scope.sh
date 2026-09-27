@@ -27,8 +27,9 @@ IFS=',' read -ra repo_list <<< "$REPOS"
 for raw in "${repo_list[@]}" "$CURRENT_REPO"; do
   repo="$(echo "$raw" | xargs)"
   [ -z "$repo" ] && continue
-  if [[ "$repo" != */* ]]; then
-    echo "::error::'$repo' is not an owner/repo slug"
+  if [[ ! "$repo" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "::error::'$repo' is not an owner/repo slug (expected exactly one" \
+      "non-empty 'owner/repo' segment)"
     exit 1
   fi
   owner="${repo%%/*}"

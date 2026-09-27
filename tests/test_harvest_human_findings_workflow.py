@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "harvest-human-findings.yaml"
 PUSH_SCRIPT = ROOT / "scripts" / "push_harvest_branch.sh"
 SCOPE_SCRIPT = ROOT / "scripts" / "resolve_harvest_scope.sh"
+MERGE_SCRIPT = ROOT / "scripts" / "merge_bot_branch_corpus.py"
 
 _SHA_PIN_RE = re.compile(r"uses:\s*\S+@[0-9a-f]{40}\b")
 
@@ -27,10 +28,11 @@ def _text() -> str:
 
 
 def _all_text() -> str:
-    """Workflow text plus the scripts it calls out to (the branch-update
-    and scope-resolution logic live there now, not inline)."""
+    """Workflow text plus the scripts it calls out to (the branch-update,
+    scope-resolution, and corpus-merge logic live there now, not inline)."""
     return "\n".join(
-        p.read_text(encoding="utf-8") for p in (WORKFLOW, PUSH_SCRIPT, SCOPE_SCRIPT)
+        p.read_text(encoding="utf-8")
+        for p in (WORKFLOW, PUSH_SCRIPT, SCOPE_SCRIPT, MERGE_SCRIPT)
     )
 
 
@@ -198,3 +200,44 @@ def test_push_script_fetches_remote_bot_branch_before_pushing() -> None:
         "must push with an explicit --force-with-lease=<ref>:<expected-sha>, "
         "not the bare form (which has no local record on a fresh checkout)"
     )
+
+
+def test_merge_script_exists_and_is_executable() -> None:
+    assert MERGE_SCRIPT.is_file(), (
+        "the unmerged-bot-branch-corpus merge logic must live in an "
+        "executable script (so it's covered by "
+        "tests/test_merge_bot_branch_corpus.py and "
+        "tests/test_push_harvest_branch.sh)"
+    )
+    assert MERGE_SCRIPT.stat().st_mode & 0o111, "merge_bot_branch_corpus.py must be executable"
+
+
+def test_merge_step_runs_before_harvest_and_push_steps() -> None:
+    """Data-loss guard (#801 follow-up): the harvest script reads/appends to
+    whatever corpus is on disk, and the push step commits whatever's on disk
+    afterwards, so the merge (carrying forward any unmerged bot-branch
+    entries) must run *before* both -- otherwise the harvest step's
+    duplicate-id check can't see them, and the eventual bot-branch reset
+    would still drop them."""
+    workflow = yaml.safe_load(_text())
+    steps = workflow["jobs"]["harvest"]["steps"]
+    step_scripts = [
+        (s.get("name", ""), (s.get("run") or ""))
+        for s in steps
+    ]
+
+    def _index_containing(needle: str) -> int:
+        for i, (name, run) in enumerate(step_scripts):
+            if needle in run or needle in name:
+                return i
+        raise AssertionError(f"no step found running/named {needle!r}")
+
+    merge_idx = _index_containing("merge_bot_branch_corpus.py")
+    harvest_idx = _index_containing("harvest_human_findings.py")
+    push_idx = _index_containing("push_harvest_branch.sh")
+
+    assert merge_idx < harvest_idx, (
+        "the corpus-merge step must run before the harvest step, so the "
+        "harvest script's duplicate-id check sees carried-forward entries"
+    )
+    assert harvest_idx < push_idx, "the harvest step must run before the push step"

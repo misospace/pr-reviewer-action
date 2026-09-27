@@ -100,6 +100,20 @@ jobs:
         with:
           python-version: '3.14'
 
+      # A prior run's harvest may still be sitting in an unmerged bot-branch
+      # PR. push_harvest_branch.sh resets that branch to main's tip and
+      # commits this run's output on top, so anything only on the unmerged
+      # PR would otherwise be silently dropped. Carry it forward into this
+      # run's input corpus (before the harvest script appends anything new)
+      # so the duplicate-id check sees it and the next push carries both.
+      - name: Merge unmerged bot-branch corpus entries
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: >
+          scripts/merge_bot_branch_corpus.py
+          --branch bot/harvest-human-findings
+          --corpus evals/corpus-human-findings.json
+
       - name: Run harvest script
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

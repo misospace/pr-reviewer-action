@@ -67,6 +67,27 @@ ERR="$(cat "$TMPDIR/stdout" "$TMPDIR/stderr")"
 check_contains "error explains the multi-owner conflict" "$ERR" "multiple owners"
 
 echo ""
+echo "=== missing owner segment ('/repo') fails clearly ==="
+run_scope "/repo" "misospace/pr-reviewer-action"
+check "exits non-zero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+ERR="$(cat "$TMPDIR/stdout" "$TMPDIR/stderr")"
+check_contains "error names the bad slug" "$ERR" "/repo"
+
+echo ""
+echo "=== missing repo segment ('owner/') fails clearly ==="
+run_scope "owner/" "misospace/pr-reviewer-action"
+check "exits non-zero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+ERR="$(cat "$TMPDIR/stdout" "$TMPDIR/stderr")"
+check_contains "error names the bad slug" "$ERR" "owner/"
+
+echo ""
+echo "=== extra segment ('owner/repo/extra') fails clearly ==="
+run_scope "owner/repo/extra" "misospace/pr-reviewer-action"
+check "exits non-zero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+ERR="$(cat "$TMPDIR/stdout" "$TMPDIR/stderr")"
+check_contains "error names the bad slug" "$ERR" "owner/repo/extra"
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ "$FAIL" -gt 0 ]]; then
