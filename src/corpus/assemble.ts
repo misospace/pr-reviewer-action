@@ -237,7 +237,7 @@ export function buildBoundedRepoMap(repoMapMd: Uint8Array | null, repoMapMaxByte
   return new Uint8Array(0);
 }
 
-const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function strictUtf8Decode(data: Uint8Array): string {
   return strictUtf8.decode(data);

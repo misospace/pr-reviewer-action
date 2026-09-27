@@ -99,7 +99,7 @@ function bytesOf(text: string): number {
 
 /** Strict UTF-8 decoder (throws on a partial/invalid trailing sequence),
  * the analog of Python's `bytes.decode("utf-8")` without `errors="replace"`. */
-const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Truncate `text` to at most `maxBytes` UTF-8 bytes, deterministically. The
  * cut prefers the latest newline not later than the cap — but only when that
