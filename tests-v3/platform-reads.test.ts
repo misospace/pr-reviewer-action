@@ -461,3 +461,28 @@ test("helpers: code-point ordering, Python str/quote, pr-files projection", () =
   assert.equal(projectPrFiles([{ filename: "a", extra: 1 }], 101), '[{"filename":"a","status":null,"additions":null,"deletions":null,"changes":null,"previous_filename":null},{"note":"file list truncated to first 100 of 101 changed files"}]\n');
   assert.equal(jqCompact(["\u007f"]), '["\\u007f"]');
 });
+
+test("enrich endpoints: percent-encoded dot segments in the ref tail are rejected; encoded slashes in real tags pass", () => {
+  assert.equal(validEnrichEndpoint("repos/up/lib/releases/tags/..%2F..%2Fvictim%2Freleases%2Ftags%2Fv1"), false);
+  assert.equal(validEnrichEndpoint("repos/up/lib/releases/tags/%2E%2E%2Fx"), false);
+  assert.equal(validEnrichEndpoint("repos/up/lib/compare/a...b%2F..%2Fc"), false);
+  assert.equal(validEnrichEndpoint("repos/up/lib/releases/tags/%E0%A4%A"), false);
+  assert.equal(validEnrichEndpoint("repos/up/lib/releases/tags/release%2Fv1.2.3"), true);
+  assert.equal(validEnrichEndpoint("repos/up/lib/compare/v1.0.0...v1.1.0"), true);
+});
+
+test("enrich: a hostile encoded tag makes no request", async () => {
+  let calls = 0;
+  const fetchImpl: FetchLike = async () => { calls += 1; return new Response("{}", { status: 200 }); };
+  const client = new GitHubEnrichClient({ token: "Bearer t", fetchImpl });
+  assert.equal(await client.get("repos/up/lib/releases/tags/..%2F..%2Fvictim%2Freleases%2Ftags%2Fv1"), null);
+  assert.equal(calls, 0);
+});
+
+test("ciAttemptTimeoutMs: 0 means no per-attempt limit, like curl --max-time 0", () => {
+  assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0" }), undefined);
+  assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0", ciTimeoutSec: "7" }), 7_000);
+  const now = () => 1_000_000_000;
+  assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0", deadlineEpoch: String(1_000_000 + 4), now }), 4_000);
+  assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0", deadlineEpoch: "1", now }), null);
+});

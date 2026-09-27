@@ -11,17 +11,20 @@ import type { CiBoundOptions } from "./types.js";
 
 const DIGITS = /^[0-9]+$/;
 
-export function ciAttemptTimeoutMs(options: CiBoundOptions = {}): number | null {
+export function ciAttemptTimeoutMs(options: CiBoundOptions = {}): number | null | undefined {
   const raw = options.apiTimeoutSec ?? "";
   let bound = DIGITS.test(raw) ? Number(raw) : 10;
+  // curl's `--max-time 0` means no per-attempt limit: only the outer budget
+  // bounds it, or, with none, the transport default.
+  const unbounded = bound === 0;
   const outer = options.ciTimeoutSec ?? "";
-  if (DIGITS.test(outer) && bound > Number(outer)) bound = Number(outer);
+  if (DIGITS.test(outer) && (unbounded || bound > Number(outer)) && Number(outer) > 0) bound = Number(outer);
   const deadline = options.deadlineEpoch ?? "";
   if (DIGITS.test(deadline)) {
     const nowSec = Math.floor((options.now ?? Date.now)() / 1000);
     const remaining = Number(deadline) - nowSec;
     if (remaining < 1) return null;
-    if (bound > remaining) bound = remaining;
+    if (bound === 0 || bound > remaining) bound = remaining;
   }
-  return bound * 1000;
+  return bound === 0 ? undefined : bound * 1000;
 }

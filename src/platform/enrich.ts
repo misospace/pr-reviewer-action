@@ -34,8 +34,22 @@ const ENDPOINT_RE = /^repos\/([^/]+)\/([^/]+)\/(releases\/tags\/|compare\/|tags\
 const GH_ENRICH_TIMEOUT_MS = 30_000;
 const DEFAULT_FORGEJO_TIMEOUT_MS = 25_000;
 
+function hasDotOrEmptySegment(path: string): boolean {
+  return path.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
+}
+
+/** The tail arrives percent-encoded (`quote(tag, safe='')`), so `%2F` hides a
+ * separator from both this check and URL normalization; a server that decodes
+ * it could still see `../`. Check the decoded form too. */
 function safeRefTail(tail: string): boolean {
-  return REF_TAIL.test(tail) && !tail.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
+  if (!REF_TAIL.test(tail) || hasDotOrEmptySegment(tail)) return false;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(tail);
+  } catch {
+    return false;
+  }
+  return !hasDotOrEmptySegment(decoded);
 }
 
 /** The endpoint shapes linked sources build: `repos/o/r/releases/tags/T`,
