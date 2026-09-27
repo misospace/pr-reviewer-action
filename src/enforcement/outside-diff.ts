@@ -60,9 +60,9 @@ export function sortPreExistingLast<T extends ArtifactFinding>(findings: readonl
 /**
  * Tag every finding whose file/line falls outside the PR's diff with
  * `outside_diff: true`, then apply the stable reorder above. `diffText` must be
- * the full diff: a file missing from a truncated diff would be tagged. Mutates
- * `artifact.findings` in place (matching the enforcement pass convention in
- * `enforce.ts`) and returns the number of findings newly tagged.
+ * the full diff: a file missing from a truncated diff would be tagged. Tags
+ * findings in place, replaces `artifact.findings` with the reordered array, and
+ * returns the number newly tagged. An empty-string file is tagged (no match).
  *
  * Call this after `reviewArtifactFromParsed` + `applyAllEnforcement` and
  * before the artifact is serialized to outputs/publish input — enforcement

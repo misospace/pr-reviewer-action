@@ -95,6 +95,16 @@ test("approval guardrails are opt-in and fail closed for unknown fork status", (
   assert.equal(check({ verdict: "request_changes", allowApprove: true, approveForks: true }).canApprove, false);
 });
 
+test("comment publication appends findings tagged outside the diff", async () => {
+  const api = new MockPublishApi();
+  const findings = [...FINDINGS, { file: "b.ts", line: 9, severity: "minor", message: "Caller breaks", outside_diff: true }];
+  await publishReview(input({ findings }), api, { diffText: DIFF });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("## Findings Outside This Diff"));
+  assert.ok(body.includes("(outside this diff) Caller breaks"));
+  assert.ok(!body.includes("(outside this diff) A finding"));
+});
+
 test("comment publication upserts a marked body with verdict and sanitized markdown", async () => {
   const api = new MockPublishApi();
   api.stickyResult = { ok: true, created: false };
