@@ -371,3 +371,117 @@ def test_cli_writes_versioned_json_and_markdown(tmp_path):
     assert json.loads((root / "related-code.json").read_text(encoding="utf-8"))["version"] == 1
     assert "# Related Code (v1)" in (root / "related-code.md").read_text(encoding="utf-8")
     assert "related_context:" in proc.stdout
+
+
+def _enclosing_file(path: str, name: str, line: int, changed_lines: list[list[int]] | None) -> dict:
+    entry = {
+        "path": path,
+        "language": "python",
+        "symbols": [{"name": name, "kind": "enclosing", "confidence": "high", "line": line}],
+        "imports": [],
+        "identifiers": [],
+    }
+    if changed_lines is not None:
+        entry["changed_lines"] = changed_lines
+    return entry
+
+
+def _changed(path: str, changed_lines: list[list[int]]) -> dict:
+    return {"path": path, "language": "python", "symbols": [], "imports": [], "identifiers": [],
+            "changed_lines": changed_lines}
+
+
+_JWT_MODULE = (
+    "def fetch_jwt():\n"          # 1
+    "    with LOCK:\n"            # 2 (added)
+    "        return 'a'\n"        # 3 (added)
+    "\n"                          # 4
+    "\n"                          # 5
+    "def get_jwt():\n"            # 6
+    "    return fetch_jwt()\n"    # 7
+)
+_JWT_TEST = (
+    "def test_old():\n"           # 1
+    "    fetch_jwt()\n"           # 2
+    "def test_new():\n"           # 3 (added)
+    "    fetch_jwt()\n"           # 4 (added)
+)
+
+
+def test_enclosing_symbol_lists_changed_file_references_after_unchanged(tmp_path):
+    root = make_repo(tmp_path, {
+        "src/jwt.py": _JWT_MODULE,
+        "tests/test_jwt.py": _JWT_TEST,
+        "src/prewarm.py": "fetch_jwt()\n",
+    })
+    result = build_related_context(
+        anchors(
+            _enclosing_file("src/jwt.py", "fetch_jwt", 1, [[2, 3]]),
+            _changed("tests/test_jwt.py", [[3, 4]]),
+        ),
+        root,
+    )
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [(r["path"], r["line"], r.get("changed_file", False)) for r in refs] == [
+        ("src/prewarm.py", 1, False),
+        ("src/jwt.py", 7, True),
+        ("tests/test_jwt.py", 2, True),
+    ]
+    assert result["truncated"] is False
+    markdown = render_related_context_markdown(result)
+    assert "- `src/jwt.py`:7 (changed file) — `    return fetch_jwt()`" in markdown
+    assert "- `src/prewarm.py`:1 — `fetch_jwt()`" in markdown
+
+
+def test_changed_file_references_have_their_own_cap(tmp_path):
+    root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE, "tests/test_jwt.py": _JWT_TEST})
+    result = build_related_context(
+        anchors(
+            _enclosing_file("src/jwt.py", "fetch_jwt", 1, [[2, 3]]),
+            _changed("tests/test_jwt.py", [[3, 4]]),
+        ),
+        root,
+        max_changed_references_per_symbol=1,
+    )
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [(r["path"], r["line"]) for r in refs] == [("src/jwt.py", 7)]
+    assert result["truncation"]["reasons"] == ["reference_cap"]
+    assert result["truncation"]["omitted_references"] == 1
+
+
+def test_changed_file_references_need_changed_lines(tmp_path):
+    root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE})
+    result = build_related_context(anchors(_enclosing_file("src/jwt.py", "fetch_jwt", 1, None)), root)
+    symbol = result["files"][0]["symbols"][0]
+    assert symbol == {"name": "fetch_jwt", "references": []}
+    assert "`fetch_jwt`: no references" in render_related_context_markdown(result)
+
+
+def test_added_declaration_referenced_only_in_changed_files(tmp_path):
+    root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE, "tests/test_jwt.py": _JWT_TEST})
+    entry = _changed("src/jwt.py", [[1, 3]])
+    entry["symbols"] = [
+        {"name": "fetch_jwt", "kind": "function", "confidence": "high", "line": 1},
+        {"name": "test_new", "kind": "function", "confidence": "high", "line": 3},
+    ]
+    result = build_related_context(anchors(entry, _changed("tests/test_jwt.py", [[3, 4]])), root)
+    symbols = result["files"][0]["symbols"]
+    assert symbols[0] == {"name": "fetch_jwt", "references": [], "only_in_changed_files": True}
+    assert symbols[1] == {"name": "test_new", "references": []}
+    markdown = render_related_context_markdown(result)
+    assert "- `fetch_jwt`: references only in changed files" in markdown
+    assert "- `test_new`: no references" in markdown
+
+
+def test_changed_lines_hostile_paths_are_literal_pathspecs(tmp_path):
+    root = make_repo(tmp_path, {"src/jwt.py": _JWT_MODULE, "src/x.py": "fetch_jwt()\n"})
+    result = build_related_context(
+        anchors(
+            _enclosing_file("src/jwt.py", "fetch_jwt", 1, [[2, 3]]),
+            _changed("src/*.py", []),
+        ),
+        root,
+    )
+    refs = result["files"][0]["symbols"][0]["references"]
+    assert [(r["path"], r["line"]) for r in refs] == [("src/x.py", 1), ("src/jwt.py", 7)]
+    assert all(r.get("changed_file") is not True for r in refs if r["path"] == "src/x.py")

@@ -27,7 +27,13 @@
           }
         ],
         "imports": [],
-        "identifiers": []
+        "identifiers": [],
+        "changed_lines": [
+          [
+            10,
+            10
+          ]
+        ]
       },
       {
         "path": "src/auth.py",
@@ -47,7 +53,17 @@
           }
         ],
         "imports": [],
-        "identifiers": []
+        "identifiers": [],
+        "changed_lines": [
+          [
+            12,
+            13
+          ],
+          [
+            18,
+            18
+          ]
+        ]
       },
       {
         "path": "src/handler.ts",
@@ -67,7 +83,21 @@
           }
         ],
         "imports": [],
-        "identifiers": []
+        "identifiers": [],
+        "changed_lines": [
+          [
+            8,
+            8
+          ],
+          [
+            13,
+            13
+          ],
+          [
+            16,
+            16
+          ]
+        ]
       }
     ],
     "anchors": [

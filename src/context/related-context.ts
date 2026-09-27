@@ -8,7 +8,10 @@
  * errors — never an exception. Internal result types are camelCase (#669);
  * `relatedContextToArtifact` is the explicit serializer to the
  * v2-identical snake_case artifact, and the JSON (with its structural byte
- * cap) and Markdown renderers are byte-exact ports. */
+ * cap) and Markdown renderers are byte-exact ports. Changed files carrying
+ * `changed_lines` (#764) are searched as well, skipping the symbol's own
+ * declaration line and every added line: listed (capped, `changed_file`) for
+ * enclosing symbols only, otherwise surfaced as `only_in_changed_files`. */
 
 import { spawn } from "node:child_process";
 import { redactText } from "./redact.js";
@@ -18,6 +21,9 @@ export const ARTIFACT_VERSION = 1;
 export const MAX_SYMBOLS = 40;
 export const MAX_REFERENCES_PER_SYMBOL = 20;
 export const MAX_REFERENCES = 200;
+export const MAX_CHANGED_REFERENCES_PER_SYMBOL = 5;
+export const MAX_CHANGED_REFERENCES = 40;
+export const MAX_CHANGED_RANGES_PER_FILE = 200;
 export const MAX_TESTS_PER_FILE = 20;
 export const MAX_MANIFESTS_PER_FILE = 20;
 export const MAX_SNIPPET_CHARS = 300;
@@ -174,6 +180,7 @@ interface GrepRow {
   path: string;
   line: number;
   snippet: string;
+  changedFile?: boolean;
 }
 
 function snippetOf(value: string): string {
@@ -198,20 +205,28 @@ export interface GrepResult {
 /** Stream eligible symbol matches without buffering an unbounded result:
  * stops at the first row past *maxHits* (the `extraHit` marker), excludes
  * changed paths, and maps spawn/timeout failures onto the explicit error
- * vocabulary. */
+ * vocabulary. `pathspecs` limits the search to those literal paths; `keep`
+ * drops rows it rejects before they count. */
 export function gitGrepReferences(
   symbol: string,
   workspace: string,
-  options: { excludedPaths: Set<string>; timeoutSec?: number; maxHits?: number },
+  options: {
+    excludedPaths: Set<string>;
+    timeoutSec?: number;
+    maxHits?: number;
+    pathspecs?: string[];
+    keep?: (row: GrepRow) => boolean;
+  },
 ): Promise<GrepResult> {
   const limit = Math.max(0, Math.trunc(options.maxHits ?? MAX_REFERENCES_PER_SYMBOL));
-  const { excludedPaths, timeoutSec = DEFAULT_GIT_TIMEOUT_SEC } = options;
+  const { excludedPaths, timeoutSec = DEFAULT_GIT_TIMEOUT_SEC, keep } = options;
   if (limit === 0) return Promise.resolve({ rows: [], extraHit: false, error: null });
+  const scope = options.pathspecs && options.pathspecs.length > 0 ? options.pathspecs.map((path) => `:(literal)${path}`) : ["."];
 
   return new Promise((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn("git", ["grep", "-n", "-F", "--", symbol, "--", "."], {
+      child = spawn("git", ["grep", "-n", "-F", "--", symbol, "--", ...scope], {
         cwd: workspace,
         stdio: ["ignore", "pipe", "ignore"],
       });
@@ -265,6 +280,7 @@ export function gitGrepReferences(
       const row = parseGrepLine(line);
       if (!row) return;
       if (excludedPaths.has(row.path)) return;
+      if (keep !== undefined && !keep(row)) return;
       if (rows.length < limit) rows.push(row);
       else extraHit = true;
     };
@@ -395,6 +411,8 @@ function discoverManifests(changedPath: string, tracked: Set<string>): [string[]
 interface SymbolAnchor {
   source: string;
   name: string;
+  kind: unknown;
+  line: unknown;
 }
 
 function anchorSymbols(anchorData: Record<string, unknown>): SymbolAnchor[] {
@@ -413,7 +431,7 @@ function anchorSymbols(anchorData: Record<string, unknown>): SymbolAnchor[] {
         const symbolRec = symbol as Record<string, unknown>;
         if (symbolRec.confidence !== "high") continue;
         const name = symbolRec.name;
-        if (typeof name === "string" && name !== "") symbols.push({ source, name });
+        if (typeof name === "string" && name !== "") symbols.push({ source, name, kind: symbolRec.kind, line: symbolRec.line });
       }
     }
     if (symbols.length > 0) return symbols;
@@ -427,10 +445,48 @@ function anchorSymbols(anchorData: Record<string, unknown>): SymbolAnchor[] {
       if (rec.confidence !== "high") continue;
       const source = toPath(rec.source);
       const name = rec.value;
-      if (source !== "" && typeof name === "string" && name !== "") symbols.push({ source, name });
+      if (source !== "" && typeof name === "string" && name !== "") symbols.push({ source, name, kind: rec.kind, line: rec.line });
     }
   }
   return symbols;
+}
+
+function lineNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value)) return null;
+  return value >= 1 ? value : null;
+}
+
+/** Map changed files with valid `changed_lines` to their added-line ranges. */
+function changedLineIndex(anchorFiles: Record<string, unknown>[], deletedPaths: Set<string>): Map<string, [number, number][]> {
+  const index = new Map<string, [number, number][]>();
+  const seen = new Set<string>();
+  for (const entry of anchorFiles) {
+    const path = toPath(entry.path);
+    if (path === "" || seen.has(path)) continue;
+    seen.add(path);
+    if (entry.deleted || deletedPaths.has(path)) continue;
+    const raw = entry.changed_lines;
+    if (!Array.isArray(raw) || raw.length > MAX_CHANGED_RANGES_PER_FILE) continue;
+    let ranges: [number, number][] | null = [];
+    for (const item of raw) {
+      const start = Array.isArray(item) && item.length === 2 ? lineNumber(item[0]) : null;
+      const end = start !== null ? lineNumber((item as unknown[])[1]) : null;
+      if (start === null || end === null || end < start) {
+        ranges = null;
+        break;
+      }
+      ranges.push([start, end]);
+    }
+    if (ranges !== null) index.set(path, ranges);
+  }
+  return index;
+}
+
+function noteReferenceCap(result: RelatedContext, omitted: number): void {
+  result.truncated = true;
+  result.truncation.truncated = true;
+  if (!result.truncation.reasons.includes("reference_cap")) result.truncation.reasons.push("reference_cap");
+  result.truncation.omittedReferences += omitted;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +496,7 @@ function anchorSymbols(anchorData: Record<string, unknown>): SymbolAnchor[] {
 export interface RelatedSymbol {
   name: string;
   references: GrepRow[];
+  onlyInChangedFiles?: boolean;
 }
 
 export interface RelatedFile {
@@ -491,6 +548,8 @@ export interface RelatedContextOptions {
   maxReferencesPerSymbol?: number;
   maxReferences?: number;
   maxTestsPerFile?: number;
+  maxChangedReferencesPerSymbol?: number;
+  maxChangedReferences?: number;
 }
 
 /** Build a version-1 related-code context without raising on Git errors. */
@@ -520,6 +579,8 @@ export async function buildRelatedContext(
   const maxReferencesPerSymbol = Math.max(0, Math.trunc(options.maxReferencesPerSymbol ?? MAX_REFERENCES_PER_SYMBOL));
   const maxReferences = Math.max(0, Math.trunc(options.maxReferences ?? MAX_REFERENCES));
   const maxTestsPerFile = Math.max(0, Math.trunc(options.maxTestsPerFile ?? MAX_TESTS_PER_FILE));
+  const maxChangedReferencesPerSymbol = Math.max(0, Math.trunc(options.maxChangedReferencesPerSymbol ?? MAX_CHANGED_REFERENCES_PER_SYMBOL));
+  const maxChangedReferences = Math.max(0, Math.trunc(options.maxChangedReferences ?? MAX_CHANGED_REFERENCES));
 
   const rawAnchorFiles = anchor.files;
   const anchorFiles = Array.isArray(rawAnchorFiles)
@@ -559,10 +620,13 @@ export async function buildRelatedContext(
     fileOrder.push(source);
   }
 
+  const changedIndex = changedLineIndex(anchorFiles, deletedPaths);
+  const changedSpecs = [...changedIndex.keys()];
   let referencesTotal = 0;
+  let changedTotal = 0;
   const errorsSeen = new Set(result.errors);
   const refsByFile = new Map<string, GrepRow[]>(fileOrder.map((path) => [path, []]));
-  for (const { source, name } of selectedSymbols) {
+  for (const { source, name, kind, line } of selectedSymbols) {
     if (deletedPaths.has(source)) continue;
     const symbolOutput: RelatedSymbol = { name, references: [] };
     const remaining = maxReferences - referencesTotal;
@@ -603,6 +667,51 @@ export async function buildRelatedContext(
 
     symbolOutput.references = filtered;
     referencesTotal += filtered.length;
+
+    const enclosing = kind === "enclosing";
+    const unreferenced = remaining > 0 && filtered.length === 0 && omitted === 0 && grepError === null;
+    if (changedIndex.size > 0 && trackedError === null && (enclosing || unreferenced)) {
+      const declLine = lineNumber(line);
+      const keep = (row: GrepRow): boolean => {
+        const ranges = changedIndex.get(row.path);
+        if (ranges === undefined) return false;
+        if (row.path === source && row.line === declLine) return false;
+        return !ranges.some(([start, end]) => start <= row.line && row.line <= end);
+      };
+      let cap = 1;
+      if (enclosing) {
+        cap = Math.min(maxChangedReferencesPerSymbol, maxChangedReferences - changedTotal);
+        if (cap <= 0) noteReferenceCap(result, 1);
+      }
+      let changedHits: GrepRow[] = [];
+      let changedExtra = false;
+      let changedError: string | null = null;
+      if (cap > 0) {
+        const grep = await gitGrepReferences(name, workspace, {
+          excludedPaths: new Set(),
+          timeoutSec: timeout,
+          maxHits: cap,
+          pathspecs: changedSpecs,
+          keep,
+        });
+        changedHits = grep.rows;
+        changedExtra = grep.extraHit;
+        changedError = grep.error;
+      }
+      if (changedError !== null && !errorsSeen.has(changedError)) {
+        result.errors.push(changedError);
+        errorsSeen.add(changedError);
+      }
+      if (enclosing) {
+        for (const row of changedHits) row.changedFile = true;
+        symbolOutput.references = [...filtered, ...changedHits];
+        changedTotal += changedHits.length;
+        if (changedExtra) noteReferenceCap(result, 1);
+      } else if (changedHits.length > 0 || changedExtra) {
+        symbolOutput.onlyInChangedFiles = true;
+      }
+    }
+
     (byFile.get(source) as RelatedFile).symbols.push(symbolOutput);
     (refsByFile.get(source) as GrepRow[]).push(...filtered);
   }
@@ -653,7 +762,9 @@ export function relatedContextToArtifact(related: RelatedContext): Record<string
           path: reference.path,
           line: reference.line,
           snippet: reference.snippet,
+          ...(reference.changedFile === true ? { changed_file: true } : {}),
         })),
+        ...(symbol.onlyInChangedFiles === true ? { only_in_changed_files: true } : {}),
       })),
       tests: [...file.tests],
       manifests: [...file.manifests],
@@ -823,7 +934,9 @@ function renderLines(artifact: Record<string, unknown>): string[] {
       for (const symbol of symbols) {
         const name = display(String(symbol.name ?? ""));
         const refs = Array.isArray(symbol.references) ? (symbol.references as Record<string, unknown>[]) : [];
-        if (refs.length === 0) {
+        if (refs.length === 0 && symbol.only_in_changed_files === true) {
+          lines.push(`- ${codeSpan(name)}: references only in changed files`);
+        } else if (refs.length === 0) {
           lines.push(`- ${codeSpan(name)}: no references`);
         } else {
           lines.push(`- ${codeSpan(name)} references:`);
@@ -832,7 +945,8 @@ function renderLines(artifact: Record<string, unknown>): string[] {
             let line = reference.line;
             if (typeof line !== "number" || !Number.isInteger(line) || line < 0) line = 0;
             const snippet = codeSpan(display(redactText(String(reference.snippet ?? ""))));
-            lines.push(`  - ${refPath}:${line} — ${snippet}`);
+            const marker = reference.changed_file === true ? " (changed file)" : "";
+            lines.push(`  - ${refPath}:${line}${marker} — ${snippet}`);
           }
         }
       }

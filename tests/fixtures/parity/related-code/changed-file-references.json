@@ -1,0 +1,134 @@
+{
+  "fixture": "changed-file-references",
+  "description": "#764: enclosing symbols also list references from changed files (marked changed_file) after unchanged-file ones, skipping their own declaration line and every added line: the same-file caller shape of #547 (get_cached_jwt -> fetch_integration_jwt, resolve_auth_header -> get_cached_jwt), a pre-existing caller in the changed test file (the added test's calls are filtered), and the per-symbol changed-reference cap (reference_cap). An added declaration (build_headers) referenced only from a changed file renders 'references only in changed files'; one with no other reference (jwt_ttl_seconds) still renders 'no references'. Anchors are the real change_anchors output for source_diff over repo_files.",
+  "repo_files": {
+    "src/jwt_cache.py": "import threading\n\n_JWT_CACHE = {}\n_JWT_LOCK = threading.RLock()\n\n\ndef build_headers(token, extra=None):\n    headers = {\"Authorization\": \"Bearer \" + token}\n    headers.update(extra or {})\n    return headers\n\n\ndef fetch_integration_jwt():\n    token = \"abc\"\n    with _JWT_LOCK:\n        _JWT_CACHE[\"jwt\"] = token\n    return token\n\n\ndef get_cached_jwt():\n    with _JWT_LOCK:\n        cached = _JWT_CACHE.get(\"jwt\")\n    if cached:\n        return cached\n    return fetch_integration_jwt()\n\n\ndef resolve_auth_header():\n    return build_headers(get_cached_jwt())\n\n\ndef jwt_ttl_seconds():\n    return 300\n",
+    "src/prewarm.py": "from src.jwt_cache import get_cached_jwt\n\n\ndef prewarm():\n    return get_cached_jwt()\n",
+    "tests/test_jwt_cache.py": "from src import jwt_cache\n\n\ndef test_get_cached_jwt_uses_cache():\n    jwt_cache._JWT_CACHE[\"jwt\"] = \"x\"\n    assert jwt_cache.get_cached_jwt() == \"x\"\n\n\ndef test_fetch_integration_jwt_many():\n    for _ in range(2):\n        jwt_cache.fetch_integration_jwt()\n    jwt_cache.fetch_integration_jwt()\n    jwt_cache.fetch_integration_jwt()\n    jwt_cache.fetch_integration_jwt()\n    jwt_cache.fetch_integration_jwt()\n    assert jwt_cache.fetch_integration_jwt() == \"abc\"\n\n\ndef test_concurrent_cache_reads():\n    assert jwt_cache.get_cached_jwt() == jwt_cache.get_cached_jwt()\n"
+  },
+  "source_diff": "diff --git a/src/jwt_cache.py b/src/jwt_cache.py\nindex e64403a..31a4b92 100644\n--- a/src/jwt_cache.py\n+++ b/src/jwt_cache.py\n@@ -1,20 +1,25 @@\n import threading\n \n _JWT_CACHE = {}\n+_JWT_LOCK = threading.RLock()\n \n \n-def build_headers(token):\n-    return {\"Authorization\": \"Bearer \" + token}\n+def build_headers(token, extra=None):\n+    headers = {\"Authorization\": \"Bearer \" + token}\n+    headers.update(extra or {})\n+    return headers\n \n \n def fetch_integration_jwt():\n     token = \"abc\"\n-    _JWT_CACHE[\"jwt\"] = token\n+    with _JWT_LOCK:\n+        _JWT_CACHE[\"jwt\"] = token\n     return token\n \n \n def get_cached_jwt():\n-    cached = _JWT_CACHE.get(\"jwt\")\n+    with _JWT_LOCK:\n+        cached = _JWT_CACHE.get(\"jwt\")\n     if cached:\n         return cached\n     return fetch_integration_jwt()\n@@ -22,3 +27,7 @@ def get_cached_jwt():\n \n def resolve_auth_header():\n     return build_headers(get_cached_jwt())\n+\n+\n+def jwt_ttl_seconds():\n+    return 300\ndiff --git a/tests/test_jwt_cache.py b/tests/test_jwt_cache.py\nindex 156a2df..5fb4a64 100644\n--- a/tests/test_jwt_cache.py\n+++ b/tests/test_jwt_cache.py\n@@ -14,3 +14,7 @@ def test_fetch_integration_jwt_many():\n     jwt_cache.fetch_integration_jwt()\n     jwt_cache.fetch_integration_jwt()\n     assert jwt_cache.fetch_integration_jwt() == \"abc\"\n+\n+\n+def test_concurrent_cache_reads():\n+    assert jwt_cache.get_cached_jwt() == jwt_cache.get_cached_jwt()\n",
+  "anchors": {
+    "version": 1,
+    "files": [
+      {
+        "path": "src/jwt_cache.py",
+        "language": "python",
+        "symbols": [
+          {
+            "name": "build_headers",
+            "kind": "function",
+            "confidence": "high",
+            "line": 7
+          },
+          {
+            "name": "jwt_ttl_seconds",
+            "kind": "function",
+            "confidence": "high",
+            "line": 32
+          },
+          {
+            "name": "fetch_integration_jwt",
+            "kind": "enclosing",
+            "confidence": "high",
+            "line": 13
+          },
+          {
+            "name": "get_cached_jwt",
+            "kind": "enclosing",
+            "confidence": "high",
+            "line": 20
+          }
+        ],
+        "imports": [],
+        "identifiers": [],
+        "changed_lines": [
+          [
+            4,
+            4
+          ],
+          [
+            7,
+            10
+          ],
+          [
+            15,
+            16
+          ],
+          [
+            21,
+            22
+          ],
+          [
+            30,
+            33
+          ]
+        ]
+      },
+      {
+        "path": "tests/test_jwt_cache.py",
+        "language": "python",
+        "symbols": [
+          {
+            "name": "test_concurrent_cache_reads",
+            "kind": "function",
+            "confidence": "high",
+            "line": 19
+          }
+        ],
+        "imports": [],
+        "identifiers": [],
+        "changed_lines": [
+          [
+            17,
+            20
+          ]
+        ]
+      }
+    ],
+    "anchors": [
+      {
+        "value": "src/jwt_cache.py",
+        "kind": "file",
+        "source": "src/jwt_cache.py",
+        "confidence": "low"
+      },
+      {
+        "value": "build_headers",
+        "kind": "symbol",
+        "source": "src/jwt_cache.py",
+        "confidence": "high"
+      },
+      {
+        "value": "jwt_ttl_seconds",
+        "kind": "symbol",
+        "source": "src/jwt_cache.py",
+        "confidence": "high"
+      },
+      {
+        "value": "fetch_integration_jwt",
+        "kind": "symbol",
+        "source": "src/jwt_cache.py",
+        "confidence": "high"
+      },
+      {
+        "value": "get_cached_jwt",
+        "kind": "symbol",
+        "source": "src/jwt_cache.py",
+        "confidence": "high"
+      },
+      {
+        "value": "tests/test_jwt_cache.py",
+        "kind": "file",
+        "source": "tests/test_jwt_cache.py",
+        "confidence": "low"
+      },
+      {
+        "value": "test_concurrent_cache_reads",
+        "kind": "symbol",
+        "source": "tests/test_jwt_cache.py",
+        "confidence": "high"
+      }
+    ],
+    "truncated": false
+  }
+}

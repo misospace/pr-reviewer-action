@@ -30,7 +30,21 @@
           }
         ],
         "imports": [],
-        "identifiers": []
+        "identifiers": [],
+        "changed_lines": [
+          [
+            4,
+            4
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            16,
+            17
+          ]
+        ]
       },
       {
         "path": "src/widget.js",
@@ -44,7 +58,13 @@
           }
         ],
         "imports": [],
-        "identifiers": []
+        "identifiers": [],
+        "changed_lines": [
+          [
+            3,
+            3
+          ]
+        ]
       }
     ],
     "anchors": [

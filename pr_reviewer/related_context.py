@@ -4,6 +4,12 @@ The builder consumes the version-1 change-anchor artifact and a checked-out Git
 worktree. It searches only high-confidence symbol anchors, discovers likely test
 paths and nearest project manifests, and emits bounded relationship data without
 executing repository code or making network/model calls.
+
+References come from unchanged files. Changed files whose anchor entry carries
+``changed_lines`` (#764) are searched too, skipping the symbol's own
+declaration line and every added line: those hits are listed, under a separate
+small cap and marked ``changed_file``, for enclosing symbols only; for any other
+symbol with no unchanged-file reference they set ``only_in_changed_files``.
 """
 
 from __future__ import annotations
@@ -18,12 +24,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 ARTIFACT_VERSION = 1
 MAX_SYMBOLS = 40
 MAX_REFERENCES_PER_SYMBOL = 20
 MAX_REFERENCES = 200
+MAX_CHANGED_REFERENCES_PER_SYMBOL = 5
+MAX_CHANGED_REFERENCES = 40
+MAX_CHANGED_RANGES_PER_FILE = 200
 MAX_TESTS_PER_FILE = 20
 MAX_MANIFESTS_PER_FILE = 20
 MAX_SNIPPET_CHARS = 300
@@ -196,15 +205,22 @@ def git_grep_references(
     excluded_paths: set[str],
     timeout: float = DEFAULT_GIT_TIMEOUT_SEC,
     max_hits: int = MAX_REFERENCES_PER_SYMBOL,
+    pathspecs: list[str] | None = None,
+    keep: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str | None]:
-    """Stream eligible symbol matches without buffering an unbounded result."""
+    """Stream eligible symbol matches without buffering an unbounded result.
+
+    ``pathspecs`` limits the search to those literal paths (default: the whole
+    worktree); ``keep`` drops rows it rejects before they count.
+    """
     limit = max(0, int(max_hits))
     if limit == 0:
         return [], False, None
     excluded = excluded_paths or set()
+    scope = [f":(literal){path}" for path in pathspecs] if pathspecs else ["."]
     try:
         proc = subprocess.Popen(
-            ["git", "grep", "-n", "-F", "--", symbol, "--", "."],
+            ["git", "grep", "-n", "-F", "--", symbol, "--", *scope],
             cwd=os.fspath(workspace),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -238,6 +254,8 @@ def git_grep_references(
                 parsed = _parse_grep_output(raw_line.decode("utf-8", "replace"))
                 for row in parsed:
                     if row["path"] in excluded:
+                        continue
+                    if keep is not None and not keep(row):
                         continue
                     if len(rows) < limit:
                         rows.append(row)
@@ -386,6 +404,52 @@ def _anchor_symbols(
     return symbols
 
 
+def _line_number(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    number = int(value)
+    return number if number >= 1 else None
+
+
+def _changed_line_index(
+    anchor_files: list[dict[str, Any]], deleted_paths: set[str],
+) -> dict[str, list[tuple[int, int]]]:
+    """Map changed files with valid ``changed_lines`` to their added-line ranges."""
+    index: dict[str, list[tuple[int, int]]] = {}
+    seen: set[str] = set()
+    for entry in anchor_files:
+        path = _path(entry.get("path"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if entry.get("deleted") or path in deleted_paths:
+            continue
+        raw = entry.get("changed_lines")
+        if not isinstance(raw, list) or len(raw) > MAX_CHANGED_RANGES_PER_FILE:
+            continue
+        ranges: list[tuple[int, int]] | None = []
+        for item in raw:
+            start = _line_number(item[0]) if isinstance(item, list) and len(item) == 2 else None
+            end = _line_number(item[1]) if start is not None else None
+            if start is None or end is None or end < start:
+                ranges = None
+                break
+            ranges.append((start, end))
+        if ranges is not None:
+            index[path] = ranges
+    return index
+
+
+def _note_reference_cap(result: dict[str, Any], omitted: int) -> None:
+    result["truncated"] = True
+    result["truncation"]["truncated"] = True
+    if "reference_cap" not in result["truncation"]["reasons"]:
+        result["truncation"]["reasons"].append("reference_cap")
+    result["truncation"]["omitted_references"] += omitted
+
+
 def _empty_result() -> dict[str, Any]:
     return {
         "version": ARTIFACT_VERSION,
@@ -414,6 +478,8 @@ def build_related_context(
     max_references_per_symbol: int = MAX_REFERENCES_PER_SYMBOL,
     max_references: int = MAX_REFERENCES,
     max_tests_per_file: int = MAX_TESTS_PER_FILE,
+    max_changed_references_per_symbol: int = MAX_CHANGED_REFERENCES_PER_SYMBOL,
+    max_changed_references: int = MAX_CHANGED_REFERENCES,
 ) -> dict[str, Any]:
     """Build a version-1 related-code artifact without raising on Git errors."""
     result = _empty_result()
@@ -431,6 +497,8 @@ def build_related_context(
     max_references_per_symbol = max(0, int(max_references_per_symbol))
     max_references = max(0, int(max_references))
     max_tests_per_file = max(0, int(max_tests_per_file))
+    max_changed_references_per_symbol = max(0, int(max_changed_references_per_symbol))
+    max_changed_references = max(0, int(max_changed_references))
 
     raw_anchor_files = anchor_data.get("files", [])
     anchor_files = (
@@ -469,10 +537,12 @@ def build_related_context(
         if source not in deleted_paths and source not in by_file:
             by_file[source] = {"path": source, "symbols": [], "tests": [], "manifests": []}
             file_order.append(source)
+    changed_index = _changed_line_index(anchor_files, deleted_paths)
     references_total = 0
+    changed_total = 0
     errors_seen = set(result["errors"])
     refs_by_file: dict[str, list[dict[str, Any]]] = {path: [] for path in file_order}
-    for source, name, _ in selected_symbols:
+    for source, name, symbol in selected_symbols:
         if source in deleted_paths:
             continue
         symbol_output = {"name": name, "references": []}
@@ -512,6 +582,51 @@ def build_related_context(
 
         symbol_output["references"] = filtered
         references_total += len(filtered)
+
+        enclosing = symbol.get("kind") == "enclosing"
+        unreferenced = remaining > 0 and not filtered and not omitted and grep_error is None
+        if changed_index and not tracked_error and (enclosing or unreferenced):
+            decl_line = _line_number(symbol.get("line"))
+
+            def keep(row: dict[str, Any], source: str = source, decl_line: int | None = decl_line) -> bool:
+                ranges = changed_index.get(row["path"])
+                if ranges is None:
+                    return False
+                if row["path"] == source and row["line"] == decl_line:
+                    return False
+                return not any(start <= row["line"] <= end for start, end in ranges)
+
+            cap = 1
+            if enclosing:
+                cap = min(max_changed_references_per_symbol, max_changed_references - changed_total)
+                if cap <= 0:
+                    _note_reference_cap(result, 1)
+            changed_hits: list[dict[str, Any]] = []
+            changed_extra = False
+            changed_error: str | None = None
+            if cap > 0:
+                changed_hits, changed_extra, changed_error = git_grep_references(
+                    name,
+                    workspace,
+                    excluded_paths=set(),
+                    timeout=timeout,
+                    max_hits=cap,
+                    pathspecs=list(changed_index),
+                    keep=keep,
+                )
+            if changed_error and changed_error not in errors_seen:
+                result["errors"].append(changed_error)
+                errors_seen.add(changed_error)
+            if enclosing:
+                for row in changed_hits:
+                    row["changed_file"] = True
+                symbol_output["references"] = filtered + changed_hits
+                changed_total += len(changed_hits)
+                if changed_extra:
+                    _note_reference_cap(result, 1)
+            elif changed_hits or changed_extra:
+                symbol_output["only_in_changed_files"] = True
+
         by_file[source]["symbols"].append(symbol_output)
         refs_by_file[source].extend(filtered)
 
@@ -682,7 +797,9 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
             for symbol in symbols:
                 name = _display(str(symbol.get("name", "")))
                 refs = symbol.get("references") or []
-                if not refs:
+                if not refs and symbol.get("only_in_changed_files") is True:
+                    lines.append(f"- {_code_span(name)}: references only in changed files")
+                elif not refs:
                     lines.append(f"- {_code_span(name)}: no references")
                 else:
                     lines.append(f"- {_code_span(name)} references:")
@@ -694,7 +811,8 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
                         snippet = _code_span(
                             _display(redact_text(str(reference.get("snippet", ""))))
                         )
-                        lines.append(f"  - {ref_path}:{line} — {snippet}")
+                        marker = " (changed file)" if reference.get("changed_file") is True else ""
+                        lines.append(f"  - {ref_path}:{line}{marker} — {snippet}")
         else:
             lines.append("- Symbols: none")
         tests = file_entry.get("tests") or []

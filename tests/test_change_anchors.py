@@ -287,6 +287,27 @@ class TestJavaScript:
         names = [s["name"] for s in result["files"][0]["symbols"]]
         assert names == ["realOne"]
 
+    def test_async_generic_and_generator_functions(self):
+        diff = _py_file("a.ts", [
+            "async function loadConfig(path) {",
+            "function localHelper(x) {",
+            "export function mapItems<T>(items: T[]) {",
+            "export default async function handler<T extends Record<string, unknown>>(req: T) {",
+            "function* walkTree(node) {",
+            "async function *streamRows() {",
+            "functionNotADecl(x);",
+            "const asyncfunction = 1;",
+        ])
+        result = extract_change_anchors(diff)
+        assert [(s["name"], s["kind"], s["confidence"]) for s in result["files"][0]["symbols"]] == [
+            ("loadConfig", "function", "high"),
+            ("localHelper", "function", "high"),
+            ("mapItems", "function", "high"),
+            ("handler", "function", "high"),
+            ("walkTree", "function", "high"),
+            ("streamRows", "function", "high"),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Go extraction
@@ -1316,6 +1337,50 @@ class TestEnclosing:
         assert [(s["name"], s["kind"]) for s in result["files"][0]["symbols"]] == [
             ("evict_entry", "function"), ("Store", "enclosing"),
         ]
+
+    def test_enclosing_async_and_generic_functions(self, tmp_path):
+        base = (
+            "async function loadConfig(path) {\n  const raw = read(path);\n  return raw;\n}\n\n"
+            "function mapItems<T>(items: T[]) {\n  return items;\n}\n"
+        )
+        head = base.replace("return raw;", "return raw.trim();").replace("return items;", "return [...items];")
+        assert _enclosing(_edit(tmp_path, "a.ts", base, head)) == [
+            ("loadConfig", "high", 1), ("mapItems", "high", 6),
+        ]
+
+    def test_changed_lines_are_added_line_ranges(self, tmp_path):
+        head = _PY_MODULE.replace(
+            "        value = os.environ.get(key)\n",
+            "        value = os.environ.get(key)\n        value = value or ''\n        value = value.strip()\n",
+        ).replace('scope + "-token"', 'f"{scope}-token"')
+        result = _edit(tmp_path, "m.py", _PY_MODULE, head)
+        entry = result["files"][0]
+        assert entry["changed_lines"] == [[10, 11], [16, 16]]
+        assert list(entry)[:6] == ["path", "language", "symbols", "imports", "identifiers", "changed_lines"]
+
+    def test_deletion_only_file_has_empty_changed_lines(self, tmp_path):
+        head = _PY_MODULE.replace("        value = os.environ.get(key)\n", "")
+        assert _edit(tmp_path, "m.py", _PY_MODULE, head)["files"][0]["changed_lines"] == []
+
+    def test_changed_lines_need_a_verified_head_and_complete_diff(self, tmp_path, monkeypatch):
+        head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')
+        diff = _git_diff(tmp_path, {"m.py": _PY_MODULE, "notes.md": "a\n"}, {"m.py": head, "notes.md": "b\n"})
+        result = extract_change_anchors(diff, None, source_root=tmp_path)
+        assert [e.get("changed_lines") for e in result["files"]] == [[[14, 14]], [[1, 1]]]
+        assert all("changed_lines" not in e for e in extract_change_anchors(diff, None)["files"])
+        listed = extract_change_anchors(
+            diff, [{"filename": "other.py", "status": "modified"}], source_root=tmp_path,
+        )
+        assert "changed_lines" not in listed["files"][0]
+        monkeypatch.setattr("pr_reviewer.change_anchors.MAX_DIFF_BYTES", len(diff) - 1)
+        truncated = extract_change_anchors(diff, None, source_root=tmp_path)
+        assert truncated["truncated"] is True
+        assert all("changed_lines" not in e for e in truncated["files"])
+        assert _enclosing(truncated) == [("refresh_token", "high", 13)]
+        (tmp_path / "m.py").write_text("# drift\n" + head, encoding="utf-8")
+        monkeypatch.undo()
+        drifted = extract_change_anchors(diff, None, source_root=tmp_path)
+        assert "changed_lines" not in drifted["files"][0]
 
     def test_no_source_root_keeps_legacy_output(self, tmp_path):
         head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')

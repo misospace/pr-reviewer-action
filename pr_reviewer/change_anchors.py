@@ -22,6 +22,10 @@ Documented behavior choices (per #571):
   a ``kind: "enclosing"`` symbol. This covers edits inside an existing
   function body, which add no declaration line. A file whose head content
   does not match the diff's new-side lines contributes no enclosing symbols.
+  A file that does match also records ``changed_lines``: inclusive
+  ``[start, end]`` head-line ranges of its added lines, so a consumer can tell
+  a reference in a changed file apart from a line the diff already shows
+  (omitted when the diff itself was truncated).
 - Diff metadata (``diff --git``, ``+++``/``---`` paths, ``@@`` hunk headers,
   binary markers) is never treated as source.
 - Diff path parsing handles both unquoted Git paths (``a/foo bar.py
@@ -65,6 +69,7 @@ MAX_ANCHORS = 200
 MAX_ENCLOSING_PER_FILE = 5
 MAX_ENCLOSING = 20
 MAX_HEAD_FILE_BYTES = 2_000_000
+MAX_CHANGED_RANGES_PER_FILE = 200
 # Safety bound on diff size consumed (bytes); larger input is truncated
 # before parsing so hostile input cannot blow up memory.
 MAX_DIFF_BYTES = 2_000_000
@@ -205,8 +210,8 @@ _PY_FROM_NAME_RE = re.compile(
 
 # JavaScript / TypeScript
 _JS_FUNC_RE = re.compile(
-    r"^\s*(?:export\s+(?:default\s+)?(?:async\s+)?)?function\s+"
-    r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\("
+    r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s*\*\s*|\s+)"
+    r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^()]*>)?\s*\("
 )
 _JS_CLASS_RE = re.compile(
     r"^\s*(?:export\s+(?:default\s+)?)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)"
@@ -844,15 +849,21 @@ def find_enclosing_declaration(
     return None
 
 
+def _changed_line_ranges(state: _FileState) -> list[list[int]]:
+    """Inclusive ``[start, end]`` head-line ranges of the file's added lines."""
+    ranges: list[list[int]] = []
+    for line_no, _ in sorted(state.added_lines):
+        if ranges and line_no <= ranges[-1][1] + 1:
+            ranges[-1][1] = max(ranges[-1][1], line_no)
+        else:
+            ranges.append([line_no, line_no])
+    return ranges
+
+
 def _enclosing_symbols(
-    state: _FileState, language: str, source_root: str | Path,
+    state: _FileState, language: str, head_lines: list[str],
 ) -> list[tuple[str, str, int]]:
     """Enclosing declarations for every change run, in run order, deduplicated."""
-    if not state.change_runs:
-        return []
-    head_lines = read_head_lines(source_root, state.path)
-    if head_lines is None or not _head_matches_diff(state, head_lines):
-        return []
     found: list[tuple[str, str, int]] = []
     seen: set[str] = set()
     for start_line, changed in state.change_runs:
@@ -880,6 +891,9 @@ class FileAnchors:
     # ``truncated`` flag can reflect silent omission.
     symbols_truncated: bool = False
     imports_truncated: bool = False
+    # Added-line ranges, present only when the head checkout was read and
+    # matched the diff.
+    changed_lines: list[list[int]] | None = None
 
 
 def _merge_with_context(state: _FileState) -> list[tuple[int, str, bool]]:
@@ -907,6 +921,7 @@ def _extract_file_anchors(
     state: _FileState,
     source_root: str | Path | None = None,
     enclosing_budget: int = 0,
+    emit_changed_lines: bool = False,
 ) -> FileAnchors:
     fa = FileAnchors(
         path=state.path,
@@ -962,10 +977,19 @@ def _extract_file_anchors(
                 _add_symbol(name, kind, confidence, line_no)
     # else: generic fallback — no token harvesting, just the file anchor.
 
-    if source_root is not None and fa.language in ("python", "javascript", "typescript", "go"):
+    head_lines = None
+    if source_root is not None and state.new_side_lines:
+        head_lines = read_head_lines(source_root, state.path)
+        if head_lines is not None and not _head_matches_diff(state, head_lines):
+            head_lines = None
+    if head_lines is not None and emit_changed_lines:
+        ranges = _changed_line_ranges(state)
+        if len(ranges) <= MAX_CHANGED_RANGES_PER_FILE:
+            fa.changed_lines = ranges
+    if head_lines is not None and fa.language in ("python", "javascript", "typescript", "go"):
         declared = {sym["name"] for sym in fa.symbols if sym["kind"] != "import"}
         enclosing = [
-            decl for decl in _enclosing_symbols(state, fa.language, source_root)
+            decl for decl in _enclosing_symbols(state, fa.language, head_lines)
             if decl[0] not in declared
         ]
         limit = max(0, min(MAX_ENCLOSING_PER_FILE, enclosing_budget))
@@ -1004,12 +1028,14 @@ def extract_change_anchors(
     enclosing-declaration symbols are added (see the module docstring).
     """
     truncated = False
+    diff_truncated = False
 
     if diff_text is None:
         diff_text = ""
     if len(diff_text) > MAX_DIFF_BYTES:
         diff_text = diff_text[:MAX_DIFF_BYTES]
         truncated = True
+        diff_truncated = True
 
     diff_files = parse_diff(diff_text)
 
@@ -1074,7 +1100,7 @@ def extract_change_anchors(
 
     enclosing_left = MAX_ENCLOSING
     for state in merged:
-        fa = _extract_file_anchors(state, source_root, enclosing_left)
+        fa = _extract_file_anchors(state, source_root, enclosing_left, not diff_truncated)
         enclosing_left -= sum(1 for sym in fa.symbols if sym["kind"] == "enclosing")
         file_entry: dict[str, Any] = {
             "path": fa.path,
@@ -1083,6 +1109,8 @@ def extract_change_anchors(
             "imports": fa.imports,
             "identifiers": fa.identifiers,
         }
+        if fa.changed_lines is not None:
+            file_entry["changed_lines"] = fa.changed_lines
         if fa.deleted:
             file_entry["deleted"] = True
         if fa.symbols_truncated:
