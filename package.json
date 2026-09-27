@@ -14,7 +14,9 @@
   "devDependencies": {
     "@types/node": "24.19.0",
     "esbuild": "0.28.2",
+    "tree-sitter-wasms": "0.1.13",
     "typescript": "7.0.2",
+    "web-tree-sitter": "0.25.10",
     "yaml": "2.9.1"
   }
 }
