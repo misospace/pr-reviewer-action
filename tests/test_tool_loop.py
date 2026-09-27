@@ -120,14 +120,11 @@ def test_loop_outcome_defaults() -> None:
 
 
 def test_adaptive_loop_budgets_scales_rounds() -> None:
-    """adaptive_loop_budgets scales rounds with a cap of 8."""
-    b = tool_loop.adaptive_loop_budgets(
-        max_rounds=2, max_tool_calls=5, wall_clock_sec=30.0
-    )
-    # rounds should be at least 1 and at most 8.
-    assert 1 <= b.max_rounds <= 8
-    assert b.max_tool_calls == 5
-    assert b.wall_clock_sec == 30.0
+    """adaptive_loop_budgets doubles the configured rounds, capped at 12."""
+    b = tool_loop.adaptive_loop_budgets(max_rounds=2, max_tool_calls=5, wall_clock_sec=30.0)
+    assert (b.max_rounds, b.max_tool_calls, b.wall_clock_sec) == (4, 5, 30.0)
+    assert tool_loop.adaptive_loop_budgets(6, 5, 30.0).max_rounds == 12
+    assert tool_loop.adaptive_loop_budgets(7, 5, 30.0).max_rounds == 12
 
 
 # ---------------------------------------------------------------------------

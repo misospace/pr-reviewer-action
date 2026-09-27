@@ -109,6 +109,16 @@ def env_int_bounded(name, default_value, min_value, max_value):
     return max(min_value, min(max_value, value))
 
 
+def resolve_loop_limits(tier: str) -> tuple[int, int]:
+    """(max_rounds, wall_clock_sec) for a native-loop tier, from env with defaults."""
+    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 4, 1, 6)
+    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900)
+    if tier == "smart":
+        max_rounds = env_int_bounded("SMART_TOOL_MAX_ROUNDS", max_rounds, 1, 6)
+        wall_clock = env_int_bounded("SMART_TOOL_LOOP_WALL_CLOCK_SEC", wall_clock, 10, 900)
+    return max_rounds, wall_clock
+
+
 def _planning_temperature():
     """Temperature for native-loop planning and summarizer turns.
 
@@ -1317,11 +1327,7 @@ def run_native_loop(
     if search_url:
         tool_schemas.append(WEB_SEARCH_SCHEMA)
 
-    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 4, 1, 6)
-    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900)
-    if tier == "smart":
-        max_rounds = env_int_bounded("SMART_TOOL_MAX_ROUNDS", max_rounds, 1, 6)
-        wall_clock = env_int_bounded("SMART_TOOL_LOOP_WALL_CLOCK_SEC", wall_clock, 10, 900)
+    max_rounds, wall_clock = resolve_loop_limits(tier)
     budgets = adaptive_loop_budgets(max_rounds, max_requests, wall_clock)
     deadline = time.monotonic() + wall_clock if tier == "smart" else None
 

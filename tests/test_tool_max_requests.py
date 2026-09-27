@@ -203,3 +203,17 @@ class TestTierAwareRequestBudget(TestCase):
 
 if __name__ == "__main__":
     unittest_main()
+
+
+def test_resolve_loop_limits_defaults_and_overrides(monkeypatch):
+    harness = _import_harness()
+    for name in ("TOOL_MAX_ROUNDS", "TOOL_LOOP_WALL_CLOCK_SEC", "SMART_TOOL_MAX_ROUNDS", "SMART_TOOL_LOOP_WALL_CLOCK_SEC"):
+        monkeypatch.delenv(name, raising=False)
+    assert harness.resolve_loop_limits("primary") == (4, 600)
+    monkeypatch.setenv("TOOL_MAX_ROUNDS", "9")
+    monkeypatch.setenv("TOOL_LOOP_WALL_CLOCK_SEC", "5000")
+    assert harness.resolve_loop_limits("primary") == (6, 900)
+    monkeypatch.setenv("SMART_TOOL_MAX_ROUNDS", "5")
+    monkeypatch.setenv("SMART_TOOL_LOOP_WALL_CLOCK_SEC", "300")
+    assert harness.resolve_loop_limits("smart") == (5, 300)
+    assert harness.resolve_loop_limits("primary") == (6, 900)
