@@ -445,3 +445,69 @@ local model. `--runs-per-mode`, `--deep-review`, and the system-prompt A/B
 flags are not wired into this path (single run per mode per scenario); the
 report's `mode_summary` and `per_scenario_results` are the two things to
 diff week-over-week, same spirit as `mode_summary` for the other corpora.
+
+### Replaying historical heads
+
+A real-PR replay reviews an old head, but the pipeline fetches some context
+live. The harness therefore:
+
+- **Resets the reused clone per scenario** (`git clean -ffdx` after checkout).
+  `context.sh` reuses a non-empty `pr.diff`, so a leftover one would silently
+  review the previous PR's diff.
+- **Builds the diff locally when an entry pins `base_sha`** (`git diff
+  base...head`). The API diff reflects the PR's *current* state, which already
+  contains later fixes.
+- **Turns off the PR thread, unresolved review threads and outstanding human
+  reviews** (`PR_THREAD_CONTEXT`, `REVIEW_THREADS_CONTEXT`,
+  `HUMAN_REVIEWS_CONTEXT` = `false`). They are fetched as of today and can
+  contain the later human finding itself.
+
+### Human-findings corpus
+
+`evals/corpus-human-findings.json` holds defects a maintainer flagged at a
+specific head, usually a frontier chat model's review posted under their own
+account, on PRs the production reviewer also reviewed at that same head. It is
+the direct measure of the goal: can the harness make a mid-size model find what
+a frontier model finds? Each entry pins `head_sha` (and `base_sha` where the
+production review recorded it), anchors the defect to a file (and a line range
+where one could be derived), and records the production reviewer's own verdict
+at that head under `source`.
+
+### Context-only mode (zero inference)
+
+`--context-only` builds each scenario's review context and stops at the model
+call: the endpoint is a closed local port and retries are off. No tokens are
+spent. For each defect it reports whether the file is in the PR diff, how many
+of the defective lines reached the assembled corpus, and how far into the corpus
+the first one sits. Use it to split misses into "the evidence never reached the
+model" (fix context assembly) and "the evidence was there but missed" (fix focus,
+ordering or reasoning), and to verify context changes before spending
+inference.
+
+```bash
+export GITHUB_TOKEN=...
+python scripts/eval_harness.py --corpus evals/corpus-human-findings.json \
+    --context-only --output eval-report/context-human.json
+```
+
+### Baseline (2026-09-27)
+
+- **Production reviewer at the pinned heads** (from its own published
+  reviews, no replay): of 75 mined findings, it caught 1, partly caught 10 and
+  missed 64. The one catch came after the maintainer had already pushed the fix.
+- **Context-only over the 70 corpus entries** (at the time of writing):
+  - context built for 69
+  - defect file in the PR diff for 57
+  - of the 19 with a line range, all defective lines were in the assembled
+    context for 16
+  - median corpus 92 KB, with the first defective line at a median 50% of the
+    way in
+
+  So most misses were not missing evidence: the defective code was in front of
+  the model and was missed.
+- **Ordering A/B** (18 findings with evidence present, MiniMax-M3, tools off,
+  one run each): current order vs diff-first gave about the same number of
+  genuine catches (roughly 2-3 of 18), with individual PRs flipping in both
+  directions between arms. That's single-run noise. Prompt and ordering tweaks
+  need repeated runs to measure. Deterministic context changes can be checked
+  with `--context-only` instead.

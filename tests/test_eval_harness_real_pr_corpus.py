@@ -28,6 +28,8 @@ from eval_harness import (
     _checkout_pinned_commit,
     _normalize_path_for_match,
     _prepare_pinned_workspace,
+    generate_context_report,
+    score_context,
     generate_real_pr_report,
     run_real_pr_corpus,
     score_clean_run,
@@ -481,3 +483,48 @@ class TestPreparePinnedWorkspace:
         path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": [], "clean": [{**base, "expected_clean": True}]}}), encoding="utf-8")
         with pytest.raises(ValueError, match="base_sha"):
             RealPRCorpus.from_file(path)
+
+
+class TestContextOnly:
+    def _repo(self, tmp_path, corpus_text):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_in(repo, "init", "-q", "-b", "main")
+        (repo / "a.py").write_text("def f():\n    return compute_the_value(1)\n")
+        _git_in(repo, "add", "a.py")
+        _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "c")
+        (repo / "pr.diff").write_text("diff --git a/a.py b/a.py\n+++ b/a.py\n")
+        (repo / "review-corpus.md").write_text(corpus_text)
+        return repo
+
+    def test_scores_defect_presence_and_position(self, tmp_path):
+        repo = self._repo(tmp_path, "x" * 90 + "\n    return compute_the_value(1)\n")
+        scenario = RealPRScenario.from_dict({"repo_full_name": "a/b", "number": 1, "head_sha": "a" * 40,
+                                             "defect": {"description": "d", "file": "a.py", "line_range": [2, 2]}})
+        row = score_context(repo, scenario)
+        assert row["context_built"] and row["defect_file_in_diff"]
+        assert (row["defect_lines"], row["defect_lines_in_context"]) == (1, 1)
+        assert row["defect_position_pct"] == 77  # 95 of 123 bytes
+
+    def test_missing_corpus_is_reported_not_raised(self, tmp_path):
+        scenario = RealPRScenario.from_dict({"repo_full_name": "a/b", "number": 1, "head_sha": "a" * 40,
+                                             "defect": {"description": "d", "file": "a.py"}})
+        assert score_context(tmp_path, scenario) == {"context_built": False}
+
+    def test_report_summary(self):
+        rows = [
+            {"id": "1", "kind": "vulnerable", "context_built": True, "corpus_bytes": 100, "defect_file_in_diff": True,
+             "defect_lines": 2, "defect_lines_in_context": 2, "defect_position_pct": 40},
+            {"id": "2", "kind": "vulnerable", "context_built": True, "corpus_bytes": 300, "defect_file_in_diff": False,
+             "defect_lines": 1, "defect_lines_in_context": 0},
+            {"id": "3", "kind": "vulnerable", "context_built": False},
+        ]
+        s = generate_context_report(rows)["summary"]
+        assert (s["vulnerable_built"], s["defect_file_in_diff"], s["with_line_range"]) == (2, 1, 2)
+        assert (s["defect_lines_all_in_context"], s["defect_lines_none_in_context"]) == (1, 1)
+        assert (s["corpus_bytes_median"], s["defect_position_pct_median"]) == (300, 40)
+
+    def test_shipped_human_findings_corpus_is_valid(self):
+        corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
+        assert len(corpus.vulnerable) >= 50 and not corpus.clean
+        assert all(s.defect and s.defect.file for s in corpus.vulnerable)

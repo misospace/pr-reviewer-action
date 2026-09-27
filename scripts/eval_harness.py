@@ -1929,6 +1929,7 @@ def run_review_for_pr(
         else:
             env.pop("DEEP_REVIEW", None)
             env.pop("DEEP_REVIEW_EXECUTION", None)
+        env.update(model_config.get("extra_env") or {})
 
         # Run the review via the orchestrator script. By default that is
         # run_review.sh next to this harness (resolved relative to this
@@ -2573,6 +2574,68 @@ def generate_real_pr_report(
     }
 
 
+# A replay reviews a historical head, but the PR thread, review threads and
+# human reviews are fetched live, so they can carry the later human finding
+# itself. Pinned replays always run without them.
+REPLAY_ENV = {
+    "PR_THREAD_CONTEXT": "false",
+    "REVIEW_THREADS_CONTEXT": "false",
+    "HUMAN_REVIEWS_CONTEXT": "false",
+}
+
+# --context-only: build the review context and stop at the model call, with
+# no inference. The endpoint is a closed local port and retries are off, so
+# the call fails immediately after the corpus is assembled.
+CONTEXT_ONLY_ENV = {
+    "AI_BASE_URL": "http://127.0.0.1:9/v1",
+    "AI_MODEL": "context-only",
+    "AI_API_KEY": "none",
+    "AI_PRIMARY_RETRIES": "0",
+    "AI_PRIMARY_RETRY_DELAY_SEC": "0",
+    "AI_FALLBACK_RETRIES": "0",
+    "AI_SMART_RETRIES": "0",
+    "AI_CONNECT_TIMEOUT_SEC": "2",
+    "AI_FALLBACK_BASE_URL": "",
+    "AI_SMART_BASE_URL": "",
+    "TOOL_MODE": "off",
+    "DEEP_REVIEW": "false",
+    "CI_STATUS_CHECK": "false",
+}
+
+
+def score_context(repo_path: Path, scenario: RealPRScenario) -> dict[str, Any]:
+    """Whether a vulnerable scenario's defect reached the assembled context.
+
+    Reads the review corpus the pipeline wrote and reports: its size, whether
+    the defect file is in the PR diff, and, when the defect has a line range,
+    how many of those (non-trivial) head lines appear in the corpus and how
+    far into the corpus the first one sits.
+    """
+    corpus_path = repo_path / "review-corpus.md"
+    if not corpus_path.is_file():
+        return {"context_built": False}
+    corpus = corpus_path.read_text(encoding="utf-8", errors="replace")
+    diff = (repo_path / "pr.diff").read_text(encoding="utf-8", errors="replace") if (repo_path / "pr.diff").is_file() else ""
+    out: dict[str, Any] = {"context_built": True, "corpus_bytes": len(corpus.encode("utf-8"))}
+    defect = scenario.defect
+    if defect is None:
+        return out
+    out["defect_file_in_diff"] = f"b/{defect.file}" in diff
+    if defect.line_range:
+        shown = subprocess.run(
+            ["git", "-C", str(repo_path), "show", f"HEAD:{defect.file}"],
+            capture_output=True, text=True, check=False,
+        ).stdout.splitlines()
+        lo, hi = defect.line_range
+        lines = [line.strip() for line in shown[max(0, lo - 1):hi] if len(line.strip()) > 8]
+        found = [corpus.find(line) for line in lines if line in corpus]
+        out["defect_lines"] = len(lines)
+        out["defect_lines_in_context"] = len(found)
+        if found:
+            out["defect_position_pct"] = round(100 * min(found) / max(1, len(corpus)))
+    return out
+
+
 def run_real_pr_corpus(
     corpus: RealPRCorpus,
     modes: list[str],
@@ -2580,6 +2643,7 @@ def run_real_pr_corpus(
     model_config: dict[str, str],
     max_entries: int | None = None,
     dry_run: bool = False,
+    context_only: bool = False,
 ) -> dict[str, Any] | None:
     """Run every scenario in a real-PR corpus across the given modes.
 
@@ -2605,6 +2669,11 @@ def run_real_pr_corpus(
                 )
         return None
 
+    extra_env = {**REPLAY_ENV, **(CONTEXT_ONLY_ENV if context_only else {})}
+    model_config = {**model_config, "extra_env": extra_env}
+    if context_only:
+        modes = ["tools_off"]
+    context_rows: list[dict[str, Any]] = []
     scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]] = []
     for i, scenario in enumerate(scenarios, 1):
         kind = "clean" if scenario.expected_clean else "vulnerable"
@@ -2617,6 +2686,12 @@ def run_real_pr_corpus(
         for mode in modes:
             run = run_review_for_pr(pr_entry, mode, work_dir, model_config)
             mode_runs[mode] = run
+            if context_only:
+                repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
+                row = {"id": scenario.id, "kind": kind, **score_context(repo_path, scenario)}
+                context_rows.append(row)
+                print(f"    [context] {json.dumps(row)}", file=sys.stderr)
+                continue
             if run.error:
                 print(f"    [{mode}] ERROR: {run.error}", file=sys.stderr)
             else:
@@ -2628,7 +2703,33 @@ def run_real_pr_corpus(
                 )
         scenario_runs.append((scenario, mode_runs))
 
+    if context_only:
+        return generate_context_report(context_rows)
     return generate_real_pr_report(scenario_runs)
+
+
+def generate_context_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize --context-only rows: how often the defect reached the context."""
+    vulnerable = [r for r in rows if r["kind"] == "vulnerable" and r.get("context_built")]
+    with_lines = [r for r in vulnerable if r.get("defect_lines")]
+    sizes = sorted(r["corpus_bytes"] for r in rows if r.get("context_built"))
+    positions = sorted(r["defect_position_pct"] for r in with_lines if "defect_position_pct" in r)
+    def median(values: list[int]) -> int | None:
+        return values[len(values) // 2] if values else None
+    return {
+        "metadata": {"mode": "context_only", "scenarios": len(rows),
+                     "context_built": sum(1 for r in rows if r.get("context_built"))},
+        "summary": {
+            "vulnerable_built": len(vulnerable),
+            "defect_file_in_diff": sum(1 for r in vulnerable if r.get("defect_file_in_diff")),
+            "with_line_range": len(with_lines),
+            "defect_lines_all_in_context": sum(1 for r in with_lines if r["defect_lines_in_context"] == r["defect_lines"]),
+            "defect_lines_none_in_context": sum(1 for r in with_lines if r["defect_lines_in_context"] == 0),
+            "corpus_bytes_median": median(sizes),
+            "defect_position_pct_median": median(positions),
+        },
+        "per_scenario": rows,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2751,6 +2852,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print planned runs without executing",
     )
     parser.add_argument(
+        "--context-only",
+        action="store_true",
+        help=(
+            "Real-PR corpora only: build each scenario's review context and stop "
+            "before the model call (no inference); report whether each defect "
+            "reached the context."
+        ),
+    )
+    parser.add_argument(
         "--max-prs",
         type=int,
         default=None,
@@ -2803,6 +2913,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             model_config,
             max_entries=args.max_prs,
             dry_run=args.dry_run,
+            context_only=args.context_only,
         )
 
     if args.dry_run:
@@ -2816,6 +2927,8 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
     else:
         print(output_text)
 
+    if args.context_only:
+        return 0 if report["metadata"]["context_built"] else 1
     if report["metadata"]["completed_runs"] == 0:
         print(
             "Error: 0 of "

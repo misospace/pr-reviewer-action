@@ -374,6 +374,7 @@ build_human_reviews() {
   : > human-reviews.md
   : > human-reviews.json
   : > human-reviews-present.txt
+  [[ "$(printf '%s' "${HUMAN_REVIEWS_CONTEXT:-true}" | tr '[:upper:]' '[:lower:]')" == "true" ]] || return 0
   head_sha="$(jq -r '.headRefOid // empty' pr.json 2>/dev/null)"
   if ! platform_pr_reviews "$REPO" "$PR_NUMBER" paginate > human-reviews.raw.json 2>/dev/null; then
     log "WARNING: PR review fetch failed; continuing without human-review context"
