@@ -240,6 +240,272 @@ class BenchmarkCorpus:
 
 
 # ---------------------------------------------------------------------------
+# Real-PR corpus (#779): real merged PRs reviewed at their pinned head, where
+# a later merged PR fixed a defect the PR introduced (vulnerable), or where
+# no later PR ever fixed one (clean control). Unlike BenchmarkCorpus's
+# category/severity+description ``known_findings`` matching, a real PR's
+# defect is anchored to a file (and optionally a line range) recovered from
+# the fixing PR's own diff/description — the fixture corpus format doesn't
+# fit that shape, so this is a deliberately separate, minimal corpus format
+# (top-level ``real_pr_corpus`` key) and scorer rather than an extension of
+# BenchmarkCorpus/compute_precision_recall.
+# ---------------------------------------------------------------------------
+
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+# Widen a defect's authored line range by this many lines on each side when
+# checking whether a finding's reported line falls inside it (#779 step 3):
+# reviewers commonly report a line a few lines off the exact anchor even
+# when they correctly identified the defective block.
+REAL_PR_LINE_TOLERANCE = 10
+
+
+@dataclass
+class RealPRDefect:
+    """The known-defect anchor for one vulnerable real-PR scenario."""
+    description: str
+    file: str | None
+    line_range: tuple[int, int] | None
+    severity: str | None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RealPRDefect:
+        lr = d.get("line_range")
+        return cls(
+            description=str(d.get("description", "")),
+            file=d.get("file"),
+            line_range=tuple(lr) if isinstance(lr, (list, tuple)) else lr,
+            severity=d.get("severity"),
+        )
+
+
+@dataclass
+class RealPRScenario:
+    """One real-PR corpus entry, vulnerable or clean."""
+    id: str
+    repo_full_name: str
+    number: int
+    head_sha: str
+    expected_clean: Any
+    defect: RealPRDefect | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RealPRScenario:
+        defect = RealPRDefect.from_dict(d["defect"]) if isinstance(d.get("defect"), dict) else None
+        return cls(
+            id=str(d.get("id") or f"{d.get('repo_full_name')}#{d.get('number')}"),
+            repo_full_name=d.get("repo_full_name", ""),
+            number=d.get("number", 0),
+            head_sha=str(d.get("head_sha", "")),
+            expected_clean=d.get("expected_clean", False),
+            defect=defect,
+            raw=d,
+        )
+
+    def to_pr_entry(self) -> dict[str, Any]:
+        """The subset run_review_for_pr needs: number/repo_full_name/head_sha,
+        plus ``base_sha`` when the entry pins the diff base."""
+        entry = {
+            "number": self.number,
+            "repo_full_name": self.repo_full_name,
+            "head_sha": self.head_sha,
+        }
+        base_sha = self.raw.get("base_sha")
+        if base_sha:
+            entry["base_sha"] = base_sha
+        return entry
+
+
+_REPO_FULL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPRScenario]) -> None:
+    """Raise ValueError (with every problem listed) on a malformed corpus.
+
+    Every entry (vulnerable or clean) must pin a full 40-hex commit SHA.
+    Every vulnerable entry must carry a defect with a non-empty description
+    and file; when it declares a line_range, that must be an ascending
+    [start, end] pair of positive ints. Every clean entry must declare
+    expected_clean: true (so a scenario can never silently score on the
+    wrong side because a flag was left off).
+    """
+    errors: list[str] = []
+
+    def _check_sha(scenario: RealPRScenario) -> None:
+        if not scenario.head_sha or not _FULL_SHA_RE.fullmatch(scenario.head_sha):
+            errors.append(
+                f"{scenario.id}: head_sha must be a full 40-hex commit SHA, "
+                f"got {scenario.head_sha!r}"
+            )
+
+    def _check_identity(scenario: RealPRScenario) -> None:
+        base_sha = scenario.raw.get("base_sha")
+        if base_sha is not None and not (isinstance(base_sha, str) and _FULL_SHA_RE.fullmatch(base_sha)):
+            errors.append(f"{scenario.id}: base_sha must be a full 40-hex commit SHA, got {base_sha!r}")
+        number = scenario.number
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            errors.append(f"{scenario.id}: number must be a positive int, got {number!r}")
+        if not isinstance(scenario.repo_full_name, str) or not _REPO_FULL_NAME_RE.fullmatch(scenario.repo_full_name):
+            errors.append(f"{scenario.id}: repo_full_name must be owner/repo, got {scenario.repo_full_name!r}")
+
+    for scenario in vulnerable:
+        _check_sha(scenario)
+        _check_identity(scenario)
+        if scenario.expected_clean is not False:
+            errors.append(f"{scenario.id}: vulnerable entry must not set expected_clean")
+        defect_file = scenario.defect.file if scenario.defect is not None else None
+        if scenario.defect is None or not scenario.defect.description or not isinstance(defect_file, str) or not defect_file.strip():
+            errors.append(
+                f"{scenario.id}: vulnerable entry must have a defect with a "
+                "description and a file"
+            )
+        elif scenario.defect.line_range is not None:
+            lr = scenario.defect.line_range
+            lo, hi = lr if isinstance(lr, tuple) and len(lr) == 2 else (None, None)
+            valid = (
+                isinstance(lo, int) and not isinstance(lo, bool)
+                and isinstance(hi, int) and not isinstance(hi, bool)
+                and lo > 0 and hi >= lo
+            )
+            if not valid:
+                errors.append(
+                    f"{scenario.id}: defect.line_range must be an ascending "
+                    f"[start, end] pair of positive ints, got {scenario.defect.line_range!r}"
+                )
+
+    for scenario in clean:
+        _check_sha(scenario)
+        _check_identity(scenario)
+        if scenario.expected_clean is not True:
+            errors.append(f"{scenario.id}: clean entry must set expected_clean: true (a JSON boolean)")
+
+    if errors:
+        raise ValueError(
+            "real-PR corpus validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
+
+
+@dataclass
+class RealPRCorpus:
+    vulnerable: list[RealPRScenario] = field(default_factory=list)
+    clean: list[RealPRScenario] = field(default_factory=list)
+
+    @classmethod
+    def from_file(cls, path: Path) -> RealPRCorpus:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        block = data.get("real_pr_corpus") if isinstance(data, dict) else None
+        if not isinstance(block, dict):
+            raise ValueError(f"{path}: missing top-level 'real_pr_corpus' object")
+        vulnerable_raw = block.get("vulnerable", [])
+        clean_raw = block.get("clean", [])
+        if not isinstance(vulnerable_raw, list) or not isinstance(clean_raw, list):
+            raise ValueError(f"{path}: 'real_pr_corpus.vulnerable' and '.clean' must be lists")
+        if not all(isinstance(e, dict) for e in [*vulnerable_raw, *clean_raw]):
+            raise ValueError(f"{path}: every real_pr_corpus entry must be an object")
+        vulnerable = [RealPRScenario.from_dict(e) for e in vulnerable_raw]
+        clean = [RealPRScenario.from_dict(e) for e in clean_raw]
+        validate_real_pr_corpus(vulnerable, clean)
+        return cls(vulnerable=vulnerable, clean=clean)
+
+
+def _normalize_path_for_match(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/").lower()
+
+
+def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:
+    """Loose file match: exact, or one path is a path-boundary suffix of the other.
+
+    Findings may report a path relative to the repo root, or (less
+    commonly) something shorter/longer; treat a match as either exact or a
+    suffix aligned on a '/' boundary so ``run_review.sh`` doesn't
+    false-positive-match ``scripts/other_run_review.sh``.
+    """
+    if not isinstance(finding_file, str) or not finding_file:
+        return False
+    f = _normalize_path_for_match(finding_file)
+    a = _normalize_path_for_match(anchor_file)
+    if not f or not a:
+        return False
+    return f == a or f.endswith("/" + a) or a.endswith("/" + f)
+
+
+def score_vulnerable_run(
+    run: ReviewRun, defect: RealPRDefect, tolerance: int = REAL_PR_LINE_TOLERANCE,
+) -> dict[str, Any]:
+    """Score one run of a vulnerable real-PR scenario against its defect anchor.
+
+    ``hit`` (strict): some finding's file matches the defect's file AND,
+    when the defect declares a line_range, that finding's line falls inside
+    [start - tolerance, end + tolerance]. When the defect has no line_range,
+    ``hit`` degrades to the file-only match.
+    ``file_only_hit``: some finding's file matches the defect's file,
+    regardless of line — the looser signal for anchors this exercise can't
+    line-check (or a reviewer that got the file right but misreported the
+    line). An errored run scores as a miss on every field (it produced no
+    findings to check).
+    """
+    hit = False
+    file_only_hit = False
+    if not run.error and defect.file:
+        findings = run.findings if isinstance(run.findings, list) else []
+        lo_hi = defect.line_range
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            if not _finding_file_matches_anchor(finding.get("file"), defect.file):
+                continue
+            file_only_hit = True
+            if lo_hi is None:
+                hit = True
+                continue
+            line = finding.get("line")
+            if isinstance(line, int) and not isinstance(line, bool):
+                lo, hi = lo_hi
+                if (lo - tolerance) <= line <= (hi + tolerance):
+                    hit = True
+    return {
+        "errored": bool(run.error),
+        "error": run.error,
+        "hit": hit,
+        "file_only_hit": file_only_hit,
+        "has_line_anchor": defect.line_range is not None,
+        "verdict": run.verdict,
+        "request_changes": run.verdict == "request_changes",
+    }
+
+
+def score_clean_run(run: ReviewRun) -> dict[str, Any]:
+    """Score one run of a clean-control real-PR scenario for false positives.
+
+    Records both any-severity findings and blocker/major-only findings
+    (the higher-signal false-positive bar), plus whether the run's verdict
+    was request_changes. An errored run produced no findings and no
+    verdict, so it scores as zero false positives and not request_changes —
+    errored_count is tracked alongside so it isn't mistaken for a clean pass.
+    """
+    findings = run.findings if isinstance(run.findings, list) else []
+    blocker_major = [
+        f for f in findings
+        if isinstance(f, dict)
+        and str(f.get("severity", "")).strip().lower() in ("blocker", "major")
+    ]
+    return {
+        "errored": bool(run.error),
+        "error": run.error,
+        "any_finding_count": len(findings),
+        "blocker_major_finding_count": len(blocker_major),
+        "false_positive": len(findings) > 0,
+        "blocker_major_false_positive": len(blocker_major) > 0,
+        "verdict": run.verdict,
+        "request_changes": run.verdict == "request_changes",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Corpus helpers
 # ---------------------------------------------------------------------------
 
@@ -1386,6 +1652,114 @@ def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None
         )
 
 
+def _prepare_pinned_workspace(
+    repo_path: Path, head_sha: str, base_sha: str | None = None,
+) -> tuple[bool, str]:
+    """Reset a reused clone so no prior scenario's artifacts leak in.
+
+    The clone is shared by every scenario of a repo, and the review reuses a
+    non-empty ``pr.diff`` it finds there, so a stale one would review the
+    wrong PR. Removes every untracked/ignored file, then, when ``base_sha`` is
+    given, writes ``pr.diff`` as ``base...head`` so the review sees the diff as
+    it was at that head rather than the PR's current state. Returns (ok, error).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "clean", "-ffdxq"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if result.returncode != 0:
+        return False, f"git clean failed: {result.stderr[:300]}"
+    if not base_sha:
+        return True, ""
+    if subprocess.run(
+        ["git", "-C", str(repo_path), "cat-file", "-e", f"{base_sha}^{{commit}}"],
+        capture_output=True, check=False,
+    ).returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "--no-tags", "origin", base_sha],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "diff", f"{base_sha}...{head_sha}"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return False, f"diff {base_sha[:12]}...{head_sha[:12]} failed: {result.stderr[:300]}"
+    (repo_path / "pr.diff").write_text(result.stdout, encoding="utf-8")
+    return True, ""
+
+
+def _checkout_pinned_commit(
+    repo_path: Path, commit_sha: str, pr_number: int | None = None,
+) -> tuple[bool, str | None, str]:
+    """Checkout an exact commit, verifying the checkout landed on it.
+
+    Real-PR corpus entries (#779) pin the exact head SHA a scenario was
+    authored against, so a repository history change since (a force-push,
+    an unlikely PR-number reuse) can never silently swap in a different
+    revision. Tries the cheap ``refs/pull/<pr>/head`` fetch first (GitHub
+    retains PR refs indefinitely, even long after merge) and accepts it only
+    when the resolved SHA matches ``commit_sha`` exactly; otherwise falls
+    back to fetching the commit SHA directly and checking that out. Returns
+    (ok, commit_sha, error) like ``_checkout_pr_head`` — ok is False (never
+    silently on the wrong commit) unless the checked-out HEAD equals
+    ``commit_sha``.
+    """
+    if pr_number is not None:
+        ok, sha, _err = _checkout_pr_head(repo_path, pr_number)
+        if ok and sha == commit_sha:
+            return True, sha, ""
+
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_path), "fetch", "--no-tags", "--force",
+                "origin", commit_sha,
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if result.returncode != 0:
+            return (
+                False, None,
+                f"fetch of pinned commit {commit_sha} failed (exit "
+                f"{result.returncode}): {result.stderr[:300]}",
+            )
+
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_path), "checkout",
+                "--force", "--detach", commit_sha,
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if result.returncode != 0:
+            return (
+                False, None,
+                f"checkout of pinned commit {commit_sha} failed (exit "
+                f"{result.returncode}): {result.stderr[:300]}",
+            )
+
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        sha = result.stdout.strip()
+        if result.returncode != 0 or not sha:
+            return (False, None, "could not resolve checked-out HEAD")
+        if sha != commit_sha:
+            return (
+                False, None,
+                f"checked-out HEAD {sha} does not match pinned commit {commit_sha}",
+            )
+
+        return (True, sha, "")
+    except subprocess.TimeoutExpired:
+        return (
+            False, None,
+            "git timed out while materializing the pinned commit",
+        )
+
+
 def run_review_for_pr(
     pr_entry: dict[str, Any],
     mode: str,
@@ -1474,7 +1848,13 @@ def run_review_for_pr(
         # read_file/git_grep, tree exploration, specialist verification)
         # would otherwise come from the current default-branch tree.
         if semantic_fixture is None:
-            ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+            pinned_sha = pr_entry.get("head_sha")
+            if pinned_sha:
+                ok, sha, err = _checkout_pinned_commit(repo_path, pinned_sha, pr_number)
+            else:
+                ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+            if ok:
+                ok, err = _prepare_pinned_workspace(repo_path, sha, pr_entry.get("base_sha"))
             if not ok:
                 run.error = f"PR head not materialized: {err}"
                 run.wall_clock_sec = time.monotonic() - start
@@ -1550,6 +1930,7 @@ def run_review_for_pr(
         else:
             env.pop("DEEP_REVIEW", None)
             env.pop("DEEP_REVIEW_EXECUTION", None)
+        env.update(model_config.get("extra_env") or {})
 
         # Run the review via the orchestrator script. By default that is
         # run_review.sh next to this harness (resolved relative to this
@@ -2057,6 +2438,302 @@ def generate_report(
 
 
 # ---------------------------------------------------------------------------
+# Real-PR report generation (#779)
+# ---------------------------------------------------------------------------
+
+def _new_real_pr_mode_summary() -> dict[str, Any]:
+    return {
+        "vulnerable_total": 0,
+        "vulnerable_errors": 0,
+        "hits": 0,
+        "file_only_hits": 0,
+        "vulnerable_request_changes": 0,
+        "clean_total": 0,
+        "clean_errors": 0,
+        "any_finding_false_positives": 0,
+        "blocker_major_false_positives": 0,
+        "clean_request_changes": 0,
+    }
+
+
+def generate_real_pr_report(
+    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]],
+    corpus_source: str | None = None,
+) -> dict[str, Any]:
+    """Build the real-PR corpus report from every scenario's per-mode runs.
+
+    ``scenario_runs`` is a list of (scenario, {mode: ReviewRun}) pairs — one
+    entry per corpus scenario actually run, each carrying exactly one run
+    per mode (the real-PR path does not currently support runs-per-mode
+    repetition).
+
+    Rates are DELIBERATELY denominated differently by design, both spelled
+    out in each mode block so a reader never has to guess:
+      - recall (strict/file-level) divides by the TOTAL vulnerable runs for
+        that mode, counting an errored run as a miss — a crash didn't catch
+        the defect either.
+      - false-positive and request-changes rates divide by the total run
+        count for that kind (vulnerable or clean) as well, for the same
+        reason: an errored run is scored, not excluded.
+      - verdict_agreement_rate treats vulnerable+clean together as a single
+        binary classification (should this PR get request_changes?) and
+        reports the combined accuracy — the one number meant to move
+        together with recall and the FP rate rather than trade off against
+        them silently.
+    """
+    per_scenario: list[dict[str, Any]] = []
+    mode_summary: dict[str, dict[str, Any]] = {}
+    modes_seen: set[str] = set()
+
+    for scenario, mode_runs in scenario_runs:
+        kind = "clean" if scenario.expected_clean is True else "vulnerable"
+        entry: dict[str, Any] = {
+            "id": scenario.id,
+            "repo_full_name": scenario.repo_full_name,
+            "number": scenario.number,
+            "head_sha": scenario.head_sha,
+            "kind": kind,
+        }
+        if scenario.defect is not None:
+            entry["defect"] = {
+                "description": scenario.defect.description,
+                "file": scenario.defect.file,
+                "line_range": list(scenario.defect.line_range) if scenario.defect.line_range else None,
+                "severity": scenario.defect.severity,
+            }
+        runs_out: dict[str, Any] = {}
+        for mode, run in mode_runs.items():
+            modes_seen.add(mode)
+            mm = mode_summary.setdefault(mode, _new_real_pr_mode_summary())
+            run_dict = run.to_dict()
+            if kind == "vulnerable" and scenario.defect is not None:
+                score = score_vulnerable_run(run, scenario.defect)
+                mm["vulnerable_total"] += 1
+                if score["errored"]:
+                    mm["vulnerable_errors"] += 1
+                if score["hit"]:
+                    mm["hits"] += 1
+                if score["file_only_hit"]:
+                    mm["file_only_hits"] += 1
+                if score["request_changes"]:
+                    mm["vulnerable_request_changes"] += 1
+            else:
+                score = score_clean_run(run)
+                mm["clean_total"] += 1
+                if score["errored"]:
+                    mm["clean_errors"] += 1
+                if score["false_positive"]:
+                    mm["any_finding_false_positives"] += 1
+                if score["blocker_major_false_positive"]:
+                    mm["blocker_major_false_positives"] += 1
+                if score["request_changes"]:
+                    mm["clean_request_changes"] += 1
+            run_dict["score"] = score
+            runs_out[mode] = run_dict
+        entry["runs"] = runs_out
+        per_scenario.append(entry)
+
+    def _rate(numer: int, denom: int) -> float | None:
+        return round(numer / denom, 4) if denom else None
+
+    for mode, mm in mode_summary.items():
+        mm["recall_strict"] = _rate(mm["hits"], mm["vulnerable_total"])
+        mm["recall_file_level"] = _rate(mm["file_only_hits"], mm["vulnerable_total"])
+        mm["vulnerable_request_changes_rate"] = _rate(
+            mm["vulnerable_request_changes"], mm["vulnerable_total"]
+        )
+        mm["false_positive_rate"] = _rate(mm["any_finding_false_positives"], mm["clean_total"])
+        mm["blocker_major_false_positive_rate"] = _rate(
+            mm["blocker_major_false_positives"], mm["clean_total"]
+        )
+        mm["clean_request_changes_rate"] = _rate(mm["clean_request_changes"], mm["clean_total"])
+        total_scenarios = mm["vulnerable_total"] + mm["clean_total"]
+        agreeing = mm["vulnerable_request_changes"] + (
+            mm["clean_total"] - mm["clean_request_changes"]
+        )
+        mm["verdict_agreement_rate"] = _rate(agreeing, total_scenarios)
+
+    total_runs = sum(len(runs) for _s, runs in scenario_runs)
+    completed_runs = sum(
+        1 for _s, runs in scenario_runs for r in runs.values() if not r.error
+    )
+    return {
+        "metadata": {
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "harness_version": "0.1.0",
+            "corpus_kind": "real_pr_corpus",
+            "corpus_source": corpus_source,
+            "modes_tested": sorted(modes_seen),
+            "vulnerable_scenarios": sum(1 for s, _ in scenario_runs if not s.expected_clean),
+            "clean_scenarios": sum(1 for s, _ in scenario_runs if s.expected_clean),
+            "total_runs": total_runs,
+            "completed_runs": completed_runs,
+            "errored_runs": total_runs - completed_runs,
+        },
+        "mode_summary": {m: mode_summary[m] for m in sorted(mode_summary)},
+        "per_scenario_results": per_scenario,
+    }
+
+
+# A replay reviews a historical head, but the PR thread, review threads and
+# human reviews are fetched live, so they can carry the later human finding
+# itself. Pinned replays always run without them.
+REPLAY_ENV = {
+    "PR_THREAD_CONTEXT": "false",
+    "REVIEW_THREADS_CONTEXT": "false",
+    "HUMAN_REVIEWS_CONTEXT": "false",
+}
+
+# --context-only: build the review context and stop at the model call, with
+# no inference. The endpoint is a closed local port and retries are off, so
+# the call fails immediately after the corpus is assembled.
+CONTEXT_ONLY_ENV = {
+    "AI_BASE_URL": "http://127.0.0.1:9/v1",
+    "AI_MODEL": "context-only",
+    "AI_API_KEY": "none",
+    "AI_PRIMARY_RETRIES": "0",
+    "AI_PRIMARY_RETRY_DELAY_SEC": "0",
+    "AI_FALLBACK_RETRIES": "0",
+    "AI_SMART_RETRIES": "0",
+    "AI_CONNECT_TIMEOUT_SEC": "2",
+    "AI_FALLBACK_BASE_URL": "",
+    "AI_SMART_BASE_URL": "",
+    "TOOL_MODE": "off",
+    "DEEP_REVIEW": "false",
+    "CI_STATUS_CHECK": "false",
+}
+
+
+def score_context(repo_path: Path, scenario: RealPRScenario) -> dict[str, Any]:
+    """Whether a vulnerable scenario's defect reached the assembled context.
+
+    Reads the review corpus the pipeline wrote and reports: its size, whether
+    the defect file is in the PR diff, and, when the defect has a line range,
+    how many of those (non-trivial) head lines appear in the corpus and how
+    far into the corpus the first one sits.
+    """
+    corpus_path = repo_path / "review-corpus.md"
+    if not corpus_path.is_file():
+        return {"context_built": False}
+    corpus = corpus_path.read_text(encoding="utf-8", errors="replace")
+    diff = (repo_path / "pr.diff").read_text(encoding="utf-8", errors="replace") if (repo_path / "pr.diff").is_file() else ""
+    out: dict[str, Any] = {"context_built": True, "corpus_bytes": len(corpus.encode("utf-8"))}
+    defect = scenario.defect
+    if defect is None:
+        return out
+    out["defect_file_in_diff"] = f"b/{defect.file}" in diff
+    if defect.line_range:
+        shown = subprocess.run(
+            ["git", "-C", str(repo_path), "show", f"HEAD:{defect.file}"],
+            capture_output=True, text=True, check=False,
+        ).stdout.splitlines()
+        lo, hi = defect.line_range
+        lines = [line.strip() for line in shown[max(0, lo - 1):hi] if len(line.strip()) > 8]
+        found = [corpus.find(line) for line in lines if line in corpus]
+        out["defect_lines"] = len(lines)
+        out["defect_lines_in_context"] = len(found)
+        if found:
+            out["defect_position_pct"] = round(100 * min(found) / max(1, len(corpus)))
+    return out
+
+
+def run_real_pr_corpus(
+    corpus: RealPRCorpus,
+    modes: list[str],
+    work_dir: Path,
+    model_config: dict[str, str],
+    max_entries: int | None = None,
+    dry_run: bool = False,
+    context_only: bool = False,
+) -> dict[str, Any] | None:
+    """Run every scenario in a real-PR corpus across the given modes.
+
+    ``max_entries`` limits the VULNERABLE and CLEAN lists independently
+    (first N of each), so ``--max-prs 1`` gives exactly one of each kind —
+    the shape the #779 smoke test needs — rather than truncating the
+    concatenated list and starving the clean side.
+
+    Returns None (having printed the planned runs) in dry-run mode instead
+    of a report.
+    """
+    vulnerable = corpus.vulnerable[:max_entries] if max_entries else corpus.vulnerable
+    clean = corpus.clean[:max_entries] if max_entries else corpus.clean
+    scenarios = [*vulnerable, *clean]
+
+    if dry_run:
+        for scenario in scenarios:
+            kind = "clean" if scenario.expected_clean is True else "vulnerable"
+            for mode in modes:
+                print(
+                    f"  Would run: [{kind}] {scenario.repo_full_name}#{scenario.number} "
+                    f"@{scenario.head_sha[:12]} [{mode}]"
+                )
+        return None
+
+    extra_env = {**REPLAY_ENV, **(CONTEXT_ONLY_ENV if context_only else {})}
+    model_config = {**model_config, "extra_env": extra_env}
+    if context_only:
+        modes = ["tools_off"]
+    context_rows: list[dict[str, Any]] = []
+    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]] = []
+    for i, scenario in enumerate(scenarios, 1):
+        kind = "clean" if scenario.expected_clean is True else "vulnerable"
+        print(
+            f"[{i}/{len(scenarios)}] [{kind}] {scenario.repo_full_name}#{scenario.number}",
+            file=sys.stderr,
+        )
+        pr_entry = scenario.to_pr_entry()
+        mode_runs: dict[str, ReviewRun] = {}
+        for mode in modes:
+            run = run_review_for_pr(pr_entry, mode, work_dir, model_config)
+            mode_runs[mode] = run
+            if context_only:
+                repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
+                row = {"id": scenario.id, "kind": kind, **score_context(repo_path, scenario)}
+                context_rows.append(row)
+                print(f"    [context] {json.dumps(row)}", file=sys.stderr)
+                continue
+            if run.error:
+                print(f"    [{mode}] ERROR: {run.error}", file=sys.stderr)
+            else:
+                findings = run.findings if isinstance(run.findings, list) else []
+                print(
+                    f"    [{mode}] verdict={run.verdict} findings={len(findings)} "
+                    f"commit={run.commit_sha} wall={run.wall_clock_sec:.1f}s",
+                    file=sys.stderr,
+                )
+        scenario_runs.append((scenario, mode_runs))
+
+    if context_only:
+        return generate_context_report(context_rows)
+    return generate_real_pr_report(scenario_runs)
+
+
+def generate_context_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize --context-only rows: how often the defect reached the context."""
+    vulnerable = [r for r in rows if r["kind"] == "vulnerable" and r.get("context_built")]
+    with_lines = [r for r in vulnerable if r.get("defect_lines")]
+    sizes = sorted(r["corpus_bytes"] for r in rows if r.get("context_built"))
+    positions = sorted(r["defect_position_pct"] for r in with_lines if "defect_position_pct" in r)
+    def median(values: list[int]) -> int | None:
+        return values[len(values) // 2] if values else None
+    return {
+        "metadata": {"mode": "context_only", "scenarios": len(rows),
+                     "context_built": sum(1 for r in rows if r.get("context_built"))},
+        "summary": {
+            "vulnerable_built": len(vulnerable),
+            "defect_file_in_diff": sum(1 for r in vulnerable if r.get("defect_file_in_diff")),
+            "with_line_range": len(with_lines),
+            "defect_lines_all_in_context": sum(1 for r in with_lines if r["defect_lines_in_context"] == r["defect_lines"]),
+            "defect_lines_none_in_context": sum(1 for r in with_lines if r["defect_lines_in_context"] == 0),
+            "corpus_bytes_median": median(sizes),
+            "defect_position_pct_median": median(positions),
+        },
+        "per_scenario": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -2176,6 +2853,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print planned runs without executing",
     )
     parser.add_argument(
+        "--context-only",
+        action="store_true",
+        help=(
+            "Real-PR corpora only: build each scenario's review context and stop "
+            "before the model call (no inference); report whether each defect "
+            "reached the context."
+        ),
+    )
+    parser.add_argument(
         "--max-prs",
         type=int,
         default=None,
@@ -2194,6 +2880,68 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _main_real_pr_corpus(args: argparse.Namespace) -> int:
+    """The real-PR corpus (#779) CLI path: score hits/FPs, not known_findings."""
+    try:
+        corpus = RealPRCorpus.from_file(args.corpus)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not corpus.vulnerable and not corpus.clean:
+        print("Error: real-PR corpus is empty", file=sys.stderr)
+        return 1
+
+    model_config = {
+        "model": args.model,
+        "base_url": args.base_url,
+        "api_key": args.api_key,
+        "github_token": args.github_token,
+    }
+
+    print(
+        f"Loaded {len(corpus.vulnerable)} vulnerable + {len(corpus.clean)} clean "
+        "real-PR scenarios" + (f", capped at {args.max_prs} each" if args.max_prs else ""),
+        file=sys.stderr,
+    )
+    print(f"Modes: {args.modes}", file=sys.stderr)
+    print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory(prefix="eval-harness-realpr-") as tmpdir:
+        report = run_real_pr_corpus(
+            corpus,
+            args.modes,
+            Path(tmpdir),
+            model_config,
+            max_entries=args.max_prs,
+            dry_run=args.dry_run,
+            context_only=args.context_only,
+        )
+
+    if args.dry_run:
+        return 0
+
+    output_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(output_text, encoding="utf-8")
+        print(f"\nReport written to {args.output}", file=sys.stderr)
+    else:
+        print(output_text)
+
+    if args.context_only:
+        return 0 if report["metadata"]["context_built"] else 1
+    if report["metadata"]["completed_runs"] == 0:
+        print(
+            "Error: 0 of "
+            f"{report['metadata']['total_runs']} real-PR harness runs completed; "
+            "every run errored, so no rates exist. Failing (mirrors #711).",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -2202,6 +2950,19 @@ def main() -> int:
     if not args.corpus.exists():
         print(f"Error: corpus file not found: {args.corpus}", file=sys.stderr)
         return 1
+
+    # Real-PR corpora (#779) carry a top-level 'real_pr_corpus' key instead of
+    # 'benchmark_corpus'/'semantic_corpus' and run a different scorer (defect
+    # file/line hits + clean-control false positives rather than
+    # category/severity+description known_findings matching), so they're
+    # detected up front and routed to a separate path.
+    try:
+        peek = json.loads(args.corpus.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"Error: could not read corpus file {args.corpus}: {exc}", file=sys.stderr)
+        return 1
+    if isinstance(peek, dict) and "real_pr_corpus" in peek:
+        return _main_real_pr_corpus(args)
 
     corpus = BenchmarkCorpus.from_file(args.corpus)
     if not corpus.prs:

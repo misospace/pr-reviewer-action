@@ -427,11 +427,12 @@ class TestRunReviewForPrBoundary:
         repo_path = _work_dir_with_repo(tmp_path)
         # A stale ai-output.json that is a symlink to a live file: the reset
         # must unlink the link itself, never follow it onto the target.
-        (repo_path / "evil-target.json").write_text(
+        evil_target = tmp_path / "evil-target.json"
+        evil_target.write_text(
             '{"verdict": "approve", "review_markdown": "EVIL"}',
             encoding="utf-8",
         )
-        os.symlink("evil-target.json", repo_path / "ai-output.json")
+        os.symlink(evil_target, repo_path / "ai-output.json")
         script = _write_fake_script(tmp_path / "fake_run_review.sh", deep=True)
 
         run = run_review_for_pr(
@@ -445,7 +446,7 @@ class TestRunReviewForPrBoundary:
         assert run.verdict == "request_changes"
         assert run.review_markdown == "fake review body"
         # Only the link was removed; the target file is untouched.
-        assert (repo_path / "evil-target.json").exists()
+        assert evil_target.exists()
         assert not (repo_path / "ai-output.json").is_symlink()
 
     def test_null_bytes_and_control_chars_in_findings_content_fail_soft(self, tmp_path: Path) -> None:

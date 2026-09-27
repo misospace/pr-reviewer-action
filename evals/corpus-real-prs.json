@@ -1,0 +1,953 @@
+{
+  "real_pr_corpus": {
+    "vulnerable": [
+      {
+        "id": "pr-reviewer-action-68-83",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 68,
+        "head_sha": "f7cf242547282f954a2812c6172a9a5221cc3d9e",
+        "title": "refactor: complete extraction of core logic from run_review.sh",
+        "size": {
+          "additions": 1121,
+          "deletions": 179,
+          "changedFiles": 7
+        },
+        "defect": {
+          "description": "PR #68 extracted enforcement logic into pr_reviewer/enforcement.py but left the original duplicate shell jq enforcement pipeline (~lines 851-935) intact in run_review.sh, so enforcement ran through two independent, divergence-prone code paths with no shared implementation or identity check.",
+          "file": "scripts/run_review.sh",
+          "line_range": [
+            851,
+            935
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 83,
+          "sha": "18ef6af6b49fbdfe491da7716a20312ae0942229",
+          "title": "fix(77): Route all enforcement through pr_reviewer.enforcement"
+        },
+        "confidence": "high",
+        "evidence": "F's body states verbatim: \"PR #68 extracted Python modules but left the original shell enforcement logic intact in `run_review.sh` (~lines 851-935). Enforcement ran via **both** the shell jq pipeline and the Python module with no shared code or identity check. Risk: Two sources of truth diverge silently as the Python module evolves.\"",
+        "source_file_lines": "scripts/run_review.sh (residual shell enforcement block, ~lines 851-935, that PR #68 should have deleted when adding pr_reviewer/enforcement.py); new file pr_reviewer/enforcement.py added by #68"
+      },
+      {
+        "id": "pr-reviewer-action-16-61",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 16,
+        "head_sha": "82c4ebe8408cdab639d6e038b8841157e137842a",
+        "title": "feat: harden tool harness uncertainty controls",
+        "size": {
+          "additions": 197,
+          "deletions": 20,
+          "changedFiles": 5
+        },
+        "defect": {
+          "description": "PR #16 added jq expressions in run_review.sh (TOOL_FAILURE_REASON, SUCCESSFUL_TOOL_REQUESTS) that read tool call status from `.tool_results[].result.status`, but run_tool_harness.py writes status at the top level of each result (`.tool_results[].status`), so every successful tool call was miscounted as a failure under fail-closed settings.",
+          "file": "scripts/run_review.sh",
+          "line_range": [
+            780,
+            808
+          ],
+          "severity": "blocker"
+        },
+        "fixing_pr": {
+          "number": 61,
+          "sha": "7782c1a743ab9202bfe514833c4e2cf3391d8daa",
+          "title": "fix: correct tool harness status path for fail-closed accounting (#53)"
+        },
+        "confidence": "high",
+        "evidence": "Verified via `gh pr diff 16` in the pr-reviewer-action clone: PR #16 introduces `.tool_results[]?.result.status == \"ok\"` in both the TOOL_FAILURE_REASON and SUCCESSFUL_TOOL_REQUESTS jq expressions. F's body: \"run_tool_harness.py writes each tool result status at `.tool_results[].status`, but run_review.sh counted success from `.tool_results[].result.status`. This made successful tool calls look like failures under fail-closed settings, forcing request_changes.\"",
+        "source_file_lines": "scripts/run_review.sh, jq pipelines building TOOL_FAILURE_REASON and SUCCESSFUL_TOOL_REQUESTS (confirmed via `gh pr diff 16`, lines matching `.result.status == \"ok\"`)"
+      },
+      {
+        "id": "pr-reviewer-action-144-153",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 144,
+        "head_sha": "789991fc4483899d59832e3c0ff5c6e75da1ffbe",
+        "title": "refactor: extract shared publish helpers to deduplicate native review cleanup",
+        "size": {
+          "additions": 184,
+          "deletions": 163,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "The new build_metadata_marker() function added by #144 built the marker string as `<!-- ai-pr-reviewer:{...}` without the closing `-->`, so GitHub rendered the entire published review as a hidden HTML comment (blank in the PR UI) despite valid content in the API response.",
+          "file": "scripts/publish_helpers.sh",
+          "line_range": [
+            90,
+            90
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 153,
+          "sha": "113e8afac4f7d752aa2842fd1c00ba81b6db1645",
+          "title": "fix: close HTML comment in metadata marker (was invisible in PR UI)"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'build_metadata_marker()' -- scripts/publish_helpers.sh` shows the function was introduced in commit 0bf4c52, which `gh api commits/.../pulls` resolves to PR #144. The fix diff (`git show <fix-sha>`) adds only the missing ` -->` at end of the marker string built by that function.",
+        "source_file_lines": "scripts/publish_helpers.sh, build_metadata_marker() function (introduced by #144; confirmed via `git log -S` and `git show` of the one-line fix commit)"
+      },
+      {
+        "id": "pr-reviewer-action-65-152",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 65,
+        "head_sha": "fa0ced754a9b1e143cfa73e81730cea932fcdd05",
+        "title": "feat: add review_comment publish mode and document all three modes",
+        "size": {
+          "additions": 83,
+          "deletions": 15,
+          "changedFiles": 2
+        },
+        "defect": {
+          "description": "PR #65 implemented `review_comment` publish mode using `gh pr review --comment`, which creates a COMMENTED PR review; GitHub does not render the body text of COMMENTED reviews in the PR timeline/UI, so the review content was invisible to human reviewers despite being present via the API.",
+          "file": "action.yml",
+          "line_range": [
+            397,
+            397
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 152,
+          "sha": "5e2944779fc0870f5ca3793d3703a30584802b19",
+          "title": "fix: use gh pr comment for review_comment mode (visible in PR UI)"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'gh pr review --comment'` traces the introduction of that call to commit 996dc39, confirmed via `gh api commits/.../pulls` as PR #65. F's body: \"`review_comment` publish mode used `gh pr review --comment` which creates a COMMENTED review. GitHub does NOT display the body of COMMENTED reviews in the PR timeline/UI.\"",
+        "source_file_lines": "action.yml, review_comment publish step added by #65 (calls `gh pr review --comment`)"
+      },
+      {
+        "id": "pr-reviewer-action-99-135",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 99,
+        "head_sha": "02144bc64c8b9cf90874909fe1b13392712ec94a",
+        "title": "feat: add built-in CI status check before reviewing (#98)",
+        "size": {
+          "additions": 149,
+          "deletions": 3,
+          "changedFiles": 2
+        },
+        "defect": {
+          "description": "PR #99's wait_for_ci.sh queried the GitHub Checks API with `status=pending`, but the Checks API only ever returns `queued`/`in_progress`/`completed` as status values (never `pending`), so in-progress check runs were invisible to the polling logic on repos that rely on Checks (not legacy commit statuses), causing premature timeouts or proceeding with no real signal.",
+          "file": "scripts/wait_for_ci.sh",
+          "line_range": [
+            86,
+            92
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 135,
+          "sha": "00aa24ee6ac6a3da35f72074692ab588f3cf2dd9",
+          "title": "fix: correct CI checks polling to use GitHub Checks API statuses"
+        },
+        "confidence": "high",
+        "evidence": "`gh pr diff 99` shows the introduction of `check-runs?status=pending`; F's body: \"`wait_for_ci.sh` was querying the Checks API with `status=pending`, but GitHub's Checks API uses `queued`, `in_progress`, and `completed`... repos that primarily use GitHub Checks would have their in-progress check runs invisible to the polling logic, causing premature timeouts.\"",
+        "source_file_lines": "scripts/wait_for_ci.sh, check-runs polling query added by #99 (`status=pending` filter)"
+      },
+      {
+        "id": "pr-reviewer-action-15-143",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 15,
+        "head_sha": "c99c5688458dfc00025d6ea27d98f5277cbb1ed2",
+        "title": "feat: add secure tool-harness planning mode",
+        "size": {
+          "additions": 699,
+          "deletions": 51,
+          "changedFiles": 7
+        },
+        "defect": {
+          "description": "PR #15's build_review_corpus assembled the standards/conventions section last (section 13 of the corpus) and then truncated the whole corpus from the head via `head -c \"$MAX_CORPUS\"`, so on large PRs the standards file (the section that matters most for convention enforcement) was the first thing cut off.",
+          "file": "scripts/run_review.sh",
+          "line_range": [
+            659,
+            665
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 143,
+          "sha": "a2fb516eff02657ddbbe01fc33c9c29dc9242120",
+          "title": "fix: preserve standards file in full when truncating review corpus"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'head -c \"$MAX_CORPUS\"'` traces the truncation pattern to commit c99c568, resolved via `gh api commits/.../pulls` to PR #15. F's body: \"the corpus was then truncated from the head to MAX_CORPUS bytes. On large PRs, the standards file was the first section to be cut — exactly on the PRs where convention enforcement matters most.\"",
+        "source_file_lines": "scripts/run_review.sh, build_review_corpus() section ordering and `head -c \"$MAX_CORPUS\" review-corpus.md` truncation call, introduced by #15"
+      },
+      {
+        "id": "pr-reviewer-action-107-190",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 107,
+        "head_sha": "a4a0e2b1aaa8a98b8ee2b114fa6611aa32b51bdd",
+        "title": "feat: cleanup superseded native PR reviews by default for non-comment publish modes",
+        "size": {
+          "additions": 341,
+          "deletions": 2,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "PR #107's cleanup_native_reviews resolved the bot's identity with `gh api user --jq .login` to filter which previous reviews to hide, but `/user` returns HTTP 403 for installation tokens (both default GITHUB_TOKEN and GitHub App tokens) in every real deployment, and on that error `gh api` prints the raw JSON error body to stdout (bypassing --jq), so CURRENT_ACTOR was always a non-empty garbage string; the author-match filter therefore matched nothing and the cleanup feature silently never worked since it shipped.",
+          "file": "action.yml",
+          "line_range": [
+            460,
+            464
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 190,
+          "sha": "4f8700f027349ac6b2ae3d089f9b351930b5f240",
+          "title": "fix: native review cleanup never matched — match managed reviews by marker, not author"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'gh api user --jq'` traces this to commit 996c6c1, resolved to PR #107 via the commits/pulls API. F's body: \"Two compounding failures: 1) /user returns 403 for installation tokens ... 2) On HTTP errors, gh api prints the JSON error body to stdout ... so CURRENT_ACTOR captured the error JSON — non-empty, so the github-actions[bot] fallback never fired ... Result: 'No previous managed native reviews found' on every run since the feature shipped.\"",
+        "source_file_lines": "cleanup_native_reviews function added by #107, `CURRENT_ACTOR=$(gh api user --jq .login ...)` identity resolution and author-based filter"
+      },
+      {
+        "id": "pr-reviewer-action-131-274",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 131,
+        "head_sha": "374d8a48b17362b3eb5f241012321e0b85104758",
+        "title": "feat: add incremental PR review scope to avoid full re-review on every commit",
+        "size": {
+          "additions": 902,
+          "deletions": 33,
+          "changedFiles": 9
+        },
+        "defect": {
+          "description": "resolve_review_scope (added by #131) never re-triggered a FULL review on demand once any full review had recorded findings: workflow_dispatch takes no PR context, and the force_review label only bypassed the diff-unchanged guard while scope still resolved to incremental whenever a prior managed review existed. Combined with publish_mode: review_verdict's verdict-safety guardrail (only approve on top of a clean full baseline), a PR whose one full review recorded even a stale/false-positive blocker got permanently wedged in \"Request changes\" with no way to force a fresh full review.",
+          "file": "scripts/check_review_needed.sh",
+          "line_range": [
+            210,
+            218
+          ],
+          "severity": "blocker"
+        },
+        "fixing_pr": {
+          "number": 274,
+          "sha": "b057abb928548cc01e28e5234730da442baa22f1",
+          "title": "fix(review): forced re-review on a dirty baseline runs at full scope"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'resolve_review_scope'` traces the function's introduction to commit f256846, resolved to PR #131 via commits/pulls API. F's body: \"A PR can get permanently wedged in 'Request changes' ... nothing re-triggers [a full review] on demand ... force_review only bypasses the diff-unchanged guard — scope still resolves to incremental when a prior managed review exists ... That's exactly what happened on #272.\"",
+        "source_file_lines": "scripts/check_review_needed.sh, resolve_review_scope() function added by #131 (scope resolution branch that always falls back to incremental scope when a prior managed review exists, regardless of force_review)"
+      },
+      {
+        "id": "pr-reviewer-action-45-109",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 45,
+        "head_sha": "601b9dd2b8449e7cdcdc343d1e46d8796f7d5538",
+        "title": "security: apply secret redaction to evidence provider output",
+        "size": {
+          "additions": 825,
+          "deletions": 387,
+          "changedFiles": 5
+        },
+        "defect": {
+          "description": "In the tool-execution branches added by #45 (gh_api, web_fetch, run_command, etc.), `tool_result[\"status\"] = \"ok\"` is set unconditionally right after each call, without checking whether the helper's return dict carries an `error` key (only raised Python exceptions were treated as failures). Tool calls that failed \"softly\" (disallowed repo/host, HTTP error, etc.) were therefore recorded as successful with empty/partial content, in both the direct-model-call and file-based-planning execution paths.",
+          "file": "scripts/run_tool_harness.py",
+          "line_range": [
+            613,
+            671
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 109,
+          "sha": "b644be7075249605a35b3efd48edc4f44bcd2981",
+          "title": "fix: mark tool harness results as error when tool functions return errors"
+        },
+        "confidence": "high",
+        "evidence": "Confirmed via `gh pr diff 45`: the added code sets `tool_result[\"status\"] = \"ok\"` right after building `tool_result[\"result\"]` from `res.get(...)`, with no check of `res.get(\"error\")`. F's body: \"read_file, git_grep, gh_api, web_fetch ... can return a dict with an error key, but the executor generally ignores that and records an apparently successful result ... This makes the tool harness look healthier than it actually is.\"",
+        "source_file_lines": "scripts/run_tool_harness.py, executor branches for gh_api/web_fetch/run_command (`tool_result[\"result\"] = {...}` followed by unconditional `tool_result[\"status\"] = \"ok\"`), added by #45"
+      },
+      {
+        "id": "pr-reviewer-action-45-130",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 45,
+        "head_sha": "601b9dd2b8449e7cdcdc343d1e46d8796f7d5538",
+        "title": "security: apply secret redaction to evidence provider output",
+        "size": {
+          "additions": 825,
+          "deletions": 387,
+          "changedFiles": 5
+        },
+        "defect": {
+          "description": "PR #45 introduced git_grep/gh_api/web_fetch/fetch_url/run_command in run_tool_harness.py with hardcoded per-call timeouts (15s/25s/25s/25s/30s via `urllib.request.urlopen(..., timeout=NN)` and subprocess timeout args) instead of threading the action's configurable `tool_request_timeout_sec` input through to them, so that input silently had no effect on the actual network/subprocess calls.",
+          "file": "scripts/run_tool_harness.py",
+          "line_range": [
+            236,
+            409
+          ],
+          "severity": "minor"
+        },
+        "fixing_pr": {
+          "number": 130,
+          "sha": "579589729f2d4569c6536cb0ae51509eab8baace",
+          "title": "fix: respect tool_request_timeout_sec across tool harness helpers"
+        },
+        "confidence": "high",
+        "evidence": "`gh pr diff 45` shows literal `timeout=25`, `timeout=15`, `timeout=25`, `timeout=25`, `timeout=30` added across the five helper functions. F's body: \"the tool harness helpers use hardcoded timeouts internally ... TOOL_REQUEST_TIMEOUT_SEC is read in run_review.sh/run_tool_harness.py, but it is not consistently passed into the helper functions ... workflow tuning does not work.\"",
+        "source_file_lines": "scripts/run_tool_harness.py, git_grep/gh_api/web_fetch/fetch_url/run_command definitions added by #45 with literal `timeout=15`/`timeout=25`/`timeout=30`"
+      },
+      {
+        "id": "pr-reviewer-action-262-527",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 262,
+        "head_sha": "d2cfd711177ddafe61e3344d42929f7632f25505",
+        "title": "feat(tool-loop): in-conversation verdict for native_loop (5/7 of #197)",
+        "size": {
+          "additions": 186,
+          "deletions": 0,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "The in-conversation verdict turn added by #262 runs inside run_tool_harness.py and re-sends review-corpus.truncated.md as it stood before the tool harness ran (still containing the \"Tool harness planning pending\" scaffold), instead of the corpus rebuilt after the harness produced real findings, so every successful native_loop review reported no tool harness findings were produced even when tools were actually run.",
+          "file": "scripts/run_tool_harness.py",
+          "line_range": [
+            1069,
+            1073
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 527,
+          "sha": "1d3536e6fed5ec050e07dee8cd60dfd978cff165",
+          "title": "fix: give the native_loop verdict turn the real tool harness findings"
+        },
+        "confidence": "high",
+        "evidence": "F's body: \"The in-conversation verdict turn (#205/#262 in this lineage) runs inside run_tool_harness.py and re-sends review-corpus.truncated.md as it stood before the harness ... The problem is who reads what.\" Traced via `git log -S'Tool harness planning pending'` and the explicit PR reference to the 5/7-of-#197 feature; observed live on misospace/llmkube-images#216.",
+        "source_file_lines": "scripts/run_tool_harness.py, in-conversation verdict turn added by #262 (reads pre-harness review-corpus.truncated.md rather than the post-harness rebuild)"
+      },
+      {
+        "id": "dispatch-932-955",
+        "repo_full_name": "misospace/dispatch",
+        "number": 932,
+        "head_sha": "d676411e0e2d0d3ea85fc2d7fc2cb0c3bde695e2",
+        "title": "feat(ci-failures): file issues from repeated default-branch workflow failures",
+        "size": {
+          "additions": 766,
+          "deletions": 3,
+          "changedFiles": 10
+        },
+        "defect": {
+          "description": "decideAction (added by #932) closed the first OPEN issue found anywhere in the repo whenever ANY workflow reported healthy (`filed.find(i => i.state === \"open\")`), because the filed-issues list carried no workflow association. A green run of an unrelated workflow (e.g. Release) would close a still-failing issue for a different workflow (e.g. Vulnerability Scan), which then immediately refiled and re-closed on each subsequent pass.",
+          "file": "src/lib/ci-failure-ingestion.ts",
+          "line_range": [
+            159,
+            172
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 955,
+          "sha": "b04b1f7ecee59f5fda78fb2f033b30c249fc05e6",
+          "title": "fix(ci-failures): only close an issue for the workflow that went green"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'const anyOpen = filed.find'` traces this line to commit 2dd1387, resolved via commits/pulls to PR #932. F's body: \"decideAction closed the first open issue in the repo whenever any workflow reported healthy ... Evidence: misospace/llmkube-images issues 369-372, identical signature, created and closed within the same minute, one every 20-30 minutes ... close comments name the wrong workflow outright.\"",
+        "source_file_lines": "src/lib/ci-failures/decideAction (or equivalent module) added by #932, `const anyOpen = filed.find((i) => i.state === \"open\")` line"
+      },
+      {
+        "id": "dispatch-333-879",
+        "repo_full_name": "misospace/dispatch",
+        "number": 333,
+        "head_sha": "8033b1e5e610b2998c1173d6255c1f2b03f98429",
+        "title": "feat(sync): share sync locking across all sync entry-points",
+        "size": {
+          "additions": 249,
+          "deletions": 100,
+          "changedFiles": 7
+        },
+        "defect": {
+          "description": "acquireLock(syncType) (added by #333) ignored its own `syncType` argument and always used the fixed row id `\"global\"`, so every scheduled sync job (stale-work, groomer, sync, pr-followup, reconcile, etc.) mutually excluded every other job through a single shared lock row instead of one lock per job, causing jobs with shorter intervals to repeatedly starve jobs with longer ones (one job never completed a single run in the observed period).",
+          "file": "src/lib/sync-lock.ts",
+          "line_range": [
+            18,
+            42
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 879,
+          "sha": "4e4625cc5d1622fe0f15b3355aeed3ea01f0b18b",
+          "title": "fix(sync-lock): key the lock per job so jobs stop starving each other"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'const LOCK_ID = \"global\"'` traces the constant to commit df52419, resolved via commits/pulls to PR #333. F's body: \"Every endpoint calls acquireLock(syncType) with its own type, and the helper ignored the argument ... So all six jobs mutually excluded each other through one row ... pr-followup never completed a single run.\"",
+        "source_file_lines": "sync lock module added by #333, `const LOCK_ID = \"global\" as const;` and `prisma.syncLock.findUnique({ where: { id: LOCK_ID } })`"
+      },
+      {
+        "id": "dispatch-358-487",
+        "repo_full_name": "misospace/dispatch",
+        "number": 358,
+        "head_sha": "20bf4965c271349689e06068547af7fc55851a0c",
+        "title": "feat: add agent-agnostic heartbeat orchestration API",
+        "size": {
+          "additions": 710,
+          "deletions": 0,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "heartbeat.ts's reconcileClosedIssues (added by #358) called `fetchIssues(repoFullName)` without `{ includeClosed: true }`; since fetchIssues defaults to open-only, the reconciliation pass could never see a cached issue's real (closed) state on GitHub, threw 'Issue #N not found', and silently skipped it — leaving every issue Dispatch had marked status/done permanently stuck at state: \"open\" in the DB.",
+          "file": "src/lib/heartbeat.ts",
+          "line_range": [
+            136,
+            136
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 487,
+          "sha": "12d707d989e2bc03d3007d349ee4c2c9701aa99e",
+          "title": "fix: include closed issues in reconciliation fetch"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'reconcileClosedIssues'` traces the function to commit 0716934, resolved via commits/pulls to PR #358. F's body: \"The heartbeat's reconcileClosedIssues fetch function called fetchIssues(repoFullName) without includeClosed: true ... This is why every status/done issue still has state: 'open' in the DB. At least 15 issues across dispatch, miso-chat, and pr-reviewer-action are affected.\"",
+        "source_file_lines": "src/lib/heartbeat.ts, reconcileClosedIssues() call to fetchIssues() introduced by #358 (missing `{ includeClosed: true }` option)"
+      },
+      {
+        "id": "dispatch-462-486",
+        "repo_full_name": "misospace/dispatch",
+        "number": 462,
+        "head_sha": "0a7283f43686844fc428c3569405ad5e1cc533ce",
+        "title": "feat(groomer): add hosted llm grooming",
+        "size": {
+          "additions": 2359,
+          "deletions": 80,
+          "changedFiles": 18
+        },
+        "defect": {
+          "description": "The groomer's issue selector (added by #462) filtered candidates only by `state: \"open\"` in the DB, so an issue whose GitHub label had moved to status/done but whose cached DB state hadn't yet been reconciled to closed would still be offered by the 'Groom Next' selector, and the run endpoint's guard then rejected it outright ('Cannot groom an issue with status/done label').",
+          "file": "src/lib/groomer/selector.ts",
+          "line_range": [
+            28,
+            31
+          ],
+          "severity": "minor"
+        },
+        "fixing_pr": {
+          "number": 486,
+          "sha": "39b2c43b5a2e21c0aef949dc5f8908897b89224d",
+          "title": "fix(groomer): exclude status/done issues from selector candidates"
+        },
+        "confidence": "high",
+        "evidence": "`git log --oneline -- src/lib/groomer/selector.ts` shows the earliest touch of this selector query is 00ca4c2, resolved via commits/pulls to PR #462. F's body: \"The selector only filtered by state: 'open' in the DB. Due to stale cache ... the selector picks done issues.\"",
+        "source_file_lines": "selector.ts, groom-candidate Prisma query added/extended by #462 (filters only on `state: \"open\"`, no exclusion of `status/done` label)"
+      },
+      {
+        "id": "dispatch-462-473",
+        "repo_full_name": "misospace/dispatch",
+        "number": 462,
+        "head_sha": "0a7283f43686844fc428c3569405ad5e1cc533ce",
+        "title": "feat(groomer): add hosted llm grooming",
+        "size": {
+          "additions": 2359,
+          "deletions": 80,
+          "changedFiles": 18
+        },
+        "defect": {
+          "description": "PR #462 hardcoded the groomer's request timeout at 60000ms (config.ts) regardless of prompt size; once repo-context mode was enabled and prompts grew to 4-8KB, local/nvidia model latency on those larger prompts routinely exceeded 60s, aborting groomer runs with 'This operation was aborted'.",
+          "file": "src/lib/groomer/config.ts",
+          "line_range": [
+            39,
+            39
+          ],
+          "severity": "minor"
+        },
+        "fixing_pr": {
+          "number": 473,
+          "sha": "a91fb6c9efb3f6d3e36bf547d9ea5343b100ad53",
+          "title": "fix(groomer): scale default timeoutMs with maxContextBytes to accommodate repo-context prompts"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'timeoutMs: 60000' -- src/lib/groomer/config.ts` traces this literal to 00ca4c2, resolved via commits/pulls to PR #462 (same PR as the #486 selector defect). F's body: \"Flat 60s groomer timeout aborts repo-context-enabled runs because nvidia/local models take >60s on 4-8KB prompts ... src/lib/groomer/config.ts:39 had hardcoded timeoutMs: 60000.\"",
+        "source_file_lines": "src/lib/groomer/config.ts:39, hardcoded `timeoutMs: 60000` introduced by #462"
+      },
+      {
+        "id": "dispatch-454-466",
+        "repo_full_name": "misospace/dispatch",
+        "number": 454,
+        "head_sha": "5ae8d83aed7676d1a7f9cc159de3e4e20e7e122a",
+        "title": "feat: 3-tier lane model (local/cloud/frontier) with backward-compat aliases",
+        "size": {
+          "additions": 409,
+          "deletions": 355,
+          "changedFiles": 27
+        },
+        "defect": {
+          "description": "PR #454 loaded DISPATCH_LANE_CONFIG_JSON via the Next.js instrumentation.ts register() hook, calling setLaneConfig() there. Under the production build (Next.js 16 standalone + Turbopack), instrumentation.js is emitted into a separate chunk graph from the route-handler chunks, so the config mutation never reached the module instance route handlers actually import — every deployed request instead saw the hardcoded default lane list and rejected the real configured lanes.",
+          "file": "src/instrumentation.ts",
+          "line_range": [
+            1,
+            26
+          ],
+          "severity": "blocker"
+        },
+        "fixing_pr": {
+          "number": 466,
+          "sha": "90a802c208063c172c767383973c6e21d1e9b332",
+          "title": "fix(lane-config): move DISPATCH_LANE_CONFIG_JSON init to module load to fix Turbopack standalone chunk isolation"
+        },
+        "confidence": "high",
+        "evidence": "`gh pr diff 454` confirms #454 added `src/instrumentation.ts` with `import { setLaneConfig } from \"./lib/lane-config\"` and a `register()` hook calling `setLaneConfig(parsed)`. F's body: \"Turbopack standalone build emits instrumentation.js into a separate chunk graph from route handler chunks. The setLaneConfig() call in register() mutates a module-instance that route handlers never see.\"",
+        "source_file_lines": "src/instrumentation.ts, register() hook added by #454 calling `setLaneConfig(parsed)`"
+      },
+      {
+        "id": "dispatch-121-252",
+        "repo_full_name": "misospace/dispatch",
+        "number": 121,
+        "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+        "title": "feat: add issue reconciliation service (closes #114)",
+        "size": {
+          "additions": 799,
+          "deletions": 0,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "checkPrHealth() (added by #121) read `pr.user?.login` (the PR author's GitHub username) as if it were the review decision, and hardcoded mergeStateStatus to the literal string \"clean\" instead of reading the actual field, so the reconciliation engine reported every linked PR as healthy regardless of its real review state or merge conflicts.",
+          "file": "src/lib/issue-reconciliation.ts",
+          "line_range": [
+            119,
+            120
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 252,
+          "sha": "742e73d01d5ee985f182061f0cc6492d44cb78ec",
+          "title": "fix: use real reviewDecision and mergeStateStatus in checkPrHealth (#244)"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'pr.user?.login' -- src/lib/issue-reconciliation.ts` traces this to commit 5bd6e3f, resolved via commits/pulls to PR #121. F's body: \"checkPrHealth() was reading pr.user?.login as the review decision (which is the PR author's username, not a review state) and hardcoding mergeStateStatus to clean. This caused the reconciliation engine to always report healthy PRs regardless of actual review or merge state.\"",
+        "source_file_lines": "src/lib/issue-reconciliation.ts, checkPrHealth() function added by #121 (`pr.user?.login` used as reviewDecision; `mergeStateStatus` hardcoded to \"clean\")"
+      },
+      {
+        "id": "dispatch-121-389",
+        "repo_full_name": "misospace/dispatch",
+        "number": 121,
+        "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+        "title": "feat: add issue reconciliation service (closes #114)",
+        "size": {
+          "additions": 799,
+          "deletions": 0,
+          "changedFiles": 3
+        },
+        "defect": {
+          "description": "The reconciliation service added by #121 only classified an issue's currentLane when it was still `null`, so an issue synced with status/backlog (and thus lane=backlog) that was later relabelled to status/ready/in-progress/in-review kept the stale backlog lane forever, making it invisible to normal agent worker queues (which filter out backlog-lane issues) even though it was actually ready to work.",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line_range": [
+            156,
+            165
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 389,
+          "sha": "9013a4b2b212b44d73c2a46a4b7e477f13566f1d",
+          "title": "fix: reclassify backlog lane when issues become ready"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'currentLane === null' -- src/lib/issue-reconciliation.ts` traces the earliest occurrence of this guard to commit 5bd6e3f, resolved via commits/pulls to PR #121 (same origin PR as the #252 defect). F's body: \"Issues synced with status/backlog get currentLane=backlog on first classification. When later relabelled ... the stale backlog lane persisted forever because reconcile only classified when currentLane was null. This made relabelled issues invisible to normal agent workers.\"",
+        "source_file_lines": "src/lib/issue-reconciliation.ts, lane classification gate added by #121 (`currentLane === null` guard before classifying)"
+      },
+      {
+        "id": "alert-triage-53-62",
+        "repo_full_name": "misospace/alert-triage",
+        "number": 53,
+        "head_sha": "77b6b04e6e4793e424145b5c862394ebdb15b439",
+        "title": "Merge remote commit 4259b8c into the local branch so the push is a fast-forward (GitHub issue mirror, closes #14)",
+        "size": {
+          "additions": 587,
+          "deletions": 22,
+          "changedFiles": 4
+        },
+        "defect": {
+          "description": "shouldComment() (added by #53) returned `true` (post a re-fire comment immediately) whenever the mirrored GitHub issue's labels ALREADY contained the current severity label (i.e. severity unchanged), and only fell back to the interval-based check otherwise — the exact inverse of the intended behavior, which should comment immediately on a real severity change and gate unchanged-severity re-fires on the interval.",
+          "file": "github.go",
+          "line_range": [
+            131,
+            146
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 62,
+          "sha": "d4f350dd79c5d18b77c689ab6117494b12170482",
+          "title": "Fix inverted severity-change gate in shouldComment"
+        },
+        "confidence": "high",
+        "evidence": "Confirmed via `gh pr diff 53`: the added shouldComment() loop returns true when the wanted severity label IS already present. F's body/title: \"Fix inverted severity-change gate in shouldComment ... it now returns false when the existing issue already carries the current severity label (suppressing unchanged re-fires within interval) and returns true when the severity label is absent.\"",
+        "source_file_lines": "github.go, shouldComment() function added by #53: `for _, l := range existing.Labels { if l.Name == want { return true } }`"
+      },
+      {
+        "id": "courier-46-61",
+        "repo_full_name": "misospace/courier",
+        "number": 46,
+        "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+        "title": "feat(controller): verify terminal PR state",
+        "size": {
+          "additions": 1348,
+          "deletions": 95,
+          "changedFiles": 23
+        },
+        "defect": {
+          "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+          "file": "internal/controller/observer.go",
+          "line_range": [
+            37,
+            55
+          ],
+          "severity": "blocker"
+        },
+        "fixing_pr": {
+          "number": 61,
+          "sha": "bc64d9e6ce74f885c7e73f3be6c57d0e29a82d22",
+          "title": "fix(controller): require check-set stability before AwaitingReview"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'func observeState' -- internal/controller/observer.go` shows the function was introduced in a single commit (9b1e85c) and never touched again until the fix; resolved via commits/pulls to PR #46. F's body: \"observeState returned passed when every check visible during one observation was green. Forge check registration is asynchronous ... Courier then transitioned Verifying -> AwaitingReview before the complete check set existed.\"",
+        "source_file_lines": "internal/controller/observer.go, observeState() function added by #46 (single-snapshot all-green -> \"passed\" with no check-set completeness/stability guarantee across polls)"
+      },
+      {
+        "id": "pr-reviewer-action-163-756",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 163,
+        "head_sha": "134e1e6911a1515b22741a32529c4efb1d05b997",
+        "title": "feat: add deterministic PR classification and risk flags",
+        "size": {
+          "additions": 882,
+          "deletions": 0,
+          "changedFiles": 4
+        },
+        "defect": {
+          "description": "PR #163 introduced PATH_HANDLING_PATTERNS as raw mention-based regexes (\\bpathlib\\b, \\bos\\.path\\b, filepath|pathname, identifier-shaped sanitize/join names) scanning diff content, so any mere mention of a path-handling API (not an actual untrusted-path surface) classified the PR as path_handling_changes and injected merge-blocking must_check guidance (\"review for path traversal vulnerabilities\"). This was first partially patched for ESM-specifier/prose mentions by #720, then more completely fixed by #756 after PR #748's ordinary trusted repo-root discovery (`Path(__file__).resolve().parent.parent`) tripped the same false positive.",
+          "file": "pr_reviewer/classifier.py",
+          "line_range": [
+            132,
+            140
+          ],
+          "severity": "minor"
+        },
+        "fixing_pr": {
+          "number": 756,
+          "sha": "1500f10e204c94fa5eeaca2574e7a6dd0d8f9641",
+          "title": "fix(classifier): require a real untrusted-path surface for path handling"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'PATH_HANDLING_PATTERNS' -- pr_reviewer/classifier.py` traces the constant to commit ff74ebd, resolved via commits/pulls API to PR #163. F's body: \"PATH_HANDLING_PATTERNS scanned raw diff content for path-API mentions... A mention is not a surface: PR #748's diff contained ordinary trusted repository-root discovery... so pathlib matched... This is the same false-positive family #720 fixed for ESM specifiers and prose; #748 exposed the remaining mention-shaped patterns.\"",
+        "source_file_lines": "pr_reviewer/classifier.py, PATH_HANDLING_PATTERNS definition and match-based classification introduced by #163"
+      },
+      {
+        "id": "pr-reviewer-action-457-547",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 457,
+        "head_sha": "065150383a64c093f5c45d43fcd74211101cd354",
+        "title": "feat(forgejo): Add support for Authorized Integration authentication",
+        "size": {
+          "additions": 544,
+          "deletions": 14,
+          "changedFiles": 4
+        },
+        "defect": {
+          "description": "PR #457 added a module-level JWT cache (_JWT_CACHE / _JWT_CACHE_TIME) in pr_reviewer/forgejo_backend.py, read and written by _get_jwt()/_fetch_authorized_integration_jwt() with no locking, even though this module is called from a ThreadPoolExecutor-based prewarm/fetch path (linked_sources.py). Two concurrent _get_jwt() calls landing just past TTL expiry can both observe an expired cache and both issue a token-exchange POST, with the results racing to overwrite the shared cache unsynchronized.",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line_range": [
+            120,
+            187
+          ],
+          "severity": "minor"
+        },
+        "fixing_pr": {
+          "number": 547,
+          "sha": "4c900cf3fb642bb135bfc6ba6d8869af31bfd802",
+          "title": "fix(forgejo): make the Authorized Integration JWT cache thread-safe"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'_JWT_CACHE' -- pr_reviewer/forgejo_backend.py` traces the cache to commit 1cb6bed, resolved via commits/pulls API to PR #457. Tracking issue #538 (quoted in F's linked issue): \"_fetch_authorized_integration_jwt() sets both globals unconditionally, and _get_jwt() reads them with no synchronization... If two concurrent _get_jwt() calls land just past the TTL window, both observe an expired cache and both issue an OIDC token-exchange POST... overwrites the other without serialization.\"",
+        "source_file_lines": "pr_reviewer/forgejo_backend.py, module-level _JWT_CACHE/_JWT_CACHE_TIME globals and _get_jwt()/_fetch_authorized_integration_jwt() (~lines 120, ~187), added by #457"
+      },
+      {
+        "id": "pr-reviewer-action-554-597",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 554,
+        "head_sha": "5c71820d27585acb9c8f6e6ae811e00acf2ff0a6",
+        "title": "fix(precheck): wire the @ai-reviewer dismiss directive into production",
+        "size": {
+          "additions": 458,
+          "deletions": 3,
+          "changedFiles": 5
+        },
+        "defect": {
+          "description": "PR #554's pr_reviewer.precheck._resolve_maintainers() is the security gate deciding who may use the @ai-reviewer dismiss carry-forward directive. Three of its four fallback branches failed OPEN (returned the unfiltered DISMISSAL_MAINTAINERS/GITHUB_REPOSITORY_OWNER candidate set) whenever GitHub permission verification was impossible: on ImportError (PyGithub missing), on a repo-level exception, and on the final 'fall back if all lookups failed' path. Since production's requirements.txt never installed PyGithub, the ImportError branch fired on every real run, meaning the dismiss directive had effectively no permission check in production.",
+          "file": "pr_reviewer/precheck.py",
+          "line_range": [
+            1246,
+            1291
+          ],
+          "severity": "blocker"
+        },
+        "fixing_pr": {
+          "number": 597,
+          "sha": "778beb7e43d1a9d9b5ba6d969da392a3e9530e5d",
+          "title": "fix(precheck): fail closed when the @ai-reviewer dismiss permission check can't run"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'_resolve_maintainers' -- pr_reviewer/precheck.py` and commits/pulls API resolve both contributing commits to PR #554. Tracking issue #581: \"Three of its four fallback branches fail open, returning the unfiltered candidate set whenever GitHub permission verification is impossible... requirements.txt ships only pytest, pytest-cov, and yamllint — no PyGithub. The production precheck step... [ImportError branch fires every time].\"",
+        "source_file_lines": "pr_reviewer/precheck.py, _resolve_maintainers() (~lines 1246-1291) and its call site in main() (~lines 1096-1097), added/expanded by #554"
+      },
+      {
+        "id": "miso-gallery-56-207",
+        "repo_full_name": "misospace/miso-gallery",
+        "number": 56,
+        "head_sha": "5ffb962ff7840fca121e4891020030d50b858bf9",
+        "title": "fix: add /images/ route for public direct image access",
+        "size": {
+          "additions": 6,
+          "deletions": 0,
+          "changedFiles": 2
+        },
+        "defect": {
+          "description": "PR #56 added the public, unauthenticated /images/<path:filename> route so direct image URLs would work without a login redirect, but implemented it as a raw file-serving route with no check that the requested path is actually a recognized media type or lies outside excluded directories (.trash, thumbnail cache). Any file under DATA_FOLDER — including sidecar text/JSON metadata files — could be fetched directly by path.",
+          "file": "app.py",
+          "line_range": [
+            1063,
+            1063
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 207,
+          "sha": "7e3ddc4d6f3455a6b8c6682b92bfccb3eb72e582",
+          "title": "fix: restrict /images and /view to media files only"
+        },
+        "confidence": "high",
+        "evidence": "`git log -S'@app.route(\"/images/<path:filename>\")' -- app.py` traces the route to commit 5ffb962, resolved via commits/pulls API to PR #56. F's body: \"Both routes previously served any file under DATA_FOLDER without checking whether the file is a recognized media type or whether it resides in an excluded path... This could expose sidecar text/JSON files or other non-media content.\"",
+        "source_file_lines": "app.py, `@app.route(\"/images/<path:filename>\")` / `images()` handler, introduced by #56 (~line 1063)"
+      },
+      {
+        "id": "miso-gallery-21-207",
+        "repo_full_name": "misospace/miso-gallery",
+        "number": 21,
+        "head_sha": "40633ef562f030db704123331322b73c4454eb29",
+        "title": "fix(security): auth cleanup + CSRF + hashed local password",
+        "size": {
+          "additions": 418,
+          "deletions": 575,
+          "changedFiles": 7
+        },
+        "defect": {
+          "description": "During its auth-middleware cleanup, PR #21 deliberately preserved /view/* (and /thumb/*) as public, unauthenticated direct-file routes, but like the /images/ route added by #56, the /view/<path:filename> handler served any file under DATA_FOLDER with no media-type or excluded-path check, so it shared the same sidecar-file-disclosure defect later closed by #207.",
+          "file": "app.py",
+          "line_range": [
+            1298,
+            1298
+          ],
+          "severity": "major"
+        },
+        "fixing_pr": {
+          "number": 207,
+          "sha": "7e3ddc4d6f3455a6b8c6682b92bfccb3eb72e582",
+          "title": "fix: restrict /images and /view to media files only"
+        },
+        "confidence": "medium",
+        "evidence": "`git log -S'@app.route(\"/view/<path:filename>\")' -- app.py` traces the route to commit f05b3d2, resolved via commits/pulls API to PR #21 (\"fix(security): auth cleanup + CSRF + hashed local password\", which explicitly notes it \"Preserved public direct image access for /view/* and /thumb/*\"). F's body fixes both /images/ and /view/ with the identical is_media_file()/is_excluded_gallery_path() check, confirming both routes shared the defect; confidence is medium rather than high because #21 bundled many unrelated auth changes and the /view/ route's exact original introduction (vs. an even earlier pre-#21 ancestor) was not independently re-verified beyond the single git log -S match.",
+        "source_file_lines": "app.py, `@app.route(\"/view/<path:filename>\")` handler, introduced/preserved-as-public by #21 (~line 1298)"
+      }
+    ],
+    "clean": [
+      {
+        "id": "pr-reviewer-action-630-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 630,
+        "head_sha": "0025d328b2d4e999058be4921c0f9e07748e0dbe",
+        "size": {
+          "additions": null,
+          "deletions": null,
+          "changedFiles": 8,
+          "total_changed_lines": 3771
+        },
+        "expected_clean": true,
+        "summary": "feat(evals): specialist-mode eval fixtures and effectiveness telemetry (#610) — large eval-harness feature addition, no later PR references it as a bug source within the next 40 merges."
+      },
+      {
+        "id": "pr-reviewer-action-628-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 628,
+        "head_sha": "dc217aef61c53c2adb9af1f416a15e1b06e950d0",
+        "size": {
+          "changedFiles": 21,
+          "total_changed_lines": 3329
+        },
+        "expected_clean": true,
+        "summary": "feat(review): add requirement ledger with coverage credit (#624) — large review-scoring feature; clean in the following 40 merges."
+      },
+      {
+        "id": "pr-reviewer-action-133-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 133,
+        "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+        "size": {
+          "changedFiles": 5,
+          "total_changed_lines": 428
+        },
+        "expected_clean": true,
+        "summary": "feat: add review markdown sanitizer to neutralize upstream PR/issue refs — medium security-hardening feature; clean."
+      },
+      {
+        "id": "pr-reviewer-action-499-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 499,
+        "head_sha": "c1f193a9d43f94b5e31374e4461b3153a84d4b5e",
+        "size": {
+          "changedFiles": 3,
+          "total_changed_lines": 148
+        },
+        "expected_clean": true,
+        "summary": "Extend assert_safe_artifact_paths to cover 19 additional written artifact paths — small hardening PR; clean."
+      },
+      {
+        "id": "dispatch-468-clean",
+        "repo_full_name": "misospace/dispatch",
+        "number": 468,
+        "head_sha": "2e8c95ba5b4f482f9dd95b2f7d1bfaf9e83a6f1a",
+        "size": {
+          "changedFiles": 24,
+          "total_changed_lines": 2707
+        },
+        "expected_clean": true,
+        "summary": "feat(groomer): add durable history, audit UI, repo context, and guardrails — large groomer feature; clean."
+      },
+      {
+        "id": "dispatch-104-clean",
+        "repo_full_name": "misospace/dispatch",
+        "number": 104,
+        "head_sha": "6925188ae7b968a983f43e6b30a5729d67184b8f",
+        "size": {
+          "changedFiles": 7,
+          "total_changed_lines": 2769
+        },
+        "expected_clean": true,
+        "summary": "feat: add local MCP bridge for Mission Control worker APIs — large infra feature; clean."
+      },
+      {
+        "id": "dispatch-181-clean",
+        "repo_full_name": "misospace/dispatch",
+        "number": 181,
+        "head_sha": "421a04d670a67a0f691ee32073ee6781d32648e3",
+        "size": {
+          "changedFiles": 10,
+          "total_changed_lines": 1318
+        },
+        "expected_clean": true,
+        "summary": "feat: add audit/UI visibility for active agent work and stale leases (#168) — medium-large UI/API feature; clean."
+      },
+      {
+        "id": "dispatch-1025-clean",
+        "repo_full_name": "misospace/dispatch",
+        "number": 1025,
+        "head_sha": "e8cecb0acecf397177967bfed05936651e5516ae",
+        "size": {
+          "changedFiles": 6,
+          "total_changed_lines": 137
+        },
+        "expected_clean": true,
+        "summary": "feat(ci-failures): route scan/CVE failures to escalation lane — small feature; clean."
+      },
+      {
+        "id": "alert-triage-71-clean",
+        "repo_full_name": "misospace/alert-triage",
+        "number": 71,
+        "head_sha": "f25b767e8d867baf59d108922aecc4a9ab129f17",
+        "size": {
+          "changedFiles": 4,
+          "total_changed_lines": 2055
+        },
+        "expected_clean": true,
+        "summary": "feat(github): open PRs for fix proposals — large new-capability feature; clean."
+      },
+      {
+        "id": "alert-triage-43-clean",
+        "repo_full_name": "misospace/alert-triage",
+        "number": 43,
+        "head_sha": "8d5ada6695e476697d6ec67c7eb413fe8d3ca828",
+        "size": {
+          "changedFiles": 6,
+          "total_changed_lines": 1244
+        },
+        "expected_clean": true,
+        "summary": "feat: query Prometheus-compatible backend for metric evidence — medium-large feature; clean."
+      },
+      {
+        "id": "alert-triage-90-clean",
+        "repo_full_name": "misospace/alert-triage",
+        "number": 90,
+        "head_sha": "b310d497bb97f5945e629e4afc9d4b4bfd25da7e",
+        "size": {
+          "changedFiles": 3,
+          "total_changed_lines": 137
+        },
+        "expected_clean": true,
+        "summary": "perf(metrics): fetch /api/v1/rules once per flush and share across groups — small perf fix; clean."
+      },
+      {
+        "id": "courier-64-clean",
+        "repo_full_name": "misospace/courier",
+        "number": 64,
+        "head_sha": "aaef5406713446a449a29965973384878d3bcb83",
+        "size": {
+          "changedFiles": 11,
+          "total_changed_lines": 2031
+        },
+        "expected_clean": true,
+        "summary": "feat(log): structured run events with secret redaction — large logging feature; clean."
+      },
+      {
+        "id": "courier-100-clean",
+        "repo_full_name": "misospace/courier",
+        "number": 100,
+        "head_sha": "d5cb1197b022359f6a7ef7be44b212a6a1e49538",
+        "size": {
+          "changedFiles": 7,
+          "total_changed_lines": 719
+        },
+        "expected_clean": true,
+        "summary": "feat: add liveness reap and crashloop backstop — medium reliability feature; clean."
+      },
+      {
+        "id": "courier-143-clean",
+        "repo_full_name": "misospace/courier",
+        "number": 143,
+        "head_sha": "72f8a4673351d808114a2fb48e6652db54e318e8",
+        "size": {
+          "changedFiles": 3,
+          "total_changed_lines": 141
+        },
+        "expected_clean": true,
+        "summary": "ci: build Go binaries on the runner instead of inside Docker — small CI change; clean."
+      },
+      {
+        "id": "pr-reviewer-action-600-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 600,
+        "head_sha": "8457760a0315eb8834f15ce8204a8ae18c10f5d1",
+        "size": {
+          "changedFiles": 4,
+          "total_changed_lines": 1217
+        },
+        "expected_clean": true,
+        "summary": "feat(context): add related code scanner — implements #572; part of maintainer-flagged #598/#600/#601 group investigated for a defect and found clean (no later fix references it or the group; see summary doc)."
+      }
+    ]
+  },
+  "metadata": {
+    "description": "Real merged PRs reviewed at their actual head commit (issue #779). Vulnerable entries introduced a defect that a later merged PR fixed; clean entries have no later fix and score false positives. Anchors (file/line_range) were extracted from the candidate JSON's file_lines field, cross-checked via git log -S and the commits/{sha}/pulls API.",
+    "source_issue": "misospace/pr-reviewer-action#779",
+    "candidate_count": {
+      "vulnerable": 27,
+      "clean": 15
+    },
+    "built_at": "2026-09-26"
+  }
+}
