@@ -7,7 +7,7 @@
  * in fixed insertion order. Only the JSON shapes the artifacts contain are
  * supported (objects, arrays, strings, finite numbers, booleans, null). */
 
-function escapeString(text: string): string {
+function escapeString(text: string, ensureAscii = false): string {
   let out = "";
   for (const ch of text) {
     switch (ch) {
@@ -36,6 +36,9 @@ function escapeString(text: string): string {
         const code = ch.codePointAt(0) ?? 0;
         if (code < 0x20) {
           out += `\\u${code.toString(16).padStart(4, "0")}`;
+        } else if (ensureAscii && code > 0x7e) {
+          // Python escapes astral characters as a UTF-16 surrogate pair.
+          for (let i = 0; i < ch.length; i++) out += `\\u${ch.charCodeAt(i).toString(16).padStart(4, "0")}`;
         } else {
           out += ch;
         }
@@ -45,31 +48,35 @@ function escapeString(text: string): string {
   return out;
 }
 
-function encode(value: unknown, indent: number, level: number): string {
+function encode(value: unknown, indent: number, level: number, ensureAscii: boolean): string {
   const pad = " ".repeat(indent * (level + 1));
   const closePad = " ".repeat(indent * level);
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "string") return `"${escapeString(value)}"`;
+  if (typeof value === "string") return `"${escapeString(value, ensureAscii)}"`;
   if (typeof value === "number") {
     if (Number.isInteger(value)) return String(value);
     return String(value);
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
-    const items = value.map((item) => `${pad}${encode(item, indent, level + 1)}`);
+    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, ensureAscii)}`);
     return `[\n${items.join(",\n")}\n${closePad}]`;
   }
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>);
     if (entries.length === 0) return "{}";
-    const items = entries.map(([key, item]) => `${pad}${JSON.stringify(key)}: ${encode(item, indent, level + 1)}`);
+    const items = entries.map(([key, item]) => {
+      const keyText = ensureAscii ? `"${escapeString(key, true)}"` : JSON.stringify(key);
+      return `${pad}${keyText}: ${encode(item, indent, level + 1, ensureAscii)}`;
+    });
     return `{\n${items.join(",\n")}\n${closePad}}`;
   }
   throw new TypeError(`pyJsonDump: unsupported value ${typeof value}`);
 }
 
-/** `json.dumps(value, ensure_ascii=False, indent=indent)` — insertion order. */
-export function pyJsonDump(value: unknown, indent = 2): string {
-  return encode(value, Math.min(Math.max(0, indent), 8), 0);
+/** `json.dumps(value, ensure_ascii=ensureAscii, indent=indent)` — insertion
+ * order. `ensureAscii` (Python's default) escapes everything above `~`. */
+export function pyJsonDump(value: unknown, indent = 2, ensureAscii = false): string {
+  return encode(value, Math.min(Math.max(0, indent), 8), 0, ensureAscii);
 }

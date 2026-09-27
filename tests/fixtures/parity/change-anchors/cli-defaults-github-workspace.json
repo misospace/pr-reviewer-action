@@ -1,0 +1,14 @@
+{
+ "fixture": "cli-defaults-github-workspace",
+ "description": "CLI defaults: no arguments reads pr.diff (missing here, so an empty diff), no file list, writes change-anchors.json, and takes the workspace root from GITHUB_WORKSPACE.",
+ "cli": {
+  "argv": [],
+  "github_workspace": "",
+  "read": [
+   "change-anchors.json"
+  ]
+ },
+ "repo_files": {
+  "src/unrelated.py": "x = 1\n"
+ }
+}

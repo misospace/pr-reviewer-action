@@ -1,0 +1,22 @@
+{
+ "fixture": "cli-escape-refused",
+ "description": "CLI: an --output that resolves outside the workspace root is refused with exit 1 and the Python repr of both paths (double quotes for a path containing a single quote); nothing is written.",
+ "cli": {
+  "argv": [
+   "--diff",
+   "pr.diff",
+   "--output",
+   "../it's-out.json",
+   "--workspace-root",
+   "{workspace}"
+  ],
+  "github_workspace": null,
+  "read": [
+   "../it's-out.json"
+  ]
+ },
+ "repo_files": {
+  "pr.diff": "diff --git a/src/cli_mod.py b/src/cli_mod.py\nindex 1111111..2222222 100644\n--- a/src/cli_mod.py\n+++ b/src/cli_mod.py\n@@ -1,2 +1,2 @@\n def cli_function(a):\n-    return a\n+    return a * 2\n",
+  "src/cli_mod.py": "def cli_function(a):\n    return a * 2\n"
+ }
+}

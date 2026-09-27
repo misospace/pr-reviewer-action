@@ -1,0 +1,26 @@
+{
+ "fixture": "cli-abbrev-crlf-malformed-files",
+ "description": "CLI: argparse-style unique prefixes and --opt=value, a CRLF diff with invalid UTF-8 read with replacement and universal newlines (so the head file matches), and a malformed file list degrading to none.",
+ "cli": {
+  "argv": [
+   "--dif=pr.diff",
+   "--fi",
+   "pr-files.json",
+   "--out",
+   "anchors.json",
+   "--work",
+   "{workspace}"
+  ],
+  "github_workspace": null,
+  "read": [
+   "anchors.json"
+  ]
+ },
+ "repo_files": {
+  "pr-files.json": "{not json",
+  "src/cli_mod.py": "def cli_function(a):\n    return a * 2\n"
+ },
+ "repo_files_b64": {
+  "pr.diff": "ZGlmZiAtLWdpdCBhL3NyYy9jbGlfbW9kLnB5IGIvc3JjL2NsaV9tb2QucHkNCmluZGV4IDExMTExMTEuLjIyMjIyMjIgMTAwNjQ0DQotLS0gYS9zcmMvY2xpX21vZC5weQ0KKysrIGIvc3JjL2NsaV9tb2QucHkNCkBAIC0xLDIgKzEsMiBAQA0KIGRlZiBjbGlfZnVuY3Rpb24oYSk6DQotICAgIHJldHVybiBhDQorICAgIHJldHVybiBhICogMg0KZGlmZiAtLWdpdCBhL3NyYy9iLnB5IGIvc3JjL2IucHkNCkBAIC0wLDAgKzEgQEANCitkZWYgYmFkX/9fYnl0ZXMoKToNCg=="
+ }
+}
