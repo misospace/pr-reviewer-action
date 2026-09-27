@@ -1,0 +1,24 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "approve",
+    "review_markdown": "## Review\n\nTool harness degraded; see below.",
+    "findings": [],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "tool_harness": {
+    "tier": "primary",
+    "mode": "native_loop",
+    "planning_error": "planner request failed after 3 attempts",
+    "executed_request_count": 0,
+    "tool_results": []
+  },
+  "must_check": [],
+  "config": {
+    "verdict_policy": "model",
+    "tool_failure_enforcement": true,
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}

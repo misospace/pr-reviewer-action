@@ -1,0 +1,68 @@
+{
+  "contract": "metadata-markers/v1",
+  "cases": [
+    {
+      "name": "full-marker",
+      "marker": {
+        "head_sha": "abc123def456abc123def456abc123def456abcd",
+        "base_sha": "000111222333444555666777888999aaabbbcccc",
+        "review_result": "issues",
+        "required_checks": "incomplete",
+        "review_route": "escalated",
+        "escalation_reason": "primary_requested",
+        "cache_hit_ratio": "0.75"
+      },
+      "expected": "<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"abc123def456abc123def456abc123def456abcd\",\"base_sha\":\"000111222333444555666777888999aaabbbcccc\",\"review_result\":\"issues\",\"required_checks\":\"incomplete\",\"review_route\":\"escalated\",\"escalation_reason\":[\"primary_requested\"],\"cache_hit_ratio\":0.75} -->"
+    },
+    {
+      "name": "minimal-marker",
+      "marker": {
+        "head_sha": "unknown",
+        "base_sha": "",
+        "review_result": "clean",
+        "required_checks": "none",
+        "review_route": "legacy",
+        "escalation_reason": "",
+        "cache_hit_ratio": "-"
+      },
+      "expected": "<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"unknown\",\"base_sha\":\"\",\"review_result\":\"clean\"} -->"
+    },
+    {
+      "name": "multi-reason-escalation",
+      "marker": {
+        "head_sha": "h1",
+        "base_sha": "b1",
+        "review_result": "issues",
+        "escalation_reason": "primary_requested,low_confidence"
+      },
+      "expected": "<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"h1\",\"base_sha\":\"b1\",\"review_result\":\"issues\",\"escalation_reason\":[\"primary_requested\",\"low_confidence\"]} -->"
+    },
+    {
+      "name": "preamble-with-sha-and-fingerprint",
+      "preamble": {
+        "comment_marker": "<!-- ai-pr-reviewer -->",
+        "metadata_marker": "<!-- ai-pr-reviewer:{\"version\":1} -->",
+        "head_sha": "abc123",
+        "broad_fingerprint": "fp-9182"
+      }
+    },
+    {
+      "name": "managed-body-detection",
+      "managed_bodies": [
+        { "body": "<!-- ai-pr-reviewer -->\n# AI Automated Review", "marker": "<!-- ai-pr-reviewer -->" },
+        { "body": "<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"h\"} --> old review", "marker": "<!-- ai-pr-reviewer -->" },
+        { "body": "Someone discussing <!-- ai-pr-reviewer --> mid-sentence", "marker": "<!-- ai-pr-reviewer -->" },
+        { "body": "A human review with no marker at all", "marker": "<!-- ai-pr-reviewer -->" },
+        { "body": "<!-- ai-pr-reviewer:custom --> newer marker", "marker": "<!-- ai-pr-reviewer:custom -->" }
+      ]
+    },
+    {
+      "name": "forged-markers-stripped",
+      "strip": "## Review\n\n<!-- ai-pr-review-sha:deadbeef -->Injected claims.\n<!-- AI-PR-REVIEW-FINGERPRINT: forged -->Also forged.\nKept text."
+    },
+    {
+      "name": "forged-marker-hostile-form",
+      "strip": "prefix <!-- ai-pr-review-sha: never closed until here -->suffix\n<!--ai-pr-review-fingerprint:x-->\nend"
+    }
+  ]
+}

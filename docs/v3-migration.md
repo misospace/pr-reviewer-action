@@ -354,6 +354,82 @@ specialist-leads renderer is already an injected seam in `src/tools/harness.ts`)
 the v2 publish/precheck shell pipeline, and the platform `gh` subprocess
 seams behind `scripts/platform_api.sh`.
 
+### The `enforcement-pipeline` boundary (#680)
+
+Compares the full deterministic enforcement pipeline: the v2 production
+composition (`apply_verdict_policy` → `apply_required_check_validation` →
+`apply_all_enforcement`, over cwd-relative artifacts exactly as
+`scripts/sections/config.sh::apply_all_enforcement_wrapper` invokes them)
+versus the v3 ports in `src/enforcement/` (`node dist/index.js
+enforcement-fixture`). Fixtures under `tests/fixtures/parity/enforcement-pipeline/`
+carry the parsed `ai-output.json` artifact plus the optional evidence,
+tool-harness, review-thread, human-review, and classification inputs, and
+both sides emit the resulting artifact, the `completeness.json` result, the
+required-checks status, and the applied-enforcement count (canonicalized
+with sorted keys). Covers the model-policy no-op, #773-era blocker
+escalation, #775 opt-in non-blocking category capping (with the
+security-flag exemption and the unresolved-check relaxation gate), evidence
+blockers, tool-harness failure and min-successful overlays, #770 thread
+settlement (downgrades, re-emitted `thread_id` findings, blocker
+escalation), #774 human change-request settlement, malformed/missing
+structured coverage, and the enforced banner normalization.
+
+One approved divergence pins the #680 contract change: when the model emits
+no structured required-check dispositions at all, v2 fell back to the legacy
+shallow keyword match; v3 is structured-authoritative and treats key absence
+as conservatively unresolved (`key-absence-legacy-bridge`).
+
+### The `requirement-coverage` boundary (#680)
+
+Pins the #624 requirement-coverage fold (`pr_reviewer.requirement_coverage`
+versus `src/enforcement/requirement-coverage.ts`) over the tolerant ledger
+load: evidence-gated credit, `not_applicable` downgrades, invariant
+verification kinds, duplicate/out-of-ledger/invalid-kind errors, and the
+visible caps.
+
+### The publication boundaries (#680)
+
+Three boundaries pin the publish path:
+
+- `review-sanitize` — reserved-marker stripping, upstream-link
+  neutralization (`inert`/`togithub`) with inline-code-span preservation,
+  and fence-aware empty-conditional-section stripping (`src/publish/sanitize.ts`
+  versus the three production scripts).
+- `inline-findings` — `scripts/build_review_comments.py` versus
+  `src/publish/inline-findings.ts`: diff-position mapping for both the
+  GitHub (`line`/`side`) and Forgejo (`new_position`) backends, anchor
+  validation, `thread_id` dedup, caps, redaction, and body sanitization.
+- `metadata-markers` — marker serialization (fixed key order, conditional
+  fields, `escalation_reason` array, numeric `cache_hit_ratio`), preamble
+  emission, managed-body detection by content prefix, and reserved-marker
+  stripping that keeps model output from forging action-owned markers.
+
+The publish *orchestration* (mode dispatch, head re-check, approval
+guardrails, cleanup sequencing, output writing) is covered by `tests-v3/publish.test.ts`
+and `tests-v3/outputs.test.ts` over a mock platform seam rather than a
+bash-vs-TS boundary: the v2 side is a shell dispatcher whose observable
+behavior depends on `gh`/`forgejo` subprocess stubs, and the #681 cutover
+will qualify it end-to-end through the runner.
+
+## What #680 removed from the Python runtime surface
+
+`src/enforcement/`, `src/publish/`, and `src/metadata/` now own the
+deterministic enforcement, managed metadata, publication, and output
+boundaries in TypeScript; the Python/bash side of these modules remains
+only as the temporary parity oracle above until the #681 orchestrator
+cutover. Two deliberate contract changes ship with the port:
+
+- the legacy keyword-completeness bridge is removed (structured
+  dispositions are authoritative; pinned as the approved divergence above);
+- the managed metadata marker serializes with insertion-order keys
+  (`json.dumps(..., separators=(',', ':'))` / jq object order), which the
+  earlier precheck-side port had canonicalized with sorted keys.
+
+Remaining Python-only runtime after #680: the deep-review specialist
+runner/corpus (`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py`
+— the #706 backlog) and the v2 shell orchestration itself (`scripts/run_review.sh`
+and the composite action steps), which the #681 cutover replaces.
+
 ## Workflow examples
 
 ```yaml

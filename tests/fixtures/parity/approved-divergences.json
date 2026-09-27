@@ -12,108 +12,235 @@
   "entries": [
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "numeric-bounds"
+      ],
       "key": "aiPrimaryApiFormat",
-      "expected": { "old": "", "new": "openai" },
+      "expected": {
+        "old": "",
+        "new": "openai"
+      },
       "reason": "Tier representation change: v3 resolves the primary tier's api format at config time (resolveInherited, inheriting 'openai'); v2 left it empty and fell back at call time (classification.sh PRIMARY_* resolution). The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["explicit-values"],
+      "fixtures": [
+        "explicit-values"
+      ],
       "key": "aiPrimaryApiFormat",
-      "expected": { "old": "", "new": "anthropic" },
+      "expected": {
+        "old": "",
+        "new": "anthropic"
+      },
       "reason": "Tier representation change: v3 resolves the primary tier's api format at config time (resolveInherited, inheriting the configured 'anthropic'); v2 left it empty and fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "explicit-values",
+        "numeric-bounds"
+      ],
       "key": "aiPrimaryBaseUrl",
-      "expected": { "old": "", "new": "https://primary.example.com/v1" },
+      "expected": {
+        "old": "",
+        "new": "https://primary.example.com/v1"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "explicit-values",
+        "numeric-bounds"
+      ],
       "key": "aiPrimaryModel",
-      "expected": { "old": "", "new": "primary-model" },
+      "expected": {
+        "old": "",
+        "new": "primary-model"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves aiPrimaryModel from aiModel in resolveInherited; v2 left it empty and classification.sh fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "numeric-bounds"
+      ],
       "key": "aiSmartApiFormat",
-      "expected": { "old": "", "new": "openai" },
+      "expected": {
+        "old": "",
+        "new": "openai"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartApiFormat from aiApiFormat ('openai') in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["explicit-values"],
+      "fixtures": [
+        "explicit-values"
+      ],
       "key": "aiSmartApiFormat",
-      "expected": { "old": "", "new": "anthropic" },
+      "expected": {
+        "old": "",
+        "new": "anthropic"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartApiFormat from aiApiFormat ('anthropic') in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "explicit-values",
+        "numeric-bounds"
+      ],
       "key": "aiSmartBaseUrl",
-      "expected": { "old": "", "new": "https://primary.example.com/v1" },
+      "expected": {
+        "old": "",
+        "new": "https://primary.example.com/v1"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves aiSmartBaseUrl from aiBaseUrl in resolveInherited; v2 left it empty and fell back at call time. The effective call-time value is identical."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["tier-inheritance"],
+      "fixtures": [
+        "tier-inheritance"
+      ],
       "key": "aiPrimaryApiKey",
-      "expected": { "old": "", "new": "[REDACTED]" },
+      "expected": {
+        "old": "",
+        "new": "[REDACTED]"
+      },
       "reason": "Secret presence representation: v3 inherits the primary tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["tier-inheritance"],
+      "fixtures": [
+        "tier-inheritance"
+      ],
       "key": "aiSmartApiKey",
-      "expected": { "old": "", "new": "[REDACTED]" },
+      "expected": {
+        "old": "",
+        "new": "[REDACTED]"
+      },
       "reason": "Secret presence representation: v3 inherits the smart tier's api key from the primary key at config time; v2 left it empty and the transport fell back at call time. Secrets are compared by redacted presence only."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["explicit-values"],
+      "fixtures": [
+        "explicit-values"
+      ],
       "key": "primaryModelContextTokens",
-      "expected": { "old": "", "new": "200000" },
+      "expected": {
+        "old": "",
+        "new": "200000"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves primaryModelContextTokens from modelContextTokens (200000) in resolveInherited; v2 left it empty and apply_context_limits fell back to the identical global budget."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["explicit-values"],
+      "fixtures": [
+        "explicit-values"
+      ],
       "key": "smartModelContextTokens",
-      "expected": { "old": "", "new": "200000" },
+      "expected": {
+        "old": "",
+        "new": "200000"
+      },
       "reason": "Tier inheritance moved from call time to config time: v3 resolves smartModelContextTokens from modelContextTokens (200000) in resolveInherited; v2 left it empty and apply_context_limits fell back to the identical global budget."
     },
     {
       "boundary": "config-default-resolution",
-      "fixtures": ["defaults-only", "empty-temperature-omitted", "tier-inheritance", "explicit-values", "numeric-bounds"],
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
+        "explicit-values",
+        "numeric-bounds"
+      ],
       "key": "forgejoToken",
-      "expected": { "old": "[REDACTED]", "new": "" },
+      "expected": {
+        "old": "[REDACTED]",
+        "new": ""
+      },
       "reason": "v2 inherits the Forgejo token from the GitHub token through the action.yml env expression (inputs.forgejo_token || inputs.github_token); the v3 loader does not inherit it. The #681 cutover must re-wire this fallback in the v3 composite env block; pinned here so the gap stays visible until then."
     },
     {
       "boundary": "config-default-resolution",
       "fixture": "degradable-enums",
       "key": "<outcome>",
-      "expected": { "old": "ok", "new": "error:invalid-enum" },
+      "expected": {
+        "old": "ok",
+        "new": "error:invalid-enum"
+      },
       "reason": "v2 degrades each unrecognized enum-shaped dial to its default with an ERROR log and continues the review (ai_response_format->off, verdict_policy->model, review_verbosity->normal after lowercasing, tool_mode->off including the removed plan_execute_* names from #304); the v3 contract validates enums strictly at resolution time and rejects the input."
     },
     {
       "boundary": "config-default-resolution",
       "fixture": "invalid-integers",
       "key": "<outcome>",
-      "expected": { "old": "ok", "new": "error:invalid-number" },
+      "expected": {
+        "old": "ok",
+        "new": "error:invalid-number"
+      },
       "reason": "v2 degrades malformed or out-of-range numeric inputs to their defaults with an ERROR log and continues (ai_max_tokens->8192, ai_temperature->0.1, tool_min_successful_requests->0, repo_map_max_bytes->12000 within the same 1..200000 bounds); the v3 contract rejects them at resolution time."
     },
     {
       "boundary": "config-default-resolution",
       "fixture": "uppercase-api-format",
       "key": "<outcome>",
-      "expected": { "old": "ok", "new": "error:invalid-enum" },
+      "expected": {
+        "old": "ok",
+        "new": "error:invalid-enum"
+      },
       "reason": "v2 normalized the api format case-insensitively (normalize_api_format lowercases before validating); the v3 contract accepts only the exact declared enum values and rejects anything else at resolution time."
+    },
+    {
+      "boundary": "enforcement-pipeline",
+      "fixtures": [
+        "key-absence-legacy-bridge"
+      ],
+      "key": "required_checks",
+      "expected": {
+        "old": "complete",
+        "new": "incomplete"
+      },
+      "reason": "#680 removes the v2 coexistence bridge: when the model emitted no structured required-check dispositions at all, v2 fell back to the legacy shallow keyword match against review_markdown (documented in pr_reviewer/completeness.py as removed by #680). The v3 pipeline is structured-authoritative: key absence is conservatively unresolved (every check unresolved, warn/fail modes act on it). Pinned per key with the exact old and new values."
+    },
+    {
+      "boundary": "enforcement-pipeline",
+      "fixtures": [
+        "key-absence-legacy-bridge"
+      ],
+      "key": "completeness_result",
+      "expected": {
+        "old": "{\"addressed\": [\"run full test suite after upgrade\"], \"missing\": [], \"mode\": \"warn\", \"status\": \"complete\", \"structured\": false}",
+        "new": "{\"addressed\": [], \"checks\": [{\"check\": \"run full test suite after upgrade\", \"rationale\": null, \"reason\": \"no-structured-dispositions\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"missing\": [\"run full test suite after upgrade\"], \"mode\": \"warn\", \"status\": \"incomplete\", \"structured\": false}"
+      },
+      "reason": "#680 removes the v2 coexistence bridge: when the model emitted no structured required-check dispositions at all, v2 fell back to the legacy shallow keyword match against review_markdown (documented in pr_reviewer/completeness.py as removed by #680). The v3 pipeline is structured-authoritative: key absence is conservatively unresolved (every check unresolved, warn/fail modes act on it). Pinned per key with the exact old and new values."
+    },
+    {
+      "boundary": "enforcement-pipeline",
+      "fixtures": [
+        "key-absence-legacy-bridge"
+      ],
+      "key": "artifact",
+      "expected": {
+        "old": "{\"findings\": [], \"required_checks\": \"complete\", \"review_markdown\": \"## Review\\n\\nThis diff upgrades the lockfile and runs the full test suite after upgrade.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\", \"verdict_source\": \"model\"}",
+        "new": "{\"findings\": [], \"required_checks\": \"incomplete\", \"review_markdown\": \"## Review\\n\\nThis diff upgrades the lockfile and runs the full test suite after upgrade.\\n\\n### Unaddressed required checks\\nThe classifier marked these checks as required for this PR's risk profile, but the review does not resolve or disposition them:\\n\\n- run full test suite after upgrade\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\", \"verdict_source\": \"model\"}"
+      },
+      "reason": "#680 removes the v2 coexistence bridge: when the model emitted no structured required-check dispositions at all, v2 fell back to the legacy shallow keyword match against review_markdown (documented in pr_reviewer/completeness.py as removed by #680). The v3 pipeline is structured-authoritative: key absence is conservatively unresolved (every check unresolved, warn/fail modes act on it). Pinned per key with the exact old and new values."
     }
   ]
 }

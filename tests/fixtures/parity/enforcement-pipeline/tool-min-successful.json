@@ -1,0 +1,31 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "approve",
+    "review_markdown": "## Review\n\nTwo of five tool calls succeeded.",
+    "findings": [],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "tool_harness": {
+    "tier": "primary",
+    "mode": "native_loop",
+    "planning_error": null,
+    "executed_request_count": 5,
+    "tool_results": [
+      { "tool": "git_status_short", "status": "ok" },
+      { "tool": "git_diff_stat", "status": "ok" },
+      { "tool": "git_diff_name_only", "status": "error" },
+      { "tool": "gh_api", "status": "error" },
+      { "tool": "gh_api", "status": "error" }
+    ]
+  },
+  "must_check": [],
+  "config": {
+    "verdict_policy": "model",
+    "tool_failure_enforcement": true,
+    "tool_min_successful_requests": 3,
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}
