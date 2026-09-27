@@ -18,6 +18,8 @@ import pytest
 from pr_reviewer.change_anchors import (
     ARTIFACT_VERSION,
     MAX_ANCHORS,
+    MAX_ENCLOSING,
+    MAX_ENCLOSING_PER_FILE,
     MAX_FILES,
     MAX_IMPORTS_PER_FILE,
     MAX_SYMBOLS_PER_FILE,
@@ -25,6 +27,7 @@ from pr_reviewer.change_anchors import (
     extract_change_anchors,
     load_file_list,
     main,
+    read_head_lines,
 )
 
 
@@ -1106,3 +1109,344 @@ class TestCLI:
                 assert outside_target.read_text() == "{}"
             finally:
                 shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Enclosing declarations (#764)
+# ---------------------------------------------------------------------------
+
+_GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
+def _git_diff(root: Path, base: dict[str, str], head: dict[str, str]) -> str:
+    """Write ``base``, stage it, write ``head``, and return ``git diff``."""
+    for path, content in base.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, env=_GIT_ENV)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=_GIT_ENV)
+    for path, content in head.items():
+        (root / path).write_text(content, encoding="utf-8")
+    return subprocess.run(
+        ["git", "-C", str(root), "diff", "--no-color", "--no-ext-diff"],
+        check=True, env=_GIT_ENV, capture_output=True, text=True,
+    ).stdout
+
+
+def _enclosing(result: dict, path: str | None = None) -> list[tuple[str, str, int]]:
+    return [
+        (sym["name"], sym["confidence"], sym["line"])
+        for entry in result["files"]
+        if path is None or entry["path"] == path
+        for sym in entry["symbols"]
+        if sym["kind"] == "enclosing"
+    ]
+
+
+def _edit(tmp_path: Path, path: str, base: str, head: str) -> dict:
+    diff = _git_diff(tmp_path, {path: base}, {path: head})
+    return extract_change_anchors(diff, None, source_root=tmp_path)
+
+
+_PY_MODULE = """import os
+
+
+class Store:
+    def __init__(self, ttl):
+        self.ttl = ttl
+
+    def lookup(self, key):
+        value = os.environ.get(key)
+        return value
+
+
+def refresh_token(scope):
+    token = scope + "-token"
+    return token
+
+
+LIMIT = 3
+"""
+
+
+class TestEnclosing:
+    def test_python_function_body_edit(self, tmp_path):
+        head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')
+        result = _edit(tmp_path, "m.py", _PY_MODULE, head)
+        assert _enclosing(result) == [("refresh_token", "high", 13)]
+        assert ("symbol", "refresh_token") in {(a["kind"], a["value"]) for a in result["anchors"]}
+        assert result["truncated"] is False
+
+    def test_python_method_body_edit_names_the_method(self, tmp_path):
+        head = _PY_MODULE.replace("os.environ.get(key)", "os.environ.get(key, None)")
+        assert _enclosing(_edit(tmp_path, "m.py", _PY_MODULE, head)) == [("lookup", "high", 8)]
+
+    def test_dunder_method_falls_through_to_class(self, tmp_path):
+        head = _PY_MODULE.replace("self.ttl = ttl", "self.ttl = int(ttl)")
+        assert _enclosing(_edit(tmp_path, "m.py", _PY_MODULE, head)) == [("Store", "high", 4)]
+
+    def test_module_top_level_change_has_no_enclosing(self, tmp_path):
+        head = _PY_MODULE.replace("LIMIT = 3", "LIMIT = 5")
+        result = _edit(tmp_path, "m.py", _PY_MODULE, head)
+        assert _enclosing(result) == []
+        assert result["files"][0]["symbols"] == []
+
+    def test_top_level_block_after_function_is_not_enclosed(self, tmp_path):
+        base = "def helper_fn():\n    return 1\n\n\nif os.name:\n    FLAG = 1\n"
+        head = base.replace("FLAG = 1", "FLAG = 2")
+        assert _enclosing(_edit(tmp_path, "m.py", base, head)) == []
+
+    def test_multiline_signature_closer_does_not_end_body(self, tmp_path):
+        base = "def build_client(\n    host,\n    port,\n) -> str:\n    url = host\n    return url\n"
+        head = base.replace("url = host", "url = f'{host}:{port}'")
+        assert _enclosing(_edit(tmp_path, "m.py", base, head)) == [("build_client", "high", 1)]
+
+    def test_comment_at_column_zero_inside_body_is_ignored(self, tmp_path):
+        base = "def compute_total(items):\n    total = 0\n# legacy note\n    return total\n"
+        head = base.replace("return total", "return total + 1")
+        assert _enclosing(_edit(tmp_path, "m.py", base, head)) == [("compute_total", "high", 1)]
+
+    def test_deletion_only_run(self, tmp_path):
+        head = _PY_MODULE.replace("        value = os.environ.get(key)\n", "")
+        assert _enclosing(_edit(tmp_path, "m.py", _PY_MODULE, head)) == [("lookup", "high", 8)]
+
+    def test_sibling_functions_in_one_hunk_resolve_per_run(self, tmp_path):
+        base = (
+            "def fetch_jwt():\n    token = 'a'\n    CACHE['jwt'] = token\n    return token\n"
+            "\n\ndef get_jwt():\n    cached = CACHE.get('jwt')\n    return cached or fetch_jwt()\n"
+        )
+        head = base.replace(
+            "    CACHE['jwt'] = token\n", "    with LOCK:\n        CACHE['jwt'] = token\n"
+        ).replace(
+            "    cached = CACHE.get('jwt')\n", "    with LOCK:\n        cached = CACHE.get('jwt')\n"
+        )
+        diff = _git_diff(tmp_path, {"m.py": base}, {"m.py": head})
+        assert diff.count("\n@@ ") == 1
+        result = extract_change_anchors(diff, None, source_root=tmp_path)
+        assert _enclosing(result) == [("fetch_jwt", "high", 1), ("get_jwt", "high", 8)]
+
+    def test_typescript_function_and_method_body_edits(self, tmp_path):
+        base = (
+            "export class RequestHandler {\n"
+            "  constructor(private readonly name: string) {\n"
+            "    this.name = name;\n"
+            "  }\n"
+            "\n"
+            "  async handleRequest(input: string): Promise<string> {\n"
+            "    const trimmed = input.trim();\n"
+            "    return trimmed;\n"
+            "  }\n"
+            "}\n"
+            "\n"
+            "export function formatReply(body: string) {\n"
+            "  if (body) {\n"
+            "    return body;\n"
+            "  }\n"
+            "  return '';\n"
+            "}\n"
+            "\n"
+            "export const toLabel = (value: string) => {\n"
+            "  return value;\n"
+            "};\n"
+        )
+        head = (
+            base.replace("return trimmed;", "return trimmed.toLowerCase();")
+            .replace("return '';", "return 'empty';")
+            .replace("  return value;", "  return value.trim();")
+            .replace("this.name = name;", "this.name = name.trim();")
+        )
+        result = _edit(tmp_path, "src/handler.ts", base, head)
+        assert _enclosing(result) == [
+            ("RequestHandler", "high", 1),
+            ("handleRequest", "high", 6),
+            ("formatReply", "high", 12),
+            ("toLabel", "medium", 19),
+        ]
+
+    def test_javascript_control_flow_is_not_a_method(self, tmp_path):
+        base = "function runLoop(items) {\n  for (const item of items) {\n    if (item) {\n      use(item);\n    }\n  }\n}\n"
+        head = base.replace("use(item);", "use(item, 1);")
+        assert _enclosing(_edit(tmp_path, "a.js", base, head)) == [("runLoop", "high", 1)]
+
+    def test_go_method_and_struct_body_edits(self, tmp_path):
+        base = (
+            "package server\n\n"
+            "type Server struct {\n\tname string\n}\n\n"
+            "func (s *Server) Serve(port int) error {\n"
+            "\taddr := port\n"
+            "\tif addr > 0 {\n\t\treturn nil\n\t}\n"
+            "\treturn nil\n"
+            "}\n\n"
+            "var DefaultPort = 80\n"
+        )
+        head = (
+            base.replace("\t\treturn nil", "\t\treturn fmt.Errorf(\"x\")")
+            .replace("\tname string", "\tname string\n\tport int")
+            .replace("DefaultPort = 80", "DefaultPort = 8080")
+        )
+        result = _edit(tmp_path, "server.go", base, head)
+        assert _enclosing(result) == [("Server", "high", 3), ("Serve", "high", 8)]
+
+    def test_closing_brace_change_resolves_to_its_declaration(self, tmp_path):
+        base = "func handleConn(c int) {\n\tuse(c)\n}\n"
+        head = "func handleConn(c int) {\n\tuse(c)\n} // end\n"
+        assert _enclosing(_edit(tmp_path, "x.go", base, head)) == [("handleConn", "high", 1)]
+
+    def test_low_value_enclosing_name_is_skipped(self, tmp_path):
+        base = "def main():\n    run_all()\n"
+        head = "def main():\n    run_all(1)\n"
+        assert _enclosing(_edit(tmp_path, "m.py", base, head)) == []
+
+    def test_added_declaration_is_not_duplicated_as_enclosing(self, tmp_path):
+        head = _PY_MODULE.replace(
+            'def refresh_token(scope):\n    token = scope + "-token"',
+            'def refresh_token(scope, prefix=""):\n    token = prefix + scope + "-token"',
+        )
+        result = _edit(tmp_path, "m.py", _PY_MODULE, head)
+        assert [(s["name"], s["kind"]) for s in result["files"][0]["symbols"]] == [
+            ("refresh_token", "function"),
+        ]
+
+    def test_added_method_seeds_its_class(self, tmp_path):
+        head = _PY_MODULE.replace(
+            "        return value\n",
+            "        return value\n\n    def evict_entry(self, key):\n        return key\n",
+        )
+        result = _edit(tmp_path, "m.py", _PY_MODULE, head)
+        assert [(s["name"], s["kind"]) for s in result["files"][0]["symbols"]] == [
+            ("evict_entry", "function"), ("Store", "enclosing"),
+        ]
+
+    def test_no_source_root_keeps_legacy_output(self, tmp_path):
+        head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')
+        diff = _git_diff(tmp_path, {"m.py": _PY_MODULE}, {"m.py": head})
+        assert _enclosing(extract_change_anchors(diff, None)) == []
+
+    def test_head_mismatch_skips_file(self, tmp_path):
+        head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')
+        diff = _git_diff(tmp_path, {"m.py": _PY_MODULE}, {"m.py": head})
+        (tmp_path / "m.py").write_text("# unrelated\n" + head, encoding="utf-8")
+        assert _enclosing(extract_change_anchors(diff, None, source_root=tmp_path)) == []
+
+    def test_unsupported_and_deleted_files_have_no_enclosing(self, tmp_path):
+        diff = _git_diff(
+            tmp_path,
+            {"a.rb": "def go_now\n  x = 1\nend\n", "gone.py": "def old_fn():\n    return 1\n"},
+            {"a.rb": "def go_now\n  x = 2\nend\n"},
+        )
+        (tmp_path / "gone.py").unlink()
+        diff = subprocess.run(
+            ["git", "-C", str(tmp_path), "diff", "--no-color"], check=True, env=_GIT_ENV,
+            capture_output=True, text=True,
+        ).stdout
+        assert _enclosing(extract_change_anchors(diff, None, source_root=tmp_path)) == []
+
+    def test_per_file_and_global_caps(self, tmp_path):
+        base_fns = "".join(f"def func_{i:02d}():\n    return {i}\n\n\n" for i in range(8))
+        head_fns = "".join(f"def func_{i:02d}():\n    return {i} + 1\n\n\n" for i in range(8))
+        files_base = {f"pkg/m{j}.py": base_fns for j in range(5)}
+        files_head = {f"pkg/m{j}.py": head_fns for j in range(5)}
+        diff = _git_diff(tmp_path, files_base, files_head)
+        result = extract_change_anchors(diff, None, source_root=tmp_path)
+        per_file = [len(_enclosing(result, f"pkg/m{j}.py")) for j in range(5)]
+        assert per_file == [MAX_ENCLOSING_PER_FILE] * 4 + [0]
+        assert sum(per_file) == MAX_ENCLOSING
+        assert all(entry.get("symbols_truncated") for entry in result["files"])
+        assert result["truncated"] is True
+
+
+class TestEnclosingPathSafety:
+    def test_reads_plain_file(self, tmp_path):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "a.py").write_text("x = 1\r\ny = 2\n", encoding="utf-8")
+        assert read_head_lines(tmp_path, "pkg/a.py") == ["x = 1", "y = 2", ""]
+
+    @pytest.mark.parametrize("rel", [
+        "", "/etc/passwd", "../outside.py", "pkg/../a.py", "./a.py", "pkg//a.py",
+        ".git/config", "a\x00.py",
+    ])
+    def test_rejects_unsafe_paths(self, tmp_path, rel):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+        assert read_head_lines(tmp_path, rel) is None
+
+    def test_rejects_symlinked_file_and_parent(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text("def leaked_fn():\n    return 1\n", encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "inner").mkdir()
+        (ws / "inner" / "real.py").write_text("x = 1\n", encoding="utf-8")
+        try:
+            (ws / "link.py").symlink_to(outside / "secret.py")
+            (ws / "linkdir").symlink_to(outside, target_is_directory=True)
+            (ws / "inlink.py").symlink_to(ws / "inner" / "real.py")
+        except (OSError, NotImplementedError):  # pragma: no cover — fs
+            pytest.skip("symlinks unsupported on this filesystem")
+        assert read_head_lines(ws, "link.py") is None
+        assert read_head_lines(ws, "linkdir/secret.py") is None
+        assert read_head_lines(ws, "inlink.py") is None
+        assert read_head_lines(ws, "inner/real.py") == ["x = 1", ""]
+
+    def test_symlinked_changed_file_yields_no_enclosing(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        base = "def outside_fn():\n    return 1\n"
+        head = "def outside_fn():\n    return 2\n"
+        diff = _git_diff(ws, {"m.py": base}, {"m.py": head})
+        (outside / "m.py").write_text(head, encoding="utf-8")
+        (ws / "m.py").unlink()
+        try:
+            (ws / "m.py").symlink_to(outside / "m.py")
+        except (OSError, NotImplementedError):  # pragma: no cover — fs
+            pytest.skip("symlinks unsupported on this filesystem")
+        assert _enclosing(extract_change_anchors(diff, None, source_root=ws)) == []
+        (ws / "m.py").unlink()
+        (ws / "m.py").write_text(head, encoding="utf-8")
+        assert _enclosing(extract_change_anchors(diff, None, source_root=ws)) == [
+            ("outside_fn", "high", 1),
+        ]
+
+    def test_non_regular_and_oversized_files_are_refused(self, tmp_path, monkeypatch):
+        (tmp_path / "adir.py").mkdir()
+        assert read_head_lines(tmp_path, "adir.py") is None
+        (tmp_path / "big.py").write_text("x = 1\n" * 10, encoding="utf-8")
+        monkeypatch.setattr("pr_reviewer.change_anchors.MAX_HEAD_FILE_BYTES", 10)
+        assert read_head_lines(tmp_path, "big.py") is None
+
+    def test_cli_reads_head_from_workspace_root(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        head = _PY_MODULE.replace('scope + "-token"', 'f"{scope}-token"')
+        diff = _git_diff(ws, {"m.py": _PY_MODULE}, {"m.py": head})
+        (ws / "pr.diff").write_text(diff, encoding="utf-8")
+        rc = main([
+            "--diff", str(ws / "pr.diff"),
+            "--output", str(ws / "change-anchors.json"),
+            "--workspace-root", str(ws),
+        ])
+        assert rc == 0
+        result = json.loads((ws / "change-anchors.json").read_text())
+        assert _enclosing(result) == [("refresh_token", "high", 13)]
+
+
+class TestEnclosingParityFixtures:
+    """The related-code parity fixtures' anchors are real extractor output."""
+
+    @pytest.mark.parametrize("name", ["enclosing-body-edits", "enclosing-sibling-hunk"])
+    def test_fixture_anchors_match_extractor(self, tmp_path, name):
+        fixture_path = _REPO_ROOT / "tests" / "fixtures" / "parity" / "related-code" / f"{name}.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for path, content in fixture["repo_files"].items():
+            target = tmp_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        result = extract_change_anchors(fixture["source_diff"], None, source_root=tmp_path)
+        assert result == fixture["anchors"]
+        assert _enclosing(result)

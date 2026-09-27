@@ -15,6 +15,13 @@ Documented behavior choices (per #571):
   or only as deleted (``-``) lines are NOT extracted; deleted-only
   declarations are therefore omitted initially (the issue allows either
   omission or a distinct marker; omission is the chosen behavior).
+- **Enclosing declarations (#764).** When the reviewed head checkout is
+  available (``--workspace-root``), each contiguous run of added/removed lines
+  is also resolved to its nearest enclosing declaration in the head file (by
+  indentation, using the same per-language declaration patterns), recorded as
+  a ``kind: "enclosing"`` symbol. This covers edits inside an existing
+  function body, which add no declaration line. A file whose head content
+  does not match the diff's new-side lines contributes no enclosing symbols.
 - Diff metadata (``diff --git``, ``+++``/``---`` paths, ``@@`` hunk headers,
   binary markers) is never treated as source.
 - Diff path parsing handles both unquoted Git paths (``a/foo bar.py
@@ -42,6 +49,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +62,9 @@ MAX_FILES = 100
 MAX_SYMBOLS_PER_FILE = 20
 MAX_IMPORTS_PER_FILE = 20
 MAX_ANCHORS = 200
+MAX_ENCLOSING_PER_FILE = 5
+MAX_ENCLOSING = 20
+MAX_HEAD_FILE_BYTES = 2_000_000
 # Safety bound on diff size consumed (bytes); larger input is truncated
 # before parsing so hostile input cannot blow up memory.
 MAX_DIFF_BYTES = 2_000_000
@@ -232,6 +243,14 @@ _GO_SINGLE_IMPORT_RE = re.compile(
 )
 _GO_IMPORT_BLOCK_RE = re.compile(r"^\s*import\s*\(")
 
+# Enclosing-declaration lookup only: an indented class/object method whose
+# parameter list and opening brace sit on one line.
+_JS_METHOD_RE = re.compile(
+    r"^\s+(?:(?:public|private|protected|static|readonly|override|abstract|"
+    r"async|get|set)\s+)*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?"
+    r"\s*\([^()]*\)\s*(?::\s*[^={};]+)?\{\s*$"
+)
+
 
 def _extract_python(line: str, in_from_block: bool) -> tuple[
     list[tuple[str, str, str]], list[str], bool
@@ -359,6 +378,14 @@ class _FileState:
     # block is still recognized, but contribute no anchors of their own.
     # Recorded only for Python and Go (the only block-state languages).
     context_lines: list[tuple[int, str]] = field(default_factory=list)
+    # (new_file_line_number, content) of every new-side line (context and
+    # added), used to confirm the head checkout matches the diff.
+    new_side_lines: list[tuple[int, str]] = field(default_factory=list)
+    # One entry per contiguous run of added/removed lines: the new-side line
+    # the run starts at and the content of its first non-blank line.
+    change_runs: list[tuple[int, str]] = field(default_factory=list)
+    in_run: bool = False
+    run_open: bool = False
 
 
 # Mapping of C-style backslash escapes produced by ``quote_c_style_counted`` in
@@ -643,6 +670,7 @@ def parse_diff(diff_text: str) -> list[_FileState]:
         m = _HUNK_RE.match(line)
         if m:
             current.in_hunk = True
+            current.in_run = False
             current.new_line = int(m.group(3))
             continue
 
@@ -650,8 +678,16 @@ def parse_diff(diff_text: str) -> list[_FileState]:
             # Outside any hunk: ignore (could be malformed metadata).
             continue
 
+        if line.startswith(("+", "-")):
+            if not current.in_run:
+                current.in_run = True
+                current.run_open = True
+            if current.run_open and line[1:].strip():
+                current.change_runs.append((current.new_line, line[1:]))
+                current.run_open = False
         if line.startswith("+"):
             current.added_lines.append((current.new_line, line[1:]))
+            current.new_side_lines.append((current.new_line, line[1:]))
             current.new_line += 1
             continue
         if line.startswith("-"):
@@ -668,6 +704,8 @@ def parse_diff(diff_text: str) -> list[_FileState]:
             # in-block members do not change block state — so the recorded
             # list stays small regardless of hunk size.
             content = line[1:]
+            current.in_run = False
+            current.new_side_lines.append((current.new_line, content))
             stripped = content.strip()
             lang = detect_language(current.path)
             if lang == "python":
@@ -681,6 +719,148 @@ def parse_diff(diff_text: str) -> list[_FileState]:
         # Any other line inside a hunk is malformed; skip it.
 
     return files
+
+
+# ---------------------------------------------------------------------------
+# Enclosing declarations (#764)
+# ---------------------------------------------------------------------------
+
+_CLOSERS = (")", "]", "}")
+_COMMENT_PREFIXES = {
+    "python": ("#",),
+    "javascript": ("//", "/*", "*"),
+    "typescript": ("//", "/*", "*"),
+    "go": ("//", "/*", "*"),
+}
+
+
+def read_head_lines(source_root: str | Path, rel_path: str) -> list[str] | None:
+    """Read a changed file from the head checkout, or ``None``.
+
+    The path must be a plain relative path inside ``source_root``: absolute
+    paths, empty/``.``/``..``/``.git`` components, NUL bytes, and any symlink
+    along the way (including the file itself) are refused. Only regular files
+    up to ``MAX_HEAD_FILE_BYTES`` are read. Never raises.
+    """
+    if not rel_path or "\x00" in rel_path or rel_path.startswith("/"):
+        return None
+    parts = rel_path.split("/")
+    if any(part in ("", ".", "..", ".git") for part in parts):
+        return None
+    try:
+        root = Path(source_root).resolve()
+        candidate = root.joinpath(*parts)
+        if candidate.resolve() != candidate:
+            return None
+        fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_HEAD_FILE_BYTES:
+                return None
+            data = handle.read(MAX_HEAD_FILE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_HEAD_FILE_BYTES:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    return [line.rstrip("\r") for line in text.split("\n")]
+
+
+def _head_matches_diff(state: _FileState, head_lines: list[str]) -> bool:
+    for line_no, content in state.new_side_lines:
+        if line_no < 1 or line_no > len(head_lines) or head_lines[line_no - 1] != content:
+            return False
+    return True
+
+
+def _declaration_at(line: str, language: str) -> tuple[str, str] | None:
+    """Return ``(name, confidence)`` if ``line`` is a declaration line."""
+    if language == "python":
+        patterns = ((_PY_DEF_RE, "high"), (_PY_CLASS_RE, "high"))
+    elif language == "go":
+        patterns = ((_GO_FUNC_RE, "high"), (_GO_TYPE_RE, "high"))
+    else:
+        patterns = (
+            (_JS_FUNC_RE, "high"),
+            (_JS_CLASS_RE, "high"),
+            (_JS_ARROW_RE, "medium"),
+            (_JS_METHOD_RE, "high"),
+        )
+    for pattern, confidence in patterns:
+        m = pattern.match(line)
+        if m:
+            return m.group(1), confidence
+    return None
+
+
+def _enclosing_name_ok(name: str) -> bool:
+    if not _valid_symbol(name) or name == "constructor":
+        return False
+    return not (name.startswith("__") and name.endswith("__"))
+
+
+def _indent(line: str) -> int:
+    expanded = line.expandtabs(8)
+    return len(expanded) - len(expanded.lstrip())
+
+
+def find_enclosing_declaration(
+    head_lines: list[str], start_line: int, changed: str, language: str,
+) -> tuple[str, str, int] | None:
+    """Find the declaration enclosing a change, walking up from ``start_line``.
+
+    ``start_line`` is the 1-based head line where the change run begins and
+    ``changed`` its first non-blank changed line. A declaration encloses the
+    change when it is less indented than every non-blank, non-comment line
+    between them; lines opening with a closing bracket (``):``, ``}``) do not
+    end a body. A change that itself opens with a closer may sit at its
+    declaration's own level. Unacceptable names (low-value, ``constructor``,
+    dunders) are skipped in favour of the next enclosing declaration out.
+    Returns ``(name, confidence, declaration_line)`` or ``None``.
+    """
+    ceiling = _indent(changed)
+    if changed.lstrip().startswith(_CLOSERS):
+        ceiling += 1
+    comments = _COMMENT_PREFIXES.get(language, ())
+    for line_no in range(min(start_line - 1, len(head_lines)), 0, -1):
+        line = head_lines[line_no - 1]
+        stripped = line.strip()
+        if not stripped or stripped.startswith(comments):
+            continue
+        indent = _indent(line)
+        if indent >= ceiling:
+            continue
+        decl = _declaration_at(line, language)
+        if decl and _enclosing_name_ok(decl[0]):
+            return decl[0], decl[1], line_no
+        if not decl and stripped.startswith(_CLOSERS):
+            continue
+        ceiling = indent
+        if ceiling == 0:
+            break
+    return None
+
+
+def _enclosing_symbols(
+    state: _FileState, language: str, source_root: str | Path,
+) -> list[tuple[str, str, int]]:
+    """Enclosing declarations for every change run, in run order, deduplicated."""
+    if not state.change_runs:
+        return []
+    head_lines = read_head_lines(source_root, state.path)
+    if head_lines is None or not _head_matches_diff(state, head_lines):
+        return []
+    found: list[tuple[str, str, int]] = []
+    seen: set[str] = set()
+    for start_line, changed in state.change_runs:
+        decl = find_enclosing_declaration(head_lines, start_line, changed, language)
+        if decl and decl[0] not in seen:
+            seen.add(decl[0])
+            found.append(decl)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +903,11 @@ def _merge_with_context(state: _FileState) -> list[tuple[int, str, bool]]:
     return merged
 
 
-def _extract_file_anchors(state: _FileState) -> FileAnchors:
+def _extract_file_anchors(
+    state: _FileState,
+    source_root: str | Path | None = None,
+    enclosing_budget: int = 0,
+) -> FileAnchors:
     fa = FileAnchors(
         path=state.path,
         language=detect_language(state.path),
@@ -778,6 +962,18 @@ def _extract_file_anchors(state: _FileState) -> FileAnchors:
                 _add_symbol(name, kind, confidence, line_no)
     # else: generic fallback — no token harvesting, just the file anchor.
 
+    if source_root is not None and fa.language in ("python", "javascript", "typescript", "go"):
+        declared = {sym["name"] for sym in fa.symbols if sym["kind"] != "import"}
+        enclosing = [
+            decl for decl in _enclosing_symbols(state, fa.language, source_root)
+            if decl[0] not in declared
+        ]
+        limit = max(0, min(MAX_ENCLOSING_PER_FILE, enclosing_budget))
+        if len(enclosing) > limit:
+            fa.symbols_truncated = True
+        for name, confidence, line_no in enclosing[:limit]:
+            _add_symbol(name, "enclosing", confidence, line_no)
+
     # Deterministic caps per file. Record whether the cap actually dropped
     # anything so the artifact-level ``truncated`` flag reflects silent
     # omission (#571 review feedback).
@@ -796,6 +992,7 @@ def extract_change_anchors(
     *,
     max_files: int = MAX_FILES,
     max_anchors: int = MAX_ANCHORS,
+    source_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build the versioned change-anchors artifact from a diff and file list.
 
@@ -803,7 +1000,8 @@ def extract_change_anchors(
     ``filename``/``previous_filename``/``status``). Files present in the list
     but absent from the diff still contribute a file anchor; files in the
     diff but not the list are included as well (the diff is authoritative
-    for content).
+    for content). ``source_root`` is the reviewed head checkout; when given,
+    enclosing-declaration symbols are added (see the module docstring).
     """
     truncated = False
 
@@ -842,6 +1040,8 @@ def extract_change_anchors(
                 if existing.path == state.path:
                     existing.added_lines.extend(state.added_lines)
                     existing.context_lines.extend(state.context_lines)
+                    existing.new_side_lines.extend(state.new_side_lines)
+                    existing.change_runs.extend(state.change_runs)
                     existing.binary = state.binary
                     existing.deleted = state.deleted or existing.deleted
                     existing.old_path = state.old_path or existing.old_path
@@ -872,8 +1072,10 @@ def extract_change_anchors(
              "confidence": confidence}
         )
 
+    enclosing_left = MAX_ENCLOSING
     for state in merged:
-        fa = _extract_file_anchors(state)
+        fa = _extract_file_anchors(state, source_root, enclosing_left)
+        enclosing_left -= sum(1 for sym in fa.symbols if sym["kind"] == "enclosing")
         file_entry: dict[str, Any] = {
             "path": fa.path,
             "language": fa.language,
@@ -976,7 +1178,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Output path for the change-anchors JSON "
                              "(must be inside --workspace-root)")
     parser.add_argument("--workspace-root", default="",
-                        help="Restrict --output to this directory "
+                        help="Reviewed head checkout; changed files are read "
+                             "from it and --output is restricted to it "
                              "(default: $GITHUB_WORKSPACE or cwd)")
     args = parser.parse_args(argv)
 
@@ -996,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
 
     file_list = load_file_list(args.files) if args.files else []
 
-    result = extract_change_anchors(diff_text, file_list)
+    result = extract_change_anchors(diff_text, file_list, source_root=workspace_root)
 
     out = _resolve_artifact_path(args.output, workspace_root)
     if out is None:

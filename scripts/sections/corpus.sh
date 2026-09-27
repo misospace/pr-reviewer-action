@@ -31,7 +31,7 @@ build_related_code_context() {
     return 0
   fi
 
-  local anchor_args=(--diff "$diff_path" --output change-anchors.json)
+  local anchor_args=(--diff "$diff_path" --output change-anchors.json --workspace-root "${GITHUB_WORKSPACE:-$(pwd)}")
   if [[ -n "$files_path" ]]; then
     anchor_args+=(--files "$files_path")
   fi
