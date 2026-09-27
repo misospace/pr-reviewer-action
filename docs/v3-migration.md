@@ -672,6 +672,34 @@ response artifact (`combined-scout-failed`); timeout failures carry the
 `timeout:` message in the role and response artifacts; and an error-body
 message quotes the error as Python `str()` does, redacted.
 
+### The `evidence-providers` and `sarif` boundaries (#706)
+
+Both run the real v2 evidence phase — the fork-gate block sliced from
+`scripts/sections/classification.sh`, `run_evidence_providers.py` under a
+frozen monotonic clock, and `harvest_advisory_phases` with its fallback —
+against `node dist/index.js evidence-providers-fixture` over identical
+throwaway workspaces with real provider processes, and compare the
+`evidence-providers.json` / `.md` bytes (plus `normalize_sarif` artifacts
+for SARIF fixtures).
+
+Deliberate v3 differences, none visible in the fixtures: the provider env is
+the explicit allowlist, not v2's scrubbed `os.environ`; output capture is
+bounded at `4 * max_output_bytes + 64 KiB` (v2 read unbounded), and an
+overflowing capture is cut back to its last whitespace before masking so a
+split credential cannot survive, then always marked truncated; timeouts kill
+the process tree. v2 quirks kept for parity: an argv provider whose program
+cannot be spawned, an `int(inf)` override, or a JSON integer over 4300 digits
+aborts the whole phase into the fallback artifacts, as does a lone surrogate
+that cannot be written.
+
+The `image-provenance` boundary gained transport fixtures: the real v2
+`http_json` over a stub `curl`, versus `image-transport.ts` over an injected
+fetch, comparing the document and the request log. They caught a #675 port
+bug: `parse.quote(..., safe=":")` percent-encodes `/` in the registry token
+scope (`repository:o%2Fapp:pull`). The transport refuses anything outside the
+endpoints the renderer builds (hostile config digests or revision labels) and
+https-downgrading redirects; v2's curl would have sent them.
+
 ## What #680 removed from the Python runtime surface
 
 `src/enforcement/`, `src/publish/`, and `src/metadata/` now own the

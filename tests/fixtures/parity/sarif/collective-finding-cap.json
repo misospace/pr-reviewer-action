@@ -1,0 +1,13 @@
+{
+  "fixture": "collective-finding-cap",
+  "description": "SARIF_MAX_FINDINGS=3 is one budget across files: the first file fills it partly, the second is capped, the third gets zero and says so.",
+  "files": {
+    "one.sarif": "{\"version\": \"2.1.0\", \"runs\": [{\"tool\": {\"driver\": {\"name\": \"one\"}}, \"results\": [{\"ruleId\": \"O0\", \"level\": \"warning\", \"message\": {\"text\": \"O finding 0\"}}, {\"ruleId\": \"O1\", \"level\": \"warning\", \"message\": {\"text\": \"O finding 1\"}}]}]}",
+    "two.sarif": "{\"version\": \"2.1.0\", \"runs\": [{\"tool\": {\"driver\": {\"name\": \"two\"}}, \"results\": [{\"ruleId\": \"T0\", \"level\": \"warning\", \"message\": {\"text\": \"T finding 0\"}}, {\"ruleId\": \"T1\", \"level\": \"warning\", \"message\": {\"text\": \"T finding 1\"}}, {\"ruleId\": \"T2\", \"level\": \"warning\", \"message\": {\"text\": \"T finding 2\"}}, {\"ruleId\": \"T3\", \"level\": \"warning\", \"message\": {\"text\": \"T finding 3\"}}]}]}",
+    "three.sarif": "{\"version\": \"2.1.0\", \"runs\": [{\"results\": [{\"ruleId\": \"H0\", \"level\": \"warning\", \"message\": {\"text\": \"H finding 0\"}}, {\"ruleId\": \"H1\", \"level\": \"warning\", \"message\": {\"text\": \"H finding 1\"}}]}]}"
+  },
+  "env": {
+    "SARIF_FILES": "one.sarif, two.sarif\nthree.sarif",
+    "SARIF_MAX_FINDINGS": "3"
+  }
+}

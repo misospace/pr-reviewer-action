@@ -1,0 +1,86 @@
+{
+  "fixture": "transport-failures",
+  "description": "Real transport failure text: an HTTP 404 manifest (curl -f exit 22, CalledProcessError wording cut by short() inside the URL, so the credential never renders), a BOM-prefixed and a non-JSON body (CPython JSONDecodeError text), a 500 compare rendered as unavailable, and an uncached failing token.",
+  "transport": true,
+  "diff": "diff --git a/k/a.yaml b/k/a.yaml\n   repository: ghcr.io/acme/broken\n-   tag: v1@sha256:5555555555555555555555555555555555555555555555555555555555555555\n+   tag: v1@sha256:6666666666666666666666666666666666666666666666666666666666666666\ndiff --git a/k/b.yaml b/k/b.yaml\n   repository: docker.io/acme/other\n-   tag: v2@sha256:7777777777777777777777777777777777777777777777777777777777777777\n+   tag: v2@sha256:8888888888888888888888888888888888888888888888888888888888888888\ndiff --git a/k/c.yaml b/k/c.yaml\n   repository: ghcr.io/acme/cmp\n-   tag: v3@sha256:9999999999999999999999999999999999999999999999999999999999999999\n+   tag: v3@sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+  "http": [
+    {
+      "match": "ghcr.io/token",
+      "body": {
+        "token": "ghcr-anon-token"
+      }
+    },
+    {
+      "match": "auth.docker.io/token",
+      "raw": "<html>rate limited</html>"
+    },
+    {
+      "match": "/manifests/sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "status": 404,
+      "body": {
+        "errors": [
+          {
+            "code": "MANIFEST_UNKNOWN"
+          }
+        ]
+      }
+    },
+    {
+      "match": "/manifests/sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "body": {
+        "config": {
+          "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "raw": "\ufeff{\"config\": {}}"
+    },
+    {
+      "match": "/manifests/sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "body": {
+        "config": {
+          "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      }
+    },
+    {
+      "match": "/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "body": {
+        "config": {
+          "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "body": {
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "aaaa1111",
+            "org.opencontainers.image.source": "https://github.com/acme/cmp"
+          }
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "body": {
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "bbbb2222",
+            "org.opencontainers.image.source": "https://github.com/acme/cmp"
+          }
+        }
+      }
+    },
+    {
+      "match": "api.github.com",
+      "status": 500,
+      "body": {
+        "message": "boom"
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "fixture": "path-guards",
+  "description": "Absolute paths, dot-dot escapes, missing files, directories, and blank entries in SARIF_FILES.",
+  "files": {
+    "dir/keep.txt": "x"
+  },
+  "env": {
+    "SARIF_FILES": "/etc/passwd,, ../outside.sarif\n  \nmissing.sarif,dir,a/../b.sarif"
+  }
+}

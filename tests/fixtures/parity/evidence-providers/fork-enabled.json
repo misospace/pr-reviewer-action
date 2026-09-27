@@ -1,0 +1,22 @@
+{
+  "fixture": "fork-enabled",
+  "description": "Cross-repository PR with evidence_enable_for_forks=TRUE (case-insensitive override): providers run.",
+  "config": {
+    "providers": [
+      {
+        "id": "runs",
+        "command": [
+          "printf",
+          "ran for fork"
+        ]
+      }
+    ]
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json"
+  },
+  "fork": {
+    "is_fork_pr": "true",
+    "enable_for_forks": "TRUE"
+  }
+}

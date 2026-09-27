@@ -161,7 +161,7 @@ test("provider timeout terminates the whole tree, exit_code stays null", async (
   );
   assert.equal(entry.status, "timeout");
   assert.equal(entry.exit_code, null);
-  assert.ok(entry.duration_sec >= 1 && entry.duration_sec < 20, `duration ${entry.duration_sec}`);
+  assert.ok(entry.duration_sec.value >= 1 && entry.duration_sec.value < 20, `duration ${entry.duration_sec.value}`);
 
   // The backgrounded grandchild must be gone too (v2 killed only the leader).
   for (let i = 0; i < 100; i++) {
@@ -219,7 +219,9 @@ test("output beyond max_output_bytes truncates with the flag set", async () => {
   );
   assert.equal(entry.status, "ok");
   assert.equal(entry.stdout_truncated, true);
-  assert.ok(entry.stdout.length <= 512, `stdout ${entry.stdout.length} > 512`);
+  // v2 mask_and_truncate: at most max_output_bytes, then the visible marker.
+  assert.ok(entry.stdout.endsWith("\n[truncated]"));
+  assert.ok(Buffer.byteLength(entry.stdout) <= 512 + "\n[truncated]".length, `stdout ${entry.stdout.length} > 512`);
 });
 
 test("injected redact seam masks captured output before JSON parsing", async () => {

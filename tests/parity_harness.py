@@ -1284,8 +1284,10 @@ IMAGE_PROVENANCE_BOUNDARY = Boundary(
         "GitHub compare post-processing, compare-repo resolution (OCI source "
         "labels with mismatch detection and the image-repo heuristic), and "
         "the rendered document versus the v3 TypeScript port with the same "
-        "fixture-routed transport. The HTTP transport itself (curl, tokens, "
-        "budgets) is fetch policy that stays in v2."
+        "fixture-routed transport. Transport fixtures (#706 PR 5a) keep the "
+        "real v2 http_json over a stub curl and the real v3 image transport "
+        "over an injected fetch, and also compare the request log (cached "
+        "registry token, Bearer/Accept headers, unauthenticated compare)."
     ),
     fixtures_dir="image-provenance",
     run=lambda fixture, workdir: (run_v2_image_provenance(fixture, workdir), run_v3_image_provenance(fixture, workdir)),
@@ -1602,6 +1604,37 @@ SPECIALISTS_GATE_BOUNDARY = Boundary(
     run=lambda fixture, workdir: _run_new_boundary("v2_specialists_gate.py", "specialists-gate-fixture", fixture, workdir),
 )
 
+EVIDENCE_PROVIDERS_BOUNDARY = Boundary(
+    id="evidence-providers",
+    description=(
+        "#706 PR 5a evidence-provider orchestration parity: the real v2 phase "
+        "(classification.sh fork-gate slice, run_evidence_providers.py main "
+        "with a frozen clock, harvest_advisory_phases fallback) versus the v3 "
+        "runEvidenceProvidersPhase over identical workspaces and real provider "
+        "processes. Covers config load/validation errors, argv and bash -lc "
+        "commands, JSON findings parsing, nonzero exits, timeouts, oversize "
+        "output (mask-then-truncate), secret redaction, the parallel pool's "
+        "config-order results, fork gating, crash fallback artifacts, the "
+        "head/tail markdown caps, and the byte-exact .md/.json artifacts."
+    ),
+    fixtures_dir="evidence-providers",
+    run=lambda fixture, workdir: _run_new_boundary("v2_evidence_providers.py", "evidence-providers-fixture", fixture, workdir),
+)
+
+SARIF_BOUNDARY = Boundary(
+    id="sarif",
+    description=(
+        "#706 PR 5a SARIF ingestion parity: pr_reviewer/sarif.py "
+        "normalize_sarif (level→severity mapping, rule lookup by id/index, "
+        "locations, dedup, message/title/finding/error caps) and the "
+        "run_evidence_providers.py SARIF glue (workspace-bounded paths, "
+        "bounded reads, UTF-8/JSON error text, collective finding cap, secret "
+        "redaction before storage, rendering) versus the v3 port."
+    ),
+    fixtures_dir="sarif",
+    run=lambda fixture, workdir: _run_new_boundary("v2_evidence_providers.py", "evidence-providers-fixture", fixture, workdir),
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1657,6 +1690,8 @@ NEW_BOUNDARIES = (
     LINKED_SOURCES_BOUNDARY,
     CI_GATE_BOUNDARY,
     SPECIALISTS_GATE_BOUNDARY,
+    EVIDENCE_PROVIDERS_BOUNDARY,
+    SARIF_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

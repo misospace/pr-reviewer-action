@@ -1,0 +1,22 @@
+{
+  "fixture": "providers-and-sarif",
+  "description": "Command providers followed by a SARIF file in the same summary.",
+  "files": {
+    "scan.sarif": "{\"version\": \"2.1.0\", \"runs\": [{\"tool\": {\"driver\": {\"name\": \"scanner\", \"version\": \"1.0\"}}, \"results\": [{\"ruleId\": \"R1\", \"level\": \"error\", \"message\": {\"text\": \"bad thing\"}, \"locations\": [{\"physicalLocation\": {\"artifactLocation\": {\"uri\": \"src/a.py\"}, \"region\": {\"startLine\": 3}}}]}]}]}"
+  },
+  "config": {
+    "providers": [
+      {
+        "id": "cmd",
+        "command": [
+          "printf",
+          "cmd output"
+        ]
+      }
+    ]
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json",
+    "SARIF_FILES": "scan.sarif"
+  }
+}

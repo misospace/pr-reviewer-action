@@ -1,0 +1,18 @@
+{
+  "fixture": "malformed-payloads",
+  "description": "Wrong version, runs not an array, a list payload, and the MAX_ERRORS cap with its marker.",
+  "files": {
+    "v1.sarif": "{\"version\": \"2.0.0\", \"runs\": []}",
+    "noruns.sarif": "{\"version\": \"2.1.0\", \"runs\": {}}",
+    "list.sarif": "[1, 2]",
+    "errors.sarif": "{\"version\": \"2.1.0\", \"runs\": [{\"results\": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}]}"
+  },
+  "env": {
+    "SARIF_FILES": "v1.sarif,noruns.sarif,list.sarif,errors.sarif",
+    "SARIF_MAX_FINDINGS": "0"
+  },
+  "normalize": [
+    "v1.sarif",
+    "errors.sarif"
+  ]
+}

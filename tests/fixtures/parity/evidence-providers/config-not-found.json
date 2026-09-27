@@ -1,0 +1,7 @@
+{
+  "fixture": "config-not-found",
+  "description": "EVIDENCE_PROVIDERS_FILE names a missing file.",
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "  missing/providers.json  "
+  }
+}

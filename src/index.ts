@@ -39,6 +39,7 @@ import { runLinkedSourcesFixture, runStripSourceTextFixture } from "./context/li
 import { runCiGateFixture } from "./gates/ci-wait-fixture.js";
 import { runSpecialistsGateFixture } from "./gates/specialists-gate-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
+import { runEvidenceProvidersFixture } from "./evidence/fixture.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -201,6 +202,15 @@ if (require.main === module) {
       (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
       (error: unknown) => {
         process.stderr.write(`v3 specialists-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        process.exitCode = 1;
+      },
+    );
+  } else if (firstArg === "evidence-providers-fixture") {
+    assertSupportedNode(process.versions.node);
+    runEvidenceProvidersFixture(argv[1] ?? "").then(
+      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      (error: unknown) => {
+        process.stderr.write(`v3 evidence-providers fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         process.exitCode = 1;
       },
     );

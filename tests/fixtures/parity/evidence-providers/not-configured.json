@@ -1,0 +1,5 @@
+{
+  "fixture": "not-configured",
+  "description": "No providers file and no SARIF files: the summary records configured=false and the markdown is a truly empty file.",
+  "env": {}
+}

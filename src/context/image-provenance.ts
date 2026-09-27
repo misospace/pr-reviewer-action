@@ -5,11 +5,62 @@
  * registry and GitHub API payloads into normalized provenance records via an
  * injected fetch seam; `resolveCompareRepo` picks the GitHub repo to compare
  * revisions against; and the renderer produces the exact `# Image Digest
- * Provenance Analysis` document. The HTTP transport itself (curl invocation,
- * budgets, tokens) is fetch policy and stays in v2 — this module only
- * normalizes data, with the network access parameterized. */
+ * Provenance Analysis` document. Network access goes through the injected
+ * `HttpJson` seam, called with exactly the per-request headers v2 passed to
+ * curl (registry Bearer token + manifest Accept list, compare Accept +
+ * User-Agent); the real transport is `image-transport.ts` (#706 PR 5a). */
 
 import { pySplitLines } from "../requirements/ledger.js";
+import { USER_AGENT } from "../platform/user-agent.js";
+import { pyStr, pyTruthy } from "../evidence/pyjson.js";
+
+/** `http_json(url, headers=None)`: decoded JSON, or a thrown error whose
+ * message is what v2 records in the metadata/compare `error` field. */
+export type HttpJson = (url: string, headers?: Readonly<Record<string, string>>) => Promise<unknown>;
+
+/** v2 `fetch_digest_metadata` manifest Accept list. */
+export const MANIFEST_ACCEPT = [
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json",
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+].join(", ");
+
+/** v2 `fetch_all_metadata` / compare-wave worker count. */
+const MAX_WORKERS = 8;
+
+/** Anonymous pull tokens are scoped per repository, so one token serves
+ * every manifest/blob request for it (v2 `_TOKEN_CACHE`, per run here).
+ * Concurrent lookups share one in-flight fetch; a failed fetch is evicted
+ * (v2 never cached one), an empty token is kept. */
+export type RegistryTokenCache = Map<string, Promise<unknown>>;
+
+function registryToken(tokenUrl: string, httpJson: HttpJson, cache: RegistryTokenCache | null): Promise<unknown> {
+  const cached = cache?.get(tokenUrl);
+  if (cached !== undefined) return cached;
+  const pending = httpJson(tokenUrl).then((body) => (isRecord(body) ? body.token : undefined));
+  if (cache) {
+    cache.set(tokenUrl, pending);
+    pending.catch(() => {
+      if (cache.get(tokenUrl) === pending) cache.delete(tokenUrl);
+    });
+  }
+  return pending;
+}
+
+async function mapPool<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MAX_WORKERS, items.length) }, () => lane()));
+  return results;
+}
 
 export interface DigestChange {
   file: string;
@@ -83,17 +134,13 @@ function registryAndPath(repo: string): { registry: string; path: string } {
  * repos go to registry-1.docker.io with auth.docker.io tokens; ghcr.io repos
  * to ghcr.io with ghcr.io tokens. Unknown registries raise. */
 export function registryTargets(repo: string): RegistryTargets {
-  // urllib.parse.quote(..., safe=":") semantics: "/" stays literal (default
-  // safe), ":" stays literal (explicit safe), everything reserved is %XX.
+  // urllib.parse.quote(..., safe=":") semantics: the explicit safe set
+  // REPLACES the default "/", so only ":" (plus the always-safe
+  // `_.-~` and alphanumerics) stays literal — "/" becomes %2F.
   const quote = (scope: string): string =>
     encodeURIComponent(scope)
-      .replaceAll("%2F", "/")
-      .replaceAll("%3A", ":")
-      .replaceAll("%21", "!")
-      .replaceAll("%27", "'")
-      .replaceAll("%28", "(")
-      .replaceAll("%29", ")")
-      .replaceAll("%2A", "*");
+      .replace(/[!'()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+      .replaceAll("%3A", ":");
   const { registry, path } = registryAndPath(repo);
   if (registry === "docker.io") {
     return {
@@ -126,8 +173,9 @@ function strOrNull(value: unknown): string | null {
 export async function fetchDigestMetadata(
   repo: string,
   digest: string,
-  httpJson: (url: string) => Promise<unknown>,
+  httpJson: HttpJson,
   deadline: number | null = null,
+  tokenCache: RegistryTokenCache | null = null,
 ): Promise<DigestMeta> {
   const result: DigestMeta = {
     repository: repo,
@@ -146,10 +194,12 @@ export async function fetchDigestMetadata(
     if (deadline !== null && Date.now() >= deadline) throw new Error("image digest time budget exceeded");
     const { repoPath, tokenUrl, baseUrl } = registryTargets(repo);
 
-    const tokenBody = await httpJson(tokenUrl);
-    const token = isRecord(tokenBody) ? tokenBody.token : undefined;
+    const token = await registryToken(tokenUrl, httpJson, tokenCache);
     if (!token || typeof token !== "string") throw new Error("registry token unavailable");
-    const manifest = await httpJson(`${baseUrl}/v2/${repoPath}/manifests/${digest}`);
+    const manifest = await httpJson(`${baseUrl}/v2/${repoPath}/manifests/${digest}`, {
+      Authorization: `Bearer ${token}`,
+      Accept: MANIFEST_ACCEPT,
+    });
     if (!isRecord(manifest)) throw new Error("manifest is not a JSON object");
     result.mediaType = strOrNull(manifest.mediaType);
     if (Array.isArray(manifest.manifests)) {
@@ -163,7 +213,7 @@ export async function fetchDigestMetadata(
     result.configDigest = configDigest;
     if (configDigest) {
       if (deadline !== null && Date.now() >= deadline) throw new Error("image digest time budget exceeded");
-      const blob = await httpJson(`${baseUrl}/v2/${repoPath}/blobs/${configDigest}`);
+      const blob = await httpJson(`${baseUrl}/v2/${repoPath}/blobs/${configDigest}`, { Authorization: `Bearer ${token}` });
       if (!isRecord(blob)) throw new Error("config blob is not a JSON object");
       const labels = labelsOfConfig(blob);
       result.created = strOrNull(blob.created);
@@ -212,7 +262,7 @@ export async function fetchGithubCompare(
   repo: string | null,
   oldRev: string | null | undefined,
   newRev: string | null | undefined,
-  httpJson: (url: string) => Promise<unknown>,
+  httpJson: HttpJson,
   deadline: number | null = null,
 ): Promise<CompareResult> {
   const result: CompareResult = {
@@ -242,7 +292,10 @@ export async function fetchGithubCompare(
     return Promise.resolve(result);
   }
   const run = async (): Promise<void> => {
-    const data = await httpJson(`https://api.github.com/repos/${repo}/compare/${oldRev}...${newRev}`);
+    const data = await httpJson(`https://api.github.com/repos/${repo}/compare/${oldRev}...${newRev}`, {
+      Accept: "application/vnd.github+json",
+      "User-Agent": USER_AGENT,
+    });
     if (!isRecord(data)) throw new Error("compare payload is not a JSON object");
     result.status = data.status ?? null;
     result.ahead_by = data.ahead_by ?? null;
@@ -414,26 +467,32 @@ export function parseDiff(diffText: string): DigestChange[] {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/** v2 `short`: Python truthiness, code-point length, `str()`. */
 function short(value: unknown): string {
-  if (!value) return "(unknown)";
-  if (typeof value === "string" && value.length > 120) return value.slice(0, 117) + "...";
-  return String(value);
+  if (!pyTruthy(value)) return "(unknown)";
+  if (typeof value === "string" && value.length > 120) {
+    const points = Array.from(value);
+    if (points.length > 120) return points.slice(0, 117).join("") + "...";
+  }
+  return pyStr(value);
 }
 
-/** Fetch metadata for every unique (repository, digest) pair, sequentially
- * (the v2 runs pairs in parallel; the results are order-independent and the
- * pair set is deterministic). */
+/** Fetch metadata for every unique (repository, digest) pair through an
+ * 8-wide pool like v2 (results keyed by pair, so completion order never
+ * reaches the document), sharing one per-repository token cache. */
 export async function fetchAllMetadata(
   changes: readonly DigestChange[],
-  httpJson: (url: string) => Promise<unknown>,
+  httpJson: HttpJson,
   deadline: number | null = null,
+  tokenCache: RegistryTokenCache = new Map(),
 ): Promise<Map<string, DigestMeta>> {
   const pairs = [...new Set(changes.flatMap((change) => [`${change.repository}\u0000${change.oldDigest}`, `${change.repository}\u0000${change.newDigest}`]))].sort();
-  const metas = new Map<string, DigestMeta>();
-  for (const pair of pairs) {
+  const fetched = await mapPool(pairs, (pair) => {
     const [repo, digest] = pair.split("\u0000") as [string, string];
-    metas.set(pair, await fetchDigestMetadata(repo, digest, httpJson, deadline));
-  }
+    return fetchDigestMetadata(repo, digest, httpJson, deadline, tokenCache);
+  });
+  const metas = new Map<string, DigestMeta>();
+  pairs.forEach((pair, index) => metas.set(pair, fetched[index] as DigestMeta));
   return metas;
 }
 
@@ -441,7 +500,7 @@ export async function fetchAllMetadata(
  * routed through the injected *httpJson* seam (null deadline = unbounded). */
 export async function buildImageProvenanceContext(
   diffText: string,
-  httpJson: (url: string) => Promise<unknown>,
+  httpJson: HttpJson,
   deadline: number | null = null,
 ): Promise<string> {
   const changes = parseDiff(diffText);
@@ -482,14 +541,15 @@ export async function buildImageProvenanceContext(
       }
       return 0;
     });
-    const compares = new Map<string, CompareResult>();
-    for (const key of sortedKeys) {
+    const compareResults = await mapPool(sortedKeys, (key) => {
       const parts = key.split("\u0000");
       const repo: string | null = parts[0] === "None" ? null : (parts[0] as string);
       const oldRev: string | null = parts[1] === "None" ? null : (parts[1] as string);
       const newRev: string | null = parts[2] === "None" ? null : (parts[2] as string);
-      compares.set(key, await fetchGithubCompare(repo, oldRev, newRev, httpJson, deadline));
-    }
+      return fetchGithubCompare(repo, oldRev, newRev, httpJson, deadline);
+    });
+    const compares = new Map<string, CompareResult>();
+    sortedKeys.forEach((key, index) => compares.set(key, compareResults[index] as CompareResult));
 
     lines.push("# Image Digest Provenance Analysis");
     lines.push("");
@@ -526,10 +586,10 @@ export async function buildImageProvenanceContext(
       const compare = compares.get(keySortString(key)) as CompareResult;
 
       lines.push(`- Root repo for commit compare: \`${short(compareRepo)}\` (source: \`${short(compareRepoSource || "none")}\`)`);
-      if (compare.html_url) lines.push(`- Commit compare URL: ${String(compare.html_url)}`);
+      if (pyTruthy(compare.html_url)) lines.push(`- Commit compare URL: ${pyStr(compare.html_url)}`);
       if (compare.total_commits !== null) {
         lines.push(`- Compare summary: status=${short(compare.status)}, total_commits=${short(compare.total_commits)}, ahead_by=${short(compare.ahead_by)}, behind_by=${short(compare.behind_by)}`);
-      } else if (compare.error) {
+      } else if (pyTruthy(compare.error)) {
         lines.push(`- Compare lookup: **unavailable** (${short(compare.error)})`);
       }
 

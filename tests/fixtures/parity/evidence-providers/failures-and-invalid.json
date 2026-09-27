@@ -1,0 +1,46 @@
+{
+  "fixture": "failures-and-invalid",
+  "description": "Nonzero exits with stderr, a missing command (invalid entry without output_format), a non-dict provider, falsy/numeric ids, an empty argv, and malformed per-provider overrides falling back to defaults.",
+  "config": {
+    "providers": [
+      {
+        "id": "boom",
+        "command": [
+          "bash",
+          "-c",
+          "echo partial-out; echo boom >&2; exit 4"
+        ]
+      },
+      {
+        "id": "no-command"
+      },
+      "echo this string is not a provider object",
+      {
+        "id": 0,
+        "command": [
+          "true"
+        ]
+      },
+      {
+        "id": 17,
+        "command": [],
+        "timeout_sec": "soon"
+      },
+      {
+        "id": true,
+        "command": "exit 3",
+        "timeout_sec": "2.5",
+        "max_output_bytes": [
+          "x"
+        ]
+      },
+      {
+        "id": "empty-string-cmd",
+        "command": ""
+      }
+    ]
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json"
+  }
+}

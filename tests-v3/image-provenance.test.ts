@@ -54,10 +54,10 @@ test("parseDiff buckets repository/tag/digest/image lines into old→new pairs",
 test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () => {
   const ghcr = registryTargets("ghcr.io/o/app");
   assert.equal(ghcr.baseUrl, "https://ghcr.io");
-  assert.equal(ghcr.tokenUrl, "https://ghcr.io/token?scope=repository:o/app:pull");
+  assert.equal(ghcr.tokenUrl, "https://ghcr.io/token?scope=repository:o%2Fapp:pull");
   const docker = registryTargets("docker.io/o/app");
   assert.equal(docker.baseUrl, "https://registry-1.docker.io");
-  assert.equal(docker.tokenUrl, "https://auth.docker.io/token?service=registry.docker.io&scope=repository:o/app:pull");
+  assert.equal(docker.tokenUrl, "https://auth.docker.io/token?service=registry.docker.io&scope=repository:o%2Fapp:pull");
   assert.equal(registryTargets("o/app").baseUrl, "https://registry-1.docker.io");
   assert.throws(() => registryTargets("quay.io/o/app"), /unsupported registry/);
   for (const [image, path, guess] of [
@@ -69,7 +69,7 @@ test("registry targets route docker.io, ghcr.io, and bare owner/repo repos", () 
   ] as const) {
     const target = registryTargets(image);
     assert.equal(target.repoPath, path);
-    assert.ok(target.tokenUrl.includes(`repository:${path}:pull`));
+    assert.ok(target.tokenUrl.includes(`repository:${path.replaceAll("/", "%2F")}:pull`));
     assert.equal(target.baseUrl, image.startsWith("ghcr.io/") ? "https://ghcr.io" : "https://registry-1.docker.io");
     assert.equal(guessRepoFromImage(image), guess);
   }
@@ -129,7 +129,7 @@ test("fetch shapes registry payloads into label provenance and surfaces errors",
     });
     assert.equal(routed.error, null);
     const expectedPath = image.includes("nginx") ? "library/nginx" : "owner/app";
-    assert.ok(seen.some((url) => url.includes(`repository:${expectedPath}:pull`)));
+    assert.ok(seen.some((url) => url.includes(`repository:${expectedPath.replaceAll("/", "%2F")}:pull`)));
     assert.ok(seen.some((url) => url.includes(`/v2/${expectedPath}/manifests/`)));
   }
   const failed = await fetchDigestMetadata("ghcr.io/o/img", D1, async () => {

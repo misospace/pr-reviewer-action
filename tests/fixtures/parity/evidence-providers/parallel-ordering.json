@@ -1,0 +1,31 @@
+{
+  "fixture": "parallel-ordering",
+  "description": "Providers finishing in reverse order under a 3-wide pool: results keep config order; a blocker finding sets has_blocker.",
+  "config": {
+    "providers": [
+      {
+        "id": "p1-slowest",
+        "command": "sleep 0.9; printf one"
+      },
+      {
+        "id": "p2",
+        "command": "sleep 0.5; printf two"
+      },
+      {
+        "id": "p3-blocker",
+        "command": "sleep 0.2; printf '{\"severity\": \"blocker\", \"message\": \"stop\"}'"
+      },
+      {
+        "id": "p4-fastest",
+        "command": [
+          "printf",
+          "four"
+        ]
+      }
+    ]
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json",
+    "EVIDENCE_PROVIDER_PARALLELISM": "3"
+  }
+}

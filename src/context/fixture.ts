@@ -40,7 +40,8 @@ import {
   renderRelatedContextJson,
   renderRelatedContextMarkdown,
 } from "./related-context.js";
-import { buildImageProvenanceContext, parseDiff, type DigestChange } from "./image-provenance.js";
+import { buildImageProvenanceContext, parseDiff, type DigestChange, type HttpJson } from "./image-provenance.js";
+import { createImageHttpJson } from "./image-transport.js";
 import { changeAnchorsCli, extractChangeAnchors, renderChangeAnchorsJson } from "./change-anchors.js";
 
 interface FixtureRecord {
@@ -234,25 +235,55 @@ interface HttpRoute {
   match: string;
   body?: unknown;
   error?: string;
+  /** Transport fixtures: HTTP status (default 200) and a raw body text. */
+  status?: number;
+  raw?: string;
 }
 
 interface ImageProvenanceFixture extends FixtureRecord {
   diff?: string;
   http?: HttpRoute[];
+  /** Serve the routes at the fetch level through the real transport
+   * (image-transport.ts) instead of at the httpJson seam. */
+  transport?: boolean;
+}
+
+function headerValue(headers: RequestInit["headers"], name: string): string | null {
+  const record = (headers ?? {}) as Record<string, string>;
+  const key = Object.keys(record).find((candidate) => candidate.toLowerCase() === name);
+  return key === undefined ? null : (record[key] as string);
 }
 
 export async function runImageProvenanceFixture(fixturePath: string): Promise<{ ok: boolean; values?: Record<string, string>; stderr?: string }> {
   const fixture = loadFixture(fixturePath) as ImageProvenanceFixture;
   const routes = Array.isArray(fixture.http) ? fixture.http : [];
-  const httpJson = async (url: string): Promise<unknown> => {
-    for (const route of routes) {
-      if (typeof route.match === "string" && url.includes(route.match)) {
-        if (typeof route.error === "string") throw new Error(route.error);
-        return route.body ?? null;
+  const requests = new Set<string>();
+  let httpJson: HttpJson;
+  if (fixture.transport === true) {
+    // Request log in the v2 curl stub's vocabulary: explicit Authorization,
+    // Accept (curl's implicit default when absent), and the User-Agent only
+    // for GitHub (curl's own default UA is not comparable).
+    const fetchImpl = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const ua = url.startsWith("https://api.github.com/") ? ` ua=${headerValue(init?.headers, "user-agent") ?? "-"}` : "";
+      requests.add(`GET ${url} auth=${headerValue(init?.headers, "authorization") ?? "-"} accept=${headerValue(init?.headers, "accept") ?? "*/*"}${ua}`);
+      const route = routes.find((candidate) => typeof candidate.match === "string" && url.includes(candidate.match));
+      if (route === undefined) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      const text = typeof route.raw === "string" ? route.raw : JSON.stringify(route.body ?? null);
+      return new Response(text, { status: route.status ?? 200 });
+    };
+    httpJson = createImageHttpJson({ fetchImpl });
+  } else {
+    httpJson = async (url: string): Promise<unknown> => {
+      for (const route of routes) {
+        if (typeof route.match === "string" && url.includes(route.match)) {
+          if (typeof route.error === "string") throw new Error(route.error);
+          return route.body ?? null;
+        }
       }
-    }
-    throw new Error(`no fixture route for ${url}`);
-  };
+      throw new Error(`no fixture route for ${url}`);
+    };
+  }
   const diffText = typeof fixture.diff === "string" ? fixture.diff : "";
   const changes: DigestChange[] = parseDiff(diffText);
   const markdown = await buildImageProvenanceContext(diffText, httpJson);
@@ -267,6 +298,7 @@ export async function runImageProvenanceFixture(fixturePath: string): Promise<{ 
         new_digest: change.newDigest,
       }))),
       markdown,
+      ...(fixture.transport === true ? { requests: [...requests].sort().join("\n") } : {}),
     },
   };
 }

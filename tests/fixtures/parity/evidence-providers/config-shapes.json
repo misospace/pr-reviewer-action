@@ -1,0 +1,10 @@
+{
+  "fixture": "config-shapes",
+  "description": "A top-level JSON list is accepted as the provider list.",
+  "files": {
+    "list.json": "[{\"id\": \"from-list\", \"command\": [\"printf\", \"listed\"]}]"
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "list.json"
+  }
+}

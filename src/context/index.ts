@@ -108,7 +108,9 @@ export {
   type RelatedContext,
 } from "./related-context.js";
 export {
+  MANIFEST_ACCEPT,
   buildImageProvenanceContext,
+  fetchAllMetadata,
   fetchDigestMetadata,
   fetchGithubCompare,
   guessRepoFromImage,
@@ -119,7 +121,18 @@ export {
   type CompareResult,
   type DigestChange,
   type DigestMeta,
+  type HttpJson,
+  type RegistryTokenCache,
 } from "./image-provenance.js";
+export {
+  CURL_MAX_TIME_SEC,
+  MAX_REDIRECTS,
+  buildImageProvenanceFromNetwork,
+  createImageHttpJson,
+  imageDigestDeadline,
+  imageTransportAllows,
+  type ImageTransportOptions,
+} from "./image-transport.js";
 export { redactText } from "./redact.js";
 export {
   ARTIFACT_VERSION as CHANGE_ANCHORS_ARTIFACT_VERSION,

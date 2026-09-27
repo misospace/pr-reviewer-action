@@ -1,0 +1,10 @@
+{
+  "fixture": "config-no-providers",
+  "description": "A dict config without a providers key: the no-providers message.",
+  "files": {
+    "providers.json": "{\"other\": 1}"
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json"
+  }
+}

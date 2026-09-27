@@ -1,0 +1,86 @@
+{
+  "fixture": "transport-headers",
+  "description": "Real transport (#706 PR 5a): v2 http_json over a stub curl vs the v3 image transport over an injected fetch. Pins the per-repository cached anonymous token, the Bearer header on manifest and blob reads, the four-type manifest Accept list, curl's implicit Accept elsewhere, the unauthenticated GitHub compare with its Accept and User-Agent, and float-valued compare fields rendered via str().",
+  "transport": true,
+  "diff": "diff --git a/deploy/app.yaml b/deploy/app.yaml\n   repository: ghcr.io/acme/app\n-   tag: v1@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   tag: v1@sha256:2222222222222222222222222222222222222222222222222222222222222222\ndiff --git a/deploy/hub.yaml b/deploy/hub.yaml\n-   image: nginx:1.27@sha256:3333333333333333333333333333333333333333333333333333333333333333\n+   image: nginx:1.27@sha256:4444444444444444444444444444444444444444444444444444444444444444\n",
+  "http": [
+    {
+      "match": "ghcr.io/token",
+      "body": {
+        "token": "ghcr-anon-token"
+      }
+    },
+    {
+      "match": "auth.docker.io/token",
+      "body": {
+        "token": "hub-anon-token"
+      }
+    },
+    {
+      "match": "/manifests/sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "match": "/manifests/sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "body": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": {
+        "created": "2026-09-01T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "1111aaaa",
+            "org.opencontainers.image.source": "https://github.com/acme/app"
+          }
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": {
+        "created": "2026-09-02T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "2222bbbb",
+            "org.opencontainers.image.source": "https://github.com/acme/app"
+          }
+        }
+      }
+    },
+    {
+      "match": "/manifests/sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "body": {
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "manifests": [
+          {
+            "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "platform": {
+              "os": "linux"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": "/manifests/sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "body": {
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json"
+      }
+    },
+    {
+      "match": "api.github.com/repos/acme/app/compare/1111aaaa...2222bbbb",
+      "raw": "{\"status\": \"ahead\", \"ahead_by\": 2, \"behind_by\": 1.0, \"total_commits\": 2, \"html_url\": \"https://github.com/acme/app/compare/1111aaaa...2222bbbb\", \"commits\": [{\"sha\": \"2222bbbb0000ffff\", \"commit\": {\"message\": \"feat: thing\\n\\nbody\"}}], \"files\": [{\"filename\": \"src/x.go\", \"status\": \"modified\", \"changes\": 3}]}"
+    }
+  ]
+}

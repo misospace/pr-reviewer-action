@@ -1,0 +1,10 @@
+{
+  "fixture": "config-invalid-json",
+  "description": "Unparsable config: CPython's JSONDecodeError text (line/column/char) is rendered, with CRLF translated by universal newlines.",
+  "files": {
+    "providers.json": "{\r\n  \"providers\": [\r\n    {\"id\": \"x\" \"command\": \"true\"}\r\n  ]\r\n}\r\n"
+  },
+  "env": {
+    "EVIDENCE_PROVIDERS_FILE": "providers.json"
+  }
+}
