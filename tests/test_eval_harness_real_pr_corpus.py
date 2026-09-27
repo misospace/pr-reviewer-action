@@ -270,6 +270,22 @@ class TestRealPRCorpusFromFile:
         for expected in ("line_range", "must not set expected_clean", "positive int", "owner/repo"):
             assert expected in message
 
+    def test_malformed_values_fail_as_aggregated_value_error(self, tmp_path):
+        base = {"repo_full_name": "acme/repo", "number": 1, "head_sha": "a" * 40}
+        vulnerable = [
+            {**base, "defect": {"description": "d", "file": "a.py", "line_range": 5}},
+            {**base, "defect": {"description": "d", "file": ["a.py"]}},
+        ]
+        clean = [{**base, "expected_clean": "false"}]
+        path = tmp_path / "corpus.json"
+        path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": vulnerable, "clean": clean}}), encoding="utf-8")
+        with pytest.raises(ValueError) as exc:
+            RealPRCorpus.from_file(path)
+        message = str(exc.value)
+        assert "line_range" in message
+        assert "a description and a file" in message
+        assert "a JSON boolean" in message
+
     def test_rejects_non_object_entries(self, tmp_path):
         path = tmp_path / "corpus.json"
         path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": ["x"], "clean": []}}), encoding="utf-8")

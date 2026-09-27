@@ -274,7 +274,7 @@ class RealPRDefect:
         return cls(
             description=str(d.get("description", "")),
             file=d.get("file"),
-            line_range=tuple(lr) if lr is not None else None,
+            line_range=tuple(lr) if isinstance(lr, (list, tuple)) else lr,
             severity=d.get("severity"),
         )
 
@@ -286,7 +286,7 @@ class RealPRScenario:
     repo_full_name: str
     number: int
     head_sha: str
-    expected_clean: bool
+    expected_clean: Any
     defect: RealPRDefect | None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -298,7 +298,7 @@ class RealPRScenario:
             repo_full_name=d.get("repo_full_name", ""),
             number=d.get("number", 0),
             head_sha=str(d.get("head_sha", "")),
-            expected_clean=bool(d.get("expected_clean", False)),
+            expected_clean=d.get("expected_clean", False),
             defect=defect,
             raw=d,
         )
@@ -352,9 +352,10 @@ def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPR
     for scenario in vulnerable:
         _check_sha(scenario)
         _check_identity(scenario)
-        if scenario.expected_clean:
+        if scenario.expected_clean is not False:
             errors.append(f"{scenario.id}: vulnerable entry must not set expected_clean")
-        if scenario.defect is None or not scenario.defect.description or not scenario.defect.file:
+        defect_file = scenario.defect.file if scenario.defect is not None else None
+        if scenario.defect is None or not scenario.defect.description or not isinstance(defect_file, str) or not defect_file.strip():
             errors.append(
                 f"{scenario.id}: vulnerable entry must have a defect with a "
                 "description and a file"
@@ -376,8 +377,8 @@ def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPR
     for scenario in clean:
         _check_sha(scenario)
         _check_identity(scenario)
-        if not scenario.expected_clean:
-            errors.append(f"{scenario.id}: clean entry must set expected_clean: true")
+        if scenario.expected_clean is not True:
+            errors.append(f"{scenario.id}: clean entry must set expected_clean: true (a JSON boolean)")
 
     if errors:
         raise ValueError(
@@ -2485,7 +2486,7 @@ def generate_real_pr_report(
     modes_seen: set[str] = set()
 
     for scenario, mode_runs in scenario_runs:
-        kind = "clean" if scenario.expected_clean else "vulnerable"
+        kind = "clean" if scenario.expected_clean is True else "vulnerable"
         entry: dict[str, Any] = {
             "id": scenario.id,
             "repo_full_name": scenario.repo_full_name,
@@ -2661,7 +2662,7 @@ def run_real_pr_corpus(
 
     if dry_run:
         for scenario in scenarios:
-            kind = "clean" if scenario.expected_clean else "vulnerable"
+            kind = "clean" if scenario.expected_clean is True else "vulnerable"
             for mode in modes:
                 print(
                     f"  Would run: [{kind}] {scenario.repo_full_name}#{scenario.number} "
@@ -2676,7 +2677,7 @@ def run_real_pr_corpus(
     context_rows: list[dict[str, Any]] = []
     scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]] = []
     for i, scenario in enumerate(scenarios, 1):
-        kind = "clean" if scenario.expected_clean else "vulnerable"
+        kind = "clean" if scenario.expected_clean is True else "vulnerable"
         print(
             f"[{i}/{len(scenarios)}] [{kind}] {scenario.repo_full_name}#{scenario.number}",
             file=sys.stderr,
