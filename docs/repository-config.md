@@ -92,24 +92,21 @@ still also set them as a workflow `with:` input:
 | `evidence-provider-max-output-bytes` | integer | ceiling |
 | `evidence-provider-parallelism` | integer | ceiling |
 | `evidence-blocker-enforcement` | boolean | operator-explicit wins |
+| `related-code-max-bytes` | integer | ceiling |
+| `repo-map-max-bytes` | integer | ceiling |
+| `pr-thread-max-bytes` | integer | ceiling |
+| `review-threads-max-bytes` | integer | ceiling |
+| `deep-review-corpus-max-bytes` | integer | ceiling |
+| `tool-max-response-bytes` | integer | ceiling |
 
-### Repo-config-only (no longer a workflow input)
-
-These rarely tuned byte caps and per-tier request budgets (#777's moderate
-input trim) are **only** settable from the repository config file — the
-runtime never reads them from a workflow `with:`/environment input. They
-still carry a fixed contract default that acts as their ceiling:
-
-| Key | Default (ceiling) |
-| --- | --- |
-| `related-code-max-bytes` | 16000 |
-| `repo-map-max-bytes` | 12000 |
-| `pr-thread-max-bytes` | 8000 |
-| `review-threads-max-bytes` | 8000 |
-| `deep-review-corpus-max-bytes` | 48000 |
-| `primary-tool-max-requests` | unset (tier-resolved; hard-bounded 1..20) |
-| `smart-tool-max-requests` | unset (tier-resolved; hard-bounded 1..20) |
-| `tool-max-response-bytes` | 12000 |
+`primary-tool-max-requests` and `smart-tool-max-requests` are deliberately
+**not** repo-configurable: their contract default is an empty string on
+purpose (a tier-aware budget resolved at harness time, not a fixed number),
+so there is no config-time value to narrow against. Falling back to the
+type's hard 1..20 range as a synthetic ceiling would let a repository config
+file *raise* a budget the operator's workflow never set — the operator's
+workflow input must always be the ceiling, so these stay operator-only
+workflow inputs, same as before #777.
 
 ## Precedence
 
@@ -121,9 +118,10 @@ exhaustive:
    effective ceiling. The ceiling is the operator's explicit workflow value
    when they set one, or the contract default otherwise — repository config
    can only ever narrow it downward, never past it, whether the operator
-   configured anything or not. For the two repo-config-only inputs whose
-   contract default is intentionally empty (tier-resolved budgets), the
-   type's own hard range (1..20) stands in as the ceiling.
+   configured anything or not. An input whose ceiling cannot be determined
+   this way (an unparseable or empty default with no explicit operator
+   value) fails closed — it is simply not marked repo-configurable in the
+   contract, as above.
 2. **Enums, booleans, and free-form strings** (verdict policy, review
    verbosity, standards file path, feature toggles, …): the repository may
    set any contractually valid value, but **only when the operator did not

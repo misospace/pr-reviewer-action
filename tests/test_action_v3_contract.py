@@ -21,20 +21,6 @@ REMOVED_INPUTS = {
     "escalate_on_tool_or_evidence_blockers",
     "escalate_on_tool_planning_failure",
 }
-
-# Inputs that are repo-configurable in the v3 contract but no longer surfaced
-# as a workflow `with:` input (#777): still readable, and narrowable, from
-# the repository config file, bounded by their contract default.
-REPO_CONFIG_ONLY_INPUTS = {
-    "related_code_max_bytes",
-    "repo_map_max_bytes",
-    "pr_thread_max_bytes",
-    "review_threads_max_bytes",
-    "deep_review_corpus_max_bytes",
-    "primary_tool_max_requests",
-    "smart_tool_max_requests",
-    "tool_max_response_bytes",
-}
 REMOVED_OUTPUTS = {
     "effective_review_scope",
     "previous_head_sha",
@@ -162,22 +148,22 @@ def test_repo_configurable_inputs_never_include_credentials_or_hard_security_pol
             assert entry["v2_id"] not in NEVER_REPO_CONFIGURABLE, entry["id"]
 
 
-def test_repo_config_only_inputs_stay_in_the_contract_marked_not_workflow_visible():
+# Tier-resolved budgets (#777, revised): their contract default is an empty
+# string on purpose ("resolve a tier-aware budget at harness time"), so
+# there is no config-time ceiling for repository config to narrow against.
+# They must stay operator-only workflow inputs, never repo-configurable —
+# a repository must never be able to raise a budget the operator's own
+# workflow never granted (see docs/repository-config.md).
+TIER_RESOLVED_NOT_REPO_CONFIGURABLE = {
+    "primary_tool_max_requests",
+    "smart_tool_max_requests",
+}
+
+
+def test_tier_resolved_budgets_stay_operator_only_workflow_inputs():
     contract = _load()
     by_v2 = {entry["v2_id"]: entry for entry in contract["inputs"]}
-    for v2_id in REPO_CONFIG_ONLY_INPUTS:
+    for v2_id in TIER_RESOLVED_NOT_REPO_CONFIGURABLE:
         entry = by_v2[v2_id]
-        assert entry.get("repo-config-only") is True, v2_id
-        assert entry.get("repo-configurable") is True, v2_id
-        # Still a fully-specified contract input (default carried, not removed).
+        assert not entry.get("repo-configurable"), v2_id
         assert "default" in entry, v2_id
-    removed_v2_ids = {entry["v2_id"] for entry in contract["removed"]}
-    assert not (REPO_CONFIG_ONLY_INPUTS & removed_v2_ids)
-
-
-def test_repo_config_only_inputs_documented_as_not_workflow_visible():
-    doc = (ROOT / "docs" / "v3-migration.md").read_text()
-    section = doc.split("## Repository config", 1)[1]
-    for v2_id in REPO_CONFIG_ONLY_INPUTS:
-        assert f"`{v2_id}`" in section, v2_id
-    assert "repository-config.md" in doc

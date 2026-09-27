@@ -74,28 +74,34 @@ test("bounded numeric input: with no explicit operator value, the ceiling is the
   assert.match(overDefault.warnings[0]!, /exceeds the operator ceiling of 20/);
 });
 
-test("repo-config-only budgets are readable from the file and bounded by their fixed contract default", () => {
-  const operatorRaw = baseOperatorRaw(); // tool-max-response-bytes is never read from env in production
+test("a numeric input that keeps a fixed contract default (tool-max-response-bytes) is still an ordinary workflow input, narrowable via repository config", () => {
+  const operatorRaw = baseOperatorRaw();
+  operatorRaw["tool-max-response-bytes"] = "9000"; // operator's explicit workflow ceiling
   const within = applyRepositoryConfig(contract, operatorRaw, fileOf("tool-max-response-bytes: 4000\n"));
   assert.deepEqual(within.appliedKeys, ["tool-max-response-bytes"]);
   assert.equal(within.raw["tool-max-response-bytes"], "4000");
 
-  const exceeding = applyRepositoryConfig(contract, operatorRaw, fileOf("tool-max-response-bytes: 999999\n"));
+  const exceeding = applyRepositoryConfig(contract, operatorRaw, fileOf("tool-max-response-bytes: 9001\n"));
   assert.equal(exceeding.appliedKeys.length, 0);
-  assert.match(exceeding.warnings[0]!, /exceeds the operator ceiling/);
+  assert.match(exceeding.warnings[0]!, /exceeds the operator ceiling of 9000/);
+  assert.equal(exceeding.raw["tool-max-response-bytes"], "9000");
 });
 
-test("bounded numeric input with an empty tier-resolved default falls back to the hard bound as the ceiling", () => {
-  // primary-tool-max-requests/smart-tool-max-requests default to "" (a
-  // tier-resolved budget, not a fixed number) but are still bounded 1..20.
-  const operatorRaw = baseOperatorRaw(); // left at the "" default
-  const within = applyRepositoryConfig(contract, operatorRaw, fileOf("primary-tool-max-requests: 12\n"));
-  assert.deepEqual(within.appliedKeys, ["primary-tool-max-requests"]);
-  assert.equal(within.raw["primary-tool-max-requests"], "12");
+test("tier-resolved budgets (primary/smart-tool-max-requests) are not repo-configurable at all", () => {
+  // Their contract default is "" on purpose (resolved per-route at harness
+  // time); there is no config-time ceiling to narrow against, so falling
+  // back to the type's hard 1..20 range would let a repository config file
+  // RAISE a budget the operator's own workflow never granted. They must be
+  // rejected exactly like any other non-repo-configurable input.
+  const operatorRaw = baseOperatorRaw();
+  const primary = applyRepositoryConfig(contract, operatorRaw, fileOf("primary-tool-max-requests: 12\n"));
+  assert.equal(primary.appliedKeys.length, 0);
+  assert.match(primary.warnings[0]!, /primary-tool-max-requests.*not repo-configurable/);
+  assert.equal(primary.raw["primary-tool-max-requests"], operatorRaw["primary-tool-max-requests"]);
 
-  const overHardBound = applyRepositoryConfig(contract, operatorRaw, fileOf("primary-tool-max-requests: 21\n"));
-  assert.equal(overHardBound.appliedKeys.length, 0);
-  assert.match(overHardBound.warnings[0]!, /must be between 1 and 20/);
+  const smart = applyRepositoryConfig(contract, operatorRaw, fileOf("smart-tool-max-requests: 12\n"));
+  assert.equal(smart.appliedKeys.length, 0);
+  assert.match(smart.warnings[0]!, /smart-tool-max-requests.*not repo-configurable/);
 });
 
 test("enum input: repository may set any allowed value only when the operator left it at default", () => {
@@ -301,19 +307,12 @@ test("the canonical contract marks a non-empty, sane repo-configurable set", () 
   for (const input of configurable) {
     assert.equal(input.required, false, input.id);
   }
-  const repoConfigOnly = contract.inputs.filter((input) => input["repo-config-only"]);
-  assert.ok(repoConfigOnly.length > 0);
-  for (const input of repoConfigOnly) {
-    assert.equal(input["repo-configurable"], true, input.id);
-  }
 });
 
-test("validateContract rejects repo-config-only without repo-configurable", () => {
-  const mutated = structuredClone(rawContract) as { inputs: Record<string, unknown>[] };
-  const target = mutated.inputs.find((i) => i.id === "verdict-policy")!;
-  delete target["repo-configurable"];
-  target["repo-config-only"] = true;
-  assert.throws(() => validateContract(mutated), /repo-config-only without repo-configurable/);
+test("tier-resolved budgets are excluded from the repo-configurable set", () => {
+  const byId = new Map(contract.inputs.map((input) => [input.id, input]));
+  assert.equal(byId.get("primary-tool-max-requests")?.["repo-configurable"], undefined);
+  assert.equal(byId.get("smart-tool-max-requests")?.["repo-configurable"], undefined);
 });
 
 test("validateContract rejects a required input marked repo-configurable", () => {

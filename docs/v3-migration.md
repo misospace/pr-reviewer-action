@@ -220,29 +220,20 @@ requiring every knob to be a workflow input. See
 [`docs/repository-config.md`](repository-config.md) for the file locations,
 the precedence rule, and the full list of keys a repository may set.
 
-As part of the same change, these rarely tuned byte caps and per-tier
-request knobs are **repository-config-only** in the v3 contract: they are no
-longer workflow `with:` inputs (the runtime never reads them from the
-environment), but they remain readable — and narrowable — from the
-repository config file, bounded by their contract default as a fixed
-ceiling.
+As part of the same change, these rarely tuned byte caps are
+`repo-configurable: true` in the v3 contract: a repository config file may
+narrow them below the operator's workflow-level ceiling (their explicit
+value, or the contract default when unset). They remain ordinary workflow
+`with:` inputs — the operator's workflow input is always the ceiling, and
+repository config can only narrow it, never replace or exceed it: `related_code_max_bytes`,
+`repo_map_max_bytes`, `pr_thread_max_bytes`, `review_threads_max_bytes`,
+`deep_review_corpus_max_bytes`, `tool_max_response_bytes`.
 
-| v2 input | v3 workflow input? | Where it lives in v3 |
-| --- | --- | --- |
-| `related_code_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-| `repo_map_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-| `pr_thread_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-| `review_threads_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-| `deep_review_corpus_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-| `primary_tool_max_requests` | No | Repository config only; see `docs/repository-config.md`. |
-| `smart_tool_max_requests` | No | Repository config only; see `docs/repository-config.md`. |
-| `tool_max_response_bytes` | No | Repository config only; see `docs/repository-config.md`. |
-
-These keep their `contracts/action-v3.yml` `id`/`v2_id`/`default` (they still
-appear in the contract's `inputs` list, marked `repo-config-only: true`, so
-`RepositoryConfigResolution` and the migration tooling above continue to
-account for them) — only their status as an operator-settable workflow input
-is removed.
+`primary_tool_max_requests` and `smart_tool_max_requests` are deliberately
+**not** repo-configurable: their default is an empty string on purpose (a
+tier-aware budget resolved at harness time), so there is no config-time
+ceiling to narrow against — see `docs/repository-config.md` for why falling
+back to the type's hard range would be unsafe.
 
 ## Parity harness (#673)
 

@@ -213,7 +213,6 @@ inputs:
     default: "16000"
     description: "Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)"
     repo-configurable: true
-    repo-config-only: true
   - id: linear-api-key
     v2_id: linear_api_key
     required: false
@@ -340,7 +339,6 @@ inputs:
     default: "12000"
     description: "Maximum UTF-8 bytes for the repository-map Markdown artifact and planning slot"
     repo-configurable: true
-    repo-config-only: true
   - id: pr-thread-context
     v2_id: pr_thread_context
     required: false
@@ -353,7 +351,6 @@ inputs:
     default: "8000"
     description: "Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)"
     repo-configurable: true
-    repo-config-only: true
   - id: review-threads-context
     v2_id: review_threads_context
     required: false
@@ -366,7 +363,6 @@ inputs:
     default: "8000"
     description: "Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)"
     repo-configurable: true
-    repo-config-only: true
   - id: deep-review
     v2_id: deep_review
     required: false
@@ -391,7 +387,6 @@ inputs:
     default: "48000"
     description: "Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000."
     repo-configurable: true
-    repo-config-only: true
   - id: enrichment-budget-sec
     v2_id: enrichment_budget_sec
     required: false
@@ -480,15 +475,11 @@ inputs:
     required: false
     default: ""
     description: "Request budget for the primary route only, bounded to 1..20. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty (the default) keeps the tier default."
-    repo-configurable: true
-    repo-config-only: true
   - id: smart-tool-max-requests
     v2_id: smart_tool_max_requests
     required: false
     default: ""
     description: "Request budget for the smart and escalated routes only, bounded to 1..20. Outranks tool_max_requests on those routes and leaves the primary tier untouched. Empty (the default) keeps the tier defaults."
-    repo-configurable: true
-    repo-config-only: true
   - id: tool-max-rounds
     v2_id: tool_max_rounds
     required: false
@@ -515,7 +506,6 @@ inputs:
     default: "12000"
     description: "Maximum bytes captured from each tool execution result"
     repo-configurable: true
-    repo-config-only: true
   - id: tool-allowed-gh-api-repos
     v2_id: tool_allowed_gh_api_repos
     required: false

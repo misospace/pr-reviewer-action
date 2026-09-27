@@ -31,13 +31,6 @@ export function main(): void {
   assertSupportedNode(process.versions.node);
   const contract = validateContract(V3_CONTRACT);
   const raw: Record<string, string | undefined> = Object.fromEntries(contract.inputs.map(({ id }) => [id, process.env[`INPUT_${id.toUpperCase().replaceAll("-", "_")}`]]));
-  // #777: repo-config-only inputs are no longer workflow inputs — the v3
-  // runtime never reads them from the environment, even if a workflow (or a
-  // stray env var) sets one. They are sourced solely from the contract
-  // default, narrowable only by repository config below.
-  for (const input of contract.inputs) {
-    if (input["repo-config-only"]) raw[input.id] = undefined;
-  }
   // #727/#777: read repository config from the trusted base ref, never the
   // PR head. `PR_REVIEWER_BASE_REF` is the base commit-ish the platform/
   // precheck layer resolves (see `src/platform/pr.ts`'s `PrIdentity.baseSha`);

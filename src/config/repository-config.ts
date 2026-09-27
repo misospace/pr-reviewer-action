@@ -163,20 +163,23 @@ function isOperatorExplicit(input: ContractInput, operatorRaw: RawInputs): boole
 }
 
 /** The operator's effective ceiling for a bounded numeric input: their
- * explicit value if set, else the contract default. A handful of inputs
+ * explicit value if set, else the contract default. The operator's
+ * workflow-level value (explicit or default) is always the ceiling —
+ * repository config narrows below it, never above it. A handful of inputs
  * (`primary-tool-max-requests`, `smart-tool-max-requests`) default to an
  * empty string on purpose — "resolve a tier-aware budget at harness time"
- * rather than a fixed number — so there is no numeric default to narrow
- * against; the hard `INTEGER_BOUNDS` range (already enforced independently
- * by `normalizeCandidate`) stands in as the ceiling instead. */
+ * rather than a fixed number — and are deliberately NOT marked
+ * repo-configurable in the contract, because their real ceiling cannot be
+ * resolved at config time; falling back to the type's hard range here would
+ * let a repository RAISE a budget the operator never actually granted. If a
+ * numeric ceiling can't be determined, this fails closed (0) rather than
+ * permissively. */
 function numericCeiling(input: ContractInput, operatorRaw: RawInputs): number {
   const explicit = operatorRaw[input.id];
   const fallback = stringifyDefault(input);
   const text = explicit !== undefined && explicit !== "" ? explicit : fallback;
   const parsed = Number(text);
-  if (text !== "" && Number.isFinite(parsed)) return parsed;
-  const bounds = INTEGER_BOUNDS[input.id];
-  return bounds ? bounds[1] : Number.MAX_SAFE_INTEGER;
+  return text !== "" && Number.isFinite(parsed) ? parsed : 0;
 }
 
 /** Validate and normalize one candidate repository-config value into the
