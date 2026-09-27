@@ -46,11 +46,6 @@ that cutover.
 | `ai_smart_api_format` | `ai-smart-api-format` |
 | `ai_smart_api_key` | `ai-smart-api-key` |
 | `escalate_on_risk_flags` | `escalate-on-risk-flags` |
-| `escalate_on_incomplete_required_checks` | `escalate-on-incomplete-required-checks` |
-| `escalate_on_fast_request_changes` | `escalate-on-fast-request-changes` |
-| `escalate_on_fast_low_confidence` | `escalate-on-fast-low-confidence` |
-| `escalate_on_tool_or_evidence_blockers` | `escalate-on-tool-or-evidence-blockers` |
-| `escalate_on_tool_planning_failure` | `escalate-on-tool-planning-failure` |
 | `ai_stream` | `ai-stream` |
 | `ai_fallback_stream` | `ai-fallback-stream` |
 | `allowed_source_hosts` | `allowed-source-hosts` |
@@ -201,9 +196,53 @@ These v2 fields have no v3 ID or compatibility alias:
 | `tool_planning_timeout_sec` | Input | Remove it and use `tool_turn_timeout_sec`. |
 | `tool_planning_max_context_bytes` | Input | Remove it and use `tool_corpus_max_bytes`. |
 | `tool_planning_max_tokens` | Input | Remove it and use `tool_max_tokens_per_turn`. |
+| `escalate_on_incomplete_required_checks` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
+| `escalate_on_fast_request_changes` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
+| `escalate_on_fast_low_confidence` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
+| `escalate_on_tool_or_evidence_blockers` | Input | Remove it. Deprecated since #721; no longer affects escalation (deterministic evidence/tool enforcement is unaffected). |
+| `escalate_on_tool_planning_failure` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
 
 The `tool_planning_*` inputs are currently deprecated fallback inputs in v2
 and are removed in v3. They are intentionally not copied into the v3 contract.
+
+The five `escalate_on_*` inputs above are also currently deprecated in v2
+(accepted for backward compatibility since #721 but already inert — they no
+longer trigger escalation, which is reviewer-requested only via the
+structured `smart_review_requested` verdict field). #777's moderate input
+trim drops this dead weight from the v3 contract too; they are not copied
+forward under any name.
+
+## Repository config (#727, adopted for the Action by #777)
+
+The v3.0.0 Action reads an optional repository-owned config file — same
+schema and trust rules as the #727 self-hosted operator design — instead of
+requiring every knob to be a workflow input. See
+[`docs/repository-config.md`](repository-config.md) for the file locations,
+the precedence rule, and the full list of keys a repository may set.
+
+As part of the same change, these rarely tuned byte caps and per-tier
+request knobs are **repository-config-only** in the v3 contract: they are no
+longer workflow `with:` inputs (the runtime never reads them from the
+environment), but they remain readable — and narrowable — from the
+repository config file, bounded by their contract default as a fixed
+ceiling.
+
+| v2 input | v3 workflow input? | Where it lives in v3 |
+| --- | --- | --- |
+| `related_code_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+| `repo_map_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+| `pr_thread_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+| `review_threads_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+| `deep_review_corpus_max_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+| `primary_tool_max_requests` | No | Repository config only; see `docs/repository-config.md`. |
+| `smart_tool_max_requests` | No | Repository config only; see `docs/repository-config.md`. |
+| `tool_max_response_bytes` | No | Repository config only; see `docs/repository-config.md`. |
+
+These keep their `contracts/action-v3.yml` `id`/`v2_id`/`default` (they still
+appear in the contract's `inputs` list, marked `repo-config-only: true`, so
+`RepositoryConfigResolution` and the migration tooling above continue to
+account for them) — only their status as an operator-settable workflow input
+is removed.
 
 ## Parity harness (#673)
 
