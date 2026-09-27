@@ -95,6 +95,17 @@ check_contains "digest PR includes release-notes guidance" "$OUT" "upstream rele
 check_not_contains "digest PR drops HOST PLATFORM block" "$OUT" "HOST PLATFORM"
 check_not_contains "no placeholder remains" "$OUT" "{{"
 
+echo "=== a missing classification.json leaks no kind-gated placeholder ==="
+OUT="$( cd "$WORK"
+  rm -f classification.json
+  SYSTEM_PROMPT="$BASE" SYSTEM_PROMPT_IS_DEFAULT=1
+  apply_system_prompt_fragments
+  printf '%s' "$SYSTEM_PROMPT" )"
+check_not_contains "missing classification drops version-bump placeholder" "$OUT" "{{VERSION_BUMP_GUIDANCE}}"
+check_not_contains "missing classification drops release-notes placeholder" "$OUT" "{{RELEASE_NOTES_GUIDANCE}}"
+check_not_contains "missing classification drops digest placeholder" "$OUT" "{{IMAGE_DIGEST_GUIDANCE}}"
+check_not_contains "missing classification leaves no placeholder at all" "$OUT" "{{"
+
 echo "=== review_verbosity=concise adds the brevity fragment ==="
 OUT="$( cd "$WORK"
   printf '{"pr_kind":"app_code"}' > classification.json

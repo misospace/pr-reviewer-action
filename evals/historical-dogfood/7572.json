@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "scenario": 7572,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7572,
+    "title": "fix(guard): classify the consumed operand, not the statement text",
+    "body": "",
+    "head": {
+      "sha": "fixture-7572-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7572-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 39,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7572"
+  },
+  "pr_files": [
+    {
+      "filename": "src/source_guard.py",
+      "status": "added",
+      "additions": 22,
+      "deletions": 0,
+      "changes": 22
+    },
+    {
+      "filename": "tests/test_source_guard.py",
+      "status": "added",
+      "additions": 17,
+      "deletions": 0,
+      "changes": 17
+    }
+  ],
+  "files": [
+    {
+      "path": "src/source_guard.py",
+      "content": "\"\"\"Trust guard for filesystem path handling in request handlers.\"\"\"\n\n\ndef classify_statement(line):\n    \"\"\"Classify a statement by its consumed path operand, not its raw text.\"\"\"\n    code = line.split(\"#\", 1)[0].strip()\n    if \"=\" in code:\n        code = code.split(\"=\", 1)[1].strip()\n    lowered = code.lower()\n    untrusted = \"request\" in lowered or \"req.\" in lowered\n    touches_path = \"path\" in lowered\n    if untrusted and touches_path:\n        return \"untrusted-path\"\n    return \"static\"\n\n\ndef resolve(line, base=\"/var/lib/app\"):\n    \"\"\"Resolve the path operand of an untrusted-path line under base.\"\"\"\n    if classify_statement(line) != \"untrusted-path\":\n        return None\n    operand = line.split(\"=\", 1)[-1].strip().strip(\"'\\\"\")\n    return base + \"/\" + operand\n"
+    },
+    {
+      "path": "tests/test_source_guard.py",
+      "content": "from src.source_guard import classify_statement\n\n\ndef test_request_path_is_untrusted():\n    assert classify_statement(\"save(request.args['path'])\") == \"untrusted-path\"\n\n\ndef test_static_assignment_is_not_flagged():\n    assert classify_statement(\"base_dir = '/var/lib/app/static'\") == \"static\"\n\n\ndef test_assignment_target_is_not_an_operand():\n    assert classify_statement(\"request_cache_path = os.path.join(BASE, 'static')\") == \"static\"\n\n\ndef test_comments_are_not_operands():\n    assert classify_statement(\"# handles the request path\") == \"static\"\n"
+    }
+  ],
+  "diff": "diff --git a/src/source_guard.py b/src/source_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..13b6f09bd1e09f5421f0562de3326b5bcc2b0cb5\n--- /dev/null\n+++ b/src/source_guard.py\n@@ -0,0 +1,22 @@\n+\"\"\"Trust guard for filesystem path handling in request handlers.\"\"\"\n+\n+\n+def classify_statement(line):\n+    \"\"\"Classify a statement by its consumed path operand, not its raw text.\"\"\"\n+    code = line.split(\"#\", 1)[0].strip()\n+    if \"=\" in code:\n+        code = code.split(\"=\", 1)[1].strip()\n+    lowered = code.lower()\n+    untrusted = \"request\" in lowered or \"req.\" in lowered\n+    touches_path = \"path\" in lowered\n+    if untrusted and touches_path:\n+        return \"untrusted-path\"\n+    return \"static\"\n+\n+\n+def resolve(line, base=\"/var/lib/app\"):\n+    \"\"\"Resolve the path operand of an untrusted-path line under base.\"\"\"\n+    if classify_statement(line) != \"untrusted-path\":\n+        return None\n+    operand = line.split(\"=\", 1)[-1].strip().strip(\"'\\\"\")\n+    return base + \"/\" + operand\ndiff --git a/tests/test_source_guard.py b/tests/test_source_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..d94795cb199e67705504b814cc57da8335902aee\n--- /dev/null\n+++ b/tests/test_source_guard.py\n@@ -0,0 +1,17 @@\n+from src.source_guard import classify_statement\n+\n+\n+def test_request_path_is_untrusted():\n+    assert classify_statement(\"save(request.args['path'])\") == \"untrusted-path\"\n+\n+\n+def test_static_assignment_is_not_flagged():\n+    assert classify_statement(\"base_dir = '/var/lib/app/static'\") == \"static\"\n+\n+\n+def test_assignment_target_is_not_an_operand():\n+    assert classify_statement(\"request_cache_path = os.path.join(BASE, 'static')\") == \"static\"\n+\n+\n+def test_comments_are_not_operands():\n+    assert classify_statement(\"# handles the request path\") == \"static\"\n"
+}

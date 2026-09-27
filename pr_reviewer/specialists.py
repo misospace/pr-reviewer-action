@@ -122,6 +122,9 @@ _SEVERITY_ALIASES = {
 MAX_LEADS = 50
 MAX_MESSAGE_CHARS = 2000
 MAX_CATEGORY_CHARS = 64
+#: #758 adversarial-correctness: cap on the clean-result boundary report so a
+#: specialist cannot flood the artifact with boundary prose.
+MAX_BOUNDARIES_CHALLENGED = 6
 MAX_FILE_CHARS = 512
 MAX_ERRORS = 100
 MAX_INPUT_BYTES = 1_000_000
@@ -223,6 +226,8 @@ def _normalize_lead(
     index: int,
     max_message_chars: int,
     result: dict[str, Any],
+    *,
+    contract: str = "",
 ) -> dict[str, Any] | None:
     """Normalize one raw lead entry; ``None`` when it is unusable."""
     if not isinstance(item, dict):
@@ -269,13 +274,58 @@ def _normalize_lead(
         parsed = int(raw_line.strip())
         line = parsed if parsed > 0 else None
 
-    return {
+    lead = {
         "severity": _normalize_severity(item.get("severity")),
         "category": category,
         "file": file_path,
         "line": line,
         "message": message,
     }
+    return _normalize_adversarial_fields(
+        item, index, max_message_chars, result, lead, contract=contract
+    )
+
+
+def _normalize_adversarial_fields(
+    item: dict[str, Any],
+    index: int,
+    max_message_chars: int,
+    result: dict[str, Any],
+    lead: dict[str, Any],
+    *,
+    contract: str,
+) -> dict[str, Any]:
+    """#758 adversarial-correctness contract: optional ``trigger``/``consequence``.
+
+    Both fields are free-text accounts of the falsifying input (``trigger``)
+    and the wrong observable it produces (``consequence``). Enforcement is
+    scoped to payloads that self-declare ``contract: "adversarial"`` (the
+    adversarial prompt's JSON contract): a ``major`` lead produced under that
+    contract that lacks either field is downgraded to ``minor`` with a visible
+    error. Payloads under the default contract never demote — the standard
+    prompts do not request the fields, so demanding them there would demote
+    every honest major lead. Everything is sanitized and bounded like the
+    message; a lead of any severity may carry the fields.
+    """
+    for field in ("trigger", "consequence"):
+        raw = item.get(field)
+        if isinstance(raw, str) and raw.strip():
+            lead[field] = _bounded_text(
+                _sanitize_string(raw.strip()), max_message_chars, "message_chars", result
+            )
+    if (
+        contract == "adversarial"
+        and lead["severity"] == "major"
+        and ("trigger" not in lead or "consequence" not in lead)
+    ):
+        lead["severity"] = "minor"
+        _add_error(
+            result,
+            f"leads[{index}]: major lead missing "
+            f"{'trigger' if 'trigger' not in lead else 'consequence'}"
+            f"{' and consequence' if 'trigger' in lead else ''}; downgraded to minor",
+        )
+    return lead
 
 
 def normalize_specialist_output(
@@ -333,13 +383,21 @@ def normalize_specialist_output(
     raw_leads = payload.get("leads")
     if raw_leads is None:
         raw_leads = []
+
     if not isinstance(raw_leads, list):
         _add_error(result, "payload 'leads' is not an array")
         raw_leads = []
 
     candidates: list[dict[str, Any]] = []
+    # #758: only a payload that self-declares the adversarial contract gets
+    # the trigger/consequence demotion enforcement (the adversarial prompt
+    # emits "contract": "adversarial").
+    contract = payload.get("contract")
+    contract = contract if isinstance(contract, str) else ""
     for index, item in enumerate(raw_leads):
-        lead = _normalize_lead(item, index, max_message_chars, result)
+        lead = _normalize_lead(
+            item, index, max_message_chars, result, contract=contract
+        )
         if lead is not None:
             candidates.append(lead)
 
@@ -368,6 +426,48 @@ def normalize_specialist_output(
         unique = unique[:max_leads]
 
     result["leads"] = unique
+
+    # #758 adversarial-correctness contract: an optional clean-result report
+    # of the boundaries attacked and why the attempted counterexamples held.
+    # Only meaningful with no leads, validated as sanitized bounded strings,
+    # and capped so one specialist cannot flood the artifact.
+    raw_boundaries = payload.get("boundaries_challenged")
+    if raw_boundaries is not None:
+        if not isinstance(raw_boundaries, list):
+            _add_error(result, "boundaries_challenged must be a list of strings")
+        else:
+            boundaries: list[str] = []
+            for index, entry in enumerate(raw_boundaries):
+                if not isinstance(entry, str) or not entry.strip():
+                    _add_error(
+                        result, f"boundaries_challenged[{index}] is not a usable string"
+                    )
+                    continue
+                boundaries.append(
+                    _bounded_text(
+                        _sanitize_string(entry.strip()),
+                        max_message_chars,
+                        "message_chars",
+                        result,
+                    )
+                )
+                if len(boundaries) >= MAX_BOUNDARIES_CHALLENGED:
+                    result["truncated"] = True
+                    result["truncation"]["truncated"] = True
+                    result["truncation"]["omitted_boundaries_challenged"] = (
+                        len(raw_boundaries) - MAX_BOUNDARIES_CHALLENGED
+                    )
+                    if "boundary_cap" not in result["truncation"]["reasons"]:
+                        result["truncation"]["reasons"].append("boundary_cap")
+                    break
+            if boundaries and unique:
+                _add_error(
+                    result,
+                    "boundaries_challenged is only meaningful with no leads; "
+                    "dropping it because leads exist",
+                )
+            else:
+                result["boundaries_challenged"] = boundaries
     return result
 
 
@@ -482,19 +582,25 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def prompt_fragment_path(role: str) -> Path:
-    """Path of the role's trust-framed prompt fragment on disk."""
+def prompt_fragment_path(role: str, variant: str = "") -> Path:
+    """Path of the role's trust-framed prompt fragment on disk.
+
+    ``variant`` (#758 adversarial-correctness arm) selects
+    ``specialist_<role>_<variant>.txt``; an empty variant keeps the default
+    ``specialist_<role>.txt``.
+    """
     if role not in SPECIALIST_ROLES:
         raise ValueError(
             f"unknown specialist role: {role!r}; "
             f"expected one of {list(SPECIALIST_ROLES_ORDER)}"
         )
-    return _repo_root() / "scripts" / "prompt_fragments" / f"specialist_{role}.txt"
+    name = f"specialist_{role}_{variant}.txt" if variant else f"specialist_{role}.txt"
+    return _repo_root() / "scripts" / "prompt_fragments" / name
 
 
-def load_specialist_prompt(role: str) -> str:
+def load_specialist_prompt(role: str, variant: str = "") -> str:
     """Return the role's prompt fragment text."""
-    return prompt_fragment_path(role).read_text(encoding="utf-8")
+    return prompt_fragment_path(role, variant).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +668,12 @@ def _lead_line(lead: dict[str, Any]) -> str:
     category = lead.get("category")
     if category:
         parts.append(f" ({category})")
+    trigger = lead.get("trigger")
+    if trigger:
+        parts.append(f" [trigger: {_escape_control_chars(str(trigger))}]")
+    consequence = lead.get("consequence")
+    if consequence:
+        parts.append(f" [consequence: {_escape_control_chars(str(consequence))}]")
     return "".join(parts)
 
 
@@ -620,6 +732,15 @@ def render_specialist_markdown(result: dict[str, Any], *, max_bytes: int = 0) ->
     leads = result.get("leads", [])
     header = f"## Specialist: {role}"
     lead_lines = [_lead_line(lead) for lead in leads]
+    if not lead_lines:
+        # #758 adversarial-correctness clean-result report.
+        boundaries = result.get("boundaries_challenged")
+        if isinstance(boundaries, list):
+            for entry in boundaries:
+                if isinstance(entry, str) and entry.strip():
+                    lead_lines.append(
+                        "- " + _escape_control_chars(redact_text(entry.strip()))
+                    )
 
     doc = _assemble_specialist_markdown(header, lead_lines, note=None)
     if not max_bytes:
@@ -689,13 +810,18 @@ def _sanitize_lead_for_section(lead: Any) -> dict[str, Any] | None:
         file_path = redact_text(file_path)
     if isinstance(category, str):
         category = redact_text(category)
-    return {
+    sanitized = {
         "severity": lead.get("severity") or "info",
         "category": category if isinstance(category, str) else "",
         "file": file_path if isinstance(file_path, str) and file_path else None,
         "line": lead.get("line"),
         "message": message,
     }
+    for field in ("trigger", "consequence"):
+        raw = lead.get(field)
+        if isinstance(raw, str) and raw.strip():
+            sanitized[field] = _escape_control_chars(redact_text(raw))
+    return sanitized
 
 
 def render_specialist_leads_section(
@@ -765,6 +891,19 @@ def render_specialist_leads_section(
                         lines.append(_lead_line(sanitized))
         errors = artifact.get("errors") if isinstance(artifact, dict) else None
         n_errors = len(errors) if isinstance(errors, list) else 0
+        # #758 adversarial-correctness clean-result report: when the pass
+        # produced no leads but named the boundaries it attacked, the boundary
+        # entries ARE the role's content (droppable lines under the byte cap,
+        # like leads). The normalizer drops boundaries when leads exist, so
+        # the two never mix here.
+        if not lines and isinstance(artifact, dict):
+            boundaries = artifact.get("boundaries_challenged")
+            if isinstance(boundaries, list):
+                for entry in boundaries:
+                    if isinstance(entry, str) and entry.strip():
+                        lines.append(
+                            "- " + _escape_control_chars(redact_text(entry.strip()))
+                        )
         if lines:
             note = ""
         elif n_errors:

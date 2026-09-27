@@ -298,7 +298,7 @@ def test_cli_writes_file_and_reports(tmp_path, capsys):
     out = (tmp_path / "specialist-corpus.md").read_text(encoding="utf-8")
     assert "METADATA_MARKER" in out
     assert len(out.encode("utf-8")) <= 4096
-    assert "specialist corpus:" in capsys.readouterr().out
+    assert "specialist corpus (standard):" in capsys.readouterr().out
 
 
 def test_cli_env_default_cap(tmp_path, monkeypatch):
@@ -623,3 +623,58 @@ def test_small_cap_build_needs_no_final_clamp(tmp_path):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── #758 adversarial_correctness mode ──────────────────────────────────
+
+
+def test_adversarial_corpus_excludes_author_and_ops_context(tmp_path):
+    _write_minimal(tmp_path)
+    text, meta = specialist_corpus.build_specialist_corpus(
+        tmp_path, mode="adversarial_correctness"
+    )
+
+    assert "Adversarial Correctness Corpus" in text
+    assert meta["mode"] == "adversarial_correctness"
+    # The goal (title), deterministic classification, changed files, diff,
+    # and related code survive.
+    for marker in (
+        "METADATA_MARKER", "CLASSIFICATION_MARKER", "CHANGED_FILE_MARKER",
+        "DIFF_MARKER", "RELATED_MARKER",
+    ):
+        assert marker in text, marker
+    # Author reasoning and operations context are excluded: PR body, author,
+    # linked-issue labels, must_check, standards, requirement ledger,
+    # CI/evidence output.
+    for marker in (
+        "BODY_MARKER", "MUST_CHECK_MARKER", "STANDARDS_MARKER",
+        "LEDGER_MARKER", "EVIDENCE_MARKER",
+    ):
+        assert marker not in text, marker
+    assert "linked_issue_labels" not in text
+    assert '"author"' not in text
+    # The goal framing is explicit about what is absent.
+    assert "deliberately absent" in text
+
+
+def test_adversarial_corpus_rejects_unknown_mode(tmp_path):
+    with pytest.raises(ValueError):
+        specialist_corpus.build_specialist_corpus(tmp_path, mode="nope")
+
+
+@pytest.mark.parametrize("cap", [1, 10, 512, 4096, 48000])
+def test_adversarial_corpus_hard_byte_cap_never_exceeded(tmp_path, cap):
+    _write_minimal(tmp_path)
+    _write(tmp_path, "pr.diff.truncated", "DIFF_MARKER " + "d" * 40000)
+    text, meta = specialist_corpus.build_specialist_corpus(
+        tmp_path, max_bytes=cap, mode="adversarial_correctness"
+    )
+    assert len(text.encode("utf-8")) <= cap
+    assert meta["mode"] == "adversarial_correctness"
+
+
+def test_adversarial_corpus_is_deterministic(tmp_path):
+    _write_minimal(tmp_path)
+    a, _ = specialist_corpus.build_specialist_corpus(tmp_path, mode="adversarial_correctness")
+    b, _ = specialist_corpus.build_specialist_corpus(tmp_path, mode="adversarial_correctness")
+    assert a == b

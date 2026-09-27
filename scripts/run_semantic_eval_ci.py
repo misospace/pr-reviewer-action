@@ -26,6 +26,11 @@ DETERMINISTIC_SCENARIOS = frozenset(
         6551, 6552, 6553, 6891, 6892,
         # PR #748 / #750 required-check grounding (ungrounded N/A converse + clean-shape control).
         7480, 7481,
+        # PR #756 counterexample-falsification failure classes (#757): four
+        # path-domain classes plus three cross-domain classes, each with a
+        # fixed negative control.
+        7571, 7572, 7573, 7574, 7575, 7576, 7577, 7578,
+        7579, 7580, 7581, 7582, 7583, 7584,
     }
 )
 

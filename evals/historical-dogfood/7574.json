@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "scenario": 7574,
+  "provenance": {
+    "historical_pr": 756,
+    "state": "pre-fix",
+    "source": "compact reconstruction of the PR #756 counterexample-falsification failure class (#757)"
+  },
+  "pr_json": {
+    "number": 7574,
+    "title": "fix(guard): run the traversal check after canonicalization",
+    "body": "",
+    "head": {
+      "sha": "fixture-7574-head",
+      "ref": "feature/change"
+    },
+    "base": {
+      "sha": "fixture-7574-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 2,
+    "additions": 33,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/7574"
+  },
+  "pr_files": [
+    {
+      "filename": "src/path_guard.py",
+      "status": "added",
+      "additions": 11,
+      "deletions": 0,
+      "changes": 11
+    },
+    {
+      "filename": "tests/test_path_guard.py",
+      "status": "added",
+      "additions": 22,
+      "deletions": 0,
+      "changes": 22
+    }
+  ],
+  "files": [
+    {
+      "path": "src/path_guard.py",
+      "content": "\"\"\"Path guard: canonicalize trusted anchors, then reject traversal.\"\"\"\n\nfrom urllib.parse import unquote\n\n\ndef resolve(raw, base=\"/srv/app\"):\n    \"\"\"Resolve raw under base, rejecting traversal after canonicalization.\"\"\"\n    value = unquote(raw.replace(base, \"\"))\n    if \"..\" in value or value.startswith(\"/\"):\n        raise ValueError(\"untrusted path\")\n    return base + \"/\" + value\n"
+    },
+    {
+      "path": "tests/test_path_guard.py",
+      "content": "import pytest\n\nfrom src.path_guard import resolve\n\n\ndef test_literal_traversal_is_rejected():\n    with pytest.raises(ValueError):\n        resolve(\"../../etc/passwd\")\n\n\ndef test_prefixed_traversal_is_rejected():\n    with pytest.raises(ValueError):\n        resolve(\"/srv/app/../../etc/passwd\")\n\n\ndef test_encoded_traversal_is_rejected():\n    with pytest.raises(ValueError):\n        resolve(\"%2e%2e/secret\")\n\n\ndef test_plain_path_resolves():\n    assert resolve(\"docs/readme\") == \"/srv/app/docs/readme\"\n"
+    }
+  ],
+  "diff": "diff --git a/src/path_guard.py b/src/path_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..9b327368597ab04435a17eb0bfabd3c0867933e9\n--- /dev/null\n+++ b/src/path_guard.py\n@@ -0,0 +1,11 @@\n+\"\"\"Path guard: canonicalize trusted anchors, then reject traversal.\"\"\"\n+\n+from urllib.parse import unquote\n+\n+\n+def resolve(raw, base=\"/srv/app\"):\n+    \"\"\"Resolve raw under base, rejecting traversal after canonicalization.\"\"\"\n+    value = unquote(raw.replace(base, \"\"))\n+    if \"..\" in value or value.startswith(\"/\"):\n+        raise ValueError(\"untrusted path\")\n+    return base + \"/\" + value\ndiff --git a/tests/test_path_guard.py b/tests/test_path_guard.py\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..a7511ebbe45e7e3f4e5f45df0eb113fbc1a00e5b\n--- /dev/null\n+++ b/tests/test_path_guard.py\n@@ -0,0 +1,22 @@\n+import pytest\n+\n+from src.path_guard import resolve\n+\n+\n+def test_literal_traversal_is_rejected():\n+    with pytest.raises(ValueError):\n+        resolve(\"../../etc/passwd\")\n+\n+\n+def test_prefixed_traversal_is_rejected():\n+    with pytest.raises(ValueError):\n+        resolve(\"/srv/app/../../etc/passwd\")\n+\n+\n+def test_encoded_traversal_is_rejected():\n+    with pytest.raises(ValueError):\n+        resolve(\"%2e%2e/secret\")\n+\n+\n+def test_plain_path_resolves():\n+    assert resolve(\"docs/readme\") == \"/srv/app/docs/readme\"\n"
+}
