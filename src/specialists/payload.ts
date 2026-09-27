@@ -5,6 +5,8 @@
  * operator-configured `json_schema` on the primary call downgrades to plain
  * `json_object` here and nothing else is carried over. */
 
+import { pyFloatRepr } from "../platform/py.js";
+
 export interface SpecialistPayloadInput {
   apiFormat: string;
   model: string;
@@ -54,10 +56,44 @@ export function buildSpecialistPayload(input: SpecialistPayloadInput): Specialis
   return payload;
 }
 
-/** Serialized request-body byte size, for #635 request-shape telemetry and
- * the request artifact write. */
+/** `json.dumps(value)` with Python's defaults — `", "` / `": "` separators,
+ * `ensure_ascii=True` (`\uXXXX` for every non-ASCII UTF-16 unit) — and the
+ * payload's one float field (`temperature`) as `repr(float)`. */
+function pyDumpsAscii(value: unknown, key: string | null = null): string {
+  if (value === null || value === undefined) return "null";
+  if (value === true) return "true";
+  if (value === false) return "false";
+  if (typeof value === "number") return key === "temperature" ? pyFloatRepr(value) : String(value);
+  if (typeof value === "string") {
+    let out = '"';
+    for (let index = 0; index < value.length; index += 1) {
+      const unit = value.charCodeAt(index);
+      const ch = value[index]!;
+      if (ch === '"') out += '\\"';
+      else if (ch === "\\") out += "\\\\";
+      else if (ch === "\n") out += "\\n";
+      else if (ch === "\r") out += "\\r";
+      else if (ch === "\t") out += "\\t";
+      else if (ch === "\b") out += "\\b";
+      else if (ch === "\f") out += "\\f";
+      else if (unit < 0x20 || unit > 0x7f) out += `\\u${unit.toString(16).padStart(4, "0")}`;
+      else out += ch;
+    }
+    return `${out}"`;
+  }
+  if (Array.isArray(value)) return `[${value.map((item) => pyDumpsAscii(item, key)).join(", ")}]`;
+  if (typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).map(([name, item]) => `${pyDumpsAscii(name)}: ${pyDumpsAscii(item, name)}`).join(", ")}}`;
+  }
+  return "null";
+}
+
+/** Serialized request-body byte size for #635 request-shape telemetry
+ * (`request_bytes`): v2 measures `len(json.dumps(payload).encode("utf-8"))`,
+ * i.e. Python's default ASCII-escaped, space-separated serialization — not
+ * the compact wire bytes. */
 export function payloadBytes(payload: SpecialistPayload): number {
-  return Buffer.byteLength(JSON.stringify(payload), "utf8");
+  return pyDumpsAscii(payload).length;
 }
 
 /** Copy of `payload` with the completion budget raised for the one-shot

@@ -1563,6 +1563,43 @@ CONTEXT_PRODUCERS_BOUNDARY = Boundary(
     ),
 )
 
+CI_GATE_BOUNDARY = Boundary(
+    id="ci-gate",
+    description=(
+        "#706 PR 6 CI gate workload parity: the real scripts/wait_for_ci.sh "
+        "(platform seam, _gh_api_bounded, forgejo_backend.py) over stub "
+        "gh/curl/date/sleep binaries sharing a virtual clock, versus the v3 "
+        "`gate-ci` workload (runCiWait) over an injected fetch and the same "
+        "clock. Compares exit code, $GITHUB_OUTPUT bytes, the "
+        "ci-checks-context.md evidence bytes, leftover temp files, the request "
+        "log, virtual elapsed time and the log lines across green, "
+        "pending-then-green, failure, timeout with/without skip, a head change "
+        "mid-wait, self-exclusion, and the approved transient-read divergence."
+    ),
+    fixtures_dir="ci-gate",
+    run=lambda fixture, workdir: _run_new_boundary("v2_ci_gate.py", "ci-gate-fixture", fixture, workdir),
+)
+
+SPECIALISTS_GATE_BOUNDARY = Boundary(
+    id="specialists-gate",
+    description=(
+        "#706 PR 6 specialists gate workload parity: the real "
+        "scripts/run_specialists.py (curl transport) versus the v3 "
+        "`gate-specialists` workload (runSpecialistsGate over the v3 model "
+        "transport), each against a local mock model endpoint serving the "
+        "same canned per-role responses. Compares every artifact byte for "
+        "byte (per-role request/response/contract JSON, specialists.json, "
+        "specialists.md, the presence file), the request bodies the endpoint "
+        "received, exit code and log lines; only wall-clock elapsed values "
+        "and the mock port are normalized. Covers three_call, auto selection "
+        "(including zero roles), streamed Anthropic SSE, a missing corpus, "
+        "a transport retry, the completion-overrun retry, the MAX_CORPUS fit "
+        "check, and combined_scout."
+    ),
+    fixtures_dir="specialists-gate",
+    run=lambda fixture, workdir: _run_new_boundary("v2_specialists_gate.py", "specialists-gate-fixture", fixture, workdir),
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1616,6 +1653,8 @@ NEW_BOUNDARIES = (
     PROMPT_ASSEMBLY_BOUNDARY,
     CONTEXT_PRODUCERS_BOUNDARY,
     LINKED_SOURCES_BOUNDARY,
+    CI_GATE_BOUNDARY,
+    SPECIALISTS_GATE_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

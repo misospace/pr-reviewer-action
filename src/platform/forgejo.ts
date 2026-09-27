@@ -1,4 +1,4 @@
-import { ciAttemptTimeoutMs } from "./bounded.js";
+import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { ForgejoEnrichClient } from "./enrich.js";
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 import {
@@ -393,6 +393,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
    * same failed read. */
   async externalChecks(sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
     if (!SHA_RE.test(sha)) return null;
+    if (options.transientAsUnknown === true) return this.externalChecksStrict(sha, options);
     const status = await this.read(async (at) => {
       const timeoutMs = ciAttemptTimeoutMs(options);
       if (timeoutMs === null) return "null";
@@ -403,6 +404,27 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
     // A raising CLI prints nothing (`|| echo ""`).
     const combinedText = status.ok ? status.data : "";
+    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+  }
+
+  /** `externalChecks` under the v3 CI gate's transient-read rule: no
+   * response, 429/5xx, or an undecodable 200 body is `null` ("unknown,
+   * retry") instead of the v2 `null` → `[]` fold. A non-200 JSON answer (for
+   * example a 404) and a malformed-but-decodable payload keep the v2 fold:
+   * they are persistent, and retrying cannot change them. */
+  private async externalChecksStrict(sha: string, options: ExternalChecksOptions): Promise<ExternalCheck[] | null> {
+    const status = await this.read(async (at): Promise<string | null> => {
+      const timeoutMs = ciAttemptTimeoutMs(options);
+      if (timeoutMs === null) return null;
+      const response = await this.curl(at("/commits/", `${sha}/status`), timeoutMs);
+      if (isTransientCiRead(response.status, response.status === 200 ? response.text : "null")) return null;
+      if (response.status !== 200) return "null";
+      const decoded = pyJsonDecode(response.text);
+      if (decoded === null) return null;
+      return JSON.stringify(normalizeForgejoCommitStatus(decoded));
+    });
+    if (status.ok && status.data === null) return null;
+    const combinedText = status.ok ? status.data ?? "" : "";
     return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
   }
 

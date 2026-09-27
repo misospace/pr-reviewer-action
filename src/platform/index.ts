@@ -6,7 +6,7 @@ export { resolvePlatform, type ResolvedPlatform } from "./resolve.js";
 export { USER_AGENT } from "./user-agent.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";
 export { validateEndpoint } from "./endpoint.js";
-export { ciAttemptTimeoutMs } from "./bounded.js";
+export { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 export { ForgejoEnrichClient, GitHubEnrichClient, validEnrichEndpoint } from "./enrich.js";
 export { SemanticFixtureAdapter, semanticFixtureDir } from "./semantic-fixture.js";
 export { isPublicAddress, parseIpLiteral } from "./ip-policy.js";

@@ -57,6 +57,14 @@ export interface ExternalChecksOptions extends CiBoundOptions {
   /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
    * status context is excluded. */
   statusContext?: string | undefined;
+  /** v3 CI gate (#706 PR 6, approved divergence): a transient read failure
+   * of EITHER underlying read — no response (timeout, transport error,
+   * exhausted deadline), HTTP 429/5xx, or a body that is not JSON — yields
+   * `null` ("unknown, retry") instead of folding into the checks list. Off
+   * (the default) keeps the v2 seam's fold byte for byte: a failed or
+   * unparseable commit-status read there becomes `[]` ("no external CI").
+   * A 2xx/4xx JSON answer is still an answer either way. */
+  transientAsUnknown?: boolean | undefined;
 }
 
 /**
@@ -82,6 +90,7 @@ export interface PlatformReadAdapter extends PlatformAdapter {
   listPrReviewsPaginated(): Promise<ReadResult<unknown[]>>;
   /** `platform_external_checks`: normalized external checks with
    * self-exclusion; `null` when both underlying reads came back empty (the
-   * caller's transient-failure signal). Never throws. */
+   * caller's transient-failure signal) or, under `transientAsUnknown`, when
+   * either read failed transiently. Never throws. */
   externalChecks(sha: string, options?: ExternalChecksOptions): Promise<{ name: unknown; state: string }[] | null>;
 }

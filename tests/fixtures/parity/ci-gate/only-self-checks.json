@@ -1,0 +1,55 @@
+{
+  "fixture": "only-self-checks",
+  "description": "The only signals are our own run and our own status context (custom CI_STATUS_CONTEXT): after self-exclusion the list is empty, so after two intervals the gate finalizes none and writes no evidence file.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "start_epoch": 1767225600,
+  "env": {
+    "CI_STATUS_CHECK": "true",
+    "CI_TIMEOUT_SEC": "300",
+    "CI_INTERVAL_SEC": "10",
+    "CI_API_TIMEOUT_SEC": "5",
+    "GITHUB_RUN_ID": "12345",
+    "PR_HEAD_SHA": "0123456789abcdef0123456789abcdef01234567",
+    "CI_STATUS_CONTEXT": "my-reviewer"
+  },
+  "routes": [
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100",
+      "responses": [
+        {
+          "body": {
+            "total_count": 1,
+            "check_runs": [
+              {
+                "name": "pr-review",
+                "status": "in_progress",
+                "conclusion": null,
+                "details_url": "https://github.com/o/r/actions/runs/12345/job/1",
+                "html_url": "https://github.com/o/r/actions/runs/12345/job/1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status",
+      "responses": [
+        {
+          "body": {
+            "state": "pending",
+            "total_count": 1,
+            "statuses": [
+              {
+                "context": "my-reviewer",
+                "state": "pending"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

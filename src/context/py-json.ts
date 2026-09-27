@@ -7,6 +7,8 @@
  * in fixed insertion order. Only the JSON shapes the artifacts contain are
  * supported (objects, arrays, strings, finite numbers, booleans, null). */
 
+import { pyFloatRepr } from "../platform/py.js";
+
 function escapeString(text: string, ensureAscii = false): string {
   let out = "";
   for (const ch of text) {
@@ -48,27 +50,38 @@ function escapeString(text: string, ensureAscii = false): string {
   return out;
 }
 
-function encode(value: unknown, indent: number, level: number, ensureAscii: boolean): string {
+export interface PyJsonDumpOptions {
+  /** Python's default `ensure_ascii`: escape everything above `~`. */
+  ensureAscii?: boolean;
+  /** Object keys whose numeric values are Python floats (`round(x, 3)`,
+   * `float(raw)`): rendered as `repr(float)` — `0.0`, not `0` — because a
+   * JavaScript number cannot remember that it was a float. */
+  floatKeys?: ReadonlySet<string>;
+}
+
+function encode(value: unknown, indent: number, level: number, options: PyJsonDumpOptions = {}, key: string | null = null): string {
+  const ensureAscii = options.ensureAscii === true;
   const pad = " ".repeat(indent * (level + 1));
   const closePad = " ".repeat(indent * level);
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "string") return `"${escapeString(value, ensureAscii)}"`;
   if (typeof value === "number") {
+    if (key !== null && options.floatKeys?.has(key) === true) return pyFloatRepr(value);
     if (Number.isInteger(value)) return String(value);
     return String(value);
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
-    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, ensureAscii)}`);
+    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, options, key)}`);
     return `[\n${items.join(",\n")}\n${closePad}]`;
   }
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>);
     if (entries.length === 0) return "{}";
-    const items = entries.map(([key, item]) => {
-      const keyText = ensureAscii ? `"${escapeString(key, true)}"` : JSON.stringify(key);
-      return `${pad}${keyText}: ${encode(item, indent, level + 1, ensureAscii)}`;
+    const items = entries.map(([name, item]) => {
+      const keyText = ensureAscii ? `"${escapeString(name, true)}"` : JSON.stringify(name);
+      return `${pad}${keyText}: ${encode(item, indent, level + 1, options, name)}`;
     });
     return `{\n${items.join(",\n")}\n${closePad}}`;
   }
@@ -76,9 +89,10 @@ function encode(value: unknown, indent: number, level: number, ensureAscii: bool
 }
 
 /** `json.dumps(value, ensure_ascii=ensureAscii, indent=indent)` — insertion
- * order. `ensureAscii` (Python's default) escapes everything above `~`. */
-export function pyJsonDump(value: unknown, indent = 2, ensureAscii = false): string {
-  return encode(value, Math.min(Math.max(0, indent), 8), 0, ensureAscii);
+ * order. `ensureAscii` (Python's default) escapes everything above `~`;
+ * `options.floatKeys` renders the named keys' numbers as Python floats. */
+export function pyJsonDump(value: unknown, indent = 2, ensureAscii = false, options: Omit<PyJsonDumpOptions, "ensureAscii"> = {}): string {
+  return encode(value, Math.min(Math.max(0, indent), 8), 0, { ...options, ensureAscii });
 }
 
 function escapeAscii(text: string): string {

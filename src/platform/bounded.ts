@@ -28,3 +28,18 @@ export function ciAttemptTimeoutMs(options: CiBoundOptions = {}): number | null 
   }
   return bound === 0 ? undefined : bound * 1000;
 }
+
+/** The v3 CI gate's transient-read rule (`ExternalChecksOptions
+ * .transientAsUnknown`, #706 PR 6): a CI read counts as an answer only when
+ * a response arrived (`status` non-null), was neither 429 nor 5xx, and
+ * carried a JSON body. Anything else is "unknown, retry" — never "no
+ * external CI". */
+export function isTransientCiRead(status: number | null, text: string): boolean {
+  if (status === null || status === 0 || status === 429 || status >= 500) return true;
+  try {
+    JSON.parse(text);
+    return false;
+  } catch {
+    return true;
+  }
+}

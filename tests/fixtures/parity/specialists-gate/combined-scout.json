@@ -1,0 +1,36 @@
+{
+  "fixture": "combined-scout",
+  "description": "DEEP_REVIEW_EXECUTION=combined_scout (benchmark-only): one call returns a role-keyed lead object, split into per-role artifacts; the scout request/response are written as specialist-scout.*.json and role entries carry no usage.",
+  "env": {
+    "DEEP_REVIEW": "true",
+    "AI_STREAM": "false",
+    "DEEP_REVIEW_EXECUTION": "combined_scout"
+  },
+  "corpus": "# PR Review Corpus\n\n## Diff\n\n```diff\n+def load(path):\n+    return open(path).read()\n```\n\nReviewer note: café — unicode survives.\n",
+  "responses": {
+    "scout": [
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"correctness\": {\"leads\": [{\"severity\": \"major\", \"category\": \"correctness\", \"file\": \"src/load.py\", \"line\": 2, \"message\": \"open() without a context manager leaks the handle on error.\"}, {\"severity\": \"blocker\", \"category\": \"correctness\", \"file\": \"src/load.py\", \"line\": 1, \"message\": \"Blocker severity is capped to major for specialists.\"}]}, \"security\": [{\"severity\": \"high\", \"category\": \"security\", \"file\": \"src/load.py\", \"line\": 2, \"message\": \"Untrusted path reaches open(); traversal is possible.\"}], \"tests\": {\"leads\": []}}"
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120
+          }
+        }
+      }
+    ]
+  }
+}

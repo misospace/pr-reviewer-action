@@ -1,0 +1,114 @@
+{
+  "fixture": "head-change-mid-wait",
+  "description": "No PR_HEAD_SHA forwarded: the head SHA is looked up once (bounded, under the CI deadline) and pinned. A second lookup would return a new head whose checks fail; the wait never re-reads the head and finalizes on the pinned SHA's checks.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "start_epoch": 1767225600,
+  "env": {
+    "CI_STATUS_CHECK": "true",
+    "CI_TIMEOUT_SEC": "300",
+    "CI_INTERVAL_SEC": "10",
+    "CI_API_TIMEOUT_SEC": "5",
+    "GITHUB_RUN_ID": "999"
+  },
+  "routes": [
+    {
+      "match": "repos/o/r/pulls/7",
+      "responses": [
+        {
+          "body": {
+            "number": 7,
+            "head": {
+              "sha": "0123456789abcdef0123456789abcdef01234567"
+            }
+          }
+        },
+        {
+          "body": {
+            "number": 7,
+            "head": {
+              "sha": "fedcba9876543210fedcba9876543210fedcba98"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100",
+      "responses": [
+        {
+          "body": {
+            "total_count": 1,
+            "check_runs": [
+              {
+                "name": "build",
+                "status": "in_progress",
+                "conclusion": null,
+                "details_url": "https://github.com/o/r/actions/runs/555/job/1",
+                "html_url": "https://github.com/o/r/actions/runs/555/job/1"
+              }
+            ]
+          }
+        },
+        {
+          "body": {
+            "total_count": 1,
+            "check_runs": [
+              {
+                "name": "build",
+                "status": "completed",
+                "conclusion": "success",
+                "details_url": "https://github.com/o/r/actions/runs/555/job/1",
+                "html_url": "https://github.com/o/r/actions/runs/555/job/1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status",
+      "responses": [
+        {
+          "body": {
+            "state": "pending",
+            "total_count": 0,
+            "statuses": []
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/commits/fedcba9876543210fedcba9876543210fedcba98/check-runs?per_page=100",
+      "responses": [
+        {
+          "body": {
+            "total_count": 1,
+            "check_runs": [
+              {
+                "name": "build",
+                "status": "completed",
+                "conclusion": "failure",
+                "details_url": "https://github.com/o/r/actions/runs/555/job/1",
+                "html_url": "https://github.com/o/r/actions/runs/555/job/1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/commits/fedcba9876543210fedcba9876543210fedcba98/status",
+      "responses": [
+        {
+          "body": {
+            "state": "pending",
+            "total_count": 0,
+            "statuses": []
+          }
+        }
+      ]
+    }
+  ]
+}

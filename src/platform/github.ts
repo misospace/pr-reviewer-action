@@ -1,4 +1,4 @@
-import { ciAttemptTimeoutMs } from "./bounded.js";
+import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 import {
@@ -148,13 +148,19 @@ export class GitHubAdapter implements PlatformReadAdapter {
    * (gh relays error bodies on stdout, #190), "" on timeout, transport
    * failure, or an exhausted CI deadline (the attempt is skipped). */
   private async boundedStdout(url: string, options: ExternalChecksOptions): Promise<string> {
+    return (await this.boundedRead(url, options)).text;
+  }
+
+  /** One bounded CI read with its HTTP status kept; `status` is null when no
+   * response arrived (timeout, transport failure, or a skipped attempt). */
+  private async boundedRead(url: string, options: ExternalChecksOptions): Promise<{ status: number | null; text: string }> {
     const timeoutMs = ciAttemptTimeoutMs(options);
-    if (timeoutMs === null) return "";
+    if (timeoutMs === null) return { status: null, text: "" };
     try {
-      const { text } = await requestText(url, { ...this.options(), timeoutMs });
-      return text;
+      const { status, text } = await requestText(url, { ...this.options(), timeoutMs });
+      return { status, text };
     } catch {
-      return "";
+      return { status: null, text: "" };
     }
   }
 
@@ -283,6 +289,14 @@ export class GitHubAdapter implements PlatformReadAdapter {
     const runsUrl = this.repoUrl("/commits/", `${sha}/check-runs?per_page=100`);
     const statusUrl = this.repoUrl("/commits/", `${sha}/status`);
     if (!SHA_RE.test(sha) || runsUrl === null || statusUrl === null) return null;
+    if (options.transientAsUnknown === true) {
+      // v3 CI gate: either read failing transiently is "unknown, retry",
+      // never a partial fold (see ExternalChecksOptions.transientAsUnknown).
+      const runsRead = await this.boundedRead(runsUrl, options);
+      const statusRead = await this.boundedRead(statusUrl, options);
+      if (isTransientCiRead(runsRead.status, runsRead.text) || isTransientCiRead(statusRead.status, statusRead.text)) return null;
+      return normalizeExternalChecks(runsRead.text, statusRead.text, options.runId ?? "", options.statusContext ?? "");
+    }
     const runs = await this.boundedStdout(runsUrl, options);
     const combined = await this.boundedStdout(statusUrl, options);
     return normalizeExternalChecks(runs, combined, options.runId ?? "", options.statusContext ?? "");

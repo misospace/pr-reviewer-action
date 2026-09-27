@@ -1,0 +1,17 @@
+{
+  "fixture": "auto-zero-selection",
+  "description": "DEEP_REVIEW=auto with a digest-only Renovate classification: zero roles selected, no model call; the aggregate still records the selection and three skipped entries, and the section/presence files are written empty.",
+  "env": {
+    "DEEP_REVIEW": "auto",
+    "AI_STREAM": "false"
+  },
+  "corpus": "# PR Review Corpus\n\n## Diff\n\n```diff\n+def load(path):\n+    return open(path).read()\n```\n\nReviewer note: café — unicode survives.\n",
+  "responses": {},
+  "classification": {
+    "pr_kind": "renovate_digest_only",
+    "risk_flags": [],
+    "changed_files_summary": [
+      "package-lock.json"
+    ]
+  }
+}

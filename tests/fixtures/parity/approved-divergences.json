@@ -445,6 +445,126 @@
         "new": "## Source 1\nURL: https://github.com/o/r/releases/tag/v1\n\n### Fetched Content (truncated)\n(Skipped non-allowlisted URL: github.com)\n\n### GitHub Release Metadata: o/r@v1\n```json\n{\n  \"tag_name\": \"v1\",\n  \"body\": {\n    \"float_int\": 1,\n    \"exp\": 100000,\n    \"big\": 12345678901234568,\n    \"keys\": {\n      \"2\": 4,\n      \"10\": 2,\n      \"b\": 1,\n      \"a\": 3\n    },\n    \"frac\": 2.5\n  }\n}\n\n```\n### Recent Releases\n```json\n[\n  {\n    \"tag_name\": \"v1\"\n  }\n]\n\n```\n\n\n### GitHub Releases Enrichment: o/r\n#### Recent Releases (tags)\n```json\n[\n  {\n    \"tag_name\": \"v1\"\n  }\n]\n\n```\n"
       },
       "reason": "Documented JSON.parse limitation (shared with the #803 enrich clients): CPython's json keeps integer-valued floats (1.0, 1e5 -> 100000.0), exact integers beyond 2^53, and insertion order of integer-like object keys; v3's JSON.parse yields 1 / 100000, the nearest double (12345678901234568), and integer-like keys first. Cosmetic only: no gate or security decision reads these values."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "forgejo-transient-status-read"
+      ],
+      "key": "checks_file",
+      "expected": {
+        "old": "<absent>",
+        "new": "_CI reached a terminal state before this review began (overall: success). These results are from the CI status API for commit 0123456789abcdef0123456789abcdef01234567 and are authoritative evidence of which checks ran and how they concluded._\n\n| Check | State |\n| --- | --- |\n| ci/woodpecker | success |\n"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the evidence file carries the real terminal checks instead of being absent."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "forgejo-transient-status-read"
+      ],
+      "key": "elapsed",
+      "expected": {
+        "old": "20",
+        "new": "30"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the wait lasts one more interval, still inside CI_TIMEOUT_SEC."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "forgejo-transient-status-read"
+      ],
+      "key": "outputs",
+      "expected": {
+        "old": "ci_status_final=none\nci_status_skipped=false\n",
+        "new": "ci_status_final=success\nci_status_skipped=false\n"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: ci_status_final is success (the real CI outcome) instead of none."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "forgejo-transient-status-read"
+      ],
+      "key": "requests",
+      "expected": {
+        "old": "[\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]",
+        "new": "[\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: v3 polls once more (the retry that v2 skipped)."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "forgejo-transient-status-read"
+      ],
+      "key": "stdout",
+      "expected": {
+        "old": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=300s, interval=10s, own run=999)...\n[CI-status] 00:00:00 No external CI checks registered yet — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:10 No external CI checks registered yet — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:20 No external CI checks found after 20s — proceeding without CI gating",
+        "new": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=300s, interval=10s, own run=999)...\n[CI-status] 00:00:00 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:10 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:20 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:30 CI checks finalized: success (1 external check(s))"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the retry is logged as a transient read failure instead of 'no external CI'."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "transient-status-read"
+      ],
+      "key": "checks_file",
+      "expected": {
+        "old": "<absent>",
+        "new": "_CI reached a terminal state before this review began (overall: success). These results are from the CI status API for commit 0123456789abcdef0123456789abcdef01234567 and are authoritative evidence of which checks ran and how they concluded._\n\n| Check | State |\n| --- | --- |\n| ci/legacy | success |\n"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the evidence file carries the real terminal checks instead of being absent."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "transient-status-read"
+      ],
+      "key": "elapsed",
+      "expected": {
+        "old": "20",
+        "new": "30"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the wait lasts one more interval, still inside CI_TIMEOUT_SEC."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "transient-status-read"
+      ],
+      "key": "outputs",
+      "expected": {
+        "old": "ci_status_final=none\nci_status_skipped=false\n",
+        "new": "ci_status_final=success\nci_status_skipped=false\n"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: ci_status_final is success (the real CI outcome) instead of none."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "transient-status-read"
+      ],
+      "key": "requests",
+      "expected": {
+        "old": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]",
+        "new": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: v3 polls once more (the retry that v2 skipped)."
+    },
+    {
+      "boundary": "ci-gate",
+      "fixtures": [
+        "transient-status-read"
+      ],
+      "key": "stdout",
+      "expected": {
+        "old": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=300s, interval=10s, own run=999)...\n[CI-status] 00:00:00 No external CI checks registered yet — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:10 No external CI checks registered yet — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:20 No external CI checks found after 20s — proceeding without CI gating",
+        "new": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=300s, interval=10s, own run=999)...\n[CI-status] 00:00:00 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:10 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:20 CI status read failed transiently (unknown, not 'no CI'); backing off before retrying (clamped to the outer deadline)...\n[CI-status] 00:00:30 CI checks finalized: success (1 external check(s))"
+      },
+      "reason": "#706 PR 6 intentional change: v2's platform seam folds a failed or unparseable commit-status read to [] (GitHub: empty or non-JSON gh stdout becomes '{}' or a jq failure; Forgejo: the CLI prints null), so wait_for_ci.sh read a transient API failure as 'no external CI' and finalized none after two intervals (or folded a partial list) while CI was still running. The v3 CI gate reads with transientAsUnknown: no response, HTTP 429/5xx, or a non-JSON body on either read is 'unknown, retry', so the wait keeps polling under the same deadline and finalizes on real CI state. Observable: the retry is logged as a transient read failure instead of 'no external CI'."
     }
   ]
 }

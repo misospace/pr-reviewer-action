@@ -68,10 +68,11 @@ export interface SpecialistRoleEntry {
   elapsed_sec: number;
   lead_count: number;
   errors_count: number;
-  usage: Record<string, number | null> | null;
+  /** Absent on skipped entries (v2 `_skipped_entry`). */
+  usage?: Record<string, number | null> | null;
   request_bytes: number | null;
-  overrun_retry: boolean;
-  retry_max_tokens: number | null;
+  overrun_retry?: boolean;
+  retry_max_tokens?: number | null;
   reason?: string;
   /** #758: which corpus (and prompt family) this role ran against —
    * telemetry only, never a behavior switch downstream. Present only for
@@ -196,6 +197,8 @@ function roleEntry(
   };
 }
 
+/** v2 `_skipped_entry`: exactly these keys, in this order (no usage or
+ * overrun fields — a skipped role made no request). */
 function skippedEntry(role: string, reason: string): SpecialistRoleEntry {
   return {
     role,
@@ -204,11 +207,8 @@ function skippedEntry(role: string, reason: string): SpecialistRoleEntry {
     elapsed_sec: 0,
     lead_count: 0,
     errors_count: 0,
-    usage: null,
-    request_bytes: null,
-    overrun_retry: false,
-    retry_max_tokens: null,
     reason,
+    request_bytes: null,
   };
 }
 

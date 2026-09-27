@@ -1,0 +1,107 @@
+{
+  "fixture": "overrun-retry",
+  "description": "The tests role spends the whole DEEP_REVIEW_MAX_TOKENS=1000 budget (finish_reason length, empty body); the one-shot overrun retry raises the budget to 4000 and its complete answer replaces the degraded one.",
+  "env": {
+    "DEEP_REVIEW": "true",
+    "AI_STREAM": "false",
+    "DEEP_REVIEW_MAX_TOKENS": "1000",
+    "AI_TOKENS_PARAM": "max_completion_tokens"
+  },
+  "corpus": "# PR Review Corpus\n\n## Diff\n\n```diff\n+def load(path):\n+    return open(path).read()\n```\n\nReviewer note: café — unicode survives.\n",
+  "responses": {
+    "correctness": [
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"leads\": []}"
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120
+          }
+        }
+      }
+    ],
+    "security": [
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"leads\": []}"
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120
+          }
+        }
+      }
+    ],
+    "tests": [
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": "length"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 1000,
+            "total_tokens": 1100
+          }
+        }
+      },
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"leads\": [{\"severity\": \"minor\", \"category\": \"tests\", \"file\": null, \"line\": null, \"message\": \"No test covers the missing-file branch.\"}]}"
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120
+          }
+        }
+      }
+    ]
+  }
+}

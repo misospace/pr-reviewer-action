@@ -36,6 +36,9 @@ import { runPlatformNormalizationFixture } from "./platform/fixture.js";
 import { runPromptAssemblyFixture } from "./prompt/fixture.js";
 import { runContextProducersFixture } from "./context/producers-fixture.js";
 import { runLinkedSourcesFixture, runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
+import { runCiGateFixture } from "./gates/ci-wait-fixture.js";
+import { runSpecialistsGateFixture } from "./gates/specialists-gate-fixture.js";
+import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -116,7 +119,16 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
   const firstArg = argv[0] ?? "";
-  if (firstArg === "precheck-fixture") {
+  if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {
+    // Gate workloads (#706 PR 6), launched by runConcurrentGates.
+    assertSupportedNode(process.versions.node);
+    const run = firstArg === CI_GATE_SUBMODE ? ciGateMain() : specialistsGateMain(argv.slice(1));
+    run.then(exitAfterFlush, (error: unknown) => {
+      process.stderr.write(`v3 ${firstArg} error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      // wait_for_ci.sh's fatal code is 2; run_specialists.py dies with 1.
+      exitAfterFlush(firstArg === CI_GATE_SUBMODE ? 2 : 1);
+    });
+  } else if (firstArg === "precheck-fixture") {
     precheckFixtureMain(argv[1] ?? "").catch((error: unknown) => {
       process.stderr.write(`v3 precheck fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
@@ -169,6 +181,24 @@ if (require.main === module) {
       (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
       (error: unknown) => {
         process.stderr.write(`v3 context-producers fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        process.exitCode = 1;
+      },
+    );
+  } else if (firstArg === "ci-gate-fixture") {
+    assertSupportedNode(process.versions.node);
+    runCiGateFixture(argv[1] ?? "").then(
+      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      (error: unknown) => {
+        process.stderr.write(`v3 ci-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        process.exitCode = 1;
+      },
+    );
+  } else if (firstArg === "specialists-gate-fixture") {
+    assertSupportedNode(process.versions.node);
+    runSpecialistsGateFixture(argv[1] ?? "").then(
+      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      (error: unknown) => {
+        process.stderr.write(`v3 specialists-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         process.exitCode = 1;
       },
     );
