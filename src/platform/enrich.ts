@@ -22,14 +22,13 @@
 import { requestText, type FetchLike } from "./http.js";
 import { normalizeForgejoRelease, pyJsonDecode } from "./normalize.js";
 import { pyQuote } from "./py.js";
+import { isRepoSegment, parseRepoRef, repoScopedUrl } from "./repo-ref.js";
 import type { ReadResult } from "./types.js";
 import { LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl } from "./urls.js";
 
-const NAME = "[A-Za-z0-9_.-]+";
 const REF_TAIL = /^[A-Za-z0-9._~%+:@!$&'()*,;=/-]+$/;
-const OWNER_REPO_RE = new RegExp(`^${NAME}/${NAME}$`);
 const HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$/;
-const ENDPOINT_RE = new RegExp(`^repos/(${NAME})/(${NAME})/(?:releases/tags/(.+)|compare/(.+)|tags\\?per_page=50)$`);
+const ENDPOINT_RE = /^repos\/([^/]+)\/([^/]+)\/(releases\/tags\/|compare\/|tags\?per_page=50$)(.*)$/;
 
 /** gh_api_call's subprocess bound. */
 const GH_ENRICH_TIMEOUT_MS = 30_000;
@@ -42,10 +41,22 @@ function safeRefTail(tail: string): boolean {
 /** The endpoint shapes linked sources build: `repos/o/r/releases/tags/T`,
  * `repos/o/r/compare/SPEC`, `repos/o/r/tags?per_page=50`. */
 export function validEnrichEndpoint(endpoint: string): boolean {
+  return parseEnrichEndpoint(endpoint) !== null;
+}
+
+interface EnrichEndpoint {
+  repo: string;
+  staticTail: string;
+  dynamicTail: string;
+}
+
+function parseEnrichEndpoint(endpoint: string): EnrichEndpoint | null {
   const match = ENDPOINT_RE.exec(endpoint);
-  if (!match) return false;
-  const tail = match[3] ?? match[4];
-  return tail === undefined || safeRefTail(tail);
+  if (!match) return null;
+  const [, owner = "", name = "", kind = "", rest = ""] = match;
+  if (!isRepoSegment(owner) || !isRepoSegment(name)) return null;
+  if (kind.startsWith("tags")) return rest === "" ? { repo: `${owner}/${name}`, staticTail: "/tags?per_page=50", dynamicTail: "" } : null;
+  return safeRefTail(rest) ? { repo: `${owner}/${name}`, staticTail: `/${kind}`, dynamicTail: rest } : null;
 }
 
 export interface GitHubEnrichClientOptions {
@@ -74,9 +85,11 @@ export class GitHubEnrichClient {
 
   /** One read with the failure reason kept (image provenance renders it). */
   async request(endpoint: string, accept?: string): Promise<ReadResult<unknown>> {
-    if (!validEnrichEndpoint(endpoint)) return { ok: false, error: `Endpoint not allowed for enrichment: ${endpoint}` };
+    const parsed = parseEnrichEndpoint(endpoint);
+    const url = parsed === null ? null : repoScopedUrl(this.base, parsed.repo, parsed.staticTail, parsed.dynamicTail);
+    if (url === null) return { ok: false, error: `Endpoint not allowed for enrichment: ${endpoint}` };
     try {
-      const { status, text } = await requestText(`${this.base}/${endpoint}`, {
+      const { status, text } = await requestText(url, {
         token: this.token,
         accept,
         timeoutMs: this.timeoutMs,
@@ -114,6 +127,15 @@ export class GitHubEnrichClient {
   }
 }
 
+/** Lower-cased `host[:port]` of a URL (default ports dropped), "" if unparseable. */
+function hostOf(raw: string): string {
+  try {
+    return new URL(raw.trim()).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 export interface ForgejoEnrichClientOptions {
   /** FORGEJO_API_URL of the configured instance, if any. */
   configuredApiUrl?: string | undefined;
@@ -130,17 +152,21 @@ export class ForgejoEnrichClient {
   private readonly fetchImpl: FetchLike;
 
   constructor(options: ForgejoEnrichClientOptions = {}) {
-    // `re.sub(r"^https?://", "", FORGEJO_API_URL).strip("/").lower()`
-    this.configuredHost = (options.configuredApiUrl ?? "").replace(/^https?:\/\//, "").replace(/^\/+|\/+$/g, "").toLowerCase();
+    // The configured instance's actual host[:port]. (v2 compared the whole
+    // scheme-stripped FORGEJO_API_URL, so an instance served under a path
+    // prefix never matched and its enrichment went unauthenticated.)
+    this.configuredHost = hostOf(options.configuredApiUrl ?? "");
     this.configuredAuthorization = options.configuredAuthorization;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_FORGEJO_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  private async get(host: string, ownerRepo: string, tail: string): Promise<unknown> {
-    if (!HOST_RE.test(host) || !OWNER_REPO_RE.test(ownerRepo)) return null;
-    const url = `https://${host}/api/v1/repos/${ownerRepo}/${tail}`;
-    const configured = this.configuredHost !== "" && host.toLowerCase() === this.configuredHost;
+  private async get(host: string, ownerRepo: string, staticTail: string, dynamicTail: string): Promise<unknown> {
+    if (!HOST_RE.test(host) || parseRepoRef(ownerRepo) === null) return null;
+    if (dynamicTail === "." || dynamicTail === "..") return null;
+    const url = repoScopedUrl(`https://${host}/api/v1`, ownerRepo, staticTail, dynamicTail);
+    if (url === null) return null;
+    const configured = this.configuredHost !== "" && hostOf(`https://${host}`) === this.configuredHost;
     try {
       const token = configured && this.configuredAuthorization ? await this.configuredAuthorization() : undefined;
       const { status, text } = await requestText(url, {
@@ -157,12 +183,12 @@ export class ForgejoEnrichClient {
 
   /** `fetch_forge_release`: the normalized release, or null. */
   async release(host: string, ownerRepo: string, tag: string): Promise<Record<string, unknown> | null> {
-    return normalizeForgejoRelease(await this.get(host, ownerRepo, `releases/tags/${pyQuote(tag)}`), tag);
+    return normalizeForgejoRelease(await this.get(host, ownerRepo, "/releases/tags/", pyQuote(tag)), tag);
   }
 
   /** `fetch_forge_compare`: the raw compare object, or null. */
   async compare(host: string, ownerRepo: string, spec: string): Promise<Record<string, unknown> | null> {
-    const data = await this.get(host, ownerRepo, `compare/${pyQuote(spec)}`);
+    const data = await this.get(host, ownerRepo, "/compare/", pyQuote(spec));
     return typeof data === "object" && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
   }
 }

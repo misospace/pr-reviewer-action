@@ -9,6 +9,7 @@ import {
   normalizeGithubReviewThreads,
   type ExternalCheck,
 } from "./normalize.js";
+import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
 import { GITHUB_API_BASE, parsePlatformBaseUrl } from "./urls.js";
 import type {
   ExternalChecksOptions,
@@ -22,7 +23,6 @@ import type {
 /** gh follows `Link: rel="next"` without a page cap; this bound only stops
  * a hostile or looping API from paginating forever (100 x 100 reviews). */
 const MAX_PAGES = 100;
-const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const NUMBER_RE = /^[0-9]+$/;
 const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
 
@@ -95,22 +95,25 @@ export class GitHubAdapter implements PlatformReadAdapter {
     return `${this.baseUrl}${path}`;
   }
 
+  /** A repo-scoped REST URL, or null when the repo ref is invalid or the
+   * normalized path escapes `/repos/<owner>/<name><staticTail>`. */
+  private repoUrl(staticTail: string, dynamicTail = "", repo = this.repo): string | null {
+    return repoScopedUrl(this.baseUrl, repo, staticTail, dynamicTail);
+  }
+
   /** GraphQL endpoint for this API base: api.github.com/graphql, or
    * `<host>/api/graphql` for a GHES `<host>/api/v3` base. */
   private graphqlUrl(): string {
     return this.baseUrl.endsWith("/api/v3") ? `${this.baseUrl.slice(0, -"/v3".length)}/graphql` : `${this.baseUrl}/graphql`;
   }
 
-  private get repoParts(): { owner: string; name: string } {
-    const slash = this.repo.indexOf("/");
-    return slash < 0 ? { owner: this.repo, name: this.repo } : { owner: this.repo.slice(0, slash), name: this.repo.slice(slash + 1) };
-  }
 
   /** `gh api <path>`: ok only on a 2xx JSON body (gh exits nonzero on HTTP
    * errors, and the seam's callers treat that as a failed read). */
-  private async restJson(path: string): Promise<ReadResult<unknown>> {
+  private async restJson(url: string | null): Promise<ReadResult<unknown>> {
+    if (url === null) return { ok: false, error: "Refusing a request outside the repository" };
     try {
-      const { status, text } = await requestText(this.url(path), this.options());
+      const { status, text } = await requestText(url, this.options());
       if (status < 200 || status >= 300) return { ok: false, error: `GitHub API error: ${status}` };
       const parsed = parseJson(text);
       return parsed.ok ? { ok: true, data: parsed.data } : { ok: false, error: "GitHub API returned invalid JSON" };
@@ -123,7 +126,9 @@ export class GitHubAdapter implements PlatformReadAdapter {
    * an HTTP error or a non-empty `errors` array fails the read (gh exits
    * nonzero and `set -o pipefail` propagates it). */
   private async graphql(query: string): Promise<ReadResult<unknown>> {
-    const { owner, name } = this.repoParts;
+    const ref = parseRepoRef(this.repo);
+    if (ref === null) return { ok: false, error: `Invalid repo full name: ${this.repo}` };
+    const { owner, name } = ref;
     const number: string | number = NUMBER_RE.test(this.prNumber) ? Number(this.prNumber) : this.prNumber;
     const body = JSON.stringify({ query, variables: { owner, name, number } });
     try {
@@ -142,11 +147,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
   /** `_gh_api_bounded gh api <path>` stdout: the body on any HTTP status
    * (gh relays error bodies on stdout, #190), "" on timeout, transport
    * failure, or an exhausted CI deadline (the attempt is skipped). */
-  private async boundedStdout(path: string, options: ExternalChecksOptions): Promise<string> {
+  private async boundedStdout(url: string, options: ExternalChecksOptions): Promise<string> {
     const timeoutMs = ciAttemptTimeoutMs(options);
     if (timeoutMs === null) return "";
     try {
-      const { text } = await requestText(this.url(path), { ...this.options(), timeoutMs });
+      const { text } = await requestText(url, { ...this.options(), timeoutMs });
       return text;
     } catch {
       return "";
@@ -164,8 +169,10 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async getPr(): Promise<unknown | null> {
+    const url = this.repoUrl("/pulls/", this.prNumber);
+    if (url === null) return null;
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), this.options());
+      const { status, data } = await requestJson(url, this.options());
       return status === 200 ? data : null;
     } catch {
       return null;
@@ -173,9 +180,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async getPrDiff(): Promise<string> {
+    const url = this.repoUrl("/pulls/", this.prNumber);
+    if (url === null) return "";
     try {
       const { status, text } = await requestText(
-        this.url(`/repos/${this.repo}/pulls/${this.prNumber}`),
+        url,
         this.options("application/vnd.github.v3.diff"),
       );
       return status === 200 ? text : "";
@@ -185,9 +194,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async listIssueComments(): Promise<ManagedComment[]> {
+    const url = this.repoUrl("/issues/", `${this.prNumber}/comments?per_page=100`);
+    if (url === null) return [];
     try {
       const { status, data } = await requestJson(
-        this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?per_page=100`),
+        url,
         this.options(),
       );
       return status === 200 && Array.isArray(data) ? (data as ManagedComment[]) : [];
@@ -197,9 +208,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async listPrReviews(): Promise<ManagedReview[]> {
+    const url = this.repoUrl("/pulls/", `${this.prNumber}/reviews?per_page=100`);
+    if (url === null) return [];
     try {
       const { status, data } = await requestJson(
-        this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?per_page=100`),
+        url,
         this.options(),
       );
       return status === 200 && Array.isArray(data) ? (data as ManagedReview[]) : [];
@@ -209,12 +222,12 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async listPrFiles(): Promise<ReadResult<unknown>> {
-    return this.restJson(`/repos/${this.repo}/pulls/${this.prNumber}/files?per_page=100`);
+    return this.restJson(this.repoUrl("/pulls/", `${this.prNumber}/files?per_page=100`));
   }
 
   async getIssue(repo: string, issueNumber: string): Promise<ReadResult<unknown>> {
-    if (!REPO_RE.test(repo) || !NUMBER_RE.test(issueNumber)) return { ok: false, error: "invalid issue reference" };
-    return this.restJson(`/repos/${repo}/issues/${issueNumber}`);
+    if (parseRepoRef(repo) === null || !NUMBER_RE.test(issueNumber)) return { ok: false, error: "invalid issue reference" };
+    return this.restJson(this.repoUrl("/issues/", issueNumber, repo));
   }
 
   async listPrConversationComments(): Promise<ReadResult<unknown[]>> {
@@ -242,7 +255,8 @@ export class GitHubAdapter implements PlatformReadAdapter {
    * into one array. Any failed page fails the read (gh exits nonzero). */
   async listPrReviewsPaginated(): Promise<ReadResult<unknown[]>> {
     const merged: unknown[] = [];
-    let url: string | null = this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?per_page=100`);
+    let url: string | null = this.repoUrl("/pulls/", `${this.prNumber}/reviews?per_page=100`);
+    if (url === null) return { ok: false, error: "Refusing a request outside the repository" };
     for (let page = 0; url !== null; page += 1) {
       if (page >= MAX_PAGES) return { ok: false, error: `pagination exceeded ${MAX_PAGES} pages` };
       try {
@@ -266,9 +280,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
   /** `platform_external_checks`: bounded check-runs + combined-status reads
    * (sequential, sharing the CI deadline), folded and self-excluded. */
   async externalChecks(sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
-    if (!SHA_RE.test(sha)) return null;
-    const runs = await this.boundedStdout(`/repos/${this.repo}/commits/${sha}/check-runs?per_page=100`, options);
-    const combined = await this.boundedStdout(`/repos/${this.repo}/commits/${sha}/status`, options);
+    const runsUrl = this.repoUrl("/commits/", `${sha}/check-runs?per_page=100`);
+    const statusUrl = this.repoUrl("/commits/", `${sha}/status`);
+    if (!SHA_RE.test(sha) || runsUrl === null || statusUrl === null) return null;
+    const runs = await this.boundedStdout(runsUrl, options);
+    const combined = await this.boundedStdout(statusUrl, options);
     return normalizeExternalChecks(runs, combined, options.runId ?? "", options.statusContext ?? "");
   }
 

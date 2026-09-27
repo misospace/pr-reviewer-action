@@ -11,6 +11,7 @@ import type { FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
 import { GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
+import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
 
 interface Seen {
@@ -313,6 +314,105 @@ test("ForgejoAdapter.enrichClient reuses the adapter credential for its own host
   await client.compare("git.example", "a/b", "x...y");
   await client.compare("other.example", "a/b", "x...y");
   assert.deepEqual(seen.map((s) => s.auth), ["token t", undefined]);
+});
+
+// ── Dot-segment repo refs (#706 review: path normalization before the origin check) ──
+
+const DOT_REFS = ["a/..", "../x", "./x", "a/.", "../..", "./.", "a/../b", "a/b/..", ".."];
+
+test("the shared repo-ref validator rejects dot-only segments and extra segments", () => {
+  for (const bad of DOT_REFS) assert.equal(parseRepoRef(bad), null, bad);
+  assert.deepEqual(parseRepoRef("o.x/r..y"), { owner: "o.x", name: "r..y" });
+  assert.deepEqual(parseRepoRef(".github/.dotfiles"), { owner: ".github", name: ".dotfiles" });
+});
+
+test("repoScopedUrl refuses a URL whose normalized path leaves the intended prefix", () => {
+  assert.equal(repoScopedUrl("https://api.github.com", "o/r", "/issues/", "3"), "https://api.github.com/repos/o/r/issues/3");
+  assert.equal(repoScopedUrl("https://api.github.com", "o/r", "/issues/", "../../x/y/issues/3"), null);
+  assert.equal(repoScopedUrl("https://api.github.com", "o/r", "/releases/tags/", ".."), null);
+  assert.equal(repoScopedUrl("https://api.github.com", "o/r", "/pulls/", "%2e%2e/%2e%2e/%2e%2e/user"), null);
+  assert.equal(repoScopedUrl("https://git.example/sub", "o/r", "/pulls/", "7/files"), "https://git.example/sub/repos/o/r/pulls/7/files");
+  for (const bad of DOT_REFS) assert.equal(repoScopedUrl("https://api.github.com", bad, "/issues/", "3"), null, bad);
+});
+
+test("github reads make ZERO requests for a dot-segment repo ref", async () => {
+  const { fetchImpl, seen } = recorder(() => json({}));
+  for (const bad of DOT_REFS) {
+    const own = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+    assert.equal((await own.getIssue(bad, "3")).ok, false, bad);
+    const adapter = new GitHubAdapter({ repo: bad, prNumber: "7", token: "Bearer t", fetchImpl });
+    assert.equal(await adapter.getPr(), null, bad);
+    assert.equal(await adapter.getPrDiff(), "", bad);
+    assert.deepEqual(await adapter.listIssueComments(), [], bad);
+    assert.deepEqual(await adapter.listPrReviews(), [], bad);
+    assert.equal((await adapter.listPrFiles()).ok, false, bad);
+    assert.equal((await adapter.listPrConversationComments()).ok, false, bad);
+    assert.equal((await adapter.listReviewThreads()).ok, false, bad);
+    assert.equal((await adapter.listPrReviewsPaginated()).ok, false, bad);
+    assert.equal(await adapter.externalChecks("abc"), null, bad);
+  }
+  assert.equal(seen.length, 0);
+});
+
+test("forgejo reads make ZERO requests for a dot-segment repo ref", async () => {
+  const { fetchImpl, seen } = recorder(() => json({}));
+  for (const bad of DOT_REFS) {
+    const own = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+    assert.equal((await own.getIssue(bad, "3")).ok, false, bad);
+    const adapter = new ForgejoAdapter({ repo: bad, prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+    assert.equal((await adapter.listPrFiles()).ok, false, bad);
+    assert.equal((await adapter.listPrConversationComments()).ok, false, bad);
+    assert.equal((await adapter.listReviewThreads()).ok, false, bad);
+    assert.equal((await adapter.listPrReviewsPaginated()).ok, false, bad);
+    assert.deepEqual(await adapter.externalChecks("abc"), [], bad);
+    await assert.rejects(adapter.getPr(), /Invalid repo full name/);
+    await assert.rejects(adapter.getPrDiff(), /Invalid repo full name/);
+    await assert.rejects(adapter.listIssueComments(), /Invalid repo full name/);
+    await assert.rejects(adapter.listPrReviews(), /Invalid repo full name/);
+    await assert.rejects(adapter.repoPermission(), /Invalid repo full name/);
+  }
+  assert.equal(seen.length, 0);
+});
+
+test("enrichment clients make ZERO requests for a dot-segment repo ref or ref tail", async () => {
+  const { fetchImpl, seen } = recorder(() => json({}));
+  const github = new GitHubEnrichClient({ token: "Bearer t", fetchImpl });
+  const forgejo = new ForgejoEnrichClient({ configuredApiUrl: "https://git.example", configuredAuthorization: async () => "token t", fetchImpl });
+  for (const bad of DOT_REFS) {
+    assert.equal(await github.release(bad, "v1"), null, bad);
+    assert.equal(await github.tags(bad), null, bad);
+    assert.equal(await github.compare(bad, "a...b"), null, bad);
+    assert.equal((await github.imageCompare(bad, "a", "b")).ok, false, bad);
+    assert.equal(await github.get(`repos/${bad}/releases/tags/v1`), null, bad);
+    assert.equal(await forgejo.release("git.example", bad, "v1"), null, bad);
+    assert.equal(await forgejo.compare("git.example", bad, "a...b"), null, bad);
+  }
+  assert.equal(await forgejo.release("git.example", "o/r", ".."), null);
+  assert.equal(await forgejo.release("git.example", "o/r", "."), null);
+  assert.equal(await forgejo.compare("git.example", "o/r", ".."), null);
+  assert.equal(await github.release("o/r", ".."), null);
+  assert.equal(await github.compare("o/r", "../../../user"), null);
+  assert.equal(seen.length, 0);
+});
+
+test("enrichClient on a path-prefixed instance authenticates its real host (and port) only", async () => {
+  const { fetchImpl, seen } = recorder(() => json({ total_commits: 0 }));
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example/sub/", token: "t", fetchImpl });
+  const client = adapter.enrichClient();
+  await client.compare("git.example", "a/b", "x...y");
+  await client.compare("GIT.EXAMPLE:443", "a/b", "x...y");
+  await client.compare("git.example:8443", "a/b", "x...y");
+  await client.compare("other.example", "a/b", "x...y");
+  assert.deepEqual(seen.map((s) => [s.url, s.auth]), [
+    ["https://git.example/api/v1/repos/a/b/compare/x...y", "token t"],
+    ["https://git.example/api/v1/repos/a/b/compare/x...y", "token t"],
+    ["https://git.example:8443/api/v1/repos/a/b/compare/x...y", undefined],
+    ["https://other.example/api/v1/repos/a/b/compare/x...y", undefined],
+  ]);
+  const ported = new ForgejoEnrichClient({ configuredApiUrl: "https://git.example:8443/forgejo", configuredAuthorization: async () => "token p", fetchImpl });
+  await ported.compare("git.example:8443", "a/b", "x...y");
+  await ported.compare("git.example", "a/b", "x...y");
+  assert.deepEqual(seen.slice(4).map((s) => s.auth), ["token p", undefined]);
 });
 
 // ── Semantic fixture adapter ────────────────────────────────────────────
