@@ -274,7 +274,7 @@ class RealPRDefect:
         return cls(
             description=str(d.get("description", "")),
             file=d.get("file"),
-            line_range=tuple(lr) if isinstance(lr, (list, tuple)) and lr else None,
+            line_range=tuple(lr) if lr is not None else None,
             severity=d.get("severity"),
         )
 
@@ -312,6 +312,9 @@ class RealPRScenario:
         }
 
 
+_REPO_FULL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
 def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPRScenario]) -> None:
     """Raise ValueError (with every problem listed) on a malformed corpus.
 
@@ -331,15 +334,26 @@ def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPR
                 f"got {scenario.head_sha!r}"
             )
 
+    def _check_identity(scenario: RealPRScenario) -> None:
+        number = scenario.number
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            errors.append(f"{scenario.id}: number must be a positive int, got {number!r}")
+        if not isinstance(scenario.repo_full_name, str) or not _REPO_FULL_NAME_RE.fullmatch(scenario.repo_full_name):
+            errors.append(f"{scenario.id}: repo_full_name must be owner/repo, got {scenario.repo_full_name!r}")
+
     for scenario in vulnerable:
         _check_sha(scenario)
+        _check_identity(scenario)
+        if scenario.expected_clean:
+            errors.append(f"{scenario.id}: vulnerable entry must not set expected_clean")
         if scenario.defect is None or not scenario.defect.description or not scenario.defect.file:
             errors.append(
                 f"{scenario.id}: vulnerable entry must have a defect with a "
                 "description and a file"
             )
         elif scenario.defect.line_range is not None:
-            lo, hi = scenario.defect.line_range
+            lr = scenario.defect.line_range
+            lo, hi = lr if isinstance(lr, tuple) and len(lr) == 2 else (None, None)
             valid = (
                 isinstance(lo, int) and not isinstance(lo, bool)
                 and isinstance(hi, int) and not isinstance(hi, bool)
@@ -353,6 +367,7 @@ def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPR
 
     for scenario in clean:
         _check_sha(scenario)
+        _check_identity(scenario)
         if not scenario.expected_clean:
             errors.append(f"{scenario.id}: clean entry must set expected_clean: true")
 
@@ -377,14 +392,19 @@ class RealPRCorpus:
         clean_raw = block.get("clean", [])
         if not isinstance(vulnerable_raw, list) or not isinstance(clean_raw, list):
             raise ValueError(f"{path}: 'real_pr_corpus.vulnerable' and '.clean' must be lists")
-        vulnerable = [RealPRScenario.from_dict(e) for e in vulnerable_raw if isinstance(e, dict)]
-        clean = [RealPRScenario.from_dict(e) for e in clean_raw if isinstance(e, dict)]
+        if not all(isinstance(e, dict) for e in [*vulnerable_raw, *clean_raw]):
+            raise ValueError(f"{path}: every real_pr_corpus entry must be an object")
+        vulnerable = [RealPRScenario.from_dict(e) for e in vulnerable_raw]
+        clean = [RealPRScenario.from_dict(e) for e in clean_raw]
         validate_real_pr_corpus(vulnerable, clean)
         return cls(vulnerable=vulnerable, clean=clean)
 
 
 def _normalize_path_for_match(path: str) -> str:
-    return path.strip().lstrip("./").replace("\\", "/").lower()
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/").lower()
 
 
 def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:

@@ -26,6 +26,7 @@ from eval_harness import (
     RealPRScenario,
     ReviewRun,
     _checkout_pinned_commit,
+    _normalize_path_for_match,
     generate_real_pr_report,
     run_real_pr_corpus,
     score_clean_run,
@@ -56,6 +57,11 @@ def _run(findings=None, verdict="approve", error=None):
 # ---------------------------------------------------------------------------
 
 class TestScoreVulnerableRun:
+    def test_dot_prefixed_paths_keep_their_dots(self):
+        defect = RealPRDefect("d", ".github/workflows/ci.yaml", None, "major")
+        assert score_vulnerable_run(_run([_finding("./.github/workflows/ci.yaml")]), defect)["hit"] is True
+        assert _normalize_path_for_match("../shared/lib.py") == "../shared/lib.py"
+
     def test_hit_when_file_and_line_match(self):
         defect = RealPRDefect("d", "scripts/run_review.sh", (851, 935), "major")
         run = _run([_finding("scripts/run_review.sh", line=900)], verdict="request_changes")
@@ -245,6 +251,27 @@ class TestRealPRCorpusFromFile:
         for scenario in corpus.clean:
             assert len(scenario.head_sha) == 40
             assert scenario.expected_clean is True
+
+    def test_rejects_bad_arity_side_and_identity(self, tmp_path):
+        base = {"repo_full_name": "acme/repo", "number": 1, "head_sha": "a" * 40}
+        vulnerable = [
+            {**base, "defect": {"description": "d", "file": "a.py", "line_range": [5]}},
+            {**base, "expected_clean": True, "defect": {"description": "d", "file": "a.py"}},
+            {**base, "number": 0, "repo_full_name": "bad", "defect": {"description": "d", "file": "a.py"}},
+        ]
+        path = tmp_path / "corpus.json"
+        path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": vulnerable, "clean": []}}), encoding="utf-8")
+        with pytest.raises(ValueError) as exc:
+            RealPRCorpus.from_file(path)
+        message = str(exc.value)
+        for expected in ("line_range", "must not set expected_clean", "positive int", "owner/repo"):
+            assert expected in message
+
+    def test_rejects_non_object_entries(self, tmp_path):
+        path = tmp_path / "corpus.json"
+        path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": ["x"], "clean": []}}), encoding="utf-8")
+        with pytest.raises(ValueError, match="must be an object"):
+            RealPRCorpus.from_file(path)
 
     def test_max_entries_caps_vulnerable_and_clean_independently(self, tmp_path, capsys):
         corpus = RealPRCorpus.from_file(CORPUS_PATH)
