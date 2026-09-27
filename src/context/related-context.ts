@@ -70,16 +70,28 @@ function escapeControls(value: string): string {
   });
 }
 
+/** Length in code points, as Python's `len` counts. */
+function charCount(value: string): number {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
+}
+
+/** The first `limit` code points, as Python's `value[:limit]` cuts. */
+function charSlice(value: string, limit: number): string {
+  return Array.from(value).slice(0, Math.max(0, limit)).join("");
+}
+
 function boundedText(value: unknown, limit: number = MAX_ERROR_CHARS): string {
   let text = redactText(String(value ?? "")).replace("\u0000", "\\u0000");
   text = escapeControls(text);
-  if (text.length > limit) return text.slice(0, Math.max(0, limit - 3)) + "...";
+  if (charCount(text) > limit) return charSlice(text, limit - 3) + "...";
   return text;
 }
 
 function display(value: string, limit = 200): string {
   const text = escapeControls(value);
-  if (text.length > limit) return text.slice(0, Math.max(0, limit - 1)) + "...";
+  if (charCount(text) > limit) return charSlice(text, limit - 1) + "...";
   return text;
 }
 
@@ -206,7 +218,7 @@ interface GrepRow {
 function snippetOf(value: string): string {
   let text = redactText(value);
   text = escapeControls(text);
-  if (text.length > MAX_SNIPPET_CHARS) return text.slice(0, MAX_SNIPPET_CHARS - 3) + "...";
+  if (charCount(text) > MAX_SNIPPET_CHARS) return charSlice(text, MAX_SNIPPET_CHARS - 3) + "...";
   return text;
 }
 
@@ -779,7 +791,7 @@ async function buildConsumers(
     const variants = keyVariants(key.name, key.kind);
     if (variants.length === 0) continue;
     const keep = (row: GrepRow): boolean => {
-      if (row.snippet.length >= MAX_SNIPPET_CHARS) return false;
+      if (charCount(row.snippet) >= MAX_SNIPPET_CHARS) return false;
       return key.kind !== "branch" || branchSite(row.snippet, variants);
     };
     const grep = await gitGrepReferences(variants, workspace, {
@@ -1360,7 +1372,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
     const original = originalTruncation as Record<string, unknown>;
     const originalReasons = original.reasons;
     if (Array.isArray(originalReasons)) {
-      const reasons = originalReasons.slice(0, 20).map((reason) => String(reason).slice(0, 100));
+      const reasons = originalReasons.slice(0, 20).map((reason) => charSlice(String(reason), 100));
       if (!reasons.includes("json_cap")) reasons.push("json_cap");
       truncation.reasons = reasons;
     }
@@ -1370,7 +1382,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
     }
   }
   let version = source.version ?? ARTIFACT_VERSION;
-  if (typeof version === "boolean" || (typeof version !== "number" && typeof version !== "string") || (typeof version === "string" && version.length > 100)) {
+  if (typeof version === "boolean" || (typeof version !== "number" && typeof version !== "string") || (typeof version === "string" && charCount(version) > 100)) {
     version = ARTIFACT_VERSION;
   }
   const minimal: Record<string, unknown> = {
@@ -1385,7 +1397,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
 }
 
 function shrinkJsonValue(value: unknown, limit: number): unknown {
-  if (typeof value === "string") return value.length <= limit ? value : value.slice(0, Math.max(0, limit - 3)) + "...";
+  if (typeof value === "string") return charCount(value) <= limit ? value : charSlice(value, limit - 3) + "...";
   if (Array.isArray(value)) return value.map((item) => shrinkJsonValue(item, limit));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, shrinkJsonValue(item, limit)]));
