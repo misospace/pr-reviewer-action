@@ -1,0 +1,12 @@
+{
+  "fixture": "replace-file-missing",
+  "description": "A configured SYSTEM_PROMPT_FILE that does not exist is a hard error.",
+  "env": {
+    "SYSTEM_PROMPT_FILE": "prompts/missing.txt",
+    "SYSTEM_PROMPT": "ignored"
+  },
+  "expected": {
+    "outcome": "error",
+    "category": "system_prompt_file_missing"
+  }
+}

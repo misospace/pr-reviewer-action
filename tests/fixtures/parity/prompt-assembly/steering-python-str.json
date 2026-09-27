@@ -1,0 +1,7 @@
+{
+  "fixture": "steering-python-str",
+  "description": "Python str() of non-string JSON values: missing pr_kind is 'unknown'; ints (including beyond 2^53), floats (1e+16, 3.0), bools, dicts and lists render as Python does.",
+  "files": {
+    "classification.json": "{\"risk_flags\": [1, 2.5, true, 0, {\"k\": \"v\", \"n\": [1, \"x\"]}, [\"it's\"]], \"risk_flags_with_files\": {\"1\": [\"one.py\"], \"True\": [\"bool.py\", \"\"]}, \"must_check\": [1e+16, 1.5e-05, -0.0, 3, 3.0, 123456789012345678901, 0.1, \"text\"]}"
+  }
+}

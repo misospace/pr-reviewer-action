@@ -1,0 +1,7 @@
+{
+  "fixture": "steering-full",
+  "description": "Full classification steering: pr_kind, risk flags capped at 12 with file attribution capped at 5, falsy entries dropped, required checks capped at 12.",
+  "files": {
+    "classification.json": "{\"pr_kind\": \"security\", \"risk_flags\": [\"flag_0\", \"flag_1\", \"flag_2\", \"flag_3\", \"flag_4\", \"flag_5\", \"flag_6\", \"flag_7\", \"flag_8\", \"flag_9\", \"flag_10\", \"flag_11\", \"flag_12\", \"flag_13\", \"\", null], \"risk_flags_with_files\": {\"flag_0\": [\"a.py\", \"b.py\", \"c.py\", \"d.py\", \"e.py\", \"f.py\", \"g.py\"], \"flag_1\": [], \"flag_2\": [\"only.ts\"], \"flag_13\": [\"past-the-cap.py\"]}, \"must_check\": [\"Required check number 0?\", \"Required check number 1?\", \"Required check number 2?\", \"Required check number 3?\", \"Required check number 4?\", \"Required check number 5?\", \"Required check number 6?\", \"Required check number 7?\", \"Required check number 8?\", \"Required check number 9?\", \"Required check number 10?\", \"Required check number 11?\", \"Required check number 12?\", \"Required check number 13?\", \"\", false]}"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "fixture": "classification-multi-value-stream",
+  "description": "Two JSON texts: jq reads both (first kind survives the trailing-newline strip) while json.load rejects extra data.",
+  "files": {
+    "classification.json": "{\"pr_kind\": \"k8s_manifest\"}\n{}\n"
+  }
+}

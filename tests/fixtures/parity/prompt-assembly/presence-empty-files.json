@@ -1,0 +1,11 @@
+{
+  "fixture": "presence-empty-files",
+  "description": "Presence files that exist but are empty gate nothing ([[ -s ]]).",
+  "files": {
+    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [], \"must_check\": []}",
+    "review-threads-present.txt": "",
+    "human-reviews-present.txt": "",
+    "requirement-ledger-present.txt": "",
+    "specialist-leads-present.txt": ""
+  }
+}

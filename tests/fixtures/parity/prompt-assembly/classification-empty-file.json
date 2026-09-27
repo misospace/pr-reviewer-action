@@ -1,0 +1,7 @@
+{
+  "fixture": "classification-empty-file",
+  "description": "classification.json exists but is empty: -f passes (jq yields no kind), -s fails (base user message).",
+  "files": {
+    "classification.json": ""
+  }
+}

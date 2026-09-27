@@ -1,0 +1,18 @@
+{
+  "fixture": "append-file-plus-inline-with-leads",
+  "description": "Append mode with file + inline, concise verbosity, k8s_manifest and every presence signal: the addendum precedes the later-appended specialist-leads guidance.",
+  "env": {
+    "SYSTEM_PROMPT_MODE": "append",
+    "SYSTEM_PROMPT_FILE": "conventions.md",
+    "SYSTEM_PROMPT": "Inline steering.",
+    "REVIEW_VERBOSITY": "concise"
+  },
+  "files": {
+    "conventions.md": "Conventions:\n- small PRs\n",
+    "classification.json": "{\"pr_kind\": \"k8s_manifest\", \"risk_flags\": [\"k8s_workload_change\"], \"must_check\": [\"Is the rollout safe?\"]}",
+    "review-threads-present.txt": "1\n",
+    "human-reviews-present.txt": "1\n",
+    "requirement-ledger-present.txt": "1\n",
+    "specialist-leads-present.txt": "1\n"
+  }
+}

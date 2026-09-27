@@ -1450,6 +1450,29 @@ PLATFORM_NORMALIZATION_BOUNDARY = Boundary(
     run=lambda fixture, workdir: _run_new_boundary("v2_platform_normalization.py", "platform-normalization-fixture", fixture, workdir),
 )
 
+PROMPT_ASSEMBLY_BOUNDARY = Boundary(
+    id="prompt-assembly",
+    description=(
+        "#706 prompt and message layer parity: the real v2 shell functions "
+        "(resolve_system_prompt, apply_system_prompt_fragments, "
+        "apply_specialist_leads_fragment, build_user_message, "
+        "handle_model_failure, annotate_analysis_engine) sourced with each "
+        "fixture's env and presence files, versus the v3 src/prompt/ port "
+        "over the build-time-embedded prompt assets. Covers every fragment "
+        "gate on and off, verbosity, replace vs append with SYSTEM_PROMPT / "
+        "SYSTEM_PROMPT_FILE, specialist leads, classification steering, the "
+        "failure notice and the engine annotation; compares exact bytes "
+        "(plus sha256) of the system prompt and user message."
+    ),
+    fixtures_dir="prompt-assembly",
+    run=lambda fixture, workdir: _run_new_boundary("v2_prompt_assembly.py", "prompt-assembly-fixture", fixture, workdir),
+    error_categories=(
+        (re.compile(r"SYSTEM_PROMPT_FILE does not exist"), "system_prompt_file_missing"),
+        (re.compile(r"Traceback \(most recent call last\)|user message build failed"), "user_message_build_failed"),
+    ),
+    canonical_json_keys={"failure_notices", "engine_annotations"},
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1500,6 +1523,7 @@ NEW_BOUNDARIES = (
     INLINE_FINDINGS_BOUNDARY,
     METADATA_MARKERS_BOUNDARY,
     PLATFORM_NORMALIZATION_BOUNDARY,
+    PROMPT_ASSEMBLY_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

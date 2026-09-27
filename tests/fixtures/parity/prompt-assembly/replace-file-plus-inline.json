@@ -1,0 +1,12 @@
+{
+  "fixture": "replace-file-plus-inline",
+  "description": "SYSTEM_PROMPT_FILE plus SYSTEM_PROMPT: file content, a blank line, then the inline value.",
+  "env": {
+    "SYSTEM_PROMPT_FILE": ".github/review-prompt.txt",
+    "SYSTEM_PROMPT": "Per-PR steering: focus on migrations.\n",
+    "SYSTEM_PROMPT_MODE": "replace"
+  },
+  "files": {
+    ".github/review-prompt.txt": "Static conventions.\n"
+  }
+}

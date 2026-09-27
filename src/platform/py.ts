@@ -38,7 +38,7 @@ export function pyIsInt(value: unknown): boolean {
   return typeof value === "boolean" || (typeof value === "number" && Number.isInteger(value));
 }
 
-function pyFloatRepr(value: number): string {
+export function pyFloatRepr(value: number): string {
   if (Number.isNaN(value)) return "nan";
   if (!Number.isFinite(value)) return value > 0 ? "inf" : "-inf";
   const [mantissa, expText] = value.toExponential().split("e");
@@ -57,7 +57,7 @@ function pyFloatRepr(value: number): string {
   return `${sign}${intPart}.${fracPart || "0"}`;
 }
 
-function pyReprString(text: string): string {
+export function pyReprString(text: string): string {
   const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
   let out = "";
   for (const ch of text) {

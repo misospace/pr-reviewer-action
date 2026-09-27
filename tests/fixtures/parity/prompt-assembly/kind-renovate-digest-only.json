@@ -1,0 +1,7 @@
+{
+  "fixture": "kind-renovate-digest-only",
+  "description": "renovate_digest_only substitutes digest and release-notes guidance, not version-bump.",
+  "files": {
+    "classification.json": "{\"pr_kind\": \"renovate_digest_only\", \"risk_flags\": [], \"must_check\": []}"
+  }
+}

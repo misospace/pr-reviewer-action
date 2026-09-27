@@ -1,0 +1,8 @@
+{
+  "fixture": "specialist-leads-not-called",
+  "description": "Zero leads calls (no specialist phase ran): the placeholder stays neutralized and nothing is appended.",
+  "files": {
+    "specialist-leads-present.txt": "1\n"
+  },
+  "specialist_leads_calls": 0
+}

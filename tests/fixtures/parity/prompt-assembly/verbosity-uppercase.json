@@ -1,0 +1,7 @@
+{
+  "fixture": "verbosity-uppercase",
+  "description": "REVIEW_VERBOSITY=CONCISE is lowercased and still substitutes the brevity fragment.",
+  "env": {
+    "REVIEW_VERBOSITY": "CONCISE"
+  }
+}
