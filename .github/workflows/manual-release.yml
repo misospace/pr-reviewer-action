@@ -56,35 +56,34 @@ jobs:
             echo "prerelease=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create immutable version tag
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # dist/ is not committed to main: the tag points at a build commit whose
+      # parent is the released main commit. A stable release also moves the
+      # floating major tag; a pre-release never does.
+      - name: Create version tag with dist
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SHA: ${{ steps.release.outputs.sha }}
           TAG: ${{ steps.release.outputs.tag }}
+          MAJOR_TAG: ${{ steps.release.outputs.major_tag }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
           if EXISTING_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
-            if [ "$EXISTING_SHA" != "$SHA" ]; then
+            PARENT=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$EXISTING_SHA" --jq '.parents[0].sha // ""')
+            if [ "$EXISTING_SHA" != "$SHA" ] && [ "$PARENT" != "$SHA" ]; then
               echo "Tag $TAG already points to $EXISTING_SHA"
               exit 1
             fi
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
           fi
-
-      - name: Advance floating major tag
-        if: steps.release.outputs.prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          MAJOR_TAG: ${{ steps.release.outputs.major_tag }}
-          SHA: ${{ steps.release.outputs.sha }}
-        run: |
-          set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$MAJOR_TAG" >/dev/null 2>&1; then
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$MAJOR_TAG" -f sha="$SHA" -F force=true >/dev/null
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$MAJOR_TAG" -f sha="$SHA" >/dev/null
-          fi
+          [ "$PRERELEASE" = "true" ] && MAJOR_TAG=""
+          scripts/release/tag-with-dist.sh "$SHA" "$TAG" "$MAJOR_TAG"
 
       - name: Create GitHub release
         env:

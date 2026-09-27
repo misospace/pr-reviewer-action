@@ -1500,6 +1500,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", help="write the structured parity report JSON here")
     parser.add_argument("--skip-gates", action="store_true", help="skip the migration gates")
     args = parser.parse_args(argv)
+    if not (ROOT / "dist" / "index.js").is_file():
+        parser.error("dist/index.js is missing; run `npm run build` first")
 
     selected = tuple(b for b in BOUNDARIES if not args.boundary or b.id in args.boundary)
     if args.boundary and len(selected) != len(args.boundary):

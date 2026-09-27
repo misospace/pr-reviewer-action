@@ -5,6 +5,10 @@
 # The app token matters twice over: a tag pushed with the default GITHUB_TOKEN
 # does not trigger other workflows, and this repo's consumers pin @vX, so the
 # floating major tag has to be advanced after every stable release.
+#
+# dist/ is not committed to main. After release-please tags the release commit,
+# publish-release-build commits the built bundle on top of it (off main) and
+# moves both vX.Y.Z and vX to that commit.
 name: Release Please
 
 on:
@@ -24,6 +28,7 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       major: ${{ steps.release.outputs.major }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - name: Generate bot token
         id: app-token
@@ -39,8 +44,8 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  advance-major-tag:
-    name: Advance floating major tag
+  publish-release-build:
+    name: Publish release build
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
@@ -54,22 +59,28 @@ jobs:
           app-id: ${{ secrets.MISO_APP_ID }}
           private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
 
-      # The sha is read back from the tag release-please just created rather
-      # than taken from github.sha, so this cannot drift if the release commit
-      # is ever not the commit that triggered this run.
-      - name: Point vX at the release commit
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # The base sha comes from release-please's own output, not the tag, so a
+      # rerun rebuilds from the release commit rather than stacking on the
+      # previous build commit.
+      - name: Commit dist and point vX.Y.Z and vX at it
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_SHA: ${{ needs.release-please.outputs.sha }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
           MAJOR_TAG: v${{ needs.release-please.outputs.major }}
         run: |
           set -euo pipefail
-          SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$MAJOR_TAG" >/dev/null 2>&1; then
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$MAJOR_TAG" \
-              -f sha="$SHA" -F force=true >/dev/null
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/tags/$MAJOR_TAG" -f sha="$SHA" >/dev/null
-          fi
-          echo "$MAJOR_TAG -> $SHA"
+          SHA=$(scripts/release/tag-with-dist.sh "$BASE_SHA" "$TAG" "$MAJOR_TAG")
+          echo "$TAG, $MAJOR_TAG -> $SHA"
