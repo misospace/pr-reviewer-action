@@ -16,12 +16,22 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "harvest-human-findings.yaml"
+PUSH_SCRIPT = ROOT / "scripts" / "push_harvest_branch.sh"
+SCOPE_SCRIPT = ROOT / "scripts" / "resolve_harvest_scope.sh"
 
 _SHA_PIN_RE = re.compile(r"uses:\s*\S+@[0-9a-f]{40}\b")
 
 
 def _text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def _all_text() -> str:
+    """Workflow text plus the scripts it calls out to (the branch-update
+    and scope-resolution logic live there now, not inline)."""
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in (WORKFLOW, PUSH_SCRIPT, SCOPE_SCRIPT)
+    )
 
 
 def test_workflow_exists() -> None:
@@ -83,23 +93,27 @@ def test_job_permissions_are_read_only_and_write_comes_from_app_token() -> None:
 
 
 def test_never_pushes_to_main() -> None:
-    text = _text()
+    text = _all_text()
     assert "git push" in text
     assert re.search(r"git push[^\n]*\bmain\b", text) is None, (
         "must never push directly to main"
     )
-    assert 'BRANCH: bot/harvest-human-findings' in text or "BRANCH=" not in text, (
+    assert 'BRANCH: bot/harvest-human-findings' in _text(), (
         "pushes must target the fixed bot branch, not main"
     )
     assert 'git checkout -B "$BRANCH"' in text
 
 
 def test_opens_or_updates_single_pr_never_recreates() -> None:
-    text = _text()
+    text = _all_text()
     assert "gh pr view" in text, "must check for an existing PR before creating one"
     assert "gh pr create" in text
     assert "force-with-lease" in text, (
         "the bot branch push should use --force-with-lease, not a bare force push"
+    )
+    assert PUSH_SCRIPT.is_file(), (
+        "the branch-update/PR logic must live in an executable script "
+        "(so it's covered by tests/test_push_harvest_branch.sh), not inline"
     )
 
 
@@ -144,7 +158,7 @@ def test_app_token_is_scoped_to_the_configured_harvest_repos() -> None:
 def test_never_embeds_token_in_a_url() -> None:
     """The push/PR step must not put the token in argv or a persisted
     `.git/config` URL (e.g. `https://x-access-token:$TOKEN@...`)."""
-    text = _text()
+    text = _all_text()
     assert "x-access-token" not in text, (
         "must not embed the token in a remote URL"
     )
@@ -154,4 +168,33 @@ def test_never_embeds_token_in_a_url() -> None:
     assert "gh auth setup-git" in text, (
         "expected a credential mechanism (e.g. `gh auth setup-git`) that "
         "keeps the token out of argv and out of a persisted git config value"
+    )
+
+
+def test_resolve_scope_script_exists_and_is_executable() -> None:
+    assert SCOPE_SCRIPT.is_file(), (
+        "the owner/repos scope-resolution logic must live in an executable "
+        "script (so it's covered by tests/test_resolve_harvest_scope.sh)"
+    )
+    assert SCOPE_SCRIPT.stat().st_mode & 0o111, "resolve_harvest_scope.sh must be executable"
+
+
+def test_push_script_is_executable() -> None:
+    assert PUSH_SCRIPT.stat().st_mode & 0o111, "push_harvest_branch.sh must be executable"
+
+
+def test_push_script_fetches_remote_bot_branch_before_pushing() -> None:
+    """The bug this guards: actions/checkout only fetches the triggering
+    ref, so a fresh checkout has no local remote-tracking ref for the bot
+    branch. A bare `--force-with-lease` then gets rejected as stale info on
+    every run after the first. The fix must fetch the remote bot ref (or
+    tolerate its absence) and push with an explicit expected value."""
+    text = PUSH_SCRIPT.read_text(encoding="utf-8")
+    assert "git fetch origin" in text and "${BRANCH}" in text, (
+        "must fetch the remote bot branch (or discover it's absent) before "
+        "computing the force-with-lease expected value"
+    )
+    assert re.search(r"--force-with-lease=[^\s]*\$\{?\{?expected_sha", text), (
+        "must push with an explicit --force-with-lease=<ref>:<expected-sha>, "
+        "not the bare form (which has no local record on a fresh checkout)"
     )

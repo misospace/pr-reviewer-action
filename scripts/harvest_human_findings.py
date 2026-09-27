@@ -261,6 +261,36 @@ def determine_bot_approval(
     return chosen.get("state") == "APPROVED", base_sha
 
 
+def inline_comment_anchor(
+    comment: dict[str, Any],
+) -> tuple[str, tuple[int, int] | None, str] | None:
+    """Resolve ``(path, line_range, "high")`` for one inline review comment.
+
+    Falls back from ``line``/``start_line`` to ``original_line``/
+    ``original_start_line`` (present on comments left on a diff range that's
+    since gone stale), and normalizes a reversed ``start_line > line`` pair.
+    Returns ``None`` when the comment has no ``path`` or no resolvable line
+    at all (a review-level comment with no diff position). Shared by
+    ``resolve_anchor`` (named-path fallback path) and the per-inline-comment
+    finding splitting in ``harvest_repo``, so the two call sites can't drift.
+    """
+    path = comment.get("path")
+    if not path:
+        return None
+    line = comment.get("line")
+    if line is None:
+        line = comment.get("original_line")
+    if line is None:
+        return None
+    start = comment.get("start_line")
+    if start is None:
+        start = comment.get("original_start_line")
+    lo, hi = (start, line) if start is not None else (line, line)
+    if lo > hi:
+        lo, hi = hi, lo
+    return path, (lo, hi), "high"
+
+
 def resolve_anchor(
     text: str,
     review_id: int | None,
@@ -282,18 +312,9 @@ def resolve_anchor(
         ]
         attached.sort(key=lambda c: c.get("id") or 0)
         for c in attached:
-            line = c.get("line")
-            if line is None:
-                line = c.get("original_line")
-            if line is None:
-                continue
-            start = c.get("start_line")
-            if start is None:
-                start = c.get("original_start_line")
-            lo, hi = (start, line) if start is not None else (line, line)
-            if lo > hi:
-                lo, hi = hi, lo
-            return c["path"], (lo, hi), "high"
+            anchor = inline_comment_anchor(c)
+            if anchor is not None:
+                return anchor
 
     best_file: str | None = None
     best_pos: int | None = None
@@ -371,19 +392,19 @@ def harvest_repo(
             ]
             attached.sort(key=lambda c: c.get("id") or 0)
 
-            combined_text = raw_body or "\n".join(
-                (c.get("body") or "").strip() for c in attached if c.get("body")
-            ).strip()
-            if not combined_text:
-                continue
-            # A formal CHANGES_REQUESTED review is always kept. Any other
-            # review state (in practice, maintainers often leave a
-            # COMMENTED review whose body reads as a blocking finding
-            # rather than formally requesting changes) is kept only when
-            # its text matches the same blocking-language heuristic used
-            # for issue comments.
-            if state != "CHANGES_REQUESTED" and not is_blocking_comment(combined_text):
-                continue
+            if not raw_body and not attached:
+                continue  # nothing to harvest from this review
+
+            # A formal CHANGES_REQUESTED review is always kept in full:
+            # every attached inline comment counts, and the body (if any)
+            # counts too. Any other review state (in practice, maintainers
+            # often leave a COMMENTED review with a blocking inline comment
+            # or a blocking body, rather than formally requesting changes)
+            # gates *each* piece independently on its own text — a harmless
+            # body must not mask a blocking inline comment, and one
+            # blocking inline comment must not sweep in every other nit
+            # left on the same review.
+            is_changes_requested = state == "CHANGES_REQUESTED"
 
             # Each attached inline review comment is its own finding,
             # anchored to its own path/line/start_line — a review with
@@ -392,6 +413,8 @@ def harvest_repo(
             for c in attached:
                 comment_body = (c.get("body") or "").strip()
                 if not comment_body:
+                    continue
+                if not is_changes_requested and not is_blocking_comment(comment_body):
                     continue
                 candidate: dict[str, Any] = {
                     "created_at": submitted_at,
@@ -404,19 +427,8 @@ def harvest_repo(
                         f"https://github.com/{repo}/pull/{number}"
                         f"#discussion_r{c.get('id')}"
                     ),
+                    "anchor": inline_comment_anchor(c),
                 }
-                line = c.get("line")
-                if line is None:
-                    line = c.get("original_line")
-                if line is not None:
-                    start = c.get("start_line")
-                    if start is None:
-                        start = c.get("original_start_line")
-                    start_line = start if start is not None else line
-                    lo, hi = start_line, line
-                    if lo > hi:
-                        lo, hi = hi, lo
-                    candidate["anchor"] = (c["path"], (lo, hi), "high")
                 candidates.append(candidate)
 
             # The review body becomes a *separate* finding only when it
@@ -425,7 +437,7 @@ def harvest_repo(
             # always comes from a named changed-file path (never an inline
             # comment's position, which belongs to that comment's own
             # finding above).
-            if raw_body and (state == "CHANGES_REQUESTED" or is_blocking_comment(raw_body)):
+            if raw_body and (is_changes_requested or is_blocking_comment(raw_body)):
                 candidates.append(
                     {
                         "created_at": submitted_at,

@@ -225,6 +225,43 @@ def test_determine_bot_approval_uses_review_at_finding_time_not_later_one():
 # ---------------------------------------------------------------------------
 
 
+def test_inline_comment_anchor_uses_line_and_start_line():
+    anchor = hhf.inline_comment_anchor(
+        {"path": "a/b.py", "line": 50, "start_line": 45}
+    )
+    assert anchor == ("a/b.py", (45, 50), "high")
+
+
+def test_inline_comment_anchor_falls_back_to_original_line_fields():
+    """A comment left on a diff range that's since gone stale carries
+    original_line/original_start_line instead of line/start_line."""
+    anchor = hhf.inline_comment_anchor(
+        {
+            "path": "a/b.py",
+            "line": None,
+            "start_line": None,
+            "original_line": 12,
+            "original_start_line": 8,
+        }
+    )
+    assert anchor == ("a/b.py", (8, 12), "high")
+
+
+def test_inline_comment_anchor_normalizes_reversed_range():
+    anchor = hhf.inline_comment_anchor(
+        {"path": "a/b.py", "line": 10, "start_line": 20}
+    )
+    assert anchor == ("a/b.py", (10, 20), "high")
+
+
+def test_inline_comment_anchor_no_line_returns_none():
+    assert hhf.inline_comment_anchor({"path": "a/b.py"}) is None
+
+
+def test_inline_comment_anchor_no_path_returns_none():
+    assert hhf.inline_comment_anchor({"line": 5}) is None
+
+
 def test_resolve_anchor_inline_review_comment_wins():
     review_comments = [
         {
@@ -776,6 +813,106 @@ def test_harvest_repo_review_body_and_inline_comments_are_separate_findings():
     assert by_file["scripts/bar.py"]["confidence"] == "medium"
     assert by_file["scripts/bar.py"]["line_range"] is None
     assert "Overall this needs more coverage" in by_file["scripts/bar.py"]["text"]
+
+
+def test_harvest_repo_commented_review_harmless_body_blocking_inline_harvests_only_inline():
+    """Counterexample: a harmless body must not mask a blocking inline
+    comment on a non-CHANGES_REQUESTED review -- the inline comment
+    qualifies (and is harvested) on its own text, independent of the body."""
+    number = 124
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "COMMENTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T01:00:00Z",
+                "body": "Nice work overall!",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T00:30:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    review_comments = {
+        number: [
+            {
+                "id": 501,
+                "pull_request_review_id": 1,
+                "path": "pr_reviewer/foo.py",
+                "line": 10,
+                "start_line": None,
+                "body": "This is a merge blocker: null deref here.",
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}]}
+    client = FakeClient(prs, reviews, {}, review_comments, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+    assert len(findings) == 1
+    assert findings[0]["text"] == "This is a merge blocker: null deref here."
+    assert findings[0]["file"] == "pr_reviewer/foo.py"
+
+
+def test_harvest_repo_commented_review_one_blocking_inline_one_nit_harvests_only_blocker():
+    """Counterexample: on a non-CHANGES_REQUESTED review, one blocking
+    inline comment must not sweep in an unrelated nit inline comment --
+    each inline comment is gated on its own text."""
+    number = 125
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "COMMENTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T01:00:00Z",
+                "body": "",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T00:30:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    review_comments = {
+        number: [
+            {
+                "id": 501,
+                "pull_request_review_id": 1,
+                "path": "pr_reviewer/foo.py",
+                "line": 10,
+                "start_line": None,
+                "body": "Merge blocker: this leaks a secret.",
+            },
+            {
+                "id": 502,
+                "pull_request_review_id": 1,
+                "path": "scripts/bar.py",
+                "line": 20,
+                "start_line": None,
+                "body": "nit: rename this variable",
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}, {"filename": "scripts/bar.py"}]}
+    client = FakeClient(prs, reviews, {}, review_comments, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+    assert len(findings) == 1
+    assert findings[0]["file"] == "pr_reviewer/foo.py"
+    assert findings[0]["text"] == "Merge blocker: this leaks a secret."
 
 
 def test_harvest_repo_commented_review_inline_comments_need_blocking_language():

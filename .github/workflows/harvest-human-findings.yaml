@@ -46,58 +46,32 @@ jobs:
     name: Resolve app-token scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       owner: ${{ steps.scope.outputs.owner }}
       repos: ${{ steps.scope.outputs.repos }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # actions/create-github-app-token scopes an installation token to a
       # single owner. Derive that owner (and the repo-name list under it,
       # including this repo so the PR-opening step below keeps working)
       # from the configured harvest scope, instead of leaving the token
       # unscoped (installation-wide) as before. Repos spanning more than
       # one owner aren't supported by a single token -- fail clearly rather
-      # than silently widening or narrowing the scope.
+      # than silently widening or narrowing the scope. Logic lives in
+      # scripts/resolve_harvest_scope.sh so it's covered by an executable
+      # test (tests/test_resolve_harvest_scope.sh).
       - name: Compute owner/repos for the app token
         id: scope
-        shell: bash
         env:
           REPOS: ${{ inputs.repos || vars.HARVEST_REPOS }}
           CURRENT_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          declare -A owners_seen=()
-          declare -A names_seen=()
-          names_ordered=()
-          IFS=',' read -ra repo_list <<< "$REPOS"
-          for raw in "${repo_list[@]}" "$CURRENT_REPO"; do
-            repo="$(echo "$raw" | xargs)"
-            [ -z "$repo" ] && continue
-            if [[ "$repo" != */* ]]; then
-              echo "::error::'$repo' is not an owner/repo slug"
-              exit 1
-            fi
-            owner="${repo%%/*}"
-            name="${repo#*/}"
-            owners_seen["$owner"]=1
-            if [ -z "${names_seen[$name]:-}" ]; then
-              names_seen["$name"]=1
-              names_ordered+=("$name")
-            fi
-          done
-
-          if [ "${#owners_seen[@]}" -ne 1 ]; then
-            echo "::error::harvest repos span multiple owners (${!owners_seen[*]});" \
-              "actions/create-github-app-token scopes to a single owner per token --" \
-              "narrow HARVEST_REPOS to one owner, or split this workflow into a" \
-              "matrix job per owner"
-            exit 1
-          fi
-
-          owner="${!owners_seen[*]}"
-          repos="$(IFS=,; echo "${names_ordered[*]}")"
-          echo "owner=$owner" >> "$GITHUB_OUTPUT"
-          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+        run: scripts/resolve_harvest_scope.sh
 
   harvest:
     name: Harvest human findings
@@ -151,38 +125,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: bot/harvest-human-findings
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet -- evals/corpus-human-findings.json; then
-            echo "No new findings; nothing to open a PR for."
-            exit 0
-          fi
-
-          git config user.name "miso[bot]"
-          git config user.email "miso[bot]@users.noreply.github.com"
-
-          # checkout ran with persist-credentials: false, so push auth comes
-          # from the app token here, not a persisted default GITHUB_TOKEN.
-          # `gh auth setup-git` registers `gh` as git's credential helper: it
-          # reads GH_TOKEN from the environment at push time and never puts
-          # the token in argv or in a persisted .git/config value.
-          gh auth setup-git
-
-          # The branch only ever carries this one kind of change, so resetting
-          # it to the current main tip each run is equivalent to "update the
-          # existing PR": no manual merge/rebase step, and it never touches main.
-          git checkout -B "$BRANCH"
-          git add evals/corpus-human-findings.json
-          git commit -m "chore(evals): harvest human findings from maintainer reviews"
-          git push --force-with-lease origin "$BRANCH"
-
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            echo "PR for $BRANCH already open; branch push above updated it."
-          else
-            gh pr create \
-              --head "$BRANCH" \
-              --base main \
-              --title "chore(evals): harvest human findings" \
-              --body "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
-          fi
+          BASE_BRANCH: main
+          CORPUS_PATH: evals/corpus-human-findings.json
+          COMMIT_MESSAGE: "chore(evals): harvest human findings from maintainer reviews"
+          PR_TITLE: "chore(evals): harvest human findings"
+          PR_BODY: "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
+        run: scripts/push_harvest_branch.sh
