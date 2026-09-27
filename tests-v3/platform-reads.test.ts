@@ -486,3 +486,19 @@ test("ciAttemptTimeoutMs: 0 means no per-attempt limit, like curl --max-time 0",
   assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0", deadlineEpoch: String(1_000_000 + 4), now }), 4_000);
   assert.equal(ciAttemptTimeoutMs({ apiTimeoutSec: "0", deadlineEpoch: "1", now }), null);
 });
+
+test("forgejo enrich: encoded traversal tags and specs make no request", async () => {
+  let calls = 0;
+  const fetchImpl: FetchLike = async () => { calls += 1; return new Response("{}", { status: 200 }); };
+  const client = new ForgejoEnrichClient({ fetchImpl, configuredApiUrl: "https://git.example", configuredAuthorization: async () => "token t" });
+  // Raw tags are quote()d, so '/' becomes %2F and would slip past a plain
+  // segment check; the decoded form is checked. (A tag that is itself
+  // "%2F"-text is double-encoded and stays literal after one decode.)
+  for (const tag of ["../../../x", "a/../../b", "..", "./x"]) {
+    assert.equal(await client.release("git.example", "up/lib", tag), null, tag);
+  }
+  assert.equal(await client.compare("git.example", "up/lib", "../../x...main"), null);
+  assert.equal(calls, 0);
+  assert.notEqual(await client.release("git.example", "up/lib", "release/v1.2.3"), undefined);
+  assert.equal(calls, 1);
+});

@@ -42,7 +42,10 @@ function hasDotOrEmptySegment(path: string): boolean {
  * separator from both this check and URL normalization; a server that decodes
  * it could still see `../`. Check the decoded form too. */
 function safeRefTail(tail: string): boolean {
-  if (!REF_TAIL.test(tail) || hasDotOrEmptySegment(tail)) return false;
+  return REF_TAIL.test(tail) && !hasDotOrEmptySegment(tail) && safeDecodedTail(tail);
+}
+
+function safeDecodedTail(tail: string): boolean {
   let decoded: string;
   try {
     decoded = decodeURIComponent(tail);
@@ -177,7 +180,7 @@ export class ForgejoEnrichClient {
 
   private async get(host: string, ownerRepo: string, staticTail: string, dynamicTail: string): Promise<unknown> {
     if (!HOST_RE.test(host) || parseRepoRef(ownerRepo) === null) return null;
-    if (dynamicTail === "." || dynamicTail === "..") return null;
+    if (!safeDecodedTail(dynamicTail)) return null;
     const url = repoScopedUrl(`https://${host}/api/v1`, ownerRepo, staticTail, dynamicTail);
     if (url === null) return null;
     const configured = this.configuredHost !== "" && hostOf(`https://${host}`) === this.configuredHost;
