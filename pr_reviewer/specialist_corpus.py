@@ -79,6 +79,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from pr_reviewer.related_context import fence_safe_length
 from pr_reviewer.requirement_ledger import MAX_LEDGER_MARKDOWN_BYTES
 
 #: Default hard UTF-8 byte cap on the specialist corpus. Conservative relative
@@ -477,7 +478,9 @@ def _render_section(
     back to the header. A fenced body gets its closing fence re-emitted after
     the cut; the whole emitted suffix (separator newline + closing fence +
     truncation marker) is budgeted by its exact byte length up front, so the
-    returned text can never exceed ``budget``.
+    returned text can never exceed ``budget``. An unfenced body is never cut
+    inside a fenced block of its own (a related-code snippet): the block is
+    dropped instead.
     """
     if budget <= 0:
         return "", True, False
@@ -494,6 +497,9 @@ def _render_section(
     if fixed >= cap:
         return "", True, False
     clipped, _ = _truncate_utf8(body, cap - fixed)
+    if not closing_fence:
+        lines = clipped.split("\n")
+        clipped = "\n".join(lines[: fence_safe_length(lines)])
     if not clipped.strip():
         return "", True, False
     return f"{prefix}{clipped}{suffix}", True, True

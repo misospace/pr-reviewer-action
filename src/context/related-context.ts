@@ -14,6 +14,8 @@
  * enclosing symbols only, otherwise surfaced as `only_in_changed_files`. */
 
 import { spawn } from "node:child_process";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { redactText } from "./redact.js";
 import { pyJsonDump } from "./py-json.js";
 
@@ -31,11 +33,30 @@ export const DEFAULT_GIT_TIMEOUT_SEC = 10;
 export const MAX_JSON_BYTES = 100_000;
 export const MAX_MARKDOWN_BYTES = 100_000;
 export const MAX_ERROR_CHARS = 300;
+export const MAX_CONSUMER_KEYS = 40;
+export const MAX_CONSUMERS_PER_KEY = 3;
+export const MAX_CONSUMERS = 40;
+export const MAX_CHANGED_CONSUMERS_PER_KEY = 2;
+export const MAX_CHANGED_CONSUMERS = 10;
+export const MAX_CONSUMER_SCAN = 100;
+export const MAX_CONSUMER_WINDOWS = 12;
+export const CONSUMER_CONTEXT_LINES = 2;
+export const MAX_COUNTERPARTS = 8;
+export const MAX_COUNTERPART_LINES = 20;
+const MAX_HEAD_FILE_BYTES = 2_000_000;
 
 const CONTROL_RE = /[\x00-\x1f\x7f]/g;
 const TEST_BASE_RE = /^(?:test[-_].+|.+[_-]tests?\..+|.+\.(?:test|spec)(?:\.[^.]+)?|.+_test\.go)$/i;
 const MANIFEST_BASE_RE = /^(?:pyproject\.toml|setup\.(?:py|cfg)|requirements[^/]*\.txt|package(?:-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|go\.(?:mod|sum)|Cargo\.(?:toml|lock)|Gemfile(?:\.lock)?|pom\.xml|build\.gradle(?:\.kts)?|composer\.json|Pipfile(?:\.lock)?|poetry\.lock|uv\.lock|mix\.(?:exs|lock)|Dockerfile[^/]*|action\.ya?ml)$/i;
 const GREP_ROW_RE = /^(.*?):([0-9]+):(.*)$/;
+const KEY_NAME_RE = /^-{0,2}[A-Za-z0-9_][A-Za-z0-9_.\-]{0,99}$/;
+const DECL_NAME_RE = /^[A-Za-z_$][A-Za-z0-9_$]{0,99}$/;
+const COMMENT_PREFIXES = ["#", "//", "/*", "*"];
+const PATH_WORD_RE = /[^a-z0-9]+/;
+const DOC_EXTS = new Set(["md", "rst", "txt", "adoc"]);
+const BRANCH_SITE_RE = /(?:===|!==|==|!=|["'\]]\s+=\s+|\s-(?:eq|ne)\s+)\s*["']|\s(?:not\s+)?in\s*[(\[{]\s*["']/;
+const CASE_SITE_RE = /^\s*(?:case\s|switch\s*\(|match\s)/;
+const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})/;
 
 // ---------------------------------------------------------------------------
 // Bounded text helpers
@@ -50,16 +71,28 @@ function escapeControls(value: string): string {
   });
 }
 
+/** Length in code points, as Python's `len` counts. */
+function charCount(value: string): number {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
+}
+
+/** The first `limit` code points, as Python's `value[:limit]` cuts. */
+function charSlice(value: string, limit: number): string {
+  return Array.from(value).slice(0, Math.max(0, limit)).join("");
+}
+
 function boundedText(value: unknown, limit: number = MAX_ERROR_CHARS): string {
   let text = redactText(String(value ?? "")).replace("\u0000", "\\u0000");
   text = escapeControls(text);
-  if (text.length > limit) return text.slice(0, Math.max(0, limit - 3)) + "...";
+  if (charCount(text) > limit) return charSlice(text, limit - 3) + "...";
   return text;
 }
 
 function display(value: string, limit = 200): string {
   const text = escapeControls(value);
-  if (text.length > limit) return text.slice(0, Math.max(0, limit - 1)) + "...";
+  if (charCount(text) > limit) return charSlice(text, limit - 1) + "...";
   return text;
 }
 
@@ -186,7 +219,7 @@ interface GrepRow {
 function snippetOf(value: string): string {
   let text = redactText(value);
   text = escapeControls(text);
-  if (text.length > MAX_SNIPPET_CHARS) return text.slice(0, MAX_SNIPPET_CHARS - 3) + "...";
+  if (charCount(text) > MAX_SNIPPET_CHARS) return charSlice(text, MAX_SNIPPET_CHARS - 3) + "...";
   return text;
 }
 
@@ -205,10 +238,11 @@ export interface GrepResult {
 /** Stream eligible symbol matches without buffering an unbounded result:
  * stops at the first row past *maxHits* (the `extraHit` marker), excludes
  * changed paths, and maps spawn/timeout failures onto the explicit error
- * vocabulary. `pathspecs` limits the search to those literal paths; `keep`
- * drops rows it rejects before they count. */
+ * vocabulary. `symbol` may be a list of fixed strings, any of which matches.
+ * `pathspecs` limits the search to those literal paths; `keep` drops rows it
+ * rejects before they count. */
 export function gitGrepReferences(
-  symbol: string,
+  symbol: string | readonly string[],
   workspace: string,
   options: {
     excludedPaths: Set<string>;
@@ -222,11 +256,12 @@ export function gitGrepReferences(
   const { excludedPaths, timeoutSec = DEFAULT_GIT_TIMEOUT_SEC, keep } = options;
   if (limit === 0) return Promise.resolve({ rows: [], extraHit: false, error: null });
   const scope = options.pathspecs && options.pathspecs.length > 0 ? options.pathspecs.map((path) => `:(literal)${path}`) : ["."];
+  const patterns = typeof symbol === "string" ? ["--", symbol] : symbol.flatMap((pattern) => ["-e", pattern]);
 
   return new Promise((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn("git", ["grep", "-n", "-F", "--", symbol, "--", ...scope], {
+      child = spawn("git", ["grep", "-n", "-F", ...patterns, "--", ...scope], {
         cwd: workspace,
         stdio: ["ignore", "pipe", "ignore"],
       });
@@ -511,6 +546,398 @@ async function changedFileReferences(
   return { rows, extraHit: false, error: null };
 }
 
+// ---------------------------------------------------------------------------
+// Consumers of changed keys and referenced counterparts (#791)
+// ---------------------------------------------------------------------------
+
+/** Read a worktree file as lines, or null: a verbatim port of
+ * `change_anchors.read_head_lines` (plain relative path, no symlinks, regular
+ * file within the byte cap). */
+export function readHeadLines(sourceRoot: string, relPath: string): string[] | null {
+  if (relPath === "" || relPath.includes("\u0000") || relPath.startsWith("/")) return null;
+  const parts = relPath.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === ".." || part === ".git")) return null;
+  let fd: number;
+  try {
+    const candidate = join(realpathSync(sourceRoot), ...parts);
+    if (realpathSync(candidate) !== candidate) return null;
+    fd = openSync(candidate, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch {
+    return null;
+  }
+  let data: Buffer;
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_HEAD_FILE_BYTES) return null;
+    data = readFileSync(fd);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+  if (data.length > MAX_HEAD_FILE_BYTES) return null;
+  return data.toString("utf8").split("\n").map((line) => line.replace(/\r+$/, ""));
+}
+
+/** Lowercase words of a key, env name, or flag: port of `change_anchors.key_words`. */
+export function keyWords(name: string): string[] {
+  let base = name.replace(/^-+/, "");
+  if (base.startsWith("INPUT_")) base = base.slice("INPUT_".length);
+  const words: string[] = [];
+  for (let part of base.split(/[^A-Za-z0-9]+/)) {
+    if (part === "") continue;
+    if (part !== part.toUpperCase()) part = part.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+    words.push(...part.toLowerCase().split(" ").filter((word) => word !== ""));
+  }
+  return words;
+}
+
+/** Search forms of a changed key: as written, kebab, snake, UPPER_SNAKE, and
+ * INPUT_; a `branch` variable (which may be one word) as written, snake, and
+ * UPPER_SNAKE. */
+export function keyVariants(name: string, kind = "entity"): string[] {
+  const words = keyWords(name);
+  if (words.length === 0 || (words.length < 2 && kind !== "branch")) return [];
+  const snake = words.join("_");
+  const bare = name.replace(/^-+/, "");
+  const forms =
+    kind === "branch"
+      ? [bare, snake, snake.toUpperCase()]
+      : [bare, words.join("-"), snake, snake.toUpperCase(), `INPUT_${snake.toUpperCase()}`];
+  const variants: string[] = [];
+  for (const variant of forms) {
+    if (!variants.includes(variant)) variants.push(variant);
+  }
+  return variants;
+}
+
+/** Whether a line branches on a variant that is not an attribute of
+ * something else: a `case`/`switch`/`match` on it, or a comparison with a
+ * string literal after it. */
+function branchSite(snippet: string, variants: string[]): boolean {
+  const positions: number[] = [];
+  for (const variant of variants) {
+    let index = snippet.indexOf(variant);
+    while (index > 0 && snippet[index - 1] === ".") index = snippet.indexOf(variant, index + 1);
+    if (index >= 0) positions.push(index);
+  }
+  if (positions.length === 0) return false;
+  if (CASE_SITE_RE.test(snippet)) return true;
+  return BRANCH_SITE_RE.test(snippet.slice(Math.min(...positions)));
+}
+
+function consumerTier(row: GrepRow): number {
+  if (isTestPath(row.path)) return 3;
+  const base = (row.path.includes("/") ? row.path.slice(row.path.lastIndexOf("/") + 1) : row.path).toLowerCase();
+  if (base.includes(".") && DOC_EXTS.has(base.slice(base.lastIndexOf(".") + 1))) return 2;
+  const text = row.snippet.trimStart();
+  return COMMENT_PREFIXES.some((prefix) => text.startsWith(prefix)) ? 1 : 0;
+}
+
+interface AnchorKey {
+  source: string;
+  name: string;
+  kind: string;
+  line: number | null;
+}
+
+function anchorKeys(anchorFiles: Record<string, unknown>[], deletedPaths: Set<string>): AnchorKey[] {
+  const keys: AnchorKey[] = [];
+  const seen = new Set<string>();
+  for (const entry of anchorFiles) {
+    const source = toPath(entry.path);
+    const values = entry.keys;
+    if (source === "" || entry.deleted || deletedPaths.has(source) || !Array.isArray(values)) continue;
+    for (const item of values) {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+      const rec = item as Record<string, unknown>;
+      const { name, kind } = rec;
+      if (typeof name !== "string" || !KEY_NAME_RE.test(name) || seen.has(name)) continue;
+      if (kind !== "entity" && kind !== "env" && kind !== "flag" && kind !== "branch") continue;
+      seen.add(name);
+      keys.push({ source, name, kind, line: lineNumber(rec.line) });
+    }
+  }
+  return keys;
+}
+
+interface CounterpartItem {
+  path: string;
+  name: string;
+  line: number;
+  refPath: string;
+  refName: string;
+  refLine: number;
+  refEnd: number;
+  refChanged: boolean;
+}
+
+function anchorCounterparts(anchorFiles: Record<string, unknown>[], deletedPaths: Set<string>): CounterpartItem[] {
+  const items: CounterpartItem[] = [];
+  for (const entry of anchorFiles) {
+    const source = toPath(entry.path);
+    const values = entry.counterparts;
+    if (source === "" || entry.deleted || deletedPaths.has(source) || !Array.isArray(values)) continue;
+    for (const item of values) {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+      const rec = item as Record<string, unknown>;
+      const { name, ref_name: refName } = rec;
+      const refPath = toPath(rec.ref_path);
+      const line = lineNumber(rec.line);
+      const refLine = lineNumber(rec.ref_line);
+      const refEnd = lineNumber(rec.ref_end);
+      if (typeof name !== "string" || !DECL_NAME_RE.test(name)) continue;
+      if (typeof refName !== "string" || !DECL_NAME_RE.test(refName)) continue;
+      if (refPath === "" || refPath === source || deletedPaths.has(refPath)) continue;
+      if (line === null || refLine === null || refEnd === null || refEnd < refLine) continue;
+      items.push({ path: source, name, line, refPath, refName, refLine, refEnd, refChanged: rec.ref_changed === true });
+    }
+  }
+  return items;
+}
+
+function fileWindow(lines: string[] | null, start: number, end: number): string[] {
+  if (lines === null) return [];
+  const total = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  return lines.slice(Math.max(1, start) - 1, Math.min(end, total)).map((text) => snippetOf(text.replaceAll("\t", "    ")));
+}
+
+function noteCap(result: RelatedContext, reason: string): void {
+  result.truncated = true;
+  result.truncation.truncated = true;
+  if (!result.truncation.reasons.includes(reason)) result.truncation.reasons.push(reason);
+}
+
+function noteError(result: RelatedContext, errorsSeen: Set<string>, error: string): void {
+  if (!errorsSeen.has(error)) {
+    result.errors.push(error);
+    errorsSeen.add(error);
+  }
+}
+
+/** How many distinct forms of a key a line carries: a line mapping one
+ * naming onto another (`ENV_NAME: ${{ inputs.env_name }}`) is where the key
+ * crosses a boundary. */
+function bridgeScore(snippet: string, variants: string[]): number {
+  const matched = variants.filter((variant) => snippet.includes(variant));
+  return matched.filter((variant) => !matched.some((other) => variant !== other && other.includes(variant))).length;
+}
+
+/** Whether a path is a YAML/JSON/TOML data file (not a lockfile): port of
+ * `change_anchors.data_format`. */
+function isDataFile(path: string): boolean {
+  const name = (path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path).toLowerCase();
+  if (!name.includes(".") || name.endsWith(".lock") || name.endsWith(".sum") || /[-.]lock\.(?:json|ya?ml)$/.test(name)) return false;
+  return ["yaml", "yml", "json", "toml"].includes(name.slice(name.lastIndexOf(".") + 1));
+}
+
+/** Each file's best row: lowest tier, then (in a data file) most key forms,
+ * then first line. */
+function bestPerFile(rows: GrepRow[], variants: string[]): Map<string, [number, GrepRow]> {
+  const best = new Map<string, [number, number, GrepRow]>();
+  for (const row of rows) {
+    const tier = consumerTier(row);
+    const bridge = isDataFile(row.path) ? bridgeScore(row.snippet, variants) : 0;
+    const current = best.get(row.path);
+    if (current === undefined || tier < current[0] || (tier === current[0] && bridge > current[1])) best.set(row.path, [tier, bridge, row]);
+  }
+  return new Map([...best].map(([path, [tier, , row]]) => [path, [tier, row] as [number, GrepRow]]));
+}
+
+/** Take one item from each list per round, up to `totalCap` items. */
+function breadthFirst(lists: GrepRow[][], depthCap: number, totalCap: number, result: RelatedContext): GrepRow[][] {
+  const chosen: GrepRow[][] = lists.map(() => []);
+  let total = 0;
+  for (let depth = 0; depth < depthCap; depth += 1) {
+    for (let index = 0; index < lists.length; index += 1) {
+      const rows = lists[index] as GrepRow[];
+      if (depth < rows.length) {
+        if (total >= totalCap) {
+          noteCap(result, "consumer_cap");
+          break;
+        }
+        (chosen[index] as GrepRow[]).push(rows[depth] as GrepRow);
+        total += 1;
+      }
+    }
+  }
+  return chosen;
+}
+
+/** Search each key's variants in unchanged files, then in changed files
+ * outside their added lines. A file counts once per key. Unchanged hits rank
+ * code lines before comments, docs, and tests, then files whose path shares
+ * more of the key's words, and every key gets its best hit before any key
+ * gets a second. Changed-file hits follow under their own caps, also breadth
+ * first: code lines only, non-test files first, and never the entity's own
+ * file. Within a data file, the line carrying the most forms of the key wins. A
+ * `branch` key only matches lines that compare it to a literal or
+ * switch on it. A key whose variants match more than `MAX_CONSUMER_SCAN`
+ * unchanged lines is too common to keep. The first `MAX_CONSUMER_WINDOWS`
+ * hits, breadth first, carry a few lines of context; the rest only the
+ * matched line. */
+async function buildConsumers(
+  result: RelatedContext,
+  keys: AnchorKey[],
+  workspace: string,
+  excluded: Set<string>,
+  changedIndex: Map<string, [number, number][]>,
+  timeoutSec: number,
+  errorsSeen: Set<string>,
+  caps: { perKey: number; total: number; changedPerKey: number; changedTotal: number },
+): Promise<ConsumerKey[]> {
+  if (keys.length > MAX_CONSUMER_KEYS) noteCap(result, "consumer_cap");
+  const ranked: Array<{ key: AnchorKey; variants: string[]; hits: GrepRow[]; changedHits: GrepRow[] }> = [];
+  for (const key of keys.slice(0, MAX_CONSUMER_KEYS)) {
+    const variants = keyVariants(key.name, key.kind);
+    if (variants.length === 0) continue;
+    const keep = (row: GrepRow): boolean => {
+      if (charCount(row.snippet) >= MAX_SNIPPET_CHARS) return false;
+      return key.kind !== "branch" || branchSite(row.snippet, variants);
+    };
+    const grep = await gitGrepReferences(variants, workspace, {
+      excludedPaths: excluded,
+      timeoutSec,
+      maxHits: MAX_CONSUMER_SCAN,
+      keep,
+    });
+    if (grep.error !== null) {
+      noteError(result, errorsSeen, grep.error);
+      continue;
+    }
+    if (grep.extraHit) continue;
+    const best = bestPerFile(grep.rows, variants);
+    const words = new Set(keyWords(key.name));
+    const rank = ([tier, row]: [number, GrepRow]): [number, number, string] => {
+      const pathWords = new Set(row.path.toLowerCase().split(PATH_WORD_RE));
+      let affinity = 0;
+      for (const word of words) if (pathWords.has(word)) affinity += 1;
+      return [tier, -affinity, row.path];
+    };
+    let hits = [...best.values()]
+      .map((item) => ({ rank: rank(item), row: item[1] }))
+      .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || (a.rank[2] < b.rank[2] ? -1 : a.rank[2] > b.rank[2] ? 1 : 0))
+      .map((item) => item.row);
+    if (hits.length > caps.perKey) {
+      noteCap(result, "consumer_cap");
+      hits = hits.slice(0, caps.perKey);
+    }
+
+    let changedHits: GrepRow[] = [];
+    const searched = [...changedIndex.keys()].filter((path) => key.kind !== "entity" || path !== key.source);
+    if (searched.length > 0 && caps.changedPerKey > 0) {
+      const keepChanged = (row: GrepRow): boolean => {
+        const tier = consumerTier(row);
+        if (tier === 1 || tier === 2 || !keep(row)) return false;
+        const ranges = changedIndex.get(row.path) as [number, number][];
+        return !ranges.some(([start, end]) => start <= row.line && row.line <= end);
+      };
+      const changed = await gitGrepReferences(variants, workspace, {
+        excludedPaths: new Set(),
+        timeoutSec,
+        maxHits: MAX_CONSUMER_SCAN,
+        pathspecs: searched,
+        keep: keepChanged,
+      });
+      if (changed.error !== null) noteError(result, errorsSeen, changed.error);
+      changedHits = [...bestPerFile(changed.rows, variants).values()]
+        .map((item) => item[1])
+        .sort((a, b) => Number(isTestPath(a.path)) - Number(isTestPath(b.path)) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      if (changed.extraHit || changedHits.length > caps.changedPerKey) {
+        noteCap(result, "consumer_cap");
+        changedHits = changedHits.slice(0, caps.changedPerKey);
+      }
+      for (const row of changedHits) row.changedFile = true;
+    }
+    if (hits.length > 0 || changedHits.length > 0) ranked.push({ key, variants, hits, changedHits });
+  }
+
+  const chosen = breadthFirst(
+    ranked.map((item) => item.hits),
+    caps.perKey,
+    caps.total,
+    result,
+  );
+  const chosenChanged = breadthFirst(
+    ranked.map((item) => item.changedHits),
+    caps.changedPerKey,
+    caps.changedTotal,
+    result,
+  );
+  const groups = chosen.map((rows, index) => [...rows, ...(chosenChanged[index] as GrepRow[])]);
+
+  const windowed = new Set<string>();
+  for (let depth = 0; windowed.size < MAX_CONSUMER_WINDOWS && groups.some((rows) => depth < rows.length); depth += 1) {
+    groups.forEach((rows, index) => {
+      if (depth < rows.length && windowed.size < MAX_CONSUMER_WINDOWS) windowed.add(`${index}:${depth}`);
+    });
+  }
+
+  const consumers: ConsumerKey[] = [];
+  const cache = new Map<string, string[] | null>();
+  ranked.forEach(({ key, variants }, index) => {
+    const rows = groups[index] as GrepRow[];
+    if (rows.length === 0) return;
+    const references: ConsumerReference[] = rows.map((row, position) => {
+      let match = "";
+      for (const variant of variants) {
+        if (row.snippet.includes(variant) && variant.length > match.length) match = variant;
+      }
+      const reference: ConsumerReference = {
+        path: row.path,
+        line: row.line,
+        ...(row.changedFile === true ? { changedFile: true } : {}),
+        ...(match !== "" ? { match } : {}),
+      };
+      if (windowed.has(`${index}:${position}`)) {
+        if (!cache.has(row.path)) cache.set(row.path, readHeadLines(workspace, row.path));
+        let start = Math.max(1, row.line - CONSUMER_CONTEXT_LINES);
+        let window = fileWindow(cache.get(row.path) ?? null, start, row.line + CONSUMER_CONTEXT_LINES);
+        if (window.length <= row.line - start) {
+          start = row.line;
+          window = [row.snippet];
+        }
+        reference.start = start;
+        reference.lines = window;
+      } else {
+        reference.snippet = row.snippet;
+      }
+      return reference;
+    });
+    consumers.push({ key: key.name, kind: key.kind, source: key.source, line: key.line, references });
+  });
+  return consumers;
+}
+
+function buildCounterparts(result: RelatedContext, items: CounterpartItem[], workspace: string, tracked: Set<string>, maxCounterparts: number): Counterpart[] {
+  const counterparts: Counterpart[] = [];
+  const cache = new Map<string, string[] | null>();
+  for (const item of items) {
+    if (!tracked.has(item.refPath)) continue;
+    if (counterparts.length >= maxCounterparts) {
+      noteCap(result, "counterpart_cap");
+      break;
+    }
+    if (!cache.has(item.refPath)) cache.set(item.refPath, readHeadLines(workspace, item.refPath));
+    const lines = cache.get(item.refPath) ?? null;
+    if (lines === null || item.refLine > lines.length || !(lines[item.refLine - 1] as string).includes(item.refName)) continue;
+    const end = Math.min(item.refEnd, item.refLine + MAX_COUNTERPART_LINES - 1);
+    const body = fileWindow(lines, item.refLine, end);
+    counterparts.push({
+      path: item.path,
+      name: item.name,
+      line: item.line,
+      refPath: item.refPath,
+      refName: item.refName,
+      refLine: item.refLine,
+      ...(item.refChanged ? { refChanged: true } : {}),
+      lines: body,
+      ...(body.length < item.refEnd - item.refLine + 1 ? { linesTruncated: true } : {}),
+    });
+  }
+  return counterparts;
+}
+
 function noteReferenceCap(result: RelatedContext, omitted: number): void {
   result.truncated = true;
   result.truncation.truncated = true;
@@ -545,12 +972,44 @@ export interface RelatedTruncation {
   omittedOutputBytes: number;
 }
 
+export interface ConsumerReference {
+  path: string;
+  line: number;
+  changedFile?: boolean;
+  match?: string;
+  start?: number;
+  lines?: string[];
+  snippet?: string;
+}
+
+export interface ConsumerKey {
+  key: string;
+  kind: string;
+  source: string;
+  line: number | null;
+  references: ConsumerReference[];
+}
+
+export interface Counterpart {
+  path: string;
+  name: string;
+  line: number;
+  refPath: string;
+  refName: string;
+  refLine: number;
+  refChanged?: boolean;
+  lines: string[];
+  linesTruncated?: boolean;
+}
+
 export interface RelatedContext {
   version: number;
   files: RelatedFile[];
   truncated: boolean;
   errors: string[];
   truncation: RelatedTruncation;
+  consumers?: ConsumerKey[];
+  counterparts?: Counterpart[];
 }
 
 function emptyResult(): RelatedContext {
@@ -579,6 +1038,11 @@ export interface RelatedContextOptions {
   maxTestsPerFile?: number;
   maxChangedReferencesPerSymbol?: number;
   maxChangedReferences?: number;
+  maxConsumersPerKey?: number;
+  maxConsumers?: number;
+  maxChangedConsumersPerKey?: number;
+  maxChangedConsumers?: number;
+  maxCounterparts?: number;
 }
 
 /** Build a version-1 related-code context without raising on Git errors. */
@@ -610,6 +1074,11 @@ export async function buildRelatedContext(
   const maxTestsPerFile = Math.max(0, Math.trunc(options.maxTestsPerFile ?? MAX_TESTS_PER_FILE));
   const maxChangedReferencesPerSymbol = Math.max(0, Math.trunc(options.maxChangedReferencesPerSymbol ?? MAX_CHANGED_REFERENCES_PER_SYMBOL));
   const maxChangedReferences = Math.max(0, Math.trunc(options.maxChangedReferences ?? MAX_CHANGED_REFERENCES));
+  const maxConsumersPerKey = Math.max(0, Math.trunc(options.maxConsumersPerKey ?? MAX_CONSUMERS_PER_KEY));
+  const maxConsumers = Math.max(0, Math.trunc(options.maxConsumers ?? MAX_CONSUMERS));
+  const maxChangedConsumersPerKey = Math.max(0, Math.trunc(options.maxChangedConsumersPerKey ?? MAX_CHANGED_CONSUMERS_PER_KEY));
+  const maxChangedConsumers = Math.max(0, Math.trunc(options.maxChangedConsumers ?? MAX_CHANGED_CONSUMERS));
+  const maxCounterparts = Math.max(0, Math.trunc(options.maxCounterparts ?? MAX_COUNTERPARTS));
 
   const rawAnchorFiles = anchor.files;
   const anchorFiles = Array.isArray(rawAnchorFiles)
@@ -761,6 +1230,21 @@ export async function buildRelatedContext(
   }
 
   result.files = fileOrder.map((path) => byFile.get(path) as RelatedFile);
+  const keys = anchorKeys(anchorFiles, deletedPaths);
+  if (keys.length > 0 && trackedError === null) {
+    const consumers = await buildConsumers(result, keys, workspace, changedPathsSet, changedIndex, timeout, errorsSeen, {
+      perKey: maxConsumersPerKey,
+      total: maxConsumers,
+      changedPerKey: maxChangedConsumersPerKey,
+      changedTotal: maxChangedConsumers,
+    });
+    if (consumers.length > 0) result.consumers = consumers;
+  }
+  const counterpartItems = anchorCounterparts(anchorFiles, deletedPaths);
+  if (counterpartItems.length > 0 && trackedError === null) {
+    const counterparts = buildCounterparts(result, counterpartItems, workspace, trackedSet, maxCounterparts);
+    if (counterparts.length > 0) result.counterparts = counterparts;
+  }
   if (result.errors.length > 0) {
     result.truncated = true;
     result.truncation.truncated = true;
@@ -803,6 +1287,38 @@ export function relatedContextToArtifact(related: RelatedContext): Record<string
       omitted_manifests: related.truncation.omittedManifests,
       omitted_output_bytes: related.truncation.omittedOutputBytes,
     },
+    ...(related.consumers !== undefined
+      ? {
+          consumers: related.consumers.map((consumer) => ({
+            key: consumer.key,
+            kind: consumer.kind,
+            source: consumer.source,
+            line: consumer.line,
+            references: consumer.references.map((reference) => ({
+              path: reference.path,
+              line: reference.line,
+              ...(reference.changedFile === true ? { changed_file: true } : {}),
+              ...(reference.match !== undefined ? { match: reference.match } : {}),
+              ...(reference.lines !== undefined ? { start: reference.start, lines: [...reference.lines] } : { snippet: reference.snippet }),
+            })),
+          })),
+        }
+      : {}),
+    ...(related.counterparts !== undefined
+      ? {
+          counterparts: related.counterparts.map((item) => ({
+            path: item.path,
+            name: item.name,
+            line: item.line,
+            ref_path: item.refPath,
+            ref_name: item.refName,
+            ref_line: item.refLine,
+            ...(item.refChanged === true ? { ref_changed: true } : {}),
+            lines: [...item.lines],
+            ...(item.linesTruncated === true ? { lines_truncated: true } : {}),
+          })),
+        }
+      : {}),
   };
 }
 
@@ -857,7 +1373,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
     const original = originalTruncation as Record<string, unknown>;
     const originalReasons = original.reasons;
     if (Array.isArray(originalReasons)) {
-      const reasons = originalReasons.slice(0, 20).map((reason) => String(reason).slice(0, 100));
+      const reasons = originalReasons.slice(0, 20).map((reason) => charSlice(String(reason), 100));
       if (!reasons.includes("json_cap")) reasons.push("json_cap");
       truncation.reasons = reasons;
     }
@@ -867,7 +1383,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
     }
   }
   let version = source.version ?? ARTIFACT_VERSION;
-  if (typeof version === "boolean" || (typeof version !== "number" && typeof version !== "string") || (typeof version === "string" && version.length > 100)) {
+  if (typeof version === "boolean" || (typeof version !== "number" && typeof version !== "string") || (typeof version === "string" && charCount(version) > 100)) {
     version = ARTIFACT_VERSION;
   }
   const minimal: Record<string, unknown> = {
@@ -882,7 +1398,7 @@ function minimalJsonArtifact(source: Record<string, unknown>): Record<string, un
 }
 
 function shrinkJsonValue(value: unknown, limit: number): unknown {
-  if (typeof value === "string") return value.length <= limit ? value : value.slice(0, Math.max(0, limit - 3)) + "...";
+  if (typeof value === "string") return charCount(value) <= limit ? value : charSlice(value, limit - 3) + "...";
   if (Array.isArray(value)) return value.map((item) => shrinkJsonValue(item, limit));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, shrinkJsonValue(item, limit)]));
@@ -936,6 +1452,84 @@ export function renderRelatedContextJson(artifact: Record<string, unknown>, inde
 // Markdown rendering
 // ---------------------------------------------------------------------------
 
+function positive(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+function location(path: unknown, line: unknown): string {
+  const rendered = codeSpan(display(toPath(path)));
+  const number = positive(line);
+  return number ? `${rendered}:${number}` : rendered;
+}
+
+function fenced(start: unknown, lines: unknown, indent: string): string[] {
+  const first = positive(start) || 1;
+  const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactText(String(text)), MAX_SNIPPET_CHARS)}`);
+  let longest = 0;
+  for (const text of body) for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [`${indent}${fence}`, ...body.map((text) => `${indent}${text}`), `${indent}${fence}`];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function renderConsumerLines(artifact: Record<string, unknown>): string[] {
+  const consumers = artifact.consumers;
+  if (!Array.isArray(consumers) || consumers.length === 0) return [];
+  const lines = [
+    "## Consumers of Changed Keys",
+    "",
+    "_Lines that mention a config key, env var, flag, or compared variable from the changed lines, as written or in its kebab/snake/UPPER_SNAKE/INPUT_ form; a compared variable (`branch`) counts only where a line compares or switches on it. Unchanged files come first, then changed files outside the lines the diff shows. Textual matches, not proven consumers._",
+    "",
+  ];
+  for (const consumer of consumers) {
+    if (!isRecord(consumer)) continue;
+    const key = codeSpan(display(String(consumer.key ?? "")));
+    const kind = display(String(consumer.kind ?? ""), 20);
+    lines.push(`- ${key} (${kind}, ${location(consumer.source, consumer.line)}):`);
+    const references = Array.isArray(consumer.references) ? consumer.references : [];
+    for (const reference of references) {
+      if (!isRecord(reference)) continue;
+      const match = reference.match;
+      const marker = reference.changed_file === true ? " (changed file)" : "";
+      const suffix = typeof match === "string" && match !== "" ? ` as ${codeSpan(display(match))}` : "";
+      const loc = `  - ${location(reference.path, reference.line)}${marker}${suffix}`;
+      if (Array.isArray(reference.lines)) {
+        lines.push(loc);
+        lines.push(...fenced(reference.start, reference.lines, "    "));
+      } else {
+        lines.push(`${loc} — ${codeSpan(display(redactText(String(reference.snippet ?? ""))))}`);
+      }
+    }
+  }
+  lines.push("");
+  return lines;
+}
+
+function renderCounterpartLines(artifact: Record<string, unknown>): string[] {
+  const counterparts = artifact.counterparts;
+  if (!Array.isArray(counterparts) || counterparts.length === 0) return [];
+  const lines = [
+    "## Referenced Counterparts",
+    "",
+    "_Declarations in repository files that added lines name, matched to the changed file's declarations by normalized name (e.g. `buildPrMetadata` and `_build_pr_metadata`). Bodies are bounded._",
+    "",
+  ];
+  for (const item of counterparts) {
+    if (!isRecord(item)) continue;
+    const ref = `${location(item.ref_path, item.ref_line)} ${codeSpan(display(String(item.ref_name ?? "")))}`;
+    const own = `${codeSpan(display(String(item.name ?? "")))} in ${location(item.path, item.line)}`;
+    const notes = item.ref_changed === true ? " (also changed in this PR)" : "";
+    lines.push(`- ${ref} for ${own}${notes}:`);
+    lines.push(...fenced(item.ref_line, item.lines, "  "));
+    if (item.lines_truncated === true) lines.push(`  _(body cut at ${MAX_COUNTERPART_LINES} lines)_`);
+  }
+  lines.push("");
+  return lines;
+}
+
 function renderLines(artifact: Record<string, unknown>): string[] {
   const version = typeof artifact.version === "number" || typeof artifact.version === "string" ? artifact.version : ARTIFACT_VERSION;
   const lines = [
@@ -943,6 +1537,8 @@ function renderLines(artifact: Record<string, unknown>): string[] {
     "",
     "_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._",
     "",
+    ...renderConsumerLines(artifact),
+    ...renderCounterpartLines(artifact),
     "## Changed Files",
     "",
   ];
@@ -1009,6 +1605,25 @@ function renderLines(artifact: Record<string, unknown>): string[] {
 }
 
 /** Render a compact line-bounded Markdown artifact with safe code spans. */
+/** Length of the longest prefix of `lines` that does not end inside a fenced
+ * code block, so a cut never leaves a fence open over what follows: port of
+ * `related_context.fence_safe_length`. */
+export function fenceSafeLength(lines: readonly string[]): number {
+  let safe = 0;
+  let fence = "";
+  lines.forEach((line, index) => {
+    const stripped = line.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+    if (fence !== "") {
+      if (stripped.length >= fence.length && stripped === (fence[0] as string).repeat(stripped.length)) fence = "";
+    } else {
+      const match = FENCE_OPEN_RE.exec(line);
+      if (match) fence = match[1] as string;
+    }
+    if (fence === "") safe = index + 1;
+  });
+  return safe;
+}
+
 export function renderRelatedContextMarkdown(artifact: Record<string, unknown>, maxMarkdownBytes: number | null = MAX_MARKDOWN_BYTES): string {
   const lines = renderLines(artifact);
   const full = `${lines.join("\n")}\n`;
@@ -1025,6 +1640,7 @@ export function renderRelatedContextMarkdown(artifact: Record<string, unknown>, 
     chosen.push(line);
     used += lineBytes;
   }
+  chosen.splice(fenceSafeLength(chosen));
   if (chosen.length === 0) return "\n";
   return `${[...chosen, note].join("\n")}\n`;
 }

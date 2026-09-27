@@ -97,6 +97,7 @@ export {
   MAX_SYMBOLS,
   MAX_TESTS_PER_FILE,
   buildRelatedContext,
+  fenceSafeLength,
   gitGrepReferences,
   relatedContextToArtifact,
   renderRelatedContextJson,

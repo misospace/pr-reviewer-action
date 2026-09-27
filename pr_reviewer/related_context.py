@@ -11,6 +11,11 @@ declaration line and every added line: those hits are listed, under a separate
 small cap (non-test files first) and marked ``changed_file``, for enclosing
 symbols only; for any other symbol with no unchanged-file reference they set
 ``only_in_changed_files``.
+
+Anchor ``keys`` (#791) are searched as their mechanical variants for
+``consumers``, unchanged files first and then changed files outside the added
+lines; anchor ``counterparts`` become bounded declaration bodies. Anchors
+without those fields produce the same artifact as before.
 """
 
 from __future__ import annotations
@@ -41,18 +46,42 @@ DEFAULT_GIT_TIMEOUT_SEC = 10
 MAX_JSON_BYTES = 100_000
 MAX_MARKDOWN_BYTES = 100_000
 MAX_ERROR_CHARS = 300
+MAX_CONSUMER_KEYS = 40
+MAX_CONSUMERS_PER_KEY = 3
+MAX_CONSUMERS = 40
+MAX_CHANGED_CONSUMERS_PER_KEY = 2
+MAX_CHANGED_CONSUMERS = 10
+MAX_CONSUMER_SCAN = 100
+MAX_CONSUMER_WINDOWS = 12
+CONSUMER_CONTEXT_LINES = 2
+MAX_COUNTERPARTS = 8
+MAX_COUNTERPART_LINES = 20
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 from redact import redact_text  # noqa: E402
 
+from pr_reviewer.change_anchors import (  # noqa: E402
+    data_format,
+    is_test_path as _is_test_path,
+    key_words,
+    read_head_lines,
+)
+
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
-_TEST_BASE_RE = re.compile(
-    r"^(?:test[-_].+|.+[_-]tests?\..+|.+\.(?:test|spec)(?:\.[^.]+)?|.+_test\.go)$",
-    re.IGNORECASE,
+_KEY_NAME_RE = re.compile(r"-{0,2}[A-Za-z0-9_][A-Za-z0-9_.\-]{0,99}")
+_DECL_NAME_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]{0,99}")
+_COMMENT_PREFIXES = ("#", "//", "/*", "*")
+_PATH_WORD_RE = re.compile(r"[^a-z0-9]+")
+_DOC_EXTS = frozenset({"md", "rst", "txt", "adoc"})
+_BRANCH_SITE_RE = re.compile(
+    r"""(?:===|!==|==|!=|["'\]]\s+=\s+|\s-(?:eq|ne)\s+)\s*["']|\s(?:not\s+)?in\s*[(\[{]\s*["']"""
 )
+_CASE_SITE_RE = re.compile(r"^\s*(?:case\s|switch\s*\(|match\s)")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+CLIP_MARKER = "[related-code context truncated]\n"
 _MANIFEST_BASE_RE = re.compile(
     r"^(?:pyproject\.toml|setup\.(?:py|cfg)|requirements[^/]*\.txt|"
     r"package(?:-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|go\.(?:mod|sum)|"
@@ -200,7 +229,7 @@ def _snippet(value: str) -> str:
 
 
 def git_grep_references(
-    symbol: str,
+    symbol: str | list[str],
     workspace: str | os.PathLike[str],
     *,
     excluded_paths: set[str],
@@ -211,6 +240,7 @@ def git_grep_references(
 ) -> tuple[list[dict[str, Any]], bool, str | None]:
     """Stream eligible symbol matches without buffering an unbounded result.
 
+    ``symbol`` may be a list of fixed strings, any of which matches.
     ``pathspecs`` limits the search to those literal paths (default: the whole
     worktree); ``keep`` drops rows it rejects before they count.
     """
@@ -219,9 +249,13 @@ def git_grep_references(
         return [], False, None
     excluded = excluded_paths or set()
     scope = [f":(literal){path}" for path in pathspecs] if pathspecs else ["."]
+    if isinstance(symbol, str):
+        patterns = ["--", symbol]
+    else:
+        patterns = [arg for pattern in symbol for arg in ("-e", pattern)]
     try:
         proc = subprocess.Popen(
-            ["git", "grep", "-n", "-F", "--", symbol, "--", *scope],
+            ["git", "grep", "-n", "-F", *patterns, "--", *scope],
             cwd=os.fspath(workspace),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -280,14 +314,6 @@ def git_grep_references(
     if returncode is not None and returncode < 0:
         return rows, extra_hit, None
     return [], False, _error(f"git grep exited {returncode}")
-
-
-def _is_test_path(path: str) -> bool:
-    parts = [part.lower() for part in path.split("/")]
-    base = parts[-1] if parts else ""
-    if any(part in {"test", "tests", "spec", "specs", "testing", "__tests__"} for part in parts[:-1]):
-        return True
-    return bool(_TEST_BASE_RE.match(base)) or base.endswith("_test.go")
 
 
 def _stem(path: str) -> str:
@@ -475,6 +501,350 @@ def _changed_file_references(
     return rows, False, None
 
 
+def key_variants(name: str, kind: str = "entity") -> list[str]:
+    """Search forms of a changed key: as written, kebab, snake, UPPER_SNAKE, and
+    INPUT_; a ``branch`` variable (which may be one word) as written, snake, and
+    UPPER_SNAKE."""
+    words = key_words(name)
+    if not words or (len(words) < 2 and kind != "branch"):
+        return []
+    snake = "_".join(words)
+    forms = [name.lstrip("-"), snake, snake.upper()]
+    if kind != "branch":
+        forms = [name.lstrip("-"), "-".join(words), snake, snake.upper(), "INPUT_" + snake.upper()]
+    variants: list[str] = []
+    for variant in forms:
+        if variant not in variants:
+            variants.append(variant)
+    return variants
+
+
+def _branch_site(snippet: str, variants: list[str]) -> bool:
+    """Whether a line branches on a variant that is not an attribute of
+    something else: a ``case``/``switch``/``match`` on it, or a comparison with
+    a string literal after it."""
+    positions: list[int] = []
+    for variant in variants:
+        index = snippet.find(variant)
+        while index > 0 and snippet[index - 1] == ".":
+            index = snippet.find(variant, index + 1)
+        if index >= 0:
+            positions.append(index)
+    if not positions:
+        return False
+    if _CASE_SITE_RE.match(snippet):
+        return True
+    return _BRANCH_SITE_RE.search(snippet[min(positions):]) is not None
+
+
+def _consumer_tier(row: dict[str, Any]) -> int:
+    path = row["path"]
+    if _is_test_path(path):
+        return 3
+    base = path.rsplit("/", 1)[-1].lower()
+    if "." in base and base.rsplit(".", 1)[-1] in _DOC_EXTS:
+        return 2
+    return 1 if row["snippet"].lstrip().startswith(_COMMENT_PREFIXES) else 0
+
+
+def _anchor_keys(
+    anchor_files: list[dict[str, Any]], deleted_paths: set[str],
+) -> list[tuple[str, str, str, int | None]]:
+    keys: list[tuple[str, str, str, int | None]] = []
+    seen: set[str] = set()
+    for entry in anchor_files:
+        source = _path(entry.get("path"))
+        values = entry.get("keys")
+        if not source or entry.get("deleted") or source in deleted_paths or not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            kind = item.get("kind")
+            if not isinstance(name, str) or not _KEY_NAME_RE.fullmatch(name) or name in seen:
+                continue
+            if kind not in ("entity", "env", "flag", "branch"):
+                continue
+            seen.add(name)
+            keys.append((source, name, kind, _line_number(item.get("line"))))
+    return keys
+
+
+def _anchor_counterparts(
+    anchor_files: list[dict[str, Any]], deleted_paths: set[str],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for entry in anchor_files:
+        source = _path(entry.get("path"))
+        values = entry.get("counterparts")
+        if not source or entry.get("deleted") or source in deleted_paths or not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            ref_name = item.get("ref_name")
+            ref_path = _path(item.get("ref_path"))
+            line = _line_number(item.get("line"))
+            ref_line = _line_number(item.get("ref_line"))
+            ref_end = _line_number(item.get("ref_end"))
+            if not isinstance(name, str) or not _DECL_NAME_RE.fullmatch(name):
+                continue
+            if not isinstance(ref_name, str) or not _DECL_NAME_RE.fullmatch(ref_name):
+                continue
+            if not ref_path or ref_path == source or ref_path in deleted_paths:
+                continue
+            if line is None or ref_line is None or ref_end is None or ref_end < ref_line:
+                continue
+            items.append({
+                "path": source, "name": name, "line": line, "ref_path": ref_path,
+                "ref_name": ref_name, "ref_line": ref_line, "ref_end": ref_end,
+                "ref_changed": item.get("ref_changed") is True,
+            })
+    return items
+
+
+def _file_window(
+    lines: list[str] | None, start: int, end: int,
+) -> list[str]:
+    if lines is None:
+        return []
+    total = len(lines) - 1 if lines and lines[-1] == "" else len(lines)
+    return [_snippet(text.replace("\t", "    ")) for text in lines[max(1, start) - 1 : min(end, total)]]
+
+
+def _note_cap(result: dict[str, Any], reason: str) -> None:
+    result["truncated"] = True
+    result["truncation"]["truncated"] = True
+    if reason not in result["truncation"]["reasons"]:
+        result["truncation"]["reasons"].append(reason)
+
+
+def _note_error(result: dict[str, Any], errors_seen: set[str], error: str) -> None:
+    if error not in errors_seen:
+        result["errors"].append(error)
+        errors_seen.add(error)
+
+
+def _bridge_score(snippet: str, variants: list[str]) -> int:
+    """How many distinct forms of a key a line carries: a line mapping one
+    naming onto another (``ENV_NAME: ${{ inputs.env_name }}``) is where the key
+    crosses a boundary."""
+    matched = [variant for variant in variants if variant in snippet]
+    return sum(1 for variant in matched if not any(variant != other and variant in other for other in matched))
+
+
+def _best_per_file(
+    rows: list[dict[str, Any]], variants: list[str],
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    """Each file's best row: lowest tier, then (in a data file) most key forms,
+    then first line."""
+    best: dict[str, tuple[int, int, dict[str, Any]]] = {}
+    for row in rows:
+        tier = _consumer_tier(row)
+        bridge = _bridge_score(row["snippet"], variants) if data_format(row["path"]) else 0
+        current = best.get(row["path"])
+        if current is None or (tier, -bridge) < (current[0], -current[1]):
+            best[row["path"]] = (tier, bridge, row)
+    return {path: (tier, row) for path, (tier, _, row) in best.items()}
+
+
+def _breadth_first(
+    lists: list[list[dict[str, Any]]], depth_cap: int, total_cap: int, result: dict[str, Any],
+) -> list[list[dict[str, Any]]]:
+    """Take one item from each list per round, up to ``total_cap`` items."""
+    chosen: list[list[dict[str, Any]]] = [[] for _ in lists]
+    total = 0
+    for depth in range(depth_cap):
+        for index, rows in enumerate(lists):
+            if depth < len(rows):
+                if total >= total_cap:
+                    _note_cap(result, "consumer_cap")
+                    break
+                chosen[index].append(rows[depth])
+                total += 1
+    return chosen
+
+
+def _build_consumers(
+    result: dict[str, Any],
+    keys: list[tuple[str, str, str, int | None]],
+    workspace: str | os.PathLike[str],
+    excluded: set[str],
+    changed_index: dict[str, list[tuple[int, int]]],
+    timeout: float,
+    errors_seen: set[str],
+    max_consumers_per_key: int,
+    max_consumers: int,
+    max_changed_consumers_per_key: int,
+    max_changed_consumers: int,
+) -> list[dict[str, Any]]:
+    """Search each key's variants in unchanged files, then in changed files
+    outside their added lines.
+
+    A file counts once per key. Unchanged hits rank code lines before
+    comments, docs, and tests, then files whose path shares more of the key's
+    words, and every key gets its best hit before any key gets a second.
+    Changed-file hits follow under their own caps, also breadth first: code
+    lines only, non-test files first, and never the entity's own file. Within
+    a data file, the line carrying the most forms of the key wins. A
+    ``branch`` key only matches lines that compare it to a literal or switch on
+    it. A key whose variants match more than ``MAX_CONSUMER_SCAN`` unchanged
+    lines is too common to keep. The first ``MAX_CONSUMER_WINDOWS`` hits,
+    breadth first, carry a few lines of context; the rest only the matched
+    line.
+    """
+    if len(keys) > MAX_CONSUMER_KEYS:
+        _note_cap(result, "consumer_cap")
+    ranked: list[tuple[str, str, str, int | None, list[str], list[dict[str, Any]], list[dict[str, Any]]]] = []
+    for source, name, kind, line in keys[:MAX_CONSUMER_KEYS]:
+        variants = key_variants(name, kind)
+        if not variants:
+            continue
+
+        def keep(row: dict[str, Any], variants: list[str] = variants, kind: str = kind) -> bool:
+            if len(row["snippet"]) >= MAX_SNIPPET_CHARS:
+                return False
+            return kind != "branch" or _branch_site(row["snippet"], variants)
+
+        rows, extra, error = git_grep_references(
+            variants, workspace, excluded_paths=excluded, timeout=timeout,
+            max_hits=MAX_CONSUMER_SCAN, keep=keep,
+        )
+        if error:
+            _note_error(result, errors_seen, error)
+            continue
+        if extra:
+            continue
+        best = _best_per_file(rows, variants)
+        words = set(key_words(name))
+
+        def rank(item: tuple[int, dict[str, Any]], words: set[str] = words) -> tuple[int, int, str]:
+            path = item[1]["path"]
+            affinity = len(words.intersection(_PATH_WORD_RE.split(path.lower())))
+            return item[0], -affinity, path
+
+        hits = [row for _, row in sorted(best.values(), key=rank)]
+        if len(hits) > max_consumers_per_key:
+            _note_cap(result, "consumer_cap")
+            hits = hits[:max_consumers_per_key]
+
+        changed_hits: list[dict[str, Any]] = []
+        searched = [path for path in changed_index if kind != "entity" or path != source]
+        if searched and max_changed_consumers_per_key > 0:
+
+            def keep_changed(row: dict[str, Any], keep: Callable[[dict[str, Any]], bool] = keep) -> bool:
+                if _consumer_tier(row) in (1, 2) or not keep(row):
+                    return False
+                return not any(start <= row["line"] <= end for start, end in changed_index[row["path"]])
+
+            rows, extra, error = git_grep_references(
+                variants, workspace, excluded_paths=set(), timeout=timeout,
+                max_hits=MAX_CONSUMER_SCAN, pathspecs=searched, keep=keep_changed,
+            )
+            if error:
+                _note_error(result, errors_seen, error)
+            best = _best_per_file(rows, variants)
+            changed_hits = [
+                row for _, row in sorted(best.values(), key=lambda item: (_is_test_path(item[1]["path"]), item[1]["path"]))
+            ]
+            if extra or len(changed_hits) > max_changed_consumers_per_key:
+                _note_cap(result, "consumer_cap")
+                changed_hits = changed_hits[:max_changed_consumers_per_key]
+            for row in changed_hits:
+                row["changed_file"] = True
+        if hits or changed_hits:
+            ranked.append((source, name, kind, line, variants, hits, changed_hits))
+
+    chosen = _breadth_first([item[5] for item in ranked], max_consumers_per_key, max_consumers, result)
+    chosen_changed = _breadth_first(
+        [item[6] for item in ranked], max_changed_consumers_per_key, max_changed_consumers, result,
+    )
+    groups = [rows + changed for rows, changed in zip(chosen, chosen_changed)]
+
+    windowed: set[tuple[int, int]] = set()
+    depth = 0
+    while len(windowed) < MAX_CONSUMER_WINDOWS and any(depth < len(rows) for rows in groups):
+        for index, rows in enumerate(groups):
+            if depth < len(rows) and len(windowed) < MAX_CONSUMER_WINDOWS:
+                windowed.add((index, depth))
+        depth += 1
+
+    consumers: list[dict[str, Any]] = []
+    cache: dict[str, list[str] | None] = {}
+    for index, ((source, name, kind, line, variants, _, _), rows) in enumerate(zip(ranked, groups)):
+        if not rows:
+            continue
+        references: list[dict[str, Any]] = []
+        for position, row in enumerate(rows):
+            path = row["path"]
+            reference: dict[str, Any] = {"path": path, "line": row["line"]}
+            if row.get("changed_file") is True:
+                reference["changed_file"] = True
+            match = ""
+            for variant in variants:
+                if variant in row["snippet"] and len(variant) > len(match):
+                    match = variant
+            if match:
+                reference["match"] = match
+            if (index, position) in windowed:
+                if path not in cache:
+                    cache[path] = read_head_lines(workspace, path)
+                start = max(1, row["line"] - CONSUMER_CONTEXT_LINES)
+                window = _file_window(cache[path], start, row["line"] + CONSUMER_CONTEXT_LINES)
+                if len(window) <= row["line"] - start:
+                    start, window = row["line"], [row["snippet"]]
+                reference["start"] = start
+                reference["lines"] = window
+            else:
+                reference["snippet"] = row["snippet"]
+            references.append(reference)
+        consumers.append({"key": name, "kind": kind, "source": source, "line": line, "references": references})
+    return consumers
+
+
+def _build_counterparts(
+    result: dict[str, Any],
+    items: list[dict[str, Any]],
+    workspace: str | os.PathLike[str],
+    tracked: set[str],
+    max_counterparts: int,
+) -> list[dict[str, Any]]:
+    counterparts: list[dict[str, Any]] = []
+    cache: dict[str, list[str] | None] = {}
+    for item in items:
+        ref_path = item["ref_path"]
+        if ref_path not in tracked:
+            continue
+        if len(counterparts) >= max_counterparts:
+            _note_cap(result, "counterpart_cap")
+            break
+        if ref_path not in cache:
+            cache[ref_path] = read_head_lines(workspace, ref_path)
+        lines = cache[ref_path]
+        ref_line = item["ref_line"]
+        if lines is None or ref_line > len(lines) or item["ref_name"] not in lines[ref_line - 1]:
+            continue
+        end = min(item["ref_end"], ref_line + MAX_COUNTERPART_LINES - 1)
+        body = _file_window(lines, ref_line, end)
+        entry: dict[str, Any] = {
+            "path": item["path"],
+            "name": item["name"],
+            "line": item["line"],
+            "ref_path": ref_path,
+            "ref_name": item["ref_name"],
+            "ref_line": ref_line,
+        }
+        if item["ref_changed"]:
+            entry["ref_changed"] = True
+        entry["lines"] = body
+        if len(body) < item["ref_end"] - ref_line + 1:
+            entry["lines_truncated"] = True
+        counterparts.append(entry)
+    return counterparts
+
+
 def _note_reference_cap(result: dict[str, Any], omitted: int) -> None:
     result["truncated"] = True
     result["truncation"]["truncated"] = True
@@ -513,6 +883,11 @@ def build_related_context(
     max_tests_per_file: int = MAX_TESTS_PER_FILE,
     max_changed_references_per_symbol: int = MAX_CHANGED_REFERENCES_PER_SYMBOL,
     max_changed_references: int = MAX_CHANGED_REFERENCES,
+    max_consumers_per_key: int = MAX_CONSUMERS_PER_KEY,
+    max_consumers: int = MAX_CONSUMERS,
+    max_changed_consumers_per_key: int = MAX_CHANGED_CONSUMERS_PER_KEY,
+    max_changed_consumers: int = MAX_CHANGED_CONSUMERS,
+    max_counterparts: int = MAX_COUNTERPARTS,
 ) -> dict[str, Any]:
     """Build a version-1 related-code artifact without raising on Git errors."""
     result = _empty_result()
@@ -532,6 +907,11 @@ def build_related_context(
     max_tests_per_file = max(0, int(max_tests_per_file))
     max_changed_references_per_symbol = max(0, int(max_changed_references_per_symbol))
     max_changed_references = max(0, int(max_changed_references))
+    max_consumers_per_key = max(0, int(max_consumers_per_key))
+    max_consumers = max(0, int(max_consumers))
+    max_changed_consumers_per_key = max(0, int(max_changed_consumers_per_key))
+    max_changed_consumers = max(0, int(max_changed_consumers))
+    max_counterparts = max(0, int(max_counterparts))
 
     raw_anchor_files = anchor_data.get("files", [])
     anchor_files = (
@@ -677,6 +1057,19 @@ def build_related_context(
             result["truncation"]["omitted_manifests"] += omitted_manifests
 
     result["files"] = [by_file[path] for path in file_order]
+    keys = _anchor_keys(anchor_files, deleted_paths)
+    if keys and not tracked_error:
+        consumers = _build_consumers(
+            result, keys, workspace, changed_paths, changed_index, timeout, errors_seen,
+            max_consumers_per_key, max_consumers, max_changed_consumers_per_key, max_changed_consumers,
+        )
+        if consumers:
+            result["consumers"] = consumers
+    counterpart_items = _anchor_counterparts(anchor_files, deleted_paths)
+    if counterpart_items and not tracked_error:
+        counterparts = _build_counterparts(result, counterpart_items, workspace, tracked_set, max_counterparts)
+        if counterparts:
+            result["counterparts"] = counterparts
     if result["errors"]:
         result["truncated"] = True
         result["truncation"]["truncated"] = True
@@ -804,15 +1197,95 @@ def render_related_context_json(related: dict[str, Any], indent: int = 2) -> str
     return _json_dump(bounded, 0)
 
 
+def _positive(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _location(path: Any, line: Any) -> str:
+    rendered = _code_span(_display(_path(path)))
+    number = _positive(line)
+    return f"{rendered}:{number}" if number else rendered
+
+
+def _fenced(start: Any, lines: Any, indent: str) -> list[str]:
+    first = _positive(start) or 1
+    body = [
+        f"{first + offset}: {_display(redact_text(str(text)), MAX_SNIPPET_CHARS)}"
+        for offset, text in enumerate(lines if isinstance(lines, list) else [])
+    ]
+    longest = max((len(run) for text in body for run in _BACKTICK_RUN_RE.findall(text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [f"{indent}{fence}", *(f"{indent}{text}" for text in body), f"{indent}{fence}"]
+
+
+def _render_consumer_lines(related: dict[str, Any]) -> list[str]:
+    consumers = related.get("consumers")
+    if not isinstance(consumers, list) or not consumers:
+        return []
+    lines = [
+        "## Consumers of Changed Keys",
+        "",
+        "_Lines that mention a config key, env var, flag, or compared variable from the changed lines, as written or in its kebab/snake/UPPER_SNAKE/INPUT_ form; a compared variable (`branch`) counts only where a line compares or switches on it. Unchanged files come first, then changed files outside the lines the diff shows. Textual matches, not proven consumers._",
+        "",
+    ]
+    for consumer in consumers:
+        if not isinstance(consumer, dict):
+            continue
+        key = _code_span(_display(str(consumer.get("key", ""))))
+        kind = _display(str(consumer.get("kind", "")), 20)
+        lines.append(f"- {key} ({kind}, {_location(consumer.get('source'), consumer.get('line'))}):")
+        references = consumer.get("references")
+        for reference in references if isinstance(references, list) else []:
+            if not isinstance(reference, dict):
+                continue
+            match = reference.get("match")
+            marker = " (changed file)" if reference.get("changed_file") is True else ""
+            suffix = f" as {_code_span(_display(match))}" if isinstance(match, str) and match else ""
+            location = f"  - {_location(reference.get('path'), reference.get('line'))}{marker}{suffix}"
+            if isinstance(reference.get("lines"), list):
+                lines.append(location)
+                lines.extend(_fenced(reference.get("start"), reference.get("lines"), "    "))
+            else:
+                snippet = _code_span(_display(redact_text(str(reference.get("snippet", "")))))
+                lines.append(f"{location} — {snippet}")
+    lines.append("")
+    return lines
+
+
+def _render_counterpart_lines(related: dict[str, Any]) -> list[str]:
+    counterparts = related.get("counterparts")
+    if not isinstance(counterparts, list) or not counterparts:
+        return []
+    lines = [
+        "## Referenced Counterparts",
+        "",
+        "_Declarations in repository files that added lines name, matched to the changed file's declarations by normalized name (e.g. `buildPrMetadata` and `_build_pr_metadata`). Bodies are bounded._",
+        "",
+    ]
+    for item in counterparts:
+        if not isinstance(item, dict):
+            continue
+        ref = f"{_location(item.get('ref_path'), item.get('ref_line'))} {_code_span(_display(str(item.get('ref_name', ''))))}"
+        own = f"{_code_span(_display(str(item.get('name', ''))))} in {_location(item.get('path'), item.get('line'))}"
+        notes = " (also changed in this PR)" if item.get("ref_changed") is True else ""
+        lines.append(f"- {ref} for {own}{notes}:")
+        lines.extend(_fenced(item.get("ref_line"), item.get("lines"), "  "))
+        if item.get("lines_truncated") is True:
+            lines.append(f"  _(body cut at {MAX_COUNTERPART_LINES} lines)_")
+    lines.append("")
+    return lines
+
+
 def _render_lines(related: dict[str, Any]) -> list[str]:
     lines = [
         f"# Related Code (v{related.get('version', ARTIFACT_VERSION)})",
         "",
         "_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._",
         "",
-        "## Changed Files",
-        "",
     ]
+    lines.extend(_render_consumer_lines(related))
+    lines.extend(_render_counterpart_lines(related))
+    lines.extend(["## Changed Files", ""])
     files = related.get("files") or []
     if not files:
         lines.append("_(none)_")
@@ -868,6 +1341,42 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
     return lines
 
 
+def fence_safe_length(lines: list[str]) -> int:
+    """Length of the longest prefix of ``lines`` that does not end inside a
+    fenced code block, so a cut never leaves a fence open over what follows."""
+    safe = 0
+    fence = ""
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip(" \t\r\n")
+        if fence:
+            if len(stripped) >= len(fence) and stripped == fence[0] * len(stripped):
+                fence = ""
+        else:
+            match = _FENCE_OPEN_RE.match(line)
+            if match:
+                fence = match.group(1)
+        if not fence:
+            safe = index
+    return safe
+
+
+def clip_markdown(text: str, max_bytes: int, marker: str = CLIP_MARKER) -> str:
+    """Cut ``text`` to whole lines so that it, with ``marker`` appended, fits in
+    ``max_bytes`` UTF-8 bytes, dropping any fenced block the cut would split."""
+    if len(text.encode("utf-8", "surrogateescape")) <= max_bytes:
+        return text
+    budget = max_bytes - len(marker.encode("utf-8", "surrogateescape"))
+    kept: list[str] = []
+    used = 0
+    for line in re.split(r"(?<=\n)", text):
+        size = len(line.encode("utf-8", "surrogateescape"))
+        if used + size > budget:
+            break
+        kept.append(line)
+        used += size
+    return "".join(kept[: fence_safe_length(kept)]) + marker
+
+
 def render_related_context_markdown(
     related: dict[str, Any], *, max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
 ) -> str:
@@ -889,6 +1398,7 @@ def render_related_context_markdown(
             break
         chosen.append(line)
         used += line_bytes
+    chosen = chosen[: fence_safe_length(chosen)]
     if not chosen:
         return "\n"
     return "\n".join(chosen + [note]) + "\n"
@@ -916,6 +1426,19 @@ def _load_json(path: str) -> tuple[Any, str | None]:
         return None, "invalid JSON"
 
 
+def _clip_main(source: str, output: str, max_bytes: int) -> int:
+    if not output or max_bytes <= 0:
+        print("related_context: --clip needs --clip-output and a positive --max-bytes", file=sys.stderr)
+        return 2
+    try:
+        text = Path(source).read_bytes().decode("utf-8", "surrogateescape")
+        Path(output).write_bytes(clip_markdown(text, max_bytes).encode("utf-8", "surrogateescape"))
+    except OSError as exc:
+        print(f"related_context: could not clip Markdown: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build bounded related-code context from change anchors.")
     parser.add_argument("--anchors", default="change-anchors.json")
@@ -924,7 +1447,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", "--output", dest="json_output", default="related-code.json")
     parser.add_argument("--markdown", default="related-code.md")
     parser.add_argument("--git-timeout", type=float, default=DEFAULT_GIT_TIMEOUT_SEC)
+    parser.add_argument("--clip", default="", help="Only cut this Markdown file to --max-bytes (fence-safe).")
+    parser.add_argument("--clip-output", default="")
+    parser.add_argument("--max-bytes", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.clip:
+        return _clip_main(args.clip, args.clip_output, args.max_bytes)
     workspace = args.workspace or os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
 
     anchor_data, anchor_error = _load_json(args.anchors)

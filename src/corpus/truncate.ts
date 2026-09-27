@@ -15,6 +15,9 @@
  *    (`errors="ignore"` — only reachable when the byte cut splits a multibyte
  *    character at the tail, or the source itself was not valid UTF-8), and
  *    re-encoded with `\n<MARKER>\n` appended.
+ * 4. A code fence still open at the cut is closed with its own delimiter
+ *    before the marker; trailing lines are dropped until the closer fits the
+ *    budget (or the opener itself is dropped and no closer is needed).
  *
  * All inputs/outputs are raw bytes: callers pass and receive `Uint8Array`,
  * never strings, so hostile or truncated content cannot be silently
@@ -93,6 +96,27 @@ export function truncateClean(src: Uint8Array, maxBytes: number, marker: string)
   if (nl > 0) {
     end = nl;
   }
-  const text = decodeUtf8Ignore(clip.subarray(0, end));
+  let text = decodeUtf8Ignore(clip.subarray(0, end));
+  const lines = text.split("\n");
+  let opener = -1;
+  let fence = "";
+  lines.forEach((line, index) => {
+    const stripped = line.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+    if (fence !== "") {
+      if (stripped.length >= fence.length && stripped === (fence[0] as string).repeat(stripped.length)) fence = "";
+    } else {
+      const match = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+      if (match) {
+        opener = index;
+        fence = match[1] as string;
+      }
+    }
+  });
+  if (fence !== "") {
+    const closerBytes = Buffer.byteLength(`\n${fence}`, "utf8");
+    while (lines.length > opener && Buffer.byteLength(lines.join("\n"), "utf8") + closerBytes + suffix.length > maxBytes) lines.pop();
+    text = lines.join("\n");
+    if (lines.length > opener) text += `\n${fence}`;
+  }
   return Buffer.concat([Buffer.from(text, "utf8"), suffix]);
 }

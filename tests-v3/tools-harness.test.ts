@@ -271,6 +271,23 @@ test("planner related-code excerpt drops files without symbol or test references
   assert.match(text, /200 changed file\(s\) with no symbol or test references omitted/);
 });
 
+test("planner related-code excerpt cut drops a fenced block it would split (#791)", () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
+  let entries = "";
+  for (let i = 0; i < 200; i++) {
+    const key = `SETTING_${String(i).padStart(3, "0")}`;
+    entries += `- \`${key}\` (env, \`src/config.py\`:1):\n  - \`scripts/run.py\`:12 as \`${key}\`\n    \`\`\`\`\n    12:     value = os.getenv("${key}")  # \`\`\` hostile\n    \`\`\`\`\n`;
+  }
+  for (let pad = 0; pad < 120; pad += 9) {
+    fs.writeFileSync(path.join(root, "related-code.truncated.md"), `# Related Code (v1)\n\n_${"p".repeat(pad)}_\n\n## Consumers of Changed Keys\n\n${entries}`);
+    const { text } = buildPlanningContext(50000, deps());
+    const section = text.slice(text.indexOf("# Related Code Context"), text.indexOf("\n[truncated]"));
+    const fences = section.split("\n").filter((line) => line.trim().startsWith("```"));
+    assert.equal(fences.length % 2, 0, `pad ${pad}`);
+  }
+});
+
 test("planner re-renders the Specialist Review Leads section from per-role artifacts (#776 seam wiring)", () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");

@@ -691,3 +691,35 @@ def test_adversarial_corpus_is_deterministic(tmp_path):
     a, _ = specialist_corpus.build_specialist_corpus(tmp_path, mode="adversarial_correctness")
     b, _ = specialist_corpus.build_specialist_corpus(tmp_path, mode="adversarial_correctness")
     assert a == b
+
+
+_INDENTED_FENCE_RE = re.compile(r"^[ \t]*(`{3,})\s*$")
+
+
+def test_related_code_cut_never_leaves_a_snippet_fence_open(tmp_path):
+    """An oversized related-code body is cut before a consumer window the
+    section cap would split, not inside it (#791)."""
+    _write_minimal(tmp_path)
+    entry = (
+        "- `SETTING_{i:02d}` (env, `src/config.py`:1):\n"
+        "  - `scripts/run_{i:02d}.py`:12 as `SETTING_{i:02d}`\n"
+        "    ````\n"
+        "    11: def main():\n"
+        '    12:     value = os.getenv("SETTING_{i:02d}")  # ``` hostile\n'
+        "    13:     return value\n"
+        "    ````\n"
+    )
+    for pad in range(0, 200, 7):
+        body = "# Related Code (v1)\n\n_" + "p" * pad + "_\n\n" + "".join(entry.format(i=i) for i in range(60))
+        _write(tmp_path, "related-code.truncated.md", body)
+        text, _ = specialist_corpus.build_specialist_corpus(tmp_path)
+        section = text[text.index("# Related Code Context"):]
+        section = section[: section.index(specialist_corpus._SECTION_TRUNCATED_MARKER)]
+        fence = None
+        for line in section.split("\n"):
+            match = _INDENTED_FENCE_RE.match(line)
+            if match and fence is None:
+                fence = match.group(1)
+            elif match and len(match.group(1)) >= len(fence):
+                fence = None
+        assert fence is None, pad

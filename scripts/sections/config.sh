@@ -223,10 +223,12 @@ MAX_CORPUS="$PRIMARY_MAX_CORPUS"; MAX_DIFF="$PRIMARY_MAX_DIFF"; MAX_FILES="$PRIM
 # Truncate SRC into DST at a UTF-8 / newline boundary (never mid-character or
 # mid-line), appending MARKER when truncation occurred. Replaces bare `head -c`,
 # which split multibyte characters and JSON/code fences and confused weak models.
+# A code fence open at the cut is closed with its own delimiter before MARKER,
+# inside the byte budget (lines are dropped to make room).
 truncate_clean() {
   local src="$1" dst="$2" max="$3" marker="${4:-…[content truncated]}"
   MARKER="$marker" python3 - "$src" "$dst" "$max" <<'PY'
-import os, sys
+import os, re, sys
 src, dst, max_b = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = open(src, "rb").read() if os.path.exists(src) else b""
 if len(data) <= max_b:
@@ -242,6 +244,24 @@ nl = clip.rfind(b"\n")
 if nl > 0:
     clip = clip[:nl]
 text = clip.decode("utf-8", errors="ignore")
+lines = text.split("\n")
+opener, fence = -1, ""
+for index, line in enumerate(lines):
+    stripped = line.strip(" \t\r\n")
+    if fence:
+        if len(stripped) >= len(fence) and stripped == fence[0] * len(stripped):
+            fence = ""
+    else:
+        match = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+        if match:
+            opener, fence = index, match.group(1)
+if fence:
+    closer = ("\n" + fence).encode("utf-8")
+    while len(lines) > opener and len("\n".join(lines).encode("utf-8")) + len(closer) + len(suffix) > max_b:
+        lines.pop()
+    text = "\n".join(lines)
+    if len(lines) > opener:
+        text += "\n" + fence
 open(dst, "wb").write(text.encode("utf-8") + suffix)
 PY
 }

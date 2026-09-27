@@ -26,6 +26,15 @@ Documented behavior choices (per #571):
   ``[start, end]`` head-line ranges of its added lines, so a consumer can tell
   a reference in a changed file apart from a line the diff already shows
   (omitted when the diff itself was truncated).
+- **Changed keys and referenced counterparts (#791).** A head-matched,
+  non-test file also records ``keys``: the config entity each added line of a
+  YAML/JSON/TOML file belongs to (walking up by indentation to the enclosing
+  list item's ``id``/``name``/``key`` or block key), plus env-var-like names,
+  ``--long-flags``, and variables an added code line compares or assigns a new
+  string literal to (``branch``). A supported-language file also records
+  ``counterparts``: declarations in repository files its added lines name
+  whose normalized names match its changed declarations. Both are optional,
+  capped, and flagged by ``keys_truncated`` / ``counterparts_truncated``.
 - Diff metadata (``diff --git``, ``+++``/``---`` paths, ``@@`` hunk headers,
   binary markers) is never treated as source.
 - Diff path parsing handles both unquoted Git paths (``a/foo bar.py
@@ -389,6 +398,9 @@ class _FileState:
     # One entry per contiguous run of added/removed lines: the new-side line
     # the run starts at and the content of its first non-blank line.
     change_runs: list[tuple[int, str]] = field(default_factory=list)
+    # Content of every removed line, used to tell a literal the diff
+    # introduces from one it only moves.
+    removed_lines: list[str] = field(default_factory=list)
     in_run: bool = False
     run_open: bool = False
 
@@ -697,6 +709,7 @@ def parse_diff(diff_text: str) -> list[_FileState]:
             continue
         if line.startswith("-"):
             # Deleted lines do not advance the new-side line number.
+            current.removed_lines.append(line[1:])
             continue
         if line.startswith("\\"):
             # "\ No newline at end of file"
@@ -875,6 +888,471 @@ def _enclosing_symbols(
 
 
 # ---------------------------------------------------------------------------
+# Changed keys and referenced counterparts (#791)
+# ---------------------------------------------------------------------------
+
+_DATA_FORMATS = {"yaml": "yaml", "yml": "yaml", "json": "json", "toml": "toml"}
+_DECLARATION_LANGUAGES = ("python", "javascript", "typescript", "go")
+_KEY_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+_ENV_NAME_RE = re.compile(r"(?<![A-Za-z0-9_$])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])")
+_FLAG_RE = re.compile(r"(?<![A-Za-z0-9_\-])--[a-z][a-z0-9]*(?:-[a-z0-9]+)+(?![A-Za-z0-9_\-])")
+_PATH_MENTION_RE = re.compile(
+    r"(?<![A-Za-z0-9_./\-])((?:[A-Za-z0-9_\-][A-Za-z0-9_.\-]*/)+[A-Za-z0-9_\-][A-Za-z0-9_.\-]*\.[A-Za-z0-9]+)"
+)
+_YAML_ITEM_RE = re.compile(r"^\s*-(?:\s|$)")
+_YAML_ID_RE = re.compile(
+    r"""^\s*(?:-\s+)?(?:id|name|key)\s*:\s+["']?([A-Za-z_][A-Za-z0-9_.\-]*)["']?\s*(?:#.*)?$"""
+)
+_YAML_KEY_RE = re.compile(r"""^\s*(?:-\s+)?["']?([A-Za-z0-9_][A-Za-z0-9_.\-/]*)["']?\s*:(?:\s+(.*))?$""")
+_JSON_ID_RE = re.compile(r'^\s*"(?:id|name|key)"\s*:\s*"([A-Za-z_][A-Za-z0-9_.\-]*)"\s*,?\s*$')
+_JSON_KEY_RE = re.compile(r'^\s*"([^"\\]{1,100})"\s*:\s*(.*?)\s*$')
+_TOML_HEADER_RE = re.compile(r"^\s*(\[\[?)\s*([A-Za-z0-9_.\-]+)\s*\]\]?\s*(?:#.*)?$")
+_TOML_ID_RE = re.compile(
+    r"""^\s*(?:id|name|key)\s*=\s*["']([A-Za-z_][A-Za-z0-9_.\-]*)["']\s*(?:#.*)?$"""
+)
+_STRING_RE = re.compile(r"""(["'])([^"'\\\n]{1,60})\1""")
+_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+# ``VAR == "x"``, ``"$VAR" != "x"``, ``VAR="x"``.
+_BRANCH_ASSIGN_RE = re.compile(
+    r"""(?<![\w.$])(?:"?\$\{?)?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s*(===|!==|==|!=|=)\s*["']"""
+)
+_TRAILING_WORD_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)$")
+_DECLARATION_KEYWORDS = frozenset({
+    "const", "declare", "export", "final", "let", "local", "private", "protected",
+    "public", "readonly", "static", "type", "var",
+})
+_BRANCH_IN_RE = re.compile(r"""(?<![\w.$])([A-Za-z_][A-Za-z0-9_]*)\s+(?:not\s+)?in\s*[(\[{]\s*["']""")
+_RETURN_LITERAL_RE = re.compile(r"""^\s*return\s+["']""")
+_CASE_ARM_RE = re.compile(
+    r"""^\s*(?:case\s+(["'])([^"'\\\n]{1,60})\1\s*:|([A-Za-z0-9_.*\-]+(?:\s*\|\s*[A-Za-z0-9_.*\-]+)*)\s*\))"""
+)
+_CASE_HEADER_RE = re.compile(
+    r"""^\s*(?:case\s+"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s+in\b|switch\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)|match\s+([A-Za-z_][A-Za-z0-9_]*)\s*:)"""
+)
+_LINE_COMMENT_PREFIXES = ("#", "//", "/*", "*")
+_LOW_VALUE_ENV_PREFIXES = (
+    "GITHUB_", "RUNNER_", "ACTIONS_", "NODE_", "NPM_", "PYTHON", "LC_", "XDG_",
+)
+_LOW_VALUE_FLAGS = frozenset({
+    "--dry-run", "--no-verify", "--no-color", "--no-cache", "--no-cache-dir",
+    "--no-edit", "--no-pager", "--no-deps", "--name-only", "--frozen-lockfile",
+    "--ignore-scripts", "--save-dev", "--no-install-recommends", "--fail-fast",
+    "--force-with-lease",
+})
+_LOW_VALUE_ENTITIES = frozenset({
+    "pullrequest", "pullrequesttarget", "workflowdispatch", "workflowcall",
+    "devdependencies", "peerdependencies", "optionaldependencies",
+    "compileroptions", "runson", "timeoutminutes", "workingdirectory",
+    "continueonerror", "cancelinprogress", "fetchdepth", "nodeversion",
+    "pythonversion", "githubtoken",
+})
+_LOW_VALUE_BRANCH_NAMES = frozenset({
+    "action", "content", "default", "encoding", "errors", "format", "label",
+    "language", "length", "level", "message", "method", "number", "object",
+    "option", "options", "output", "prefix", "reason", "request", "response",
+    "result", "scheme", "source", "status", "stderr", "stdout", "string",
+    "suffix", "target", "title", "value", "values", "version",
+})
+MAX_KEYS_PER_FILE = 40
+MAX_KEYS = 60
+MAX_KEY_LINE_CHARS = 500
+MAX_ENTITY_WALK = 400
+MAX_COUNTERPART_PATHS_PER_FILE = 5
+MAX_COUNTERPARTS_PER_PAIR = 4
+MAX_COUNTERPARTS = 8
+
+_TEST_BASE_RE = re.compile(
+    r"^(?:test[-_].+|.+[_-]tests?\..+|.+\.(?:test|spec)(?:\.[^.]+)?|.+_test\.go)$",
+    re.IGNORECASE,
+)
+_GENERATED_DIRS = frozenset({"dist", "build", "vendor", "node_modules", "third_party"})
+
+
+def is_test_path(path: str) -> bool:
+    parts = [part.lower() for part in path.split("/")]
+    base = parts[-1] if parts else ""
+    if any(part in {"test", "tests", "spec", "specs", "testing", "__tests__"} for part in parts[:-1]):
+        return True
+    return bool(_TEST_BASE_RE.match(base)) or base.endswith("_test.go")
+
+
+def key_words(name: str) -> list[str]:
+    """Lowercase words of a key, env name, or flag (``--``/``INPUT_`` stripped)."""
+    base = name.lstrip("-")
+    if base.startswith("INPUT_"):
+        base = base[len("INPUT_"):]
+    words: list[str] = []
+    for part in _KEY_SPLIT_RE.split(base):
+        if not part:
+            continue
+        if part != part.upper():
+            part = _CAMEL_RE.sub(r"\1 \2", part)
+        words.extend(part.lower().split())
+    return words
+
+
+def key_ok(name: str, kind: str) -> bool:
+    """Whether a changed key is specific enough to search for consumers.
+
+    Entity, env, and flag keys need two words; a ``branch`` key (a variable a
+    changed line compares or assigns a new literal to) may be one word.
+    """
+    words = key_words(name)
+    joined = "".join(words)
+    if not words or len(words[0]) < 2 or len(name) > 80 or len(joined) < 6:
+        return False
+    if kind == "branch":
+        return joined not in _LOW_VALUE_BRANCH_NAMES and not _is_low_value(name)
+    if len(words) < 2:
+        return False
+    if kind == "env":
+        return not name.startswith(_LOW_VALUE_ENV_PREFIXES)
+    if kind == "flag":
+        return name not in _LOW_VALUE_FLAGS
+    return joined not in _LOW_VALUE_ENTITIES
+
+
+def _is_lockfile(name: str) -> bool:
+    return name.endswith((".lock", ".sum")) or bool(re.search(r"[-.]lock\.(?:json|ya?ml)$", name))
+
+
+def data_format(path: str) -> str | None:
+    name = path.rsplit("/", 1)[-1].lower()
+    if "." not in name or _is_lockfile(name):
+        return None
+    return _DATA_FORMATS.get(name.rsplit(".", 1)[-1])
+
+
+def _scans_keys(path: str, language: str) -> bool:
+    parts = path.lower().split("/")
+    if _is_lockfile(parts[-1]) or parts[-1].endswith(".min.js") or is_test_path(path):
+        return False
+    if any(part in _GENERATED_DIRS for part in parts[:-1]):
+        return False
+    if data_format(path):
+        return True
+    return language in ("python", "javascript", "typescript", "go", "unsupported", "unknown")
+
+
+def _data_comment(stripped: str, fmt: str) -> bool:
+    return fmt != "json" and stripped.startswith("#") or stripped == "---"
+
+
+def _item_id(line: str, fmt: str) -> str | None:
+    m = (_JSON_ID_RE if fmt == "json" else _YAML_ID_RE).match(line)
+    return m.group(1) if m else None
+
+
+def _opens_item(line: str, fmt: str) -> bool:
+    if fmt == "json":
+        return line.strip() == "{" and _indent(line) > 0
+    return bool(_YAML_ITEM_RE.match(line))
+
+
+def _container_key(line: str, fmt: str) -> str | None:
+    if fmt == "json":
+        m = _JSON_KEY_RE.match(line)
+        if m and m.group(2).rstrip(",") in ("{", "["):
+            return m.group(1)
+        return None
+    m = _YAML_KEY_RE.match(line)
+    if not m:
+        return None
+    value = (m.group(2) or "").strip()
+    if not value or value.startswith(("#", "&")):
+        return m.group(1)
+    return None
+
+
+def _block_id(lines: list[str], opener: int, fmt: str) -> str | None:
+    """The identifying key of the list item or object opened at ``opener``."""
+    name = _item_id(lines[opener - 1], fmt)
+    if name:
+        return name
+    base = _indent(lines[opener - 1])
+    content = None
+    for line_no in range(opener + 1, min(len(lines), opener + MAX_ENTITY_WALK) + 1):
+        line = lines[line_no - 1]
+        stripped = line.strip()
+        if not stripped or _data_comment(stripped, fmt):
+            continue
+        indent = _indent(line)
+        if indent <= base:
+            break
+        if content is None:
+            content = indent
+        if indent == content:
+            name = _item_id(line, fmt)
+            if name:
+                return name
+    return None
+
+
+def _toml_entity(lines: list[str], line_no: int) -> str | None:
+    for header_no in range(line_no, max(0, line_no - MAX_ENTITY_WALK), -1):
+        m = _TOML_HEADER_RE.match(lines[header_no - 1])
+        if not m:
+            continue
+        if m.group(1) == "[[":
+            for item_no in range(header_no + 1, min(len(lines), header_no + MAX_ENTITY_WALK) + 1):
+                if _TOML_HEADER_RE.match(lines[item_no - 1]):
+                    break
+                idm = _TOML_ID_RE.match(lines[item_no - 1])
+                if idm and key_ok(idm.group(1), "entity"):
+                    return idm.group(1)
+        name = m.group(2).rsplit(".", 1)[-1]
+        return name if key_ok(name, "entity") else None
+    return None
+
+
+def resolve_entity(lines: list[str], line_no: int, fmt: str) -> str | None:
+    """Name of the config entity a head line belongs to, walking up by indentation.
+
+    That is the line's own list-item id or block key, else the identifying
+    key (``id``/``name``/``key``) of the nearest enclosing list item or
+    object, else the nearest enclosing block key. Names too generic to
+    search for are skipped in favour of the next one out.
+    """
+    if line_no < 1 or line_no > len(lines):
+        return None
+    if fmt == "toml":
+        return _toml_entity(lines, line_no)
+    target = lines[line_no - 1]
+    stripped = target.strip()
+    if not stripped or _data_comment(stripped, fmt):
+        return None
+    for name in (_item_id(target, fmt), _container_key(target, fmt)):
+        if name and key_ok(name, "entity"):
+            return name
+    ceiling = _indent(target)
+    for walk_no in range(line_no - 1, max(0, line_no - 1 - MAX_ENTITY_WALK), -1):
+        line = lines[walk_no - 1]
+        stripped = line.strip()
+        if not stripped or _data_comment(stripped, fmt):
+            continue
+        indent = _indent(line)
+        if indent >= ceiling:
+            continue
+        ceiling = indent
+        name = _block_id(lines, walk_no, fmt) if _opens_item(line, fmt) else _item_id(line, fmt)
+        if name is None:
+            name = _container_key(line, fmt)
+        if name and key_ok(name, "entity"):
+            return name
+        if ceiling == 0:
+            break
+    return None
+
+
+def _removed_literals(state: _FileState) -> set[str]:
+    literals: set[str] = set()
+    for content in state.removed_lines:
+        if len(content) > MAX_KEY_LINE_CHARS:
+            continue
+        literals.update(m.group(2) for m in _STRING_RE.finditer(content))
+        literals.update(_WORD_RE.findall(content))
+    return literals
+
+
+def _case_subject(lines: list[str], line_no: int) -> str | None:
+    """The variable of the ``case``/``switch``/``match`` directly above an arm."""
+    ceiling = _indent(lines[line_no - 1])
+    for walk_no in range(line_no - 1, max(0, line_no - 1 - MAX_ENTITY_WALK), -1):
+        line = lines[walk_no - 1]
+        if not line.strip() or _indent(line) >= ceiling:
+            continue
+        m = _CASE_HEADER_RE.match(line)
+        return next((group for group in m.groups() if group), None) if m else None
+    return None
+
+
+def branch_names(
+    content: str, line_no: int, head_lines: list[str], language: str, removed: set[str],
+) -> list[str]:
+    """Variables an added line compares, assigns, or returns a new string literal for.
+
+    A literal is new when no removed line of the file carries it. A returned
+    literal names the enclosing declaration; a ``case`` arm names the subject
+    of its ``case``/``switch``/``match``.
+    """
+    stripped = content.strip()
+    if not stripped or stripped.startswith(_LINE_COMMENT_PREFIXES):
+        return []
+    literals = [
+        (lit.start(), lit.group(2)) for lit in _STRING_RE.finditer(content)
+        if "$" not in lit.group(2)
+    ]
+    names: list[str] = []
+    for pattern in (_BRANCH_ASSIGN_RE, _BRANCH_IN_RE):
+        for m in pattern.finditer(content):
+            before = content[: m.start()].rstrip()
+            if before.endswith(("(", ",", ":")):
+                continue
+            word = _TRAILING_WORD_RE.search(before)
+            prior = word.group(1) if word else ""
+            if prior == "typeof":
+                continue
+            if pattern is _BRANCH_ASSIGN_RE and m.group(2) == "=" and prior in _DECLARATION_KEYWORDS:
+                continue
+            if any(start >= m.end(1) and value not in removed for start, value in literals):
+                names.append(m.group(1))
+    if _RETURN_LITERAL_RE.match(content) and language in _DECLARATION_LANGUAGES:
+        if any(value not in removed for _, value in literals):
+            decl = find_enclosing_declaration(head_lines, line_no, content, language)
+            if decl:
+                names.append(decl[0])
+    m = _CASE_ARM_RE.match(content)
+    if m:
+        values = [m.group(2)] if m.group(2) else [part.strip() for part in m.group(3).split("|")]
+        if any(value not in removed for value in values) and line_no <= len(head_lines):
+            subject = _case_subject(head_lines, line_no)
+            if subject:
+                names.append(subject)
+    return names
+
+
+def _changed_keys(
+    state: _FileState, language: str, head_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Entity, env, flag, and branch keys on added lines, in line order, deduplicated."""
+    fmt = data_format(state.path)
+    removed = _removed_literals(state) if not fmt else set()
+    keys: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(name: str, kind: str, line_no: int) -> None:
+        if name not in seen and key_ok(name, kind):
+            seen.add(name)
+            keys.append({"name": name, "kind": kind, "line": line_no})
+
+    for line_no, content in sorted(state.added_lines):
+        if len(content) > MAX_KEY_LINE_CHARS:
+            continue
+        if fmt:
+            entity = resolve_entity(head_lines, line_no, fmt)
+            if entity:
+                add(entity, "entity", line_no)
+        for m in _ENV_NAME_RE.finditer(content):
+            add(m.group(0), "env", line_no)
+        for m in _FLAG_RE.finditer(content):
+            add(m.group(0), "flag", line_no)
+        if not fmt:
+            for name in branch_names(content, line_no, head_lines, language, removed):
+                add(name, "branch", line_no)
+        if len(keys) > MAX_KEYS_PER_FILE:
+            break
+    return keys
+
+
+def normalized_name(name: str) -> str:
+    """``buildPrMetadata`` and ``_build_pr_metadata`` both become ``buildprmetadata``."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def declaration_end(lines: list[str], line_no: int) -> int:
+    """Last line of the declaration at ``line_no``: its more-indented body plus
+    closers at its own level."""
+    base = _indent(lines[line_no - 1])
+    end = line_no
+    for next_no in range(line_no + 1, min(len(lines), line_no + MAX_ENTITY_WALK) + 1):
+        line = lines[next_no - 1]
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = _indent(line)
+        if indent > base or (indent == base and stripped.startswith(_CLOSERS)):
+            end = next_no
+            continue
+        break
+    return end
+
+
+def _counterparts(
+    state: _FileState,
+    language: str,
+    head_lines: list[str],
+    enclosing: list[dict[str, Any]],
+    source_root: str | Path,
+    diff_added: dict[str, set[int]],
+    budget: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Declarations in files named by added lines that match this file's
+    changed declarations by normalized name.
+
+    A referenced file that is itself in the diff still counts (a port and its
+    reference often change together), but a body the diff adds in full is
+    already visible and skipped; bodies the diff only touches come first and
+    are marked ``ref_changed``.
+    """
+    changed: dict[str, tuple[str, int]] = {}
+    candidates = [
+        (line_no, _declaration_at(head_lines[line_no - 1], language))
+        for line_no, _ in sorted(state.added_lines) if line_no <= len(head_lines)
+    ]
+    candidates += [(sym["line"], (sym["name"], sym["confidence"])) for sym in enclosing]
+    for line_no, decl in sorted(candidates, key=lambda item: item[0]):
+        if decl and _enclosing_name_ok(decl[0]):
+            norm = normalized_name(decl[0])
+            if len(norm) >= 4 and norm not in changed:
+                changed[norm] = (decl[0], line_no)
+    if not changed:
+        return [], False
+
+    paths: list[str] = []
+    for _, content in sorted(state.added_lines):
+        if len(content) > MAX_KEY_LINE_CHARS:
+            continue
+        for m in _PATH_MENTION_RE.finditer(content):
+            path = m.group(1)
+            if path != state.path and path not in paths and detect_language(path) in _DECLARATION_LANGUAGES:
+                paths.append(path)
+
+    found: list[dict[str, Any]] = []
+    truncated = False
+    readable = 0
+    for path in paths:
+        if readable >= MAX_COUNTERPART_PATHS_PER_FILE:
+            truncated = True
+            break
+        ref_lines = read_head_lines(source_root, path)
+        if ref_lines is None:
+            continue
+        readable += 1
+        ref_language = detect_language(path)
+        added = diff_added.get(path, set())
+        matches: list[tuple[bool, dict[str, Any]]] = []
+        for ref_no, line in enumerate(ref_lines, start=1):
+            decl = _declaration_at(line, ref_language)
+            if not decl or not _enclosing_name_ok(decl[0]):
+                continue
+            match = changed.get(normalized_name(decl[0]))
+            if match is None:
+                continue
+            ref_end = declaration_end(ref_lines, ref_no)
+            touched = sum(1 for n in range(ref_no, ref_end + 1) if n in added)
+            if touched == ref_end - ref_no + 1:
+                continue
+            entry = {
+                "name": match[0],
+                "line": match[1],
+                "ref_path": path,
+                "ref_name": decl[0],
+                "ref_line": ref_no,
+                "ref_end": ref_end,
+            }
+            if touched:
+                entry["ref_changed"] = True
+            matches.append((not touched, entry))
+        matches.sort(key=lambda item: item[0])
+        limit = max(0, min(MAX_COUNTERPARTS_PER_PAIR, budget - len(found)))
+        if len(matches) > limit:
+            truncated = True
+        found.extend(entry for _, entry in matches[:limit])
+    return found, truncated
+
+
+# ---------------------------------------------------------------------------
 # Anchor extraction
 # ---------------------------------------------------------------------------
 
@@ -894,6 +1372,10 @@ class FileAnchors:
     # Added-line ranges, present only when the head checkout was read and
     # matched the diff.
     changed_lines: list[list[int]] | None = None
+    keys: list[dict[str, Any]] = field(default_factory=list)
+    keys_truncated: bool = False
+    counterparts: list[dict[str, Any]] = field(default_factory=list)
+    counterparts_truncated: bool = False
 
 
 def _merge_with_context(state: _FileState) -> list[tuple[int, str, bool]]:
@@ -922,6 +1404,9 @@ def _extract_file_anchors(
     source_root: str | Path | None = None,
     enclosing_budget: int = 0,
     emit_changed_lines: bool = False,
+    key_budget: int = 0,
+    counterpart_budget: int = 0,
+    diff_added: dict[str, set[int]] | None = None,
 ) -> FileAnchors:
     fa = FileAnchors(
         path=state.path,
@@ -997,6 +1482,20 @@ def _extract_file_anchors(
             fa.symbols_truncated = True
         for name, confidence, line_no in enclosing[:limit]:
             _add_symbol(name, "enclosing", confidence, line_no)
+    if head_lines is not None and _scans_keys(state.path, fa.language):
+        keys = _changed_keys(state, fa.language, head_lines)
+        limit = max(0, min(MAX_KEYS_PER_FILE, key_budget))
+        fa.keys = keys[:limit]
+        fa.keys_truncated = len(keys) > limit
+    if (
+        head_lines is not None and source_root is not None
+        and fa.language in _DECLARATION_LANGUAGES
+    ):
+        enclosing_symbols = [sym for sym in fa.symbols if sym["kind"] == "enclosing"]
+        fa.counterparts, fa.counterparts_truncated = _counterparts(
+            state, fa.language, head_lines, enclosing_symbols, source_root,
+            diff_added or {}, counterpart_budget,
+        )
 
     # Deterministic caps per file. Record whether the cap actually dropped
     # anything so the artifact-level ``truncated`` flag reflects silent
@@ -1068,6 +1567,7 @@ def extract_change_anchors(
                     existing.context_lines.extend(state.context_lines)
                     existing.new_side_lines.extend(state.new_side_lines)
                     existing.change_runs.extend(state.change_runs)
+                    existing.removed_lines.extend(state.removed_lines)
                     existing.binary = state.binary
                     existing.deleted = state.deleted or existing.deleted
                     existing.old_path = state.old_path or existing.old_path
@@ -1099,9 +1599,17 @@ def extract_change_anchors(
         )
 
     enclosing_left = MAX_ENCLOSING
+    keys_left = MAX_KEYS
+    counterparts_left = MAX_COUNTERPARTS
+    diff_added = {state.path: {line_no for line_no, _ in state.added_lines} for state in merged}
     for state in merged:
-        fa = _extract_file_anchors(state, source_root, enclosing_left, not diff_truncated)
+        fa = _extract_file_anchors(
+            state, source_root, enclosing_left, not diff_truncated,
+            keys_left, counterparts_left, diff_added,
+        )
         enclosing_left -= sum(1 for sym in fa.symbols if sym["kind"] == "enclosing")
+        keys_left -= len(fa.keys)
+        counterparts_left -= len(fa.counterparts)
         file_entry: dict[str, Any] = {
             "path": fa.path,
             "language": fa.language,
@@ -1111,6 +1619,10 @@ def extract_change_anchors(
         }
         if fa.changed_lines is not None:
             file_entry["changed_lines"] = fa.changed_lines
+        if fa.keys:
+            file_entry["keys"] = fa.keys
+        if fa.counterparts:
+            file_entry["counterparts"] = fa.counterparts
         if fa.deleted:
             file_entry["deleted"] = True
         if fa.symbols_truncated:
@@ -1118,6 +1630,12 @@ def extract_change_anchors(
             truncated = True
         if fa.imports_truncated:
             file_entry["imports_truncated"] = True
+            truncated = True
+        if fa.keys_truncated:
+            file_entry["keys_truncated"] = True
+            truncated = True
+        if fa.counterparts_truncated:
+            file_entry["counterparts_truncated"] = True
             truncated = True
         files_out.append(file_entry)
 

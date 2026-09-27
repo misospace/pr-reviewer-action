@@ -96,3 +96,30 @@ test("artifact serializer emits the v2 snake_case schema in v2 key order", async
   const truncated = relatedContextToArtifact({ ...related, truncated: true, truncation: { ...related.truncation, truncated: true } });
   assert.ok(renderRelatedContextMarkdown(truncated).includes("## Bounds"));
 });
+
+test("anchor keys list consumers in unchanged, then changed, files ahead of the per-file list (#791)", async () => {
+  const workspace = gitRepo({
+    "contracts/action.yml": "  - id: evidence-providers-file\n    repo-configurable: true\n",
+    "action.yml": "inputs:\n  evidence_providers_file:\nruns:\n  env:\n    EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}\n",
+    "scripts/run.py": 'import os\npath = os.getenv("EVIDENCE_PROVIDERS_FILE")\n',
+    "scripts/api.sh": '[[ "$(platform_resolve)" == "forgejo" ]]\necho "$PLATFORM"\n',
+  });
+  const anchors = {
+    files: [
+      { path: "contracts/action.yml", changed_lines: [[2, 2]], keys: [{ name: "evidence-providers-file", kind: "entity", line: 2 }] },
+      { path: "action.yml", changed_lines: [[2, 2]] },
+      { path: "src/platform.py", keys: [{ name: "platform", kind: "branch", line: 1 }] },
+    ],
+  };
+  const artifact = relatedContextToArtifact(await buildRelatedContext(anchors, workspace, []));
+  const consumers = artifact.consumers as Array<{ key: string; references: Array<Record<string, unknown>> }>;
+  assert.deepEqual(consumers.map((consumer) => consumer.key), ["evidence-providers-file", "platform"]);
+  assert.deepEqual(
+    consumers[0]?.references.map((reference) => [reference.path, reference.line, reference.changed_file ?? false]),
+    [["scripts/run.py", 2, false], ["action.yml", 5, true]],
+  );
+  assert.deepEqual(consumers[1]?.references.map((reference) => [reference.path, reference.line]), [["scripts/api.sh", 1]]);
+  const markdown = renderRelatedContextMarkdown(artifact);
+  assert.ok(markdown.indexOf("## Consumers of Changed Keys") < markdown.indexOf("## Changed Files"));
+  assert.ok(markdown.includes("  - `action.yml`:5 (changed file) as `evidence_providers_file`"));
+});

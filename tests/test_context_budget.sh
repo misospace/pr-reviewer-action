@@ -104,6 +104,17 @@ check "zero-byte cap emits no bytes" "$(wc -c < "$TMP/zero-byte" | tr -d ' ')" "
 truncate_clean "$TMP/no-newline" "$TMP/normal-marker" 12 'CUT'
 check "no-newline source still marks truncation" "$(grep -c '^CUT$' "$TMP/normal-marker")" "1"
 
+echo "=== Test: truncate_clean closes a fence open at the cut, inside the budget ==="
+printf 'intro\n  ````\n  1: a\n  2: ``` b\n  3: c\n  4: d\n  ````\ntail\n' > "$TMP/fenced"
+truncate_clean "$TMP/fenced" "$TMP/fenced-cut" 40 'CUT'
+check "open fence is closed with its own delimiter" "$(<"$TMP/fenced-cut")" "$(printf 'intro\n  ````\n  1: a\n  2: ``` b\n````\nCUT')"
+check "fence closer stays inside the budget" "$([ "$(wc -c < "$TMP/fenced-cut" | tr -d ' ')" -le 40 ] && echo ok)" "ok"
+truncate_clean "$TMP/fenced" "$TMP/fenced-tight" 20 'CUT'
+check "no room for a closer drops the whole block" "$(<"$TMP/fenced-tight")" "$(printf 'intro\nCUT')"
+printf 'line one\nline two\nline three\n' > "$TMP/plain"
+truncate_clean "$TMP/plain" "$TMP/plain-cut" 20 'CUT'
+check "no fence open means no fence line" "$(<"$TMP/plain-cut")" "$(printf 'line one\nCUT')"
+
 echo ""
 echo "=== Test: enrichment context trims are wired into the Python pipeline ==="
 # Enrichment rendering moved from scripts/sections/enrichment.sh into the

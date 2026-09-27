@@ -69,6 +69,15 @@ test("truncateClean degrades to a dot sentinel when the marker exceeds the budge
   assert.equal(dec(truncateClean(enc("long content here"), -5, "m")), "");
 });
 
+test("truncateClean closes a fence open at the cut inside the budget, and adds none otherwise", () => {
+  const fenced = enc("intro\n  ````\n  1: a\n  2: ``` b\n  3: c\n  4: d\n  ````\ntail\n");
+  const cut = truncateClean(fenced, 40, "CUT");
+  assert.equal(dec(cut), "intro\n  ````\n  1: a\n  2: ``` b\n````\nCUT\n");
+  assert.ok(cut.length <= 40);
+  assert.equal(dec(truncateClean(fenced, 20, "CUT")), "intro\nCUT\n");
+  assert.equal(dec(truncateClean(enc("line one\nline two\nline three\n"), 20, "CUT")), "line one\nCUT\n");
+});
+
 test("decodeUtf8Ignore drops only the incomplete trailing sequence", () => {
   // "日" (3 bytes) followed by a truncated 3-byte lead
   const data = new Uint8Array([0xe6, 0x97, 0xa5, 0xe6]);

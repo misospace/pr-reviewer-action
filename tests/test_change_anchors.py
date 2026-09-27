@@ -1515,3 +1515,334 @@ class TestEnclosingParityFixtures:
         result = extract_change_anchors(fixture["source_diff"], None, source_root=tmp_path)
         assert result == fixture["anchors"]
         assert _enclosing(result)
+
+
+# ---------------------------------------------------------------------------
+# Changed keys and referenced counterparts (#791)
+# ---------------------------------------------------------------------------
+
+from pr_reviewer.change_anchors import (  # noqa: E402
+    MAX_COUNTERPARTS_PER_PAIR,
+    MAX_KEYS_PER_FILE,
+    branch_names,
+    key_ok,
+    key_words,
+    normalized_name,
+    resolve_entity,
+)
+
+
+def _keys(result: dict, path: str | None = None) -> list[tuple[str, str, int]]:
+    return [
+        (key["name"], key["kind"], key["line"])
+        for entry in result["files"]
+        if path is None or entry["path"] == path
+        for key in entry.get("keys", [])
+    ]
+
+
+def _counterparts(result: dict) -> list[tuple[str, str, str, int, int, bool]]:
+    return [
+        (c["name"], c["ref_path"], c["ref_name"], c["ref_line"], c["ref_end"], c.get("ref_changed", False))
+        for entry in result["files"]
+        for c in entry.get("counterparts", [])
+    ]
+
+
+_CONTRACT = """inputs:
+  - id: model-name
+    type: string
+    description: The model.
+  - id: evidence-providers-file
+    type: path
+    description: Provider definitions.
+  - id: sarif-files
+    type: path
+"""
+
+
+class TestEntityResolution:
+    def test_changed_line_resolves_to_enclosing_list_item_id(self, tmp_path):
+        head = _CONTRACT.replace("    type: path\n    description: Provider", "    type: path\n    repo-configurable: true\n    description: Provider")
+        result = _edit(tmp_path, "contracts/action.yml", _CONTRACT, head)
+        assert _keys(result) == [("evidence-providers-file", "entity", 7)]
+
+    def test_nested_mapping_key_and_block_id_below_the_opener(self):
+        lines = [
+            "jobs:",
+            "  review:",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+            "        with:",
+            "          fetch-depth: 0",
+            "      - name: run-reviewer",
+            "        env:",
+            "          REVIEW_MODE: strict",
+        ]
+        assert resolve_entity(lines, 9, "yaml") == "run-reviewer"
+        assert resolve_entity(lines, 6, "yaml") is None
+        assert resolve_entity(lines, 2, "yaml") is None
+
+    def test_json_and_toml_entities(self):
+        json_lines = [
+            "{",
+            '  "providers": [',
+            "    {",
+            '      "name": "sarif-upload",',
+            '      "timeout": 30',
+            "    }",
+            "  ]",
+            "}",
+        ]
+        assert resolve_entity(json_lines, 5, "json") == "sarif-upload"
+        toml_lines = ["[tool.review-settings]", "mode = 'x'", "[[providers]]", "name = 'lint-runner'", "cmd = 'y'"]
+        assert resolve_entity(toml_lines, 2, "toml") == "review-settings"
+        assert resolve_entity(toml_lines, 5, "toml") == "lint-runner"
+
+    def test_generic_entities_are_skipped_for_the_next_one_out(self):
+        lines = ["on:", "  pull_request:", "    types: [opened]", "  workflow_dispatch:", "    inputs:", "      dry_run: x"]
+        assert resolve_entity(lines, 3, "yaml") is None
+        assert resolve_entity(lines, 6, "yaml") is None
+
+    def test_comment_and_out_of_range_lines(self):
+        assert resolve_entity(["# note", "a_b_key: 1"], 1, "yaml") is None
+        assert resolve_entity(["a_b_key: 1"], 5, "yaml") is None
+
+    def test_lockfiles_generated_and_test_paths_are_not_scanned(self, tmp_path):
+        base = '{\n  "name": "demo-package"\n}\n'
+        head = '{\n  "name": "demo-package",\n  "private_mode": true\n}\n'
+        for path in ("package-lock.json", "dist/config.json", "tests/fixtures/config.json"):
+            target = tmp_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+        diff = _git_diff(tmp_path, {p: base for p in ("package-lock.json", "dist/config.json", "tests/fixtures/config.json", "cfg/app.json")},
+                         {p: head for p in ("package-lock.json", "dist/config.json", "tests/fixtures/config.json", "cfg/app.json")})
+        result = extract_change_anchors(diff, None, source_root=tmp_path)
+        assert [entry["path"] for entry in result["files"] if entry.get("keys")] == ["cfg/app.json"]
+
+
+class TestCodeKeys:
+    def test_env_names_and_long_flags(self, tmp_path):
+        base = "import os\n"
+        head = (
+            "import os\n"
+            'PATH_VALUE = os.getenv("EVIDENCE_PROVIDERS_FILE")\n'
+            'RUNNER = os.getenv("GITHUB_TOKEN") or os.getenv("AB_C")\n'
+            'ARGS = ["--providers-file", "--dry-run", "--x"]\n'
+        )
+        result = _edit(tmp_path, "run.py", base, head)
+        assert _keys(result) == [
+            ("PATH_VALUE", "env", 2),
+            ("EVIDENCE_PROVIDERS_FILE", "env", 2),
+            ("--providers-file", "flag", 4),
+        ]
+
+    def test_key_ok_filters(self):
+        assert key_ok("EVIDENCE_FILE", "env")
+        assert not key_ok("GITHUB_EVENT_PATH", "env")
+        assert not key_ok("AB_C", "env")
+        assert not key_ok("--dry-run", "flag")
+        assert key_ok("--providers-file", "flag")
+        assert not key_ok("runs-on", "entity")
+        assert not key_ok("platform", "entity")
+        assert key_ok("platform", "branch")
+        assert not key_ok("status", "branch")
+        assert not key_ok("mode", "branch")
+        assert not key_ok("x" * 81 + "_a", "env")
+
+    def test_key_words(self):
+        assert key_words("--evidence-providers-file") == ["evidence", "providers", "file"]
+        assert key_words("INPUT_EVIDENCE_FILE") == ["evidence", "file"]
+        assert key_words("buildPrMetadata") == ["build", "pr", "metadata"]
+        assert key_words("_build_pr_metadata") == ["build", "pr", "metadata"]
+
+
+class TestBranchNames:
+    @staticmethod
+    def _names(line: str, removed: set[str] | None = None, language: str = "python", head: list[str] | None = None) -> list[str]:
+        head = head if head is not None else [line]
+        return branch_names(line, len(head), head, language, removed or set())
+
+    def test_comparison_with_new_literal(self):
+        assert self._names('    if platform == "tangled":') == ["platform"]
+        assert self._names('if [[ "$PLATFORM" != "tangled" ]]; then', language="unsupported") == ["PLATFORM"]
+        assert self._names('    if platform in ("github", "tangled"):') == ["platform"]
+
+    def test_moved_literal_is_not_new(self):
+        assert self._names('    if platform == "forgejo":', removed={"forgejo"}) == []
+
+    def test_declarations_type_checks_kwargs_and_attributes_are_skipped(self):
+        assert self._names('const delimiterText = "```";', language="typescript") == []
+        assert self._names('  if (typeof parsed !== "object") {', language="typescript") == []
+        assert self._names('    run(encoding="utf-8")') == []
+        assert self._names('  mode: CorpusMode = "standard",', language="typescript") == []
+        assert self._names('    if parts.scheme == "https":') == []
+        assert self._names('    # platform = "tangled"') == []
+        assert self._names('    p="$OTHER"', language="unsupported") == []
+
+    def test_plain_assignment_counts(self):
+        assert self._names('    platform="tangled"', language="unsupported") == ["platform"]
+
+    def test_returned_literal_names_the_enclosing_function(self):
+        head = ["def resolve_platform():", "    if x:", '        return "tangled"']
+        assert branch_names(head[2], 3, head, "python", set()) == ["resolve_platform"]
+
+    def test_case_arm_names_the_case_subject(self):
+        head = ['case "$PLATFORM" in', "  github|forgejo) run ;;", "  tangled) fail ;;", "esac"]
+        assert branch_names(head[2], 3, head, "unsupported", {"github", "forgejo"}) == ["PLATFORM"]
+        assert branch_names(head[1], 2, head, "unsupported", {"github", "forgejo"}) == []
+        js = ["switch (platformName) {", '  case "tangled":', "    break;", "}"]
+        assert branch_names(js[1], 2, js, "typescript", set()) == ["platformName"]
+
+    def test_branch_keys_in_changed_files(self, tmp_path):
+        base = 'def resolve_platform(value):\n    if value == "github":\n        return "github"\n    return "forgejo"\n'
+        head = (
+            'def resolve_platform(value):\n    if value == "github":\n        return "github"\n'
+            '    if platform == "tangled":\n        return "tangled"\n    return "forgejo"\n'
+        )
+        result = _edit(tmp_path, "platform.py", base, head)
+        assert _keys(result) == [("platform", "branch", 4), ("resolve_platform", "branch", 5)]
+
+    def test_test_files_contribute_no_keys(self, tmp_path):
+        base = "def test_x():\n    pass\n"
+        head = 'def test_x():\n    platform = "tangled"\n    assert os.getenv("EVIDENCE_FILE")\n'
+        assert _keys(_edit(tmp_path, "tests/test_platform.py", base, head)) == []
+
+
+class TestKeyCaps:
+    def test_per_file_cap_flags_truncation(self, tmp_path):
+        base = "X = 1\n"
+        head = "X = 1\n" + "".join(f'V = os.getenv("SETTING_NUMBER_{i:03d}")\n' for i in range(MAX_KEYS_PER_FILE + 5))
+        result = _edit(tmp_path, "cfg.py", base, head)
+        entry = result["files"][0]
+        assert len(entry["keys"]) == MAX_KEYS_PER_FILE
+        assert entry["keys_truncated"] is True
+        assert result["truncated"] is True
+
+    def test_overall_budget_spans_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("pr_reviewer.change_anchors.MAX_KEYS", 3)
+        base = {"a.py": "X = 1\n", "b.py": "X = 1\n"}
+        head = {
+            "a.py": 'X = 1\nA = os.getenv("FIRST_SETTING")\nB = os.getenv("SECOND_SETTING")\n',
+            "b.py": 'X = 1\nC = os.getenv("THIRD_SETTING")\nD = os.getenv("FOURTH_SETTING")\n',
+        }
+        result = extract_change_anchors(_git_diff(tmp_path, base, head), None, source_root=tmp_path)
+        assert _keys(result) == [
+            ("FIRST_SETTING", "env", 2), ("SECOND_SETTING", "env", 3), ("THIRD_SETTING", "env", 2),
+        ]
+        assert result["files"][1]["keys_truncated"] is True
+
+    def test_long_lines_are_skipped(self, tmp_path):
+        head = "X = 1\n" + 'Y = "' + "a" * 600 + '" + os.getenv("LONG_LINE_SETTING")\n'
+        assert _keys(_edit(tmp_path, "c.py", "X = 1\n", head)) == []
+
+    def test_no_head_checkout_means_no_keys(self, tmp_path):
+        diff = _git_diff(tmp_path, {"c.py": "X = 1\n"}, {"c.py": 'X = 1\nY = os.getenv("SOME_SETTING")\n'})
+        assert _keys(extract_change_anchors(diff, None)) == []
+        (tmp_path / "c.py").write_text("stale\n", encoding="utf-8")
+        assert _keys(extract_change_anchors(diff, None, source_root=tmp_path)) == []
+
+
+_V2_MODULE = '''def _build_pr_metadata(root):
+    obj = read(root)
+    return obj
+
+
+def _build_pr_diff(root):
+    return ""
+
+
+def unrelated_helper():
+    return 1
+'''
+
+_V3_BASE = "export const X = 1;\n"
+_V3_HEAD = '''export const X = 1;
+// v3 port of `pr_reviewer/corpus_v2.py`.
+export function buildPrMetadata(root: string): string {
+  return read(root);
+}
+export function buildPrDiff(root: string): string {
+  return "";
+}
+'''
+
+
+class TestCounterparts:
+    def test_normalized_name(self):
+        assert normalized_name("buildPrMetadata") == normalized_name("_build_pr_metadata") == "buildprmetadata"
+        assert normalized_name("build-pr-metadata") == "buildprmetadata"
+
+    def test_port_reference_yields_matching_declarations(self, tmp_path):
+        (tmp_path / "pr_reviewer").mkdir()
+        (tmp_path / "pr_reviewer" / "corpus_v2.py").write_text(_V2_MODULE, encoding="utf-8")
+        result = _edit(tmp_path, "src/corpus.ts", _V3_BASE, _V3_HEAD)
+        assert _counterparts(result) == [
+            ("buildPrMetadata", "pr_reviewer/corpus_v2.py", "_build_pr_metadata", 1, 3, False),
+            ("buildPrDiff", "pr_reviewer/corpus_v2.py", "_build_pr_diff", 6, 7, False),
+        ]
+
+    def test_referenced_file_in_the_diff(self, tmp_path):
+        v2_head = _V2_MODULE.replace("    return obj", "    return dict(obj)")
+        v2_base = _V2_MODULE.replace("def _build_pr_diff(root):\n    return \"\"\n", "")
+        diff = _git_diff(
+            tmp_path,
+            {"pr_reviewer/corpus_v2.py": v2_base, "src/corpus.ts": _V3_BASE},
+            {"pr_reviewer/corpus_v2.py": v2_head, "src/corpus.ts": _V3_HEAD},
+        )
+        result = extract_change_anchors(diff, None, source_root=tmp_path)
+        # The touched body is kept and marked; the body the diff adds in full is skipped.
+        assert _counterparts(result) == [
+            ("buildPrMetadata", "pr_reviewer/corpus_v2.py", "_build_pr_metadata", 1, 3, True),
+        ]
+
+    def test_missing_unsafe_and_self_references_yield_nothing(self, tmp_path):
+        head = _V3_HEAD.replace("pr_reviewer/corpus_v2.py", "pr_reviewer/missing.py")
+        head = head.replace("// v3 port", "// see ../pr_reviewer/corpus_v2.py and src/corpus.ts; v3 port")
+        (tmp_path / "pr_reviewer").mkdir()
+        (tmp_path / "pr_reviewer" / "corpus_v2.py").write_text(_V2_MODULE, encoding="utf-8")
+        assert _counterparts(_edit(tmp_path, "src/corpus.ts", _V3_BASE, head)) == []
+
+    def test_symlinked_reference_is_refused(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "corpus_v2.py").write_text(_V2_MODULE, encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "pr_reviewer").mkdir()
+        try:
+            (ws / "pr_reviewer" / "corpus_v2.py").symlink_to(outside / "corpus_v2.py")
+        except (OSError, NotImplementedError):  # pragma: no cover — fs
+            pytest.skip("symlinks unsupported on this filesystem")
+        assert _counterparts(_edit(ws, "src/corpus.ts", _V3_BASE, _V3_HEAD)) == []
+
+    def test_per_pair_cap(self, tmp_path):
+        count = MAX_COUNTERPARTS_PER_PAIR + 2
+        v2 = "".join(f"def _step_number_{i}(x):\n    return x\n\n\n" for i in range(count))
+        v3 = "export const X = 1;\n// port of `pkg/steps.py`\n" + "".join(
+            f"export function stepNumber{i}(x: number) {{\n  return x;\n}}\n" for i in range(count)
+        )
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "steps.py").write_text(v2, encoding="utf-8")
+        result = _edit(tmp_path, "src/steps.ts", _V3_BASE, v3)
+        assert len(_counterparts(result)) == MAX_COUNTERPARTS_PER_PAIR
+        assert result["files"][0]["counterparts_truncated"] is True
+        assert result["truncated"] is True
+
+
+class TestConsumerParityFixtures:
+    """The #791 related-code parity fixtures' anchors are real extractor output."""
+
+    @pytest.mark.parametrize("name,field", [
+        ("consumers-of-changed-keys", "keys"),
+        ("referenced-counterparts", "counterparts"),
+    ])
+    def test_fixture_anchors_match_extractor(self, tmp_path, name, field):
+        fixture_path = _REPO_ROOT / "tests" / "fixtures" / "parity" / "related-code" / f"{name}.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for path, content in fixture["repo_files"].items():
+            target = tmp_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        result = extract_change_anchors(fixture["source_diff"], None, source_root=tmp_path)
+        assert result == fixture["anchors"]
+        assert any(entry.get(field) for entry in result["files"])
