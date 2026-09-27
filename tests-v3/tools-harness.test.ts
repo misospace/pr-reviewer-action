@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
+import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -36,6 +37,7 @@ function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) =
       throw new Error("no scripted transport");
     },
     timeFn: () => 0,
+    renderSpecialistLeads: (roleResults, maxBytes) => renderSpecialistLeadsSection(roleResults, maxBytes),
   };
   return {
     root,
@@ -267,6 +269,26 @@ test("planner related-code excerpt drops files without symbol or test references
   assert.match(text, /### `src\/app\.py`/);
   assert.doesNotMatch(text, /fixtures\/3\.json/);
   assert.match(text, /200 changed file\(s\) with no symbol or test references omitted/);
+});
+
+test("planner re-renders the Specialist Review Leads section from per-role artifacts (#776 seam wiring)", () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "pr.diff.truncated"), "diff --git a/x b/x\n+line\n");
+  fs.writeFileSync(
+    path.join(root, "specialist-correctness.json"),
+    JSON.stringify({
+      version: 1,
+      role: "correctness",
+      leads: [{ severity: "major", category: "logic", file: "src/x.ts", line: 10, message: "off-by-one" }],
+      truncated: false,
+      truncation: { truncated: false, reasons: [], omitted_leads: 0, omitted_message_chars: 0, omitted_errors: 0 },
+      errors: [],
+    }),
+  );
+  fs.writeFileSync(path.join(root, "specialist-leads-present.txt"), "42\n");
+  const { text } = buildPlanningContext(50000, deps());
+  assert.match(text, /# Specialist Review Leads/);
+  assert.match(text, /- \[major\] off-by-one at `src\/x\.ts`:10 \(logic\)/);
 });
 
 test("usage accounting reads the OpenAI shape a streamed anthropic turn reassembles into", () => {
