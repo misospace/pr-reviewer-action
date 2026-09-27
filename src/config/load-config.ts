@@ -3,7 +3,7 @@ import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, POSITIVE_INT
 import { isRuntimeConfig, secretValue, type RuntimeConfig } from "./types.js";
 
 type MutableConfig = Record<string, string | number | boolean | ReturnType<typeof secretValue>>;
-const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
+export const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
   "repo-map-max-bytes": [1, 200_000],
   "pr-thread-max-bytes": [1, 200_000],
   "deep-review-corpus-max-bytes": [1, 500_000],

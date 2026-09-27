@@ -1,3 +1,4 @@
+import { SECRET_INPUTS } from "./schema.js";
 
 export interface ContractInput {
   readonly id: string;
@@ -5,6 +6,16 @@ export interface ContractInput {
   readonly required: boolean;
   readonly default?: string | number | boolean;
   readonly description: string;
+  /** Repository config (#727/#777) may narrow this input; see
+   * `src/config/repository-config.ts` for the precedence rule. Absent/false
+   * means the repository file may never set this key — the allowed set is
+   * data here, not code. */
+  readonly "repo-configurable"?: boolean;
+  /** This input is no longer surfaced as a workflow `with:` input (the v3
+   * runtime never reads it from the environment) — it is sourced solely from
+   * its contract default, narrowable only by repository config. Implies
+   * `repo-configurable: true`. */
+  readonly "repo-config-only"?: boolean;
 }
 
 export interface ContractOutput {
@@ -53,6 +64,17 @@ export function validateContract(value: unknown): ActionContract {
   }
   for (const input of inputs) validateNames(input.id, input.v2_id, "input");
   for (const output of outputs) validateNames(output.id, output.v2_id, "output");
+  for (const input of inputs) {
+    if (input["repo-config-only"] && !input["repo-configurable"]) {
+      throw new Error(`input '${input.id}' has repo-config-only without repo-configurable`);
+    }
+    if (input["repo-configurable"] && input.required) {
+      throw new Error(`input '${input.id}' cannot be both required and repo-configurable — a required input is an operator-supplied credential/endpoint/ceiling and must never gain authority from repository-controlled config`);
+    }
+    if (SECRET_INPUTS.has(input.id) && input["repo-configurable"]) {
+      throw new Error(`input '${input.id}' is a secret and must never be repo-configurable`);
+    }
+  }
   return Object.freeze({ schema_version: 1, contract: "github-action", inputs, outputs, removed });
 }
 
@@ -65,7 +87,7 @@ function validateNames(id: string, v2Id: string, label: string): void {
 
 function validateInput(value: unknown, path: string): ContractInput {
   const item = objectAt(value, path);
-  rejectUnknown(item, ["id", "v2_id", "required", "default", "description"], path);
+  rejectUnknown(item, ["id", "v2_id", "required", "default", "description", "repo-configurable", "repo-config-only"], path);
   const id = stringAt(item.id, `${path}.id`);
   const v2_id = stringAt(item.v2_id, `${path}.v2_id`);
   if (typeof item.required !== "boolean") throw new Error(`${path}.required must be a boolean`);
@@ -74,7 +96,21 @@ function validateInput(value: unknown, path: string): ContractInput {
     throw new Error(`${path}.default must be a string, number, or boolean scalar`);
   }
   if (typeof item.default === "number" && !Number.isFinite(item.default)) throw new Error(`${path}.default must be finite`);
-  return Object.freeze({ id, v2_id, required: item.required, ...( "default" in item ? { default: item.default as string | number | boolean } : {}), description });
+  if ("repo-configurable" in item && typeof item["repo-configurable"] !== "boolean") {
+    throw new Error(`${path}.repo-configurable must be a boolean`);
+  }
+  if ("repo-config-only" in item && typeof item["repo-config-only"] !== "boolean") {
+    throw new Error(`${path}.repo-config-only must be a boolean`);
+  }
+  return Object.freeze({
+    id,
+    v2_id,
+    required: item.required,
+    ...("default" in item ? { default: item.default as string | number | boolean } : {}),
+    description,
+    ...(item["repo-configurable"] === true ? { "repo-configurable": true as const } : {}),
+    ...(item["repo-config-only"] === true ? { "repo-config-only": true as const } : {}),
+  });
 }
 
 function validateOutput(value: unknown, path: string): ContractOutput {
