@@ -418,8 +418,7 @@ build_review_corpus() {
   body_budget=$(( MAX_CORPUS - std_bytes - ledger_bytes - sp_bytes - framing_bytes ))
   [ "$body_budget" -lt 0 ] && body_budget=0
   truncate_clean review-corpus.body.md review-corpus.body.truncated.md "$body_budget" \
-    '```
- …[review corpus truncated to fit the model context budget]'
+    '…[review corpus truncated to fit the model context budget]'
 
   # Prepend the (capped) standards section — first and highest-authority,
   # truncation-exempt (see tests/test_corpus_standards_survival.sh) — then the
