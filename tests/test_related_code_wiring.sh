@@ -110,6 +110,7 @@ reset_artifacts
 RELATED_BODY="$(printf '# Related Code (v1)\n%s' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')" run_context pr.diff pr-files.json
 check_contains "single path: anchor uses the current full-PR diff" "$(<"$WORK/calls.log")" "--diff pr.diff"
 check_contains "single path: anchor receives the file manifest" "$(<"$WORK/calls.log")" "--files pr-files.json"
+check_contains "single path: anchor reads the head checkout" "$(<"$WORK/calls.log")" "--workspace-root $WORK"
 check_contains "single path: output keeps truncation marker" "$(<"$WORK/related-code.truncated.md")" "[related-code context truncated]"
 TRUNCATED_BYTES="$(wc -c < "$WORK/related-code.truncated.md" | tr -d ' ')"
 if [ "$TRUNCATED_BYTES" -le 64 ]; then
