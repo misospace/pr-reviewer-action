@@ -99,36 +99,48 @@ inputs:
     required: false
     default: "false"
     description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change."
+    repo-configurable: true
+    repo-policy: true
   - id: verdict-policy
     v2_id: verdict_policy
     required: false
     default: "model"
     description: "How the final verdict is decided. 'model' (default) uses the model's own verdict. 'findings_severity_gated' preserves request_changes from the model and escalates approve to request_changes when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes."
+    repo-configurable: true
+    repo-policy: true
   - id: non-blocking-finding-categories
     v2_id: non_blocking_finding_categories
     required: false
     default: ""
     description: "Comma-separated finding categories (from tests, docs, style, question, performance, bug, other; security is never allowed) that cannot request changes on their own under verdict_policy=findings_severity_gated. Their blocker/major findings are capped at minor, and a model request_changes backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under verdict_policy=model. Empty (the default) disables it."
+    repo-configurable: true
+    repo-policy: true
   - id: inline-findings
     v2_id: inline_findings
     required: false
     default: "false"
     description: "If true, structured findings that anchor to a line in the PR diff are attached as native line-anchored review comments when publishing with publish_mode=review_comment or review_verdict. Findings that cannot be anchored stay in the review body only. Default false — no inline comments. Ignored for publish_mode=comment."
+    repo-configurable: true
   - id: inline-findings-max
     v2_id: inline_findings_max
     required: false
     default: "20"
     description: "Maximum inline review comments attached per review when inline_findings=true."
+    repo-configurable: true
   - id: validate-required-checks
     v2_id: validate_required_checks
     required: false
     default: "auto"
     description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all."
+    repo-configurable: true
+    repo-policy: true
   - id: required-check-validation-mode
     v2_id: required_check_validation_mode
     required: false
     default: "warn"
     description: "What to do when required checks are unresolved or undispositioned. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required_checks output and metadata marker) without changing the published review. Incompleteness never triggers smart escalation by itself (#721)."
+    repo-configurable: true
+    repo-policy: true
   - id: review-routing-mode
     v2_id: review_routing_mode
     required: false
@@ -179,31 +191,6 @@ inputs:
     required: false
     default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
     description: "Comma-separated pr_kind / risk_flag names that route directly to the smart model when review_routing_mode=auto. Matched against route_signals — linked-issue flags and file-based signals backed by an actual changed filename — so a benign PR whose diff merely mentions a pattern (e.g. os.path) does not route."
-  - id: escalate-on-incomplete-required-checks
-    v2_id: escalate_on_incomplete_required_checks
-    required: false
-    default: "false"
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-  - id: escalate-on-fast-request-changes
-    v2_id: escalate_on_fast_request_changes
-    required: false
-    default: "true"
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-  - id: escalate-on-fast-low-confidence
-    v2_id: escalate_on_fast_low_confidence
-    required: false
-    default: "true"
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-  - id: escalate-on-tool-or-evidence-blockers
-    v2_id: escalate_on_tool_or_evidence_blockers
-    required: false
-    default: "true"
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). Evidence/tool blockers remain subject to deterministic enforcement; the value is ignored except for a startup notice."
-  - id: escalate-on-tool-planning-failure
-    v2_id: escalate_on_tool_planning_failure
-    required: false
-    default: "false"
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
   - id: ai-stream
     v2_id: ai_stream
     required: false
@@ -224,11 +211,13 @@ inputs:
     required: false
     default: "true"
     description: "Include deterministic related-code context discovered from changed-file anchors"
+    repo-configurable: true
   - id: related-code-max-bytes
     v2_id: related_code_max_bytes
     required: false
     default: "16000"
     description: "Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)"
+    repo-configurable: true
   - id: linear-api-key
     v2_id: linear_api_key
     required: false
@@ -264,16 +253,20 @@ inputs:
     required: false
     default: "replace"
     description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim. 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
+    repo-configurable: true
+    repo-policy: true
   - id: review-verbosity
     v2_id: review_verbosity
     required: false
     default: "normal"
     description: "Output-length dial for the bundled default prompt. 'normal' (default) leaves the prompt unchanged. 'concise' adds a brevity fragment: a ~300-word target, prose limited to blocker/major issues with minor/info left to the findings array, no diff restatement, and Standards Compliance omitted unless a convention is violated. must_check coverage and the Unknowns section are explicitly exempt, so brevity cannot hide a gap. Applies only to the bundled default — a replace-mode system_prompt override is used verbatim."
+    repo-configurable: true
   - id: standards-file
     v2_id: standards_file
     required: false
     default: ""
     description: "Repository standards file path for conventions and policy context"
+    repo-configurable: true
   - id: standards-file-candidates
     v2_id: standards_file_candidates
     required: false
@@ -294,6 +287,11 @@ inputs:
     required: false
     default: "false"
     description: "If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines."
+  - id: allow-repo-policy-overrides
+    v2_id: allow_repo_policy_overrides
+    required: false
+    default: "false"
+    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
   - id: approve-forks
     v2_id: approve_forks
     required: false
@@ -314,6 +312,7 @@ inputs:
     required: false
     default: "normal"
     description: "Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)"
+    repo-configurable: true
   - id: model-context-tokens
     v2_id: model_context_tokens
     required: false
@@ -344,61 +343,73 @@ inputs:
     required: false
     default: "true"
     description: "Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context"
+    repo-configurable: true
   - id: repo-map-max-bytes
     v2_id: repo_map_max_bytes
     required: false
     default: "12000"
     description: "Maximum UTF-8 bytes for the repository-map Markdown artifact and planning slot"
+    repo-configurable: true
   - id: pr-thread-context
     v2_id: pr_thread_context
     required: false
     default: "true"
     description: "Include bounded recent PR conversation comments (thread context) in the review corpus, with the action's own managed comments filtered out"
+    repo-configurable: true
   - id: pr-thread-max-bytes
     v2_id: pr_thread_max_bytes
     required: false
     default: "8000"
     description: "Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)"
+    repo-configurable: true
   - id: review-threads-context
     v2_id: review_threads_context
     required: false
     default: "true"
     description: "Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus; the reviewer must disposition each listed thread"
+    repo-configurable: true
   - id: review-threads-max-bytes
     v2_id: review_threads_max_bytes
     required: false
     default: "8000"
     description: "Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)"
+    repo-configurable: true
   - id: deep-review
     v2_id: deep_review
     required: false
     default: "false"
     description: "Specialist leads (correctness/security/tests) over the review corpus: false = off, true = all three roles, auto = deterministic classifier-driven selection, possibly zero (advisory only)"
+    repo-configurable: true
   - id: deep-review-timeout-sec
     v2_id: deep_review_timeout_sec
     required: false
     default: "600"
     description: "Maximum wall-clock seconds for the whole deep-review specialist phase; stragglers past the deadline are recorded as role errors (advisory only). Default 600."
+    repo-configurable: true
   - id: deep-review-max-tokens
     v2_id: deep_review_max_tokens
     required: false
     default: "4096"
     description: "Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096."
+    repo-configurable: true
   - id: deep-review-corpus-max-bytes
     v2_id: deep_review_corpus_max_bytes
     required: false
     default: "48000"
     description: "Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000."
+    repo-configurable: true
   - id: enrichment-budget-sec
     v2_id: enrichment_budget_sec
     required: false
     default: "60"
     description: "Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60."
+    repo-configurable: true
   - id: image-digest-budget-sec
     v2_id: image_digest_budget_sec
     required: false
     default: "60"
     description: "Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. Default 60."
+    repo-configurable: true
   - id: evidence-providers-file
     v2_id: evidence_providers_file
     required: false
@@ -414,26 +425,32 @@ inputs:
     required: false
     default: "200"
     description: "Global maximum number of findings combined across all supplied SARIF files"
+    repo-configurable: true
   - id: evidence-provider-timeout-sec
     v2_id: evidence_provider_timeout_sec
     required: false
     default: "30"
     description: "Default timeout in seconds for each evidence provider command"
+    repo-configurable: true
   - id: evidence-provider-max-output-bytes
     v2_id: evidence_provider_max_output_bytes
     required: false
     default: "20000"
     description: "Maximum stdout or stderr bytes captured per evidence provider command"
+    repo-configurable: true
   - id: evidence-provider-parallelism
     v2_id: evidence_provider_parallelism
     required: false
     default: "4"
     description: "Maximum evidence provider commands run concurrently. Set 1 to force serial execution when providers contend on shared files. Default 4."
+    repo-configurable: true
   - id: evidence-blocker-enforcement
     v2_id: evidence_blocker_enforcement
     required: false
     default: "false"
     description: "If true, force request_changes when any evidence provider reports blocker severity"
+    repo-configurable: true
+    repo-policy: true
   - id: evidence-enable-for-forks
     v2_id: evidence_enable_for_forks
     required: false
@@ -499,6 +516,7 @@ inputs:
     required: false
     default: "12000"
     description: "Maximum bytes captured from each tool execution result"
+    repo-configurable: true
   - id: tool-allowed-gh-api-repos
     v2_id: tool_allowed_gh_api_repos
     required: false
@@ -686,6 +704,26 @@ outputs:
     v2_id: tool_calls
     description: "JSON array of read-only tools executed by the native tool harness, with tool names and statuses"
 removed:
+  - kind: inputs
+    v2_id: escalate_on_incomplete_required_checks
+    status: removed
+    reason: "Removed in v3; deprecated since #721 and no longer affects escalation (post-primary escalation is reviewer-requested only via smart_review_requested)."
+  - kind: inputs
+    v2_id: escalate_on_fast_request_changes
+    status: removed
+    reason: "Removed in v3; deprecated since #721 and no longer affects escalation (post-primary escalation is reviewer-requested only via smart_review_requested)."
+  - kind: inputs
+    v2_id: escalate_on_fast_low_confidence
+    status: removed
+    reason: "Removed in v3; deprecated since #721 and no longer affects escalation (post-primary escalation is reviewer-requested only via smart_review_requested)."
+  - kind: inputs
+    v2_id: escalate_on_tool_or_evidence_blockers
+    status: removed
+    reason: "Removed in v3; deprecated since #721 and no longer affects escalation (evidence/tool blockers remain subject to deterministic enforcement, unaffected by this input)."
+  - kind: inputs
+    v2_id: escalate_on_tool_planning_failure
+    status: removed
+    reason: "Removed in v3; deprecated since #721 and no longer affects escalation (post-primary escalation is reviewer-requested only via smart_review_requested)."
   - kind: inputs
     v2_id: tool_planning_timeout_sec
     status: removed

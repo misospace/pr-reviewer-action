@@ -15,6 +15,11 @@ REMOVED_INPUTS = {
     "tool_planning_timeout_sec",
     "tool_planning_max_context_bytes",
     "tool_planning_max_tokens",
+    "escalate_on_incomplete_required_checks",
+    "escalate_on_fast_request_changes",
+    "escalate_on_fast_low_confidence",
+    "escalate_on_tool_or_evidence_blockers",
+    "escalate_on_tool_planning_failure",
 }
 REMOVED_OUTPUTS = {
     "effective_review_scope",
@@ -104,6 +109,11 @@ def test_live_action_metadata_remains_v2_snake_case_until_cutover():
         "tool_planning_timeout_sec",
         "tool_planning_max_context_bytes",
         "tool_planning_max_tokens",
+        "escalate_on_incomplete_required_checks",
+        "escalate_on_fast_request_changes",
+        "escalate_on_fast_low_confidence",
+        "escalate_on_tool_or_evidence_blockers",
+        "escalate_on_tool_planning_failure",
     }
     incremental_removals = {
         entry["v2_id"] for entry in contract["removed"] if entry["kind"] == "inputs"
@@ -115,3 +125,45 @@ def test_live_action_metadata_remains_v2_snake_case_until_cutover():
     assert set(live["outputs"]) == {entry["v2_id"] for entry in contract["outputs"]}
     assert all("-" not in name for kind in ("inputs", "outputs") for name in live[kind])
     assert "with:\n          github_token:" in (ROOT / ".github/workflows/ai-pr-review.yaml").read_text()
+
+
+# Credential/endpoint/operator-ceiling inputs (#777): repository config must
+# never gain authority over these, so they must never be marked
+# repo-configurable in the contract.
+NEVER_REPO_CONFIGURABLE = {
+    "github_token", "ai_base_url", "ai_model", "ai_api_key",
+    "ai_fallback_base_url", "ai_fallback_api_key", "ai_primary_api_key", "ai_smart_api_key",
+    "linear_api_key", "tool_mcp_token", "forgejo_token",
+    "allowed_source_hosts", "tool_mode", "tool_enable_for_forks", "tool_mcp_servers",
+    "evidence_enable_for_forks", "linear_enable_for_forks", "allow_approve", "approve_forks",
+    "publish_mode", "evidence_providers_file", "allow_repo_policy_overrides",
+}
+
+
+def test_repo_configurable_inputs_never_include_credentials_or_hard_security_policy():
+    contract = _load()
+    for entry in contract["inputs"]:
+        if entry.get("repo-configurable"):
+            assert entry["required"] is False, entry["id"]
+            assert entry["v2_id"] not in NEVER_REPO_CONFIGURABLE, entry["id"]
+
+
+# Tier-resolved budgets (#777, revised): their contract default is an empty
+# string on purpose ("resolve a tier-aware budget at harness time"), so
+# there is no config-time ceiling for repository config to narrow against.
+# They must stay operator-only workflow inputs, never repo-configurable —
+# a repository must never be able to raise a budget the operator's own
+# workflow never granted (see docs/repository-config.md).
+TIER_RESOLVED_NOT_REPO_CONFIGURABLE = {
+    "primary_tool_max_requests",
+    "smart_tool_max_requests",
+}
+
+
+def test_tier_resolved_budgets_stay_operator_only_workflow_inputs():
+    contract = _load()
+    by_v2 = {entry["v2_id"]: entry for entry in contract["inputs"]}
+    for v2_id in TIER_RESOLVED_NOT_REPO_CONFIGURABLE:
+        entry = by_v2[v2_id]
+        assert not entry.get("repo-configurable"), v2_id
+        assert "default" in entry, v2_id

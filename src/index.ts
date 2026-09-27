@@ -29,12 +29,30 @@ import { runEnforcementFixture, runRequirementCoverageFixture } from "./enforcem
 import { runMetadataMarkersFixture } from "./metadata/fixture.js";
 import { runSanitizeFixture } from "./publish/fixture.js";
 import { runInlineFindingsFixture } from "./publish/inline-findings-fixture.js";
+import { runRepositoryConfigFixture } from "./config/fixture.js";
+import { resolveRepositoryConfig } from "./config/repository-config.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
   const contract = validateContract(V3_CONTRACT);
-  const raw = Object.fromEntries(contract.inputs.map(({ id }) => [id, process.env[`INPUT_${id.toUpperCase().replaceAll("-", "_")}`]]));
-  const config = loadConfig(contract, raw);
+  const raw: Record<string, string | undefined> = Object.fromEntries(contract.inputs.map(({ id }) => [id, process.env[`INPUT_${id.toUpperCase().replaceAll("-", "_")}`]]));
+  // #727/#777: read repository config from the trusted base ref, never the
+  // PR head. `PR_REVIEWER_BASE_REF` is the base commit-ish the platform/
+  // precheck layer resolves (see `src/platform/pr.ts`'s `PrIdentity.baseSha`);
+  // it is intentionally optional here — until the #681 orchestrator cutover
+  // wires that resolution end to end, an unset value leaves the operator's
+  // inputs untouched rather than failing the review.
+  const baseRef = process.env.PR_REVIEWER_BASE_REF ?? "";
+  let effectiveRaw = raw;
+  if (baseRef !== "") {
+    const resolution = resolveRepositoryConfig(contract, raw, {
+      baseRef,
+      ...(process.env.GITHUB_WORKSPACE === undefined ? {} : { workspace: process.env.GITHUB_WORKSPACE }),
+    });
+    for (const warning of resolution.warnings) process.stderr.write(`repository config: ${warning}\n`);
+    effectiveRaw = resolution.raw;
+  }
+  const config = loadConfig(contract, effectiveRaw);
   if (process.env.PR_REVIEWER_V3_DEBUG === "true") {
     process.stdout.write(`${JSON.stringify({ schemaVersion: contract.schema_version, inputs: contract.inputs.length, config: toJSON(config) })}\n`);
   }
@@ -133,6 +151,9 @@ if (require.main === module) {
   } else if (firstArg === "requirement-coverage-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runRequirementCoverageFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "repository-config-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runRepositoryConfigFixture(argv[1] ?? ""))}\n`);
   } else if (firstArg === "metadata-markers-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runMetadataMarkersFixture(argv[1] ?? ""))}\n`);
