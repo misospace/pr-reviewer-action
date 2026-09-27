@@ -304,3 +304,9 @@ test("streamed anthropic turns reassembled into OpenAI shape still yield tool ca
   assert.equal(text, "Reading.");
   assert.deepEqual(calls, [{ id: "call_1", name: "list_tree", arguments: '{"path": "."}' }]);
 });
+
+test("adaptiveLoopBudgets: rounds double and cap at 12", () => {
+  assert.equal(adaptiveLoopBudgets(2, 5, 30).maxRounds, 4);
+  assert.equal(adaptiveLoopBudgets(6, 5, 30).maxRounds, 12);
+  assert.equal(adaptiveLoopBudgets(7, 5, 30).maxRounds, 12);
+});
