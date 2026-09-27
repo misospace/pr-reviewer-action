@@ -125,7 +125,7 @@ def test_voluntary_stop_reports_remaining_and_echoes_budget():
     assert outcome.requests_remaining == 7
     assert outcome.max_tool_calls == 8
     assert outcome.max_rounds == 6
-    assert outcome.wall_clock_sec == 120.0
+    assert outcome.wall_clock_sec == 600.0
     assert outcome.elapsed_sec >= 0.0
     assert outcome.tool_result_bytes > 0
     assert outcome.compaction_summarize == 0
@@ -388,7 +388,7 @@ def test_resolve_tool_budget_tier_default(monkeypatch):
     details = rth.resolve_tool_budget("primary")
     assert details == {
         "route": "primary",
-        "budget": 8,
+        "budget": 16,
         "source": "tier-default",
         "configured": None,
     }
@@ -417,7 +417,7 @@ def test_resolve_tool_budget_invalid_falls_to_tier_default(monkeypatch):
     details = rth.resolve_tool_budget("smart")
     assert details["source"] == "tier-default"
     assert details["configured"] is None
-    assert details["budget"] == 16
+    assert details["budget"] == 32
 
 
 def test_resolve_tool_max_requests_stays_int(monkeypatch):
@@ -455,7 +455,7 @@ def test_main_missing_config_telemetry(monkeypatch, tmp_path):
     assert telemetry["phase"] == "pre-loop"
     assert telemetry["failure"] == "missing-config"
     assert telemetry["route"] == "primary"
-    assert telemetry["budget"]["effective_max_requests"] == 8
+    assert telemetry["budget"]["effective_max_requests"] == 16
     assert telemetry["verdict"] == {"produced": False, "status": "", "reason": ""}
 
 
@@ -468,7 +468,7 @@ def test_main_smart_tier_abort_keeps_route(monkeypatch, tmp_path):
     telemetry = artifact["tool_loop_telemetry"]
     assert telemetry["phase"] == "pre-loop"
     assert telemetry["route"] == "smart"
-    assert telemetry["budget"]["effective_max_requests"] == 16
+    assert telemetry["budget"]["effective_max_requests"] == 32
 
 
 # ---------------------------------------------------------------------------

@@ -85,10 +85,10 @@ class LoopBudgets:
 
     # Sentinel default only — production always passes an explicit budget from
     # adaptive_loop_budgets, whose request budget is tier-resolved (#701):
-    # primary 8, smart 16, escalated 20.
-    max_tool_calls: int = 8  # total executed calls across rounds (TOOL_MAX_REQUESTS)
-    max_rounds: int = 3  # model round-trips (TOOL_MAX_ROUNDS)
-    wall_clock_sec: float = 120.0  # whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC)
+    # primary 16, smart 32, escalated 40.
+    max_tool_calls: int = 16  # total executed calls across rounds (TOOL_MAX_REQUESTS)
+    max_rounds: int = 4  # model round-trips (TOOL_MAX_ROUNDS)
+    wall_clock_sec: float = 600.0  # whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC)
     # When the conversation outgrows this, the oldest tool results are
     # compacted before the next request (newest results stay intact) — by a
     # model-generated digest when a summarizer is wired, else blunt truncation.
@@ -105,11 +105,11 @@ def adaptive_loop_budgets(
     wall_clock_sec: float,
 ) -> "LoopBudgets":
     """Right-size the loop budget. A native round is one model turn, so the
-    headroom is 2× the configured rounds (capped at 8); the configured tool-call
+    headroom is 2× the configured rounds (capped at 12); the configured tool-call
     budget is used as-is.
 
     #701: the request budget is TIER-AWARE. The caller resolves the effective
-    budget from the route (primary ~8, smart ~16, escalated up to 20 — see
+    budget from the route (primary ~16, smart ~32, escalated up to 40 — see
     ``run_tool_harness.resolve_tool_max_requests``) and passes it in here; this
     function only derives the round headroom and keeps request, round, and
     wall-clock ceilings independent. An earlier version shallow-capped the
@@ -121,7 +121,7 @@ def adaptive_loop_budgets(
     compatibility matrix). The primary model is fully capable; don't ration its
     evidence-gathering.
     """
-    rounds = min(max(max_rounds, 1) * 2, 8)
+    rounds = min(max(max_rounds, 1) * 2, 12)
     return LoopBudgets(
         max_tool_calls=max_tool_calls,
         max_rounds=rounds,

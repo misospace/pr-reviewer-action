@@ -1061,8 +1061,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const toolSchemas = [...TOOL_SCHEMAS];
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
-  let maxRounds = envIntBounded(env, "TOOL_MAX_ROUNDS", 3, 1, 6);
-  let wallClock = envIntBounded(env, "TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900);
+  let maxRounds = envIntBounded(env, "TOOL_MAX_ROUNDS", 4, 1, 6);
+  let wallClock = envIntBounded(env, "TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900);
   if (input.tier === "smart") {
     maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
     wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);

@@ -63,7 +63,7 @@ test("missing corpus aborts pre-loop with the version-1 telemetry shape", async 
   assert.equal(telemetry!.phase, "pre-loop");
   assert.equal(telemetry!.stop_reason, "harness-abort");
   assert.equal(telemetry!.failure, "missing-corpus");
-  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 8);
+  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 16);
   assert.equal((telemetry!.budget as Record<string, unknown>).source, "tier-default");
 });
 

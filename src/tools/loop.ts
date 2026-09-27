@@ -74,7 +74,7 @@ function formatNote(template: string, values: Record<string, number>): string {
 export interface LoopBudgets {
   /** Total executed calls across rounds (TOOL_MAX_REQUESTS). */
   maxToolCalls: number;
-  /** Model round-trips (derived: configured rounds doubled, capped at 8). */
+  /** Model round-trips (derived: configured rounds doubled, capped at 12). */
   maxRounds: number;
   /** Whole-loop ceiling (TOOL_LOOP_WALL_CLOCK_SEC). */
   wallClockSec: number;
@@ -88,10 +88,10 @@ export interface LoopBudgets {
 
 /**
  * Right-size the loop budget. A native round is one model turn, so the
- * headroom is 2× the configured rounds (capped at 8); the configured tool-call
+ * headroom is 2× the configured rounds (capped at 12); the configured tool-call
  * budget is used as-is. #701: the request budget is TIER-AWARE — the caller
- * resolves the effective budget from the route (primary ~8, smart ~16,
- * escalated up to 20 — see resolveToolMaxRequests in src/tools/budget.ts) and
+ * resolves the effective budget from the route (primary ~16, smart ~32,
+ * escalated up to 40 — see resolveToolMaxRequests in src/tools/budget.ts) and
  * passes it in here.
  */
 export function adaptiveLoopBudgets(
@@ -99,7 +99,7 @@ export function adaptiveLoopBudgets(
   maxToolCalls: number,
   wallClockSec: number,
 ): LoopBudgets {
-  const rounds = Math.min(Math.max(maxRounds, 1) * 2, 8);
+  const rounds = Math.min(Math.max(maxRounds, 1) * 2, 12);
   return {
     maxToolCalls,
     maxRounds: rounds,
@@ -262,7 +262,7 @@ export async function driveToolLoop(
   executeFn: (toolName: string, args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>,
   options: DriveToolLoopOptions,
 ): Promise<LoopOutcome> {
-  const budgets: LoopBudgets = options.budgets ?? adaptiveLoopBudgets(3, 8, 120);
+  const budgets: LoopBudgets = options.budgets ?? adaptiveLoopBudgets(4, 16, 600);
   const maxTokens = options.maxTokens ?? 1024;
   const temperature = options.temperature ?? 0.0;
   const stream = options.stream ?? false;

@@ -102,7 +102,7 @@ still also set them as a workflow `with:` input:
 **not** repo-configurable: their contract default is an empty string on
 purpose (a tier-aware budget resolved at harness time, not a fixed number),
 so there is no config-time value to narrow against. Falling back to the
-type's hard 1..20 range as a synthetic ceiling would let a repository config
+type's hard 1..50 range as a synthetic ceiling would let a repository config
 file *raise* a budget the operator's workflow never set — the operator's
 workflow input must always be the ceiling, so these stay operator-only
 workflow inputs, same as before #777.

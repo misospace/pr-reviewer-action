@@ -508,7 +508,7 @@ inputs:
       Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange
       (all model round-trips plus tool execution). Ignored for other modes.
     required: false
-    default: "120"
+    default: "600"
   tool_loop_summarize:
     description: >-
       When "true", tool_mode=native_loop folds the oldest tool results into a
@@ -529,21 +529,21 @@ inputs:
     description: >-
       Maximum number of tool requests the harness executes when tool_mode is
       enabled. Empty (the default) resolves a tier-aware budget from the review
-      route (#701): ~8 for the primary route, ~16 for the smart route, and up
-      to 20 for the escalated (deep) path — never above the hard ceiling of 20.
-      An explicit value overrides every tier and is bounded to 1..20.
+      route (#701): ~16 for the primary route, ~32 for the smart route, and up
+      to 40 for the escalated (deep) path — never above the hard ceiling of 50.
+      An explicit value overrides every tier and is bounded to 1..50.
     required: false
     default: ""
   primary_tool_max_requests:
     description: >-
-      Request budget for the primary route only, bounded to 1..20. Outranks
+      Request budget for the primary route only, bounded to 1..50. Outranks
       tool_max_requests on that route and leaves the smart/escalated tiers
       untouched. Empty (the default) keeps the tier default.
     required: false
     default: ""
   smart_tool_max_requests:
     description: >-
-      Request budget for the smart and escalated routes only, bounded to 1..20.
+      Request budget for the smart and escalated routes only, bounded to 1..50.
       Outranks tool_max_requests on those routes and leaves the primary tier
       untouched. Empty (the default) keeps the tier defaults.
     required: false
@@ -551,10 +551,10 @@ inputs:
   tool_max_rounds:
     description: >-
       Round budget for tool_mode=native_loop, where a round is a single model turn:
-      the loop allows up to twice this value (capped at 8) to leave room for
+      the loop allows up to twice this value (capped at 12) to leave room for
       one-call-per-turn chains and repair turns. Ignored when tool_mode=off.
     required: false
-    default: "3"
+    default: "4"
   tool_turn_timeout_sec:
     description: Timeout in seconds for each model turn of the tool_mode=native_loop exchange. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts.
     required: false

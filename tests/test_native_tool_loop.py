@@ -24,24 +24,24 @@ from pr_reviewer.tool_loop import (
 
 
 class TestAdaptiveLoopBudgets:
-    """Loop depth is route-independent: 2× the configured rounds (capped at 8)
+    """Loop depth is route-independent: 2× the configured rounds (capped at 12)
     plus the configured tool-call budget, on every route. The route selects the
     MODEL, never the tool budget — the primary model is fully capable and is no
     longer shallow-capped (the loop self-limits when the model stops calling
     tools)."""
 
-    def test_headroom_doubles_rounds_capped_at_8(self):
+    def test_headroom_doubles_rounds_capped_at_12(self):
         b = adaptive_loop_budgets(3, 4, 120.0)
         assert b.max_rounds == 6  # 3 * 2
         assert b.max_tool_calls == 4
-        assert adaptive_loop_budgets(6, 4, 120.0).max_rounds == 8  # capped
+        assert adaptive_loop_budgets(7, 4, 120.0).max_rounds == 12  # capped
 
     def test_full_configured_budget_is_granted(self):
         # Was capped to 2 rounds / 3 calls on the "fast" route; the budget is
         # route-independent now.
-        b = adaptive_loop_budgets(3, 8, 120.0)
-        assert b.max_rounds == 6
-        assert b.max_tool_calls == 8
+        b = adaptive_loop_budgets(4, 16, 120.0)
+        assert b.max_rounds == 8
+        assert b.max_tool_calls == 16
 
 
 def openai_tool_call_response(calls, content=None):

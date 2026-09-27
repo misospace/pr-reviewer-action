@@ -337,13 +337,13 @@ def _main_telemetry(monkeypatch, tmp_path, env):
 def test_primary_tier_telemetry(monkeypatch, tmp_path):
     harness = _main_telemetry(monkeypatch, tmp_path, {})
     assert harness["tool_budget_tier"] == "primary"
-    assert harness["tool_request_budget"] == 8
+    assert harness["tool_request_budget"] == 16
 
 
 def test_routed_smart_tier_telemetry(monkeypatch, tmp_path):
     harness = _main_telemetry(monkeypatch, tmp_path, {"REVIEW_CONTEXT_PROFILE": "smart"})
     assert harness["tool_budget_tier"] == "smart"
-    assert harness["tool_request_budget"] == 16
+    assert harness["tool_request_budget"] == 32
 
 
 def test_escalated_tier_telemetry(monkeypatch, tmp_path):
@@ -353,7 +353,7 @@ def test_escalated_tier_telemetry(monkeypatch, tmp_path):
         {"TOOL_HARNESS_TIER": "smart", "TOOL_ESCALATION": "true"},
     )
     assert harness["tool_budget_tier"] == "escalated"
-    assert harness["tool_request_budget"] == 20
+    assert harness["tool_request_budget"] == 40
 
 
 def test_explicit_override_telemetry(monkeypatch, tmp_path):

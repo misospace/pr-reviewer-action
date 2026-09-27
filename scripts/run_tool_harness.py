@@ -1134,12 +1134,12 @@ STOP_BUDGET_REASON = "tool-call-budget-exhausted"
 # follows the review route instead of one global ceiling: the primary route
 # keeps a conservative budget, the smart route gets more headroom, and the
 # escalated (deep) path gets the most — never above the hard safety ceiling
-# of 20. Explicit user configuration (TOOL_MAX_REQUESTS, and
+# of 50. Explicit user configuration (TOOL_MAX_REQUESTS, and
 # SMART_TOOL_MAX_REQUESTS on smart/escalated runs) always wins, clamped to
-# 1..20. Resolution is tier-aware at harness time because the route is
+# 1..50. Resolution is tier-aware at harness time because the route is
 # decided by classification long after config resolution.
-TOOL_REQUEST_HARD_MAX = 20
-TOOL_REQUEST_TIER_DEFAULTS = {"primary": 8, "smart": 16, "escalated": 20}
+TOOL_REQUEST_HARD_MAX = 50
+TOOL_REQUEST_TIER_DEFAULTS = {"primary": 16, "smart": 32, "escalated": 40}
 
 
 def tool_budget_route(tier):
@@ -1220,8 +1220,8 @@ def resolve_tool_max_requests(tier):
     PRIMARY_TOOL_MAX_REQUESTS (primary only) or SMART_TOOL_MAX_REQUESTS
     (smart/escalated only) > TOOL_MAX_REQUESTS > the
     route's tier default. Every explicit value is clamped to
-    1..TOOL_REQUEST_HARD_MAX; an unparsable value falls through to the next
-    source, never widening the budget.
+    1..TOOL_REQUEST_HARD_MAX (50); an unparsable value falls through to the
+    next source, never widening the budget.
     """
     return resolve_tool_budget(tier)["budget"]
 
@@ -1317,8 +1317,8 @@ def run_native_loop(
     if search_url:
         tool_schemas.append(WEB_SEARCH_SCHEMA)
 
-    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 3, 1, 6)
-    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900)
+    max_rounds = env_int_bounded("TOOL_MAX_ROUNDS", 4, 1, 6)
+    wall_clock = env_int_bounded("TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900)
     if tier == "smart":
         max_rounds = env_int_bounded("SMART_TOOL_MAX_ROUNDS", max_rounds, 1, 6)
         wall_clock = env_int_bounded("SMART_TOOL_LOOP_WALL_CLOCK_SEC", wall_clock, 10, 900)

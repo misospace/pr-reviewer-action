@@ -11,7 +11,7 @@ production actually resolves, not a reimplementation.
 
 The fixture's `expected` (route, budget, source) is enforced HERE as well
 as by the v3 side: both runners fail closed on any expectation mismatch, so
-the absolute tier defaults (primary 8, smart 16, escalated 20), the hard
+the absolute tier defaults (primary 16, smart 32, escalated 40), the hard
 ceiling, and the #702 budget provenance are pinned, not just v2↔v3
 agreement.
 

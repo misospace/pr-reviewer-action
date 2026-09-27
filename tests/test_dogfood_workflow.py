@@ -125,8 +125,8 @@ def test_dogfood_native_loop_budget() -> None:
     """The dogfood loop keeps the #565 rounds/wall-clock and the #701 tier budget.
 
     tool_max_requests must stay unset: an explicit value outranks the #701
-    tier resolver, so the old "8" pin silently capped smart and escalated
-    reviews at 8 requests instead of 16/20.
+    tier resolver, so a fixed pin would silently cap smart and escalated
+    reviews at the primary tier's request budget instead of 32/40.
     """
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
 
@@ -179,15 +179,18 @@ def test_public_action_defaults_unchanged() -> None:
     """The public action.yml defaults for the tool budget inputs stay as-is.
 
     #701 moved tool_max_requests to a tier-aware resolver: the input default is
-    now empty and the route decides the effective budget (primary 8, smart 16,
-    escalated 20). The other tool-budget inputs keep their #565 defaults.
+    now empty and the route decides the effective budget (primary 16, smart 32,
+    escalated 40). #794 raised the tool_max_rounds and tool_loop_wall_clock_sec
+    defaults to match the dogfood workflow's long-standing values (issue #565),
+    so the two are now identical rather than dogfood-only. The other
+    tool-budget inputs keep their #565 defaults.
     """
     defaults = _extract_action_defaults()
 
     expected = {
-        "tool_loop_wall_clock_sec": "120",
+        "tool_loop_wall_clock_sec": "600",
         "tool_max_requests": "",
-        "tool_max_rounds": "3",
+        "tool_max_rounds": "4",
         "tool_turn_timeout_sec": "60",
         "tool_corpus_max_bytes": "50000",
         "tool_max_tokens_per_turn": "400",
@@ -196,8 +199,7 @@ def test_public_action_defaults_unchanged() -> None:
     for name, want in expected.items():
         got = defaults.get(name)
         assert got == want, (
-            f"action.yml default for {name} must stay {want!r} (issue #565 is "
-            f"dogfood-only); found {got!r}"
+            f"action.yml default for {name} must stay {want!r}; found {got!r}"
         )
 
 

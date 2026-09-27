@@ -1,7 +1,7 @@
 {
   "fixture": "tool-budget-tiers",
   "contract": "tool-request-budget/v1",
-  "description": "#701 tier-aware native tool-loop request budget: the effective budget follows the review route (primary 8, smart 16, escalated 20), explicit values are bounded to 1..20, and SMART_TOOL_MAX_REQUESTS outranks TOOL_MAX_REQUESTS on smart/escalated runs. Each case carries the env the production harness subprocess would see and the expected (route, budget) both the v2 harness resolver and the v3 port must produce. #702 extends each expectation with the budget source (smart-override | explicit | tier-default) so the provenance of the ceiling is pinned across the migration too.",
+  "description": "#701 tier-aware native tool-loop request budget: the effective budget follows the review route (primary 16, smart 32, escalated 40), explicit values are bounded to 1..50, and SMART_TOOL_MAX_REQUESTS outranks TOOL_MAX_REQUESTS on smart/escalated runs. Each case carries the env the production harness subprocess would see and the expected (route, budget) both the v2 harness resolver and the v3 port must produce. #702 extends each expectation with the budget source (smart-override | explicit | tier-default) so the provenance of the ceiling is pinned across the migration too.",
   "cases": [
     {
       "name": "primary-default",
@@ -9,7 +9,7 @@
       "env": {},
       "expected": {
         "route": "primary",
-        "budget": 8,
+        "budget": 16,
         "source": "tier-default"
       }
     },
@@ -21,7 +21,7 @@
       },
       "expected": {
         "route": "smart",
-        "budget": 16,
+        "budget": 32,
         "source": "tier-default"
       }
     },
@@ -31,7 +31,7 @@
       "env": {},
       "expected": {
         "route": "smart",
-        "budget": 16,
+        "budget": 32,
         "source": "tier-default"
       }
     },
@@ -43,7 +43,7 @@
       },
       "expected": {
         "route": "escalated",
-        "budget": 20,
+        "budget": 40,
         "source": "tier-default"
       }
     },
@@ -56,7 +56,7 @@
       },
       "expected": {
         "route": "escalated",
-        "budget": 20,
+        "budget": 40,
         "source": "tier-default"
       }
     },
@@ -98,6 +98,18 @@
       }
     },
     {
+      "name": "explicit-at-hard-ceiling",
+      "tier": "primary",
+      "env": {
+        "TOOL_MAX_REQUESTS": "50"
+      },
+      "expected": {
+        "route": "primary",
+        "budget": 50,
+        "source": "explicit"
+      }
+    },
+    {
       "name": "hard-ceiling-clamps-high",
       "tier": "primary",
       "env": {
@@ -105,7 +117,19 @@
       },
       "expected": {
         "route": "primary",
-        "budget": 20,
+        "budget": 50,
+        "source": "explicit"
+      }
+    },
+    {
+      "name": "just-over-hard-ceiling-clamps",
+      "tier": "primary",
+      "env": {
+        "TOOL_MAX_REQUESTS": "51"
+      },
+      "expected": {
+        "route": "primary",
+        "budget": 50,
         "source": "explicit"
       }
     },
@@ -156,7 +180,7 @@
       },
       "expected": {
         "route": "primary",
-        "budget": 8,
+        "budget": 16,
         "source": "tier-default"
       }
     },
@@ -168,7 +192,7 @@
       },
       "expected": {
         "route": "smart",
-        "budget": 16,
+        "budget": 32,
         "source": "tier-default"
       }
     },
@@ -194,7 +218,7 @@
       },
       "expected": {
         "route": "smart",
-        "budget": 16,
+        "budget": 32,
         "source": "tier-default"
       }
     },
@@ -219,7 +243,7 @@
       },
       "expected": {
         "route": "smart",
-        "budget": 16,
+        "budget": 32,
         "source": "tier-default"
       }
     },
