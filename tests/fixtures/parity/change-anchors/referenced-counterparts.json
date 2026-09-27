@@ -1,0 +1,16 @@
+{
+ "fixture": "referenced-counterparts",
+ "description": "#791 referenced counterparts: a JS port names Python files on added lines; declarations there whose normalized names match the changed declarations are recorded (camel/snake/underscore/class forms), bodies the diff touches first with ref_changed, a body the diff adds in full skipped; the per-pair cap (4), the readable-path cap (5) and the artifact cap (8) set counterparts_truncated; unreadable and non-code mentions are skipped.",
+ "diff": "diff --git a/src/metadata.js b/src/metadata.js\nindex 1111111..2222222 100644\n--- a/src/metadata.js\n+++ b/src/metadata.js\n@@ -1,7 +1,9 @@\n+// Port of pr_reviewer/metadata.py and pr_reviewer/render.py\n export function buildPrMetadata(input) {\n-  return input;\n+  return { ...input };\n }\n \n export function renderSummary(input) {\n-  return input;\n+  // see pr_reviewer/fresh.py pr_reviewer/one.py pr_reviewer/two.py pr_reviewer/three.py pr_reviewer/four.py pr_reviewer/five.py\n+  return String(input);\n }\ndiff --git a/pr_reviewer/metadata.py b/pr_reviewer/metadata.py\nindex 1111111..2222222 100644\n--- a/pr_reviewer/metadata.py\n+++ b/pr_reviewer/metadata.py\n@@ -3,6 +3,7 @@\n \n \n def _build_pr_metadata(data):\n+    data = dict(data)\n     return data\n \n \ndiff --git a/pr_reviewer/render.py b/pr_reviewer/render.py\nindex 1111111..2222222 100644\n--- a/pr_reviewer/render.py\n+++ b/pr_reviewer/render.py\n@@ -1,2 +1,3 @@\n def render_summary(value):\n+    value = value.strip()\n     return value\ndiff --git a/pr_reviewer/fresh.py b/pr_reviewer/fresh.py\nnew file mode 100644\nindex 1111111..2222222 100644\n--- /dev/null\n+++ b/pr_reviewer/fresh.py\n@@ -0,0 +1,2 @@\n+def render_summary(value):\n+    return value\n",
+ "repo_files": {
+  "src/metadata.js": "// Port of pr_reviewer/metadata.py and pr_reviewer/render.py\nexport function buildPrMetadata(input) {\n  return { ...input };\n}\n\nexport function renderSummary(input) {\n  // see pr_reviewer/fresh.py pr_reviewer/one.py pr_reviewer/two.py pr_reviewer/three.py pr_reviewer/four.py pr_reviewer/five.py\n  return String(input);\n}\n",
+  "pr_reviewer/metadata.py": "def build_pr_metadata(data):\n    return data\n\n\ndef _build_pr_metadata(data):\n    data = dict(data)\n    return data\n\n\nclass BuildPrMetadata:\n    pass\n\n\ndef build_pr_metadata_v2(data):\n    return data\ndef build_pr_metadata(x0):\n    return 0\n\n\ndef build_pr_metadata(x1):\n    return 1\n\n\ndef build_pr_metadata(x2):\n    return 2\n\n\n",
+  "pr_reviewer/render.py": "def render_summary(value):\n    value = value.strip()\n    return value\n",
+  "pr_reviewer/fresh.py": "def render_summary(value):\n    return value\n",
+  "pr_reviewer/one.py": "def render_summary(a):\n    return a\n",
+  "pr_reviewer/two.py": "def render_summary(a):\n    return a\n",
+  "pr_reviewer/three.py": "def render_summary(a):\n    return a\n",
+  "pr_reviewer/four.py": "def render_summary(a):\n    return a\n",
+  "pr_reviewer/five.py": "def render_summary(a):\n    return a\n"
+ }
+}

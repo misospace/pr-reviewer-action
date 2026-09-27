@@ -1,0 +1,24 @@
+{
+ "fixture": "cli-symlink-output-refused",
+ "description": "CLI: an --output path that is a symlink escaping the workspace is refused; an --output through an in-workspace symlinked directory is resolved and written.",
+ "cli": {
+  "argv": [
+   "--diff",
+   "pr.diff",
+   "--output",
+   "escape-link.json",
+   "--workspace-root",
+   "{workspace}"
+  ],
+  "github_workspace": null,
+  "read": [
+   "escape-link.json"
+  ]
+ },
+ "repo_files": {
+  "pr.diff": "diff --git a/src/cli_mod.py b/src/cli_mod.py\nindex 1111111..2222222 100644\n--- a/src/cli_mod.py\n+++ b/src/cli_mod.py\n@@ -1,2 +1,2 @@\n def cli_function(a):\n-    return a\n+    return a * 2\n"
+ },
+ "symlinks": {
+  "escape-link.json": "../outside-target.json"
+ }
+}

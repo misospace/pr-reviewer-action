@@ -47,3 +47,57 @@ def prepare_repo(root: Path, fixture: dict, *, init_git: bool | None = None) -> 
         subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)], check=True, env=env)
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
     return root
+
+
+def prepare_workspace(root: Path, fixture: dict) -> Path:
+    """Create *root* fresh as a plain head-checkout workspace for the #706
+    change-anchors boundary (no Git): `repo_files` ({path: text}),
+    `repo_files_b64` ({path: base64 bytes}), `repo_files_generated`
+    ([{path, content, count}] with `{i}` substituted in both, or
+    [{path, parts: [{text, count}]}] for one file), `oversize_files`
+    ({path: byte count}), `dirs` ([path]) and `symlinks` ({path: target}).
+    Paths stay inside *root*; symlink targets are written verbatim."""
+    import base64
+
+    if root.exists() or root.is_symlink():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    root_resolved = root.resolve()
+
+    def target_of(path: str) -> Path | None:
+        target = root / path
+        resolved = target.parent.resolve() / target.name
+        if resolved != root_resolved and root_resolved not in resolved.parents:
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def write(path: str, data: bytes) -> None:
+        target = target_of(path)
+        if target is not None:
+            target.write_bytes(data)
+
+    for path, content in (fixture.get("repo_files") or {}).items():
+        write(str(path), ("" if content is None else str(content)).encode("utf-8"))
+    for path, encoded in (fixture.get("repo_files_b64") or {}).items():
+        write(str(path), base64.b64decode(encoded))
+    for spec in fixture.get("repo_files_generated") or []:
+        if "parts" in spec:
+            text = "".join(
+                part["text"].replace("{i}", str(i)) for part in spec["parts"] for i in range(part.get("count", 1))
+            )
+            write(spec["path"], text.encode("utf-8"))
+        else:
+            for i in range(spec.get("count", 1)):
+                write(spec["path"].replace("{i}", str(i)), spec["content"].replace("{i}", str(i)).encode("utf-8"))
+    for path, size in (fixture.get("oversize_files") or {}).items():
+        write(str(path), b"x" * int(size))
+    for path in fixture.get("dirs") or []:
+        target = target_of(str(path))
+        if target is not None:
+            target.mkdir(parents=True, exist_ok=True)
+    for path, link_target in (fixture.get("symlinks") or {}).items():
+        target = target_of(str(path))
+        if target is not None:
+            target.symlink_to(str(link_target))
+    return root

@@ -1,0 +1,30 @@
+{
+ "fixture": "path-safety",
+ "description": "Head reads refuse a symlinked file, a symlinked directory component, '..'/'.'/empty/.git components, an absolute path, a directory, a symlink loop, and a file over MAX_HEAD_FILE_BYTES — each would otherwise yield an enclosing anchor and changed_lines, as the regular file alongside does. A counterpart reference to a symlinked file is skipped without spending the readable-path budget.",
+ "diff": "diff --git a/src/link.py b/src/link.py\nindex 1111111..2222222 100644\n--- a/src/link.py\n+++ b/src/link.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/linked_dir/inner.py b/linked_dir/inner.py\nindex 1111111..2222222 100644\n--- a/linked_dir/inner.py\n+++ b/linked_dir/inner.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/../escape.py b/src/../escape.py\nindex 1111111..2222222 100644\n--- a/src/../escape.py\n+++ b/src/../escape.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/.git/hooks/hook.py b/.git/hooks/hook.py\nindex 1111111..2222222 100644\n--- a/.git/hooks/hook.py\n+++ b/.git/hooks/hook.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/.git/x.py b/src/.git/x.py\nindex 1111111..2222222 100644\n--- a/src/.git/x.py\n+++ b/src/.git/x.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/./dot.py b/src/./dot.py\nindex 1111111..2222222 100644\n--- a/src/./dot.py\n+++ b/src/./dot.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src//double.py b/src//double.py\nindex 1111111..2222222 100644\n--- a/src//double.py\n+++ b/src//double.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/adir/is_dir.py b/adir/is_dir.py\nindex 1111111..2222222 100644\n--- a/adir/is_dir.py\n+++ b/adir/is_dir.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/huge.py b/src/huge.py\nindex 1111111..2222222 100644\n--- a/src/huge.py\n+++ b/src/huge.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/real.py b/src/real.py\nindex 1111111..2222222 100644\n--- a/src/real.py\n+++ b/src/real.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a//abs/root.py b//abs/root.py\n@@ -1,2 +1,2 @@\n def guarded(a):\n-    return a\n+    return a * 3\ndiff --git a/src/port.py b/src/port.py\nindex 1111111..2222222 100644\n--- a/src/port.py\n+++ b/src/port.py\n@@ -1,2 +1,3 @@\n def build_report():\n+    # port of lib/link_ref.py and lib/real_ref.py and lib/loop.py\n     return 0\n",
+ "repo_files": {
+  "src/real.py": "def guarded(a):\n    return a * 3\n",
+  "src/dot.py": "def guarded(a):\n    return a * 3\n",
+  "src/double.py": "def guarded(a):\n    return a * 3\n",
+  "escape.py": "def guarded(a):\n    return a * 3\n",
+  ".git/hooks/hook.py": "def guarded(a):\n    return a * 3\n",
+  "src/.git/x.py": "def guarded(a):\n    return a * 3\n",
+  "target/real_target.py": "def guarded(a):\n    return a * 3\n",
+  "outside/inner.py": "def guarded(a):\n    return a * 3\n",
+  "src/port.py": "def build_report():\n    # port of lib/link_ref.py and lib/real_ref.py and lib/loop.py\n    return 0\n",
+  "lib/real_ref.py": "def build_report():\n    return 1\n",
+  "lib/hidden_ref.py": "def build_report():\n    return 1\n"
+ },
+ "symlinks": {
+  "src/link.py": "../target/real_target.py",
+  "linked_dir": "outside",
+  "lib/link_ref.py": "hidden_ref.py",
+  "lib/loop.py": "loop.py"
+ },
+ "dirs": [
+  "adir/is_dir.py"
+ ],
+ "oversize_files": {
+  "src/huge.py": 2000001
+ }
+}

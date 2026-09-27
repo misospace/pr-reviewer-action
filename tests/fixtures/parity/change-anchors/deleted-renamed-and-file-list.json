@@ -1,0 +1,42 @@
+{
+ "fixture": "deleted-renamed-and-file-list",
+ "description": "Deleted files (deleted file mode and +++ /dev/null) emit only path/language/deleted; a rename with a hunk takes the new path; a pure rename and a copy header; a file-list entry marked removed, a list-only file, a previous_filename-only entry, a duplicate list entry, a non-object entry, and a diff-only file appended after list order; the same path in two diff sections is merged (append order, sorted by line then content).",
+ "diff": "diff --git a/old/gone.py b/old/gone.py\ndeleted file mode 100644\nindex 1111111..2222222 100644\n--- a/old/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def gone_function():\n-    pass\ndiff --git a/old/also_gone.js b/old/also_gone.js\nindex 1111111..0000000\n--- a/old/also_gone.js\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-function alsoGone() {}\ndiff --git a/old/moved.py b/new/moved.py\nrename from old/moved.py\nrename to new/moved.py\nindex 1111111..2222222 100644\n--- a/old/moved.py\n+++ b/new/moved.py\n@@ -1,2 +1,2 @@\n def moved_function():\n-    return 1\n+    return 2\ndiff --git a/a/pure.py b/b/pure.py\nsimilarity index 100%\nrename from a/pure.py\nrename to b/pure.py\ndiff --git a/src/orig.py b/src/copy.py\nsimilarity index 90%\ncopy from src/orig.py\ncopy to src/copy.py\n--- a/src/orig.py\n+++ b/src/copy.py\n@@ -1 +1,2 @@\n x = 1\n+def copied_helper():\ndiff --git a/src/dup.py b/src/dup.py\n--- a/src/dup.py\n+++ b/src/dup.py\n@@ -3,0 +4,2 @@\n+\n+def second_section():\ndiff --git a/src/dup.py b/src/dup.py\n--- a/src/dup.py\n+++ b/src/dup.py\n@@ -0,0 +1,2 @@\n+def first_section():\n+    return 1\ndiff --git a/src/diff_only.go b/src/diff_only.go\nnew file mode 100644\nindex 1111111..2222222 100644\n--- /dev/null\n+++ b/src/diff_only.go\n@@ -0,0 +1,3 @@\n+package x\n+\n+func DiffOnly() {}\n",
+ "file_list": [
+  {
+   "filename": "listed/removed.py",
+   "status": "removed"
+  },
+  {
+   "filename": "listed/only.ts",
+   "status": "modified"
+  },
+  {
+   "previous_filename": "listed/prev_only.js",
+   "status": "renamed"
+  },
+  {
+   "filename": "src/dup.py",
+   "status": "modified"
+  },
+  {
+   "filename": "listed/only.ts",
+   "status": "modified"
+  },
+  "not-an-object",
+  {
+   "filename": "",
+   "previous_filename": "",
+   "status": "added"
+  },
+  {
+   "filename": "new/moved.py",
+   "previous_filename": 7,
+   "status": "renamed"
+  }
+ ],
+ "repo_files": {
+  "new/moved.py": "def moved_function():\n    return 2\n",
+  "src/dup.py": "def first_section():\n    return 1\n\n\ndef second_section():\n    return 2\n"
+ }
+}

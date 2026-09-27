@@ -14,6 +14,7 @@ import {
   runReviewThreadsFixture,
   runRelatedCodeFixture,
   runRepoMapFixture,
+  runChangeAnchorsFixture,
 } from "./context/fixture.js";
 import { runCorpusFixture, runDiffPriorityFixture } from "./corpus/index.js";
 import { conversationFixtureMain } from "./model/fixture.js";
@@ -131,6 +132,9 @@ if (require.main === module) {
       process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
+  } else if (firstArg === "change-anchors-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runChangeAnchorsFixture(argv[1] ?? ""))}\n`);
   } else if (firstArg === "diff-priority-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runDiffPriorityFixture(argv[1] ?? ""))}\n`);

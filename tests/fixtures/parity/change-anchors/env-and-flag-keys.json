@@ -1,0 +1,9 @@
+{
+ "fixture": "env-and-flag-keys",
+ "description": "#791 env-var-like names (INPUT_ prefix stripped for the word check; low-value GITHUB_/NODE_ prefixes and short names dropped) and --long-flags (low-value flags such as --dry-run dropped) in a shell script (unsupported language, still scanned) and Python.",
+ "diff": "diff --git a/scripts/run.sh b/scripts/run.sh\nindex 1111111..2222222 100644\n--- a/scripts/run.sh\n+++ b/scripts/run.sh\n@@ -1,4 +1,8 @@\n #!/bin/sh\n run() {\n   echo start\n+  export REVIEW_TIMEOUT_SECONDS=30\n+  tool --max-retry-count 3 --dry-run --new-flag-name\n+  echo \"$INPUT_FORGE_BASE_URL $GITHUB_TOKEN_VALUE $NODE_OPTIONS_X $A_B\"\n+  X_Y=1 --ab-c\n }\ndiff --git a/app/settings.py b/app/settings.py\nnew file mode 100644\nindex 1111111..2222222 100644\n--- /dev/null\n+++ b/app/settings.py\n@@ -0,0 +1,5 @@\n+import os\n+\n+\n+def settings():\n+    return os.environ.get(\"PR_REVIEWER_MODE_NAME\", \"--fallback-mode-flag\")\n",
+ "repo_files": {
+  "scripts/run.sh": "#!/bin/sh\nrun() {\n  echo start\n  export REVIEW_TIMEOUT_SECONDS=30\n  tool --max-retry-count 3 --dry-run --new-flag-name\n  echo \"$INPUT_FORGE_BASE_URL $GITHUB_TOKEN_VALUE $NODE_OPTIONS_X $A_B\"\n  X_Y=1 --ab-c\n}\n",
+  "app/settings.py": "import os\n\n\ndef settings():\n    return os.environ.get(\"PR_REVIEWER_MODE_NAME\", \"--fallback-mode-flag\")\n"
+ }
+}

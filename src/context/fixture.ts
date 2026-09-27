@@ -8,7 +8,7 @@
  * image-provenance fixture supplies an ordered substring→payload table that
  * stands in for the registry/GitHub transport (fetch policy stays in v2). */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import {
   classifyUrl,
@@ -41,6 +41,7 @@ import {
   renderRelatedContextMarkdown,
 } from "./related-context.js";
 import { buildImageProvenanceContext, parseDiff, type DigestChange } from "./image-provenance.js";
+import { changeAnchorsCli, extractChangeAnchors, renderChangeAnchorsJson } from "./change-anchors.js";
 
 interface FixtureRecord {
   fixture?: string;
@@ -268,4 +269,74 @@ export async function runImageProvenanceFixture(fixturePath: string): Promise<{ 
       markdown,
     },
   };
+}
+
+// --- Change anchors ------------------------------------------------------------------
+
+interface TextPart {
+  text?: unknown;
+  count?: unknown;
+}
+
+interface ChangeAnchorsFixture extends FixtureRecord {
+  diff?: string | null;
+  diff_parts?: TextPart[];
+  file_list?: unknown[] | null;
+  workspace?: boolean;
+  max_files?: number;
+  max_anchors?: number;
+  expected_anchors?: unknown;
+  cli?: { argv?: string[]; github_workspace?: string | null; read?: string[] };
+}
+
+/** `"".join(text.replace("{i}", str(i)) for i in range(count))` per part:
+ * the fixture generator both runners expand identically. */
+function expandParts(parts: TextPart[]): string {
+  let out = "";
+  for (const part of parts) {
+    const text = typeof part.text === "string" ? part.text : "";
+    const count = typeof part.count === "number" ? part.count : 1;
+    for (let i = 0; i < count; i++) out += text.replaceAll("{i}", String(i));
+  }
+  return out;
+}
+
+/** Change-anchor parity (#706): the extractor over the fixture diff and the
+ * harness-prepared workspace (`PARITY_REPO_DIR`), rendered as the persisted
+ * `json.dumps(indent=2)` document; or, with `cli`, the v2 CLI run from the
+ * workspace (exit code, stderr, written files). */
+export function runChangeAnchorsFixture(fixturePath: string): { ok: boolean; values?: Record<string, string>; stderr?: string } {
+  const fixture = loadFixture(fixturePath) as ChangeAnchorsFixture;
+  const workspace = process.env.PARITY_REPO_DIR ?? process.cwd();
+  if (fixture.cli) {
+    const argv = (fixture.cli.argv ?? []).map((arg) => arg.replaceAll("{workspace}", workspace));
+    const gw = fixture.cli.github_workspace;
+    const env: Record<string, string> = {};
+    if (typeof gw === "string") env.GITHUB_WORKSPACE = gw === "" ? workspace : `${workspace}/${gw}`;
+    const previous = process.cwd();
+    process.chdir(workspace);
+    let result: { exitCode: number; stderr: string };
+    try {
+      result = changeAnchorsCli(argv, env);
+    } finally {
+      process.chdir(previous);
+    }
+    const values: Record<string, string> = { exit_code: String(result.exitCode), stderr: result.stderr };
+    for (const rel of fixture.cli.read ?? []) {
+      const target = `${workspace}/${rel}`;
+      values[`output:${rel}`] = existsSync(target) ? readFileSync(target, "utf8") : "<absent>";
+    }
+    return { ok: true, values };
+  }
+  const diff = Array.isArray(fixture.diff_parts) ? expandParts(fixture.diff_parts) : (fixture.diff ?? null);
+  const artifact = extractChangeAnchors(diff, Array.isArray(fixture.file_list) ? fixture.file_list : null, {
+    sourceRoot: fixture.workspace === false ? null : workspace,
+    ...(typeof fixture.max_files === "number" ? { maxFiles: fixture.max_files } : {}),
+    ...(typeof fixture.max_anchors === "number" ? { maxAnchors: fixture.max_anchors } : {}),
+  });
+  const values: Record<string, string> = { artifact: renderChangeAnchorsJson(artifact) };
+  if (fixture.expected_anchors !== undefined) {
+    values.matches_expected_anchors = String(pythonJsonStringify(artifact) === pythonJsonStringify(fixture.expected_anchors));
+  }
+  return { ok: true, values };
 }
