@@ -1591,7 +1591,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function pyTruthy(value: unknown): boolean {
-  if (value === null || value === undefined || value === false || value === 0 || value === "") return false;
+  if (value === null || value === undefined || value === false || value === 0) return false;
+  if (typeof value === "string") return value.length > 0;
   if (Array.isArray(value)) return value.length > 0;
   if (isRecord(value)) return Object.keys(value).length > 0;
   return true;
