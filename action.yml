@@ -321,6 +321,14 @@ inputs:
       native approvals can affect branch protection rules and automerge pipelines.
     required: false
     default: "false"
+  allow_repo_policy_overrides:
+    description: >-
+      If true, a repository config file may set policy inputs (marked repo-policy in the v3
+      contract: verdict policy, blocking categories, required-check and evidence enforcement,
+      fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false,
+      so a repository cannot loosen a gate its operator enforces. v3 only.
+    required: false
+    default: "false"
   approve_forks:
     description: >-
       If true and publish_mode=review_verdict with allow_approve=true, native approvals are also

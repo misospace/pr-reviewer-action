@@ -242,10 +242,15 @@ export function applyRepositoryConfig(
   }
 
   const byId = new Map(contract.inputs.map((input) => [input.id, input]));
+  const policyAllowed = operatorRaw["allow-repo-policy-overrides"] === "true";
   for (const [key, value] of Object.entries(parsed.values)) {
     const input = byId.get(key);
     if (!input || !input["repo-configurable"] || SECRET_INPUTS.has(key)) {
       warnings.push(`Repository config '${file.path}' sets '${key}', which is not repo-configurable; ignoring it.`);
+      continue;
+    }
+    if (input["repo-policy"] && !policyAllowed) {
+      warnings.push(`Repository config '${file.path}' sets policy input '${key}', but the operator did not enable allow-repo-policy-overrides; ignoring it.`);
       continue;
     }
     const isNumeric = INTEGER_INPUTS.has(key) || FLOAT_INPUTS.has(key);

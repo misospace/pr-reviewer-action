@@ -64,6 +64,7 @@ that cutover.
 | `publish_review_comment` | `publish-review-comment` |
 | `publish_mode` | `publish-mode` |
 | `allow_approve` | `allow-approve` |
+| `allow_repo_policy_overrides` | `allow-repo-policy-overrides` |
 | `approve_forks` | `approve-forks` |
 | `cleanup_previous_native_reviews` | `cleanup-previous-native-reviews` |
 | `upstream_link_mode` | `upstream-link-mode` |

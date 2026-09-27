@@ -13,6 +13,7 @@ export interface ContractInput {
    * input; repository config can only narrow it below the operator's
    * effective ceiling, never widen or replace it. */
   readonly "repo-configurable"?: boolean;
+  readonly "repo-policy"?: boolean;
 }
 
 export interface ContractOutput {
@@ -65,6 +66,9 @@ export function validateContract(value: unknown): ActionContract {
     if (input["repo-configurable"] && input.required) {
       throw new Error(`input '${input.id}' cannot be both required and repo-configurable — a required input is an operator-supplied credential/endpoint/ceiling and must never gain authority from repository-controlled config`);
     }
+    if (input["repo-policy"] && !input["repo-configurable"]) {
+      throw new Error(`input '${input.id}' has repo-policy without repo-configurable`);
+    }
     if (SECRET_INPUTS.has(input.id) && input["repo-configurable"]) {
       throw new Error(`input '${input.id}' is a secret and must never be repo-configurable`);
     }
@@ -81,7 +85,7 @@ function validateNames(id: string, v2Id: string, label: string): void {
 
 function validateInput(value: unknown, path: string): ContractInput {
   const item = objectAt(value, path);
-  rejectUnknown(item, ["id", "v2_id", "required", "default", "description", "repo-configurable"], path);
+  rejectUnknown(item, ["id", "v2_id", "required", "default", "description", "repo-configurable", "repo-policy"], path);
   const id = stringAt(item.id, `${path}.id`);
   const v2_id = stringAt(item.v2_id, `${path}.v2_id`);
   if (typeof item.required !== "boolean") throw new Error(`${path}.required must be a boolean`);
@@ -93,6 +97,9 @@ function validateInput(value: unknown, path: string): ContractInput {
   if ("repo-configurable" in item && typeof item["repo-configurable"] !== "boolean") {
     throw new Error(`${path}.repo-configurable must be a boolean`);
   }
+  if ("repo-policy" in item && typeof item["repo-policy"] !== "boolean") {
+    throw new Error(`${path}.repo-policy must be a boolean`);
+  }
   return Object.freeze({
     id,
     v2_id,
@@ -100,6 +107,7 @@ function validateInput(value: unknown, path: string): ContractInput {
     ...("default" in item ? { default: item.default as string | number | boolean } : {}),
     description,
     ...(item["repo-configurable"] === true ? { "repo-configurable": true as const } : {}),
+    ...(item["repo-policy"] === true ? { "repo-policy": true as const } : {}),
   });
 }
 

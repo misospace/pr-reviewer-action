@@ -24,6 +24,10 @@ function baseOperatorRaw(): Record<string, string> {
   return Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "operator-value" : String(input.default)]));
 }
 
+function policyOperatorRaw(): Record<string, string> {
+  return { ...baseOperatorRaw(), "allow-repo-policy-overrides": "true" };
+}
+
 function fileOf(text: string, path = ".github/pr-reviewer.yml"): RepositoryConfigFile {
   return { path, text };
 }
@@ -105,7 +109,7 @@ test("tier-resolved budgets (primary/smart-tool-max-requests) are not repo-confi
 });
 
 test("enum input: repository may set any allowed value only when the operator left it at default", () => {
-  const operatorRaw = baseOperatorRaw(); // verdict-policy left at contract default "model"
+  const operatorRaw = policyOperatorRaw(); // verdict-policy left at contract default "model"
   const applied = applyRepositoryConfig(contract, operatorRaw, fileOf("verdict-policy: findings_severity_gated\n"));
   assert.deepEqual(applied.appliedKeys, ["verdict-policy"]);
   assert.equal(applied.raw["verdict-policy"], "findings_severity_gated");
@@ -113,7 +117,7 @@ test("enum input: repository may set any allowed value only when the operator le
 });
 
 test("enum input: an operator's explicit value always wins over the repository's", () => {
-  const operatorRaw = baseOperatorRaw();
+  const operatorRaw = policyOperatorRaw();
   operatorRaw["verdict-policy"] = "findings_severity_gated"; // explicit, differs from default "model"
   const resolution = applyRepositoryConfig(contract, operatorRaw, fileOf("verdict-policy: model\n"));
   assert.equal(resolution.appliedKeys.length, 0);
@@ -122,14 +126,14 @@ test("enum input: an operator's explicit value always wins over the repository's
 });
 
 test("enum input: an invalid repository value is rejected with a warning, never crashes", () => {
-  const operatorRaw = baseOperatorRaw();
+  const operatorRaw = policyOperatorRaw();
   const resolution = applyRepositoryConfig(contract, operatorRaw, fileOf("verdict-policy: not_a_real_policy\n"));
   assert.equal(resolution.appliedKeys.length, 0);
   assert.match(resolution.warnings[0]!, /must be one of/);
 });
 
 test("boolean input follows the same operator-explicit rule as enums", () => {
-  const operatorRaw = baseOperatorRaw(); // fail-on-request-changes defaults to "false", left unset
+  const operatorRaw = policyOperatorRaw(); // fail-on-request-changes defaults to "false", left unset
   const applied = applyRepositoryConfig(contract, operatorRaw, fileOf("fail-on-request-changes: true\n"));
   assert.deepEqual(applied.appliedKeys, ["fail-on-request-changes"]);
   assert.equal(applied.raw["fail-on-request-changes"], "true");
@@ -138,6 +142,23 @@ test("boolean input follows the same operator-explicit rule as enums", () => {
   const blocked = applyRepositoryConfig(contract, operatorRaw, fileOf("fail-on-request-changes: false\n"));
   assert.equal(blocked.appliedKeys.length, 0);
   assert.equal(blocked.raw["fail-on-request-changes"], "true");
+});
+
+test("policy inputs are ignored unless the operator opts in; non-policy inputs are unaffected", () => {
+  const file = fileOf("verdict-policy: findings_severity_gated\nnon-blocking-finding-categories: security\nreview-verbosity: concise\n");
+  const gated = applyRepositoryConfig(contract, baseOperatorRaw(), file);
+  assert.deepEqual(gated.appliedKeys, ["review-verbosity"]);
+  assert.equal(gated.raw["verdict-policy"], "model");
+  assert.equal(gated.warnings.filter((w) => w.includes("allow-repo-policy-overrides")).length, 2);
+  const allowed = applyRepositoryConfig(contract, policyOperatorRaw(), file);
+  assert.deepEqual([...allowed.appliedKeys].sort(), ["non-blocking-finding-categories", "review-verbosity", "verdict-policy"]);
+});
+
+test("the policy opt-in itself can never come from repository config", () => {
+  const file = fileOf("allow-repo-policy-overrides: true\nverdict-policy: findings_severity_gated\n");
+  const resolution = applyRepositoryConfig(contract, baseOperatorRaw(), file);
+  assert.deepEqual(resolution.appliedKeys, []);
+  assert.equal(resolution.raw["allow-repo-policy-overrides"], "false");
 });
 
 test("free-form string input (standards-file) follows the operator-explicit rule and enforces a length cap", () => {
@@ -284,7 +305,7 @@ test("resolveRepositoryConfig ties the git read and the precedence merge togethe
   writeConfigFile(root, REPOSITORY_CONFIG_CANDIDATE_PATHS[0], "verdict-policy: findings_severity_gated\n");
   const sha = commit(root, "base config");
 
-  const operatorRaw = baseOperatorRaw();
+  const operatorRaw = policyOperatorRaw();
   const resolution = resolveRepositoryConfig(contract, operatorRaw, { baseRef: sha, workspace: root });
   assert.deepEqual(resolution.appliedKeys, ["verdict-policy"]);
   assert.equal(resolution.raw["verdict-policy"], "findings_severity_gated");

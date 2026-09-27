@@ -100,18 +100,21 @@ inputs:
     default: "false"
     description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change."
     repo-configurable: true
+    repo-policy: true
   - id: verdict-policy
     v2_id: verdict_policy
     required: false
     default: "model"
     description: "How the final verdict is decided. 'model' (default) uses the model's own verdict. 'findings_severity_gated' preserves request_changes from the model and escalates approve to request_changes when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes."
     repo-configurable: true
+    repo-policy: true
   - id: non-blocking-finding-categories
     v2_id: non_blocking_finding_categories
     required: false
     default: ""
     description: "Comma-separated finding categories (from tests, docs, style, question, performance, bug, other; security is never allowed) that cannot request changes on their own under verdict_policy=findings_severity_gated. Their blocker/major findings are capped at minor, and a model request_changes backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under verdict_policy=model. Empty (the default) disables it."
     repo-configurable: true
+    repo-policy: true
   - id: inline-findings
     v2_id: inline_findings
     required: false
@@ -130,12 +133,14 @@ inputs:
     default: "auto"
     description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all."
     repo-configurable: true
+    repo-policy: true
   - id: required-check-validation-mode
     v2_id: required_check_validation_mode
     required: false
     default: "warn"
     description: "What to do when required checks are unresolved or undispositioned. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required_checks output and metadata marker) without changing the published review. Incompleteness never triggers smart escalation by itself (#721)."
     repo-configurable: true
+    repo-policy: true
   - id: review-routing-mode
     v2_id: review_routing_mode
     required: false
@@ -249,6 +254,7 @@ inputs:
     default: "replace"
     description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim. 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
     repo-configurable: true
+    repo-policy: true
   - id: review-verbosity
     v2_id: review_verbosity
     required: false
@@ -281,6 +287,11 @@ inputs:
     required: false
     default: "false"
     description: "If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines."
+  - id: allow-repo-policy-overrides
+    v2_id: allow_repo_policy_overrides
+    required: false
+    default: "false"
+    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
   - id: approve-forks
     v2_id: approve_forks
     required: false
@@ -440,6 +451,7 @@ inputs:
     default: "false"
     description: "If true, force request_changes when any evidence provider reports blocker severity"
     repo-configurable: true
+    repo-policy: true
   - id: evidence-enable-for-forks
     v2_id: evidence_enable_for_forks
     required: false

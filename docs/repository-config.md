@@ -138,6 +138,18 @@ Anything that needs a real lock should be enforced upstream in the
 operator's own review of what merges to the repository's base branch, or by
 simply not marking that input `repo-configurable` in the first place.
 
+### Policy inputs need operator opt-in
+
+Inputs marked `repo-policy` in the contract change what blocks a merge or
+what the reviewer is told, not just how much work it does:
+`fail-on-request-changes`, `verdict-policy`, `non-blocking-finding-categories`,
+`validate-required-checks`, `required-check-validation-mode`,
+`evidence-blocker-enforcement`, and `system-prompt-mode`. Under rule 2 a
+repository could loosen them whenever the workflow leaves them unset, which
+matters when one team owns the workflow and another owns the repository. So
+they are ignored (with a warning) unless the operator sets
+`allow-repo-policy-overrides: "true"`; rule 2 then applies as usual.
+
 ## Unknown and malformed input
 
 - An unrecognized key, or a real contract key that isn't marked
