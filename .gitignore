@@ -4,9 +4,6 @@ __pycache__/
 .coverage
 *.egg-info/
 dist/
-!/dist/
-/dist/*
-!/dist/index.js
 build/
 *.egg
 .venv/

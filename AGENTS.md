@@ -52,7 +52,7 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 
 ```bash
 npm ci && npm run typecheck && npm test     # v3 TypeScript (vitest via node --test)
-npm run build && git diff --exit-code HEAD -- dist   # dist/ is committed; CI enforces a clean rebuild
+npm run build                                # dist/ is not committed; npm test and the parity harness need it built
 pytest tests/ -v --tb=short                 # Python unit tests (CI gate)
 tests/test_check_review_needed.sh           # shell behavior tests run standalone
 PR_NUMBER=6757 tests/smoke_test.sh          # end-to-end against a real PR with a mock API server
@@ -60,7 +60,7 @@ PR_NUMBER=6757 tests/smoke_test.sh          # end-to-end against a real PR with 
 
 ## Development conventions (normative)
 
-- **Committed `dist/`**: any change to `src/` requires `npm run build` with the rebuilt bundle committed.
+- **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
 - **Parity boundaries**: v3 ports must stay byte-identical to v2 at the serialization boundary. When porting a new boundary, add JSON-only fixtures under `tests/fixtures/parity/<boundary>/` and a v2 runner in `tests/parity_runners/`; pin snake_case shapes there.
 - **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
 - **Model calls use `curl -q`** so a user `.curlrc` cannot interfere with local models; API keys pass via 0600 config files, never argv.

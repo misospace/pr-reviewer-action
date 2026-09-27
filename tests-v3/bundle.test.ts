@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 
-test("committed bundle embeds the canonical contract and runs without source files", () => {
+test("built bundle embeds the canonical contract and runs without source files", () => {
   const secret = "bundle-secret-probe";
   const bundle = resolve("dist/index.js");
   const source = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
