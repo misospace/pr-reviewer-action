@@ -304,12 +304,17 @@ class RealPRScenario:
         )
 
     def to_pr_entry(self) -> dict[str, Any]:
-        """The subset run_review_for_pr needs: number/repo_full_name/head_sha."""
-        return {
+        """The subset run_review_for_pr needs: number/repo_full_name/head_sha,
+        plus ``base_sha`` when the entry pins the diff base."""
+        entry = {
             "number": self.number,
             "repo_full_name": self.repo_full_name,
             "head_sha": self.head_sha,
         }
+        base_sha = self.raw.get("base_sha")
+        if base_sha:
+            entry["base_sha"] = base_sha
+        return entry
 
 
 _REPO_FULL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -335,6 +340,9 @@ def validate_real_pr_corpus(vulnerable: list[RealPRScenario], clean: list[RealPR
             )
 
     def _check_identity(scenario: RealPRScenario) -> None:
+        base_sha = scenario.raw.get("base_sha")
+        if base_sha is not None and not (isinstance(base_sha, str) and _FULL_SHA_RE.fullmatch(base_sha)):
+            errors.append(f"{scenario.id}: base_sha must be a full 40-hex commit SHA, got {base_sha!r}")
         number = scenario.number
         if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
             errors.append(f"{scenario.id}: number must be a positive int, got {number!r}")
@@ -1643,6 +1651,43 @@ def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None
         )
 
 
+def _prepare_pinned_workspace(
+    repo_path: Path, head_sha: str, base_sha: str | None = None,
+) -> tuple[bool, str]:
+    """Reset a reused clone so no prior scenario's artifacts leak in.
+
+    The clone is shared by every scenario of a repo, and the review reuses a
+    non-empty ``pr.diff`` it finds there, so a stale one would review the
+    wrong PR. Removes every untracked/ignored file, then, when ``base_sha`` is
+    given, writes ``pr.diff`` as ``base...head`` so the review sees the diff as
+    it was at that head rather than the PR's current state. Returns (ok, error).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "clean", "-ffdxq"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if result.returncode != 0:
+        return False, f"git clean failed: {result.stderr[:300]}"
+    if not base_sha:
+        return True, ""
+    if subprocess.run(
+        ["git", "-C", str(repo_path), "cat-file", "-e", f"{base_sha}^{{commit}}"],
+        capture_output=True, check=False,
+    ).returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "--no-tags", "origin", base_sha],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "diff", f"{base_sha}...{head_sha}"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return False, f"diff {base_sha[:12]}...{head_sha[:12]} failed: {result.stderr[:300]}"
+    (repo_path / "pr.diff").write_text(result.stdout, encoding="utf-8")
+    return True, ""
+
+
 def _checkout_pinned_commit(
     repo_path: Path, commit_sha: str, pr_number: int | None = None,
 ) -> tuple[bool, str | None, str]:
@@ -1807,6 +1852,8 @@ def run_review_for_pr(
                 ok, sha, err = _checkout_pinned_commit(repo_path, pinned_sha, pr_number)
             else:
                 ok, sha, err = _checkout_pr_head(repo_path, pr_number)
+            if ok:
+                ok, err = _prepare_pinned_workspace(repo_path, sha, pr_entry.get("base_sha"))
             if not ok:
                 run.error = f"PR head not materialized: {err}"
                 run.wall_clock_sec = time.monotonic() - start

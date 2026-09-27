@@ -27,6 +27,7 @@ from eval_harness import (
     ReviewRun,
     _checkout_pinned_commit,
     _normalize_path_for_match,
+    _prepare_pinned_workspace,
     generate_real_pr_report,
     run_real_pr_corpus,
     score_clean_run,
@@ -437,3 +438,46 @@ class TestCheckoutPinnedCommit:
         assert ok is False
         assert sha is None
         assert err
+
+
+def _git_in(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+class TestPreparePinnedWorkspace:
+    def _repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_in(repo, "init", "-q", "-b", "main")
+        _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "base")
+        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        (repo / "a.py").write_text("x = 1\n")
+        _git_in(repo, "add", "a.py")
+        _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "head")
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        return repo, base, head
+
+    def test_removes_a_previous_scenarios_artifacts(self, tmp_path):
+        repo, _base, head = self._repo(tmp_path)
+        (repo / "pr.diff").write_text("diff of some other PR\n")
+        (repo / "ai-output.json").write_text("{}")
+        ok, err = _prepare_pinned_workspace(repo, head)
+        assert ok, err
+        assert not (repo / "pr.diff").exists()
+        assert not (repo / "ai-output.json").exists()
+        assert (repo / "a.py").exists()
+
+    def test_base_sha_writes_the_diff_at_that_head(self, tmp_path):
+        repo, base, head = self._repo(tmp_path)
+        (repo / "pr.diff").write_text("stale\n")
+        ok, err = _prepare_pinned_workspace(repo, head, base)
+        assert ok, err
+        diff = (repo / "pr.diff").read_text()
+        assert "+x = 1" in diff and "stale" not in diff
+
+    def test_bad_base_sha_is_rejected_by_validation(self, tmp_path):
+        base = {"repo_full_name": "acme/repo", "number": 1, "head_sha": "a" * 40, "base_sha": "abc"}
+        path = tmp_path / "corpus.json"
+        path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": [], "clean": [{**base, "expected_clean": True}]}}), encoding="utf-8")
+        with pytest.raises(ValueError, match="base_sha"):
+            RealPRCorpus.from_file(path)
