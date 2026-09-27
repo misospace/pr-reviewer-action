@@ -56,6 +56,7 @@ const PATH_WORD_RE = /[^a-z0-9]+/;
 const DOC_EXTS = new Set(["md", "rst", "txt", "adoc"]);
 const BRANCH_SITE_RE = /(?:===|!==|==|!=|["'\]]\s+=\s+|\s-(?:eq|ne)\s+)\s*["']|\s(?:not\s+)?in\s*[(\[{]\s*["']/;
 const CASE_SITE_RE = /^\s*(?:case\s|switch\s*\(|match\s)/;
+const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})/;
 
 // ---------------------------------------------------------------------------
 // Bounded text helpers
@@ -1604,6 +1605,25 @@ function renderLines(artifact: Record<string, unknown>): string[] {
 }
 
 /** Render a compact line-bounded Markdown artifact with safe code spans. */
+/** Length of the longest prefix of `lines` that does not end inside a fenced
+ * code block, so a cut never leaves a fence open over what follows: port of
+ * `related_context.fence_safe_length`. */
+export function fenceSafeLength(lines: readonly string[]): number {
+  let safe = 0;
+  let fence = "";
+  lines.forEach((line, index) => {
+    const stripped = line.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+    if (fence !== "") {
+      if (stripped.length >= fence.length && stripped === (fence[0] as string).repeat(stripped.length)) fence = "";
+    } else {
+      const match = FENCE_OPEN_RE.exec(line);
+      if (match) fence = match[1] as string;
+    }
+    if (fence === "") safe = index + 1;
+  });
+  return safe;
+}
+
 export function renderRelatedContextMarkdown(artifact: Record<string, unknown>, maxMarkdownBytes: number | null = MAX_MARKDOWN_BYTES): string {
   const lines = renderLines(artifact);
   const full = `${lines.join("\n")}\n`;
@@ -1620,6 +1640,7 @@ export function renderRelatedContextMarkdown(artifact: Record<string, unknown>, 
     chosen.push(line);
     used += lineBytes;
   }
+  chosen.splice(fenceSafeLength(chosen));
   if (chosen.length === 0) return "\n";
   return `${[...chosen, note].join("\n")}\n`;
 }

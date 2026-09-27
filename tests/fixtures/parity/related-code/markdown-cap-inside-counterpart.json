@@ -1,0 +1,140 @@
+{
+  "fixture": "markdown-cap-inside-counterpart",
+  "description": "#791 Markdown byte cap landing inside a counterpart body: the line-bounded renderer drops the whole fenced block instead of stopping inside it, so no fence is left open. Repo files and anchors are those of referenced-counterparts.",
+  "repo_files": {
+    "pr_reviewer/corpus_v2.py": "\"\"\"v2 corpus builders.\"\"\"\n\n\ndef _build_pr_metadata(root):\n    obj = read_json(root, \"pr.json\") or {}\n    return render(obj)\n\n\ndef _build_classification(root):\n    return render(read_json(root, \"classification.json\"))\n\n\ndef _build_pr_diff(root):\n    return read_text(root, \"pr.diff\")\n\n\ndef _unrelated_helper():\n    return None\n",
+    "src/specialists/corpus.ts": "export const CORPUS_VERSION = 1;\n\n// v3 port of `pr_reviewer/corpus_v2.py`; see also `pr_reviewer/missing.py`.\nexport function buildPrMetadata(root: string): string {\n  const obj = readJson(root, \"pr.json\") ?? {};\n  return render(obj);\n}\n\nexport function buildClassification(root: string): string {\n  return render(readJson(root, \"classification.json\"));\n}\n\nexport function buildPrDiff(root: string): string {\n  return readText(root, \"pr.diff\");\n}\n"
+  },
+  "anchors": {
+    "version": 1,
+    "files": [
+      {
+        "path": "pr_reviewer/corpus_v2.py",
+        "language": "python",
+        "symbols": [
+          {
+            "name": "_build_pr_diff",
+            "kind": "function",
+            "confidence": "high",
+            "line": 13
+          },
+          {
+            "name": "_build_pr_metadata",
+            "kind": "enclosing",
+            "confidence": "high",
+            "line": 4
+          }
+        ],
+        "imports": [],
+        "identifiers": [],
+        "changed_lines": [
+          [
+            5,
+            5
+          ],
+          [
+            13,
+            16
+          ]
+        ]
+      },
+      {
+        "path": "src/specialists/corpus.ts",
+        "language": "typescript",
+        "symbols": [
+          {
+            "name": "buildPrMetadata",
+            "kind": "function",
+            "confidence": "high",
+            "line": 4
+          },
+          {
+            "name": "buildClassification",
+            "kind": "function",
+            "confidence": "high",
+            "line": 9
+          },
+          {
+            "name": "buildPrDiff",
+            "kind": "function",
+            "confidence": "high",
+            "line": 13
+          }
+        ],
+        "imports": [],
+        "identifiers": [],
+        "changed_lines": [
+          [
+            2,
+            15
+          ]
+        ],
+        "counterparts": [
+          {
+            "name": "buildPrMetadata",
+            "line": 4,
+            "ref_path": "pr_reviewer/corpus_v2.py",
+            "ref_name": "_build_pr_metadata",
+            "ref_line": 4,
+            "ref_end": 6,
+            "ref_changed": true
+          },
+          {
+            "name": "buildClassification",
+            "line": 9,
+            "ref_path": "pr_reviewer/corpus_v2.py",
+            "ref_name": "_build_classification",
+            "ref_line": 9,
+            "ref_end": 10
+          }
+        ]
+      }
+    ],
+    "anchors": [
+      {
+        "value": "pr_reviewer/corpus_v2.py",
+        "kind": "file",
+        "source": "pr_reviewer/corpus_v2.py",
+        "confidence": "low"
+      },
+      {
+        "value": "_build_pr_diff",
+        "kind": "symbol",
+        "source": "pr_reviewer/corpus_v2.py",
+        "confidence": "high"
+      },
+      {
+        "value": "_build_pr_metadata",
+        "kind": "symbol",
+        "source": "pr_reviewer/corpus_v2.py",
+        "confidence": "high"
+      },
+      {
+        "value": "src/specialists/corpus.ts",
+        "kind": "file",
+        "source": "src/specialists/corpus.ts",
+        "confidence": "low"
+      },
+      {
+        "value": "buildPrMetadata",
+        "kind": "symbol",
+        "source": "src/specialists/corpus.ts",
+        "confidence": "high"
+      },
+      {
+        "value": "buildClassification",
+        "kind": "symbol",
+        "source": "src/specialists/corpus.ts",
+        "confidence": "high"
+      },
+      {
+        "value": "buildPrDiff",
+        "kind": "symbol",
+        "source": "src/specialists/corpus.ts",
+        "confidence": "high"
+      }
+    ],
+    "truncated": false
+  },
+  "markdown_max_bytes": 677
+}

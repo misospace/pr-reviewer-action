@@ -802,3 +802,74 @@ def test_consumer_and_counterpart_fences_resist_hostile_lines(tmp_path):
         opens = [i for i, line in enumerate(lines) if line == indent + "`````"]
         assert opens, indent
     assert "````" in markdown
+
+
+def _open_fence(text: str) -> str | None:
+    fence = None
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if fence is None:
+            if stripped.startswith(("```", "~~~")):
+                fence = stripped[: len(stripped) - len(stripped.lstrip(stripped[0]))]
+        elif stripped and stripped == fence[0] * len(stripped) and len(stripped) >= len(fence):
+            fence = None
+    return fence
+
+
+def _fenced_result(tmp_path: Path) -> dict:
+    root = make_repo(tmp_path, {
+        "cfg.yml": "a: 1\n",
+        "pr_reviewer/v2.py": _V2,
+        "src/v3.ts": "x\n",
+        **{f"src/use_{i}.py": f'import os\n\n\ndef read_{i}():\n    return os.getenv("SETTING_{i:02d}")  # ``` run\n' for i in range(6)},
+    })
+    return build_related_context(anchors(
+        _key_file("cfg.yml", [(f"SETTING_{i:02d}", "env", 1) for i in range(6)]),
+        _key_file("src/v3.ts", [], counterparts=[_counterpart()]),
+    ), root)
+
+
+def test_markdown_cap_never_splits_consumer_or_counterpart_blocks(tmp_path):
+    result = _fenced_result(tmp_path)
+    full = render_related_context_markdown(result, max_markdown_bytes=None)
+    assert _open_fence(full) is None
+    consumers = full.index("## Consumers")
+    counterparts = full.index("## Referenced Counterparts")
+    naive_open = 0
+    for cap in range(consumers, len(full.encode("utf-8")), 11):
+        rendered = render_related_context_markdown(result, max_markdown_bytes=cap)
+        assert len(rendered.encode("utf-8")) <= cap
+        assert _open_fence(rendered) is None, cap
+        naive = full.encode("utf-8")[:cap].decode("utf-8", "ignore")
+        naive_open += _open_fence(naive.rsplit("\n", 1)[0]) is not None
+    assert naive_open > 0 and counterparts < len(full)
+
+
+def test_clip_markdown_is_fence_safe_and_budget_honest(tmp_path):
+    full = render_related_context_markdown(_fenced_result(tmp_path), max_markdown_bytes=None)
+    size = len(full.encode("utf-8"))
+    assert related_context.clip_markdown(full, size) == full
+    for cap in range(40, size, 13):
+        clipped = related_context.clip_markdown(full, cap)
+        assert len(clipped.encode("utf-8")) <= cap
+        assert clipped.endswith(related_context.CLIP_MARKER)
+        assert full.startswith(clipped[: -len(related_context.CLIP_MARKER)])
+        assert _open_fence(clipped) is None, cap
+
+
+def test_fence_safe_length():
+    fsl = related_context.fence_safe_length
+    assert fsl(["a", "  ````", "  1: ``` x", "  ````", "b"]) == 5
+    assert fsl(["a", "  ````", "  1: x", "  ```"]) == 1
+    assert fsl(["a", "~~~", "x"]) == 1
+    assert fsl([]) == 0
+
+
+def test_clip_cli(tmp_path):
+    source = tmp_path / "related-code.md"
+    source.write_text("# Related Code (v1)\n\n- `K`:\n  ```\n  1: x\n  2: y\n  3: z\n  4: w\n  ```\n", encoding="utf-8")
+    out = tmp_path / "related-code.truncated.md"
+    rc = related_context.main(["--clip", str(source), "--clip-output", str(out), "--max-bytes", "62"])
+    assert rc == 0
+    assert out.read_text(encoding="utf-8") == "# Related Code (v1)\n\n- `K`:\n" + related_context.CLIP_MARKER
+    assert related_context.main(["--clip", str(source), "--clip-output", str(out)]) == 2

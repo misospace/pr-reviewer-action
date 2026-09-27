@@ -55,6 +55,9 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "pr_reviewer.change_anchors" ]]; then
   printf '{"version":1,"anchors":[]}' > "$output"
   exit 0
 fi
+if [[ "${1:-}" == "-m" && "${2:-}" == "pr_reviewer.related_context" && "${3:-}" == "--clip" ]]; then
+  PYTHONPATH="$ROOT_DIR" exec "$REAL_PYTHON3" "$@"
+fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "pr_reviewer.related_context" ]]; then
   if [[ "${RELATED_MODE:-ok}" == "fail" ]]; then exit 1; fi
   output_json="related-code.json"
@@ -81,7 +84,7 @@ reset_artifacts() {
 run_context() {
   (
     cd "$WORK"
-    PATH="$WORK:$PATH" REAL_PYTHON3="$REAL_PYTHON3" CALL_LOG="$WORK/calls.log" \
+    PATH="$WORK:$PATH" REAL_PYTHON3="$REAL_PYTHON3" ROOT_DIR="$ROOT_DIR" CALL_LOG="$WORK/calls.log" \
       RELATED_CODE_CONTEXT="${RELATED_CODE_CONTEXT:-true}" \
       RELATED_CODE_MAX_BYTES="${RELATED_CODE_MAX_BYTES:-64}" \
       GITHUB_WORKSPACE="$WORK" build_related_code_context "$@"
@@ -120,6 +123,60 @@ else
   echo "  FAIL: truncated related-code output exceeds cap ($TRUNCATED_BYTES bytes)"
   FAIL=$((FAIL+1))
 fi
+
+# Fenced consumer windows and counterpart bodies: whatever cap lands inside a
+# block, the clipped artifact keeps every fence closed and stays within the cap.
+FENCED_BODY="$(cat <<'MD'
+# Related Code (v1)
+
+## Consumers of Changed Keys
+
+- `evidence-providers-file` (entity, `contracts/action.yml`:7):
+  - `scripts/run_evidence_providers.py`:10 as `EVIDENCE_PROVIDERS_FILE`
+    ````
+    9: def main():
+    10:     path = os.getenv("EVIDENCE_PROVIDERS_FILE", "")  # ``` hostile
+    11:     return path
+    ````
+
+## Referenced Counterparts
+
+- `pr_reviewer/v2.py`:4 `_build_pr_metadata` for `buildPrMetadata` in `src/v3.ts`:4:
+  ```
+  4: def _build_pr_metadata(root):
+  5:     obj = read_json(root, "pr.json")
+  6:     return render(obj)
+  ```
+
+## Changed Files
+MD
+)"
+FENCED_TOTAL="$(printf '%s\n' "$FENCED_BODY" | wc -c | tr -d ' ')"
+fence_failures=""
+for ((cap=40; cap<FENCED_TOTAL; cap+=7)); do
+  reset_artifacts
+  RELATED_BODY="$FENCED_BODY" RELATED_CODE_MAX_BYTES="$cap" run_context pr.diff pr-files.json
+  verdict="$("$REAL_PYTHON3" - "$WORK/related-code.truncated.md" "$cap" <<'PY'
+import re
+import sys
+
+data = open(sys.argv[1], "rb").read()
+text = data.decode("utf-8")
+fence = ""
+for line in text.splitlines():
+    stripped = line.strip()
+    if fence:
+        if len(stripped) >= len(fence) and stripped == fence[0] * len(stripped):
+            fence = ""
+    elif re.match(r"^[ \t]*(`{3,}|~{3,})", line):
+        fence = re.match(r"^[ \t]*(`{3,}|~{3,})", line).group(1)
+ok = not fence and len(data) <= int(sys.argv[2]) and text.endswith("[related-code context truncated]\n")
+print("ok" if ok else "bad")
+PY
+)"
+  [ "$verdict" = "ok" ] || fence_failures="$fence_failures $cap"
+done
+check "fenced blocks are never left open by the byte cap" "${fence_failures:-none}" "none"
 
 reset_artifacts
 RELATED_BODY="# Related Code (v1)" run_context pr.diff pr-files.json

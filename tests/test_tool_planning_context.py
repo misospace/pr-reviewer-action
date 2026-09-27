@@ -487,3 +487,21 @@ class TestPlannerSeesPrIdentity:
         assert "### `src/app.py`" in text
         assert "fixtures/3.json" not in text
         assert "200 changed file(s) with no symbol or test references omitted" in text
+
+    def test_related_code_excerpt_cut_drops_a_split_fenced_block(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _write_pieces(tmp_path)
+        entry = (
+            "- `SETTING_{i:03d}` (env, `src/config.py`:1):\n"
+            "  - `scripts/run.py`:12 as `SETTING_{i:03d}`\n"
+            "    ````\n"
+            '    12:     value = os.getenv("SETTING_{i:03d}")  # ``` hostile\n'
+            "    ````\n"
+        )
+        body = "# Related Code (v1)\n\n## Consumers of Changed Keys\n\n" + "".join(entry.format(i=i) for i in range(200))
+        for pad in range(0, 120, 9):
+            (tmp_path / "related-code.truncated.md").write_text(body.replace("## Consumers", "_" + "p" * pad + "_\n\n## Consumers", 1))
+            text, _ = build_planning_context(50000)
+            section = text[text.index("# Related Code Context"): text.index("\n[truncated]")]
+            opens = [line.strip() for line in section.split("\n") if line.strip().startswith("```")]
+            assert len(opens) % 2 == 0, pad

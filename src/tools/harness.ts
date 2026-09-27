@@ -33,6 +33,7 @@ import {
   pyDumpsAscii,
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
+import { fenceSafeLength } from "../context/related-context.js";
 import { maskAndTruncate } from "../context/redact.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
@@ -542,7 +543,8 @@ export function buildPlanningContext(
     let text = parts.filter((part) => part).join("\n\n");
     const raw = Buffer.from(text, "utf8");
     if (raw.length > cap) {
-      text = decodeUtf8Ignore(raw.subarray(0, cap)) + "\n[truncated]";
+      const cut = decodeUtf8Ignore(raw.subarray(0, cap)).split("\n");
+      text = `${cut.slice(0, fenceSafeLength(cut)).join("\n")}\n[truncated]`;
       anyClipped = true;
     }
     if (text.startsWith(`# ${title}`)) return text;

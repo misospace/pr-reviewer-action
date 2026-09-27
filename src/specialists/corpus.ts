@@ -17,6 +17,7 @@
  * v2 file read is an entry in the `SpecialistCorpusWorkspace` map keyed by the
  * exact v2 filename (`Uint8Array | null`; `null` = file absent). */
 
+import { fenceSafeLength } from "../context/related-context.js";
 import { MAX_LEDGER_MARKDOWN_BYTES } from "../requirements/ledger.js";
 
 /** Default hard UTF-8 byte cap on the specialist corpus. */
@@ -358,7 +359,11 @@ function renderSection(
   const suffix = closingFence ? `\n${closingFence}${marker}` : marker;
   const fixed = bytesOf(prefix) + bytesOf(suffix);
   if (fixed >= cap) return ["", true, false];
-  const [clipped] = truncateUtf8(body, cap - fixed);
+  let [clipped] = truncateUtf8(body, cap - fixed);
+  if (!closingFence) {
+    const lines = clipped.split("\n");
+    clipped = lines.slice(0, fenceSafeLength(lines)).join("\n");
+  }
   if (!clipped.trim()) return ["", true, false];
   return [`${prefix}${clipped}${suffix}`, true, true];
 }

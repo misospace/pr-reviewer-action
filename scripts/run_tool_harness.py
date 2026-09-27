@@ -53,6 +53,7 @@ from pr_reviewer.tool_executors import (  # noqa: E402
     web_fetch,
     web_search,
 )
+from pr_reviewer.related_context import fence_safe_length  # noqa: E402
 from pr_reviewer.repo_map import (  # noqa: E402
     reframe_for_corpus,
     render_repo_map_markdown,
@@ -716,7 +717,8 @@ def build_planning_context(max_bytes, corpus_path=None):
         text = "\n\n".join(part for part in parts if part)
         raw = text.encode("utf-8")
         if len(raw) > cap:
-            text = raw[:cap].decode("utf-8", errors="ignore") + "\n[truncated]"
+            cut = raw[:cap].decode("utf-8", errors="ignore").split("\n")
+            text = "\n".join(cut[: fence_safe_length(cut)]) + "\n[truncated]"
             any_clipped = True
         if text.startswith(f"# {title}"):
             return text

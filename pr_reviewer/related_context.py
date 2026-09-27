@@ -80,6 +80,8 @@ _BRANCH_SITE_RE = re.compile(
     r"""(?:===|!==|==|!=|["'\]]\s+=\s+|\s-(?:eq|ne)\s+)\s*["']|\s(?:not\s+)?in\s*[(\[{]\s*["']"""
 )
 _CASE_SITE_RE = re.compile(r"^\s*(?:case\s|switch\s*\(|match\s)")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+CLIP_MARKER = "[related-code context truncated]\n"
 _MANIFEST_BASE_RE = re.compile(
     r"^(?:pyproject\.toml|setup\.(?:py|cfg)|requirements[^/]*\.txt|"
     r"package(?:-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|go\.(?:mod|sum)|"
@@ -1339,6 +1341,42 @@ def _render_lines(related: dict[str, Any]) -> list[str]:
     return lines
 
 
+def fence_safe_length(lines: list[str]) -> int:
+    """Length of the longest prefix of ``lines`` that does not end inside a
+    fenced code block, so a cut never leaves a fence open over what follows."""
+    safe = 0
+    fence = ""
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip(" \t\r\n")
+        if fence:
+            if len(stripped) >= len(fence) and stripped == fence[0] * len(stripped):
+                fence = ""
+        else:
+            match = _FENCE_OPEN_RE.match(line)
+            if match:
+                fence = match.group(1)
+        if not fence:
+            safe = index
+    return safe
+
+
+def clip_markdown(text: str, max_bytes: int, marker: str = CLIP_MARKER) -> str:
+    """Cut ``text`` to whole lines so that it, with ``marker`` appended, fits in
+    ``max_bytes`` UTF-8 bytes, dropping any fenced block the cut would split."""
+    if len(text.encode("utf-8", "surrogateescape")) <= max_bytes:
+        return text
+    budget = max_bytes - len(marker.encode("utf-8", "surrogateescape"))
+    kept: list[str] = []
+    used = 0
+    for line in re.split(r"(?<=\n)", text):
+        size = len(line.encode("utf-8", "surrogateescape"))
+        if used + size > budget:
+            break
+        kept.append(line)
+        used += size
+    return "".join(kept[: fence_safe_length(kept)]) + marker
+
+
 def render_related_context_markdown(
     related: dict[str, Any], *, max_markdown_bytes: int | None = MAX_MARKDOWN_BYTES,
 ) -> str:
@@ -1360,6 +1398,7 @@ def render_related_context_markdown(
             break
         chosen.append(line)
         used += line_bytes
+    chosen = chosen[: fence_safe_length(chosen)]
     if not chosen:
         return "\n"
     return "\n".join(chosen + [note]) + "\n"
@@ -1387,6 +1426,19 @@ def _load_json(path: str) -> tuple[Any, str | None]:
         return None, "invalid JSON"
 
 
+def _clip_main(source: str, output: str, max_bytes: int) -> int:
+    if not output or max_bytes <= 0:
+        print("related_context: --clip needs --clip-output and a positive --max-bytes", file=sys.stderr)
+        return 2
+    try:
+        text = Path(source).read_bytes().decode("utf-8", "surrogateescape")
+        Path(output).write_bytes(clip_markdown(text, max_bytes).encode("utf-8", "surrogateescape"))
+    except OSError as exc:
+        print(f"related_context: could not clip Markdown: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build bounded related-code context from change anchors.")
     parser.add_argument("--anchors", default="change-anchors.json")
@@ -1395,7 +1447,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", "--output", dest="json_output", default="related-code.json")
     parser.add_argument("--markdown", default="related-code.md")
     parser.add_argument("--git-timeout", type=float, default=DEFAULT_GIT_TIMEOUT_SEC)
+    parser.add_argument("--clip", default="", help="Only cut this Markdown file to --max-bytes (fence-safe).")
+    parser.add_argument("--clip-output", default="")
+    parser.add_argument("--max-bytes", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.clip:
+        return _clip_main(args.clip, args.clip_output, args.max_bytes)
     workspace = args.workspace or os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
 
     anchor_data, anchor_error = _load_json(args.anchors)

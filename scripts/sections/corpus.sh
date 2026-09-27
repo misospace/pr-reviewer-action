@@ -62,23 +62,10 @@ build_related_code_context() {
     return 0
   fi
 
-  if ! RELATED_CODE_MAX_BYTES="$RELATED_CODE_MAX_BYTES" python3 - <<'PY'
-import os
-from pathlib import Path
-
-source = Path("related-code.md").read_bytes()
-limit = int(os.environ["RELATED_CODE_MAX_BYTES"])
-if len(source) <= limit:
-    Path("related-code.truncated.md").write_bytes(source)
-else:
-    marker = b"\n[related-code context truncated]\n"
-    clipped = source[:limit - len(marker)]
-    newline = clipped.rfind(b"\n")
-    if newline >= 0:
-        clipped = clipped[:newline]
-    Path("related-code.truncated.md").write_bytes(clipped + marker)
-PY
-  then
+  # Whole-line, fence-safe cut: a fenced snippet the cap would split is
+  # dropped, so the corpus never inherits an open code fence.
+  if ! python3 -m pr_reviewer.related_context --clip related-code.md \
+      --clip-output related-code.truncated.md --max-bytes "$RELATED_CODE_MAX_BYTES"; then
     log "WARNING: related-code truncation failed; continuing without related-code context"
     for empty_artifact in $artifacts; do
       : > "$empty_artifact"
