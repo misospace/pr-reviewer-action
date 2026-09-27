@@ -201,19 +201,32 @@ class TestTierAwareRequestBudget(TestCase):
             self.assertEqual(self.mod.tool_budget_route("smart"), "smart")
 
 
+class TestResolveLoopLimits(TestCase):
+    """resolve_loop_limits: 4 rounds / 600s by default, smart overrides, clamping."""
+
+    _NAMES = ("TOOL_MAX_ROUNDS", "TOOL_LOOP_WALL_CLOCK_SEC", "SMART_TOOL_MAX_ROUNDS", "SMART_TOOL_LOOP_WALL_CLOCK_SEC")
+
+    def setUp(self):
+        self.mod = _import_harness()
+        env = {k: v for k, v in os.environ.items() if k not in self._NAMES}
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_defaults(self):
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (4, 600))
+
+    def test_bounds_clamp(self):
+        os.environ["TOOL_MAX_ROUNDS"] = "9"
+        os.environ["TOOL_LOOP_WALL_CLOCK_SEC"] = "5000"
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (6, 900))
+
+    def test_smart_overrides_only_on_smart(self):
+        os.environ["SMART_TOOL_MAX_ROUNDS"] = "5"
+        os.environ["SMART_TOOL_LOOP_WALL_CLOCK_SEC"] = "300"
+        self.assertEqual(self.mod.resolve_loop_limits("smart"), (5, 300))
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (4, 600))
+
+
 if __name__ == "__main__":
     unittest_main()
-
-
-def test_resolve_loop_limits_defaults_and_overrides(monkeypatch):
-    harness = _import_harness()
-    for name in ("TOOL_MAX_ROUNDS", "TOOL_LOOP_WALL_CLOCK_SEC", "SMART_TOOL_MAX_ROUNDS", "SMART_TOOL_LOOP_WALL_CLOCK_SEC"):
-        monkeypatch.delenv(name, raising=False)
-    assert harness.resolve_loop_limits("primary") == (4, 600)
-    monkeypatch.setenv("TOOL_MAX_ROUNDS", "9")
-    monkeypatch.setenv("TOOL_LOOP_WALL_CLOCK_SEC", "5000")
-    assert harness.resolve_loop_limits("primary") == (6, 900)
-    monkeypatch.setenv("SMART_TOOL_MAX_ROUNDS", "5")
-    monkeypatch.setenv("SMART_TOOL_LOOP_WALL_CLOCK_SEC", "300")
-    assert harness.resolve_loop_limits("smart") == (5, 300)
-    assert harness.resolve_loop_limits("primary") == (6, 900)
