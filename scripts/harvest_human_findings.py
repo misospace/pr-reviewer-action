@@ -16,12 +16,17 @@ tracked in ``evals/corpus-human-findings.json`` (see ``docs/evals.md``,
     "blocker", "before merge", "request changes" — case-insensitive; its head
     is the latest PR commit before the comment's timestamp),
 
-kept only when the reviewer bot's own review *at that exact head* was an
-approval. The bot dismisses its own older reviews as newer heads land, which
-flips ``state`` to ``DISMISSED`` after the fact — so the approval decision is
-read from the bot's ``ai-pr-reviewer:{...}`` metadata marker
-(``pr_reviewer/metadata.py``) when present (``review_result: "clean"``), and
-only falls back to the raw ``state`` when no marker parses.
+kept only when the reviewer bot's own review *at that exact head, at or
+before the finding's own timestamp* was an approval. "At or before" matters:
+a bot approval posted only after the maintainer's finding can't retroactively
+justify harvesting it, and a bot review posted even later (e.g. the bot
+catching up and flagging issues after the fact) can't retroactively
+disqualify a finding that was valid when it was made. The bot dismisses its
+own older reviews as newer heads land, which flips ``state`` to ``DISMISSED``
+after the fact — so the approval decision is read from the bot's
+``ai-pr-reviewer:{...}`` metadata marker (``pr_reviewer/metadata.py``) when
+present (``review_result: "clean"``), and only falls back to the raw
+``state`` when no marker parses.
 
 GitHub reads only (``gh api`` when available, otherwise ``urllib`` with a
 token from the environment — never argv). This script never writes to
@@ -210,16 +215,27 @@ def resolve_head_for_comment(commits: list[dict[str, Any]], comment_created_at: 
 
 
 def determine_bot_approval(
-    reviews: list[dict[str, Any]], bots: set[str], head_sha: str
+    reviews: list[dict[str, Any]],
+    bots: set[str],
+    head_sha: str,
+    finding_created_at: str,
 ) -> tuple[bool, str | None]:
     """Whether the reviewer bot's review at ``head_sha`` was an approval.
 
-    Prefers the bot's ``ai-pr-reviewer:{...}`` metadata marker
-    (``review_result == "clean"``) over the review's raw ``state``, since a
-    later dismissal (the bot superseding its own stale review) flips
-    ``state`` to ``DISMISSED`` without changing what the marker recorded at
-    the time. Returns ``(approved, base_sha)`` — ``base_sha`` is the marker's
-    ``base_sha`` field when it is a full 40-hex commit sha, else ``None``.
+    Only considers bot reviews with ``submitted_at <= finding_created_at`` —
+    time-bounds the approval to the human finding it's meant to explain. A
+    bot review posted after the maintainer's finding (even at the same head)
+    can't retroactively justify harvesting that finding, and a bot review
+    posted later still (e.g. the bot flagging issues after the fact) can't
+    retroactively disqualify it either.
+
+    Among the reviews at or before that timestamp, prefers the bot's
+    ``ai-pr-reviewer:{...}`` metadata marker (``review_result == "clean"``)
+    over the review's raw ``state``, since a later dismissal (the bot
+    superseding its own stale review) flips ``state`` to ``DISMISSED``
+    without changing what the marker recorded at the time. Returns
+    ``(approved, base_sha)`` — ``base_sha`` is the marker's ``base_sha``
+    field when it is a full 40-hex commit sha, else ``None``.
     """
     bots_lower = {b.lower() for b in bots}
     candidates = [
@@ -227,6 +243,7 @@ def determine_bot_approval(
         for r in reviews
         if (r.get("user") or {}).get("login", "").lower() in bots_lower
         and r.get("commit_id") == head_sha
+        and (r.get("submitted_at") or "") <= finding_created_at
     ]
     if not candidates:
         return False, None
@@ -342,38 +359,87 @@ def harvest_repo(
             head_sha = rv.get("commit_id")
             if not head_sha:
                 continue
-            body = (rv.get("body") or "").strip()
             review_id = rv.get("id")
-            if not body:
-                attached = [
-                    c
-                    for c in review_comments
-                    if c.get("pull_request_review_id") == review_id
-                ]
-                body = "\n".join(
-                    (c.get("body") or "").strip() for c in attached if c.get("body")
-                ).strip()
-            if not body:
+            raw_body = (rv.get("body") or "").strip()
+            state = rv.get("state")
+            submitted_at = rv.get("submitted_at") or ""
+
+            attached = [
+                c
+                for c in review_comments
+                if c.get("pull_request_review_id") == review_id and c.get("path")
+            ]
+            attached.sort(key=lambda c: c.get("id") or 0)
+
+            combined_text = raw_body or "\n".join(
+                (c.get("body") or "").strip() for c in attached if c.get("body")
+            ).strip()
+            if not combined_text:
                 continue
             # A formal CHANGES_REQUESTED review is always kept. Any other
             # review state (in practice, maintainers often leave a
             # COMMENTED review whose body reads as a blocking finding
             # rather than formally requesting changes) is kept only when
-            # its body matches the same blocking-language heuristic used
+            # its text matches the same blocking-language heuristic used
             # for issue comments.
-            if rv.get("state") != "CHANGES_REQUESTED" and not is_blocking_comment(body):
+            if state != "CHANGES_REQUESTED" and not is_blocking_comment(combined_text):
                 continue
-            candidates.append(
-                {
-                    "created_at": rv.get("submitted_at") or "",
+
+            # Each attached inline review comment is its own finding,
+            # anchored to its own path/line/start_line — a review with
+            # several inline comments must not collapse into one defect
+            # anchored to the first comment.
+            for c in attached:
+                comment_body = (c.get("body") or "").strip()
+                if not comment_body:
+                    continue
+                candidate: dict[str, Any] = {
+                    "created_at": submitted_at,
                     "kind": "review",
-                    "source_id": review_id or 0,
-                    "text": body,
+                    "source_id": c.get("id") or 0,
+                    "text": comment_body,
                     "head_sha": head_sha,
-                    "review_id": review_id,
-                    "url": f"https://github.com/{repo}/pull/{number}#pullrequestreview-{review_id}",
+                    "review_id": None,
+                    "url": (
+                        f"https://github.com/{repo}/pull/{number}"
+                        f"#discussion_r{c.get('id')}"
+                    ),
                 }
-            )
+                line = c.get("line")
+                if line is None:
+                    line = c.get("original_line")
+                if line is not None:
+                    start = c.get("start_line")
+                    if start is None:
+                        start = c.get("original_start_line")
+                    start_line = start if start is not None else line
+                    lo, hi = start_line, line
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    candidate["anchor"] = (c["path"], (lo, hi), "high")
+                candidates.append(candidate)
+
+            # The review body becomes a *separate* finding only when it
+            # independently reads as one — not merely because attached
+            # inline comments made the review eligible above. Its anchor
+            # always comes from a named changed-file path (never an inline
+            # comment's position, which belongs to that comment's own
+            # finding above).
+            if raw_body and (state == "CHANGES_REQUESTED" or is_blocking_comment(raw_body)):
+                candidates.append(
+                    {
+                        "created_at": submitted_at,
+                        "kind": "review",
+                        "source_id": review_id or 0,
+                        "text": raw_body,
+                        "head_sha": head_sha,
+                        "review_id": None,
+                        "url": (
+                            f"https://github.com/{repo}/pull/{number}"
+                            f"#pullrequestreview-{review_id}"
+                        ),
+                    }
+                )
 
         for c in issue_comments:
             login = (c.get("user") or {}).get("login", "")
@@ -402,10 +468,16 @@ def harvest_repo(
         candidates.sort(key=lambda c: (c["created_at"], c["kind"], c["source_id"]))
 
         for cand in candidates:
-            approved, base_sha = determine_bot_approval(reviews, bots, cand["head_sha"])
+            approved, base_sha = determine_bot_approval(
+                reviews, bots, cand["head_sha"], cand["created_at"]
+            )
             if not approved:
                 continue
-            anchor = resolve_anchor(cand["text"], cand["review_id"], review_comments, changed_files)
+            anchor = cand.get("anchor")
+            if anchor is None:
+                anchor = resolve_anchor(
+                    cand["text"], cand.get("review_id"), review_comments, changed_files
+                )
             finding = {
                 "repo": repo,
                 "number": number,

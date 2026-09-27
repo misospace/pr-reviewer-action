@@ -42,8 +42,66 @@ on:
 permissions: {}
 
 jobs:
+  resolve-scope:
+    name: Resolve app-token scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      owner: ${{ steps.scope.outputs.owner }}
+      repos: ${{ steps.scope.outputs.repos }}
+    steps:
+      # actions/create-github-app-token scopes an installation token to a
+      # single owner. Derive that owner (and the repo-name list under it,
+      # including this repo so the PR-opening step below keeps working)
+      # from the configured harvest scope, instead of leaving the token
+      # unscoped (installation-wide) as before. Repos spanning more than
+      # one owner aren't supported by a single token -- fail clearly rather
+      # than silently widening or narrowing the scope.
+      - name: Compute owner/repos for the app token
+        id: scope
+        shell: bash
+        env:
+          REPOS: ${{ inputs.repos || vars.HARVEST_REPOS }}
+          CURRENT_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          declare -A owners_seen=()
+          declare -A names_seen=()
+          names_ordered=()
+          IFS=',' read -ra repo_list <<< "$REPOS"
+          for raw in "${repo_list[@]}" "$CURRENT_REPO"; do
+            repo="$(echo "$raw" | xargs)"
+            [ -z "$repo" ] && continue
+            if [[ "$repo" != */* ]]; then
+              echo "::error::'$repo' is not an owner/repo slug"
+              exit 1
+            fi
+            owner="${repo%%/*}"
+            name="${repo#*/}"
+            owners_seen["$owner"]=1
+            if [ -z "${names_seen[$name]:-}" ]; then
+              names_seen["$name"]=1
+              names_ordered+=("$name")
+            fi
+          done
+
+          if [ "${#owners_seen[@]}" -ne 1 ]; then
+            echo "::error::harvest repos span multiple owners (${!owners_seen[*]});" \
+              "actions/create-github-app-token scopes to a single owner per token --" \
+              "narrow HARVEST_REPOS to one owner, or split this workflow into a" \
+              "matrix job per owner"
+            exit 1
+          fi
+
+          owner="${!owners_seen[*]}"
+          repos="$(IFS=,; echo "${names_ordered[*]}")"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
   harvest:
     name: Harvest human findings
+    needs: resolve-scope
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -55,6 +113,8 @@ jobs:
         with:
           app-id: ${{ secrets.MISO_APP_ID }}
           private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
+          owner: ${{ needs.resolve-scope.outputs.owner }}
+          repositories: ${{ needs.resolve-scope.outputs.repos }}
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,7 +164,10 @@ jobs:
 
           # checkout ran with persist-credentials: false, so push auth comes
           # from the app token here, not a persisted default GITHUB_TOKEN.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # `gh auth setup-git` registers `gh` as git's credential helper: it
+          # reads GH_TOKEN from the environment at push time and never puts
+          # the token in argv or in a persisted .git/config value.
+          gh auth setup-git
 
           # The branch only ever carries this one kind of change, so resetting
           # it to the current main tip each run is equivalent to "update the

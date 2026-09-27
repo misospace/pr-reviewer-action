@@ -8,6 +8,7 @@ unpinned action.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -99,4 +100,58 @@ def test_opens_or_updates_single_pr_never_recreates() -> None:
     assert "gh pr create" in text
     assert "force-with-lease" in text, (
         "the bot branch push should use --force-with-lease, not a bare force push"
+    )
+
+
+def test_app_token_is_scoped_to_the_configured_harvest_repos() -> None:
+    """The app token must be scoped to owner/repositories derived from the
+    configured harvest scope (HARVEST_REPOS / inputs.repos), not left
+    unscoped (which defaults to installation-wide, i.e. this repo only, or
+    broader depending on the app install)."""
+    workflow = yaml.safe_load(_text())
+    jobs = workflow["jobs"]
+
+    assert "resolve-scope" in jobs, (
+        "expected a job that resolves owner/repos for the app token from "
+        "the configured harvest scope"
+    )
+    scope_outputs = jobs["resolve-scope"].get("outputs", {})
+    assert "owner" in scope_outputs and "repos" in scope_outputs
+
+    harvest = jobs["harvest"]
+    assert harvest.get("needs") in ("resolve-scope", ["resolve-scope"]) or (
+        isinstance(harvest.get("needs"), list) and "resolve-scope" in harvest["needs"]
+    ), "the harvest job must depend on the scope-resolution job"
+
+    token_step = next(s for s in harvest["steps"] if s.get("id") == "app-token")
+    with_block = token_step.get("with", {})
+    assert "owner" in with_block, "app-token step must set owner: to scope the token"
+    assert "repositories" in with_block, (
+        "app-token step must set repositories: to scope the token"
+    )
+    assert "needs.resolve-scope.outputs.owner" in with_block["owner"]
+    assert "needs.resolve-scope.outputs.repos" in with_block["repositories"]
+
+    # The scope-resolution step itself must derive from the configured
+    # harvest scope (HARVEST_REPOS / dispatch input), not a hardcoded value.
+    scope_step_text = json.dumps(jobs["resolve-scope"])
+    assert "HARVEST_REPOS" in scope_step_text or "inputs.repos" in scope_step_text
+    # ...and must fold in the current repo so the PR-opening step (which
+    # runs against this repo) stays covered by the same token.
+    assert "github.repository" in scope_step_text
+
+
+def test_never_embeds_token_in_a_url() -> None:
+    """The push/PR step must not put the token in argv or a persisted
+    `.git/config` URL (e.g. `https://x-access-token:$TOKEN@...`)."""
+    text = _text()
+    assert "x-access-token" not in text, (
+        "must not embed the token in a remote URL"
+    )
+    assert not re.search(r"git remote set-url[^\n]*\$\{?\{?\s*.*TOKEN", text, re.IGNORECASE), (
+        "must not build a remote URL containing a token variable"
+    )
+    assert "gh auth setup-git" in text, (
+        "expected a credential mechanism (e.g. `gh auth setup-git`) that "
+        "keeps the token out of argv and out of a persisted git config value"
     )

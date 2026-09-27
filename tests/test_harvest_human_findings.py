@@ -87,7 +87,7 @@ def test_determine_bot_approval_marker_clean():
             "body": _marker(review_result="clean"),
         }
     ]
-    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is True
     assert base_sha == BASE
 
@@ -103,7 +103,7 @@ def test_determine_bot_approval_dismissed_then_clean():
             "body": _marker(review_result="clean"),
         }
     ]
-    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is True
     assert base_sha == BASE
 
@@ -118,7 +118,7 @@ def test_determine_bot_approval_marker_issues_not_approved():
             "body": _marker(review_result="issues"),
         }
     ]
-    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is False
 
 
@@ -132,12 +132,12 @@ def test_determine_bot_approval_no_marker_falls_back_to_state():
             "body": "Looks good, no marker here.",
         }
     ]
-    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is True
     assert base_sha is None
 
     reviews[0]["state"] = "CHANGES_REQUESTED"
-    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is False
 
 
@@ -151,7 +151,7 @@ def test_determine_bot_approval_no_bot_review_at_head():
             "body": "human review",
         }
     ]
-    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
     assert approved is False
     assert base_sha is None
 
@@ -173,8 +173,51 @@ def test_determine_bot_approval_picks_latest_when_multiple_at_same_head():
             "body": _marker(review_result="clean"),
         },
     ]
-    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD)
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T02:00:00Z")
     assert approved is True
+
+
+def test_determine_bot_approval_ignores_approval_after_finding():
+    """Counterexample (a): human finding at 10:00, bot's first approval of
+    that head lands at 10:05 — the approval can't retroactively justify a
+    finding it postdates, so this must NOT be treated as approved."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T10:05:00Z",
+            "body": _marker(review_result="clean"),
+        }
+    ]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T10:00:00Z")
+    assert approved is False
+    assert base_sha is None
+
+
+def test_determine_bot_approval_uses_review_at_finding_time_not_later_one():
+    """Counterexample (b): bot approves at 09:00, human finding at 10:00,
+    bot later posts `issues` at 11:00 on the same head — the 09:00 approval
+    is what was true when the finding was made, so this IS approved."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T09:00:00Z",
+            "body": _marker(review_result="clean"),
+        },
+        {
+            "user": {"login": BOT},
+            "state": "CHANGES_REQUESTED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T11:00:00Z",
+            "body": _marker(review_result="issues"),
+        },
+    ]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T10:00:00Z")
+    assert approved is True
+    assert base_sha == BASE
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +588,237 @@ def test_harvest_repo_blocking_comment_resolves_head_from_commits():
     assert len(findings) == 1
     assert findings[0]["head_sha"] == HEAD
     assert findings[0]["file"] == "pr_reviewer/foo.py"
+
+
+def test_harvest_repo_not_harvested_when_bot_approves_after_finding():
+    """End-to-end counterexample (a): the bot's only approval of this head
+    lands 5 minutes after the maintainer's finding, so it must not count."""
+    number = 110
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-01T10:00:00Z",
+                "body": "Bug in pr_reviewer/foo.py.",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-01T10:05:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}]}
+    client = FakeClient(prs, reviews, {}, {}, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+    assert findings == []
+
+
+def test_harvest_repo_harvested_when_bot_approved_before_finding_despite_later_issues_review():
+    """End-to-end counterexample (b): the bot approved this head before the
+    finding, then later (after the finding) flagged issues on the same
+    head — the earlier approval is still what counts."""
+    number = 111
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-01T09:00:00Z",
+                "body": _marker(),
+            },
+            {
+                "id": 2,
+                "user": {"login": MAINTAINER},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-01T10:00:00Z",
+                "body": "Bug in pr_reviewer/foo.py.",
+            },
+            {
+                "id": 3,
+                "user": {"login": BOT},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-01T11:00:00Z",
+                "body": _marker(review_result="issues"),
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}]}
+    client = FakeClient(prs, reviews, {}, {}, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+    assert len(findings) == 1
+    assert findings[0]["file"] == "pr_reviewer/foo.py"
+
+
+# ---------------------------------------------------------------------------
+# One entry per inline finding
+# ---------------------------------------------------------------------------
+
+
+def test_harvest_repo_review_with_two_inline_comments_gives_two_findings():
+    number = 120
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T01:00:00Z",
+                "body": "",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T00:30:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    review_comments = {
+        number: [
+            {
+                "id": 501,
+                "pull_request_review_id": 1,
+                "path": "pr_reviewer/foo.py",
+                "line": 10,
+                "start_line": None,
+                "body": "off-by-one here",
+            },
+            {
+                "id": 502,
+                "pull_request_review_id": 1,
+                "path": "scripts/bar.py",
+                "line": 20,
+                "start_line": None,
+                "body": "unchecked return value",
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}, {"filename": "scripts/bar.py"}]}
+    client = FakeClient(prs, reviews, {}, review_comments, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+
+    assert len(findings) == 2
+    by_file = {f["file"]: f for f in findings}
+    assert by_file["pr_reviewer/foo.py"]["line_range"] == (10, 10)
+    assert by_file["pr_reviewer/foo.py"]["text"] == "off-by-one here"
+    assert by_file["scripts/bar.py"]["line_range"] == (20, 20)
+    assert by_file["scripts/bar.py"]["text"] == "unchecked return value"
+    for f in findings:
+        assert f["confidence"] == "high"
+
+    entries, _, _ = hhf.build_entries(findings, set())
+    assert len(entries) == 2
+    assert {e["defect"]["file"] for e in entries} == {"pr_reviewer/foo.py", "scripts/bar.py"}
+
+
+def test_harvest_repo_review_body_and_inline_comments_are_separate_findings():
+    """A non-empty CHANGES_REQUESTED body is its own finding *in addition
+    to* each inline comment, anchored via named-path (not to a comment)."""
+    number = 122
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T01:00:00Z",
+                "body": "Overall this needs more coverage in scripts/bar.py.",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T00:30:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    review_comments = {
+        number: [
+            {
+                "id": 501,
+                "pull_request_review_id": 1,
+                "path": "pr_reviewer/foo.py",
+                "line": 10,
+                "start_line": None,
+                "body": "off-by-one here",
+            },
+        ]
+    }
+    files = {number: [{"filename": "pr_reviewer/foo.py"}, {"filename": "scripts/bar.py"}]}
+    client = FakeClient(prs, reviews, {}, review_comments, {}, files)
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+
+    assert len(findings) == 2
+    by_file = {f["file"]: f for f in findings}
+    assert by_file["pr_reviewer/foo.py"]["confidence"] == "high"
+    assert by_file["pr_reviewer/foo.py"]["line_range"] == (10, 10)
+    assert by_file["scripts/bar.py"]["confidence"] == "medium"
+    assert by_file["scripts/bar.py"]["line_range"] is None
+    assert "Overall this needs more coverage" in by_file["scripts/bar.py"]["text"]
+
+
+def test_harvest_repo_commented_review_inline_comments_need_blocking_language():
+    """A COMMENTED review with no blocking language anywhere (body or
+    inline comments) is skipped entirely -- inline splitting doesn't bypass
+    the blocking-language gate for non-CHANGES_REQUESTED reviews."""
+    number = 123
+    prs = [{"number": number, "updated_at": "2026-01-05T00:00:00Z"}]
+    reviews = {
+        number: [
+            {
+                "id": 1,
+                "user": {"login": MAINTAINER},
+                "state": "COMMENTED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T01:00:00Z",
+                "body": "",
+            },
+            {
+                "id": 2,
+                "user": {"login": BOT},
+                "state": "APPROVED",
+                "commit_id": HEAD,
+                "submitted_at": "2026-01-05T00:30:00Z",
+                "body": _marker(),
+            },
+        ]
+    }
+    review_comments = {
+        number: [
+            {
+                "id": 501,
+                "pull_request_review_id": 1,
+                "path": "pr_reviewer/foo.py",
+                "line": 10,
+                "start_line": None,
+                "body": "nit: rename this variable",
+            },
+        ]
+    }
+    client = FakeClient(prs, reviews, {}, review_comments, {}, {})
+    findings = hhf.harvest_repo(client, REPO, {MAINTAINER}, {BOT})
+    assert findings == []
 
 
 def test_harvest_repo_non_blocking_comment_ignored():
