@@ -78,6 +78,14 @@ const SECTION_TRUNCATED_MARKER = "…[section truncated to fit specialist corpus
 
 const FENCE_LINE_RE = /^(`{3,})(\S*)\s*$/;
 
+/** Wrap untrusted body in a fence its own backtick runs cannot close. */
+function fence(info: string, body: string): string {
+  let longest = 0;
+  for (const run of body.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  const delimiter = "`".repeat(Math.max(3, longest + 1));
+  return `${delimiter}${info}\n${body}\n${delimiter}`;
+}
+
 function bodyClosingFence(body: string): string {
   const firstLine = body.split("\n", 1)[0]!.trim();
   const match = FENCE_LINE_RE.exec(firstLine);
@@ -167,7 +175,7 @@ function buildPrMetadata(ws: SpecialistCorpusWorkspace): string {
     url: obj.url ?? null,
     body: body.slice(0, PR_BODY_MAX_CHARS),
   };
-  return "```json\n" + compactJson(projection) + "\n```";
+  return fence("json", compactJson(projection));
 }
 
 function buildClassification(ws: SpecialistCorpusWorkspace): string {
@@ -183,7 +191,7 @@ function buildClassification(ws: SpecialistCorpusWorkspace): string {
     linked_issue_labels: obj.linked_issue_labels ?? null,
     must_check: obj.must_check ?? null,
   };
-  return "```json\n" + compactJson(projection) + "\n```";
+  return fence("json", compactJson(projection));
 }
 
 function buildChangedFiles(ws: SpecialistCorpusWorkspace): string {
@@ -213,20 +221,20 @@ function buildChangedFiles(ws: SpecialistCorpusWorkspace): string {
         previous_filename: row.previous_filename ?? null,
       });
     }
-    let body = "```json\n" + compactJson(rows) + "\n```";
+    let body = fence("json", compactJson(rows));
     if (omitted) {
       body += `\n(${omitted} changed-file row(s) omitted)\n`;
     }
     return body;
   }
   // Truncated mid-document (invalid JSON): keep the raw text, capped later.
-  return "```text\n" + raw + "\n```";
+  return fence("text", raw);
 }
 
 function buildPrDiff(ws: SpecialistCorpusWorkspace): string {
   const raw = readArtifactText(ws, "pr.diff.truncated", "pr.diff");
   if (!raw) return "";
-  return "```diff\n" + raw + "\n```";
+  return fence("diff", raw);
 }
 
 function buildStandards(ws: SpecialistCorpusWorkspace): string {
@@ -278,7 +286,7 @@ function buildPrMetadataAdversarial(ws: SpecialistCorpusWorkspace): string {
     deletions: obj.deletions ?? null,
     url: obj.url ?? null,
   };
-  return "```json\n" + compactJson(projection) + "\n```";
+  return fence("json", compactJson(projection));
 }
 
 /** Blinded classification: deterministic targeting only. Drops
@@ -296,7 +304,7 @@ function buildClassificationAdversarial(ws: SpecialistCorpusWorkspace): string {
     risk_flags_with_files: obj.risk_flags_with_files ?? null,
     changed_files_summary: summary ?? null,
   };
-  return "```json\n" + compactJson(projection) + "\n```";
+  return fence("json", compactJson(projection));
 }
 
 const SECTIONS_ADVERSARIAL_CORRECTNESS: readonly SectionSpec[] = [

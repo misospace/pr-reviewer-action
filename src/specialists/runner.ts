@@ -355,8 +355,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     }
 
     let response = outcome.raw;
-    let text = extractResponseText(response);
-    let artifact = parseSpecialistResponse(text, role);
+    let artifact = parseSpecialistResponse(extractResponseText(response), role);
 
     if (completionOverran(response) && artifact.errors.length > 0 && artifact.leads.length === 0) {
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
@@ -376,7 +375,6 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           if (retriedArtifact.errors.length === 0) {
             response = retried.raw;
             artifact = retriedArtifact;
-            text = extractResponseText(response);
           }
         }
       }

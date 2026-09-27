@@ -156,6 +156,16 @@ _SECTION_TRUNCATED_MARKER = "…[section truncated to fit specialist corpus budg
 _FENCE_LINE_RE = re.compile(r"^(`{3,})(\S*)\s*$")
 
 
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _fence(info: str, body: str) -> str:
+    """Wrap untrusted *body* in a fence its own backtick runs cannot close."""
+    longest = max((len(run) for run in _BACKTICK_RUN_RE.findall(body)), default=0)
+    delimiter = "`" * max(3, longest + 1)
+    return f"{delimiter}{info}\n{body}\n{delimiter}"
+
+
 def _body_closing_fence(body: str) -> str:
     """Return the closing fence line for a fenced *body*, else ``""``.
 
@@ -257,7 +267,7 @@ def _build_pr_metadata(root: Path) -> str:
         "url": obj.get("url"),
         "body": body[:_PR_BODY_MAX_CHARS],
     }
-    return "```json\n" + _compact_json(projection) + "\n```"
+    return _fence("json", _compact_json(projection))
 
 
 def _build_classification(root: Path) -> str:
@@ -275,7 +285,7 @@ def _build_classification(root: Path) -> str:
         "linked_issue_labels": obj.get("linked_issue_labels"),
         "must_check": obj.get("must_check"),
     }
-    return "```json\n" + _compact_json(projection) + "\n```"
+    return _fence("json", _compact_json(projection))
 
 
 def _build_changed_files(root: Path) -> str:
@@ -304,19 +314,19 @@ def _build_changed_files(root: Path) -> str:
                     "previous_filename": item.get("previous_filename"),
                 }
             )
-        body = "```json\n" + _compact_json(rows) + "\n```"
+        body = _fence("json", _compact_json(rows))
         if omitted:
             body += f"\n({omitted} changed-file row(s) omitted)\n"
         return body
     # Truncated mid-document (invalid JSON): keep the raw text, capped later.
-    return "```text\n" + raw + "\n```"
+    return _fence("text", raw)
 
 
 def _build_pr_diff(root: Path) -> str:
     raw = _read_artifact_text(root, "pr.diff.truncated", "pr.diff")
     if not raw:
         return ""
-    return "```diff\n" + raw + "\n```"
+    return _fence("diff", raw)
 
 
 def _build_standards(root: Path) -> str:
@@ -403,7 +413,7 @@ def _build_pr_metadata_adversarial(root: Path) -> str:
         "deletions": obj.get("deletions"),
         "url": obj.get("url"),
     }
-    return "```json\n" + _compact_json(projection) + "\n```"
+    return _fence("json", _compact_json(projection))
 
 
 def _build_classification_adversarial(root: Path) -> str:
@@ -425,7 +435,7 @@ def _build_classification_adversarial(root: Path) -> str:
         "risk_flags_with_files": obj.get("risk_flags_with_files"),
         "changed_files_summary": summary,
     }
-    return "```json\n" + _compact_json(projection) + "\n```"
+    return _fence("json", _compact_json(projection))
 
 
 _SECTIONS_ADVERSARIAL_CORRECTNESS: tuple[
