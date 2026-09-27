@@ -1,0 +1,71 @@
+{
+  "fixture": "forgejo-external-checks",
+  "description": "Forgejo: no check-runs API (empty struct); commit statuses carry per-entry `status`, normalized to `state`; our own context is excluded. Quirk: a failed status read prints null, which folds to [] ('no external CI'), not to the empty transient signal.",
+  "platform": "forgejo",
+  "repo": "o/r",
+  "pr_number": 5,
+  "env": {
+    "GITHUB_RUN_ID": "77",
+    "CI_STATUS_CONTEXT": "ai-review"
+  },
+  "routes": [
+    {
+      "match": "api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status",
+      "body": {
+        "state": "failure",
+        "sha": "0123456789abcdef0123456789abcdef01234567",
+        "total_count": 4,
+        "statuses": [
+          {
+            "id": 1,
+            "status": "success",
+            "context": "ci/build \ud83d\udd28",
+            "target_url": "https://forgejo.example/o/r/actions/runs/77"
+          },
+          {
+            "id": 2,
+            "status": "failure",
+            "context": "ci/test"
+          },
+          {
+            "id": 3,
+            "status": "pending",
+            "context": "ai-review"
+          },
+          {
+            "id": 4,
+            "status": "warning",
+            "context": "lint"
+          }
+        ]
+      }
+    },
+    {
+      "match": "api/v1/repos/o/r/commits/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/status",
+      "status": 404,
+      "body": {
+        "message": "not found"
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "external-checks",
+      "sha": "0123456789abcdef0123456789abcdef01234567",
+      "expected": {
+        "text": "[{\"name\":\"ci/build \ud83d\udd28\",\"state\":\"success\"},{\"name\":\"ci/test\",\"state\":\"failure\"},{\"name\":\"lint\",\"state\":\"pending\"}]"
+      }
+    },
+    {
+      "op": "external-checks",
+      "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expected": {
+        "text": "[]"
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://forgejo.example/api/v1/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1",
+    "GET https://forgejo.example/api/v1/repos/o/r/commits/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/status auth=1"
+  ]
+}

@@ -1366,6 +1366,24 @@ METADATA_MARKERS_BOUNDARY = Boundary(
 )
 
 
+PLATFORM_NORMALIZATION_BOUNDARY = Boundary(
+    id="platform-normalization",
+    description=(
+        "#706 platform read-seam parity: raw GitHub REST/GraphQL and Forgejo "
+        "/api/v1 responses served to the real v2 seam (platform_api.sh jq "
+        "projections, forgejo_backend.py normalizers, the pr-files.json "
+        "projection, _gh_api_bounded) through stub gh/curl binaries, versus "
+        "the v3 adapters over an injected fetch serving the same routes. "
+        "Covers PR files, linked issues, conversation comments, review "
+        "threads, paginated reviews, external checks with self-exclusion and "
+        "bounded timeouts, linked-source enrichment, and the semantic-fixture "
+        "adapter; compares normalized values, byte-significant artifacts, and "
+        "the request log."
+    ),
+    fixtures_dir="platform-normalization",
+    run=lambda fixture, workdir: _run_new_boundary("v2_platform_normalization.py", "platform-normalization-fixture", fixture, workdir),
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1415,6 +1433,7 @@ NEW_BOUNDARIES = (
     SANITIZE_BOUNDARY,
     INLINE_FINDINGS_BOUNDARY,
     METADATA_MARKERS_BOUNDARY,
+    PLATFORM_NORMALIZATION_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

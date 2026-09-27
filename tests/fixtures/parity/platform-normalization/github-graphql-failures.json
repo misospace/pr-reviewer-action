@@ -1,0 +1,53 @@
+{
+  "fixture": "github-graphql-failures",
+  "description": "GraphQL failure modes fail the read: an errors array (gh exits nonzero) and a null pullRequest (jq cannot iterate null).",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "routes": [
+    {
+      "match": "graphql:comments",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "type": "FORBIDDEN",
+            "message": "Resource not accessible by integration"
+          }
+        ]
+      }
+    },
+    {
+      "match": "graphql:reviewThreads",
+      "body": {
+        "data": {
+          "repository": {
+            "pullRequest": null
+          }
+        }
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "conversation-comments",
+      "expected": {
+        "result": {
+          "ok": false
+        }
+      }
+    },
+    {
+      "op": "review-threads",
+      "expected": {
+        "result": {
+          "ok": false
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "POST https://api.github.com/graphql auth=1 {\"query\":\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }\",\"variables\":{\"name\":\"r\",\"number\":7,\"owner\":\"o\"}}",
+    "POST https://api.github.com/graphql auth=1 {\"query\":\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }\",\"variables\":{\"name\":\"r\",\"number\":7,\"owner\":\"o\"}}"
+  ]
+}

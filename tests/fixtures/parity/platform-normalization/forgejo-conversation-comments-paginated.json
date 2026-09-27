@@ -1,0 +1,1867 @@
+{
+  "fixture": "forgejo-conversation-comments-paginated",
+  "description": "Forgejo list-comments pagination (limit=50, stop on a short page) over 103 comments, normalized, sorted by created_at and REVERSED (the v2 Forgejo branch is newest-first) then cut to 100: legacy created_on/updated_on fields, a comment with no user, unicode/astral bodies.",
+  "platform": "forgejo",
+  "repo": "o/r",
+  "pr_number": 5,
+  "routes": [
+    {
+      "match": "api/v1/repos/o/r/issues/5/comments?page=1&limit=50",
+      "body": [
+        {
+          "id": 1000,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1000",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 0",
+          "created_at": "2026-08-01T00:00:00Z",
+          "updated_at": "2026-08-01T00:00:00Z"
+        },
+        {
+          "id": 1001,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1001",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 1",
+          "created_at": "2026-08-01T01:00:00Z",
+          "updated_at": "2026-08-01T01:00:00Z"
+        },
+        {
+          "id": 1002,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1002",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 2",
+          "created_at": "2026-08-01T02:00:00Z",
+          "updated_at": "2026-08-01T02:00:00Z"
+        },
+        {
+          "id": 1003,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1003",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 3",
+          "created_at": "2026-08-01T03:00:00Z",
+          "updated_at": "2026-08-01T03:00:00Z"
+        },
+        {
+          "id": 1004,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1004",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 4",
+          "created_at": "2026-08-01T04:00:00Z",
+          "updated_at": "2026-08-01T04:00:00Z"
+        },
+        {
+          "id": 1005,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1005",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 5",
+          "created_at": "2026-08-01T05:00:00Z",
+          "updated_at": "2026-08-01T05:00:00Z"
+        },
+        {
+          "id": 1006,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1006",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 6",
+          "created_at": "2026-08-01T06:00:00Z",
+          "updated_at": "2026-08-01T06:00:00Z"
+        },
+        {
+          "id": 1007,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1007",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 7",
+          "created_at": "2026-08-01T07:00:00Z",
+          "updated_at": "2026-08-01T07:00:00Z"
+        },
+        {
+          "id": 1008,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1008",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 8",
+          "created_at": "2026-08-01T08:00:00Z",
+          "updated_at": "2026-08-01T08:00:00Z"
+        },
+        {
+          "id": 1009,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1009",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 9",
+          "created_at": "2026-08-01T09:00:00Z",
+          "updated_at": "2026-08-01T09:00:00Z"
+        },
+        {
+          "id": 1010,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1010",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 10",
+          "created_at": "2026-08-01T10:00:00Z",
+          "updated_at": "2026-08-01T10:00:00Z"
+        },
+        {
+          "id": 1011,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1011",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 11",
+          "created_at": "2026-08-01T11:00:00Z",
+          "updated_at": "2026-08-01T11:00:00Z"
+        },
+        {
+          "id": 1012,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1012",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 12",
+          "created_at": "2026-08-01T12:00:00Z",
+          "updated_at": "2026-08-01T12:00:00Z"
+        },
+        {
+          "id": 1013,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1013",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 13",
+          "created_at": "2026-08-01T13:00:00Z",
+          "updated_at": "2026-08-01T13:00:00Z"
+        },
+        {
+          "id": 1014,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1014",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 14",
+          "created_at": "2026-08-01T14:00:00Z",
+          "updated_at": "2026-08-01T14:00:00Z"
+        },
+        {
+          "id": 1015,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1015",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 15",
+          "created_at": "2026-08-01T15:00:00Z",
+          "updated_at": "2026-08-01T15:00:00Z"
+        },
+        {
+          "id": 1016,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1016",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 16",
+          "created_at": "2026-08-01T16:00:00Z",
+          "updated_at": "2026-08-01T16:00:00Z"
+        },
+        {
+          "id": 1017,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1017",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 17",
+          "created_at": "2026-08-01T17:00:00Z",
+          "updated_at": "2026-08-01T17:00:00Z"
+        },
+        {
+          "id": 1018,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1018",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 18",
+          "created_at": "2026-08-01T18:00:00Z",
+          "updated_at": "2026-08-01T18:00:00Z"
+        },
+        {
+          "id": 1019,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1019",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 19",
+          "created_at": "2026-08-01T19:00:00Z",
+          "updated_at": "2026-08-01T19:00:00Z"
+        },
+        {
+          "id": 1020,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1020",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 20",
+          "created_at": "2026-08-01T20:00:00Z",
+          "updated_at": "2026-08-01T20:00:00Z"
+        },
+        {
+          "id": 1021,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1021",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 21",
+          "created_at": "2026-08-01T21:00:00Z",
+          "updated_at": "2026-08-01T21:00:00Z"
+        },
+        {
+          "id": 1022,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1022",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 22",
+          "created_at": "2026-08-01T22:00:00Z",
+          "updated_at": "2026-08-01T22:00:00Z"
+        },
+        {
+          "id": 1023,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1023",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 23",
+          "created_at": "2026-08-01T23:00:00Z",
+          "updated_at": "2026-08-01T23:00:00Z"
+        },
+        {
+          "id": 1024,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1024",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 24",
+          "created_at": "2026-08-02T00:00:00Z",
+          "updated_at": "2026-08-02T00:00:00Z"
+        },
+        {
+          "id": 1025,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1025",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 25",
+          "created_at": "2026-08-02T01:00:00Z",
+          "updated_at": "2026-08-02T01:00:00Z"
+        },
+        {
+          "id": 1026,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1026",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 26",
+          "created_at": "2026-08-02T02:00:00Z",
+          "updated_at": "2026-08-02T02:00:00Z"
+        },
+        {
+          "id": 1027,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1027",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 27",
+          "created_at": "2026-08-02T03:00:00Z",
+          "updated_at": "2026-08-02T03:00:00Z"
+        },
+        {
+          "id": 1028,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1028",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 28",
+          "created_at": "2026-08-02T04:00:00Z",
+          "updated_at": "2026-08-02T04:00:00Z"
+        },
+        {
+          "id": 1029,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1029",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 29",
+          "created_at": "2026-08-02T05:00:00Z",
+          "updated_at": "2026-08-02T05:00:00Z"
+        },
+        {
+          "id": 1030,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1030",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 30",
+          "created_at": "2026-08-02T06:00:00Z",
+          "updated_at": "2026-08-02T06:00:00Z"
+        },
+        {
+          "id": 1031,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1031",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 31",
+          "created_at": "2026-08-02T07:00:00Z",
+          "updated_at": "2026-08-02T07:00:00Z"
+        },
+        {
+          "id": 1032,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1032",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 32",
+          "created_at": "2026-08-02T08:00:00Z",
+          "updated_at": "2026-08-02T08:00:00Z"
+        },
+        {
+          "id": 1033,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1033",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 33",
+          "created_at": "2026-08-02T09:00:00Z",
+          "updated_at": "2026-08-02T09:00:00Z"
+        },
+        {
+          "id": 1034,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1034",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 34",
+          "created_at": "2026-08-02T10:00:00Z",
+          "updated_at": "2026-08-02T10:00:00Z"
+        },
+        {
+          "id": 1035,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1035",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 35",
+          "created_at": "2026-08-02T11:00:00Z",
+          "updated_at": "2026-08-02T11:00:00Z"
+        },
+        {
+          "id": 1036,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1036",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 36",
+          "created_at": "2026-08-02T12:00:00Z",
+          "updated_at": "2026-08-02T12:00:00Z"
+        },
+        {
+          "id": 1037,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1037",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 37",
+          "created_at": "2026-08-02T13:00:00Z",
+          "updated_at": "2026-08-02T13:00:00Z"
+        },
+        {
+          "id": 1038,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1038",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 38",
+          "created_at": "2026-08-02T14:00:00Z",
+          "updated_at": "2026-08-02T14:00:00Z"
+        },
+        {
+          "id": 1039,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1039",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 39",
+          "created_at": "2026-08-02T15:00:00Z",
+          "updated_at": "2026-08-02T15:00:00Z"
+        },
+        {
+          "id": 1040,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1040",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 40",
+          "created_at": "2026-08-02T16:00:00Z",
+          "updated_at": "2026-08-02T16:00:00Z"
+        },
+        {
+          "id": 1041,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1041",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 41",
+          "created_at": "2026-08-02T17:00:00Z",
+          "updated_at": "2026-08-02T17:00:00Z"
+        },
+        {
+          "id": 1042,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1042",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 42",
+          "created_at": "2026-08-02T18:00:00Z",
+          "updated_at": "2026-08-02T18:00:00Z"
+        },
+        {
+          "id": 1043,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1043",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 43",
+          "created_at": "2026-08-02T19:00:00Z",
+          "updated_at": "2026-08-02T19:00:00Z"
+        },
+        {
+          "id": 1044,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1044",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 44",
+          "created_at": "2026-08-02T20:00:00Z",
+          "updated_at": "2026-08-02T20:00:00Z"
+        },
+        {
+          "id": 1045,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1045",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 45",
+          "created_at": "2026-08-02T21:00:00Z",
+          "updated_at": "2026-08-02T21:00:00Z"
+        },
+        {
+          "id": 1046,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1046",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 46",
+          "created_at": "2026-08-02T22:00:00Z",
+          "updated_at": "2026-08-02T22:00:00Z"
+        },
+        {
+          "id": 1047,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1047",
+          "user": {
+            "login": "user2",
+            "id": 1
+          },
+          "body": "comment 47",
+          "created_at": "2026-08-02T23:00:00Z",
+          "updated_at": "2026-08-02T23:00:00Z"
+        },
+        {
+          "id": 1048,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1048",
+          "user": {
+            "login": "user0",
+            "id": 1
+          },
+          "body": "comment 48",
+          "created_at": "2026-08-03T00:00:00Z",
+          "updated_at": "2026-08-03T00:00:00Z"
+        },
+        {
+          "id": 1049,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-1049",
+          "user": {
+            "login": "user1",
+            "id": 1
+          },
+          "body": "comment 49",
+          "created_at": "2026-08-03T01:00:00Z",
+          "updated_at": "2026-08-03T01:00:00Z"
+        }
+      ]
+    },
+    {
+      "match": "api/v1/repos/o/r/issues/5/comments?page=2&limit=50",
+      "body": [
+        {
+          "id": 2000,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2000",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 0 \ud83d\ude00",
+          "created_at": "2026-09-01T00:00:00Z",
+          "updated_at": "2026-09-01T00:00:00Z"
+        },
+        {
+          "id": 2001,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2001",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 1 ",
+          "created_at": "2026-09-01T01:00:00Z",
+          "updated_at": "2026-09-01T01:00:00Z"
+        },
+        {
+          "id": 2002,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2002",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 2 ",
+          "created_at": "2026-09-01T02:00:00Z",
+          "updated_at": "2026-09-01T02:00:00Z"
+        },
+        {
+          "id": 2003,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2003",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 3 ",
+          "created_at": "2026-09-01T03:00:00Z",
+          "updated_at": "2026-09-01T03:00:00Z"
+        },
+        {
+          "id": 2004,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2004",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 4 ",
+          "created_at": "2026-09-01T04:00:00Z",
+          "updated_at": "2026-09-01T04:00:00Z"
+        },
+        {
+          "id": 2005,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2005",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 5 ",
+          "created_at": "2026-09-01T05:00:00Z",
+          "updated_at": "2026-09-01T05:00:00Z"
+        },
+        {
+          "id": 2006,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2006",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 6 ",
+          "created_at": "2026-09-01T06:00:00Z",
+          "updated_at": "2026-09-01T06:00:00Z"
+        },
+        {
+          "id": 2007,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2007",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 7 \ud83d\ude00",
+          "created_at": "2026-09-01T07:00:00Z",
+          "updated_at": "2026-09-01T07:00:00Z"
+        },
+        {
+          "id": 2008,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2008",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 8 ",
+          "created_at": "2026-09-01T08:00:00Z",
+          "updated_at": "2026-09-01T08:00:00Z"
+        },
+        {
+          "id": 2009,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2009",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 9 ",
+          "created_at": "2026-09-01T09:00:00Z",
+          "updated_at": "2026-09-01T09:00:00Z"
+        },
+        {
+          "id": 2010,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2010",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 10 ",
+          "created_at": "2026-09-01T10:00:00Z",
+          "updated_at": "2026-09-01T10:00:00Z"
+        },
+        {
+          "id": 2011,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2011",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 11 ",
+          "created_at": "2026-09-01T11:00:00Z",
+          "updated_at": "2026-09-01T11:00:00Z"
+        },
+        {
+          "id": 2012,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2012",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 12 ",
+          "created_at": "2026-09-01T12:00:00Z",
+          "updated_at": "2026-09-01T12:00:00Z"
+        },
+        {
+          "id": 2013,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2013",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 13 ",
+          "created_at": "2026-09-01T13:00:00Z",
+          "updated_at": "2026-09-01T13:00:00Z"
+        },
+        {
+          "id": 2014,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2014",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 14 \ud83d\ude00",
+          "created_at": "2026-09-01T14:00:00Z",
+          "updated_at": "2026-09-01T14:00:00Z"
+        },
+        {
+          "id": 2015,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2015",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 15 ",
+          "created_at": "2026-09-01T15:00:00Z",
+          "updated_at": "2026-09-01T15:00:00Z"
+        },
+        {
+          "id": 2016,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2016",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 16 ",
+          "created_at": "2026-09-01T16:00:00Z",
+          "updated_at": "2026-09-01T16:00:00Z"
+        },
+        {
+          "id": 2017,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2017",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 17 ",
+          "created_at": "2026-09-01T17:00:00Z",
+          "updated_at": "2026-09-01T17:00:00Z"
+        },
+        {
+          "id": 2018,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2018",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 18 ",
+          "created_at": "2026-09-01T18:00:00Z",
+          "updated_at": "2026-09-01T18:00:00Z"
+        },
+        {
+          "id": 2019,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2019",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 19 ",
+          "created_at": "2026-09-01T19:00:00Z",
+          "updated_at": "2026-09-01T19:00:00Z"
+        },
+        {
+          "id": 2020,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2020",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 20 ",
+          "created_at": "2026-09-01T20:00:00Z",
+          "updated_at": "2026-09-01T20:00:00Z"
+        },
+        {
+          "id": 2021,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2021",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 21 \ud83d\ude00",
+          "created_at": "2026-09-01T21:00:00Z",
+          "updated_at": "2026-09-01T21:00:00Z"
+        },
+        {
+          "id": 2022,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2022",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 22 ",
+          "created_at": "2026-09-01T22:00:00Z",
+          "updated_at": "2026-09-01T22:00:00Z"
+        },
+        {
+          "id": 2023,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2023",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 23 ",
+          "created_at": "2026-09-01T23:00:00Z",
+          "updated_at": "2026-09-01T23:00:00Z"
+        },
+        {
+          "id": 2024,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2024",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 24 ",
+          "created_at": "2026-09-02T00:00:00Z",
+          "updated_at": "2026-09-02T00:00:00Z"
+        },
+        {
+          "id": 2025,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2025",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 25 ",
+          "created_at": "2026-09-02T01:00:00Z",
+          "updated_at": "2026-09-02T01:00:00Z"
+        },
+        {
+          "id": 2026,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2026",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 26 ",
+          "created_at": "2026-09-02T02:00:00Z",
+          "updated_at": "2026-09-02T02:00:00Z"
+        },
+        {
+          "id": 2027,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2027",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 27 ",
+          "created_at": "2026-09-02T03:00:00Z",
+          "updated_at": "2026-09-02T03:00:00Z"
+        },
+        {
+          "id": 2028,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2028",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 28 \ud83d\ude00",
+          "created_at": "2026-09-02T04:00:00Z",
+          "updated_at": "2026-09-02T04:00:00Z"
+        },
+        {
+          "id": 2029,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2029",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 29 ",
+          "created_at": "2026-09-02T05:00:00Z",
+          "updated_at": "2026-09-02T05:00:00Z"
+        },
+        {
+          "id": 2030,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2030",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 30 ",
+          "created_at": "2026-09-02T06:00:00Z",
+          "updated_at": "2026-09-02T06:00:00Z"
+        },
+        {
+          "id": 2031,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2031",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 31 ",
+          "created_at": "2026-09-02T07:00:00Z",
+          "updated_at": "2026-09-02T07:00:00Z"
+        },
+        {
+          "id": 2032,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2032",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 32 ",
+          "created_at": "2026-09-02T08:00:00Z",
+          "updated_at": "2026-09-02T08:00:00Z"
+        },
+        {
+          "id": 2033,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2033",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 33 ",
+          "created_at": "2026-09-02T09:00:00Z",
+          "updated_at": "2026-09-02T09:00:00Z"
+        },
+        {
+          "id": 2034,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2034",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 34 ",
+          "created_at": "2026-09-02T10:00:00Z",
+          "updated_at": "2026-09-02T10:00:00Z"
+        },
+        {
+          "id": 2035,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2035",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 35 \ud83d\ude00",
+          "created_at": "2026-09-02T11:00:00Z",
+          "updated_at": "2026-09-02T11:00:00Z"
+        },
+        {
+          "id": 2036,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2036",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 36 ",
+          "created_at": "2026-09-02T12:00:00Z",
+          "updated_at": "2026-09-02T12:00:00Z"
+        },
+        {
+          "id": 2037,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2037",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 37 ",
+          "created_at": "2026-09-02T13:00:00Z",
+          "updated_at": "2026-09-02T13:00:00Z"
+        },
+        {
+          "id": 2038,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2038",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 38 ",
+          "created_at": "2026-09-02T14:00:00Z",
+          "updated_at": "2026-09-02T14:00:00Z"
+        },
+        {
+          "id": 2039,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2039",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 39 ",
+          "created_at": "2026-09-02T15:00:00Z",
+          "updated_at": "2026-09-02T15:00:00Z"
+        },
+        {
+          "id": 2040,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2040",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 40 ",
+          "created_at": "2026-09-02T16:00:00Z",
+          "updated_at": "2026-09-02T16:00:00Z"
+        },
+        {
+          "id": 2041,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2041",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 41 ",
+          "created_at": "2026-09-02T17:00:00Z",
+          "updated_at": "2026-09-02T17:00:00Z"
+        },
+        {
+          "id": 2042,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2042",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 42 \ud83d\ude00",
+          "created_at": "2026-09-02T18:00:00Z",
+          "updated_at": "2026-09-02T18:00:00Z"
+        },
+        {
+          "id": 2043,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2043",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 43 ",
+          "created_at": "2026-09-02T19:00:00Z",
+          "updated_at": "2026-09-02T19:00:00Z"
+        },
+        {
+          "id": 2044,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2044",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 44 ",
+          "created_at": "2026-09-02T20:00:00Z",
+          "updated_at": "2026-09-02T20:00:00Z"
+        },
+        {
+          "id": 2045,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2045",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 45 ",
+          "created_at": "2026-09-02T21:00:00Z",
+          "updated_at": "2026-09-02T21:00:00Z"
+        },
+        {
+          "id": 2046,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2046",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 46 ",
+          "created_at": "2026-09-02T22:00:00Z",
+          "updated_at": "2026-09-02T22:00:00Z"
+        },
+        {
+          "id": 2047,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2047",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 47 ",
+          "created_at": "2026-09-02T23:00:00Z",
+          "updated_at": "2026-09-02T23:00:00Z"
+        },
+        {
+          "id": 2048,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2048",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 48 ",
+          "created_at": "2026-09-03T00:00:00Z",
+          "updated_at": "2026-09-03T00:00:00Z"
+        },
+        {
+          "id": 2049,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-2049",
+          "user": {
+            "login": "bob",
+            "id": 1
+          },
+          "body": "later 49 \ud83d\ude00",
+          "created_at": "2026-09-03T01:00:00Z",
+          "updated_at": "2026-09-03T01:00:00Z"
+        }
+      ]
+    },
+    {
+      "match": "api/v1/repos/o/r/issues/5/comments?page=3&limit=50",
+      "body": [
+        {
+          "id": 3001,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-3001",
+          "user": {
+            "login": "carol",
+            "id": 1
+          },
+          "body": "newest caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+          "created_at": "2026-09-20T00:00:00Z",
+          "updated_at": "2026-09-20T00:00:00Z"
+        },
+        {
+          "id": 3002,
+          "html_url": "https://forgejo.example/o/r/pulls/5#issuecomment-3002",
+          "user": {
+            "login": "dave",
+            "id": 1
+          },
+          "body": "legacy timestamps",
+          "created_on": "2026-09-19T00:00:00Z",
+          "updated_on": "2026-09-19T00:00:00Z"
+        },
+        {
+          "id": 3003,
+          "body": "no user, no timestamps"
+        }
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "op": "conversation-comments",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": [
+            {
+              "id": 3001,
+              "body": "newest caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+              "created_at": "2026-09-20T00:00:00Z",
+              "updated_at": "2026-09-20T00:00:00Z",
+              "user": "carol"
+            },
+            {
+              "id": 3002,
+              "body": "legacy timestamps",
+              "created_at": "2026-09-19T00:00:00Z",
+              "updated_at": "2026-09-19T00:00:00Z",
+              "user": "dave"
+            },
+            {
+              "id": 2049,
+              "body": "later 49 \ud83d\ude00",
+              "created_at": "2026-09-03T01:00:00Z",
+              "updated_at": "2026-09-03T01:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2048,
+              "body": "later 48 ",
+              "created_at": "2026-09-03T00:00:00Z",
+              "updated_at": "2026-09-03T00:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2047,
+              "body": "later 47 ",
+              "created_at": "2026-09-02T23:00:00Z",
+              "updated_at": "2026-09-02T23:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2046,
+              "body": "later 46 ",
+              "created_at": "2026-09-02T22:00:00Z",
+              "updated_at": "2026-09-02T22:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2045,
+              "body": "later 45 ",
+              "created_at": "2026-09-02T21:00:00Z",
+              "updated_at": "2026-09-02T21:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2044,
+              "body": "later 44 ",
+              "created_at": "2026-09-02T20:00:00Z",
+              "updated_at": "2026-09-02T20:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2043,
+              "body": "later 43 ",
+              "created_at": "2026-09-02T19:00:00Z",
+              "updated_at": "2026-09-02T19:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2042,
+              "body": "later 42 \ud83d\ude00",
+              "created_at": "2026-09-02T18:00:00Z",
+              "updated_at": "2026-09-02T18:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2041,
+              "body": "later 41 ",
+              "created_at": "2026-09-02T17:00:00Z",
+              "updated_at": "2026-09-02T17:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2040,
+              "body": "later 40 ",
+              "created_at": "2026-09-02T16:00:00Z",
+              "updated_at": "2026-09-02T16:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2039,
+              "body": "later 39 ",
+              "created_at": "2026-09-02T15:00:00Z",
+              "updated_at": "2026-09-02T15:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2038,
+              "body": "later 38 ",
+              "created_at": "2026-09-02T14:00:00Z",
+              "updated_at": "2026-09-02T14:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2037,
+              "body": "later 37 ",
+              "created_at": "2026-09-02T13:00:00Z",
+              "updated_at": "2026-09-02T13:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2036,
+              "body": "later 36 ",
+              "created_at": "2026-09-02T12:00:00Z",
+              "updated_at": "2026-09-02T12:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2035,
+              "body": "later 35 \ud83d\ude00",
+              "created_at": "2026-09-02T11:00:00Z",
+              "updated_at": "2026-09-02T11:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2034,
+              "body": "later 34 ",
+              "created_at": "2026-09-02T10:00:00Z",
+              "updated_at": "2026-09-02T10:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2033,
+              "body": "later 33 ",
+              "created_at": "2026-09-02T09:00:00Z",
+              "updated_at": "2026-09-02T09:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2032,
+              "body": "later 32 ",
+              "created_at": "2026-09-02T08:00:00Z",
+              "updated_at": "2026-09-02T08:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2031,
+              "body": "later 31 ",
+              "created_at": "2026-09-02T07:00:00Z",
+              "updated_at": "2026-09-02T07:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2030,
+              "body": "later 30 ",
+              "created_at": "2026-09-02T06:00:00Z",
+              "updated_at": "2026-09-02T06:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2029,
+              "body": "later 29 ",
+              "created_at": "2026-09-02T05:00:00Z",
+              "updated_at": "2026-09-02T05:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2028,
+              "body": "later 28 \ud83d\ude00",
+              "created_at": "2026-09-02T04:00:00Z",
+              "updated_at": "2026-09-02T04:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2027,
+              "body": "later 27 ",
+              "created_at": "2026-09-02T03:00:00Z",
+              "updated_at": "2026-09-02T03:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2026,
+              "body": "later 26 ",
+              "created_at": "2026-09-02T02:00:00Z",
+              "updated_at": "2026-09-02T02:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2025,
+              "body": "later 25 ",
+              "created_at": "2026-09-02T01:00:00Z",
+              "updated_at": "2026-09-02T01:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2024,
+              "body": "later 24 ",
+              "created_at": "2026-09-02T00:00:00Z",
+              "updated_at": "2026-09-02T00:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2023,
+              "body": "later 23 ",
+              "created_at": "2026-09-01T23:00:00Z",
+              "updated_at": "2026-09-01T23:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2022,
+              "body": "later 22 ",
+              "created_at": "2026-09-01T22:00:00Z",
+              "updated_at": "2026-09-01T22:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2021,
+              "body": "later 21 \ud83d\ude00",
+              "created_at": "2026-09-01T21:00:00Z",
+              "updated_at": "2026-09-01T21:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2020,
+              "body": "later 20 ",
+              "created_at": "2026-09-01T20:00:00Z",
+              "updated_at": "2026-09-01T20:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2019,
+              "body": "later 19 ",
+              "created_at": "2026-09-01T19:00:00Z",
+              "updated_at": "2026-09-01T19:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2018,
+              "body": "later 18 ",
+              "created_at": "2026-09-01T18:00:00Z",
+              "updated_at": "2026-09-01T18:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2017,
+              "body": "later 17 ",
+              "created_at": "2026-09-01T17:00:00Z",
+              "updated_at": "2026-09-01T17:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2016,
+              "body": "later 16 ",
+              "created_at": "2026-09-01T16:00:00Z",
+              "updated_at": "2026-09-01T16:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2015,
+              "body": "later 15 ",
+              "created_at": "2026-09-01T15:00:00Z",
+              "updated_at": "2026-09-01T15:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2014,
+              "body": "later 14 \ud83d\ude00",
+              "created_at": "2026-09-01T14:00:00Z",
+              "updated_at": "2026-09-01T14:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2013,
+              "body": "later 13 ",
+              "created_at": "2026-09-01T13:00:00Z",
+              "updated_at": "2026-09-01T13:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2012,
+              "body": "later 12 ",
+              "created_at": "2026-09-01T12:00:00Z",
+              "updated_at": "2026-09-01T12:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2011,
+              "body": "later 11 ",
+              "created_at": "2026-09-01T11:00:00Z",
+              "updated_at": "2026-09-01T11:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2010,
+              "body": "later 10 ",
+              "created_at": "2026-09-01T10:00:00Z",
+              "updated_at": "2026-09-01T10:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2009,
+              "body": "later 9 ",
+              "created_at": "2026-09-01T09:00:00Z",
+              "updated_at": "2026-09-01T09:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2008,
+              "body": "later 8 ",
+              "created_at": "2026-09-01T08:00:00Z",
+              "updated_at": "2026-09-01T08:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2007,
+              "body": "later 7 \ud83d\ude00",
+              "created_at": "2026-09-01T07:00:00Z",
+              "updated_at": "2026-09-01T07:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2006,
+              "body": "later 6 ",
+              "created_at": "2026-09-01T06:00:00Z",
+              "updated_at": "2026-09-01T06:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2005,
+              "body": "later 5 ",
+              "created_at": "2026-09-01T05:00:00Z",
+              "updated_at": "2026-09-01T05:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2004,
+              "body": "later 4 ",
+              "created_at": "2026-09-01T04:00:00Z",
+              "updated_at": "2026-09-01T04:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2003,
+              "body": "later 3 ",
+              "created_at": "2026-09-01T03:00:00Z",
+              "updated_at": "2026-09-01T03:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2002,
+              "body": "later 2 ",
+              "created_at": "2026-09-01T02:00:00Z",
+              "updated_at": "2026-09-01T02:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2001,
+              "body": "later 1 ",
+              "created_at": "2026-09-01T01:00:00Z",
+              "updated_at": "2026-09-01T01:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 2000,
+              "body": "later 0 \ud83d\ude00",
+              "created_at": "2026-09-01T00:00:00Z",
+              "updated_at": "2026-09-01T00:00:00Z",
+              "user": "bob"
+            },
+            {
+              "id": 1049,
+              "body": "comment 49",
+              "created_at": "2026-08-03T01:00:00Z",
+              "updated_at": "2026-08-03T01:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1048,
+              "body": "comment 48",
+              "created_at": "2026-08-03T00:00:00Z",
+              "updated_at": "2026-08-03T00:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1047,
+              "body": "comment 47",
+              "created_at": "2026-08-02T23:00:00Z",
+              "updated_at": "2026-08-02T23:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1046,
+              "body": "comment 46",
+              "created_at": "2026-08-02T22:00:00Z",
+              "updated_at": "2026-08-02T22:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1045,
+              "body": "comment 45",
+              "created_at": "2026-08-02T21:00:00Z",
+              "updated_at": "2026-08-02T21:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1044,
+              "body": "comment 44",
+              "created_at": "2026-08-02T20:00:00Z",
+              "updated_at": "2026-08-02T20:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1043,
+              "body": "comment 43",
+              "created_at": "2026-08-02T19:00:00Z",
+              "updated_at": "2026-08-02T19:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1042,
+              "body": "comment 42",
+              "created_at": "2026-08-02T18:00:00Z",
+              "updated_at": "2026-08-02T18:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1041,
+              "body": "comment 41",
+              "created_at": "2026-08-02T17:00:00Z",
+              "updated_at": "2026-08-02T17:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1040,
+              "body": "comment 40",
+              "created_at": "2026-08-02T16:00:00Z",
+              "updated_at": "2026-08-02T16:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1039,
+              "body": "comment 39",
+              "created_at": "2026-08-02T15:00:00Z",
+              "updated_at": "2026-08-02T15:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1038,
+              "body": "comment 38",
+              "created_at": "2026-08-02T14:00:00Z",
+              "updated_at": "2026-08-02T14:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1037,
+              "body": "comment 37",
+              "created_at": "2026-08-02T13:00:00Z",
+              "updated_at": "2026-08-02T13:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1036,
+              "body": "comment 36",
+              "created_at": "2026-08-02T12:00:00Z",
+              "updated_at": "2026-08-02T12:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1035,
+              "body": "comment 35",
+              "created_at": "2026-08-02T11:00:00Z",
+              "updated_at": "2026-08-02T11:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1034,
+              "body": "comment 34",
+              "created_at": "2026-08-02T10:00:00Z",
+              "updated_at": "2026-08-02T10:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1033,
+              "body": "comment 33",
+              "created_at": "2026-08-02T09:00:00Z",
+              "updated_at": "2026-08-02T09:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1032,
+              "body": "comment 32",
+              "created_at": "2026-08-02T08:00:00Z",
+              "updated_at": "2026-08-02T08:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1031,
+              "body": "comment 31",
+              "created_at": "2026-08-02T07:00:00Z",
+              "updated_at": "2026-08-02T07:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1030,
+              "body": "comment 30",
+              "created_at": "2026-08-02T06:00:00Z",
+              "updated_at": "2026-08-02T06:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1029,
+              "body": "comment 29",
+              "created_at": "2026-08-02T05:00:00Z",
+              "updated_at": "2026-08-02T05:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1028,
+              "body": "comment 28",
+              "created_at": "2026-08-02T04:00:00Z",
+              "updated_at": "2026-08-02T04:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1027,
+              "body": "comment 27",
+              "created_at": "2026-08-02T03:00:00Z",
+              "updated_at": "2026-08-02T03:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1026,
+              "body": "comment 26",
+              "created_at": "2026-08-02T02:00:00Z",
+              "updated_at": "2026-08-02T02:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1025,
+              "body": "comment 25",
+              "created_at": "2026-08-02T01:00:00Z",
+              "updated_at": "2026-08-02T01:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1024,
+              "body": "comment 24",
+              "created_at": "2026-08-02T00:00:00Z",
+              "updated_at": "2026-08-02T00:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1023,
+              "body": "comment 23",
+              "created_at": "2026-08-01T23:00:00Z",
+              "updated_at": "2026-08-01T23:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1022,
+              "body": "comment 22",
+              "created_at": "2026-08-01T22:00:00Z",
+              "updated_at": "2026-08-01T22:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1021,
+              "body": "comment 21",
+              "created_at": "2026-08-01T21:00:00Z",
+              "updated_at": "2026-08-01T21:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1020,
+              "body": "comment 20",
+              "created_at": "2026-08-01T20:00:00Z",
+              "updated_at": "2026-08-01T20:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1019,
+              "body": "comment 19",
+              "created_at": "2026-08-01T19:00:00Z",
+              "updated_at": "2026-08-01T19:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1018,
+              "body": "comment 18",
+              "created_at": "2026-08-01T18:00:00Z",
+              "updated_at": "2026-08-01T18:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1017,
+              "body": "comment 17",
+              "created_at": "2026-08-01T17:00:00Z",
+              "updated_at": "2026-08-01T17:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1016,
+              "body": "comment 16",
+              "created_at": "2026-08-01T16:00:00Z",
+              "updated_at": "2026-08-01T16:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1015,
+              "body": "comment 15",
+              "created_at": "2026-08-01T15:00:00Z",
+              "updated_at": "2026-08-01T15:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1014,
+              "body": "comment 14",
+              "created_at": "2026-08-01T14:00:00Z",
+              "updated_at": "2026-08-01T14:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1013,
+              "body": "comment 13",
+              "created_at": "2026-08-01T13:00:00Z",
+              "updated_at": "2026-08-01T13:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1012,
+              "body": "comment 12",
+              "created_at": "2026-08-01T12:00:00Z",
+              "updated_at": "2026-08-01T12:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1011,
+              "body": "comment 11",
+              "created_at": "2026-08-01T11:00:00Z",
+              "updated_at": "2026-08-01T11:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1010,
+              "body": "comment 10",
+              "created_at": "2026-08-01T10:00:00Z",
+              "updated_at": "2026-08-01T10:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1009,
+              "body": "comment 9",
+              "created_at": "2026-08-01T09:00:00Z",
+              "updated_at": "2026-08-01T09:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1008,
+              "body": "comment 8",
+              "created_at": "2026-08-01T08:00:00Z",
+              "updated_at": "2026-08-01T08:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1007,
+              "body": "comment 7",
+              "created_at": "2026-08-01T07:00:00Z",
+              "updated_at": "2026-08-01T07:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1006,
+              "body": "comment 6",
+              "created_at": "2026-08-01T06:00:00Z",
+              "updated_at": "2026-08-01T06:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1005,
+              "body": "comment 5",
+              "created_at": "2026-08-01T05:00:00Z",
+              "updated_at": "2026-08-01T05:00:00Z",
+              "user": "user2"
+            },
+            {
+              "id": 1004,
+              "body": "comment 4",
+              "created_at": "2026-08-01T04:00:00Z",
+              "updated_at": "2026-08-01T04:00:00Z",
+              "user": "user1"
+            },
+            {
+              "id": 1003,
+              "body": "comment 3",
+              "created_at": "2026-08-01T03:00:00Z",
+              "updated_at": "2026-08-01T03:00:00Z",
+              "user": "user0"
+            },
+            {
+              "id": 1002,
+              "body": "comment 2",
+              "created_at": "2026-08-01T02:00:00Z",
+              "updated_at": "2026-08-01T02:00:00Z",
+              "user": "user2"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://forgejo.example/api/v1/repos/o/r/issues/5/comments?page=1&limit=50 auth=1",
+    "GET https://forgejo.example/api/v1/repos/o/r/issues/5/comments?page=2&limit=50 auth=1",
+    "GET https://forgejo.example/api/v1/repos/o/r/issues/5/comments?page=3&limit=50 auth=1"
+  ]
+}

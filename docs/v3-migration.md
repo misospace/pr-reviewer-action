@@ -457,6 +457,28 @@ bash-vs-TS boundary: the v2 side is a shell dispatcher whose observable
 behavior depends on `gh`/`forgejo` subprocess stubs, and the #681 cutover
 will qualify it end-to-end through the runner.
 
+### The `platform-normalization` boundary (#706)
+
+Pins the platform read seams: raw GitHub REST/GraphQL and Forgejo `/api/v1`
+responses (a route table in each fixture under
+`tests/fixtures/parity/platform-normalization/`) are served to the real v2
+seam — `scripts/platform_api.sh`, `forgejo_backend.py` via `_forgejo_py`,
+`gh_api_call`, and the `pr-files.json` jq projection read from
+`scripts/sections/context.sh` — through stub `gh`/`curl` binaries, and to
+the v3 adapters through an injected fetch (`node dist/index.js
+platform-normalization-fixture`). Both sides emit each read's `{ok, data}`
+as order-preserving ASCII JSON, the byte-significant artifacts (the
+`pr-files.json` line, the external-checks line, the raw diff), and the
+request log. Each fixture also records its expected output, pinned against
+the v2 side by `tests/test_platform_normalization_goldens.py`.
+
+v2 quirks kept for parity (candidates for approved divergences once the
+orchestrator owns these reads): a failed Forgejo issue fetch is a successful
+read of `null`; a failed Forgejo file, comment or review listing is an empty
+list; a failed or unparseable commit-status read folds to `[]` ("no external
+CI") rather than to the empty transient signal; and the Forgejo
+conversation branch is newest-first while GitHub's is oldest-first.
+
 ## What #680 removed from the Python runtime surface
 
 `src/enforcement/`, `src/publish/`, and `src/metadata/` now own the

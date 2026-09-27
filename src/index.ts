@@ -31,6 +31,7 @@ import { runSanitizeFixture } from "./publish/fixture.js";
 import { runInlineFindingsFixture } from "./publish/inline-findings-fixture.js";
 import { runRepositoryConfigFixture } from "./config/fixture.js";
 import { resolveRepositoryConfig } from "./config/repository-config.js";
+import { runPlatformNormalizationFixture } from "./platform/fixture.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -131,6 +132,15 @@ if (require.main === module) {
       process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
+  } else if (firstArg === "platform-normalization-fixture") {
+    assertSupportedNode(process.versions.node);
+    runPlatformNormalizationFixture(argv[1] ?? "").then(
+      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      (error: unknown) => {
+        process.stderr.write(`v3 platform-normalization fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        process.exitCode = 1;
+      },
+    );
   } else if (firstArg === "diff-priority-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runDiffPriorityFixture(argv[1] ?? ""))}\n`);

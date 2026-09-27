@@ -1,0 +1,37 @@
+{
+  "fixture": "github-external-checks-deadline-exhausted",
+  "description": "An already-expired CI_DEADLINE_EPOCH skips both attempts without issuing a request: empty output.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "env": {
+    "CI_DEADLINE_EPOCH": "1"
+  },
+  "routes": [
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100",
+      "body": {
+        "total_count": 0,
+        "check_runs": []
+      }
+    },
+    {
+      "match": "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status",
+      "body": {
+        "state": "success",
+        "total_count": 0,
+        "statuses": []
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "external-checks",
+      "sha": "0123456789abcdef0123456789abcdef01234567",
+      "expected": {
+        "text": ""
+      }
+    }
+  ],
+  "expected_requests": []
+}

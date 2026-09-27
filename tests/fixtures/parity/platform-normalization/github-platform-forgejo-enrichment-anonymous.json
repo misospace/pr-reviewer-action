@@ -1,0 +1,42 @@
+{
+  "fixture": "github-platform-forgejo-enrichment-anonymous",
+  "description": "On a GitHub-hosted run no Forgejo instance is configured, so Forgejo-hosted linked sources are always read anonymously.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "routes": [
+    {
+      "match": "https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v2",
+      "body": {
+        "tag_name": "v2",
+        "name": "v2",
+        "published_at": "2026-09-03T00:00:00Z",
+        "html_url": "https://codeberg.org/ext/lib/releases/tag/v2",
+        "body": ""
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "forgejo-enrich-release",
+      "host": "codeberg.org",
+      "repo": "ext/lib",
+      "tag": "v2",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": {
+            "tag_name": "v2",
+            "name": "v2",
+            "published_at": "2026-09-03T00:00:00Z",
+            "html_url": "https://codeberg.org/ext/lib/releases/tag/v2",
+            "body": ""
+          }
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v2 auth=0"
+  ]
+}

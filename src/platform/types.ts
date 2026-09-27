@@ -36,3 +36,52 @@ export interface PlatformAdapter {
    * `{"error": ...}`, never throws for policy rejections. */
   ghApi(endpoint: string): Promise<GhApiResult>;
 }
+
+/** Outcome of a platform read that the v2 seam can fail: `ok` mirrors the
+ * shell function's exit status, `data` its (parsed) stdout. */
+export type ReadResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/** CI-polling bounds for `externalChecks` (#663), taken from config/env by
+ * the caller: `CI_API_TIMEOUT_SEC`, `CI_TIMEOUT_SEC`, `CI_DEADLINE_EPOCH`. */
+export interface CiBoundOptions {
+  apiTimeoutSec?: string | undefined;
+  ciTimeoutSec?: string | undefined;
+  deadlineEpoch?: string | undefined;
+  /** Clock override for tests; epoch milliseconds. */
+  now?: (() => number) | undefined;
+}
+
+export interface ExternalChecksOptions extends CiBoundOptions {
+  /** `GITHUB_RUN_ID`: our own workflow run's check runs are excluded. */
+  runId?: string | undefined;
+  /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
+   * status context is excluded. */
+  statusContext?: string | undefined;
+}
+
+/**
+ * The read seams the v3 orchestrator consumes (#706 PR 1). Every method
+ * matches the v2 seam's output shape (`scripts/platform_api.sh` /
+ * `pr_reviewer/forgejo_backend.py`) byte for byte at the value level; the
+ * `platform-normalization` parity boundary pins it.
+ */
+export interface PlatformReadAdapter extends PlatformAdapter {
+  /** `platform_pr_files`: first page (100) of changed files — GitHub REST
+   * shape, or the Forgejo `list_pr_files` normalization. */
+  listPrFiles(): Promise<ReadResult<unknown>>;
+  /** `platform_issue_get` for a linked issue (any repo on this forge). */
+  getIssue(repo: string, issueNumber: string): Promise<ReadResult<unknown>>;
+  /** `platform_pr_review_comments`: up to the 100 most recent PR
+   * conversation comments as `{id,user,created_at,updated_at,body}`. */
+  listPrConversationComments(): Promise<ReadResult<unknown[]>>;
+  /** `platform_review_threads`: up to 100 inline review threads in the
+   * review_threads.py shape. */
+  listReviewThreads(): Promise<ReadResult<unknown[]>>;
+  /** `platform_pr_reviews ... paginate`: every review, the shape
+   * human_reviews.py consumes. */
+  listPrReviewsPaginated(): Promise<ReadResult<unknown[]>>;
+  /** `platform_external_checks`: normalized external checks with
+   * self-exclusion; `null` when both underlying reads came back empty (the
+   * caller's transient-failure signal). Never throws. */
+  externalChecks(sha: string, options?: ExternalChecksOptions): Promise<{ name: unknown; state: string }[] | null>;
+}

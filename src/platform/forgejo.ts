@@ -1,7 +1,39 @@
+import { ciAttemptTimeoutMs } from "./bounded.js";
+import { ForgejoEnrichClient } from "./enrich.js";
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+import {
+  forgejoReviewCommentId,
+  groupForgejoReviewThreads,
+  normalizeExternalChecks,
+  normalizeForgejoCommitStatus,
+  normalizeForgejoConversationComments,
+  normalizeForgejoIssue,
+  normalizeForgejoPrFiles,
+  normalizeForgejoReviews,
+  pyJsonDecode,
+  type ExternalCheck,
+} from "./normalize.js";
 import { parsePlatformBaseUrl } from "./urls.js";
 import { validateEndpoint, type EndpointValidation } from "./endpoint.js";
-import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "./types.js";
+import type {
+  ExternalChecksOptions,
+  GhApiResult,
+  ManagedComment,
+  ManagedReview,
+  PlatformReadAdapter,
+  ReadResult,
+} from "./types.js";
+
+/** Forgejo has no check-runs API: the v2 seam substitutes this empty
+ * struct, and the commit-status read carries the CI signal. */
+const FORGEJO_EMPTY_CHECK_RUNS = '{"check_runs":[],"total_count":0}';
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const NUMBER_RE = /^[0-9]+$/;
+const SHA_RE = /^(?!\.+$)[A-Za-z0-9._-]+$/;
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 const JWT_TTL_SECONDS = 2700;
@@ -41,7 +73,7 @@ function parseRepo(repo: string): { owner: string; repo: string } {
  * User-Agent must stay non-default: Cloudflare bot-fight fronting
  * self-hosted Forgejo blocks the default fetch UA.
  */
-export class ForgejoAdapter implements PlatformAdapter {
+export class ForgejoAdapter implements PlatformReadAdapter {
   readonly platform = "forgejo" as const;
   readonly repo: string;
   readonly prNumber: string;
@@ -253,6 +285,129 @@ export class ForgejoAdapter implements PlatformAdapter {
       }));
   }
 
+  /** `_curl` semantics for a read: `{status, text}`, with a transport
+   * failure reported as status 0 (v2: curl's nonzero exit code stands in
+   * for the HTTP status, so it is never 200). A credential failure (the
+   * authorized-integration JWT exchange) throws: v2's CLI raises there. */
+  private async curl(url: string, timeoutMs?: number): Promise<{ status: number; text: string }> {
+    const options = await this.options();
+    try {
+      const { status, text } = await requestText(url, { ...options, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+      return { status, text };
+    } catch {
+      return { status: 0, text: "" };
+    }
+  }
+
+  /** Run one read; anything the v2 CLI would raise on fails the read. */
+  private async read<T>(body: (base: string) => Promise<T>, repo = this.repo): Promise<ReadResult<T>> {
+    if (!REPO_RE.test(repo)) return { ok: false, error: `Invalid repo full name: ${repo}` };
+    try {
+      return { ok: true, data: await body(this.apiPath(`/repos/${repo}`)) };
+    } catch (error) {
+      return { ok: false, error: errorText(error) };
+    }
+  }
+
+  /** `list_pr_files`: a failed or non-list read is `[]`. */
+  listPrFiles(): Promise<ReadResult<unknown>> {
+    return this.read(async (base) => {
+      const { status, text } = await this.curl(`${base}/pulls/${this.prNumber}/files`);
+      return status === 200 ? normalizeForgejoPrFiles(pyJsonDecode(text)) : [];
+    });
+  }
+
+  /** `fetch_issue`. v2 quirk kept for parity: a failed Forgejo fetch is a
+   * SUCCESSFUL read whose payload is `null` (the CLI prints `null` and exits
+   * 0), unlike GitHub, where the read fails. */
+  async getIssue(repo: string, issueNumber: string): Promise<ReadResult<unknown>> {
+    if (!NUMBER_RE.test(issueNumber)) return { ok: false, error: "invalid issue reference" };
+    return this.read(async (base) => {
+      const { status, text } = await this.curl(`${base}/issues/${issueNumber}`);
+      return status === 200 ? normalizeForgejoIssue(pyJsonDecode(text)) : null;
+    }, repo);
+  }
+
+  /** `list_comments` (Forgejo) normalized, then the seam's
+   * `sort_by(.created_at // "") | reverse | .[0:100]`. Pages of 50; a
+   * failed or empty page ends the listing with what was collected. */
+  listPrConversationComments(): Promise<ReadResult<unknown[]>> {
+    return this.read(async (base) => {
+      const all: unknown[] = [];
+      for (let page = 1; ; page += 1) {
+        const { status, text } = await this.curl(`${base}/issues/${this.prNumber}/comments?page=${page}&limit=50`);
+        if (status !== 200) break;
+        const comments = pyJsonDecode(text);
+        if (!Array.isArray(comments) || comments.length === 0) break;
+        all.push(...comments);
+        if (comments.length < 50) break;
+      }
+      return normalizeForgejoConversationComments(all);
+    });
+  }
+
+  /** `list_review_threads`: every review's comments grouped into threads. */
+  listReviewThreads(): Promise<ReadResult<unknown[]>> {
+    return this.read(async (base) => {
+      const reviewsUrl = `${base}/pulls/${this.prNumber}/reviews`;
+      const { status, text } = await this.curl(reviewsUrl);
+      if (status !== 200) return [];
+      const reviews = pyJsonDecode(text);
+      if (!Array.isArray(reviews)) return [];
+      const commentLists: unknown[][] = [];
+      for (const review of reviews) {
+        const reviewId = forgejoReviewCommentId(review);
+        if (reviewId === null) continue;
+        const response = await this.curl(`${reviewsUrl}/${reviewId}/comments`);
+        if (response.status !== 200) continue;
+        const comments = pyJsonDecode(response.text);
+        if (Array.isArray(comments)) commentLists.push(comments);
+      }
+      return groupForgejoReviewThreads(commentLists);
+    });
+  }
+
+  /** `list_pr_reviews` (Forgejo serves every review in one response; the v2
+   * `paginate` argument does not change the Forgejo request). */
+  listPrReviewsPaginated(): Promise<ReadResult<unknown[]>> {
+    return this.read(async (base) => {
+      const { status, text } = await this.curl(`${base}/pulls/${this.prNumber}/reviews`);
+      return status === 200 ? normalizeForgejoReviews(pyJsonDecode(text)) : [];
+    });
+  }
+
+  /** `platform_external_checks` on Forgejo: the empty check-runs struct plus
+   * the `commit-status` CLI output. v2 quirk kept for parity: a failed
+   * status read prints `null`, which folds to `[]` ("no external CI"), not
+   * to the empty/transient signal. The status read is bounded like the
+   * GitHub CI reads (#663); a timeout or exhausted deadline counts as that
+   * same failed read. */
+  async externalChecks(sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
+    if (!SHA_RE.test(sha)) return null;
+    const status = await this.read(async (base) => {
+      const timeoutMs = ciAttemptTimeoutMs(options);
+      if (timeoutMs === null) return "null";
+      const response = await this.curl(`${base}/commits/${sha}/status`, timeoutMs);
+      if (response.status !== 200) return "null";
+      const normalized = normalizeForgejoCommitStatus(pyJsonDecode(response.text));
+      return normalized === null ? "null" : JSON.stringify(normalized);
+    });
+    // A raising CLI prints nothing (`|| echo ""`).
+    const combinedText = status.ok ? status.data : "";
+    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+  }
+
+  /** Linked-source enrichment client whose configured-host credential is
+   * this adapter's (token or authorized-integration JWT). */
+  enrichClient(): ForgejoEnrichClient {
+    return new ForgejoEnrichClient({
+      configuredApiUrl: this.baseUrl,
+      configuredAuthorization: () => this.authorizationHeader(),
+      timeoutMs: this.timeoutMs,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
   private static permissionFromRepoPayload(data: unknown): string | null {
     if (!isObject(data)) return null;
     const perms = isObject(data.permissions) ? data.permissions : null;
@@ -356,7 +511,9 @@ export class ForgejoAdapter implements PlatformAdapter {
       return { error: "Missing FORGEJO_TOKEN" };
     }
     try {
-      const { status, data } = await requestJson(this.apiPath(translated), (await this.options("application/json")));
+      // `translate` already returns the /api/v1-prefixed path (as v2's
+      // `_forgejo_translate` does); join it to the bare base like v2.
+      const { status, data } = await requestJson(`${this.baseUrl}${translated}`, (await this.options("application/json")));
       if (status !== 200) return { error: `Forgejo API error: ${status}` };
       return { data };
     } catch (error) {
