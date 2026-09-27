@@ -1,0 +1,11 @@
+{
+  "mode": "normalize",
+  "role": "security",
+  "payload": {
+    "leads": [
+      {"severity": "blocker", "category": "sec", "file": "./src/auth.py", "line": 42, "message": "Unsanitized query"},
+      {"severity": "warning", "message": "Minor logging concern"},
+      {"severity": "note", "message": "Consider adding a comment", "line": "17"}
+    ]
+  }
+}

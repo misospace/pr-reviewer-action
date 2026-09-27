@@ -379,11 +379,26 @@ context, the in-conversation verdict turn, and the #702 telemetry object.
 The Python side of these modules is now a temporary oracle for the parity
 boundaries above; production wiring still invokes the v2 scripts until the
 #681 orchestrator cutover. Remaining Python-only runtime after #678 (the
-#680/#706 backlog): the deep-review specialist runner/corpus
-(`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py` — the
-specialist-leads renderer is already an injected seam in `src/tools/harness.ts`),
-the v2 publish/precheck shell pipeline, and the platform `gh` subprocess
-seams behind `scripts/platform_api.sh`.
+#680/#706 backlog): the v2 publish/precheck shell pipeline, and the platform
+`gh` subprocess seams behind `scripts/platform_api.sh`.
+
+### The deep-review specialist runtime (#776)
+
+`src/specialists/` is a byte/behavior-exact port of the deep-review
+specialist runtime: `pr_reviewer/specialists.py` (normalize/parse contract,
+fence-safe markdown rendering, the #758 adversarial-correctness contract),
+`pr_reviewer/specialist_corpus.py` (the bounded #632 corpus builder and its
+#758 author-blinded `adversarial_correctness` variant), and the concurrent
+runner half of `scripts/run_specialists.py` (per-role payload construction,
+the three #635 execution shapes, the completion-overrun retry, request
+metering). The port is transport/filesystem-agnostic by design — the caller
+supplies a `requestFn` and receives artifacts to persist, matching the
+#678 routing/tool-loop modules — since no v3 orchestrator yet exists to wire
+a real workspace writer or the `gates.ts` `specialists` branch's subprocess
+before #681. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
+to the real `renderSpecialistLeadsSection` port. New parity boundaries:
+`specialist-corpus`, `specialist-payload`, `specialist-normalize`
+(`tests/fixtures/parity/specialist-*/`, `tests/parity_runners/v2_specialist_*.py`).
 
 ### The `enforcement-pipeline` boundary (#680)
 

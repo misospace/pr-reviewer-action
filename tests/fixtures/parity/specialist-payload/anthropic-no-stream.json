@@ -1,0 +1,11 @@
+{
+  "api_format": "anthropic",
+  "model": "claude-test",
+  "system": "You are a security specialist.",
+  "user": "corpus text",
+  "max_tokens": 4096,
+  "temperature": null,
+  "response_format": "off",
+  "tokens_param": "max_tokens",
+  "stream": false
+}

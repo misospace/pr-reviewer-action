@@ -1,0 +1,5 @@
+{
+  "mode": "parse",
+  "role": "tests",
+  "text": "Sure, here is the analysis:\n```json\n{\"leads\": [{\"severity\": \"minor\", \"message\": \"flaky test\"}]}\n```\n"
+}

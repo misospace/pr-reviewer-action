@@ -1286,6 +1286,17 @@ def _tool_loop_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, 
     return _run_new_boundary("v2_tool_loop.py", "tool-loop-fixture", fixture, workdir)
 
 
+def _specialist_corpus_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_specialist_corpus.py", "specialist-corpus-fixture", fixture, workdir)
+
+
+def _specialist_payload_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_specialist_payload.py", "specialist-payload-fixture", fixture, workdir)
+
+
+def _specialist_normalize_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    return _run_new_boundary("v2_specialist_normalize.py", "specialist-normalize-fixture", fixture, workdir)
+
 # ---------------------------------------------------------------------------
 # Boundaries: enforcement / publishing / metadata (#680)
 # ---------------------------------------------------------------------------
@@ -1359,6 +1370,46 @@ NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
     Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
+    Boundary(
+        id="specialist-corpus",
+        description=(
+            "#776 deep-review specialist corpus parity: the deterministic, "
+            "bounded #632 corpus builder (survival-priority section order, "
+            "reserved requirement ledger, per-section caps, hard byte cap) and "
+            "the #758 author-blinded adversarial_correctness variant, byte-exact "
+            "against the v3 TypeScript port."
+        ),
+        fixtures_dir="specialist-corpus",
+        run=_specialist_corpus_run,
+        canonical_json_keys={"result"},
+    ),
+    Boundary(
+        id="specialist-payload",
+        description=(
+            "#776 deep-review specialist wire-payload parity: the per-role "
+            "OpenAI/Anthropic request builder (json_schema→json_object "
+            "downgrade, max_completion_tokens, stream_options) and the "
+            "one-shot completion-overrun retry payload, byte-exact against "
+            "the v3 TypeScript port."
+        ),
+        fixtures_dir="specialist-payload",
+        run=_specialist_payload_run,
+        canonical_json_keys={"result"},
+    ),
+    Boundary(
+        id="specialist-normalize",
+        description=(
+            "#776 deep-review specialist normalize parity: raw model output "
+            "to the normalized version-1 lead artifact (dedupe, caps, "
+            "severity aliasing), the tolerant raw-text parser, the #758 "
+            "adversarial-correctness contract (trigger/consequence major-lead "
+            "demotion, boundaries_challenged), and the completion-overrun "
+            "retry decision, byte-exact against the v3 TypeScript port."
+        ),
+        fixtures_dir="specialist-normalize",
+        run=_specialist_normalize_run,
+        canonical_json_keys={"result"},
+    ),
     ENFORCEMENT_BOUNDARY,
     REQUIREMENT_COVERAGE_BOUNDARY,
     SANITIZE_BOUNDARY,

@@ -1,0 +1,13 @@
+{
+  "mode": "adversarial_correctness",
+  "max_bytes": 48000,
+  "files": {
+    "pr.json": "{\"number\": 9, \"title\": \"Rework retry logic\", \"author\": {\"login\": \"dev\"}, \"body\": \"This closes the gap from the author's own testing.\", \"baseRefName\": \"main\", \"headRefName\": \"fix/retry\"}",
+    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [], \"changed_files_summary\": [\"src/retry.py\"], \"linked_issue_labels\": [\"bug\"], \"must_check\": [\"tests pass\"]}",
+    "pr.diff.truncated": "diff --git a/src/retry.py b/src/retry.py\n+def retry():\n+    pass\n",
+    "standards-context.capped.md": "# Standards\nUse type hints.\n",
+    "requirement-ledger.md": "# Requirement Ledger\n- REQ-1: retries must be capped\n",
+    "related-code.truncated.md": "# Related Code\n- src/retry.py calls sleep()\n",
+    "evidence-providers.md": "# Evidence\nAll checks green.\n"
+  }
+}
