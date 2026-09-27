@@ -1,0 +1,63 @@
+{
+  "fixture": "disallowed-hosts",
+  "description": "Hosts outside ALLOWED_SOURCE_HOSTS, known non-fetchable hosts (gitlab/bitbucket), and allowlisted hostnames whose DNS is private (RFC1918, loopback, cloud metadata, IPv4-mapped IPv6 loopback, mixed public+private) or fails: every one collapses into the skipped-hosts summary and none is fetched.",
+  "input": {
+    "urls": [
+      "https://evil.example/x",
+      "https://gitlab.com/o/r/-/releases",
+      "https://bitbucket.org/o/r",
+      "https://private.test/a",
+      "https://loop.test/b",
+      "https://meta.test/c",
+      "https://mapped.test/d",
+      "https://mixed.test/e",
+      "https://nodns.test/f",
+      "http://169.254.169.254/latest/meta-data/",
+      "https://[::1]/g",
+      "https://evil.example/second"
+    ],
+    "allowed_source_hosts": "gitlab.com,bitbucket.org,private.test,loop.test,meta.test,mapped.test,mixed.test,nodns.test,169.254.169.254,::1",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "evil.example": [
+      "104.16.1.1"
+    ],
+    "gitlab.com": [
+      "104.16.1.1"
+    ],
+    "bitbucket.org": [
+      "104.16.1.1"
+    ],
+    "private.test": [
+      "10.1.2.3"
+    ],
+    "loop.test": [
+      "127.0.0.1"
+    ],
+    "meta.test": [
+      "169.254.169.254"
+    ],
+    "mapped.test": [
+      "::ffff:127.0.0.1"
+    ],
+    "mixed.test": [
+      "104.16.1.1",
+      "192.168.1.1"
+    ]
+  },
+  "http": [
+    {
+      "url": "https://evil.example/x",
+      "body": "must not be fetched"
+    }
+  ],
+  "golden": {
+    "markdown": "(12 sources skipped \u2014 non-allowlisted or non-fetchable hosts: 169.254.169.254, ::1, bitbucket.org, evil.example, gitlab.com, loop.test, mapped.test, meta.test, mixed.test, nodns.test, private.test)\n\n",
+    "requests": "[]",
+    "budget_warnings": "0"
+  }
+}

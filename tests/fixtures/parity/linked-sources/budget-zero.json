@@ -1,0 +1,29 @@
+{
+  "fixture": "budget-zero",
+  "description": "A zero budget: no fetch, no prewarm, no sections; only the refused-repo notice (collected before any budget check) renders, with one warning.",
+  "budget": {
+    "max_seconds": 0,
+    "tick": 0
+  },
+  "input": {
+    "urls": [
+      "https://artifacthub.io/a",
+      "https://github.com/x/y/releases/tag/v1"
+    ],
+    "allowed_source_hosts": "artifacthub.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "104.16.1.1"
+    ]
+  },
+  "golden": {
+    "markdown": "### Not Authorized for Enrichment\n\nThese repos were linked from the PR body but are not the repo under review (and were not listed in `TOOL_ALLOWED_GH_API_REPOS`), so the action did not query them with the operator token:\n\n- `x/y`\n\n",
+    "requests": "[]",
+    "budget_warnings": "1"
+  }
+}

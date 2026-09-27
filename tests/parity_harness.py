@@ -1473,6 +1473,34 @@ PROMPT_ASSEMBLY_BOUNDARY = Boundary(
     canonical_json_keys={"failure_notices", "engine_annotations"},
 )
 
+# Error vocabulary for the linked-sources boundary: v2 raises out of
+# render_linked_sources on hostile payload types (``.get`` on a non-dict,
+# slicing None, ``.lower()`` on a non-string) and on URLs urlparse rejects;
+# the v3 port throws the same Python exception kinds.
+LINKED_SOURCES_CATEGORIES = (
+    (re.compile(r"^(AttributeError|TypeError): "), "malformed-api-payload"),
+    (re.compile(r"^ValueError: "), "invalid-url-or-text"),
+)
+
+LINKED_SOURCES_BOUNDARY = Boundary(
+    id="linked-sources",
+    description=(
+        "#706 PR 5b linked-source enrichment parity: the real v2 "
+        "render_linked_sources (fetch_url's urllib opener with the "
+        "allowlist redirect handler, the host_allowed public-DNS gate, "
+        "strip_source_text, gh_api_call and the Forgejo enrich reads, the "
+        "#509 repo gate, BudgetTracker) versus the v3 port (SSRF-safe "
+        "fetchSource, pinned enrich clients), with only the transport seams "
+        "fixture-routed: DNS answers, raw HTTP exchanges, the gh/curl API "
+        "route table, and a fake budget clock. Compares the rendered "
+        "linked-sources.md byte for byte, the sorted request log, and the "
+        "budget-warning count."
+    ),
+    fixtures_dir="linked-sources",
+    run=lambda fixture, workdir: _run_new_boundary("v2_linked_sources.py", "linked-sources-fixture", fixture, workdir),
+    error_categories=LINKED_SOURCES_CATEGORIES,
+)
+
 
 def _producer_git_env() -> dict[str, str]:
     """Both sides run git against their own prepared worktree; neither may
@@ -1587,6 +1615,7 @@ NEW_BOUNDARIES = (
     PLATFORM_NORMALIZATION_BOUNDARY,
     PROMPT_ASSEMBLY_BOUNDARY,
     CONTEXT_PRODUCERS_BOUNDARY,
+    LINKED_SOURCES_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

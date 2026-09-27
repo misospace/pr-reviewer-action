@@ -1,0 +1,35 @@
+{
+  "fixture": "malformed-payload",
+  "description": "A hostile releases payload whose elements are not objects: v2's `.get` raises AttributeError out of render_linked_sources; the v3 port throws the same exception kind.",
+  "input": {
+    "urls": [
+      "https://github.com/o/r/releases/tag/v1"
+    ],
+    "allowed_source_hosts": "",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {},
+  "routes": [
+    {
+      "match": "repos/o/r/releases/tags/v1",
+      "body": {
+        "tag_name": "v1"
+      }
+    },
+    {
+      "match": "repos/o/r/releases?per_page=30",
+      "body": [
+        [
+          "tag_name"
+        ],
+        "x"
+      ]
+    }
+  ],
+  "golden": {
+    "error": "AttributeError: 'list' object has no attribute 'get'"
+  }
+}

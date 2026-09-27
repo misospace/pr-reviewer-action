@@ -518,6 +518,52 @@ raise on aborts the review (`UserMessageBuildError`). Fragments must not
 contain `&` or `\`: v2 inserts them with an unquoted `${var/pattern/$frag}`,
 which bash >= 5.2 expands.
 
+### The `linked-sources` boundary (#706)
+
+Pins `render_linked_sources` and its SSRF-safe fetch. The real v2 render
+(`fetch_url`'s urllib opener and allowlist redirect handler, the
+`host_allowed` public-DNS gate, `strip_source_text.py`, `gh_api_call`, the
+Forgejo enrich reads, the #509 repo gate and `BudgetTracker`) runs with only
+its transport seams fixture-routed: `enrichment.socket.getaddrinfo`,
+urllib's `http(s)_open`, stub `gh`/`curl` binaries, and the budget clock
+(`tests/parity_runners/v2_linked_sources.py`). The v3 side
+(`node dist/index.js linked-sources-fixture`) injects the same data at the
+resolver, the `Exchange` transport, the enrich clients' fetch, and the
+`BudgetTracker` clock. Both emit the rendered `linked-sources.md`, the
+sorted request log, and the budget-warning count;
+`tests/test_linked_sources_goldens.py` pins each fixture's recorded v2
+output.
+
+The v3 fetch (`src/platform/safe-fetch.ts`) resolves each hop once, requires
+every address to be public (`src/platform/ip-policy.ts`, CPython 3.14's
+`ipaddress` classification), and pins the socket to those addresses through
+its `lookup` hook, closing the rebinding window v2's urllib left open. TLS
+SNI and `Host` keep the hostname.
+
+Approved divergences (all fail closed):
+
+- `100.64.0.0/10` (CGNAT) and `fec0::/10` (site-local) are blocked; CPython
+  classifies neither as private or reserved.
+- Raw source bodies are capped at 5 MiB and Forgejo enrich API responses at
+  32 MiB; v2 read both unbounded.
+- Every redirect hop must stay inside `ALLOWED_SOURCE_HOSTS`; v2 checked hops
+  only against `fetch_url`'s default allowlist.
+- Redirect hops go only to http/https (urllib also followed `ftp://`), and
+  proxy environment variables are not honored.
+- A URL whose Python hostname and connection target disagree (userinfo,
+  backslash tricks, non-ASCII request targets) fails instead of connecting.
+
+v2 behavior kept for parity: the raw fetch is effectively limited to
+`ALLOWED_SOURCE_HOSTS` ∩ `{github.com, gitlab.com, registry.terraform.io,
+artifacthub.io}` (v2's `_fetch_sections` never passes its allowlist to
+`fetch_url`), and github.com/gitlab.com are never fetched raw. Hostile
+payload types (`.get` on a non-dict, slicing `None`) and URLs `urlparse`
+rejects abort the whole render. Fetched text is rendered inside a `text`
+fence without fence-safety, and the corpus-level untrusted-data delimiters
+are what contain it. JSON goes through `JSON.parse`, so integer-valued
+floats, integers beyond 2^53 and integer-like object keys do not round-trip
+byte for byte.
+
 ### The `context-producers` boundary (#706)
 
 Pins the deterministic corpus producers that existed only as v2 shell:

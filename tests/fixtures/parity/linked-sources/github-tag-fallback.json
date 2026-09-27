@@ -1,0 +1,65 @@
+{
+  "fixture": "github-tag-fallback",
+  "description": "Phase 3 releases enrichment when no release matches the target version: the tags list fallback, a repo whose tags read fails, and a repo whose releases read fails (current-repo authorization).",
+  "input": {
+    "urls": [
+      "https://github.com/o/r/pull/9",
+      "https://github.com/o/other",
+      "https://github.com/o/nothing/issues/1"
+    ],
+    "allowed_source_hosts": "",
+    "target_version": "9.9.9",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r",
+    "tool_allowed_gh_api_repos": "o/other,o/nothing"
+  },
+  "dns": {},
+  "routes": [
+    {
+      "match": "repos/o/r/releases?per_page=30",
+      "body": [
+        {
+          "tag_name": "v1.0.0",
+          "name": "one"
+        },
+        {
+          "tag_name": "v0.9.0",
+          "name": "nine 9.9 no"
+        }
+      ]
+    },
+    {
+      "match": "repos/o/r/tags?per_page=50",
+      "body": [
+        {
+          "name": "v1.0.0",
+          "commit": {
+            "sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "url": "u"
+          },
+          "zipball_url": "z"
+        },
+        {
+          "name": "v0.9.0"
+        }
+      ]
+    },
+    {
+      "match": "repos/o/other/releases?per_page=30",
+      "body": []
+    },
+    {
+      "match": "repos/o/other/tags?per_page=50",
+      "status": 500,
+      "body": {
+        "message": "boom"
+      }
+    }
+  ],
+  "golden": {
+    "markdown": "(3 sources skipped \u2014 non-allowlisted or non-fetchable hosts: github.com)\n\n\n### GitHub Releases Enrichment: o/r\n#### Recent Releases (tags)\n```json\n[\n  {\n    \"tag_name\": \"v1.0.0\",\n    \"name\": \"one\"\n  },\n  {\n    \"tag_name\": \"v0.9.0\",\n    \"name\": \"nine 9.9 no\"\n  }\n]\n\n```\n(No release tags matched target version 9.9.9 in o/r)\n#### Recent Tags\n```json\n[\n  {\n    \"name\": \"v1.0.0\",\n    \"commit\": {\n      \"sha\": \"dddddddddddddddddddddddddddddddddddddddd\",\n      \"url\": \"u\"\n    }\n  },\n  {\n    \"name\": \"v0.9.0\"\n  }\n]\n\n```\n\n### GitHub Releases Enrichment: o/other\n#### Recent Releases (tags)\n```json\n[]\n\n```\n(No release tags matched target version 9.9.9 in o/other)\n(Could not fetch tags list for o/other)\n\n### GitHub Releases Enrichment: o/nothing\n(Could not fetch releases list for o/nothing)\n",
+    "requests": "[\"GET https://api.github.com/repos/o/nothing/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/other/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/other/tags?per_page=50 auth=0\",\"GET https://api.github.com/repos/o/r/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/r/tags?per_page=50 auth=0\"]",
+    "budget_warnings": "0"
+  }
+}

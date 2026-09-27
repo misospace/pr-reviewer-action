@@ -184,3 +184,18 @@ export {
 } from "./standards-file.js";
 export { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 export { linearIssueToV2, renderLinearMarkdown } from "../precheck/linear.js";
+export { BudgetTracker, DeadlineBudget } from "./budget.js";
+export { looksLikeHtml, pyDecodeUtf8Ignore, pyHtmlUnescape, reduceSource, stripHtml, stripSourceToText } from "./strip-source-text.js";
+export {
+  SKIP_FETCH_HOSTS,
+  defaultLinkedSourcesDeps,
+  githubRepoKey,
+  parseAllowedRepos,
+  pyJsonDumpsIndent2,
+  renderLinkedSources,
+  repoAllowed,
+  type ForgejoEnrichApi,
+  type GitHubEnrichApi,
+  type LinkedSourcesDeps,
+  type LinkedSourcesInput,
+} from "./linked-sources.js";

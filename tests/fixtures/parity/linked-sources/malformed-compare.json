@@ -1,0 +1,27 @@
+{
+  "fixture": "malformed-compare",
+  "description": "A hostile compare payload with commits: null: v2 slices None and raises TypeError; the v3 port throws the same exception kind.",
+  "input": {
+    "urls": [
+      "https://github.com/o/r/compare/a...b"
+    ],
+    "allowed_source_hosts": "",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {},
+  "routes": [
+    {
+      "match": "repos/o/r/compare/a...b",
+      "body": {
+        "status": "ahead",
+        "commits": null
+      }
+    }
+  ],
+  "golden": {
+    "error": "TypeError: 'NoneType' object is not subscriptable"
+  }
+}

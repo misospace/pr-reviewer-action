@@ -6,10 +6,9 @@
  * old→new compare-SHA extraction, and release/compare URL classification.
  * These are the enrichment *normalization* producers: text in, canonical
  * camelCase structures out — every consumer receives these objects instead of
- * re-running the brittle shell pipelines. Deliberately NOT ported here: the
- * host allowlist DNS resolution / public-IP checks (`host_allowed` and
- * friends) — that is fetch/security policy owned by the platform/tool
- * boundaries and stays in v2 until the fetch seam migrates. */
+ * re-running the brittle shell pipelines. The host allowlist DNS resolution
+ * / public-IP checks (`host_allowed` and friends) are fetch policy and live
+ * in `src/platform/safe-fetch.ts`. */
 
 import { pySplitLines } from "../requirements/ledger.js";
 
@@ -161,8 +160,11 @@ const FORGE_RELEASE_RE = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/releases\/tag\/
 const FORGE_COMPARE_RE = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/compare\/([^?#]+)/;
 
 /** Classify a URL into GitHub/Forgejo release or compare metadata, or null.
- * Query strings and fragments in compare URLs do not break capture. */
-export function classifyUrl(url: string): UrlClassification | null {
+ * Query strings and fragments in compare URLs do not break capture.
+ * `hostOf` extracts the hostname that excludes github.com from the Forgejo
+ * patterns; linked sources pass CPython's `urlparse(...).hostname`
+ * (`pyUrlHost`), which is what v2 uses. */
+export function classifyUrl(url: string, hostOf: (url: string) => string = urlHost): UrlClassification | null {
   const ghRelease = GH_RELEASE_RE.exec(url);
   if (ghRelease) {
     return { type: "github_release", owner: ghRelease[1] as string, repo: ghRelease[2] as string, tag: ghRelease[3] as string };
@@ -172,7 +174,7 @@ export function classifyUrl(url: string): UrlClassification | null {
     return { type: "github_compare", owner: ghCompare[1] as string, repo: ghCompare[2] as string, compareSpec: ghCompare[3] as string };
   }
   // Forgejo (github.com is handled above)
-  if (urlHost(url).toLowerCase() !== "github.com") {
+  if (hostOf(url).toLowerCase() !== "github.com") {
     const forgeRelease = FORGE_RELEASE_RE.exec(url);
     if (forgeRelease) {
       return {

@@ -28,7 +28,7 @@ import { LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl } from "./urls.js";
 
 const REF_TAIL = /^[A-Za-z0-9._~%+:@!$&'()*,;=/-]+$/;
 const HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$/;
-const ENDPOINT_RE = /^repos\/([^/]+)\/([^/]+)\/(releases\/tags\/|compare\/|tags\?per_page=50$)(.*)$/;
+const ENDPOINT_RE = /^repos\/([^/]+)\/([^/]+)\/(releases\/tags\/|compare\/|tags\?per_page=50$|releases\?per_page=30$)(.*)$/;
 
 /** gh_api_call's subprocess bound. */
 const GH_ENRICH_TIMEOUT_MS = 30_000;
@@ -56,7 +56,8 @@ function safeDecodedTail(tail: string): boolean {
 }
 
 /** The endpoint shapes linked sources build: `repos/o/r/releases/tags/T`,
- * `repos/o/r/compare/SPEC`, `repos/o/r/tags?per_page=50`. */
+ * `repos/o/r/compare/SPEC`, `repos/o/r/tags?per_page=50`,
+ * `repos/o/r/releases?per_page=30`. */
 export function validEnrichEndpoint(endpoint: string): boolean {
   return parseEnrichEndpoint(endpoint) !== null;
 }
@@ -72,7 +73,9 @@ function parseEnrichEndpoint(endpoint: string): EnrichEndpoint | null {
   if (!match) return null;
   const [, owner = "", name = "", kind = "", rest = ""] = match;
   if (!isRepoSegment(owner) || !isRepoSegment(name)) return null;
-  if (kind.startsWith("tags")) return rest === "" ? { repo: `${owner}/${name}`, staticTail: "/tags?per_page=50", dynamicTail: "" } : null;
+  if (kind.startsWith("tags") || kind.startsWith("releases?")) {
+    return rest === "" ? { repo: `${owner}/${name}`, staticTail: `/${kind}`, dynamicTail: "" } : null;
+  }
   return safeRefTail(rest) ? { repo: `${owner}/${name}`, staticTail: `/${kind}`, dynamicTail: rest } : null;
 }
 

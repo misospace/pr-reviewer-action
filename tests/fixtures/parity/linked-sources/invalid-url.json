@@ -1,0 +1,23 @@
+{
+  "fixture": "invalid-url",
+  "description": "A PR URL urlparse rejects ('https://[oops'): v2's render raises ValueError before any fetch; the v3 port throws the same exception kind.",
+  "input": {
+    "urls": [
+      "https://[oops/x",
+      "https://artifacthub.io/a"
+    ],
+    "allowed_source_hosts": "artifacthub.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "104.16.1.1"
+    ]
+  },
+  "golden": {
+    "error": "ValueError: Invalid IPv6 URL"
+  }
+}

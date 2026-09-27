@@ -1,0 +1,85 @@
+{
+  "fixture": "ghcr-lookup",
+  "description": "Phase 4 ghcr.io path inference: a release found via the v-prefixed target tag, a bare-tag hit, a miss falling back to the commit compare of the digest SHAs, an image already covered by a github.com link, and an unusable image path.",
+  "input": {
+    "urls": [
+      "https://github.com/o/covered"
+    ],
+    "allowed_source_hosts": "",
+    "target_version": "2.0.0",
+    "ghcr_images": [
+      "o/covered",
+      "o/app",
+      "o/bare",
+      "o/nomatch",
+      "solo"
+    ],
+    "compare_shas": [
+      "abc1234",
+      "def5678"
+    ],
+    "github_repository": "o/r",
+    "tool_allowed_gh_api_repos": "o/*,o/covered,o/app,o/bare,o/nomatch"
+  },
+  "dns": {},
+  "routes": [
+    {
+      "match": "repos/o/covered/releases?per_page=30",
+      "body": [
+        {
+          "tag_name": "v2.0.0",
+          "name": "two",
+          "body": "b"
+        }
+      ]
+    },
+    {
+      "match": "repos/o/app/releases/tags/v2.0.0",
+      "body": {
+        "tag_name": "v2.0.0",
+        "name": "App 2",
+        "body": "app notes",
+        "html_url": "h"
+      }
+    },
+    {
+      "match": "repos/o/bare/releases/tags/2.0.0",
+      "body": {
+        "tag_name": "2.0.0",
+        "name": "Bare"
+      }
+    },
+    {
+      "match": "repos/o/nomatch/compare/abc1234...def5678",
+      "body": {
+        "html_url": "c",
+        "status": "ahead",
+        "ahead_by": 1,
+        "total_commits": 1,
+        "commits": [
+          {
+            "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "commit": {
+              "message": "chore"
+            }
+          }
+        ],
+        "files": [
+          {
+            "filename": "x",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "changes": 1,
+            "patch": "dropped"
+          }
+        ]
+      }
+    }
+  ],
+  "golden": {
+    "markdown": "(1 source skipped \u2014 non-allowlisted or non-fetchable hosts: github.com)\n\n\n### GitHub Releases Enrichment: o/covered\n#### Recent Releases (tags)\n```json\n[\n  {\n    \"tag_name\": \"v2.0.0\",\n    \"name\": \"two\"\n  }\n]\n\n```\n#### Releases matching target version 2.0.0\n```json\n[\n  {\n    \"tag_name\": \"v2.0.0\",\n    \"name\": \"two\",\n    \"body\": \"b\"\n  }\n]\n\n```\n\n### GitHub Release Lookup via ghcr.io Path: o/app\n#### Matched via ghcr.io path: o/app@v2.0.0\n```json\n{\n  \"tag_name\": \"v2.0.0\",\n  \"name\": \"App 2\",\n  \"html_url\": \"h\",\n  \"body\": \"app notes\"\n}\n\n```\n\n### GitHub Release Lookup via ghcr.io Path: o/bare\n#### Matched via ghcr.io path: o/bare@2.0.0\n```json\n{\n  \"tag_name\": \"2.0.0\",\n  \"name\": \"Bare\"\n}\n\n```\n\n### GitHub Release Lookup via ghcr.io Path: o/nomatch\n(No release found for o/nomatch at version 2.0.0 via ghcr.io path inference)\n#### Commit compare abc1234...def5678 (no release published for this version)\n```json\n{\n  \"html_url\": \"c\",\n  \"status\": \"ahead\",\n  \"ahead_by\": 1,\n  \"total_commits\": 1,\n  \"commits\": [\n    {\n      \"sha\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"commit\": {\n        \"message\": \"chore\"\n      }\n    }\n  ]\n}\n\n```\n#### Changed Files\n```json\n[\n  {\n    \"filename\": \"x\",\n    \"status\": \"modified\",\n    \"additions\": 1,\n    \"deletions\": 0,\n    \"changes\": 1\n  }\n]\n\n```\n",
+    "requests": "[\"GET https://api.github.com/repos/o/app/releases/tags/2.0.0 auth=0\",\"GET https://api.github.com/repos/o/app/releases/tags/v2.0.0 auth=0\",\"GET https://api.github.com/repos/o/bare/releases/tags/2.0.0 auth=0\",\"GET https://api.github.com/repos/o/bare/releases/tags/v2.0.0 auth=0\",\"GET https://api.github.com/repos/o/covered/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/nomatch/compare/abc1234...def5678 auth=0\",\"GET https://api.github.com/repos/o/nomatch/releases/tags/2.0.0 auth=0\",\"GET https://api.github.com/repos/o/nomatch/releases/tags/v2.0.0 auth=0\"]",
+    "budget_warnings": "0"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "fixture": "redirect-outside-allowed-source-hosts",
+  "description": "A redirect to a host in fetch_url's default allowlist but not in ALLOWED_SOURCE_HOSTS: v2's redirect handler checks only the default set and follows it; v3 re-checks ALLOWED_SOURCE_HOSTS on every hop and refuses (approved divergence).",
+  "input": {
+    "urls": [
+      "https://artifacthub.io/moved"
+    ],
+    "allowed_source_hosts": "artifacthub.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "104.16.1.1"
+    ],
+    "registry.terraform.io": [
+      "104.16.2.2"
+    ]
+  },
+  "http": [
+    {
+      "url": "https://artifacthub.io/moved",
+      "status": 302,
+      "headers": {
+        "Location": "https://registry.terraform.io/elsewhere"
+      }
+    },
+    {
+      "url": "https://registry.terraform.io/elsewhere",
+      "body": "followed"
+    }
+  ],
+  "golden": {
+    "markdown": "## Source 1\nURL: https://artifacthub.io/moved\n\n### Fetched Content (truncated)\n```text\nfollowed\n\n```\n\n",
+    "requests": "[\"GET https://artifacthub.io/moved\",\"GET https://registry.terraform.io/elsewhere\"]",
+    "budget_warnings": "0"
+  }
+}

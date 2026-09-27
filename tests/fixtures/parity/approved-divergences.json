@@ -241,6 +241,78 @@
         "new": "{\"findings\": [], \"required_checks\": \"incomplete\", \"review_markdown\": \"## Review\\n\\nThis diff upgrades the lockfile and runs the full test suite after upgrade.\\n\\n### Unaddressed required checks\\nThe classifier marked these checks as required for this PR's risk profile, but the review does not resolve or disposition them:\\n\\n- run full test suite after upgrade\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\", \"verdict_source\": \"model\"}"
       },
       "reason": "#680 removes the v2 coexistence bridge: when the model emitted no structured required-check dispositions at all, v2 fell back to the legacy shallow keyword match against review_markdown (documented in pr_reviewer/completeness.py as removed by #680). The v3 pipeline is structured-authoritative: key absence is conservatively unresolved (every check unresolved, warn/fail modes act on it). Pinned per key with the exact old and new values."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "cgnat-divergence"
+      ],
+      "key": "markdown",
+      "expected": {
+        "old": "## Source 1\nURL: https://artifacthub.io/cgnat\n\n### Fetched Content (truncated)\n```text\ninternal\n\n```\n\n",
+        "new": "(1 source skipped — non-allowlisted or non-fetchable hosts: artifacthub.io)\n\n"
+      },
+      "reason": "v3 blocks 100.64.0.0/10 (CGNAT shared address space). CPython's ipaddress deliberately reports is_private=False for it and it is not reserved, so v2's _is_public_ip treated it as public and fetched; v3's ip-policy adds it (fail closed), so the allowlisted host is skipped."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "cgnat-divergence"
+      ],
+      "key": "requests",
+      "expected": {
+        "old": "[\"GET https://artifacthub.io/cgnat\"]",
+        "new": "[]"
+      },
+      "reason": "Same CGNAT block: v3 never connects to the 100.64.0.0/10 address."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "oversize-over-cap"
+      ],
+      "key": "markdown",
+      "expected": {
+        "old": "## Source 1\nURL: https://artifacthub.io/huge\n\n### Fetched Content (truncated)\n```text\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n…[source truncated]\n\n```\n\n",
+        "new": "## Source 1\nURL: https://artifacthub.io/huge\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from artifacthub.io)\n\n"
+      },
+      "reason": "v3 caps raw linked-source bodies at 5 MiB (MAX_SOURCE_BYTES); v2's fetch_url read the body unbounded. Bodies under the cap render identically; this ~5.3 MB body fails the fetch in v3."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "redirect-ftp"
+      ],
+      "key": "requests",
+      "expected": {
+        "old": "[\"GET ftp://artifacthub.io/pub/file\",\"GET https://artifacthub.io/ftp\"]",
+        "new": "[\"GET https://artifacthub.io/ftp\"]"
+      },
+      "reason": "v3 follows redirect hops only to http/https; urllib's redirect handler also accepts ftp:// and v2 attempted the FTP hop to the allowlisted host (refused by the fixture). The rendered markdown is identical."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "redirect-outside-allowed-source-hosts"
+      ],
+      "key": "markdown",
+      "expected": {
+        "old": "## Source 1\nURL: https://artifacthub.io/moved\n\n### Fetched Content (truncated)\n```text\nfollowed\n\n```\n\n",
+        "new": "## Source 1\nURL: https://artifacthub.io/moved\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from artifacthub.io)\n\n"
+      },
+      "reason": "v3 re-checks ALLOWED_SOURCE_HOSTS on every redirect hop (maintainer design); v2's _AllowListRedirectHandler checked only fetch_url's default allowlist, so it followed a hop to registry.terraform.io even though the operator had not allowlisted it."
+    },
+    {
+      "boundary": "linked-sources",
+      "fixtures": [
+        "redirect-outside-allowed-source-hosts"
+      ],
+      "key": "requests",
+      "expected": {
+        "old": "[\"GET https://artifacthub.io/moved\",\"GET https://registry.terraform.io/elsewhere\"]",
+        "new": "[\"GET https://artifacthub.io/moved\"]"
+      },
+      "reason": "Same per-hop ALLOWED_SOURCE_HOSTS check: v3 does not request the non-allowlisted redirect target."
     }
   ]
 }

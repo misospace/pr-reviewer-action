@@ -9,6 +9,29 @@ export { validateEndpoint } from "./endpoint.js";
 export { ciAttemptTimeoutMs } from "./bounded.js";
 export { ForgejoEnrichClient, GitHubEnrichClient, validEnrichEndpoint } from "./enrich.js";
 export { SemanticFixtureAdapter, semanticFixtureDir } from "./semantic-fixture.js";
+export { isPublicAddress, parseIpLiteral } from "./ip-policy.js";
+export { pyRequestTarget, pyUrlHost, pyUrlHostname, pyUrlsplit, PyUrlValueError } from "./py-url.js";
+export {
+  DEFAULT_FETCH_HOSTS,
+  MAX_ENRICH_API_BYTES,
+  MAX_REDIRECTS,
+  MAX_REPEATS,
+  MAX_SOURCE_BYTES,
+  SOURCE_FETCH_TIMEOUT_MS,
+  createNodeExchange,
+  fetchSource,
+  hostAllowed,
+  nodeExchange,
+  pinnedLookup,
+  resolveHostIps,
+  resolvePublicAddresses,
+  safeFetchLike,
+  systemResolver,
+  type Exchange,
+  type ExchangeRequest,
+  type ExchangeResponse,
+  type Resolver,
+} from "./safe-fetch.js";
 export { projectPrFiles, type ExternalCheck } from "./normalize.js";
 export type {
   CiBoundOptions,

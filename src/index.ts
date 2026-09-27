@@ -35,6 +35,7 @@ import { resolveRepositoryConfig } from "./config/repository-config.js";
 import { runPlatformNormalizationFixture } from "./platform/fixture.js";
 import { runPromptAssemblyFixture } from "./prompt/fixture.js";
 import { runContextProducersFixture } from "./context/producers-fixture.js";
+import { runLinkedSourcesFixture } from "./context/linked-sources-fixture.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -135,6 +136,15 @@ if (require.main === module) {
       process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     });
+  } else if (firstArg === "linked-sources-fixture") {
+    assertSupportedNode(process.versions.node);
+    runLinkedSourcesFixture(argv[1] ?? "").then(
+      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      (error: unknown) => {
+        process.stderr.write(`v3 linked-sources fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        process.exitCode = 1;
+      },
+    );
   } else if (firstArg === "platform-normalization-fixture") {
     assertSupportedNode(process.versions.node);
     runPlatformNormalizationFixture(argv[1] ?? "").then(

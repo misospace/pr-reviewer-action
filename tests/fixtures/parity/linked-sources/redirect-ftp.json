@@ -1,0 +1,33 @@
+{
+  "fixture": "redirect-ftp",
+  "description": "A redirect to ftp:// on an allowlisted host: urllib attempts the FTP hop (logged, refused by the fixture); v3 rejects non-http(s) hop schemes before connecting. The rendered markdown is identical; only the request log differs (approved divergence).",
+  "input": {
+    "urls": [
+      "https://artifacthub.io/ftp"
+    ],
+    "allowed_source_hosts": "artifacthub.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "104.16.1.1"
+    ]
+  },
+  "http": [
+    {
+      "url": "https://artifacthub.io/ftp",
+      "status": 302,
+      "headers": {
+        "Location": "ftp://artifacthub.io/pub/file"
+      }
+    }
+  ],
+  "golden": {
+    "markdown": "## Source 1\nURL: https://artifacthub.io/ftp\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from artifacthub.io)\n\n",
+    "requests": "[\"GET ftp://artifacthub.io/pub/file\",\"GET https://artifacthub.io/ftp\"]",
+    "budget_warnings": "0"
+  }
+}

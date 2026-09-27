@@ -1,0 +1,25 @@
+{
+  "fixture": "ghcr-no-target",
+  "description": "Phase 4 without a target version: the lookup notice renders and the compare fallback is attempted (and fails).",
+  "input": {
+    "urls": [
+      "https://example.org/x"
+    ],
+    "allowed_source_hosts": "",
+    "target_version": "",
+    "ghcr_images": [
+      "o/app"
+    ],
+    "compare_shas": [
+      "abc1234",
+      "def5678"
+    ],
+    "github_repository": "o/app"
+  },
+  "dns": {},
+  "golden": {
+    "markdown": "(1 source skipped \u2014 non-allowlisted or non-fetchable hosts: example.org)\n\n\n### GitHub Release Lookup via ghcr.io Path: o/app\n(TARGET_VERSION not set; skipping release lookup for o/app)\n",
+    "requests": "[\"GET https://api.github.com/repos/o/app/compare/abc1234...def5678 auth=0\"]",
+    "budget_warnings": "0"
+  }
+}

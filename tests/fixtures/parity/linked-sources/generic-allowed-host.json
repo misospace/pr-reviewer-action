@@ -1,0 +1,43 @@
+{
+  "fixture": "generic-allowed-host",
+  "description": "Raw fetch of allowlisted non-GitHub hosts: an HTML page stripped to visible text (script/style/head/svg/noscript dropped, entities incl. legacy/invalid refs, BOM, unicode word boundary, whitespace collapse), a plain-text page with invalid UTF-8 and NUL bytes, and an empty body.",
+  "input": {
+    "urls": [
+      "https://artifacthub.io/packages/helm/x/y",
+      "https://registry.terraform.io/providers/x/y/latest",
+      "https://artifacthub.io/empty"
+    ],
+    "allowed_source_hosts": "artifacthub.io,registry.terraform.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "104.16.1.1"
+    ],
+    "registry.terraform.io": [
+      "2606:4700::6810:1"
+    ]
+  },
+  "http": [
+    {
+      "url": "https://artifacthub.io/packages/helm/x/y",
+      "body": "\ufeff<!DOCTYPE html>\n<html><head><title>ignored</title><script>var x = '<p>no</p>';</script></head>\n<body>\n<STYLE>p{}</style><h1>Chart   v2.0 &amp; notes</h1>\n\n\n<p>Caf&eacute; &#233; &#x1F680; &notit; &amp &lt;tag&gt; &#0; &#128;</p>\n<svg><text>drop</text></svg><noscript>drop</noscript>\n<p>\u4e2d\u6587 \ud83d\ude00 \ud835\udd38\u00a0nbsp\u3000ideo</p><script\u00e9>kept</script\u00e9>\n</body></html>"
+    },
+    {
+      "url": "https://registry.terraform.io/providers/x/y/latest",
+      "body_b64": "cGxhaW4gw6kgdGV4dAr//iBiYWQg4oIgdHJ1bmMgAG51bCDtoIAgc3Vycm9nYXRlIPCfmIAgb2sKCgogIHNwYWNlZA=="
+    },
+    {
+      "url": "https://artifacthub.io/empty",
+      "body": ""
+    }
+  ],
+  "golden": {
+    "markdown": "## Source 1\nURL: https://artifacthub.io/packages/helm/x/y\n\n### Fetched Content (truncated)\n```text\n\ufeff \n Chart v2.0 & notes \n Caf\u00e9 \u00e9 \ud83d\ude80 \u00acit; & <tag> \ufffd \u20ac \n \u4e2d\u6587 \ud83d\ude00 \ud835\udd38\u00a0nbsp\u3000ideo kept\n\n```\n\n## Source 2\nURL: https://registry.terraform.io/providers/x/y/latest\n\n### Fetched Content (truncated)\n```text\nplain \u00e9 text\n bad  trunc  nul  surrogate \ud83d\ude00 ok\n\n\n  spaced\n\n```\n\n## Source 3\nURL: https://artifacthub.io/empty\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from artifacthub.io)\n\n",
+    "requests": "[\"GET https://artifacthub.io/empty\",\"GET https://artifacthub.io/packages/helm/x/y\",\"GET https://registry.terraform.io/providers/x/y/latest\"]",
+    "budget_warnings": "0"
+  }
+}

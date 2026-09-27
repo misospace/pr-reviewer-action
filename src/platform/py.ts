@@ -38,6 +38,7 @@ export function pyIsInt(value: unknown): boolean {
   return typeof value === "boolean" || (typeof value === "number" && Number.isInteger(value));
 }
 
+/** `repr(float)`. */
 export function pyFloatRepr(value: number): string {
   if (Number.isNaN(value)) return "nan";
   if (!Number.isFinite(value)) return value > 0 ? "inf" : "-inf";
