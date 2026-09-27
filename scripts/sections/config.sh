@@ -635,7 +635,7 @@ apply_system_prompt_fragments() {
     SYSTEM_PROMPT="${SYSTEM_PROMPT} Trace producer -> persisted representation -> transport/environment -> consumer -> decision for cross-step features; verify the production wiring uses the same artifact and capability as the tests. A test or CI result absent from a truncated corpus is not evidence that the exact head failed or lacks coverage: distinguish omitted evidence from an observed counterexample, and do not request changes solely because a tail is missing."
   fi
   if [[ "${SYSTEM_PROMPT_IS_DEFAULT:-0}" == "1" && -f classification.json ]]; then
-    local kind vb="" dg="" rn=""
+    local kind vb="" dg="" rn="" fg=""
     kind="$(jq -r '.pr_kind // ""' classification.json 2>/dev/null || echo "")"
     if [[ "$kind" == "dependency_upgrade" || "$kind" == "k8s_manifest" ]]; then
       vb="$(<"$SCRIPT_DIR/prompt_fragments/version_bump.txt") "
@@ -653,6 +653,12 @@ apply_system_prompt_fragments() {
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/$vb}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/$dg}"
     SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/$rn}"
+  else
+    # No classification for this run: the kind-gated placeholders must never
+    # leak into the prompt (the same contract the verbosity dial documents).
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{VERSION_BUMP_GUIDANCE\}\}/}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{IMAGE_DIGEST_GUIDANCE\}\}/}"
+    SYSTEM_PROMPT="${SYSTEM_PROMPT/\{\{RELEASE_NOTES_GUIDANCE\}\}/}"
   fi
   # append mode: compose the supplied prompt onto the assembled default as a
   # repo-specific addendum, so a consumer adds conventions without copying (and

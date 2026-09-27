@@ -42,6 +42,28 @@ CAPABILITY_PRECHECK_CREDENTIAL = "precheck_capability_wiring"
 CAPABILITY_BROKEN_ARROW = "broken_dataflow_arrow"
 CAPABILITY_CORPUS_EVIDENCE = "review_corpus_evidence_transport"
 CAPABILITY_TRUNCATION_COUNTEREXAMPLE = "truncation_counterexample"
+# #757 counterexample-driven falsification: the four PR #756-derived failure
+# classes where the reviewer verified that code/tests/parity agree with the
+# intended design but never challenged whether the implementation's actual
+# semantic/lexical boundary matches the claim. Generic across languages and
+# repositories — not path-classifier signatures:
+#   - boundary_scope_leak: the implementation claims to inspect an
+#     operand/value but actually scans a broader statement/container, so the
+#     trigger can be moved to an irrelevant syntactic position and still fire;
+#   - information_loss_ordering: normalization/neutralization removes the
+#     evidence a downstream rule needs before that rule can inspect it, and
+#     routing the same value through a simple alias hides it identically;
+#   - cooccurrence_false_flow: nearby untrusted-looking data is mistaken for
+#     data that actually reaches the changed operation;
+#   - incidental_positive_fixture: a positive test contains multiple
+#     trigger-shaped tokens and passes for the wrong reason — remove the
+#     incidental tokens while preserving the semantically relevant source and
+#     the claimed signal must still work, else the test proves vocabulary,
+#     not semantics.
+CAPABILITY_SCOPE_LEAK = "boundary_scope_leak"
+CAPABILITY_INFO_LOSS_ORDER = "information_loss_ordering"
+CAPABILITY_FALSE_FLOW = "cooccurrence_false_flow"
+CAPABILITY_INCIDENTAL_FIXTURE = "incidental_positive_fixture"
 # #750: an ungrounded not_applicable cannot wave away a real required-check
 # risk. A correct review names the concrete risk surface (or calls the N/A
 # waiver ungrounded); a review that emits the N/A token over a present risk
@@ -120,6 +142,30 @@ REMEDIATION_PROPOSAL_CUES = (
     "replace", "propose", "suggested", "remediation", "mitigat", "install ",
     "add a ", "keep the", "no fix is needed", "not needed because", "refuse to",
 )
+# #757: generic counterexample-ATTEMPT cues — phrases that show the reviewer
+# tried to construct a falsifying input, independent of whether the attempt
+# hit this scenario's specific defect. Scenario-specific
+# `falsification_expectations.counterexample_any_of` needles decide
+# `counterexample_found`; these cues only decide `counterexample_attempted`,
+# so an A/B can measure attempt rate separately from success rate.
+COUNTEREXAMPLE_ATTEMPT_CUES = (
+    "counterexample", "counter-example", "near-miss", "near miss",
+    "just across the boundary", "just outside the boundary",
+    "boundary value", "adjacent input", "hostile input",
+    "if the trigger were moved", "moving the trigger", "renaming the trigger",
+    "moving or renaming", "mutation would", "mutating the",
+    "flip the classification", "flip the result", "flips the observed",
+    "flips the classification", "an input where", "an input that",
+)
+# #757: per-scenario falsification contract — the narrowest structured
+# distinction between verification-by-coherence and actual falsification.
+# `boundary_any_of` needles decide whether the reviewer named the changed
+# decision boundary; `counterexample_any_of` needles decide whether a
+# concrete falsifying input for THIS scenario was constructed. A review that
+# restates the intended behavior, cites green tests, or observes parity hits
+# the boundary needles but never the counterexample needles — exactly the
+# #756 failure the telemetry must stay able to see.
+FALSIFICATION_EXPECTATION_KEYS = frozenset({"boundary_any_of", "counterexample_any_of"})
 KNOWN_CAPABILITY_CLASSES = frozenset(
     {
         CAPABILITY_SEQUENCING,
@@ -139,6 +185,10 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_BROKEN_ARROW,
         CAPABILITY_CORPUS_EVIDENCE,
         CAPABILITY_TRUNCATION_COUNTEREXAMPLE,
+        CAPABILITY_SCOPE_LEAK,
+        CAPABILITY_INFO_LOSS_ORDER,
+        CAPABILITY_FALSE_FLOW,
+        CAPABILITY_INCIDENTAL_FIXTURE,
         CAPABILITY_REQUIRED_CHECK_GROUNDING,
     }
 )
@@ -279,6 +329,53 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
     (CAPABILITY_TRUNCATION_COUNTEREXAMPLE, (
         "truncate_clean writes an oversized marker beyond max_corpus",
         "oversized marker exceeds the corpus budget",
+    )),
+    # #757 falsification vocabularies. Deliberately causal/mechanism-level
+    # (a generic "be more adversarial" sentence matches none of these), so
+    # only a finding that names the boundary mechanism counts. The scenario
+    # carries the concrete falsification separately via
+    # falsification_expectations.counterexample_any_of — this vocabulary only
+    # decides whether the changed decision boundary was named at all.
+    (CAPABILITY_SCOPE_LEAK, (
+        "scans a broader statement", "scans the whole statement",
+        "scans the whole line", "statement-wide", "line-wide",
+        "scans the container instead of the value",
+        "checks the container rather than the value",
+        "operand rather than the statement", "inspects the operand",
+        "instead of the consumed value", "instead of the assigned value",
+        "wrong object", "wrong scope", "scope of the check",
+        "irrelevant syntactic position", "irrelevant position",
+    )),
+    (CAPABILITY_INFO_LOSS_ORDER, (
+        "normalized away before", "erases evidence before",
+        "erases the evidence before", "removes evidence before",
+        "destroys the evidence before", "lost before the check",
+        "lost before the downstream", "neutralization erases",
+        "normalization erases", "normalization removes the evidence",
+        "alias hides", "aliased value is erased", "through a simple alias",
+        "through an alias", "runs after normalization",
+        "runs before normalization", "inspected after normalization",
+        "inspected after the value is lost", "downstream rule cannot inspect",
+        "ordering erases evidence", "ordering loses the evidence",
+    )),
+    (CAPABILITY_FALSE_FLOW, (
+        "co-occurrence mistaken for flow", "co-occurrence, not flow",
+        "nearby but unrelated", "nearby data does not flow",
+        "never reaches the changed operation", "never reaches the sink",
+        "does not flow into", "no dataflow into", "without any dataflow",
+        "adjacent line satisfies", "adjacent statement satisfies",
+        "presence is not flow", "proximity is not flow",
+        "unrelated adjacent", "unrelated neighbor",
+    )),
+    (CAPABILITY_INCIDENTAL_FIXTURE, (
+        "incidental trigger", "trigger vocabulary", "trigger-shaped",
+        "incidental token", "incidental identifier", "incidental keyword",
+        "for the wrong reason", "passes for the wrong reason",
+        "tests repeat the implementation's", "fixtures repeat the implementation's",
+        "prove vocabulary", "proves vocabulary", "not the semantics",
+        "mutation would flip", "moving the trigger", "renaming the trigger",
+        "moving or renaming the trigger", "strip the incidental",
+        "removing the incidental",
     )),
     # #750: causal terms only — a generic "be careful with paths" matches
     # none of these, so only a finding that names the concrete risk surface
@@ -468,6 +565,13 @@ class SemanticScenario:
     # must cover ("required") and remediation shapes that must be rejected
     # ("forbidden", e.g. the wrapper-only repair or the silent fallback).
     remediation_expectations: dict[str, Any] = field(default_factory=dict)
+    # #757: per-scenario falsification contract (see
+    # FALSIFICATION_EXPECTATION_KEYS). When present on a vulnerable scenario,
+    # a run satisfies the scenario only if it constructed a concrete
+    # counterexample against the changed decision boundary — boundary
+    # comprehension alone (restating the design, citing green tests) is
+    # telemetry, never a pass.
+    falsification_expectations: dict[str, Any] = field(default_factory=dict)
     fixture: dict[str, Any] | None = None
     offline_runs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -497,6 +601,7 @@ class SemanticScenario:
             expected_metrics=entry.get("expected_metrics", {}),
             diff_polarity=entry.get("diff_polarity"),
             remediation_expectations=entry.get("remediation_expectations") or {},
+            falsification_expectations=entry.get("falsification_expectations") or {},
             fixture=entry.get("fixture"),
             offline_runs=entry.get("offline_runs", []),
         )
@@ -521,6 +626,7 @@ class SemanticScenario:
             "expected_metrics": self.expected_metrics,
             "diff_polarity": self.diff_polarity,
             "remediation_expectations": self.remediation_expectations,
+            "falsification_expectations": self.falsification_expectations,
             "fixture": self.fixture,
             "offline_runs": self.offline_runs,
         }
@@ -711,6 +817,23 @@ def validate_semantic_corpus(corpus: SemanticCorpus) -> None:
             _require(isinstance(items, list), f"{prefix}: remediation_expectations.{key} must be a list")
             for item in items:
                 _require(isinstance(item, str) and item.strip(), f"{prefix}: remediation_expectations.{key} entries must be non-empty strings")
+        # #757 falsification contract: both needle lists are required so the
+        # boundary-comprehension vs counterexample distinction is always
+        # decidable, and negative controls cannot declare one (their success
+        # state is the absence of a false attribution, not a falsification).
+        _require(isinstance(scenario.falsification_expectations, dict), f"{prefix}: falsification_expectations must be an object")
+        if scenario.falsification_expectations:
+            _require(
+                not scenario.negative_control,
+                f"{prefix}: falsification_expectations cannot be declared on a negative control",
+            )
+            for key in scenario.falsification_expectations:
+                _require(key in FALSIFICATION_EXPECTATION_KEYS, f"{prefix}: falsification_expectations key {key!r} is not recognised")
+            for key in ("boundary_any_of", "counterexample_any_of"):
+                items = scenario.falsification_expectations.get(key, [])
+                _require(isinstance(items, list) and bool(items), f"{prefix}: falsification_expectations.{key} must be a non-empty list")
+                for item in items:
+                    _require(isinstance(item, str) and item.strip(), f"{prefix}: falsification_expectations.{key} entries must be non-empty strings")
         _require(isinstance(scenario.offline_runs, list), f"{prefix}: offline_runs must be a list")
         for fixture in scenario.offline_runs:
             _require(isinstance(fixture, dict), f"{prefix}: offline_runs entries must be objects")
@@ -780,6 +903,17 @@ class SemanticResult:
     # capability/evidence-anchor contract through `passed`.
     calibration_run: bool = False
     disposition_calibration_pass: bool | None = None
+    # #757 counterexample-driven falsification telemetry. The first three are
+    # None when the scenario declares no falsification_expectations (the
+    # contract is not part of that scenario); booleans otherwise.
+    # `finding_correct` is computed on every vulnerable scenario
+    # (expected_capabilities non-empty): the defect was detected and
+    # dispositioned correct (not suppressed, remediation sound).
+    boundary_understood: bool | None = None
+    counterexample_attempted: bool | None = None
+    counterexample_found: bool | None = None
+    finding_correct: bool | None = None
+    falsification_violations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -806,6 +940,11 @@ class SemanticResult:
             "remediation_ok": self.remediation_ok,
             "calibration_run": self.calibration_run,
             "disposition_calibration_pass": self.disposition_calibration_pass,
+            "boundary_understood": self.boundary_understood,
+            "counterexample_attempted": self.counterexample_attempted,
+            "counterexample_found": self.counterexample_found,
+            "finding_correct": self.finding_correct,
+            "falsification_violations": self.falsification_violations,
         }
 
 
@@ -1036,6 +1175,31 @@ def evaluate_semantic_capability(
         # A vulnerable scenario is only satisfied by a clean detection with
         # sound remediation reasoning; every other disposition is a miss.
         result.passed = False
+    # #757 counterexample-driven falsification: when the scenario declares a
+    # falsification contract, passing requires an actual constructed
+    # counterexample against the changed boundary. A review that restates the
+    # intended design, cites green tests, or observes parity understands the
+    # boundary (boundary_understood) but never falsifies it — exactly the
+    # verification-by-coherence failure #756 exhibited, so it must never be a
+    # pass. `counterexample_attempted` stays telemetry so an A/B can measure
+    # attempt rate separately from success.
+    if scenario.falsification_expectations:
+        # Same normalization as classify_signal (backtick/apostrophe fold), so
+        # a counterexample written inside markdown code spans matches the same
+        # needle as plain text.
+        falsification_text = _normalize_for_matching(combined_text)
+        boundary_needles = [_normalize_for_matching(str(item)) for item in scenario.falsification_expectations.get("boundary_any_of", [])]
+        counterexample_needles = [_normalize_for_matching(str(item)) for item in scenario.falsification_expectations.get("counterexample_any_of", [])]
+        result.boundary_understood = any(needle in falsification_text for needle in boundary_needles)
+        result.counterexample_found = any(needle in falsification_text for needle in counterexample_needles)
+        result.counterexample_attempted = result.counterexample_found or any(
+            cue in falsification_text for cue in COUNTEREXAMPLE_ATTEMPT_CUES
+        )
+        if scenario.expected_capabilities and not result.counterexample_found:
+            result.falsification_violations.append("counterexample_not_found")
+            result.passed = False
+    if scenario.expected_capabilities:
+        result.finding_correct = detected and result.disposition == DISPOSITION_CORRECT
     if result.calibration_run:
         if result.disposition != result.disposition_expected:
             result.disposition_violations.append(
@@ -1131,6 +1295,8 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
         "disposition_calibration_passes": calibration_passes_total,
         "disposition_calibration_rate": round(calibration_passes_total / calibration_runs_total, 4) if calibration_runs_total else None,
         "merge_safety_calibration_disposition_counts": calibration_disposition_totals,
+        # #757 counterexample-driven falsification telemetry.
+        "falsification": _falsification_summary(scored, negative_controls),
     }
     return {
         "evaluator_version": SEMANTIC_EVAL_VERSION,
@@ -1154,6 +1320,38 @@ def evaluate_semantic_corpus(corpus: SemanticCorpus) -> dict[str, Any]:
             "false_positive_rate": round(sum(item["false_positive_rate"] for item in negative_controls) / len(negative_controls), 4) if negative_controls else 0.0,
         },
     }
+
+
+def _falsification_summary(scored: list[dict[str, Any]], negative_controls: list[dict[str, Any]]) -> dict[str, Any]:
+    """#757: aggregate counterexample-falsification telemetry across scenarios.
+
+    Rates average the per-scenario falsification blocks (scenarios without a
+    falsification contract contribute nothing, never a zero).
+    `clean_control_preserved_rate` is the fraction of negative-control
+    scenarios (with runs) whose reviewer runs produced zero false
+    capability attributions — the "clean control preserved" signal. It is
+    None when the corpus declares no negative controls.
+    """
+    blocks = [item["falsification"] for item in scored if item.get("falsification")]
+    summary: dict[str, Any] = {
+        "scenarios": len(blocks),
+        "boundary_understood_rate": round(sum(block["boundary_understood_rate"] for block in blocks) / len(blocks), 4) if blocks else None,
+        "counterexample_attempted_rate": round(sum(block["counterexample_attempted_rate"] for block in blocks) / len(blocks), 4) if blocks else None,
+        "counterexample_found_rate": round(sum(block["counterexample_found_rate"] for block in blocks) / len(blocks), 4) if blocks else None,
+        "finding_correct_rate": round(sum(block["finding_correct_rate"] for block in blocks) / len(blocks), 4) if blocks else None,
+    }
+    controls_with_runs = [item for item in negative_controls if item["runs"]]
+    # Reads the per-scenario `false_positive_rate`, which for a negative
+    # control IS the reviewer-run forbidden-capability rate. Valid because
+    # validate_semantic_corpus rejects falsification_expectations on negative
+    # controls, so no other signal can enter this rate; revisit if that
+    # schema constraint is ever relaxed.
+    summary["clean_control_preserved_rate"] = (
+        round(sum(1 for item in controls_with_runs if item["false_positive_rate"] == 0.0) / len(controls_with_runs), 4)
+        if controls_with_runs
+        else None
+    )
+    return summary
 
 
 def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[SemanticResult]) -> dict[str, Any]:
@@ -1190,6 +1388,25 @@ def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[Se
         disposition: sum(1 for result in calibration_results if result.disposition == disposition)
         for disposition in MERGE_SAFETY_DISPOSITIONS_ORDER
     }
+    # #757 falsification telemetry: rates over reviewer runs only. A scenario
+    # without a falsification contract reports None so A/B comparisons never
+    # average absent obligations in as zeros.
+    falsification: dict[str, Any] | None = None
+    if scenario.falsification_expectations:
+        if reviewer_runs:
+            falsification = {
+                "boundary_understood_rate": round(sum(result.boundary_understood is True for result in reviewer_results) / reviewer_runs, 4),
+                "counterexample_attempted_rate": round(sum(result.counterexample_attempted is True for result in reviewer_results) / reviewer_runs, 4),
+                "counterexample_found_rate": round(sum(result.counterexample_found is True for result in reviewer_results) / reviewer_runs, 4),
+                "finding_correct_rate": round(sum(result.finding_correct is True for result in reviewer_results) / reviewer_runs, 4),
+            }
+        else:
+            falsification = {
+                "boundary_understood_rate": 0.0,
+                "counterexample_attempted_rate": 0.0,
+                "counterexample_found_rate": 0.0,
+                "finding_correct_rate": 0.0,
+            }
     return {
         "scenario_number": scenario.number,
         "runs": runs,
@@ -1217,6 +1434,9 @@ def aggregate_semantic_runs(scenario: SemanticScenario, per_run_results: list[Se
         # Dispositions the scorer assigned to the calibration fixtures, with
         # how often they matched the declared answer key.
         "merge_safety_calibration_disposition_counts": calibration_disposition_counts,
+        # #757 counterexample-driven falsification telemetry (None when the
+        # scenario declares no falsification contract).
+        "falsification": falsification,
     }
 
 
@@ -1233,6 +1453,7 @@ __all__ = [
     "DISPOSITION_CORRECT", "DISPOSITION_INVALID_REMEDIATION", "DISPOSITION_NOT_FOUND",
     "DISPOSITION_SPECULATIVE_FALSE_POSITIVE", "DISPOSITION_SUPPRESSED_PRE_EXISTING",
     "MERGE_SAFETY_DISPOSITIONS", "MERGE_SAFETY_DISPOSITIONS_ORDER",
+    "_falsification_summary",
     "RECOGNISED_DIFF_POLARITIES", "RECOGNISED_MODES", "RECOGNISED_ROUTES", "RECOGNISED_SIGNAL_STAGES", "RECOGNISED_STAGES", "SEMANTIC_CORPUS_VERSION",
     "SEMANTIC_EVAL_VERSION", "SIGNAL_KIND_FINDING", "SIGNAL_KIND_MENTION", "SIGNAL_KIND_TOOL",
      "ReviewSignal", "SemanticCorpus", "SemanticCorpusError", "SemanticResult", "SemanticScenario",
