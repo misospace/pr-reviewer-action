@@ -6,8 +6,10 @@ are scored, the offline semantic gate, and the on-demand semantic judge.
 
 The corpora are `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`,
 and `evals/corpus-specialists.json`, wired into CI by the `eval-harness`
-workflow (`.github/workflows/eval-harness.yaml`). Use this page for manual
-runs or when triaging a failing scheduled regression sweep.
+workflow (`.github/workflows/eval-harness.yaml`). `evals/corpus-real-prs.json`
+(real merged PRs at their pinned head, see below) is run manually for now.
+Use this page for manual runs or when triaging a failing scheduled
+regression sweep.
 
 ## Prerequisites
 
@@ -364,3 +366,82 @@ findings (`final_findings_count` / `dedupe_final_findings` max 0) while a
 lean. The weekly scheduled sweep remains standard-only (`deep`
 absent → `false`), and none of this changes production defaults:
 `deep_review` is still off by default for action users.
+
+## Real-PR corpus (#779)
+
+Every other corpus on this page is compact reconstructed fixtures — even the
+"historical" ones in `evals/corpus-historical-dogfood.json` are synthetic
+adversarial scenarios attached to real PR numbers for provenance only. They
+can't measure whether the reviewer catches a defect in the wild: real PRs are
+larger, need truncation, and often require reading other files, none of which
+a hand-written fixture reproduces. `evals/corpus-real-prs.json` is real merged
+PRs reviewed at their actual pinned head commit, split into two kinds:
+
+- **`vulnerable`** — a PR that introduced a defect a *later* merged PR fixed.
+  Each entry pins the PR's `head_sha` and carries a `defect` anchor (`file`,
+  optional `line_range`, `severity`, one-line `description`) plus the
+  `fixing_pr` (number/sha/title) for provenance, recovered from the fixing
+  PR's own diff and description via `git log -S` and the
+  `commits/{sha}/pulls` API — never from a commit-message suffix.
+- **`clean`** — a PR with no later fix in the following ~40 merges; scored
+  for false positives instead.
+
+Unlike the other corpora's category/severity+description `known_findings`
+matching, a real defect is anchored to a file and line, so this corpus uses
+its own scorer (`score_vulnerable_run` / `score_clean_run` /
+`generate_real_pr_report` in `scripts/eval_harness.py`) rather than
+`compute_precision_recall`:
+
+- A vulnerable run is a **hit** when some finding's `file` matches the
+  defect's `file` and, when the defect declares a `line_range`, that
+  finding's `line` falls inside the range widened by `REAL_PR_LINE_TOLERANCE`
+  (±10) on each side. It's a looser **file-only hit** when the file matches
+  regardless of line — credit for "found the right file, missed the exact
+  line," and the only signal available for the anchors with no line number.
+- A clean run is scored for false positives: any finding at all, and
+  separately any finding at `blocker`/`major` severity (the higher-signal
+  bar), plus whether the verdict was `request_changes`.
+- The report's `recall_strict` / `recall_file_level` / `false_positive_rate`
+  all divide by the **total** run count for that kind, counting an errored
+  run as a miss (a crash didn't catch the defect either) rather than
+  excluding it — see each mode block's own errored counts to tell "the
+  model missed it" from "the run crashed." `verdict_agreement_rate` combines
+  both kinds into one binary-classification accuracy (vulnerable should get
+  `request_changes`, clean should not), so it moves together with recall and
+  the FP rate instead of trading off against them silently.
+
+The corpus's `vulnerable` and `clean` PRs span five repos
+(`misospace/pr-reviewer-action`, `misospace/dispatch`, `misospace/courier`,
+`misospace/alert-triage`, `misospace/miso-gallery`, all public), so each
+review runs against **that repo's own** checked-out standards file
+(AGENTS.md etc.), not `pr-reviewer-action`'s — the pipeline resolves it from
+the workspace the harness clones and checks out, same as any other PR.
+Checkout pins the exact `head_sha` (`_checkout_pinned_commit`): it tries the
+cheap `refs/pull/<n>/head` fetch first and verifies the resolved SHA against
+the pin, falling back to fetching the commit SHA directly on any mismatch or
+failure — a PR-ref that moved or a reused PR number can never silently swap
+in the wrong revision.
+
+Run it with the same harness and CLI flags as the other corpora; a top-level
+`real_pr_corpus` key in the corpus file routes to this scorer automatically
+(no separate flag). Credentials come from the environment, never argv, same
+as the arm-comparison runbook above:
+
+```bash
+export AI_API_KEY=...    GITHUB_TOKEN=...      # read by the harness; never pass on argv
+export EVAL_REVIEW_TIMEOUT_SEC=900             # slow local models overrun the 300s default
+python scripts/eval_harness.py \
+    --corpus evals/corpus-real-prs.json \
+    --modes tools_off native_loop \
+    --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
+    --output eval-report/eval-report-real-prs.json
+```
+
+`--max-prs N` caps the `vulnerable` and `clean` lists **independently** (the
+first N of each), unlike the other corpora where it truncates one
+concatenated list — `--max-prs 1` gives exactly one vulnerable and one clean
+scenario, useful for a smoke test that shouldn't burn a full sweep on a busy
+local model. `--runs-per-mode`, `--deep-review`, and the system-prompt A/B
+flags are not wired into this path (single run per mode per scenario); the
+report's `mode_summary` and `per_scenario_results` are the two things to
+diff week-over-week, same spirit as `mode_summary` for the other corpora.
