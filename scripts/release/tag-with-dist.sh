@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Usage: tag-with-dist.sh <base-sha> <tag> [<major-tag>]
 #
-# dist/ is never committed to main. A release builds it at <base-sha>, commits
-# it on a detached commit whose only parent is <base-sha>, and force-points
-# <tag> (and <major-tag>, when given) at that commit, so every published tag
-# ships the bundle while main stays source-only. Prints the release commit sha.
+# dist/ is never committed to main. Given a dist/index.js already built from
+# <base-sha> (by a separate job without write credentials), this commits it on a
+# detached commit whose only parent is <base-sha> and force-points <tag> (and
+# <major-tag>, when given) at that commit, so every published tag ships the
+# bundle while main stays source-only. Runs no npm. Prints the release commit sha.
 set -euo pipefail
 
 BASE=${1:?base sha required}
 TAG=${2:?tag required}
 MAJOR_TAG=${3:-}
 
+[ -f dist/index.js ] || { echo "tag-with-dist: dist/index.js not found" >&2; exit 1; }
 git checkout -q --detach "$BASE"
-npm ci --no-audit --no-fund >&2
-npm run build >&2
 git add -f dist/index.js
 
 export GIT_AUTHOR_NAME="github-actions[bot]"

@@ -13,7 +13,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-dist:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - name: Checkout protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Record release commit
+        id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build
+        run: npm ci --no-audit --no-fund && npm run build
+
+      - name: Upload dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-dist
+          path: dist/index.js
+          if-no-files-found: error
+
+  # Holds the tag-writing token but runs no npm.
   publish-release:
+    needs: build-dist
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,12 +61,18 @@ jobs:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
           private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
 
-      - name: Checkout protected main
+      - name: Checkout the built commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ needs.build-dist.outputs.sha }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: dist
 
       - name: Normalize release metadata
         id: release
@@ -55,13 +97,6 @@ jobs:
             echo "sha=$(git rev-parse HEAD)"
             echo "prerelease=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: package-lock.json
 
       # dist/ is not committed to main: the tag points at a build commit whose
       # parent is the released main commit. A stable release also moves the
