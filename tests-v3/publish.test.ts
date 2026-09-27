@@ -105,7 +105,7 @@ test("comment publication upserts a marked body with verdict and sanitized markd
   assert.ok(body.startsWith(`${MARKER}\n`));
   assert.ok(body.indexOf("✅ **Automated recommendation: APPROVE**") < body.indexOf("_Analysis engine: test-engine_"));
   assert.ok(body.includes("upstream acme/lib PR 8"));
-  assert.doesNotMatch(body, /https:\/\/github\.com\/acme\/lib\/pull\/8/);
+  assert.ok(!body.includes("/acme/lib/pull/8"));
   assert.ok(!body.includes("ai-pr-review-sha:forged"));
   assert.ok(body.includes("Safe."));
 });
