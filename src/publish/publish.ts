@@ -139,7 +139,7 @@ function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: Upstr
   const label = Object.hasOwn(SEVERITY_LABELS, severity) ? SEVERITY_LABELS[severity]! : severity;
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
-  const message = String(finding.message || "").trim();
+  const message = String(finding.message || "").replace(/\s+/g, " ").trim();
   const prefix = finding.pre_existing === true ? "(pre-existing, outside this diff)" : "(outside this diff)";
   const line = `- **${label}${suffix}:** ${prefix} ${message}`;
   return sanitizeMarkdown(redactText(line), linkMode);
