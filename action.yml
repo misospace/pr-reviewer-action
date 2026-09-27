@@ -816,8 +816,11 @@ runs:
         command -v curl >/dev/null
         command -v git >/dev/null
         command -v python3 >/dev/null
+        # PYTHONSAFEPATH (3.11+) keeps the reviewed checkout from shadowing
+        # the action's pr_reviewer package; older interpreters ignore it.
         if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
-          echo "::warning::Python 3.11+ is recommended: older versions ignore PYTHONSAFEPATH, so a reviewed repository's top-level pr_reviewer/ package could shadow the reviewer's modules."
+          echo "::error::python3 3.11 or newer is required (found $(python3 -V 2>&1))."
+          exit 1
         fi
         # Concurrent CI/deep-review gate cleanup walks the forked process tree
         # (scripts/sections/gating.sh); without pgrep the invariant cannot be
