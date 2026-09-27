@@ -12,6 +12,41 @@
   "entries": [
     {
       "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "prThreadMaxBytes",
+      "expected": { "old": "4000", "new": "8000" },
+      "reason": "#777 moderate input trim: pr-thread-max-bytes is repo-config-only in v3 (no longer a workflow input, still readable from repository config). The v3 runtime never reads INPUT_PR_THREAD_MAX_BYTES; it resolves the fixed contract default unless a repository config file narrows it."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["explicit-values"],
+      "key": "repoMapMaxBytes",
+      "expected": { "old": "9000", "new": "12000" },
+      "reason": "#777 moderate input trim: repo-map-max-bytes is repo-config-only in v3 (no longer a workflow input, still readable from repository config). The v3 runtime never reads INPUT_REPO_MAP_MAX_BYTES; it resolves the fixed contract default unless a repository config file narrows it."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["numeric-bounds"],
+      "key": "deepReviewCorpusMaxBytes",
+      "expected": { "old": "500000", "new": "48000" },
+      "reason": "#777 moderate input trim: deep-review-corpus-max-bytes is repo-config-only in v3 (no longer a workflow input, still readable from repository config). The v3 runtime never reads INPUT_DEEP_REVIEW_CORPUS_MAX_BYTES; it resolves the fixed contract default unless a repository config file narrows it."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["numeric-bounds"],
+      "key": "prThreadMaxBytes",
+      "expected": { "old": "1", "new": "8000" },
+      "reason": "#777 moderate input trim: pr-thread-max-bytes is repo-config-only in v3 (no longer a workflow input, still readable from repository config). The v3 runtime never reads INPUT_PR_THREAD_MAX_BYTES; it resolves the fixed contract default unless a repository config file narrows it."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": ["numeric-bounds"],
+      "key": "repoMapMaxBytes",
+      "expected": { "old": "200000", "new": "12000" },
+      "reason": "#777 moderate input trim: repo-map-max-bytes is repo-config-only in v3 (no longer a workflow input, still readable from repository config). The v3 runtime never reads INPUT_REPO_MAP_MAX_BYTES; it resolves the fixed contract default unless a repository config file narrows it."
+    },
+    {
+      "boundary": "config-default-resolution",
       "fixtures": [
         "defaults-only",
         "empty-temperature-omitted",
