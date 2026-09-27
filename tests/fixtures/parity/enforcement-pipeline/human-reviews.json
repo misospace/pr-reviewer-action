@@ -1,0 +1,24 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "approve",
+    "review_markdown": "## Review\n\nChange requests from human reviewers are settled below.",
+    "findings": [],
+    "human_review_dispositions": [
+      { "review_id": "501", "disposition": "addressed", "evidence": "src/app.py:44 now validates the signature before decode" },
+      { "review_id": "502", "disposition": "addressed", "evidence": "handled in the follow-up commit" }
+    ],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "human_reviews": [
+    { "review_id": "501", "login": "alice", "commit_id": "5690b16fabcdef0123456789abcdef0123456789", "head_moved": true, "submitted_at": "2026-09-20T10:00:00Z" },
+    { "review_id": "502", "login": "bob", "commit_id": null, "head_moved": "unknown", "submitted_at": null }
+  ],
+  "must_check": [],
+  "config": {
+    "verdict_policy": "model",
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}

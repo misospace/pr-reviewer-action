@@ -1,0 +1,20 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "approve",
+    "review_markdown": "## Review\n\nLooks good overall.\n\nRecommendation: Approve",
+    "findings": [
+      { "severity": "minor", "category": "style", "file": null, "line": null, "message": "Naming nit" },
+      { "severity": "blocker", "category": "security", "file": "src/auth.py", "line": 42, "message": "Token compared with ==; timing attack" }
+    ],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "must_check": [],
+  "config": {
+    "verdict_policy": "findings_severity_gated",
+    "non_blocking_finding_categories": "",
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}

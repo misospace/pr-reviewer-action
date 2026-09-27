@@ -1,0 +1,24 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "approve",
+    "review_markdown": "## Review\n\nThe pipeline looks right.",
+    "findings": [],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "evidence": {
+    "has_blocker": true,
+    "providers": [
+      { "id": "trivy", "provider_severity": "blocker" },
+      { "id": "semgrep", "provider_severity": "minor" }
+    ]
+  },
+  "must_check": [],
+  "config": {
+    "verdict_policy": "model",
+    "evidence_blocker_enforcement": true,
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}

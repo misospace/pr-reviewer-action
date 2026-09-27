@@ -1,0 +1,11 @@
+{
+  "contract": "review-sanitize/v1",
+  "cases": [
+    {
+      "name": "fenced-sanitized-inline-preserved",
+      "markdown": "Outside #123 and @user.\n\nInline `#456 @inline` remains unchanged.\n\n```text\n#789 @fenced\n## Standards\nstill inside fence\n```\n\n## After\nDone.",
+      "link_mode": "inert",
+      "presence": { "linked_issue": true, "evidence_provider": true, "standards": false, "tool_harness_findings": true, "tool_harness_results": true }
+    }
+  ]
+}

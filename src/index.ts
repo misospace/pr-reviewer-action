@@ -25,6 +25,10 @@ import {
   runSpecialistPayloadFixture,
 } from "./specialists/fixture.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
+import { runEnforcementFixture, runRequirementCoverageFixture } from "./enforcement/fixture.js";
+import { runMetadataMarkersFixture } from "./metadata/fixture.js";
+import { runSanitizeFixture } from "./publish/fixture.js";
+import { runInlineFindingsFixture } from "./publish/inline-findings-fixture.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -123,6 +127,21 @@ if (require.main === module) {
     escalationFixtureMain(argv[1] ?? "");
   } else if (firstArg === "tool-loop-fixture") {
     toolLoopFixtureMain(argv[1] ?? "").catch((error: unknown) => { process.stderr.write(`v3 tool-loop fixture error: ${error instanceof Error ? error.message : "unknown error"}\\n`); process.exitCode = 1; });
+  } else if (firstArg === "enforcement-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runEnforcementFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "requirement-coverage-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runRequirementCoverageFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "metadata-markers-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runMetadataMarkersFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "sanitize-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runSanitizeFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "inline-findings-fixture") {
+    assertSupportedNode(process.versions.node);
+    process.stdout.write(`${JSON.stringify(runInlineFindingsFixture(argv[1] ?? ""))}\n`);
   } else if (firstArg === "required-check-coverage-fixture") {
     runRequiredCheckCoverageMode(argv[1] ?? "");
   } else if (firstArg === "specialist-corpus-fixture") {

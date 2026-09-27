@@ -1297,6 +1297,74 @@ def _specialist_payload_run(fixture: dict[str, Any], workdir: Path) -> tuple[Sid
 def _specialist_normalize_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
     return _run_new_boundary("v2_specialist_normalize.py", "specialist-normalize-fixture", fixture, workdir)
 
+# ---------------------------------------------------------------------------
+# Boundaries: enforcement / publishing / metadata (#680)
+# ---------------------------------------------------------------------------
+
+ENFORCEMENT_BOUNDARY = Boundary(
+    id="enforcement-pipeline",
+    description=(
+        "#680 deterministic enforcement parity: verdict policy (#772/#775 "
+        "non-blocking category capping with the security-flag exemption and "
+        "the unresolved-check gate), #750 structured required-check "
+        "completeness with malformed-disposition conservatism, evidence "
+        "blocker / tool-harness failure / min-successful overlays, #770 "
+        "review-thread settlement (downgrades, re-emitted findings, blocker "
+        "escalation), #774 human change-request settlement, the enforced "
+        "banner normalization, and the #624 requirement-coverage fold."
+    ),
+    fixtures_dir="enforcement-pipeline",
+    run=lambda fixture, workdir: _run_new_boundary("v2_enforcement.py", "enforcement-fixture", fixture, workdir),
+)
+
+REQUIREMENT_COVERAGE_BOUNDARY = Boundary(
+    id="requirement-coverage",
+    description=(
+        "#680/#624 requirement-coverage parity: the tolerant ledger loader "
+        "and the deterministic claim fold (evidence-gated credit, "
+        "not_applicable downgrades, invariant verification kinds, duplicate "
+        "and out-of-ledger errors, visible caps)."
+    ),
+    fixtures_dir="requirement-coverage",
+    run=lambda fixture, workdir: _run_new_boundary("v2_requirement_coverage.py", "requirement-coverage-fixture", fixture, workdir),
+)
+
+SANITIZE_BOUNDARY = Boundary(
+    id="review-sanitize",
+    description=(
+        "#680 publication sanitization parity: reserved marker stripping, "
+        "upstream-link neutralization (inert/togithub) with inline-code-span "
+        "preservation, and fence-aware empty-conditional-section stripping."
+    ),
+    fixtures_dir="review-sanitize",
+    run=lambda fixture, workdir: _run_new_boundary("v2_sanitize.py", "sanitize-fixture", fixture, workdir),
+)
+
+INLINE_FINDINGS_BOUNDARY = Boundary(
+    id="inline-findings",
+    description=(
+        "#680 inline-findings anchoring parity: diff-position mapping "
+        "(GitHub side=RIGHT lines and Forgejo new_position), anchor "
+        "validation, thread_id dedup, caps, redaction, and link-mode "
+        "sanitization of comment bodies."
+    ),
+    fixtures_dir="inline-findings",
+    run=lambda fixture, workdir: _run_new_boundary("v2_inline_findings.py", "inline-findings-fixture", fixture, workdir),
+)
+
+METADATA_MARKERS_BOUNDARY = Boundary(
+    id="metadata-markers",
+    description=(
+        "#680 managed metadata parity: metadata-marker serialization (fixed "
+        "key order, conditional fields, escalation_reason array, numeric "
+        "cache_hit_ratio), marker preamble emission, managed-body detection "
+        "by content prefix, and reserved-marker stripping that keeps model "
+        "output from forging action-owned markers."
+    ),
+    fixtures_dir="metadata-markers",
+    run=lambda fixture, workdir: _run_new_boundary("v2_metadata_markers.py", "metadata-markers-fixture", fixture, workdir),
+)
+
 
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
@@ -1342,6 +1410,11 @@ NEW_BOUNDARIES = (
         run=_specialist_normalize_run,
         canonical_json_keys={"result"},
     ),
+    ENFORCEMENT_BOUNDARY,
+    REQUIREMENT_COVERAGE_BOUNDARY,
+    SANITIZE_BOUNDARY,
+    INLINE_FINDINGS_BOUNDARY,
+    METADATA_MARKERS_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

@@ -1,0 +1,21 @@
+{
+  "contract": "enforcement-pipeline/v1",
+  "artifact": {
+    "verdict": "request_changes",
+    "review_markdown": "## Review\n\nAuth surface changed; findings below.",
+    "findings": [
+      { "severity": "major", "category": "tests", "file": "tests/auth_test.py", "line": 3, "message": "No test for the new session path" },
+      { "severity": "minor", "category": "docs", "file": null, "line": null, "message": "Docstring stale" }
+    ],
+    "smart_review_requested": false,
+    "smart_review_reason": null
+  },
+  "classification": { "risk_flags": ["auth_changes"] },
+  "must_check": [],
+  "config": {
+    "verdict_policy": "findings_severity_gated",
+    "non_blocking_finding_categories": "tests,docs",
+    "validate_required_checks": "auto",
+    "required_check_validation_mode": "warn"
+  }
+}

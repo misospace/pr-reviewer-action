@@ -1,0 +1,11 @@
+{
+  "contract": "review-sanitize/v1",
+  "cases": [
+    {
+      "name": "benign-review",
+      "markdown": "## Review\n\nThe change keeps validation close to the request boundary.\n\n## Tests\n\n- Unit tests cover the new branch.",
+      "link_mode": "inert",
+      "presence": { "linked_issue": true, "evidence_provider": true, "standards": true, "tool_harness_findings": true, "tool_harness_results": true }
+    }
+  ]
+}

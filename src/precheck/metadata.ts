@@ -67,10 +67,28 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
 
-/** Compact JSON with `,`/`:` separators, matching Python's
- * `json.dumps(separators=(",", ":"))` for marker payloads. */
+/** Compact JSON with `,`/`:` separators and INSERTION key order — the exact
+ * `json.dumps(data, separators=(',', ':'))` of `pr_reviewer/metadata.py`'s
+ * `build_marker` (and the jq key order in `build_metadata_marker`). The
+ * sort_keys variant (`pythonJsonStringify`) is for canonical-artifact values;
+ * the marker is a positional wire format, so its key order is contractual. */
 function jsonCompact(value: unknown): string {
-  return pythonJsonStringify(value, ",", ":");
+  if (value === null) return "null";
+  if (value === true) return "true";
+  if (value === false) return "false";
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (typeof value === "string") return pythonStringEscape(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(jsonCompact).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${pythonStringEscape(key)}:${jsonCompact(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return "null";
 }
 
 /** Serialize a restricted JSON value the way Python's
