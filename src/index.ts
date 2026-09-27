@@ -19,6 +19,11 @@ import { runCorpusFixture, runDiffPriorityFixture } from "./corpus/index.js";
 import { conversationFixtureMain } from "./model/fixture.js";
 import { escalationFixtureMain } from "./routing/fixture.js";
 import { toolLoopFixtureMain } from "./tools/fixture.js";
+import {
+  runSpecialistCorpusFixture,
+  runSpecialistNormalizeFixture,
+  runSpecialistPayloadFixture,
+} from "./specialists/fixture.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 
 export function main(): void {
@@ -120,6 +125,12 @@ if (require.main === module) {
     toolLoopFixtureMain(argv[1] ?? "").catch((error: unknown) => { process.stderr.write(`v3 tool-loop fixture error: ${error instanceof Error ? error.message : "unknown error"}\\n`); process.exitCode = 1; });
   } else if (firstArg === "required-check-coverage-fixture") {
     runRequiredCheckCoverageMode(argv[1] ?? "");
+  } else if (firstArg === "specialist-corpus-fixture") {
+    process.stdout.write(`${JSON.stringify(runSpecialistCorpusFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "specialist-payload-fixture") {
+    process.stdout.write(`${JSON.stringify(runSpecialistPayloadFixture(argv[1] ?? ""))}\n`);
+  } else if (firstArg === "specialist-normalize-fixture") {
+    process.stdout.write(`${JSON.stringify(runSpecialistNormalizeFixture(argv[1] ?? ""))}\n`);
   } else if (mode === "v3-request-builder" && firstArg) {
     runRequestBuilderMode(firstArg);
   } else if (mode === "v3-verdict-parser" && firstArg) {
