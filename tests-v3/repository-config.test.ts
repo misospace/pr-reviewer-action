@@ -298,7 +298,7 @@ test("resolveRepositoryConfig degrades to the operator's inputs, with a warning,
 });
 
 // ---------------------------------------------------------------------------
-// Contract-level invariants for the repo-configurable/repo-config-only markers.
+// Contract-level invariants for the repo-configurable marker.
 // ---------------------------------------------------------------------------
 
 test("the canonical contract marks a non-empty, sane repo-configurable set", () => {
