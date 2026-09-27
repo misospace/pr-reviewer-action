@@ -5,7 +5,10 @@ import { redactText } from "../context/redact.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
-const SEVERITY_LABELS: Record<string, string> = {
+/** Exported for the outside-diff summary renderer (v3-only, `../enforcement/outside-diff.js`
+ * pairs it with `diffPositions` below) so severity labels never drift between the
+ * two finding-rendering call sites. */
+export const SEVERITY_LABELS: Record<string, string> = {
   blocker: "🛑 Blocker",
   major: "⚠️ Major",
   minor: "Minor",
