@@ -102,13 +102,18 @@ function assembleSpecialistMarkdown(header: string, leadLines: string[], note: s
   return `${head}\n${fence}markdown\n${rest}${fence}\n`;
 }
 
-function fitToBytes(text: string, maxBytes: number): string {
+/** Longest code-point prefix within `maxBytes`; never splits a surrogate pair. */
+export function fitToBytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  let i = text.length;
-  while (i > 0 && Buffer.byteLength(text.slice(0, i), "utf8") > maxBytes) {
-    i -= 1;
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of text) {
+    const size = Buffer.byteLength(codePoint, "utf8");
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    end += codePoint.length;
   }
-  return text.slice(0, i);
+  return text.slice(0, end);
 }
 
 /** Render a normalized specialist result as fence-safe markdown. When

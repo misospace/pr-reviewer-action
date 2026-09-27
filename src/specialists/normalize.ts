@@ -93,15 +93,17 @@ function boundedText(
   counter: "message_chars",
   result: SpecialistArtifact,
 ): string {
-  if (value.length <= limit) return value;
+  // Code points, not UTF-16 units, to match the v2 oracle's `value[:limit]`.
+  const codePoints = Array.from(value);
+  if (codePoints.length <= limit) return value;
   result.truncated = true;
   result.truncation.truncated = true;
-  result.truncation.omitted_message_chars += value.length - limit;
+  result.truncation.omitted_message_chars += codePoints.length - limit;
   const reason = `${counter}_cap`;
   if (!result.truncation.reasons.includes(reason)) {
     result.truncation.reasons.push(reason);
   }
-  return value.slice(0, limit);
+  return codePoints.slice(0, limit).join("");
 }
 
 function normalizeSeverity(raw: unknown): string {

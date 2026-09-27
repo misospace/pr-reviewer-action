@@ -14,6 +14,7 @@ import {
   type SpecialistRunInput,
   type SpecialistTransportOutcome,
 } from "../src/specialists/index.js";
+import { fitToBytes } from "../src/specialists/render.js";
 
 // ---------------------------------------------------------------------------
 // normalize.ts
@@ -473,4 +474,11 @@ test("runSpecialists: #758 adversarial arm runs correctness blinded and forces t
   const roles = result.aggregate.roles as Array<{ role: string; corpus_source?: string }>;
   assert.equal(roles.find((r) => r.role === "correctness")!.corpus_source, "adversarial");
   assert.equal(roles.find((r) => r.role === "security")!.corpus_source, "standard");
+});
+
+test("fitToBytes keeps whole code points and never splits a surrogate pair", () => {
+  const text = "ab\u{1F600}\u{1F600}";
+  assert.equal(fitToBytes(text, 5), "ab");
+  assert.equal(fitToBytes(text, 6), "ab\u{1F600}");
+  assert.equal(fitToBytes(text, 100), text);
 });

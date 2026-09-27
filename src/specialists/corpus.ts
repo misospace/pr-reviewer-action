@@ -173,7 +173,7 @@ function buildPrMetadata(ws: SpecialistCorpusWorkspace): string {
     additions: obj.additions ?? null,
     deletions: obj.deletions ?? null,
     url: obj.url ?? null,
-    body: body.slice(0, PR_BODY_MAX_CHARS),
+    body: Array.from(body).slice(0, PR_BODY_MAX_CHARS).join(""),
   };
   return fence("json", compactJson(projection));
 }
