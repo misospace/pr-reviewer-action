@@ -13,7 +13,8 @@
  * the v2 error text names.
  */
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
-import { buildComments } from "./inline-findings.js";
+import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
+import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble } from "../metadata/markers.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, type CleanupLog } from "./cleanup.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
@@ -124,6 +125,47 @@ export function buildInlineComments(options: {
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
 export { resolveCleanupFlag } from "./cleanup.js";
 
+const OUTSIDE_DIFF_PREFIX = "(pre-existing, outside this diff)";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** One rendered line for the outside-diff appendix — the same severity
+ * label/category/redaction/sanitization discipline as `findingToBody`
+ * (`./inline-findings.js`), minus the per-comment disclaimer, since this
+ * renders as one bullet in a shared section rather than a standalone
+ * comment. */
+function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: UpstreamLinkMode): string {
+  const severity = typeof finding.severity === "string" ? finding.severity : "info";
+  const label = Object.hasOwn(SEVERITY_LABELS, severity) ? SEVERITY_LABELS[severity]! : severity;
+  const category = finding.category;
+  const suffix = category && category !== "other" ? ` (${String(category)})` : "";
+  const message = String(finding.message || "").trim();
+  const line = `- **${label}${suffix}:** ${OUTSIDE_DIFF_PREFIX} ${message}`;
+  return sanitizeMarkdown(redactText(line), linkMode);
+}
+
+/**
+ * Render an appendix for findings the deterministic outside-diff pass (or a
+ * model-set `pre_existing` flag) marked as not about the reviewed change.
+ * Inline comments can never anchor these — the anchor line isn't in any
+ * diff hunk — so without this section they would otherwise vanish from the
+ * published review the moment the model's own prose doesn't happen to
+ * mention them. Returns "" when there is nothing to render (no section is
+ * added). v3-only, content-level: never touches verdict or any other
+ * policy-relevant output.
+ */
+export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLinkMode): string {
+  if (!Array.isArray(findings)) return "";
+  const flagged = findings.filter(
+    (item): item is Record<string, unknown> => isRecord(item) && (item.outside_diff === true || item.pre_existing === true),
+  );
+  if (flagged.length === 0) return "";
+  const lines = flagged.map((finding) => renderOutsideDiffLine(finding, linkMode));
+  return `\n\n## Findings Outside This Diff\n${lines.join("\n")}\n`;
+}
+
 /**
  * Evaluate the native approval guardrails: approval is opt-in
  * (`allow_approve`) and separately fork-gated (`approve_forks`). A clean
@@ -226,8 +268,12 @@ export async function publishReview(
     return { status: "superseded", messages };
   }
 
-  // Sanitize model output first — the same pipeline for every mode.
-  const sanitized = sanitizeForPublication(input.reviewMarkdown, input.upstreamLinkMode, input.conditionalPresence);
+  // Sanitize model output first — the same pipeline for every mode. Any
+  // outside-diff findings are appended as their own section: unlike inline
+  // comments (which can only anchor in-diff findings), every publish mode
+  // renders review_markdown, so this is the one place that never drops them.
+  const sanitized = sanitizeForPublication(input.reviewMarkdown, input.upstreamLinkMode, input.conditionalPresence)
+    + renderOutsideDiffSection(input.findings, input.upstreamLinkMode);
   const reviewResult = input.verdict === "request_changes" ? "issues" : "clean";
   const metadataMarker = buildRunMetadataMarker({
     headSha: input.headSha,
