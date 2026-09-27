@@ -1,9 +1,9 @@
 """Tests for issue #103 and #701: tool_max_requests in the tool harness.
 
 Acceptance criteria:
-  - Explicit TOOL_MAX_REQUESTS values are honoured and clamped to 1..20.
+  - Explicit TOOL_MAX_REQUESTS values are honoured and clamped to 1..50.
   - Invalid/missing values fall back to the tier-aware default (#701):
-    primary 8, smart 16, escalated 20.
+    primary 16, smart 32, escalated 40.
 """
 
 import os
@@ -110,18 +110,18 @@ class TestTierAwareRequestBudget(TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             return self.mod.resolve_tool_max_requests(tier)
 
-    def test_primary_default_is_8(self):
-        self.assertEqual(self._resolve({}), 8)
+    def test_primary_default_is_16(self):
+        self.assertEqual(self._resolve({}), 16)
 
-    def test_routed_smart_profile_gets_16(self):
-        self.assertEqual(self._resolve({"REVIEW_CONTEXT_PROFILE": "smart"}), 16)
+    def test_routed_smart_profile_gets_32(self):
+        self.assertEqual(self._resolve({"REVIEW_CONTEXT_PROFILE": "smart"}), 32)
 
-    def test_smart_tier_gets_16(self):
-        self.assertEqual(self._resolve({}, tier="smart"), 16)
+    def test_smart_tier_gets_32(self):
+        self.assertEqual(self._resolve({}, tier="smart"), 32)
 
-    def test_escalated_tier_gets_20(self):
+    def test_escalated_tier_gets_40(self):
         self.assertEqual(
-            self._resolve({"TOOL_ESCALATION": "true"}, tier="smart"), 20
+            self._resolve({"TOOL_ESCALATION": "true"}, tier="smart"), 40
         )
 
     def test_explicit_value_overrides_every_tier(self):
@@ -137,7 +137,7 @@ class TestTierAwareRequestBudget(TestCase):
         )
 
     def test_explicit_value_clamped_to_hard_bounds(self):
-        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "99"}), 20)
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "99"}), 50)
         self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "0"}), 1)
         self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "-3"}), 1)
 
@@ -163,7 +163,7 @@ class TestTierAwareRequestBudget(TestCase):
 
     def test_smart_override_ignored_on_primary(self):
         self.assertEqual(
-            self._resolve({"SMART_TOOL_MAX_REQUESTS": "10"}), 8
+            self._resolve({"SMART_TOOL_MAX_REQUESTS": "10"}), 16
         )
 
     def test_primary_override_wins_on_primary_only(self):
@@ -171,7 +171,7 @@ class TestTierAwareRequestBudget(TestCase):
             self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "12", "TOOL_MAX_REQUESTS": "3"}), 12
         )
         self.assertEqual(
-            self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "12"}, tier="smart"), 16
+            self._resolve({"PRIMARY_TOOL_MAX_REQUESTS": "12"}, tier="smart"), 32
         )
         with mock.patch.dict(os.environ, {"PRIMARY_TOOL_MAX_REQUESTS": "12"}, clear=True):
             self.assertEqual(self.mod.resolve_tool_budget("primary")["source"], "primary-override")
@@ -182,9 +182,9 @@ class TestTierAwareRequestBudget(TestCase):
         )
 
     def test_invalid_explicit_value_falls_back_to_tier_default(self):
-        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "abc"}), 8)
+        self.assertEqual(self._resolve({"TOOL_MAX_REQUESTS": "abc"}), 16)
         self.assertEqual(
-            self._resolve({"TOOL_MAX_REQUESTS": "abc"}, tier="smart"), 16
+            self._resolve({"TOOL_MAX_REQUESTS": "abc"}, tier="smart"), 32
         )
 
     def test_route_classification(self):
@@ -199,6 +199,33 @@ class TestTierAwareRequestBudget(TestCase):
             self.assertEqual(self.mod.tool_budget_route("primary"), "smart")
             # An escalated run is tier=smart regardless of the (primary) profile.
             self.assertEqual(self.mod.tool_budget_route("smart"), "smart")
+
+
+class TestResolveLoopLimits(TestCase):
+    """resolve_loop_limits: 4 rounds / 600s by default, smart overrides, clamping."""
+
+    _NAMES = ("TOOL_MAX_ROUNDS", "TOOL_LOOP_WALL_CLOCK_SEC", "SMART_TOOL_MAX_ROUNDS", "SMART_TOOL_LOOP_WALL_CLOCK_SEC")
+
+    def setUp(self):
+        self.mod = _import_harness()
+        env = {k: v for k, v in os.environ.items() if k not in self._NAMES}
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_defaults(self):
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (4, 600))
+
+    def test_bounds_clamp(self):
+        os.environ["TOOL_MAX_ROUNDS"] = "9"
+        os.environ["TOOL_LOOP_WALL_CLOCK_SEC"] = "5000"
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (6, 900))
+
+    def test_smart_overrides_only_on_smart(self):
+        os.environ["SMART_TOOL_MAX_ROUNDS"] = "5"
+        os.environ["SMART_TOOL_LOOP_WALL_CLOCK_SEC"] = "300"
+        self.assertEqual(self.mod.resolve_loop_limits("smart"), (5, 300))
+        self.assertEqual(self.mod.resolve_loop_limits("primary"), (4, 600))
 
 
 if __name__ == "__main__":

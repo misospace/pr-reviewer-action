@@ -138,10 +138,10 @@ that cutover.
 ### Tier-aware tool request budget (#701)
 
 `tool_max_requests` defaults to **empty** on both sides. The empty value is
-resolved at tool-harness time into a tier-aware budget — primary ~8, smart
-route ~16, escalated (deep) up to 20, hard ceiling 20 — instead of one
+resolved at tool-harness time into a tier-aware budget — primary ~16, smart
+route ~32, escalated (deep) up to 40, hard ceiling 50 — instead of one
 undifferentiated ceiling. Explicit values override every tier (bounded to
-1..20); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs.
+1..50); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs.
 Precedence: `SMART_TOOL_MAX_REQUESTS` (smart/escalated) > `tool_max_requests`
 > tier default. The v3 native tool loop must reproduce this resolution and
 the exhaustion-aware behavior (remaining-budget notes on later loop turns,

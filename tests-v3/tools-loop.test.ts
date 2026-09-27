@@ -85,7 +85,7 @@ test("round budget exhausts with the doubled cap", async () => {
     timeFn,
   });
   assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
-  assert.equal(outcome.rounds, 6); // 3 configured × 2, capped at 8
+  assert.equal(outcome.rounds, 6); // 3 configured × 2, capped at 12
 });
 
 test("request budget exhaustion refuses further calls and records the distinct stop reason", async () => {
@@ -303,4 +303,10 @@ test("streamed anthropic turns reassembled into OpenAI shape still yield tool ca
   );
   assert.equal(text, "Reading.");
   assert.deepEqual(calls, [{ id: "call_1", name: "list_tree", arguments: '{"path": "."}' }]);
+});
+
+test("adaptiveLoopBudgets: rounds double and cap at 12", () => {
+  assert.equal(adaptiveLoopBudgets(2, 5, 30).maxRounds, 4);
+  assert.equal(adaptiveLoopBudgets(6, 5, 30).maxRounds, 12);
+  assert.equal(adaptiveLoopBudgets(7, 5, 30).maxRounds, 12);
 });

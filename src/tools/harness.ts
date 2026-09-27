@@ -149,6 +149,17 @@ export function envIntBounded(env: EnvLike, name: string, defaultValue: number, 
   return Math.max(minValue, Math.min(maxValue, value));
 }
 
+/** [maxRounds, wallClockSec] for a native-loop tier, from env with defaults. */
+export function resolveLoopLimits(env: EnvLike, tier: string): [number, number] {
+  let maxRounds = envIntBounded(env, "TOOL_MAX_ROUNDS", 4, 1, 6);
+  let wallClock = envIntBounded(env, "TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900);
+  if (tier === "smart") {
+    maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
+    wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);
+  }
+  return [maxRounds, wallClock];
+}
+
 export function normalizeRepoName(value: string | undefined): string {
   const text = (value ?? "").trim().replace(/^\/+|\/+$/g, "");
   const parts = text.split("/").filter((p) => p.length > 0);
@@ -1063,12 +1074,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const toolSchemas = [...TOOL_SCHEMAS];
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
-  let maxRounds = envIntBounded(env, "TOOL_MAX_ROUNDS", 3, 1, 6);
-  let wallClock = envIntBounded(env, "TOOL_LOOP_WALL_CLOCK_SEC", 120, 10, 900);
-  if (input.tier === "smart") {
-    maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
-    wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);
-  }
+  const [maxRounds, wallClock] = resolveLoopLimits(env, input.tier);
   const budgets = adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock);
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
 

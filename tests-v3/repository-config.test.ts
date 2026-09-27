@@ -94,7 +94,7 @@ test("a numeric input that keeps a fixed contract default (tool-max-response-byt
 test("tier-resolved budgets (primary/smart-tool-max-requests) are not repo-configurable at all", () => {
   // Their contract default is "" on purpose (resolved per-route at harness
   // time); there is no config-time ceiling to narrow against, so falling
-  // back to the type's hard 1..20 range would let a repository config file
+  // back to the type's hard 1..50 range would let a repository config file
   // RAISE a budget the operator's own workflow never granted. They must be
   // rejected exactly like any other non-repo-configurable input.
   const operatorRaw = baseOperatorRaw();

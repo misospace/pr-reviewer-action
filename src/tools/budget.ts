@@ -30,11 +30,11 @@ export type ToolBudgetTier = "primary" | "smart" | "escalated";
  */
 export type ToolBudgetSource = "primary-override" | "smart-override" | "explicit" | "tier-default";
 
-export const TOOL_REQUEST_HARD_MAX = 20;
+export const TOOL_REQUEST_HARD_MAX = 50;
 
 export const TOOL_REQUEST_TIER_DEFAULTS: Readonly<
   Record<ToolBudgetTier, number>
-> = Object.freeze({ primary: 8, smart: 16, escalated: 20 });
+> = Object.freeze({ primary: 16, smart: 32, escalated: 40 });
 
 export type EnvLike = Readonly<Record<string, string | undefined>>;
 
