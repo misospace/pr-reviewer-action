@@ -219,7 +219,9 @@ def main() -> int:
             "stdout": proc.stdout.decode("utf-8").rstrip("\n"),
             "stderr": proc.stderr.decode("utf-8").rstrip("\n"),
         }
-    print(json.dumps({"ok": True, "values": values}, ensure_ascii=False))
+    # ASCII-escaped: the harness splits stdout into lines, and a raw U+2028 or
+    # U+0085 inside a hostile check name would split the JSON line.
+    print(json.dumps({"ok": True, "values": values}, ensure_ascii=True))
     return 0
 
 

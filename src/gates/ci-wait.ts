@@ -101,14 +101,32 @@ export function ciAdapterFromEnv(ciEnv: CiEnv, repo: string, prNumber: string, t
   });
 }
 
-/** jq `"| \(.name) | \(.state) |"`: strings interpolate raw, anything else
- * as compact JSON. */
-function renderCell(value: unknown): string {
-  return typeof value === "string" ? value : jqCompact(value);
+/** Control characters, C1 controls, and the Unicode line/paragraph
+ * separators: any of them could end the table row. */
+const CELL_BREAK_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
+
+/** One Markdown table cell from untrusted check data (check names are
+ * chosen by whoever configures CI). v2 interpolated them raw (jq
+ * `"| \(.name) | \(.state) |"`), so a name carrying `|` or a newline could
+ * split the row or forge a heading in the review corpus; this is an approved
+ * `ci-gate` divergence. Non-strings render as compact JSON first, as jq
+ * does. Then control runs collapse to one space, `\` / `|` / backticks are
+ * backslash-escaped (backslash first, so `\|` cannot un-escape a pipe), and
+ * `&` `<` `>` become entities so no HTML survives. */
+export function escapeTableCell(value: unknown): string {
+  const text = typeof value === "string" ? value : jqCompact(value);
+  return text
+    .replace(CELL_BREAK_RE, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/`/g, "\\`")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function renderRows(checks: readonly ExternalCheck[]): string {
-  return checks.map((check) => `| ${renderCell(check.name)} | ${renderCell(check.state)} |`).join("\n").replace(/\n+$/, "");
+  return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.state)} |`).join("\n");
 }
 
 class Finished {

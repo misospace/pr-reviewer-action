@@ -73,7 +73,9 @@ function encode(value: unknown, indent: number, level: number, options: PyJsonDu
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
-    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, options, key)}`);
+    // Float marking is for a key's direct scalar only: container elements
+    // keep their own number representation.
+    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, options)}`);
     return `[\n${items.join(",\n")}\n${closePad}]`;
   }
   if (typeof value === "object") {

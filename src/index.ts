@@ -32,7 +32,7 @@ import { runSanitizeFixture } from "./publish/fixture.js";
 import { runInlineFindingsFixture } from "./publish/inline-findings-fixture.js";
 import { runRepositoryConfigFixture } from "./config/fixture.js";
 import { resolveRepositoryConfig } from "./config/repository-config.js";
-import { runPlatformNormalizationFixture } from "./platform/fixture.js";
+import { asciiJson, runPlatformNormalizationFixture } from "./platform/fixture.js";
 import { runPromptAssemblyFixture } from "./prompt/fixture.js";
 import { runContextProducersFixture } from "./context/producers-fixture.js";
 import { runLinkedSourcesFixture, runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
@@ -187,7 +187,9 @@ if (require.main === module) {
   } else if (firstArg === "ci-gate-fixture") {
     assertSupportedNode(process.versions.node);
     runCiGateFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
+      // ASCII-escaped: hostile check names may carry U+2028/U+0085, which the
+      // harness would treat as line breaks.
+      (result) => { process.stdout.write(`${asciiJson(result)}\n`); },
       (error: unknown) => {
         process.stderr.write(`v3 ci-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         process.exitCode = 1;

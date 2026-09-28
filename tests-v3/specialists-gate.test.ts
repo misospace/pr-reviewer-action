@@ -214,6 +214,11 @@ test("resolveArtifactPath/guardedWrite: workspace-relative, escapes refused, in-
 test("pyJsonDump floatKeys renders Python floats; payloadBytes measures Python's json.dumps", () => {
   assert.equal(pyJsonDump({ elapsed_sec: 0, other: 0, temperature: 1 }, 2, false, { floatKeys: new Set(["elapsed_sec", "temperature"]) }), '{\n  "elapsed_sec": 0.0,\n  "other": 0,\n  "temperature": 1.0\n}');
   assert.equal(pyJsonDump({ elapsed_sec: 0.25 }, 2, false, { floatKeys: new Set(["elapsed_sec"]) }), '{\n  "elapsed_sec": 0.25\n}');
+  // Float marking applies to the key's direct scalar only, never through a
+  // container it holds.
+  const marked = new Set(["temperature"]);
+  assert.equal(pyJsonDump({ temperature: [1, 2.5, { n: 3 }] }, 0, false, { floatKeys: marked }).replace(/\n\s*/g, ""), '{"temperature": [1,2.5,{"n": 3}]}');
+  assert.equal(pyJsonDump({ temperature: { value: 1, inner: [2] } }, 0, false, { floatKeys: marked }).replace(/\n\s*/g, ""), '{"temperature": {"value": 1,"inner": [2]}}');
   // json.dumps({"model": "m", "temperature": 1.0, "messages": ["café"]}) == '{"model": "m", "temperature": 1.0, "messages": ["caf\\u00e9"]}'
   assert.equal(payloadBytes({ model: "m", temperature: 1, messages: ["café"] }), '{"model": "m", "temperature": 1.0, "messages": ["caf\\u00e9"]}'.length);
 });

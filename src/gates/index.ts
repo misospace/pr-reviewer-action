@@ -13,7 +13,7 @@ export {
   type GateRunResult,
   type RunConcurrentGatesOptions,
 } from "./gates.js";
-export { CI_EVIDENCE_TIMEOUT_STATE, ciAdapterFromEnv, runCiWait, type CiEnv, type CiWaitDeps } from "./ci-wait.js";
+export { CI_EVIDENCE_TIMEOUT_STATE, ciAdapterFromEnv, escapeTableCell, runCiWait, type CiEnv, type CiWaitDeps } from "./ci-wait.js";
 export {
   parseSpecialistsArgs,
   resolveActionRoot,

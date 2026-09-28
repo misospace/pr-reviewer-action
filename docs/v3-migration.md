@@ -638,13 +638,19 @@ clock. Fixtures serve per-route response sequences and compare exit code,
 `$GITHUB_OUTPUT`, the `ci-checks-context.md` bytes, leftover temp files, the
 request log, elapsed virtual time and the log lines.
 
-The one approved divergence is the commit-status quirk above: the v3 CI gate
+The first approved divergence is the commit-status quirk above: the v3 CI gate
 reads with `transientAsUnknown`, so no response, HTTP 429/5xx, or a non-JSON
 body on either read is "unknown, retry" instead of `[]`. v2 could finalize
 `none` (or a partial list) while CI was still running. It is pinned for the
 GitHub and Forgejo `transient-status-read` fixtures. The head SHA stays
 pinned once for the whole wait, as in v2; a head that moves mid-wait is the
 publish boundary's exact-head guard's problem, not the CI gate's.
+
+The second (`hostile-check-names`): v2 wrote check names raw into the
+evidence table, so a name with `|`, a newline plus a forged `## heading`, or
+control characters split rows. v3 escapes every cell (`escapeTableCell`):
+control runs become one space, `\` `|` and backticks are backslash-escaped,
+and `&` `<` `>` become entities, so the table keeps one row per check.
 
 `specialists-gate` runs `scripts/run_specialists.py` (curl transport) and the
 v3 `gate-specialists` workload (v3 model transport) against local mock model
