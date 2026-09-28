@@ -39,7 +39,9 @@ function mappedEnv(env) {
   const mapped = {};
   const map = contractInputMap();
   for (const [v2Key, v3Id] of map) {
-    const value = env[v2Key];
+    // The workflow binds SCREAMING_SNAKE names (AI_MODEL); accept the
+    // contract's snake_case v2 id too.
+    const value = env[v2Key] ?? env[v2Key.toUpperCase()];
     // Forward empty bindings too: the composite's env blocks bind empty
     // strings and the contract loader applies defaults for "" — the shadow
     // must see exactly what production sees.
@@ -51,6 +53,13 @@ function mappedEnv(env) {
   // Ambient runner context the run entry reads as plain env.
   for (const key of ["REPO", "PR_NUMBER", "PR_HEAD_SHA", "IS_FORK_PR", "PLATFORM", "FORGEJO_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_VERSION"]) {
     if (env[key] !== undefined) mapped[key] = env[key];
+  }
+  // The composite passes the token to its steps as GH_TOKEN; bind it to the
+  // required `github-token` contract input when no explicit value exists.
+  const token = env.GH_TOKEN || env.GITHUB_TOKEN;
+  if (token && !mapped["INPUT_GITHUB-TOKEN"]) {
+    mapped["INPUT_GITHUB-TOKEN"] = token;
+    mapped.INPUT_GITHUB_TOKEN = token;
   }
   // Inputs the composite resolves outside the shared env file (review-step
   // env block): forward the raw v2 names; the contract map above covers the

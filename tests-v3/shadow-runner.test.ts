@@ -93,6 +93,10 @@ test("run-mode mapping projects v2 names onto the v3 INPUT_ contract", async () 
     GH_TOKEN: "t",
     NOT_A_CONTRACT_KEY: "x",
   });
+  // The workflow's SCREAMING_SNAKE bindings map too.
+  const upper = mappedEnv({ AI_MODEL: "M2", DEEP_REVIEW: "true" });
+  assert.equal(upper["INPUT_AI-MODEL"], "M2");
+  assert.equal(upper["INPUT_DEEP-REVIEW"], "true");
   // Contract inputs bind both the hyphen and the underscore INPUT_ forms.
   assert.equal(mapped["INPUT_AI-MODEL"], "m");
   assert.equal(mapped.INPUT_AI_MODEL, "m");
@@ -104,6 +108,9 @@ test("run-mode mapping projects v2 names onto the v3 INPUT_ contract", async () 
   // Ambient runner context passes through; nothing else does.
   assert.equal(mapped.REPO, "o/r");
   assert.equal(mapped.GH_TOKEN, "t");
+  // ...and binds the required github-token input.
+  assert.equal(mapped["INPUT_GITHUB-TOKEN"], "t");
+  assert.equal(mapped.INPUT_GITHUB_TOKEN, "t");
   assert.equal("NOT_A_CONTRACT_KEY" in mapped, false);
   assert.equal("PATH" in mapped, false);
 });
