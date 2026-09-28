@@ -37,6 +37,54 @@ test("enforcement fixture runs model no-op and blocker escalation pipelines", ()
   });
 });
 
+test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, and forced-keep", () => {
+  withFixtures((dir) => {
+    const strictBase = { contract: "enforcement-pipeline/v1" };
+    // Model request_changes backed only by minors: relaxed to approve, one
+    // override line, and the strict mapping runs AFTER overlays.
+    const relaxed = runEnforcementFixture(writeJson(dir, "relax.json", {
+      ...strictBase,
+      artifact: { verdict: "request_changes", review_markdown: "review", findings: [{ severity: "minor", category: "bug", file: null, line: null, message: "nit" }] },
+      config: { verdict_policy: "strict" },
+    }));
+    assert.equal(relaxed.ok, true);
+    const relaxedArtifact = JSON.parse(relaxed.values!.artifact!);
+    assert.equal(relaxedArtifact.verdict, "approve");
+    assert.equal(relaxedArtifact.verdict_source, "findings");
+    assert.ok(relaxedArtifact.review_markdown.includes("_Verdict set from open findings (verdict_policy=strict): no blocker or major finding out of 1 open; model verdict was 'request_changes'._"));
+
+    // Incomplete coverage: the completeness pass runs first, the mapping
+    // publishes the non-blocking state (approve), never request_changes.
+    const partial = runEnforcementFixture(writeJson(dir, "partial.json", {
+      ...strictBase,
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      must_check: ["run the test suite"],
+      config: { verdict_policy: "strict" },
+    }));
+    assert.equal(partial.ok, true);
+    const partialArtifact = JSON.parse(partial.values!.artifact!);
+    assert.equal(partialArtifact.verdict, "approve");
+    assert.equal(partialArtifact.required_checks, "incomplete");
+
+    // A tool-harness failure forces request_changes after the model verdict;
+    // the strict mapping never relaxes it and adds no note of its own.
+    const forced = runEnforcementFixture(writeJson(dir, "forced.json", {
+      ...strictBase,
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      tool_harness: { planning_error: "plan broke" },
+      config: { verdict_policy: "strict", tool_failure_enforcement: true },
+    }));
+    assert.equal(forced.ok, true);
+    const forcedArtifact = JSON.parse(forced.values!.artifact!);
+    assert.equal(forcedArtifact.verdict, "request_changes");
+    // Provenance honesty (#811 review): the model said approve; the forced
+    // verdict is the enforcement layer's, never the model's.
+    assert.equal(forcedArtifact.verdict_source, "enforcement");
+    assert.ok(forcedArtifact.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
+    assert.ok(forcedArtifact.review_markdown.includes("## Tool Harness Failure"));
+  });
+});
+
 test("requirement-coverage fixture credits grounded evidence and exposes bad ledgers", () => {
   withFixtures((dir) => {
     const result = runRequirementCoverageFixture(writeJson(dir, "coverage.json", {

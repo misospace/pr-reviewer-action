@@ -155,13 +155,17 @@ export function lastManagedBody(
 /** Carry the previous review's verdict forward on a diff-unchanged skip so
  * a downstream gate cannot flip red→green on re-run: parsed from the last
  * managed comment's metadata marker (no new API call). No marker or an
- * unparseable marker → verdict stays empty. */
+ * unparseable marker → verdict stays empty. #811's strict-policy marker
+ * values (`findings` / `partial`) are non-blocking states and carry an
+ * approve, exactly like `clean`. */
 export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string } | null {
   const data = parseMetadata(lastCommentBody);
   if (!data) return null;
   const result = String(data.review_result ?? "").toLowerCase();
   if (result === "issues") return { verdict: "request_changes", verdictSource: "carry_forward" };
-  if (result === "clean") return { verdict: "approve", verdictSource: "carry_forward" };
+  if (result === "clean" || result === "findings" || result === "partial") {
+    return { verdict: "approve", verdictSource: "carry_forward" };
+  }
   return null;
 }
 

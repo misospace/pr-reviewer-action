@@ -109,7 +109,7 @@ test("tier-resolved budgets (primary/smart-tool-max-requests) are not repo-confi
 });
 
 test("enum input: repository may set any allowed value only when the operator left it at default", () => {
-  const operatorRaw = policyOperatorRaw(); // verdict-policy left at contract default "model"
+  const operatorRaw = policyOperatorRaw(); // verdict-policy left at contract default "strict"
   const applied = applyRepositoryConfig(contract, operatorRaw, fileOf("verdict-policy: findings_severity_gated\n"));
   assert.deepEqual(applied.appliedKeys, ["verdict-policy"]);
   assert.equal(applied.raw["verdict-policy"], "findings_severity_gated");
@@ -118,7 +118,7 @@ test("enum input: repository may set any allowed value only when the operator le
 
 test("enum input: an operator's explicit value always wins over the repository's", () => {
   const operatorRaw = policyOperatorRaw();
-  operatorRaw["verdict-policy"] = "findings_severity_gated"; // explicit, differs from default "model"
+  operatorRaw["verdict-policy"] = "findings_severity_gated"; // explicit, differs from default "strict"
   const resolution = applyRepositoryConfig(contract, operatorRaw, fileOf("verdict-policy: model\n"));
   assert.equal(resolution.appliedKeys.length, 0);
   assert.equal(resolution.raw["verdict-policy"], "findings_severity_gated");
@@ -148,7 +148,7 @@ test("policy inputs are ignored unless the operator opts in; non-policy inputs a
   const file = fileOf("verdict-policy: findings_severity_gated\nnon-blocking-finding-categories: security\nreview-verbosity: concise\n");
   const gated = applyRepositoryConfig(contract, baseOperatorRaw(), file);
   assert.deepEqual(gated.appliedKeys, ["review-verbosity"]);
-  assert.equal(gated.raw["verdict-policy"], "model");
+  assert.equal(gated.raw["verdict-policy"], "strict");
   assert.equal(gated.warnings.filter((w) => w.includes("allow-repo-policy-overrides")).length, 2);
   const allowed = applyRepositoryConfig(contract, policyOperatorRaw(), file);
   assert.deepEqual([...allowed.appliedKeys].sort(), ["non-blocking-finding-categories", "review-verbosity", "verdict-policy"]);

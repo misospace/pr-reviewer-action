@@ -1,6 +1,6 @@
 /**
  * Verdict policy (#680 port of `pr_reviewer/enforcement.py::apply_verdict_policy`,
- * carrying #772 and the #775 opt-in rework).
+ * carrying #772 and the #775 opt-in rework; #811 adds the strict mapping).
  *
  * Monotonic escalation from structured findings: with
  * `findings_severity_gated`, blocker-severity findings escalate an approve to
@@ -11,8 +11,12 @@
  * the verdict is relaxed to approve — the one downgrade this policy makes.
  * Non-blocker findings never downgrade a model request_changes, and when the
  * model produced no findings the model verdict stands.
+ *
+ * `strict` (the v3 default, #811) is not an escalation on top of the model
+ * verdict but a derivation: see `applyStrictVerdictPolicy` below.
  */
 import type { ReviewArtifact, ArtifactFinding } from "./artifact.js";
+import type { VerdictValue } from "../model/types.js";
 
 /**
  * Categories a consumer may declare non-blocking (`non_blocking_finding_categories`,
@@ -96,8 +100,11 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
 }
 
 export interface VerdictPolicyResult {
-  /** "model" | "findings" — the applied verdict source. */
-  source: "model" | "findings";
+  /** "model" | "findings" | "enforcement" — the applied verdict source:
+   * "findings" when the strict mapping overrode the model verdict from the
+   * open-findings rule, "enforcement" when a fail-closed layer forced a
+   * verdict the model did not produce, "model" otherwise. */
+  source: "model" | "findings" | "enforcement";
 }
 
 /**
@@ -114,7 +121,7 @@ export function applyVerdictPolicy(
   options: { nonBlockingCategories: ReadonlySet<string>; securityFlagged: boolean },
 ): VerdictPolicyResult {
   const findings = artifact.findings;
-  let source: "model" | "findings" = "model";
+  let source: "model" | "findings" | "enforcement" = "model";
 
   if (policy === "findings_severity_gated" && Array.isArray(findings)) {
     if (
@@ -146,4 +153,148 @@ export function applyVerdictPolicy(
 
   artifact.verdict_source = source;
   return { source };
+}
+
+// ---------------------------------------------------------------------------
+// #811: the strict verdict — the published verdict is a deterministic
+// function of the normalized still-open findings and required-check
+// coverage; the model's verdict is an input, not the final answer.
+// ---------------------------------------------------------------------------
+
+/**
+ * The published review state under `verdict_policy=strict`, recorded in the
+ * metadata marker's `review_result`: `issues` (blocking), `partial`
+ * (coverage gap), `findings` (open non-blocking findings), `clean` (nothing
+ * open, coverage complete). Precedence is blocking > partial > findings >
+ * clean. `clean`/`issues` keep their v2 meaning because the unchanged-diff
+ * carry-forward reads them; `findings`/`partial` carry an approve.
+ */
+export type StrictReviewResult = "issues" | "partial" | "findings" | "clean";
+
+/** The open finding severities that can request changes (#811): blocker and
+ * major only. Minor and info can never request changes on their own. */
+export function hasBlockingOpenFinding(findings: unknown): boolean {
+  return Array.isArray(findings) && findings.some((finding) => {
+    const severity = (finding as { severity?: unknown } | null)?.severity;
+    return severity === "blocker" || severity === "major";
+  });
+}
+
+/**
+ * The strict state rule, shared by the enforcement mapping (which decides
+ * the verdict from these inputs) and the publish step (which labels the
+ * marker from the same inputs), so the two cannot drift. `requiredChecks`
+ * is the completeness pass status; `none` (validation off or nothing to
+ * check) is not a gap. #810's tool-loop partial coverage joins this once
+ * implemented.
+ */
+export function strictReviewResult(
+  verdict: string,
+  findings: unknown,
+  requiredChecks: unknown,
+): StrictReviewResult {
+  if (verdict === "request_changes") return "issues";
+  if (requiredChecks === "incomplete") return "partial";
+  if (Array.isArray(findings) && findings.length > 0) return "findings";
+  return "clean";
+}
+
+export interface StrictVerdictOutcome {
+  verdict: VerdictValue;
+  reviewResult: StrictReviewResult;
+  /** "model" when the published verdict equals the model's, "findings" when
+   * the strict mapping overrode it (same vocabulary as applyVerdictPolicy). */
+  source: "model" | "findings" | "enforcement";
+  /** True when the strict mapping's verdict differs from the model's own. */
+  overridden: boolean;
+}
+
+function severityCounts(findings: ArtifactFinding[]): { blocking: number; total: number } {
+  let blocking = 0;
+  for (const finding of findings) {
+    if (finding.severity === "blocker" || finding.severity === "major") blocking += 1;
+  }
+  return { blocking, total: findings.length };
+}
+
+function appendStrictNote(artifact: ReviewArtifact, detail: string, modelVerdict: string): void {
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + `\n\n_Verdict set from open findings (verdict_policy=strict): ${detail}; `
+    + `model verdict was '${modelVerdict}'._`;
+}
+
+/**
+ * Apply the strict verdict mapping (#811) to the artifact in place. Runs
+ * LAST in the enforcement pipeline — after the completeness pass (which
+ * records `required_checks`) and after the enforcement overlays — so it
+ * sees the final still-open findings set: the normalized findings array
+ * including any threads the settlement pass re-emitted. That array is the
+ * single source of truth ("still-open" = after carry-forward resolution,
+ * #792); there is no other open-findings set to reconcile with.
+ *
+ * Mapping: request_changes only when at least one open finding is blocker
+ * or major; otherwise approve. `forced` is the caller's fail-closed signal
+ * — a forcing layer (evidence blocker, tool-harness failure, min-successful,
+ * `required_check_validation_mode=fail`) fired for these inputs — and a
+ * request_changes it forced is never relaxed here, even when the model
+ * itself also asked for changes (the layer's own section discloses it).
+ * When the mapping overrides the model verdict the review says so in one
+ * line, as findings_severity_gated does.
+ */
+export function applyStrictVerdictPolicy(
+  artifact: ReviewArtifact,
+  options: { modelVerdict: string; forced: boolean },
+): StrictVerdictOutcome {
+  const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
+  const modelVerdict = options.modelVerdict;
+  const counts = severityCounts(findings);
+
+  let verdict: VerdictValue;
+  let overridden: boolean;
+  let source: "model" | "findings" | "enforcement";
+  if (counts.blocking > 0) {
+    verdict = "request_changes";
+    overridden = modelVerdict !== "request_changes";
+    source = overridden ? "findings" : "model";
+    if (overridden) {
+      appendStrictNote(
+        artifact,
+        `${counts.blocking} blocker/major finding(s) out of ${counts.total} open`,
+        modelVerdict,
+      );
+    }
+  } else if (options.forced) {
+    // A fail-closed enforcement layer decided this verdict. When the model
+    // did not produce it, attributing the verdict to "model" would lie
+    // about provenance — the deciding authority is the enforcement layer
+    // ("enforcement"); the layer's own section discloses the forcing.
+    verdict = "request_changes";
+    overridden = modelVerdict !== "request_changes";
+    source = overridden ? "enforcement" : "model";
+    if (overridden) {
+      appendStrictNote(
+        artifact,
+        "a fail-closed enforcement layer forced request_changes",
+        modelVerdict,
+      );
+    }
+  } else {
+    verdict = "approve";
+    overridden = modelVerdict !== "approve";
+    source = overridden ? "findings" : "model";
+    if (overridden) {
+      appendStrictNote(
+        artifact,
+        counts.total > 0
+          ? `no blocker or major finding out of ${counts.total} open`
+          : "no open findings",
+        modelVerdict,
+      );
+    }
+  }
+
+  const reviewResult = strictReviewResult(verdict, findings, artifact.required_checks);
+  artifact.verdict = verdict;
+  artifact.verdict_source = source;
+  return { verdict, reviewResult, source, overridden };
 }

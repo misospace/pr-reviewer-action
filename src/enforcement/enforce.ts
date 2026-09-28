@@ -181,6 +181,29 @@ export interface EnforcementInputs {
 }
 
 /**
+ * True when a fail-closed verdict-forcing rule fired for these inputs —
+ * evidence blockers, tool-harness failure, or the min-successful fallback
+ * (the same conditions `applyAllEnforcement` forces `request_changes` on;
+ * thread/human settlement never force). The #811 strict verdict mapping
+ * consults this so it can never relax a request_changes these layers
+ * forced, including when the model itself also asked for changes.
+ */
+export function failClosedEnforcementFired(inputs: Pick<
+  EnforcementInputs,
+  "evidenceBlockerEnabled" | "evidence" | "toolFailureEnabled" | "toolHarness" | "toolMinSuccessful"
+>): boolean {
+  if (inputs.evidenceBlockerEnabled && inputs.evidence?.has_blocker) return true;
+  if (inputs.toolFailureEnabled) {
+    if (toolHarnessFailureReason(inputs.toolHarness ?? null)) return true;
+    if (inputs.toolMinSuccessful > 0
+      && countSuccessfulRequests(inputs.toolHarness ?? null) < inputs.toolMinSuccessful) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Apply all configured enforcement rules in sequence (port of
  * `apply_all_enforcement`): evidence blockers, tool-harness failure (with
  * the min-successful fallback), review-thread settlement, human change-request

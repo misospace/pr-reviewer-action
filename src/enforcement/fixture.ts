@@ -12,9 +12,9 @@ import { readFileSync } from "node:fs";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { ledgerToArtifact, loadLedgerFromValue } from "../requirements/ledger.js";
 import { reviewArtifactFromParsed, type ReviewArtifact } from "./artifact.js";
-import { applyVerdictPolicy, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
-import { applyRequiredCheckValidation } from "./completeness.js";
-import { applyAllEnforcement, type EnforcementInputs } from "./enforce.js";
+import { applyVerdictPolicy, applyStrictVerdictPolicy, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
+import { applyRequiredCheckValidation, type RequiredCheckValidationResult } from "./completeness.js";
+import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "./enforce.js";
 import type { EnforcementThread } from "./threads.js";
 import type { EnforcementHumanReview } from "./human-reviews.js";
 import { normalizeRequirementCoverage, extractCoveragePayload } from "./requirement-coverage.js";
@@ -65,29 +65,68 @@ export function runEnforcementFixture(fixturePath: string): {
   try {
     const artifact = asArtifact(structuredClone(fixture.artifact));
     const config = fixture.config;
+    // The fixture contract's default mirrors the v2 runtime default
+    // (VERDICT_POLICY:-model), NOT the v3 contract default ("strict" since
+    // #811): this CLI is the parity oracle for v2 semantics, and every
+    // fixture states its policy explicitly.
     const policy = config.verdict_policy ?? "model";
     const categories = parseNonBlockingCategories(config.non_blocking_finding_categories);
     const securityFlagged = securityRiskFlagged(fixture.classification ?? null);
+    // The model's own verdict, captured before the pipeline can mutate it —
+    // the strict mapping needs it as an input, not as the final answer.
+    const modelVerdict = String(fixture.artifact.verdict ?? "");
 
-    // Order mirrors apply_all_enforcement_wrapper: verdict policy, then
-    // completeness validation, then enforcement overlays.
-    applyVerdictPolicy(artifact, policy, { nonBlockingCategories: categories, securityFlagged });
-    const completeness = applyRequiredCheckValidation(artifact, {
-      enabled: config.validate_required_checks ?? "auto",
-      mode: config.required_check_validation_mode ?? "warn",
-      mustCheck: fixture.must_check ?? [],
-    });
-    const inputs: EnforcementInputs = {
-      evidenceBlockerEnabled: config.evidence_blocker_enforcement === true,
-      toolFailureEnabled: config.tool_failure_enforcement === true,
-      toolMinSuccessful: config.tool_min_successful_requests ?? 0,
-      evidence: (fixture.evidence ?? null) as EnforcementInputs["evidence"],
-      toolHarness: (fixture.tool_harness ?? null) as EnforcementInputs["toolHarness"],
-      threads: fixture.threads ?? null,
-      humanReviews: fixture.human_reviews ?? null,
-      verdictPolicy: policy,
-    };
-    const applied = applyAllEnforcement(artifact, inputs);
+    let completeness: RequiredCheckValidationResult;
+    let applied: number;
+    if (policy === "strict") {
+      // #811 strict composition: coverage first (the mapping reads
+      // `required_checks`), then the enforcement overlays (fail-closed; they
+      // may force request_changes), then the strict mapping over the final
+      // still-open findings set — thread settlement's re-emitted findings
+      // included. The model verdict is captured before anything mutates it.
+      completeness = applyRequiredCheckValidation(artifact, {
+        enabled: config.validate_required_checks ?? "auto",
+        mode: config.required_check_validation_mode ?? "warn",
+        mustCheck: fixture.must_check ?? [],
+      });
+      const inputs: EnforcementInputs = {
+        evidenceBlockerEnabled: config.evidence_blocker_enforcement === true,
+        toolFailureEnabled: config.tool_failure_enforcement === true,
+        toolMinSuccessful: config.tool_min_successful_requests ?? 0,
+        evidence: (fixture.evidence ?? null) as EnforcementInputs["evidence"],
+        toolHarness: (fixture.tool_harness ?? null) as EnforcementInputs["toolHarness"],
+        threads: fixture.threads ?? null,
+        humanReviews: fixture.human_reviews ?? null,
+        verdictPolicy: policy,
+      };
+      applied = applyAllEnforcement(artifact, inputs);
+      // The fail-closed signal: a forcing layer fired, or the fail-mode
+      // completeness pass forced request_changes. The mapping never relaxes
+      // a verdict these forced.
+      const forced = failClosedEnforcementFired(inputs)
+        || (completeness.status === "incomplete" && completeness.mode === "fail");
+      applyStrictVerdictPolicy(artifact, { modelVerdict, forced });
+    } else {
+      // Order mirrors apply_all_enforcement_wrapper: verdict policy, then
+      // completeness validation, then enforcement overlays.
+      applyVerdictPolicy(artifact, policy, { nonBlockingCategories: categories, securityFlagged });
+      completeness = applyRequiredCheckValidation(artifact, {
+        enabled: config.validate_required_checks ?? "auto",
+        mode: config.required_check_validation_mode ?? "warn",
+        mustCheck: fixture.must_check ?? [],
+      });
+      const inputs: EnforcementInputs = {
+        evidenceBlockerEnabled: config.evidence_blocker_enforcement === true,
+        toolFailureEnabled: config.tool_failure_enforcement === true,
+        toolMinSuccessful: config.tool_min_successful_requests ?? 0,
+        evidence: (fixture.evidence ?? null) as EnforcementInputs["evidence"],
+        toolHarness: (fixture.tool_harness ?? null) as EnforcementInputs["toolHarness"],
+        threads: fixture.threads ?? null,
+        humanReviews: fixture.human_reviews ?? null,
+        verdictPolicy: policy,
+      };
+      applied = applyAllEnforcement(artifact, inputs);
+    }
 
     // Requirement-coverage fold (#624): advisory, never a verdict.
     let requirementCoverage: Record<string, unknown> | null = null;

@@ -17,6 +17,8 @@ import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble } from "../metadata/markers.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, type CleanupLog } from "./cleanup.js";
+import { strictReviewResult } from "../enforcement/verdict-policy.js";
+import { escapeTableCell } from "../gates/ci-wait.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -27,6 +29,12 @@ export interface PublishInput {
   /** Raw model-produced review markdown (unsanitized). */
   reviewMarkdown: string;
   verdict: string;
+  /** The configured `verdict_policy`. "strict" (the v3 default, #811) turns
+   * on the derived review_result (clean/findings/partial/issues), the
+   * findings + coverage-gap rendering at the top of the body, and the
+   * verdict-line counts. Any other value (including undefined) keeps the
+   * v2 body bytes and the binary clean/issues marker exactly as before. */
+  verdictPolicy?: string;
   analysisEngine: string;
   baseSha: string;
   headSha: string;
@@ -85,13 +93,16 @@ export function sanitizeForPublication(
   );
 }
 
-/** Build the published body: marker preamble + engine line + sanitized review. */
+/** Build the published body: marker preamble + engine line + the strict
+ * state block (#811, when present) + sanitized review. */
 export function buildPublishedBody(options: {
   markers: string;
   header?: string;
   note?: string;
   analysisEngine: string;
   sanitizedMarkdown: string;
+  /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
+  stateBlock?: string | undefined;
 }): string {
   const lines = [options.markers];
   if (options.header) {
@@ -101,6 +112,9 @@ export function buildPublishedBody(options: {
     lines.push(options.note, "");
   }
   lines.push(`_Analysis engine: ${options.analysisEngine}_`, "");
+  if (options.stateBlock) {
+    lines.push(options.stateBlock, "");
+  }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
 }
@@ -162,6 +176,106 @@ export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLi
   if (flagged.length === 0) return "";
   const lines = flagged.map((finding) => renderOutsideDiffLine(finding, linkMode));
   return `\n\n## Findings Outside This Diff\n${lines.join("\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// #752 rendering, as adopted by #811: the normalized still-open findings and
+// the coverage gap are rendered near the top of every review published under
+// verdict_policy=strict, so an approve with findings never reads as clean.
+// Opt-out policies keep today's bodies byte-for-byte.
+// ---------------------------------------------------------------------------
+
+/** Rows rendered before the visible "N more" cap keeps the body bounded
+ * (50 findings of up to 2000 characters each would overrun a comment). */
+export const FINDINGS_SUMMARY_MAX_ROWS = 50;
+
+const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
+
+/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`. */
+export function severityCountsLabel(findings: unknown): string {
+  if (!Array.isArray(findings)) return "";
+  const counts = new Map<string, number>();
+  for (const finding of findings) {
+    const severity = isRecord(finding) && typeof finding.severity === "string"
+      ? finding.severity
+      : "info";
+    counts.set(severity, (counts.get(severity) ?? 0) + 1);
+  }
+  const ordered = [
+    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
+    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
+  ];
+  return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
+}
+
+/** A path (model-controlled) as one bounded code span: whitespace collapsed
+ * and fenced by a backtick run longer than any inside it, so it cannot open
+ * markdown structure; pipes are escaped because GFM tables split cells even
+ * inside code spans. */
+function locationCell(finding: Record<string, unknown>): string {
+  const file = typeof finding.file === "string" ? finding.file : "";
+  const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
+  if (file === "" && line === "") return "";
+  const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
+  const body = escapeTableCell(raw.replace(/\s+/g, " ").trim());
+  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
+}
+
+/**
+ * The `### Findings (…)` section: one row per normalized still-open finding
+ * — severity, `file:line` (or `file`, or blank), message — the same array
+ * the verdict was decided on, so the body is the one place a reader sees the
+ * whole set. Messages get redact_text, upstream-link neutralization,
+ * whitespace collapse, a length cap, and table-cell escaping; a hostile
+ * message cannot split the row or forge headings. Returns "" when there is
+ * nothing to render.
+ */
+export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkMode): string {
+  if (!Array.isArray(findings)) return "";
+  const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
+  if (rows.length === 0) return "";
+  const counts = severityCountsLabel(rows);
+  const lines = [
+    `### Findings${counts ? ` (${counts})` : ""}`,
+    "",
+    "| Severity | Location | Finding |",
+    "| --- | --- | --- |",
+  ];
+  for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
+    const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
+    const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
+    const message = escapeTableCell(
+      sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 300),
+    );
+    lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
+  }
+  if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
+    lines.push("", `_…and ${rows.length - FINDINGS_SUMMARY_MAX_ROWS} more finding(s) not listed._`);
+  }
+  return `\n\n${lines.join("\n")}\n`;
+}
+
+/** The deterministic coverage-gap notice rendered above the findings when
+ * required-check validation ended incomplete (#811; #810's tool-loop
+ * partial coverage will render beside it once implemented). */
+export function renderCoverageGapNotice(requiredChecks: string): string {
+  if (requiredChecks !== "incomplete") return "";
+  return "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
+}
+
+/** The top-of-body state block for verdict_policy=strict: coverage gap first
+ * (it qualifies the whole review), then the findings summary. */
+function renderStrictStateBlock(options: {
+  requiredChecks: string;
+  findings: unknown;
+  linkMode: UpstreamLinkMode;
+}): string {
+  return renderCoverageGapNotice(options.requiredChecks)
+    + renderFindingsSummary(options.findings, options.linkMode);
 }
 
 /**
@@ -272,7 +386,16 @@ export async function publishReview(
   // renders review_markdown, so this is the one place that never drops them.
   const sanitized = sanitizeForPublication(input.reviewMarkdown, input.upstreamLinkMode, input.conditionalPresence)
     + renderOutsideDiffSection(input.findings, input.upstreamLinkMode);
-  const reviewResult = input.verdict === "request_changes" ? "issues" : "clean";
+  // The marker's review_result. Under verdict_policy=strict (#811) it
+  // distinguishes the non-blocking states (clean / findings / partial) from
+  // issues, from the same still-open findings and coverage the strict
+  // mapping decided the verdict on. Every other policy keeps the binary
+  // clean/issues consumers rely on; the unchanged-diff carry-forward reads
+  // this field (findings/partial carry an approve).
+  const strict = input.verdictPolicy === "strict";
+  const reviewResult: string = strict
+    ? strictReviewResult(input.verdict, input.findings, input.requiredChecks)
+    : input.verdict === "request_changes" ? "issues" : "clean";
   const metadataMarker = buildRunMetadataMarker({
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -318,12 +441,18 @@ export async function publishReview(
 
   try {
     if (input.mode === "comment") {
-      const prefix = VERDICT_PREFIXES[input.verdict] ?? "✅ **Automated recommendation: APPROVE**";
+      // #752: counts where the verdict is stated, under the strict policy.
+      const counts = strict ? severityCountsLabel(input.findings) : "";
+      const suffix = counts ? ` · ${counts}` : "";
+      const prefix = (VERDICT_PREFIXES[input.verdict] ?? "✅ **Automated recommendation: APPROVE**") + suffix;
       const body = buildPublishedBody({
         markers,
         header: prefix,
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        stateBlock: strict
+          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          : undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -335,6 +464,9 @@ export async function publishReview(
         header: "# AI Automated Review",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        stateBlock: strict
+          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          : undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -365,9 +497,17 @@ export async function publishReview(
         note: "_Full PR review._",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        stateBlock: strict
+          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          : undefined,
       });
       if (!guardrails.canApprove && input.verdict === "approve") {
-        body += "\n> **Approval blocked by policy**: this clean review is advisory. Native approvals require `allow_approve: true` (and `approve_forks: true` for cross-repository PRs).\n";
+        // #752: a review with open findings or a coverage gap must not call
+        // itself clean, even when its verdict is an approve.
+        const advisory = reviewResult === "clean"
+          ? "this clean review is advisory"
+          : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
+        body += `\n> **Approval blocked by policy**: ${advisory}. Native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs).\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (allow_approve=${input.allowApprove}, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? input.isForkPr})`,
         );
