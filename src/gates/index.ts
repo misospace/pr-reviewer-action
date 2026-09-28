@@ -16,7 +16,6 @@ export {
 export { CI_EVIDENCE_TIMEOUT_STATE, ciAdapterFromEnv, escapeTableCell, runCiWait, type CiEnv, type CiWaitDeps } from "./ci-wait.js";
 export {
   parseSpecialistsArgs,
-  resolveActionRoot,
   runSpecialistsGate,
   type SpecialistsGateArgs,
   type SpecialistsGateDeps,

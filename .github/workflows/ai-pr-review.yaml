@@ -102,3 +102,93 @@ jobs:
           non_blocking_finding_categories: tests,docs,style,question
           publish_mode: review_verdict
           allow_approve: "true"
+
+      - name: Build v3 runtime (shadow)
+        # The #809 shadow comparison: build the v3 TypeScript runtime from
+        # the same checkout the v2 review just ran from, then re-run the
+        # review through the v3 entry beside v2. Dogfood only — nothing here
+        # publishes, and a shadow failure never fails the job.
+        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Run v3 shadow review (never publishes)
+        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        env:
+          # The v2 production run already consumed the shared env file; the
+          # shadow rebuilds its bindings from the same workflow sources.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AI_BASE_URL: ${{ vars.LITELLM_URL }}
+          AI_API_FORMAT: ${{ vars.PRIMARY_FORMAT }}
+          AI_MODEL: ${{ vars.PRIMARY_MODEL }}
+          AI_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          AI_MAX_TOKENS: "32768"
+          AI_RESPONSE_FORMAT: json_object
+          AI_FALLBACK_BASE_URL: ${{ vars.LITELLM_URL }}
+          AI_FALLBACK_API_FORMAT: ${{ vars.FALLBACK_FORMAT }}
+          AI_FALLBACK_MODEL: ${{ vars.FALLBACK_MODEL }}
+          AI_FALLBACK_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          AI_PRIMARY_RETRIES: "3"
+          AI_PRIMARY_RETRY_DELAY_SEC: "15"
+          REVIEW_ROUTING_MODE: auto
+          AI_SMART_BASE_URL: ${{ vars.LITELLM_URL }}
+          AI_SMART_API_FORMAT: ${{ vars.SMART_FORMAT }}
+          AI_SMART_MODEL: ${{ vars.SMART_MODEL }}
+          AI_SMART_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          CONTEXT_LIMIT_MODE: normal
+          CI_STATUS_CHECK: "true"
+          CI_TIMEOUT_SEC: "600"
+          DEEP_REVIEW: "true"
+          TOOL_MODE: native_loop
+          TOOL_MAX_ROUNDS: "4"
+          PRIMARY_TOOL_MAX_REQUESTS: "16"
+          TOOL_LOOP_WALL_CLOCK_SEC: "600"
+          TOOL_TURN_TIMEOUT_SEC: "300"
+          TOOL_MAX_TOKENS_PER_TURN: "16000"
+          TOOL_MAX_RESPONSE_BYTES: "12000"
+          TOOL_ALLOWED_GH_API_REPOS: misospace/pr-reviewer-action
+          TOOL_REQUEST_TIMEOUT_SEC: "15"
+          TOOL_ENABLE_FOR_FORKS: "false"
+          ON_MODEL_FAILURE: notice
+          VERDICT_POLICY: findings_severity_gated
+          NON_BLOCKING_FINDING_CATEGORIES: tests,docs,style,question
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          SHADOW_DIR="$(mktemp -d "$RUNNER_TEMP/v3-shadow.XXXXXX")"
+          echo "$SHADOW_DIR" > "$RUNNER_TEMP/v3-shadow-dir"
+          PR_REVIEWER_RUN_DIR="$SHADOW_DIR" node scripts/v3_shadow_run.mjs run
+
+      - name: Compare v3 shadow against v2
+        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        env:
+          SHADOW_V2_VERDICT: ${{ steps.review.outputs.verdict }}
+          SHADOW_V2_VERDICT_SOURCE: ${{ steps.review.outputs.verdict_source }}
+          SHADOW_V2_REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
+          SHADOW_V2_ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
+          SHADOW_V2_REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
+          SHADOW_V2_ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
+          SHADOW_V2_CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
+          SHADOW_V2_FINDINGS: ${{ steps.review.outputs.findings }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir")"
+          PR_REVIEWER_RUN_DIR="$SHADOW_DIR" SHADOW_REPORT="$SHADOW_DIR/shadow-comparison.md" node scripts/v3_shadow_run.mjs compare
+
+      - name: Upload v3 shadow run
+        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        run: |
+          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir")"
+          mkdir -p "$RUNNER_TEMP/v3-shadow-artifacts"
+          cp "$SHADOW_DIR/shadow-comparison.md" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          cp "$SHADOW_DIR/shadow-outputs.txt" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          cp "$SHADOW_DIR/ai-output.json" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          cp "$SHADOW_DIR/tool-harness.json" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          cp "$SHADOW_DIR/review-corpus.truncated.md" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          tar -czf "$RUNNER_TEMP/v3-shadow-artifacts/run.tar.gz" -C "$SHADOW_DIR" . 2>/dev/null || true
+          echo "shadow run directory: $SHADOW_DIR"
+          echo "shadow comparison:" && cat "$RUNNER_TEMP/v3-shadow-artifacts/shadow-comparison.md" 2>/dev/null || true

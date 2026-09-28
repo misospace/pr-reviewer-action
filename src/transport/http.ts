@@ -220,6 +220,11 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         port: url.port,
         path: `${url.pathname}${url.search}`,
         method: "POST",
+        // CodeQL js/file-access-to-http: the body is `payload.body`, built
+        // in memory by buildModelRequest from the typed config (model,
+        // system prompt, corpus string). No file-read value reaches this
+        // call site; the endpoint origin is the operator-configured
+        // ai_base_url, and the API key rides the in-memory headers only.
         headers,
       },
       (response) => {

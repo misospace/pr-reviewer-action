@@ -1,0 +1,40 @@
+import type { FetchLike } from "../platform/http.js";
+import { ForgejoAdapter } from "../platform/forgejo.js";
+import { GitHubAdapter } from "../platform/github.js";
+import { resolvePlatform } from "../platform/resolve.js";
+import type { PlatformReadAdapter } from "../platform/types.js";
+import type { StageEnv } from "./env.js";
+
+/**
+ * Real platform seam construction (#809): the adapter the orchestrator hands
+ * to every context producer, built from the resolved run environment. GitHub
+ * and Forgejo are first-class; the platform choice is the precheck's
+ * resolved `PLATFORM` (auto → forgejo when FORGEJO_API_URL is set or the
+ * server URL is non-github), never a capability conditional.
+ */
+export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): PlatformReadAdapter {
+  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
+  const repo = env.REPO!;
+  const prNumber = env.PR_NUMBER!;
+  if (platform === "forgejo") {
+    return new ForgejoAdapter({
+      repo,
+      prNumber,
+      baseUrl: env.FORGEJO_API_URL ?? "",
+      token: env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || undefined,
+      ...(env.FORGEJO_AUTH_METHOD !== undefined ? { authMethod: env.FORGEJO_AUTH_METHOD } : {}),
+      ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
+        ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }
+        : {}),
+      ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+    });
+  }
+  const token = env.GH_TOKEN ?? "";
+  return new GitHubAdapter({
+    repo,
+    prNumber,
+    ...(token ? { token: `Bearer ${token}` } : {}),
+    ...(env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
+    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+  });
+}

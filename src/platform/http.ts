@@ -58,6 +58,10 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
     );
   }
   const headers = buildHeaders(opts, true);
+  // CodeQL js/file-access-to-http: `opts.body` is an in-memory string built
+  // by the platform adapters from typed values (issue comments, review
+  // bodies, marker text) — no read-from-disk value reaches it on any path;
+  // the origin/redirect policy above is the actual security boundary here.
   const doFetch = opts.fetchImpl ?? fetch;
   const init: RequestInit = {
     method: opts.method ?? "GET",

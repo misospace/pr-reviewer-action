@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { pyJsonDump } from "../src/context/py-json.js";
 import { guardedWrite, resolveArtifactPath } from "../src/gates/guarded-write.js";
 import { specialistRequestFn, toV2Completion } from "../src/gates/specialist-transport.js";
@@ -12,7 +12,6 @@ import type { SpecialistRequestFn } from "../src/specialists/runner.js";
 import { TransportFailure } from "../src/transport/http.js";
 import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/transport.js";
 
-const ACTION_ROOT = resolve(".");
 const CORPUS = "# Corpus\n\n+def load(path):\n+    return open(path).read()\n";
 
 function leadsResponse(leads: unknown[]): unknown {
@@ -53,7 +52,6 @@ async function run(env: Record<string, string>, options: Partial<SpecialistsGate
     env: { AI_MODEL: "m", AI_BASE_URL: "http://model.invalid/v1", AI_STREAM: "false", GITHUB_WORKSPACE: root, ...env },
     argv: options.argv ?? [],
     cwd: root,
-    actionRoot: ACTION_ROOT,
     requestFn: options.requestFn ?? mockTransport(),
     stdout: (line) => out.push(line),
     stderr: (line) => err.push(line),

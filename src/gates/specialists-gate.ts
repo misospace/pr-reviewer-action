@@ -6,6 +6,7 @@ import { redactText } from "../context/redact.js";
 import { pyFloatRepr, pyStr } from "../platform/py.js";
 import { emptyArtifact } from "../specialists/normalize.js";
 import { loadSpecialistPrompt } from "../specialists/prompts.js";
+
 import { renderSpecialistLeadsSection } from "../specialists/render.js";
 import {
   DEFAULT_EXECUTION_MODE,
@@ -63,8 +64,6 @@ export interface SpecialistsGateDeps {
   argv: readonly string[];
   /** Base for relative corpus paths and the workspace default. */
   cwd?: string;
-  /** Where `scripts/prompt_fragments/` lives (the action checkout). */
-  actionRoot?: string;
   /** Injected transport (tests); defaults to the v3 model transport. */
   requestFn?: SpecialistRequestFn;
   stdout?: (line: string) => void;
@@ -181,22 +180,13 @@ function jsonText(value: unknown, floatPaths: ReadonlySet<string> = NO_FLOATS): 
   return `${pyJsonDump(value, 2, false, { floatPaths })}\n`;
 }
 
-/** The action checkout that holds `scripts/prompt_fragments/`: the nearest
- * ancestor of this module (the bundle's `dist/`, or the test build) that has
- * one, else the cwd. */
-export function resolveActionRoot(start: string = __dirname, cwd: string = process.cwd()): string {
-  let current = start;
-  for (;;) {
-    if (existsSync(path.join(current, "scripts", "prompt_fragments", "specialist_correctness.txt"))) return current;
-    const parent = path.dirname(current);
-    if (parent === current) return cwd;
-    current = parent;
-  }
-}
+/** `gate-specialists`: exit 0 whenever the aggregate was written. The
+ * specialist role prompts are embedded at build time (#809) — there is no
+ * action-checkout probe and no `actionRoot` dependency. */
 
-function loadPrompt(role: string, actionRoot: string, variant = ""): string | undefined {
+function loadPrompt(role: string, variant = ""): string | undefined {
   try {
-    return loadSpecialistPrompt(role, actionRoot, variant);
+    return loadSpecialistPrompt(role, variant);
   } catch {
     return undefined;
   }
@@ -350,13 +340,12 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     stdout("WARNING: adversarial correctness corpus is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call");
   }
 
-  const actionRoot = deps.actionRoot ?? resolveActionRoot();
   const rolePrompts: Partial<Record<string, string>> = {};
   for (const role of SPECIALIST_ROLES_ORDER) {
     // #758: an active adversarial arm runs correctness on its own variant.
     const prompt = role === "correctness" && adversarialActive
-      ? loadPrompt(role, actionRoot, "adversarial")
-      : loadPrompt(role, actionRoot);
+      ? loadPrompt(role, "adversarial")
+      : loadPrompt(role);
     if (prompt !== undefined) rolePrompts[role] = prompt;
   }
 

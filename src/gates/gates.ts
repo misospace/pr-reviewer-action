@@ -62,12 +62,24 @@ export interface GateBranch {
   file: string;
   args?: readonly string[];
   cwd?: string;
-  /** Allowlist for this child's environment (see `./env.ts`). */
+  /** Allowlist for this child's environment (see `./env.ts`). Ignored for an
+   * in-process `workload` branch, which shares the parent's memory and never
+   * receives a child environment. */
   envAllowlist: EnvAllowlist;
   /** Optional per-branch deadline; expiry terminates the whole tree. */
   timeoutMs?: number;
   /** Per-stream stdout/stderr capture cap. */
   maxOutputBytes?: number;
+  /**
+   * In-process workload (#809): when set, the branch runs inside this
+   * process instead of launching a subprocess (`file`/`args` unused). The
+   * resolved promise value is the exit code (0 = ok); a thrown error is a
+   * failed workload, and the branch must honor the parent scope's signal for
+   * cancellation — the scope abort is passed to the workload so transports
+   * and sleeps can wind down. The fail-soft join semantics are identical to
+   * a subprocess branch.
+   */
+  workload?: (signal: AbortSignal) => Promise<number>;
 }
 
 export interface RunConcurrentGatesOptions {
@@ -95,13 +107,22 @@ function notLaunched(gate: GateName): GateOutcome {
   };
 }
 
+/** Only subprocess branches own process trees; an undefined (disabled) or
+ * in-process branch needs no descendant-cleanup preflight. */
+function hasSubprocessBranch(branch: GateBranch | undefined): boolean {
+  return branch !== undefined && branch.workload === undefined;
+}
+
 function toOutcome(gate: GateName, result: ProcessResult): GateOutcome {
   const ok = result.status === "exited" && result.exitCode === 0;
   let error: string | null = null;
   if (!ok) {
     switch (result.status) {
       case "exited":
-        error = `workload exited ${result.exitCode}`;
+        // An in-process workload reports its thrown failure via launchError.
+        error = result.launchError
+          ? `workload failed: ${result.launchError}`
+          : `workload exited ${result.exitCode}`;
         break;
       case "timeout":
         error = "workload exceeded its deadline; tree terminated";
@@ -152,17 +173,30 @@ export async function runConcurrentGates(
 
   // Fail-closed preflight (the typed require_gate_tree_cleanup): refuse to
   // enter background concurrency when descendant cleanup cannot be guaranteed.
-  try {
-    await preflightTreeCleanup();
-  } catch (error) {
-    throw new GateLaunchError(
-      "preflight",
-      error instanceof Error ? error.message : String(error),
-    );
+  // Only subprocess branches spawn process trees; a run whose branches are all
+  // in-process (#809) owns no children here and skips the pgrep preflight,
+  // exactly like the disabled-gates fast path.
+  if (hasSubprocessBranch(options.ci) || hasSubprocessBranch(options.specialists)) {
+    try {
+      await preflightTreeCleanup();
+    } catch (error) {
+      throw new GateLaunchError(
+        "preflight",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
-  const launch = (gate: GateName, branch: GateBranch): ProcessHandle =>
-    runProcess({
+  interface CommonHandle {
+    launched: Promise<void>;
+    launchRefusal: string | null;
+    result: Promise<ProcessResult>;
+    abort: () => Promise<void>;
+  }
+
+  const launch = (gate: GateName, branch: GateBranch): CommonHandle => {
+    if (branch.workload) return launchWorkload(branch, options.scope);
+    return runProcess({
       file: branch.file,
       ...(branch.args !== undefined ? { args: branch.args } : {}),
       ...(branch.cwd !== undefined ? { cwd: branch.cwd } : {}),
@@ -171,6 +205,7 @@ export async function runConcurrentGates(
       ...(branch.maxOutputBytes !== undefined ? { maxOutputBytes: branch.maxOutputBytes } : {}),
       ...(options.scope !== undefined ? { signal: options.scope.signal } : {}),
     });
+  };
 
   // Both forks happen before either join, exactly as corpus.sh arranges them.
   const ciHandle = options.ci ? launch("ci", options.ci) : null;
@@ -216,4 +251,113 @@ export async function runConcurrentGates(
     }
   }
   return outcome;
+}
+
+// ---------------------------------------------------------------------------
+// Asymmetric fork/join (#809)
+// ---------------------------------------------------------------------------
+
+/** A single gate branch launched but not yet joined. Owns the fork/join
+ * halves of `runConcurrentGates` so the orchestrator can reproduce v2's
+ * schedule — the CI gate forks before the deterministic corpus build and
+ * joins after the specialist phase, while `runConcurrentGates` (the symmetric
+ * #679 shape) remains for callers that fork and join together. */
+export interface ForkedGate {
+  readonly gate: GateName;
+  join(): Promise<GateOutcome>;
+  /** Terminate the branch now (abnormal-exit lifecycle). Idempotent. */
+  abort(): Promise<void>;
+}
+
+/** Fork one gate branch (the typed `fork_ci_gate` / `fork_specialist_gate`).
+ * Fails closed on a launch refusal: throws `GateLaunchError` after waiting
+ * for the async preflight, exactly like `runConcurrentGates`. */
+export async function forkGate(gate: GateName, branch: GateBranch, options: { ambientEnv?: NodeJS.ProcessEnv; scope?: CancellationScope } = {}): Promise<ForkedGate> {
+  let settled: GateOutcome | null = null;
+  let handle: CommonHandleLike;
+  if (branch.workload) {
+    handle = launchWorkload(branch, options.scope);
+  } else {
+    try {
+      await preflightTreeCleanup();
+    } catch (error) {
+      throw new GateLaunchError("preflight", error instanceof Error ? error.message : String(error));
+    }
+    handle = runProcess({
+      file: branch.file,
+      ...(branch.args !== undefined ? { args: branch.args } : {}),
+      ...(branch.cwd !== undefined ? { cwd: branch.cwd } : {}),
+      env: buildChildEnv(branch.envAllowlist, options.ambientEnv ?? process.env),
+      ...(branch.timeoutMs !== undefined ? { timeoutMs: branch.timeoutMs } : {}),
+      ...(branch.maxOutputBytes !== undefined ? { maxOutputBytes: branch.maxOutputBytes } : {}),
+      ...(options.scope !== undefined ? { signal: options.scope.signal } : {}),
+    });
+    await handle.launched;
+    if (handle.launchRefusal !== null) {
+      throw new GateLaunchError(gate, handle.launchRefusal);
+    }
+  }
+  return {
+    gate,
+    join: async (): Promise<GateOutcome> => {
+      if (settled === null) settled = toOutcome(gate, await handle.result);
+      return settled;
+    },
+    abort: handle.abort,
+  };
+}
+
+interface CommonHandleLike {
+  launched: Promise<void>;
+  launchRefusal: string | null;
+  result: Promise<ProcessResult>;
+  abort: () => Promise<void>;
+}
+
+/** In-process gate workload launcher, shared by `runConcurrentGates` and
+ * `forkGate`. See `GateBranch.workload` for the contract. */
+export function launchWorkload(branch: GateBranch, scope?: CancellationScope): CommonHandleLike {
+  const workload = branch.workload!;
+  const started = Date.now();
+  const controller = new AbortController();
+  const scopeSignal = scope?.signal;
+  if (scopeSignal?.aborted) controller.abort();
+  scopeSignal?.addEventListener("abort", () => controller.abort(), { once: true });
+  const result = (async (): Promise<ProcessResult> => {
+    // Soft per-branch deadline: an in-process workload cannot be killed, so
+    // expiry only reports the outcome; the specialist phase bounds itself
+    // with its own internal phase deadline, which normally fires first.
+    const deadline = branch.timeoutMs !== undefined && branch.timeoutMs > 0
+      ? new Promise<"deadline">((resolve) => {
+        const timer = setTimeout(() => resolve("deadline"), branch.timeoutMs);
+        timer.unref?.();
+      })
+      : null;
+    let code: number | "deadline";
+    try {
+      code = await Promise.race([
+        workload(controller.signal),
+        ...(deadline ? [deadline] : []),
+      ]);
+    } catch (error) {
+      const buffers = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      if (scopeSignal?.aborted) {
+        return { status: "cancelled", exitCode: null, signal: null, ...buffers, stdoutTruncated: false, stderrTruncated: false, durationMs: Date.now() - started, termination: null, launchError: error instanceof Error ? error.message : String(error) };
+      }
+      return { status: "exited", exitCode: 1, signal: null, ...buffers, stdoutTruncated: false, stderrTruncated: false, durationMs: Date.now() - started, termination: null, launchError: error instanceof Error ? error.message : String(error) };
+    }
+    if (typeof code !== "number") {
+      return { status: "timeout", exitCode: null, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false, durationMs: Date.now() - started, termination: null };
+    }
+    return { status: "exited", exitCode: code, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false, durationMs: Date.now() - started, termination: null };
+  })();
+  return {
+    launched: Promise.resolve(),
+    launchRefusal: null,
+    result,
+    abort: async () => {
+      controller.abort();
+      await result.catch(() => {});
+    },
+  };
 }

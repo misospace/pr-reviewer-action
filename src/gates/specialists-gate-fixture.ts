@@ -21,7 +21,8 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
-import { resolveActionRoot, runSpecialistsGate } from "./specialists-gate.js";
+import { loadSpecialistPrompt } from "../specialists/prompts.js";
+import { runSpecialistsGate } from "./specialists-gate.js";
 
 interface MockResponse {
   status?: number;
@@ -77,12 +78,11 @@ function identifyRole(payload: Record<string, unknown>, prompts: Record<string, 
 
 export async function runSpecialistsGateFixture(fixturePath: string): Promise<{ ok: boolean; values: Record<string, string> }> {
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as SpecialistsFixture;
-  const actionRoot = resolveActionRoot();
   const prompts: Record<string, string> = {};
   for (const role of SPECIALIST_ROLES_ORDER) {
-    prompts[role] = readFileSync(join(actionRoot, "scripts", "prompt_fragments", `specialist_${role}.txt`), "utf8");
+    prompts[role] = loadSpecialistPrompt(role);
   }
-  prompts.correctness_adversarial = readFileSync(join(actionRoot, "scripts", "prompt_fragments", "specialist_correctness_adversarial.txt"), "utf8");
+  prompts.correctness_adversarial = loadSpecialistPrompt("correctness", "adversarial");
 
   const received: Record<string, { body: string; auth: boolean }[]> = {};
   const cursors: Record<string, number> = {};
@@ -138,7 +138,6 @@ export async function runSpecialistsGateFixture(fixturePath: string): Promise<{ 
       env,
       argv: ["--corpus", "specialist-corpus.md", ...args],
       cwd: workspace,
-      actionRoot,
       stdout: (line) => stdout.push(line),
       stderr: (line) => stderr.push(line),
     });

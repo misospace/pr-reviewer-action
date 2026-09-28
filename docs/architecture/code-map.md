@@ -95,6 +95,23 @@ Design rationale and the composite/Node runtime decision:
 - **`src/prompt/` (#706)** — The prompt and message layer, byte-exact against the v2 shell: `system-prompt.ts` ports `resolve_system_prompt` / `apply_system_prompt_fragments` / `apply_specialist_leads_fragment` as three phase functions (config time, after classification, after the specialist phase) over a `PromptWorkspace` of presence files; `user-message.ts` ports `build_user_message` with its embedded Python's semantics; `failure.ts` ports `handle_model_failure` and `annotate_analysis_engine`; `bash.ts` holds the shell/jq idioms they depend on; `assets.ts` exposes the build-time-embedded default prompt and fragments; `fixture.ts` is the `prompt-assembly` parity CLI. The native-loop harness still trusts an assembled `SYSTEM_PROMPT` (the orchestrator passes the `src/prompt/` result there, as v2 exports it).
 - **`src/platform/publish-api.ts`** — The write-side platform seam (#680): sticky-comment upsert with the shared latest-marker-containing-comment semantics (never `--edit-last`'s author-based selection), GitHub-shaped native review creation (Forgejo re-validates inline positions against the fresh diff and maps events to ReviewStateType), review dismissal, and the GraphQL-only capabilities (minimized state, minimize, superseded-thread query/resolve) that degrade explicitly on Forgejo.
 
+### v3 run orchestrator (`src/run/`) (#809)
+
+The end-to-end review entry: `run/review.ts` chains every ported stage in the
+v2 `run_review.sh` order with typed in-memory state — config → context →
+advisory phases (enrichment, image digests, evidence, in-process now) →
+classification/routing → corpus → concurrent gates → native tool harness →
+review call/fallback/escalation → enforcement → outputs. `run/env.ts`
+projects the kebab-case contract config onto the SCREAMING_SNAKE stage ABI
+(the `config-default-resolution` boundary) plus the ambient runner context;
+`run/workspace.ts` is the write-through artifact bus (in-memory state is
+authoritative, disk is the diagnostics mirror); `run/platform.ts` builds the
+real `PlatformReadAdapter`. The specialist gate runs in-process
+(`gates.ts` workload branches + `forkGate` for the asymmetric CI fork/join
+schedule); `src/specialists/prompts.ts` reads build-time-embedded fragments.
+`node dist/index.js run` never publishes; the dogfood shadow job
+(`scripts/v3_shadow_run.mjs`) diffs it against v2.
+
 ### Fork review workflow (privilege-separated)
 
 - **`.github/workflows/fork-ai-review.yaml`** — the privileged fork-PR reviewer (two-stage privilege separation, [`docs/fork-review.md`](../fork-review.md)): triggered by `workflow_run` (CI completed) and a label-gated `pull_request_target` (`ai-review-fork`, maintainer-only). Every checkout is pinned to `github.sha` (a base-repo commit — never the fork head); the reviewer runs `uses: ./` from that trusted checkout; model policy is pinned to the `FORK_PRIMARY_*`/`FORK_SMART_*` repo variables with a model-scoped `FORK_LITELLM_API_KEY` and **no** fallback inputs (local-model-only; `on_model_failure: notice` degrades visibly). Fork feature policy pinned off (`tool_mode: off`, tool/evidence/Linear disabled, `allowed_source_hosts: ""`, related-code/repo-map off, `approve_forks: false`); compute bounded (retries 1, `low` context, 30-minute job, one concurrency group per PR with cancel-in-progress).

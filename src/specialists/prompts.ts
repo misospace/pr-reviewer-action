@@ -1,16 +1,13 @@
 /** Prompt-fragment loading for the fixed specialist roles (v3 port of the
  * loader half of `pr_reviewer/specialists.py`). Fragments are static,
- * repository-committed text assets (`scripts/prompt_fragments/specialist_*.txt`)
- * shared with the v2 runtime; reading them is not "running Python" — they are
- * plain data files, and other v3 prompt-assembly ports read the same
- * directory. Resolution anchors on the repository root (`process.cwd()`,
- * matching the convention `src/context/repo-map.ts` and `src/context/fixture.ts`
- * already use for workspace-root resolution), not on the compiled bundle's
- * own location, so it works identically from `dist/index.js` (bundled) and
- * from the unbundled test build. */
+ * repository-committed text assets shared with the v2 runtime, embedded into
+ * the bundle at build time (#804/#809) — the shipped runtime never reads
+ * `scripts/prompt_fragments/` from disk, because at runtime the working
+ * directory is the *reviewed* checkout, which does not contain them. The
+ * generator (scripts/generate-v3-contract.mjs) embeds every fragment
+ * verbatim, so the embedded text is byte-identical to the v2 file. */
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { BUNDLED_PROMPT_ASSETS, rawFragment } from "../prompt/assets.js";
 import { SPECIALIST_ROLES } from "./types.js";
 
 export class UnknownSpecialistRoleError extends Error {
@@ -21,16 +18,16 @@ export class UnknownSpecialistRoleError extends Error {
 }
 
 /** `variant` (#758 adversarial-correctness arm) selects
- * `specialist_<role>_<variant>.txt`; an empty variant keeps the default
- * `specialist_<role>.txt`. */
-export function promptFragmentPath(role: string, repoRoot: string = process.cwd(), variant = ""): string {
+ * `specialist_<role>_<variant>`; an empty variant keeps the default
+ * `specialist_<role>`. Keys match the generator's fragment map (file names
+ * without the `.txt` suffix). */
+export function specialistFragmentName(role: string, variant = ""): string {
   if (!SPECIALIST_ROLES.has(role)) {
     throw new UnknownSpecialistRoleError(role);
   }
-  const name = variant ? `specialist_${role}_${variant}.txt` : `specialist_${role}.txt`;
-  return path.join(repoRoot, "scripts", "prompt_fragments", name);
+  return variant ? `specialist_${role}_${variant}` : `specialist_${role}`;
 }
 
-export function loadSpecialistPrompt(role: string, repoRoot: string = process.cwd(), variant = ""): string {
-  return readFileSync(promptFragmentPath(role, repoRoot, variant), "utf8");
+export function loadSpecialistPrompt(role: string, variant = ""): string {
+  return rawFragment(BUNDLED_PROMPT_ASSETS, specialistFragmentName(role, variant));
 }

@@ -725,6 +725,40 @@ runner/corpus (`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py`
 — the #706 backlog) and the v2 shell orchestration itself (`scripts/run_review.sh`
 and the composite action steps), which the #681 cutover replaces.
 
+## The v3 run entry (#809)
+
+`node dist/index.js run` is the end-to-end TypeScript review orchestrator: it
+executes the full review in the order `scripts/run_review.sh` uses today —
+config, context, enrichment, classification/routing, gates, corpus, native
+tool harness, review call with fallback and reviewer-requested escalation,
+deterministic enforcement, requirement-coverage fold, and the kebab-case step
+outputs — with typed in-memory state between stages and a write-through
+workspace (`src/run/workspace.ts`) persisting the v2-named artifacts
+(`ai-output.json`, `review-corpus.truncated.md`, `classification.json`, ...)
+under `PR_REVIEWER_RUN_DIR` for outputs, evals, diagnostics and the shadow
+comparison. No Python and no shell run anywhere in the path; the CI gate
+still launches as its least-privilege subprocess (`gate-ci`), while the
+specialist phase runs in-process against the real v3 transport.
+
+The entry never publishes and (until the #706 cutover) is not the shipped
+production path — production still runs the v2 composite. It reads the
+kebab-case contract inputs as `INPUT_*` environment variables (the shape the
+v3 action metadata will export) plus the ambient runner context
+(`PR_HEAD_SHA`, `IS_FORK_PR`, `PLATFORM`, ...).
+
+### Shadow mode (#809)
+
+The dogfood workflow runs the v3 entry beside v2 on every same-repo PR
+(Build/Run/Compare/Upload steps in `.github/workflows/ai-pr-review.yaml`,
+driven by `scripts/v3_shadow_run.mjs` — dogfood-only tooling, not part of the
+shipped runtime). The shadow never publishes; it writes its artifacts to a
+scratch `PR_REVIEWER_RUN_DIR`, diffs verdict, verdict source, route,
+escalation reason, required checks, analysis engine, cache-hit ratio and the
+findings count against the v2 step's outputs, and uploads the report as a
+workflow artifact. Every difference observed across the qualification PRs
+must be fixed or pinned as an approved divergence before the #681 release
+gate.
+
 ## Workflow examples
 
 ```yaml

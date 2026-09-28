@@ -39,6 +39,7 @@ import { runLinkedSourcesFixture, runStripSourceTextFixture } from "./context/li
 import { runCiGateFixture } from "./gates/ci-wait-fixture.js";
 import { runSpecialistsGateFixture } from "./gates/specialists-gate-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
+import { runReview, RunReviewError } from "./run/index.js";
 import { runEvidenceProvidersFixture } from "./evidence/fixture.js";
 
 export function main(): void {
@@ -120,7 +121,17 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
   const firstArg = argv[0] ?? "";
-  if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {
+  if (firstArg === "run") {
+    // The end-to-end review orchestrator (#809): the typed successor of
+    // scripts/run_review.sh. Never publishes — the publish boundary stays
+    // with the composite's publish step until #706/#681.
+    runReview({ env: process.env })
+      .then(() => { exitAfterFlush(0); })
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 run error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
+      });
+  } else if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {
     // Gate workloads (#706 PR 6), launched by runConcurrentGates.
     assertSupportedNode(process.versions.node);
     const run = firstArg === CI_GATE_SUBMODE ? ciGateMain() : specialistsGateMain(argv.slice(1));

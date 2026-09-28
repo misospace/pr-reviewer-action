@@ -209,6 +209,12 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
     if (checksFile === "") return;
     const rows = renderRows(checks ?? []);
     if (rows === "") return;
+    // CodeQL js/http-to-file-access: writing the CI evidence file is the
+    // sanctioned pipeline by design — this artifact's whole purpose is to
+    // carry forge-API check results into the review corpus as UNTRUSTED
+    // DATA. The untrusted-data boundary holds downstream: every table cell
+    // is escaped (escapeTableCell) and the corpus renderer fences the
+    // section, so the network content can never forge instructions.
     const tmp = `${checksFile}.tmp.${deps.pid ?? process.pid}`;
     deps.onTmpChange?.(tmp);
     const body =
