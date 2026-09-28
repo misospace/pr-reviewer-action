@@ -407,13 +407,18 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
   // (strict coverage contract applies unchanged), provenance is the changed
   // site the question is anchored to, and duplicates of already-extracted
   // requirements are dropped (first occurrence owns the entry).
-  let obligationCount = 0;
+  // Eligible (non-duplicate) obligations the cap drops are omissions too,
+  // and must show in the truncation metadata like any other drop.
+  let omittedObligations = 0;
   for (const obligation of input.harnessObligations ?? []) {
-    if (entries.length >= MAX_REQUIREMENTS) break;
     const { text, truncated } = obligationText(obligation);
     const key = text.toLowerCase();
     const index = indexByKey.get(key);
     if (index !== undefined) continue;
+    if (entries.length >= MAX_REQUIREMENTS) {
+      omittedObligations += 1;
+      continue;
+    }
     indexByKey.set(key, entries.length);
     entries.push({
       id: requirementId(text),
@@ -423,11 +428,10 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
       truncated,
       provenance: [{ source: HARNESS_SOURCE, ref: obligation.source || "harness", line: obligation.line }],
     });
-    obligationCount += 1;
   }
 
-  const omitted = Math.max(0, entries.length - MAX_REQUIREMENTS);
-  const kept = omitted > 0 ? entries.slice(0, MAX_REQUIREMENTS) : entries;
+  const omitted = Math.max(0, entries.length - MAX_REQUIREMENTS) + omittedObligations;
+  const kept = entries.length > MAX_REQUIREMENTS ? entries.slice(0, MAX_REQUIREMENTS) : entries;
   return {
     version: ARTIFACT_VERSION,
     sha: computeSha(kept),

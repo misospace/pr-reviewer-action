@@ -17,7 +17,7 @@
  */
 import type { ChangeAnchorsArtifact } from "../context/change-anchors.js";
 import type { RelatedContext } from "../context/related-context.js";
-import { MAX_REQUIREMENTS, MAX_REQUIREMENT_CHARS } from "./ledger.js";
+import { MAX_REQUIREMENTS, MAX_REQUIREMENT_CHARS, TRUNCATION_MARKER } from "./ledger.js";
 
 /** One candidate obligation before ledger injection. `connects` is the
  * consumer/caller count that drives the most-connected-first cap. */
@@ -202,7 +202,7 @@ export function obligationText(obligation: HarnessObligation): { text: string; t
   if (obligation.text.length <= MAX_REQUIREMENT_CHARS) {
     return { text: obligation.text, truncated: false };
   }
-  return { text: obligation.text.slice(0, MAX_REQUIREMENT_CHARS), truncated: true };
+  return { text: obligation.text.slice(0, MAX_REQUIREMENT_CHARS - 1) + TRUNCATION_MARKER, truncated: true };
 }
 
 /** Most-connected-first, the order obligations are injected in. */
