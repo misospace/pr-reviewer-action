@@ -290,8 +290,9 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     if (skipReason === "diff-unchanged") {
       const carried = carriedVerdict(lastCommentBody);
       // ── #812: the stale carried verdict ──────────────────────────────
-      // A carried request_changes binds to the CI conclusion (and the
-      // required-checks state) the review saw. When the forge exposes the
+      // A carried request_changes binds to the external-CI conclusion the
+      // review saw (required-check coverage is not recomputed here). When
+      // the forge exposes the
       // external-checks read seam, re-read it on the skip: a changed or
       // unknown conclusion forces a fresh review (fail closed), so CI
       // turning green — or a transient API failure — can never leave a

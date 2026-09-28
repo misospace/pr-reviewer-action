@@ -633,3 +633,49 @@ async function runWithVerdictOn(platform: PlatformReadAdapter, verdict: Record<s
     cleanup();
   }
 }
+
+test("#812: a head that moved during the CI wait skips the metadata refresh", async () => {
+  const requests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    requests.push(String(body));
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  let prBody = "Original description.";
+  let headSha = "a".repeat(40);
+  const platform = mockPlatform();
+  const base = platform.getPr.bind(platform);
+  platform.getPr = async () => {
+    const pr = await base() as Record<string, unknown>;
+    return { ...pr, body: prBody, head: { ...(pr.head as Record<string, unknown>), sha: headSha } } as never;
+  };
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      // A new push lands while CI runs: this review is superseded, so it must
+      // not mix the new head's metadata into the old head's review.
+      ciGate: { file: "", envAllowlist: [], workload: async () => { prBody = "NEW-HEAD description."; headSha = "b".repeat(40); return 0; } },
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(readFileSync(join(runDir, "pr-body.txt"), "utf8"), "Original description.");
+    assert.doesNotMatch(requests.at(-1) ?? "", /NEW-HEAD/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});

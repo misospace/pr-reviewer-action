@@ -351,7 +351,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     await buildHumanReviewsSection(ws, adapter, String(prRecord.headRefOid ?? ""), env);
     return linkedResult;
   };
-  let linked = await buildMetadataContext(pr);
+  const linked = await buildMetadataContext(pr);
 
   // Manifest context (context.sh tail).
   const manifest = buildManifestContext(prFilesRaw, workspace);
@@ -478,7 +478,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       ws.write("pr-object.json", pyJsonDumps(refreshed));
       ws.write("pr.json", pyJsonDumps(pr));
       ws.write("pr-body.txt", String(pr.body ?? ""));
-      linked = await buildMetadataContext(pr);
+      await buildMetadataContext(pr);
       await buildPrThreadSection(ws, adapter, env);
     }
   }

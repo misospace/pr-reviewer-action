@@ -326,9 +326,10 @@ interface SkipAdapter extends PlatformAdapter {
   externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
 }
 
-function skipAdapter812(external: ExternalCheck[] | null, body: string): SkipAdapter {
+function skipAdapter812(external: ExternalCheck[] | null, body: string): SkipAdapter & { readCount(): number } {
   let reads = 0;
   return {
+    readCount: () => reads,
     platform: "github",
     getPr: () => Promise.resolve({ number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
@@ -388,6 +389,7 @@ test("#812: a carried approve is never re-checked (zero extra API reads)", async
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "approve");
   assert.equal(output.verdict_source, "carry_forward");
+  assert.equal(adapter.readCount(), 0);
 });
 
 test("#812: a pre-#812 marker (no stored ci_state) forces one fresh review", async () => {
