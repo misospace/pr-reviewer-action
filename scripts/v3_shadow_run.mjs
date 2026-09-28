@@ -14,14 +14,12 @@
 //   node scripts/v3_shadow_run.mjs compare   — read the v2 review step's
 //       outputs (passed as SHADOW_V2_* env) and the v3 run's artifacts, and
 //       write a line-by-line diff report to $SHADOW_REPORT.
-//   node scripts/v3_shadow_run.mjs map       — print the run-mode env mapping
-//       as JSON (test seam; runs nothing).
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -152,11 +150,15 @@ function compareMode() {
   console.log(report.join("\n"));
 }
 
-const mode = process.argv[2] ?? "run";
-if (mode === "run") runMode();
-else if (mode === "compare") compareMode();
-else if (mode === "map") console.log(JSON.stringify(Object.keys(mappedEnv(process.env)).sort().map((key) => [key, mappedEnv(process.env)[key]])));
-else {
-  console.error(`unknown mode: ${mode}`);
-  process.exit(2);
+export { mappedEnv };
+
+// Importing the module (tests) must not run a mode.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const mode = process.argv[2] ?? "run";
+  if (mode === "run") runMode();
+  else if (mode === "compare") compareMode();
+  else {
+    console.error(`unknown mode: ${mode}`);
+    process.exit(2);
+  }
 }

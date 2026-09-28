@@ -433,3 +433,13 @@ test("model policy: the model verdict passes through minor findings", async () =
   assert.equal(result.outputs.verdictSource, "model");
   assert.match(result.marker, /review_result.{0,4}issues/);
 });
+
+test("findings_severity_gated policy: CSV non-blocking categories are split, not matched as characters", async () => {
+  const result = await runWithVerdict(
+    { verdict: "request_changes", findings: [{ ...finding("major"), category: "tests" }] },
+    { "verdict-policy": "findings_severity_gated", "non-blocking-finding-categories": "docs, tests,style" },
+  );
+  assert.equal(result.outputs.verdict, "approve");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.match(result.outputs.reviewMarkdown, /Verdict relaxed from structured findings/);
+});

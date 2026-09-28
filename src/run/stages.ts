@@ -56,10 +56,6 @@ export function safeJson(bytes: Uint8Array | null | undefined): Record<string, u
   }
 }
 
-export function splitCsv(raw: string): string {
-  return raw;
-}
-
 function joinLines(lines: readonly string[]): string {
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
