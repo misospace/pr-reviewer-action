@@ -1,0 +1,35 @@
+{
+  "fixture": "site-local-divergence",
+  "description": "An allowlisted hostname resolving into fec0::/10 (deprecated IPv6 site-local): CPython's ipaddress lists it in no private/reserved table, so v2 treats it as public and fetches; v3 blocks it (approved divergence).",
+  "input": {
+    "urls": [
+      "https://artifacthub.io/site-local"
+    ],
+    "allowed_source_hosts": "artifacthub.io",
+    "target_version": "",
+    "ghcr_images": [],
+    "compare_shas": null,
+    "github_repository": "o/r"
+  },
+  "dns": {
+    "artifacthub.io": [
+      "fec0::1"
+    ]
+  },
+  "http": [
+    {
+      "url": "https://artifacthub.io/site-local",
+      "body": "internal"
+    }
+  ],
+  "golden": {
+    "markdown": "## Source 1\nURL: https://artifacthub.io/site-local\n\n### Fetched Content (truncated)\n```text\ninternal\n\n```\n\n",
+    "requests": "[\"GET https://artifacthub.io/site-local\"]",
+    "budget_warnings": "0"
+  },
+  "v3_golden": {
+    "markdown": "(1 source skipped \u2014 non-allowlisted or non-fetchable hosts: artifacthub.io)\n\n",
+    "requests": "[]",
+    "budget_warnings": "0"
+  }
+}

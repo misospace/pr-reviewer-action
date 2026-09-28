@@ -8,6 +8,8 @@ import http from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
 import type { LookupAddress } from "node:dns";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { isPublicAddress, parseIPv6 } from "../src/platform/ip-policy.js";
 import {
   createNodeExchange,
@@ -316,4 +318,72 @@ test("the enrich transport pins public resolution, refuses private hosts and nev
   await assert.rejects(fetchLike("https://internal.forge/api/v1/x"), /public addresses/);
   await assert.rejects(fetchLike("https://codeberg.org/api/v1/x", { method: "POST" }), /only GET/);
   assert.equal(exchange.seen.length, 2);
+});
+
+const PROXY_VARS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"];
+
+/** A proxy that records every request or CONNECT it receives. */
+async function withProxy(run: (proxyUrl: string, hits: string[]) => Promise<void>): Promise<void> {
+  const hits: string[] = [];
+  const proxy = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.end("via proxy");
+  });
+  proxy.on("connect", (req, socket) => {
+    hits.push(`CONNECT ${req.url}`);
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  try {
+    await run(`http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, hits);
+  } finally {
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  }
+}
+
+test("proxy environment variables never divert the pinned transport", async () => {
+  await withProxy(async (proxyUrl, proxyHits) => {
+    await withServer((_req, res) => res.end("direct"), async (port, hits) => {
+      const saved = Object.fromEntries(PROXY_VARS.map((name) => [name, process.env[name]]));
+      for (const name of PROXY_VARS) process.env[name] = proxyUrl;
+      try {
+        const body = await fetchSource(`http://direct.test:${port}/pinned`, {
+          allowedHosts: new Set(["direct.test"]), resolver: fakeResolver({ "direct.test": ["127.0.0.1"] }),
+          addressPolicy: loopbackOnly, exchange: createNodeExchange(loopbackOnly),
+        });
+        assert.equal(Buffer.from(body ?? []).toString(), "direct");
+      } finally {
+        for (const name of PROXY_VARS) {
+          if (saved[name] === undefined) delete process.env[name];
+          else process.env[name] = saved[name];
+        }
+      }
+      assert.equal(hits.length, 1);
+      assert.deepEqual(proxyHits, []);
+
+      // Node's opt-in env-proxy support (NODE_USE_ENV_PROXY) is read at
+      // startup, so check it in a fresh process: the pinned transport
+      // (agent: false + pinned lookup) still connects directly.
+      const module = join(__dirname, "..", "src", "platform", "safe-fetch.js");
+      const script = `
+        const { fetchSource, createNodeExchange } = require(${JSON.stringify(module)});
+        const only = (a) => a === "127.0.0.1";
+        fetchSource("http://direct.test:${port}/pinned-child", {
+          allowedHosts: new Set(["direct.test"]), resolver: async () => ["127.0.0.1"],
+          addressPolicy: only, exchange: createNodeExchange(only),
+        }).then((body) => process.stdout.write(Buffer.from(body ?? []).toString()));`;
+      const env: Record<string, string> = { PATH: process.env.PATH ?? "", NODE_USE_ENV_PROXY: "1" };
+      for (const name of PROXY_VARS) env[name] = proxyUrl;
+      const child = await new Promise<{ stdout: string; status: number | null }>((resolve) => {
+        const c = spawn(process.execPath, ["-e", script], { env });
+        let stdout = "";
+        c.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+        c.on("close", (status) => resolve({ stdout, status }));
+      });
+      assert.equal(child.status, 0);
+      assert.equal(child.stdout, "direct");
+      assert.equal(hits.length, 2, "the child connected straight to the target");
+      assert.deepEqual(proxyHits, [], "no request or CONNECT ever reached the proxy");
+    });
+  });
 });

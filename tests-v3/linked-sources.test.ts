@@ -10,6 +10,7 @@ import { BudgetTracker, DeadlineBudget, pyParseInt } from "../src/context/budget
 import {
   fenceFor,
   parseAllowedRepos,
+  SKIP_FETCH_HOSTS,
   pyJsonDumpsIndent2,
   renderLinkedSources,
   repoAllowed,
@@ -29,11 +30,25 @@ test("reduceSource strips HTML like strip_source_text.py", () => {
   assert.throws(() => pyHtmlUnescape(`&#${"0".repeat(4301)};`), PyValueError);
 });
 
-test("the tag-block regex replacement stays linear on hostile input", () => {
-  const hostile = Buffer.from(`<${"<head ".repeat(40_000)}${"</script>".repeat(40_000)}${"<".repeat(40_000)}x${"\u3000".repeat(200_000)}x`);
-  const started = Date.now();
-  reduceSource(hostile, 4000);
-  assert.ok(Date.now() - started < 2000, "no quadratic backtracking");
+/** Best-of-3 wall time for one reduceSource call. */
+function timeReduce(data: Buffer): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < 3; run += 1) {
+    const started = process.hrtime.bigint();
+    reduceSource(data, 4000);
+    best = Math.min(best, Number(process.hrtime.bigint() - started));
+  }
+  return best;
+}
+
+test("the tag-block and strip scans stay linear on hostile input (8x input, far below 64x time)", () => {
+  // Unclosed openers, closers of another tag, unclosed '<', and a long
+  // interior run of non-ASCII whitespace: each is quadratic under the naive
+  // Python regexes. Linear code scales ~8x at 8x size; quadratic ~64x.
+  const hostile = (n: number): Buffer => Buffer.from(`<${"<head ".repeat(n)}${"</script>".repeat(n)}${"<".repeat(n)}x${"\u3000".repeat(5 * n)}x`);
+  const small = timeReduce(hostile(5_000));
+  const large = timeReduce(hostile(40_000));
+  assert.ok(large / Math.max(small, 1) < 24, `8x input took ${(large / Math.max(small, 1)).toFixed(1)}x the time`);
 });
 
 test("json.dumps(indent=2) is ASCII-escaped with Python float repr", () => {
@@ -191,4 +206,21 @@ test("an unparseable URL or malformed entry drops only itself", async () => {
   assert.match(md, /## Source 2\n/);
   assert.match(md, /\(1 source skipped — non-allowlisted or non-fetchable hosts: unparseable URL\)/);
   assert.match(md, /### Recent Releases\n```json\n\[\n  \{\n    "tag_name": "v1"\n  \}\n\]/);
+});
+
+test("github.com, gitlab.com and bitbucket.org take the skip path, never a raw fetch", async () => {
+  assert.deepEqual([...SKIP_FETCH_HOSTS].sort(), ["bitbucket.org", "gitlab.com"]);
+  const fetched: string[] = [];
+  const md = await renderLinkedSources(
+    {
+      urls: ["https://github.com/o/r/pull/1", "https://gitlab.com/o/r/-/releases", "https://bitbucket.org/o/r", "https://GitLab.com/x"],
+      allowedHosts: new Set(["github.com", "gitlab.com", "bitbucket.org"]),
+      targetVersion: "", ghcrImages: [], compareShas: null, currentRepo: "other/repo",
+    },
+    deps({ fetchSource: async (url) => { fetched.push(url); return Buffer.from("must not be fetched"); } }),
+  );
+  assert.deepEqual(fetched, [], "no raw fetch for the skip hosts");
+  assert.match(md, /\(Raw HTML fetch skipped for github\.com — structured release\/compare metadata is captured below when available\)/);
+  assert.match(md, /\(3 sources skipped — non-allowlisted or non-fetchable hosts: bitbucket\.org, gitlab\.com\)/);
+  assert.doesNotMatch(md, /must not be fetched/);
 });

@@ -25,7 +25,7 @@ def test_fixture_corpus_covers_the_contract() -> None:
     names = {path.stem for path in FIXTURES}
     assert {
         "github-release-compare", "generic-allowed-host", "disallowed-hosts", "oversize-bodies",
-        "budget-exhaustion", "redirects", "malformed-entries", "hostile-text", "operator-added-host", "redirect-outside-allowed-source-hosts", "forgejo-release-compare",
+        "budget-exhaustion", "redirects", "malformed-entries", "hostile-text", "operator-added-host", "cgnat-divergence", "site-local-divergence", "redirect-outside-allowed-source-hosts", "forgejo-release-compare",
     } <= names
     for path in FIXTURES:
         assert "golden" in json.loads(path.read_text(encoding="utf-8")), path.name

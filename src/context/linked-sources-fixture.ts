@@ -19,6 +19,7 @@ import { fetchSource, type Exchange, type Resolver } from "../platform/safe-fetc
 import { BudgetTracker } from "./budget.js";
 import { parseAllowedHosts } from "./enrichment.js";
 import { parseAllowedRepos, renderLinkedSources } from "./linked-sources.js";
+import { pyHtmlUnescape, reduceSource } from "./strip-source-text.js";
 
 interface HttpRoute {
   url: string;
@@ -126,4 +127,27 @@ export async function runLinkedSourcesFixture(fixturePath: string): Promise<{ ok
   } catch (error) {
     return { ok: false, stderr: error instanceof Error ? error.message : String(error) };
   }
+}
+
+interface StripCase {
+  kind: "reduce" | "unescape";
+  b64?: string;
+  max?: number;
+  text?: string;
+}
+
+/** `node dist/index.js strip-source-text-fixture <cases.json>`: the v3 side
+ * of the CPython differential corpus in tests/test_strip_source_text_diff.py.
+ * Each case is `reduce_source(bytes, max)` or `html.unescape(text)`; the
+ * output is one `{ok, text}` / `{ok: false, error}` entry per case. */
+export function runStripSourceTextFixture(casesPath: string): Array<{ ok: boolean; text?: string; error?: string }> {
+  const cases = JSON.parse(readFileSync(casesPath, "utf8")) as StripCase[];
+  return cases.map((c) => {
+    try {
+      const text = c.kind === "unescape" ? pyHtmlUnescape(c.text ?? "") : reduceSource(Buffer.from(c.b64 ?? "", "base64"), c.max ?? 4000);
+      return { ok: true, text };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.name : String(error) };
+    }
+  });
 }
