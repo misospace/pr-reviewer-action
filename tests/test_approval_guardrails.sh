@@ -87,16 +87,14 @@ check_exists "action.yml has allow-approve input" \
 check_exists "action.yml has approve-forks input" \
   "$(grep -c 'approve-forks:' "$ACTION_YML" 2>/dev/null || echo 0)"
 
-check_contains "publish_mode default is comment" \
-  "$(cat "$ACTION_YML")" "default: \"comment\""
+check_contains "publish-mode default is review_comment (v3 recommended default)" \
+  "$(cat "$ACTION_YML")" "default: \"review_comment\""
 
 check_contains "allow_approve default is false" \
   "$(cat "$ACTION_YML")" "default: \"false\""
 
-check_exists "action.yml has the publish dispatcher step" \
-  "$(grep -c '^    - name: Publish review$' "$ACTION_YML" || echo 0)"
-check_exists "action.yml publish step runs the v3 runtime entrypoint" \
-  "$(grep -c 'dist/index.js" publish' "$ACTION_YML" || echo 0)"
+check_exists "action.yml runs the v3 JavaScript action entry" \
+  "$(grep -c '^  main: dist/index.js$' "$ACTION_YML" || echo 0)"
 
 # The dispatcher shell was extracted from action.yml into scripts/publish.sh
 # (#541); the per-mode assertions below target that script.

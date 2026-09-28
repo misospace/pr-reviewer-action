@@ -941,3 +941,16 @@ test("the CI gate only launches from a real bundle entry, never the test runner 
     cleanup();
   }
 });
+
+test("the CI gate's v2 step outputs are republished under the contract's kebab names", async () => {
+  const { ciGateOutputs } = await import("../src/run/review.js");
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const file = join(runDir, "ci-gate-outputs.txt");
+    writeFileSync(file, "ci_status_final=success\nci_status_skipped=false\nunrelated=1\n");
+    assert.equal(ciGateOutputs(file), "ci-status-final=success\nci-status-skipped=false\n");
+    assert.equal(ciGateOutputs(join(runDir, "missing.txt")), "");
+  } finally {
+    cleanup();
+  }
+});

@@ -8,6 +8,7 @@ import { resolveTierBudgets } from "../corpus/budgets.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { canonicalChangedFile } from "../context/types.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
@@ -156,6 +157,26 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
   error: null,
   survivedPids: [],
 });
+
+/** Scratch file the CI gate child writes its step outputs to. */
+const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
+
+/** The CI gate's `ci_status_final` / `ci_status_skipped` step outputs as the
+ * contract's kebab-case output assignments. */
+export function ciGateOutputs(path: string): string {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+  const values = new Map<string, string>();
+  for (const line of text.split("\n")) {
+    const match = /^(ci_status_final|ci_status_skipped)=([A-Za-z_-]*)$/.exec(line.trim());
+    if (match) values.set(match[1]!.replaceAll("_", "-"), match[2]!);
+  }
+  return [...values].map(([key, value]) => `${key}=${value}\n`).join("");
+}
 
 /** Set on every gate child; a process carrying it never starts a review. */
 export const GATE_CHILD_ENV = "PR_REVIEWER_GATE_CHILD";
@@ -479,7 +500,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // The gate child is marked so it can never start a review (or another
       // gate) itself: the recursion stops at depth one.
       ciFork = await forkGate("ci", options.ciGate ?? ciGateBranch({ entry: entry ?? "" }), {
-        ambientEnv: { ...options.env, [GATE_CHILD_ENV]: "1" },
+        // The gate writes its v2 step outputs (ci_status_final/skipped) to a
+        // scratch file; the run republishes them under the contract names.
+        ambientEnv: { ...options.env, [GATE_CHILD_ENV]: "1", GITHUB_OUTPUT: join(runDir, CI_GATE_OUTPUT_FILE) },
         scope,
       });
       log("CI status gating launched concurrently");
@@ -528,6 +551,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     const outcome = await ciFork.join();
     env.CI_GATE_ACTIVE = outcome.ran ? "true" : "false";
     if (!outcome.ok) log("CI status gating exited non-zero; continuing (CI evidence is advisory)");
+    persistOutputs(context.outputFilePath, ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
   }
 
   // #812: the PR body, linked issues and thread context are re-read after
