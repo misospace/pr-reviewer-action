@@ -900,6 +900,23 @@ workflow artifact. Every difference observed across the qualification PRs
 must be fixed or pinned as an approved divergence before the #681 release
 gate.
 
+## The verification ledger (#796)
+
+The requirement ledger gains harness-authored verification obligations:
+`src/requirements/obligations.ts` derives deterministic review questions from
+the related-code layer (edited functions with callers, changed keys with
+consumers, port/counterpart pairs, upper-snake literals with dispatch
+sites), capped most-connected-first (hard cap 12 before the ledger's own
+48-entry cap) and injected after the extracted standards/linked-issue/PR
+sources as ordinary `invariant` entries with `source: "harness"` provenance.
+The ledger sha covers them (they are ledger entries like any other), the
+strict requirement-coverage fold and evidence-gated normalizer are unchanged,
+and the verdict remains the reviewer's. The requirement-ledger prompt
+fragment adds one rule: a `violated` obligation must come with a finding.
+Pending merge gate: the human-findings corpus measurement (ledger-on vs
+off, 3 runs per PR per arm) must be recorded before the injection ships
+enabled in production.
+
 ## Workflow examples
 
 ```yaml
