@@ -228,4 +228,9 @@ jobs:
             cp "$SHADOW_DIR/$name" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
           done
           echo "shadow run directory: $SHADOW_DIR"
+          # The report embeds PR-derived text: suspend workflow commands so
+          # it cannot inject ::commands:: into the job log.
+          STOP_TOKEN="shadow-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$STOP_TOKEN"
           echo "shadow comparison:" && cat "$RUNNER_TEMP/v3-shadow-artifacts/shadow-comparison.md" 2>/dev/null || true
+          echo "::$STOP_TOKEN::"
