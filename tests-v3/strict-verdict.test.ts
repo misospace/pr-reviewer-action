@@ -151,9 +151,13 @@ test("mapping agrees with the model verdict: no note, model source", () => {
   assert.equal(blocking.artifact.verdict, "request_changes");
   assert.equal(blocking.artifact.verdict_source, "model");
   assert.ok(!blocking.artifact.review_markdown.includes(NOTE));
+  // A forced verdict the model itself produced keeps "model" provenance.
+  const agreedForced = runStrictPipeline("request_changes", [], { coverage: "complete", enforcement: { evidenceBlockerEnabled: true, evidence: { has_blocker: true, providers: [] } } });
+  assert.equal(agreedForced.artifact.verdict, "request_changes");
+  assert.equal(agreedForced.artifact.verdict_source, "model");
 });
 
-test("enforcement-forced request_changes is never relaxed and carries no strict note", () => {
+test("enforcement-forced request_changes discloses the forced provenance", () => {
   const { artifact: a, outcome } = runStrictPipeline("approve", [], {
     coverage: "complete",
     enforcement: {
@@ -163,9 +167,13 @@ test("enforcement-forced request_changes is never relaxed and carries no strict 
   });
   assert.equal(a.verdict, "request_changes");
   assert.equal(outcome.reviewResult, "issues");
-  assert.equal(outcome.overridden, false);
-  assert.equal(a.verdict_source, "model");
-  assert.ok(!a.review_markdown.includes(NOTE));
+  // The published verdict differs from the model's own: that is an override.
+  assert.equal(outcome.overridden, true);
+  // Provenance honesty (#811 review): the model said approve; the forced
+  // verdict belongs to the enforcement layer, never to the model.
+  assert.equal(a.verdict_source, "enforcement");
+  assert.equal(outcome.source, "enforcement");
+  assert.ok(a.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
   assert.ok(a.review_markdown.includes("## Evidence Provider Blockers"));
 });
 
@@ -175,7 +183,9 @@ test("required_check_validation_mode=fail still forces request_changes under str
   });
   assert.equal(a.verdict, "request_changes");
   assert.equal(outcome.reviewResult, "issues");
-  assert.ok(!a.review_markdown.includes(NOTE));
+  // The model said approve; the forced verdict is the enforcement layer's.
+  assert.equal(a.verdict_source, "enforcement");
+  assert.ok(a.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
 });
 
 test("a fail-closed layer firing beside a model request_changes is never relaxed", () => {
@@ -192,6 +202,9 @@ test("a fail-closed layer firing beside a model request_changes is never relaxed
   assert.equal(a.verdict, "request_changes");
   assert.equal(outcome.reviewResult, "issues");
   assert.equal(outcome.overridden, false);
+  // The model produced request_changes itself: "model" provenance is
+  // truthful even though a layer also forced it.
+  assert.equal(a.verdict_source, "model");
   assert.ok(!a.review_markdown.includes(NOTE));
   assert.ok(a.review_markdown.includes("## Evidence Provider Blockers"));
 });

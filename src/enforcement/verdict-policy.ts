@@ -100,8 +100,11 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
 }
 
 export interface VerdictPolicyResult {
-  /** "model" | "findings" — the applied verdict source. */
-  source: "model" | "findings";
+  /** "model" | "findings" | "enforcement" — the applied verdict source:
+   * "findings" when the strict mapping overrode the model verdict from the
+   * open-findings rule, "enforcement" when a fail-closed layer forced a
+   * verdict the model did not produce, "model" otherwise. */
+  source: "model" | "findings" | "enforcement";
 }
 
 /**
@@ -118,7 +121,7 @@ export function applyVerdictPolicy(
   options: { nonBlockingCategories: ReadonlySet<string>; securityFlagged: boolean },
 ): VerdictPolicyResult {
   const findings = artifact.findings;
-  let source: "model" | "findings" = "model";
+  let source: "model" | "findings" | "enforcement" = "model";
 
   if (policy === "findings_severity_gated" && Array.isArray(findings)) {
     if (
@@ -201,7 +204,7 @@ export interface StrictVerdictOutcome {
   reviewResult: StrictReviewResult;
   /** "model" when the published verdict equals the model's, "findings" when
    * the strict mapping overrode it (same vocabulary as applyVerdictPolicy). */
-  source: "model" | "findings";
+  source: "model" | "findings" | "enforcement";
   /** True when the strict mapping's verdict differs from the model's own. */
   overridden: boolean;
 }
@@ -248,9 +251,11 @@ export function applyStrictVerdictPolicy(
 
   let verdict: VerdictValue;
   let overridden: boolean;
+  let source: "model" | "findings" | "enforcement";
   if (counts.blocking > 0) {
     verdict = "request_changes";
     overridden = modelVerdict !== "request_changes";
+    source = overridden ? "findings" : "model";
     if (overridden) {
       appendStrictNote(
         artifact,
@@ -259,11 +264,24 @@ export function applyStrictVerdictPolicy(
       );
     }
   } else if (options.forced) {
+    // A fail-closed enforcement layer decided this verdict. When the model
+    // did not produce it, attributing the verdict to "model" would lie
+    // about provenance — the deciding authority is the enforcement layer
+    // ("enforcement"); the layer's own section discloses the forcing.
     verdict = "request_changes";
-    overridden = false;
+    overridden = modelVerdict !== "request_changes";
+    source = overridden ? "enforcement" : "model";
+    if (overridden) {
+      appendStrictNote(
+        artifact,
+        "a fail-closed enforcement layer forced request_changes",
+        modelVerdict,
+      );
+    }
   } else {
     verdict = "approve";
     overridden = modelVerdict !== "approve";
+    source = overridden ? "findings" : "model";
     if (overridden) {
       appendStrictNote(
         artifact,
@@ -276,7 +294,6 @@ export function applyStrictVerdictPolicy(
   }
 
   const reviewResult = strictReviewResult(verdict, findings, artifact.required_checks);
-  const source = overridden ? "findings" : "model";
   artifact.verdict = verdict;
   artifact.verdict_source = source;
   return { verdict, reviewResult, source, overridden };

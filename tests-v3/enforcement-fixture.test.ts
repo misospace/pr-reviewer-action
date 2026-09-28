@@ -77,8 +77,10 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
     assert.equal(forced.ok, true);
     const forcedArtifact = JSON.parse(forced.values!.artifact!);
     assert.equal(forcedArtifact.verdict, "request_changes");
-    assert.equal(forcedArtifact.verdict_source, "model");
-    assert.ok(!forcedArtifact.review_markdown.includes("verdict_policy=strict"));
+    // Provenance honesty (#811 review): the model said approve; the forced
+    // verdict is the enforcement layer's, never the model's.
+    assert.equal(forcedArtifact.verdict_source, "enforcement");
+    assert.ok(forcedArtifact.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
     assert.ok(forcedArtifact.review_markdown.includes("## Tool Harness Failure"));
   });
 });

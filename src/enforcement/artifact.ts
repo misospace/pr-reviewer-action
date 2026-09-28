@@ -55,7 +55,7 @@ export interface ReviewArtifact {
   verdict: VerdictValue;
   review_markdown: string;
   findings: ArtifactFinding[];
-  /** "model" | "findings" — written by the verdict-policy pass. */
+  /** "model" | "findings" | "enforcement" — written by the verdict-policy pass. */
   verdict_source?: string;
   /** "complete" | "incomplete" | "none" — written by the completeness pass. */
   required_checks?: string;
