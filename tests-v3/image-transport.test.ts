@@ -5,9 +5,11 @@ import {
   buildImageProvenanceContext,
   createImageHttpJson,
   fetchAllMetadata,
+  fetchDigestMetadata,
   imageDigestDeadline,
   imageTransportAllows,
   parseDiff,
+  type RegistryTokenCache,
 } from "../src/context/index.js";
 import { pinnedLookup, type ExchangeRequest, type ExchangeResponse } from "../src/platform/safe-fetch.js";
 
@@ -267,4 +269,48 @@ test("adversarial: a DNS answer that flips after validation is never used — th
 test("the response cap holds on redirect hops too", async () => {
   const harness = safeHarness("https://cdn.example/b", {}, 1024);
   await assert.rejects(harness.httpJson(BLOB), /exit status 63\.$/);
+});
+
+// ── Registry-token cache (v2 _TOKEN_CACHE semantics) ─────────────────────
+
+/** An httpJson whose token endpoint follows *tokenPlan* call by call. */
+function tokenScript(tokenPlan: Array<"fail" | "ok">): { httpJson: (url: string) => Promise<unknown>; tokenCalls: () => number } {
+  let calls = 0;
+  const httpJson = async (url: string): Promise<unknown> => {
+    if (url.includes("/token")) {
+      const step = tokenPlan[Math.min(calls, tokenPlan.length - 1)];
+      calls += 1;
+      await new Promise((resolve) => { setTimeout(resolve, 5); });
+      if (step === "fail") throw new Error("HTTP request failed: token endpoint down");
+      return { token: "anon" };
+    }
+    return { mediaType: "application/vnd.oci.image.manifest.v1+json" };
+  };
+  return { httpJson, tokenCalls: () => calls };
+}
+
+test("a failed token fetch is evicted from the shared cache, so the next lookup retries and succeeds", async () => {
+  const cache: RegistryTokenCache = new Map();
+  const { httpJson, tokenCalls } = tokenScript(["fail", "ok"]);
+  const first = await fetchDigestMetadata("ghcr.io/o/app", `sha256:${D1}`, httpJson, null, cache);
+  assert.equal(first.error, "HTTP request failed: token endpoint down");
+  assert.equal(tokenCalls(), 1);
+  await new Promise((resolve) => { setImmediate(resolve); });
+  assert.equal(cache.size, 0, "the rejected in-flight fetch is not left cached");
+
+  const second = await fetchDigestMetadata("ghcr.io/o/app", `sha256:${D2}`, httpJson, null, cache);
+  assert.equal(tokenCalls(), 2, "the token endpoint is retried, not answered from a cached rejection");
+  assert.equal(second.error, null);
+  assert.equal(second.mediaType, "application/vnd.oci.image.manifest.v1+json");
+});
+
+test("concurrent lookups for one repository share exactly one in-flight token fetch", async () => {
+  const cache: RegistryTokenCache = new Map();
+  const { httpJson, tokenCalls } = tokenScript(["ok"]);
+  const metas = await Promise.all(
+    ["1", "2", "3", "4"].map((d) => fetchDigestMetadata("ghcr.io/o/app", `sha256:${d.repeat(64)}`, httpJson, null, cache)),
+  );
+  assert.ok(metas.every((meta) => meta.error === null));
+  assert.equal(tokenCalls(), 1);
+  assert.equal(cache.size, 1);
 });
