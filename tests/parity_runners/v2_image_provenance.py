@@ -11,7 +11,7 @@ injected fetch seam.
 Transport fixtures (``"transport": true``, #706 PR 5a) keep the REAL v2
 ``http_json`` and replace only the network edge: a stub ``curl`` on PATH
 serves the routes (``status`` >= 400 exits 22 like ``curl -f``; ``raw`` is a
-verbatim body) and logs each request's explicit headers, so the v3 transport
+verbatim body; ``redirect`` is followed like ``curl -L``) and logs each request's explicit headers, so the v3 transport
 (image-transport.ts over an injected fetch) is compared on the rendered
 document AND on what it sends: Authorization, Accept (curl's implicit
 default when absent), and the User-Agent for GitHub requests."""
@@ -51,19 +51,30 @@ while i < len(args):
     if not arg.startswith("-"):
         url = arg
     i += 1
-line = f"GET {url} auth={headers.get('authorization', '-')} accept={headers.get('accept', '*/*')}"
-if url.startswith("https://api.github.com/"):
-    line += f" ua={headers.get('user-agent', '-')}"
-with open(os.environ["PARITY_LOG"], "a", encoding="utf-8") as fh:
-    fh.write(line + "\n")
-route = next((r for r in routes if r.get("match") and r["match"] in url), None)
-if route is None:
-    sys.stderr.write("curl: (22) The requested URL returned error: 404\n")
-    sys.exit(22)
-if route.get("status", 200) >= 400:
-    sys.stderr.write(f"curl: (22) The requested URL returned error: {route['status']}\n")
-    sys.exit(22)
-sys.stdout.write(route["raw"] if "raw" in route else json.dumps(route.get("body")))
+from urllib.parse import urljoin, urlsplit
+for _hop in range(51):
+    line = f"GET {url} auth={headers.get('authorization', '-')} accept={headers.get('accept', '*/*')}"
+    if url.startswith("https://api.github.com/"):
+        line += f" ua={headers.get('user-agent', '-')}"
+    with open(os.environ["PARITY_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    route = next((r for r in routes if r.get("match") and r["match"] in url), None)
+    if route is None:
+        sys.stderr.write("curl: (22) The requested URL returned error: 404\n")
+        sys.exit(22)
+    if "redirect" in route:
+        # curl -L: follow, and (curl >= 7.58) drop Authorization off-host.
+        target = urljoin(url, route["redirect"])
+        if urlsplit(target).netloc != urlsplit(url).netloc:
+            headers.pop("authorization", None)
+        url = target
+        continue
+    if route.get("status", 200) >= 400:
+        sys.stderr.write(f"curl: (22) The requested URL returned error: {route['status']}\n")
+        sys.exit(22)
+    sys.stdout.write(route["raw"] if "raw" in route else json.dumps(route.get("body")))
+    sys.exit(0)
+sys.exit(47)
 '''
 
 

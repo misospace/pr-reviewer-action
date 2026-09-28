@@ -325,6 +325,9 @@ test("a secret straddling the capture cap never leaks, whatever the cut offset",
   const secrets = [
     { name: "ghp", text: `ghp_${"Q".repeat(80)}`, needle: "Q", fragments: [5, 12, 33] },
     { name: "kv", text: `api_key=${"Z".repeat(80)}`, needle: "Z", fragments: [9, 12, 15] },
+    // A credential with internal whitespace: the cut can land between the
+    // scheme word and the token, or inside the token (Bearer needs 20+).
+    { name: "bearer", text: `Bearer ${"W".repeat(80)}`, needle: "W", fragments: [7, 8, 15, 26] },
   ];
   for (const secret of secrets) {
     const offsets: Array<readonly [string, number]> = [

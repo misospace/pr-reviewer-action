@@ -1,0 +1,82 @@
+{
+  "fixture": "transport-redirect-cdn",
+  "description": "Legitimate registry blob redirects to a public CDN host (same-origin hop first, then cross-origin): both runtimes follow them through the SSRF fence, and Authorization is dropped once the hop leaves ghcr.io.",
+  "transport": true,
+  "diff": "diff --git a/deploy/app.yaml b/deploy/app.yaml\n   repository: ghcr.io/acme/app\n-   tag: v1@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   tag: v1@sha256:2222222222222222222222222222222222222222222222222222222222222222\n",
+  "dns": {
+    "pkg-containers.githubusercontent.com": [
+      "185.199.108.154"
+    ]
+  },
+  "http": [
+    {
+      "match": "/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "redirect": "/v2/acme/app/blobs/moved-aaaaaaaa"
+    },
+    {
+      "match": "/moved-aaaaaaaa",
+      "redirect": "https://pkg-containers.githubusercontent.com/ghcr1/blobs/aaaa?sig=x"
+    },
+    {
+      "match": "pkg-containers.githubusercontent.com/ghcr1/blobs/aaaa",
+      "body": {
+        "created": "2026-09-01T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "1111aaaa",
+            "org.opencontainers.image.source": "https://github.com/acme/app"
+          }
+        }
+      }
+    },
+    {
+      "match": "/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "redirect": "https://pkg-containers.githubusercontent.com/ghcr1/blobs/bbbb?sig=y"
+    },
+    {
+      "match": "pkg-containers.githubusercontent.com/ghcr1/blobs/bbbb",
+      "body": {
+        "created": "2026-09-02T00:00:00Z",
+        "config": {
+          "Labels": {
+            "org.opencontainers.image.revision": "2222bbbb",
+            "org.opencontainers.image.source": "https://github.com/acme/app"
+          }
+        }
+      }
+    },
+    {
+      "match": "ghcr.io/token",
+      "body": {
+        "token": "ghcr-anon-token"
+      }
+    },
+    {
+      "match": "/manifests/sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "body": {
+        "config": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "match": "/manifests/sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "body": {
+        "config": {
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "match": "api.github.com",
+      "body": {
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
+        "total_commits": 1,
+        "commits": [],
+        "files": []
+      }
+    }
+  ]
+}

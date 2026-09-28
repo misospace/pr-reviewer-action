@@ -697,8 +697,14 @@ The `image-provenance` boundary gained transport fixtures: the real v2
 fetch, comparing the document and the request log. They caught a #675 port
 bug: `parse.quote(..., safe=":")` percent-encodes `/` in the registry token
 scope (`repository:o%2Fapp:pull`). The transport refuses anything outside the
-endpoints the renderer builds (hostile config digests or revision labels) and
-https-downgrading redirects; v2's curl would have sent them.
+endpoints the renderer builds (hostile config digests or revision labels).
+Every hop, the first and each redirect, goes through #808's `safeFetchLike`
+(http(s) only, no userinfo, public-only DNS/IP, the socket pinned to the
+validated addresses), redirect hops must be https, and responses are capped
+at 32 MiB. Public registry/CDN redirects still work (fixture
+`transport-redirect-cdn`). v2's curl followed redirects to any address;
+refusing the internal hops is an approved divergence (fixture
+`transport-redirect-ssrf`: link-local metadata and an RFC1918 hostname).
 
 ## What #680 removed from the Python runtime surface
 

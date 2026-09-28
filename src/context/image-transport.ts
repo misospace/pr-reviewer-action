@@ -22,6 +22,16 @@
  *   never lands in an error string. The renderer's 120-char `short()` cut
  *   falls inside the URL, so the rendered line is byte-identical to v2.
  *
+ * SSRF fence on every hop (#806 review): each request, the first and every
+ * redirect target, goes through #808's `safeFetchLike` — http(s) only, no
+ * userinfo, public-only DNS/IP (`ip-policy.ts`), and the socket pinned to
+ * the validated addresses so a second DNS answer is never used; a redirect
+ * hop must additionally be https without userinfo. Registry/CDN redirects to
+ * public hosts keep working. A refused hop fails the read before any
+ * request to it is made. Responses are capped at `MAX_IMAGE_RESPONSE_BYTES`.
+ * v2's curl followed redirects to any address (approved divergence, fixture
+ * `transport-redirect-ssrf`).
+ *
  * Tightened (fail closed, #670/#682 lineage): the first request must target
  * the pinned endpoints the renderer builds — `auth.docker.io/token`,
  * `registry-1.docker.io` / `ghcr.io` `/v2/<repo>/(manifests|blobs)/<digest>`
@@ -41,6 +51,7 @@ import { PyJsonDecodeError, PyUncaughtError, pyIntFromText, pyJsonLoads, pyReprS
 import { validEnrichEndpoint } from "../platform/enrich.js";
 import { parseRepoRef, repoScopedUrl } from "../platform/repo-ref.js";
 import type { FetchLike } from "../platform/http.js";
+import { MAX_ENRICH_API_BYTES, SourceFetchError, safeFetchLike, type Exchange, type Resolver } from "../platform/safe-fetch.js";
 import { LINKED_SOURCE_GITHUB_BASE } from "../platform/urls.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { buildImageProvenanceContext, type HttpJson } from "./image-provenance.js";
@@ -50,6 +61,9 @@ export const CURL_MAX_TIME_SEC = 40;
 /** curl's default `--max-redirs`. */
 export const MAX_REDIRECTS = 50;
 export const DEFAULT_IMAGE_DIGEST_BUDGET_SEC = 60;
+/** Per-response cap (manifests, config blobs and compares are far smaller;
+ * v2's curl read unbounded). */
+export const MAX_IMAGE_RESPONSE_BYTES = MAX_ENRICH_API_BYTES;
 
 const COMPONENT = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
 const DIGEST = "[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+";
@@ -96,6 +110,9 @@ export function imageDigestDeadline(env: NodeJS.ProcessEnv, now: number = Date.n
   return budget <= 0 ? null : now + budget * 1000;
 }
 
+/** `safeFetchLike` refusals that are policy, not transport, failures. */
+const POLICY_REFUSAL = /does not resolve to public addresses|^scheme |credentials in URL|only GET/;
+
 /** `str(CalledProcessError)` for the v2 curl argv, credential redacted. */
 function curlFailure(url: string, headers: Readonly<Record<string, string>>, exitStatus: number): Error {
   const argv = ["curl", "-fsSL", "--connect-timeout", String(CURL_CONNECT_TIMEOUT_SEC), "--max-time", String(CURL_MAX_TIME_SEC), url];
@@ -109,6 +126,7 @@ function curlFailure(url: string, headers: Readonly<Record<string, string>>, exi
 function curlExitStatus(error: unknown): number {
   const name = error instanceof Error ? error.name : "";
   if (name === "TimeoutError" || name === "AbortError") return 28;
+  if (error instanceof SourceFetchError && /exceeds \d+ bytes/.test(error.message)) return 63;
   const cause = error instanceof Error ? (error as Error & { cause?: { code?: unknown } }).cause : undefined;
   const code = typeof cause?.code === "string" ? cause.code : "";
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") return 6;
@@ -119,7 +137,14 @@ function curlExitStatus(error: unknown): number {
 }
 
 export interface ImageTransportOptions {
+  /** Replaces the whole per-hop transport (default: #808's `safeFetchLike`
+   * built from `resolver`/`exchange`). Only for tests and fixtures. */
   fetchImpl?: FetchLike;
+  /** DNS seam for the default safe transport. */
+  resolver?: Resolver;
+  /** Socket seam for the default safe transport. */
+  exchange?: Exchange;
+  maxBytes?: number;
   /** Opt-in `Authorization: Bearer` for the api.github.com compare (v2
    * sends none). Never forwarded off-origin. */
   githubToken?: string;
@@ -129,7 +154,15 @@ export interface ImageTransportOptions {
 
 /** The production `HttpJson` for image provenance. */
 export function createImageHttpJson(options: ImageTransportOptions = {}): HttpJson {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const maxBytes = options.maxBytes ?? MAX_IMAGE_RESPONSE_BYTES;
+  const fetchImpl: FetchLike =
+    options.fetchImpl ??
+    safeFetchLike({
+      resolver: options.resolver,
+      exchange: options.exchange,
+      maxBytes,
+      timeoutMs: CURL_CONNECT_TIMEOUT_SEC * 1000,
+    });
   const maxTimeMs = options.maxTimeMs ?? CURL_MAX_TIME_SEC * 1000;
   return async (url: string, headers: Readonly<Record<string, string>> = {}): Promise<unknown> => {
     if (!imageTransportAllows(url)) {
@@ -147,6 +180,9 @@ export function createImageHttpJson(options: ImageTransportOptions = {}): HttpJs
       try {
         response = await fetchImpl(current, { method: "GET", headers: outgoing, redirect: "manual", signal });
       } catch (error) {
+        if (error instanceof SourceFetchError && POLICY_REFUSAL.test(error.message)) {
+          throw new Error(`HTTP request failed: refusing ${redirects === 0 ? "request" : "redirect hop"}: ${error.message}`);
+        }
         throw curlFailure(url, headers, curlExitStatus(error));
       }
       const location = response.headers.get("location");
@@ -159,6 +195,9 @@ export function createImageHttpJson(options: ImageTransportOptions = {}): HttpJs
           throw curlFailure(url, headers, 3);
         }
         if (next.protocol !== "https:") throw curlFailure(url, headers, 1);
+        if (next.username !== "" || next.password !== "") {
+          throw new Error("HTTP request failed: refusing redirect hop: credentials in URL not allowed");
+        }
         if (next.origin !== current.origin) {
           for (const key of Object.keys(outgoing)) if (key.toLowerCase() === "authorization") delete outgoing[key];
         }
@@ -170,7 +209,9 @@ export function createImageHttpJson(options: ImageTransportOptions = {}): HttpJs
     if (response.status >= 400) throw curlFailure(url, headers, 22);
     let text: string;
     try {
-      text = Buffer.from(await response.arrayBuffer()).toString("utf8");
+      const body = Buffer.from(await response.arrayBuffer());
+      if (body.length > maxBytes) throw new SourceFetchError(`response exceeds ${maxBytes} bytes`);
+      text = body.toString("utf8");
     } catch (error) {
       throw curlFailure(url, headers, curlExitStatus(error));
     }

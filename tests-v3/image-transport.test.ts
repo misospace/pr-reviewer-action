@@ -9,6 +9,7 @@ import {
   imageTransportAllows,
   parseDiff,
 } from "../src/context/index.js";
+import { pinnedLookup, type ExchangeRequest, type ExchangeResponse } from "../src/platform/safe-fetch.js";
 
 const D1 = "1".repeat(64);
 const D2 = "2".repeat(64);
@@ -163,4 +164,107 @@ test("imageDigestDeadline parses like DeadlineBudget.from_env (default 60, <=0 d
   assert.equal(imageDigestDeadline({ IMAGE_DIGEST_BUDGET_SEC: "junk" }, 0), 60_000);
   assert.equal(imageDigestDeadline({ IMAGE_DIGEST_BUDGET_SEC: "0" }, 0), null);
   assert.equal(imageDigestDeadline({ IMAGE_DIGEST_BUDGET_SEC: "-3" }, 0), null);
+});
+
+// ── SSRF fence on every hop (#806 review; #808's safeFetchLike) ───────────
+
+interface SafeHarness {
+  exchanged: ExchangeRequest[];
+  lookups: string[];
+  httpJson: ReturnType<typeof createImageHttpJson>;
+}
+
+/** The real safe transport over a fake DNS and socket layer: the first hop
+ * (an allowlisted registry blob) redirects to *location*. */
+function safeHarness(location: string, dns: Record<string, string[] | (() => string[])>, maxBytes?: number): SafeHarness {
+  const exchanged: ExchangeRequest[] = [];
+  const lookups: string[] = [];
+  const resolver = async (host: string): Promise<string[]> => {
+    lookups.push(host);
+    const answer = dns[host] ?? ["93.184.216.34"];
+    return typeof answer === "function" ? answer() : answer;
+  };
+  const exchange = async (request: ExchangeRequest): Promise<ExchangeResponse> => {
+    exchanged.push(request);
+    if (request.host === "ghcr.io") return { status: 302, headers: { location }, body: Buffer.alloc(0) };
+    return { status: 200, headers: {}, body: Buffer.from('{"created": "2026-01-01", "pad": "' + "x".repeat(2048) + '"}') };
+  };
+  return { exchanged, lookups, httpJson: createImageHttpJson({ resolver, exchange, ...(maxBytes ? { maxBytes } : {}) }) };
+}
+
+const BLOB = `https://ghcr.io/v2/o/app/blobs/sha256:${CFG}`;
+
+test("a public CDN redirect is followed through the fence; Authorization stays on ghcr.io", async () => {
+  const harness = safeHarness("https://pkg-containers.githubusercontent.com/b?sig=1", { "pkg-containers.githubusercontent.com": ["185.199.108.154"] });
+  const data = (await harness.httpJson(BLOB, { Authorization: "Bearer reg" })) as Record<string, unknown>;
+  assert.equal(data.created, "2026-01-01");
+  assert.deepEqual(harness.exchanged.map((r) => [r.host, r.addresses, r.headers.authorization]), [
+    ["ghcr.io", ["93.184.216.34"], "Bearer reg"],
+    ["pkg-containers.githubusercontent.com", ["185.199.108.154"], undefined],
+  ]);
+});
+
+test("adversarial: redirects to loopback, RFC1918, link-local/metadata and IPv6 local are refused before the second request", async () => {
+  const cases: Array<[string, Record<string, string[]>]> = [
+    ["https://127.0.0.1/admin", {}],
+    ["https://localhost.attacker.test/x", { "localhost.attacker.test": ["127.0.0.1"] }],
+    ["https://10.1.2.3/x", {}],
+    ["https://internal.corp.test/x", { "internal.corp.test": ["93.184.216.34", "192.168.1.10"] }],
+    ["https://169.254.169.254/latest/meta-data/iam/security-credentials/", {}],
+    ["https://metadata.attacker.test/computeMetadata/v1/", { "metadata.attacker.test": ["169.254.169.254"] }],
+    ["https://[::1]/x", {}],
+    ["https://[fe80::1]/x", {}],
+    ["https://v6.attacker.test/x", { "v6.attacker.test": ["fd00::7"] }],
+  ];
+  for (const [location, dns] of cases) {
+    const harness = safeHarness(location, dns);
+    await assert.rejects(harness.httpJson(BLOB, { Authorization: "Bearer reg" }), /refusing redirect hop: host .* does not resolve to public addresses only/, location);
+    assert.equal(harness.exchanged.length, 1, `${location}: the second request is never made`);
+  }
+});
+
+test("adversarial: redirects to a disallowed scheme or with userinfo are refused before the second request", async () => {
+  for (const location of ["http://pkg-containers.githubusercontent.com/b", "ftp://files.example/b", "file:///etc/passwd", "gopher://x.example/"]) {
+    const harness = safeHarness(location, {});
+    await assert.rejects(harness.httpJson(BLOB), /exit status 1\.$/, location);
+    assert.equal(harness.exchanged.length, 1, location);
+    assert.deepEqual(harness.lookups, ["ghcr.io"], `${location}: the refused hop is never even resolved`);
+  }
+  const creds = safeHarness("https://user:pw@cdn.example/b", {});
+  await assert.rejects(creds.httpJson(BLOB), /refusing redirect hop: credentials in URL not allowed/);
+  assert.equal(creds.exchanged.length, 1);
+});
+
+test("adversarial: a DNS answer that flips after validation is never used — the connect is pinned", async () => {
+  let calls = 0;
+  const flipping = (): string[] => {
+    calls += 1;
+    return calls === 1 ? ["185.199.108.154"] : ["127.0.0.1"];
+  };
+  const harness = safeHarness("https://cdn.flip.test/b", { "cdn.flip.test": flipping });
+  await harness.httpJson(BLOB);
+  const hop = harness.exchanged[1] as ExchangeRequest;
+  assert.deepEqual(hop.addresses, ["185.199.108.154"], "the exchange is pinned to the validated answer");
+  assert.equal(harness.lookups.filter((host) => host === "cdn.flip.test").length, 1, "one resolution per hop, none at connect time");
+  // The socket's lookup hook answers only the validated address, whatever
+  // DNS would now say, and nothing for any other hostname.
+  const lookup = pinnedLookup(hop.host, hop.addresses);
+  const answer = await new Promise<string>((resolve, reject) => {
+    lookup("cdn.flip.test", { family: 0 } as never, (error: unknown, address: unknown) => (error ? reject(error as Error) : resolve(String(address))));
+  });
+  assert.equal(answer, "185.199.108.154");
+  await assert.rejects(new Promise((resolve, reject) => {
+    lookup("127.0.0.1.nip.io", { family: 0 } as never, (error: unknown, address: unknown) => (error ? reject(error as Error) : resolve(address)));
+  }));
+
+  // A flip that lands on the hop's own validation is refused outright.
+  calls = 1;
+  const flipped = safeHarness("https://cdn.flip.test/b", { "cdn.flip.test": flipping });
+  await assert.rejects(flipped.httpJson(BLOB), /does not resolve to public addresses only/);
+  assert.equal(flipped.exchanged.length, 1);
+});
+
+test("the response cap holds on redirect hops too", async () => {
+  const harness = safeHarness("https://cdn.example/b", {}, 1024);
+  await assert.rejects(harness.httpJson(BLOB), /exit status 63\.$/);
 });
