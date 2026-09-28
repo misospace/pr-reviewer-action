@@ -137,6 +137,11 @@ export interface RunReviewResult {
   classification: Record<string, unknown>;
   ciGate: GateOutcome;
   specialistGate: GateOutcome;
+  /** The resolved verdict policy, plus the #810 coverage record and the #812
+   * CI conclusion the publish step needs for the marker and body. */
+  verdictPolicy: string;
+  partialCoverage?: PartialCoverage;
+  ciState?: string;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -166,6 +171,31 @@ export function runtimeBundleEntry(env: NodeJS.ProcessEnv): string | null {
   return /(?:^|[\\/])dist[\\/]index\.js$/.test(own) ? own : null;
 }
 
+/** The contract inputs as the runner exports them: `INPUT_<ID>` with kebab
+ * IDs kept literally (`INPUT_GITHUB-TOKEN`), then the underscore form, the
+ * v2 SCREAMING_SNAKE binding, and GH_TOKEN/GITHUB_TOKEN for the token. */
+export function rawInputsFromEnv(
+  contract: ReturnType<typeof validateContract>,
+  env: NodeJS.ProcessEnv,
+): Record<string, string | undefined> {
+  const options = { env };
+  return Object.fromEntries(contract.inputs.map(({ id, v2_id }) => [
+      id,
+      // The runner exports composite inputs as INPUT_<ID uppercased
+      // literally — kebab IDs keep their hyphens (`INPUT_GITHUB-TOKEN`).
+      // The underscore form and the composite's SCREAMING_SNAKE bindings
+      // (the v2 names, unchanged — only the public IDs went kebab) are the
+      // compatibility fallbacks.
+      options.env[`INPUT_${id.toUpperCase()}`]
+        ?? options.env[`INPUT_${id.toUpperCase().replaceAll("-", "_")}`]
+        ?? (v2_id !== undefined && v2_id !== "" ? options.env[v2_id.toUpperCase()] : undefined)
+        // The token rides the shared env file as GH_TOKEN/GITHUB_TOKEN (the
+        // composite's only token consumer is the platform auth binding);
+        // the runner does not export a hyphenated INPUT_ name for it.
+        ?? (id === "github-token" ? (options.env.GH_TOKEN ?? options.env.GITHUB_TOKEN) : undefined),
+    ]));
+}
+
 export async function runReview(options: RunReviewOptions): Promise<RunReviewResult> {
   const clock = options.now ?? ((): number => Date.now() / 1000);
   const started = clock();
@@ -185,21 +215,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // ── Config stage (config.sh) ─────────────────────────────────────────
   const raw: Record<string, string | undefined> = options.inputs
     ? { ...options.inputs }
-    : Object.fromEntries(contract.inputs.map(({ id, v2_id }) => [
-      id,
-      // The runner exports composite inputs as INPUT_<ID uppercased
-      // literally — kebab IDs keep their hyphens (`INPUT_GITHUB-TOKEN`).
-      // The underscore form and the composite's SCREAMING_SNAKE bindings
-      // (the v2 names, unchanged — only the public IDs went kebab) are the
-      // compatibility fallbacks.
-      options.env[`INPUT_${id.toUpperCase()}`]
-        ?? options.env[`INPUT_${id.toUpperCase().replaceAll("-", "_")}`]
-        ?? (v2_id !== undefined && v2_id !== "" ? options.env[v2_id.toUpperCase()] : undefined)
-        // The token rides the shared env file as GH_TOKEN/GITHUB_TOKEN (the
-        // composite's only token consumer is the platform auth binding);
-        // the runner does not export a hyphenated INPUT_ name for it.
-        ?? (id === "github-token" ? (options.env.GH_TOKEN ?? options.env.GITHUB_TOKEN) : undefined),
-    ]));
+    : rawInputsFromEnv(contract, options.env);
   const baseRef = options.env.PR_REVIEWER_BASE_REF ?? "";
   let effectiveRaw = raw;
   if (baseRef !== "") {
@@ -746,6 +762,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ciGate: ciFork === null ? NO_GATE_OUTCOME("ci") : await ciFork.join(),
     specialistGate: specialistOutcome,
     durationSec: Math.max(0, finished - started),
+    verdictPolicy,
+    ...(partialCoverage ? { partialCoverage } : {}),
+    ...(ciState !== undefined ? { ciState } : {}),
   };
 }
 

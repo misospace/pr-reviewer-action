@@ -41,6 +41,7 @@ import { runSpecialistsGateFixture } from "./gates/specialists-gate-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 import { runReview, RunReviewError } from "./run/index.js";
 import { precheckMain, publishMain } from "./run/entrypoints.js";
+import { actionMain } from "./run/action.js";
 import { runEvidenceProvidersFixture } from "./evidence/fixture.js";
 
 export function main(): void {
@@ -301,12 +302,26 @@ if (require.main === module) {
   } else if (mode !== "") {
     process.stderr.write(`v3 runtime: unknown parity mode '${mode}'\n`);
     process.exitCode = 1;
-  } else {
+  } else if (firstArg === "config") {
+    // Validate the inputs and (with PR_REVIEWER_V3_DEBUG=true) print the
+    // resolved, redacted config.
     try {
       main();
     } catch (error) {
       process.stderr.write(`v3 runtime configuration error: ${error instanceof Error ? error.message : "unknown error"}\n`);
       process.exitCode = 1;
     }
+  } else if (firstArg === "") {
+    // The JavaScript action entry (`runs.using: node24`, `main: dist/index.js`).
+    assertSupportedNode(process.versions.node);
+    actionMain(process.env)
+      .then((code) => { exitAfterFlush(code); })
+      .catch((error: unknown) => {
+        process.stdout.write(`::error::${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
+      });
+  } else {
+    process.stderr.write(`v3 runtime: unknown command '${firstArg}'\n`);
+    process.exitCode = 1;
   }
 }

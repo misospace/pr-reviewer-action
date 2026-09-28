@@ -32,7 +32,7 @@ function ghToken(env: NodeJS.ProcessEnv): string {
   return env.GH_TOKEN ?? env.GITHUB_TOKEN ?? "";
 }
 
-function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
+export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
@@ -63,11 +63,11 @@ interface StepEvent {
   label?: string;
 }
 
-function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?: string } {
+export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?: string; prNumber?: string } {
   const path = env.GITHUB_EVENT_PATH ?? "";
   if (path === "") return {};
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as StepEvent & { pull_request?: { head?: { sha?: string } } };
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as StepEvent & { pull_request?: { number?: number; head?: { sha?: string } } };
     const event: StepEvent = {};
     if (parsed.name !== undefined) event.name = parsed.name;
     if (parsed.action !== undefined) event.action = parsed.action;
@@ -75,6 +75,7 @@ function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?: strin
     return {
       ...(Object.keys(event).length > 0 ? { event } : {}),
       ...(parsed.pull_request?.head?.sha !== undefined ? { headSha: parsed.pull_request.head.sha } : {}),
+      ...(typeof parsed.pull_request?.number === "number" ? { prNumber: String(parsed.pull_request.number) } : {}),
     };
   } catch {
     return {};
@@ -131,11 +132,8 @@ function isFileNonEmpty(env: NodeJS.ProcessEnv, name: string): boolean {
   }
 }
 
-/** `node dist/index.js publish` — the typed successor of
- * `scripts/publish.sh` in the composite. Fail-soft: exit 0 on
- * published/superseded, 1 on failed, matching the v2 dispatcher's
- * continue-on-error semantics for advisory publication problems. */
-export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
+/** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
+export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
@@ -152,17 +150,20 @@ export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
   const api: PublishPlatformApi = platform === "forgejo"
     ? new ForgejoPublishApi({ ...apiOptions, baseUrl: env.FORGEJO_API_URL ?? "", diffProvider })
     : new GitHubPublishApi(apiOptions);
+  return { api, platform, diffProvider };
+}
 
-  const headSha = env.HEAD_SHA ?? "";
-  const baseSha = env.BASE_SHA ?? "";
-  const input: PublishInput = {
+/** PublishInput from the stage environment (the composite's publish-step
+ * bindings, or the action entry's in-process equivalents). */
+export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): PublishInput {
+  return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
     verdict: env.VERDICT ?? "",
     analysisEngine: env.ANALYSIS_ENGINE ?? "",
-    baseSha,
-    headSha,
-    prNumber,
+    baseSha: env.BASE_SHA ?? "",
+    headSha: env.HEAD_SHA ?? "",
+    prNumber: env.PR_NUMBER ?? "",
     commentMarker: env.COMMENT_MARKER ?? "",
     ...(env.BROAD_FINGERPRINT !== undefined ? { broadFingerprint: env.BROAD_FINGERPRINT } : {}),
     requiredChecks: env.REQUIRED_CHECKS ?? "",
@@ -185,15 +186,27 @@ export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
       toolHarnessResults: isFileNonEmpty(env, "tool-harness.md"),
     },
     ...(env.REREVIEW_LABEL ? { rerunLabel: env.REREVIEW_LABEL } : {}),
+    ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
     forgejoPositions: platform === "forgejo",
   };
+}
 
-  const result: PublishResult = await publishReview(input, api, {
-    diffText: platform === "forgejo" ? await diffProvider() : "",
+/** Publish and relay messages; fail-soft (1 only on a failed publication). */
+export async function publishWith(input: PublishInput, seam: ReturnType<typeof buildPublishApi>): Promise<number> {
+  const result: PublishResult = await publishReview(input, seam.api, {
+    diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
   });
   for (const message of result.messages) process.stdout.write(`${message}\n`);
   if (result.error) process.stderr.write(`${result.error}\n`);
   return result.status === "failed" ? 1 : 0;
+}
+
+/** `node dist/index.js publish` — the typed successor of
+ * `scripts/publish.sh`. Fail-soft: exit 0 on published/superseded, 1 on
+ * failed, matching the v2 dispatcher's semantics. */
+export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
+  const seam = buildPublishApi(env);
+  return publishWith(publishInputFromEnv(env, seam.platform), seam);
 }
 
 function parseJsonish(raw: string): unknown {

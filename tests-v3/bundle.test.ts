@@ -15,7 +15,7 @@ test("built bundle embeds the canonical contract and runs without source files",
   };
   const cwd = mkdtempSync(join(tmpdir(), "v3-bundle-"));
   try {
-    const result = spawnSync(process.execPath, [bundle], {
+    const result = spawnSync(process.execPath, [bundle, "config"], {
       cwd,
       encoding: "utf8",
       env: {
@@ -43,7 +43,7 @@ test("built bundle embeds the canonical contract and runs without source files",
     assert.equal(debug.config.aiPrimaryModel, "test-model");
     assert.equal(debug.config.aiFallbackBaseUrl, "https://example.invalid");
 
-    const invalid = spawnSync(process.execPath, [bundle], {
+    const invalid = spawnSync(process.execPath, [bundle, "config"], {
       cwd,
       encoding: "utf8",
       env: {
