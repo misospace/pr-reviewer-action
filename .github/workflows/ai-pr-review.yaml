@@ -107,7 +107,8 @@ jobs:
         # The #809 shadow comparison: build the v3 TypeScript runtime from
         # the same checkout the v2 review just ran from, then re-run the
         # review through the v3 entry beside v2. Dogfood only — nothing here
-        # publishes, and a shadow failure never fails the job.
+        # publishes. A build failure fails the job like any other broken
+        # head; the shadow RUN itself is the diagnostic and never gates.
         if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -116,6 +117,9 @@ jobs:
 
       - name: Run v3 shadow review (never publishes)
         if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        # Diagnostics, not a gate: a shadow failure uploads nothing and never
+        # blocks the merge (unlike the build step, which reflects the head).
+        continue-on-error: true
         env:
           # The v2 production run already consumed the shared env file; the
           # shadow rebuilds its bindings from the same workflow sources.
@@ -165,6 +169,8 @@ jobs:
 
       - name: Compare v3 shadow against v2
         if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        # Same diagnostics-only contract as the run step.
+        continue-on-error: true
         env:
           SHADOW_V2_VERDICT: ${{ steps.review.outputs.verdict }}
           SHADOW_V2_VERDICT_SOURCE: ${{ steps.review.outputs.verdict_source }}

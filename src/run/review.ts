@@ -2,7 +2,6 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
-import { isSecretValue } from "../config/types.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope } from "../runtime/signals.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
@@ -14,7 +13,6 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { resolveStandardsFile } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import type { FetchLike } from "../platform/http.js";
-import { projectPrFiles } from "../platform/normalize.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { buildPlatformReadAdapter } from "./platform.js";
@@ -974,7 +972,6 @@ function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
   const budget = input.budgets[profileKey];
   const corpusName = input.route === "escalated" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
   const corpusBytes = byteLength(ws.read(corpusName));
-  const diffName = profileKey === "smart" ? "pr.diff.smart.truncated" : "pr.diff.truncated";
   const diffBytes = byteLength(ws.read("pr.diff"));
 
   const usageFile = input.route === "escalated" && ws.isFile("ai-response.smart.json")

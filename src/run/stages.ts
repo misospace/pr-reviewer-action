@@ -11,7 +11,6 @@ import {
 } from "../corpus/assemble.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
-import { canonicalChangedFile } from "../context/types.js";
 import {
   clipRelatedCodeMarkdown,
   extractChangeAnchors,
