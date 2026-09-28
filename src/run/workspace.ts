@@ -1,4 +1,4 @@
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { guardedWrite, resolveArtifactPath } from "../gates/guarded-write.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
 
@@ -32,12 +32,14 @@ export class RunWorkspace {
       // CodeQL js/http-to-file-access: these bytes are the run's diagnostic
       // artifacts (model output, CI evidence, corpus sections) — untrusted
       // PR/model data written to the run directory is the pipeline's whole
-      // purpose. The trust boundary holds downstream: publication sanitizes
-      // (stripReservedMarkers/neutralization), corpus sections are fenced,
-      // and the artifacts are never executed or dereferenced as paths.
+      // purpose. The containment boundary is resolveArtifactPath: escapes
+      // and symlinked-out names resolve to null and are refused here; an
+      // in-workspace symlink resolves to its (contained) target, which is
+      // the sanctioned semantics the specialists gate pins. Downstream, the
+      // publication sanitizer, the corpus fences, and the never-execute rule
+      // hold the untrusted-data boundary.
       try {
-        const target = resolveArtifactPath(name, this.root)!;
-        writeFileSync(target, bytes);
+        writeFileSync(resolveArtifactPath(name, this.root)!, bytes);
       } catch {
         this.persistFailures.push(name);
       }
