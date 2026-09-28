@@ -15,13 +15,17 @@
  * - `jq -r` prints each name plus a newline, `$(...)` drops NUL bytes and
  *   trailing newlines, and `read -r` splits the rest on newlines, skipping
  *   empty lines — a filename with an embedded newline is two entries;
- * - `[ -f ]` follows symlinks and is relative to the workspace;
+ * - a candidate is embedded only when `workspaceRegularFile` accepts it: no
+ *   symlink component and no `..` below the workspace, so a PR-controlled
+ *   symlink named like a manifest never pulls a runner file into the corpus
+ *   (#805); a refused path that exists gets its own notice;
  * - the line count is the number of newline bytes (GNU `wc -l`), and the
  *   file is embedded verbatim, so one without a trailing newline runs into
  *   the closing fence exactly as `cat` would. */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { jqEach, jqField } from "../platform/jq.js";
+import { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 
 export const MANIFEST_LINE_BUDGET = 1200;
 export const MANIFEST_NAME_RE = /(?:helmrelease|deployment|statefulset|daemonset|kustomization)\.ya?ml(?=\n?$)/iu;
@@ -43,14 +47,6 @@ export function selectChangedManifests(prFilesRaw: unknown): string[] {
     return names;
   }
   return names;
-}
-
-function isRegularFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function countNewlines(data: Uint8Array): number {
@@ -78,12 +74,14 @@ export function buildManifestContext(prFilesRaw: unknown, workspace: string): Ma
     parts.push(enc("# Changed Manifest Context (modified files only)\n\n"));
     let total = 0;
     for (const file of manifests) {
-      const path = file.startsWith("/") ? file : `${workspace}/${file}`;
-      if (!isRegularFile(path)) {
-        parts.push(enc(`## File: ${file}\n(file not present in checked-out tree at this ref)\n\n`));
+      if (!workspaceRegularFile(workspace, file)) {
+        const notice = workspacePathExists(workspace, file)
+          ? "(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)"
+          : "(file not present in checked-out tree at this ref)";
+        parts.push(enc(`## File: ${file}\n${notice}\n\n`));
         continue;
       }
-      const content = readFileSync(path);
+      const content = readFileSync(workspaceFsPath(workspace, file));
       const lines = countNewlines(content);
       if (total + lines > MANIFEST_LINE_BUDGET) {
         parts.push(enc("(manifest content truncated - too many total lines)\n"));

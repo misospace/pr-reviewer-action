@@ -154,6 +154,8 @@ export {
   NO_TERMS_NOTICE,
   REPO_HISTORY_MAX_BYTES,
   REPO_IMPACT_MAX_BYTES,
+  GrepAttribution,
+  LineSplitter,
   attributeGrepHits,
   buildRepoImpactHistory,
   extractImpactTerms,
@@ -166,6 +168,7 @@ export {
   LinkedIssueProjectionError,
   buildLinkedIssueContext,
   projectLinkedIssue,
+  pyInt,
   pyParseInt,
   type LinearOptions,
   type LinkedIssueContextInput,
@@ -179,4 +182,5 @@ export {
   xargsEcho,
   type StandardsFileInput,
 } from "./standards-file.js";
+export { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 export { linearIssueToV2, renderLinearMarkdown } from "../precheck/linear.js";

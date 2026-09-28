@@ -36,6 +36,19 @@ def prepare_repo(root: Path, fixture: dict, *, init_git: bool | None = None) -> 
         for path in files:
             entries.setdefault(str(path), "")
     _write_entries(root, entries)
+    # Adversarial containment fixtures (#805): `outside_files` land in a
+    # sibling directory of the worktree (<root>/../outside), never inside it,
+    # and `symlinks` ({path: target}) are created verbatim so a tracked link
+    # can point there. Both sides get the same relative link text.
+    outside = root.parent / "outside"
+    for path, content in (fixture.get("outside_files") or {}).items():
+        target = outside / str(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("" if content is None else str(content), encoding="utf-8", newline="")
+    for path, link_target in (fixture.get("symlinks") or {}).items():
+        link = root / str(path)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(str(link_target))
     if init_git:
         env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
         subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)], check=True, env=env)

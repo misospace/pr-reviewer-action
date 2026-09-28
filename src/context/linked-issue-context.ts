@@ -53,11 +53,39 @@ export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
   }
 }
 
-/** Python `int(text)` for argparse `type=int` (ASCII digits). */
-export function pyParseInt(text: string): number | null {
+/** Decimal value of a Unicode `Nd` digit: Nd characters come in contiguous
+ * runs of ten starting at zero, so the value is the offset in its run. */
+function ndValue(ch: string): number {
+  let cp = ch.codePointAt(0) as number;
+  let offset = 0;
+  while (/^\p{Nd}$/u.test(String.fromCodePoint(cp - 1))) {
+    cp -= 1;
+    offset += 1;
+  }
+  return offset % 10;
+}
+
+/** Python 3.14 `int(text)`: surrounding `str.isspace()` whitespace, an
+ * optional sign, and any Unicode decimal digits with single underscores
+ * between them. `null` where Python raises `ValueError`. */
+export function pyInt(text: string): number | null {
   const stripped = pyStrip(text);
-  if (!/^[+-]?[0-9](?:_?[0-9])*$/.test(stripped)) return null;
-  return Number.parseInt(stripped.replace(/_/g, ""), 10);
+  const match = /^([+-]?)(\p{Nd}(?:_?\p{Nd})*)$/u.exec(stripped);
+  if (match === null) return null;
+  let value = 0;
+  for (const ch of (match[2] as string).replace(/_/g, "")) value = value * 10 + ndValue(ch);
+  return match[1] === "-" ? -value : value;
+}
+
+/** The value `linear_context.py --timeout <text>` ends up with (CPython 3.14
+ * argparse, `type=int`), or `null` when argparse exits 2. A value starting
+ * with `-` is only taken as the option's argument when it looks like a
+ * negative number (`-\.?\d`, Unicode digits) or contains a space; anything
+ * else parses as an unknown option. The action's config already restricts
+ * the input to `^[0-9]+$` >= 1, so the fallbacks here are defensive. */
+export function pyParseInt(text: string): number | null {
+  if (text.length > 1 && text.startsWith("-") && !/^-\.?\p{Nd}/u.test(text) && !text.includes(" ")) return null;
+  return pyInt(text);
 }
 
 export interface LinearOptions {

@@ -1504,6 +1504,14 @@ def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> tuple[Side
             **_producer_git_env(),
         },
     )
+    # Adversarial containment fixtures (#805) name content that lives outside
+    # the worktree behind a symlink: it must never reach either runtime's
+    # output, whatever the two sides agree on.
+    for marker in fixture.get("forbidden_output") or []:
+        for side, result in (("v2", old), ("v3", new)):
+            leaked = [key for key, value in result.values.items() if marker in str(value)]
+            if leaked or marker in (result.error or ""):
+                raise RuntimeError(f"{side} output leaked out-of-checkout content {marker!r} via {leaked or ['<error>']}")
     return old, new
 
 

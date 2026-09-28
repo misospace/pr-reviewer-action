@@ -6,7 +6,7 @@
  * only the first line counts and a trailing empty field is dropped), trims
  * each with `printf '%s' "$candidate" | xargs`, word-splits the result, and
  * glob-expands each word with `nullglob` (`matches=( $candidate )`). The
- * first match that is a regular file (`[[ -f ]]`, symlinks followed) wins.
+ * first match that passes the checkout containment guard wins (#805).
  * When nothing matches, the incoming value is returned unchanged.
  *
  * `xargs` follows GNU findutils (the production runners): blanks and
@@ -23,6 +23,7 @@
 
 import { lstatSync, readdirSync, statSync } from "node:fs";
 import { compareCodePoints } from "../platform/jq.js";
+import { workspaceFsPath, workspaceRegularFile } from "./workspace-path.js";
 
 export const DEFAULT_STANDARDS_FILE_CANDIDATES =
   "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt";
@@ -263,10 +264,15 @@ export interface StandardsFileInput {
   workspace: string;
 }
 
-/** The resolved `$STANDARDS_FILE` value. */
+/** The resolved `$STANDARDS_FILE` value. Every checkout path goes through
+ * `workspaceRegularFile` (#805): a PR-controlled symlink (file or directory
+ * component) or a `..` escape never resolves, while an absolute
+ * `standards_file` or candidate outside the checkout is operator-owned and
+ * keeps working. A refused configured value that still reads as a file is
+ * cleared, because the corpus and ledger readers only test `-f`. */
 export function resolveStandardsFile(input: StandardsFileInput): string {
-  const fsPath = (path: string): string => (path.startsWith("/") ? path : `${input.workspace}/${path}`);
-  if (input.standardsFile !== "" && isRegularFile(fsPath(input.standardsFile))) return input.standardsFile;
+  const safe = (path: string): boolean => workspaceRegularFile(input.workspace, path, { allowExternal: true });
+  if (input.standardsFile !== "" && safe(input.standardsFile)) return input.standardsFile;
   const firstLine = input.candidates.split("\n")[0] ?? "";
   const fields = firstLine.split(",");
   if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop();
@@ -275,9 +281,10 @@ export function resolveStandardsFile(input: StandardsFileInput): string {
     if (candidate === "") continue;
     for (const word of candidate.split(/[ \t\n]+/).filter((part) => part !== "")) {
       for (const match of expandGlob(word, input.workspace)) {
-        if (isRegularFile(fsPath(match))) return match;
+        if (safe(match)) return match;
       }
     }
   }
+  if (input.standardsFile !== "" && isRegularFile(workspaceFsPath(input.workspace, input.standardsFile))) return "";
   return input.standardsFile;
 }

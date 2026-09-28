@@ -94,7 +94,7 @@ export async function runContextProducersFixture(fixturePath: string): Promise<F
       return {
         ok: true,
         values: fileValues(artifacts, [
-          "terms.all.txt", "terms.txt", "repo-impact.md", "repo-history.md", "repo-impact.truncated.md", "repo-history.truncated.md",
+          "terms.all.txt", "terms.txt", "repo-impact.truncated.md", "repo-history.truncated.md",
         ]),
       };
     }

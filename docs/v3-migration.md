@@ -536,6 +536,30 @@ sites (`platform_issue_get`, `urlopen` inside the real `linear_context.py`,
 the ledger/anchor/related-context builders). Every artifact is compared
 byte for byte (`file:<name>`, strict UTF-8 or `!b64:`).
 
+Checkout containment (#805) is a production fix in both runtimes, so the
+two sides still agree and no divergence is approved. A repository path
+(changed manifests, standards-file candidates and a relative or in-checkout
+`standards_file`) is read only when it names a regular file reachable
+without following any symlink and without `..`
+(`workspace_regular_file` in `scripts/sections/common.sh`,
+`workspaceRegularFile` in `src/context/workspace-path.ts`). A refused
+manifest renders a "not embedded" notice. A refused `standards_file` that
+still reads as a file is cleared, because the corpus and ledger readers only
+test `-f`. An absolute `standards_file` or candidate outside the checkout is
+operator-owned and keeps working; a relative `../` escape no longer
+resolves, so operators give an absolute path instead. Adversarial fixtures
+put runner content behind file and directory symlinks and fail the run if
+it reaches either side's output (`forbidden_output`).
+
+The repo-impact scan streams: grep rows are attributed as they arrive,
+each term keeps only what can reach its capped section, the grep stops once
+every term is full, and each `git log` keeps cap + 1 bytes. v3 therefore
+materializes only the capped `repo-impact.truncated.md` and
+`repo-history.truncated.md` (the files the corpus reads); v2's untruncated
+intermediates are not compared. The Linear timeout follows CPython 3.14
+(`argparse` plus `int()`: Unicode digits, whitespace, underscores, then
+`max(1, t)`), although config already limits the input to `^[0-9]+$` >= 1.
+
 The runner pins the production runner environment: `LC_ALL=C` (the byte
 collation C.UTF-8 gives `sort -u` and bash globs here) and GNU `wc`'s
 unpadded count. Semantics that follow GNU tools rather than the macOS ones

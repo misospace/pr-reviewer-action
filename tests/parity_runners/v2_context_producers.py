@@ -12,6 +12,8 @@ sliced verbatim (never copied) so the runner cannot drift from production:
                     (+ common.sh ``gate_feature_for_forks``)
 - ``ledger-signal`` scripts/sections/context.sh ``build_requirement_ledger``
 - ``standards``     scripts/sections/config.sh ``resolve_standards_file``
+                    (+ common.sh ``workspace_regular_file``, also used by
+                    the manifest block)
 - ``related-clip``  scripts/sections/corpus.sh ``build_related_code_context``
 
 Each slice runs under ``set -euo pipefail`` (run_review.sh's mode) with the
@@ -47,8 +49,9 @@ STUB = Path(__file__).resolve().parent / "v2_context_producers_stub.py"
 ARTIFACTS = {
     "manifest": ["manifest-context.md"],
     "repo-impact": [
-        "terms.all.txt", "terms.txt", "repo-impact.md", "repo-history.md",
-        "repo-impact.truncated.md", "repo-history.truncated.md",
+        # The untruncated repo-impact.md / repo-history.md are v2
+        # intermediates nothing reads; v3 materializes only the capped ones.
+        "terms.all.txt", "terms.txt", "repo-impact.truncated.md", "repo-history.truncated.md",
     ],
     "linked-issues": [
         "linked-issues.json", "linked-issues.md", "linear-issues.json", "linear-issues.md",
@@ -77,8 +80,10 @@ def section(name: str) -> str:
 
 def slices(producer: str) -> str:
     context = section("context.sh")
+    common = section("common.sh")
+    guard = common[common.index("workspace_regular_file() {"):]
     if producer == "manifest":
-        return slice_between(context, "CHANGED_MANIFESTS=$(jq", "\nsection_timer_end", "manifest")
+        return guard + "\n" + slice_between(context, "CHANGED_MANIFESTS=$(jq", "\nsection_timer_end", "manifest")
     if producer == "repo-impact":
         config = section("config.sh")
         classification = section("classification.sh")
@@ -87,7 +92,6 @@ def slices(producer: str) -> str:
             slice_between(classification, 'log "Gathering repository impact and history..."', "\nsection_timer_end", "repo-impact"),
         ])
     if producer == "linked-issues":
-        common = section("common.sh")
         return "\n".join([
             common[common.index("gate_feature_for_forks() {"):],
             slice_between(context, "jq -r '.body // \"\"' pr.json > pr-body.txt", "\n", "pr-body"),
@@ -97,7 +101,7 @@ def slices(producer: str) -> str:
         return slice_between(context, "build_requirement_ledger() {", "\nbuild_requirement_ledger\n", "ledger") + "\nbuild_requirement_ledger\n"
     if producer == "standards":
         config = section("config.sh")
-        return slice_between(config, "resolve_standards_file() {", "resolve_system_prompt() {", "standards") + (
+        return guard + "\n" + slice_between(config, "resolve_standards_file() {", "resolve_system_prompt() {", "standards") + (
             '\nresolve_standards_file\nprintf "%s" "$STANDARDS_FILE" > "$PARITY_OUT/standards_file"\n'
         )
     if producer == "related-clip":

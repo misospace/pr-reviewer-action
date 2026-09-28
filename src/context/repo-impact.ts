@@ -20,7 +20,13 @@
  * stdout kept, as `2>/dev/null || true` does. Each combined grep row is then
  * re-attributed to every term whose literal text occurs in the row's content
  * (the row minus the `^[^:]*:[0-9]+:` prefix, the awk `sub`), 60 rows per
- * term. Git output is handled as bytes (latin1 view), never re-encoded. */
+ * term. Git output is handled as bytes (latin1 view), never re-encoded.
+ *
+ * Both scans stream (#805): grep rows are attributed as they arrive and each
+ * term keeps only what can reach its capped section, the scan stops once
+ * every term is full, and each `git log` keeps cap + 1 bytes. Only the
+ * capped documents (`repo-impact.truncated.md`, `repo-history.truncated.md`,
+ * the ones the corpus reads) are materialized, byte-identical to v2's. */
 
 import { spawn } from "node:child_process";
 import { jqAlt, jqField, jqRaw } from "../platform/jq.js";
@@ -43,7 +49,6 @@ const STOPWORDS = new Set([
 const GREP_PREFIX_RE = /^[^:]*:[0-9]+:/;
 
 const latin1 = (data: Uint8Array): string => Buffer.from(data).toString("latin1");
-const fromLatin1 = (text: string): Buffer => Buffer.from(text, "latin1");
 const enc = (text: string): Buffer => Buffer.from(text, "utf8");
 
 /** stdout of `jq -r '.title, (.body // "")'` over the pr.json value: each
@@ -80,36 +85,137 @@ export function extractImpactTerms(pr: unknown, versionHintsTruncated: Uint8Arra
 // backslash is escaped too so the grep pattern stays literal regardless.
 const escapeTerm = (term: string): string => term.replace(/[\\.]/g, "\\$&");
 
-function runGitStdout(argv: string[], workspace: string): Promise<Buffer> {
+/** Splits a byte stream into `\n`-terminated lines without buffering more
+ * than the current line. A final line without a newline is still a line,
+ * as awk treats it. */
+export class LineSplitter {
+  private pending: Buffer[] = [];
+
+  /** Feeds a chunk; calls `onLine` per complete line until it returns false. */
+  push(chunk: Buffer, onLine: (line: Buffer) => boolean): boolean {
+    let start = 0;
+    for (let index = chunk.indexOf(0x0a); index !== -1; index = chunk.indexOf(0x0a, start)) {
+      this.pending.push(chunk.subarray(start, index));
+      const line = this.pending.length === 1 ? (this.pending[0] as Buffer) : Buffer.concat(this.pending);
+      this.pending = [];
+      start = index + 1;
+      if (!onLine(line)) return false;
+    }
+    if (start < chunk.length) this.pending.push(Buffer.from(chunk.subarray(start)));
+    return true;
+  }
+
+  flush(onLine: (line: Buffer) => boolean): void {
+    if (this.pending.length === 0) return;
+    const line = Buffer.concat(this.pending);
+    this.pending = [];
+    if (line.length > 0) onLine(line);
+  }
+}
+
+/** Streaming awk attribution (#805): every combined `git grep` row is
+ * attributed to each term whose literal occurs in the row's content, in
+ * stream order, keeping per term at most `limit` rows AND no more rows once
+ * that term's section already exceeds `byteBudget` — beyond that point its
+ * bytes can only land past the cut `truncate_clean` makes, so the capped
+ * artifact is byte-identical to v2's while memory stays bounded by the caps
+ * (plus the current line). `push` returns false once every term is full, so
+ * the producer can stop the scan early. */
+export class GrepAttribution {
+  readonly rows: Buffer[][];
+  private readonly bytes: number[];
+  private readonly counts: number[];
+  private open: number;
+
+  constructor(private readonly terms: readonly string[], private readonly limit = MAX_HITS_PER_TERM, private readonly byteBudget = Number.POSITIVE_INFINITY) {
+    this.rows = terms.map(() => []);
+    this.bytes = terms.map(() => 0);
+    this.counts = terms.map(() => 0);
+    this.open = terms.length;
+  }
+
+  private full(index: number): boolean {
+    return (this.counts[index] as number) >= this.limit || (this.bytes[index] as number) > this.byteBudget;
+  }
+
+  push(line: Buffer): boolean {
+    if (this.open === 0) return false;
+    const content = latin1(line).replace(GREP_PREFIX_RE, "");
+    this.terms.forEach((term, index) => {
+      if (this.full(index) || !content.includes(term)) return;
+      (this.rows[index] as Buffer[]).push(line, NEWLINE);
+      this.counts[index] = (this.counts[index] as number) + 1;
+      this.bytes[index] = (this.bytes[index] as number) + line.length + 1;
+      if (this.full(index)) this.open -= 1;
+    });
+    return this.open > 0;
+  }
+
+  section(index: number): Buffer {
+    return Buffer.concat(this.rows[index] as Buffer[]);
+  }
+}
+
+const NEWLINE = Buffer.from("\n");
+
+/** awk re-attribution of a buffered combined grep output to one term. */
+export function attributeGrepHits(combined: Uint8Array, term: string, limit = MAX_HITS_PER_TERM): string {
+  const attribution = new GrepAttribution([term], limit);
+  const splitter = new LineSplitter();
+  const onLine = (line: Buffer): boolean => attribution.push(line);
+  if (splitter.push(Buffer.from(combined), onLine)) splitter.flush(onLine);
+  return latin1(attribution.section(0));
+}
+
+/** Runs git and streams stdout to `onChunk` until it returns false (then the
+ * process is killed). Exit status and stderr are ignored, like
+ * `2>/dev/null || true`; a spawn failure is empty output. */
+function streamGit(argv: string[], workspace: string, onChunk: (chunk: Buffer) => boolean): Promise<void> {
   return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn("git", argv, { cwd: workspace, stdio: ["ignore", "pipe", "ignore"] });
     } catch {
-      resolve(Buffer.alloc(0));
+      resolve();
       return;
     }
-    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.on("error", () => resolve(Buffer.concat(chunks)));
-    child.on("close", () => resolve(Buffer.concat(chunks)));
+    let stopped = false;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stopped) return;
+      if (!onChunk(chunk)) {
+        stopped = true;
+        child.stdout?.destroy();
+        child.kill();
+      }
+    });
+    child.on("error", () => resolve());
+    child.on("close", () => resolve());
   });
 }
 
-/** awk re-attribution of the combined grep output to one term. */
-export function attributeGrepHits(combined: Uint8Array, term: string, limit = MAX_HITS_PER_TERM): string {
-  const text = latin1(combined);
-  const rows = text.split("\n");
-  if (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
-  let out = "";
-  let matches = 0;
-  for (const row of rows) {
-    if (!row.replace(GREP_PREFIX_RE, "").includes(term)) continue;
-    out += `${row}\n`;
-    matches += 1;
-    if (matches === limit) break;
-  }
-  return out;
+/** The combined grep, attributed while it streams. */
+async function scanImpact(terms: readonly string[], alt: string, workspace: string): Promise<GrepAttribution> {
+  const attribution = new GrepAttribution(terms, MAX_HITS_PER_TERM, REPO_IMPACT_MAX_BYTES);
+  const splitter = new LineSplitter();
+  const onLine = (line: Buffer): boolean => attribution.push(line);
+  let open = true;
+  await streamGit(["grep", "-nEI", "-e", alt, "--", "."], workspace, (chunk) => (open = splitter.push(chunk, onLine)));
+  if (open) splitter.flush(onLine);
+  return attribution;
+}
+
+/** One term's `git log`, keeping at most `cap + 1` bytes (enough for
+ * `truncate_clean` to cut exactly where it would cut the full output). */
+async function scanHistory(term: string, workspace: string, cap: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  await streamGit(["log", "--oneline", "--decorate", `--grep=${term}`, "-n", "10"], workspace, (chunk) => {
+    const keep = chunk.subarray(0, Math.max(0, cap + 1 - size));
+    chunks.push(Buffer.from(keep));
+    size += keep.length;
+    return size <= cap;
+  });
+  return Buffer.concat(chunks);
 }
 
 export interface RepoImpactInput {
@@ -136,27 +242,26 @@ export async function buildRepoImpactHistory(input: RepoImpactInput): Promise<Re
   artifacts.set("terms.txt", lines(terms));
   if (terms.length === 0) {
     const notice = enc(NO_TERMS_NOTICE);
-    for (const name of ["repo-impact.md", "repo-history.md", "repo-impact.truncated.md", "repo-history.truncated.md"]) {
+    for (const name of ["repo-impact.truncated.md", "repo-history.truncated.md"]) {
       artifacts.set(name, new Uint8Array(notice));
     }
     return { artifacts, terms };
   }
   const alt = terms.map(escapeTerm).join("|");
-  const [combined, ...histories] = await Promise.all([
-    runGitStdout(["grep", "-nEI", "-e", alt, "--", "."], input.workspace),
-    ...terms.map((term) => runGitStdout(["log", "--oneline", "--decorate", `--grep=${term}`, "-n", "10"], input.workspace)),
+  const [attribution, ...histories] = await Promise.all([
+    scanImpact(terms, alt, input.workspace),
+    ...terms.map((term) => scanHistory(term, input.workspace, REPO_HISTORY_MAX_BYTES)),
   ]);
   const impact: Buffer[] = [];
   const history: Buffer[] = [];
   terms.forEach((term, index) => {
-    impact.push(enc(`## Term: ${term}\n\n### git grep hits\n\`\`\`text\n`), fromLatin1(attributeGrepHits(combined as Buffer, term)), enc("```\n\n"));
+    impact.push(enc(`## Term: ${term}\n\n### git grep hits\n\`\`\`text\n`), (attribution as GrepAttribution).section(index), enc("```\n\n"));
     history.push(enc(`## Term: ${term}\n\n### git log context\n\`\`\`text\n`), histories[index] as Buffer, enc("```\n\n"));
   });
-  const impactBytes = new Uint8Array(Buffer.concat(impact));
-  const historyBytes = new Uint8Array(Buffer.concat(history));
-  artifacts.set("repo-impact.md", impactBytes);
-  artifacts.set("repo-history.md", historyBytes);
-  artifacts.set("repo-impact.truncated.md", truncateClean(impactBytes, REPO_IMPACT_MAX_BYTES, IMPACT_MARKER));
-  artifacts.set("repo-history.truncated.md", truncateClean(historyBytes, REPO_HISTORY_MAX_BYTES, HISTORY_MARKER));
+  // Only the capped documents are materialized: v2's untruncated
+  // repo-impact.md / repo-history.md are intermediates nothing reads, and
+  // the retained prefix is exact up to each cap + 1 byte.
+  artifacts.set("repo-impact.truncated.md", truncateClean(new Uint8Array(Buffer.concat(impact)), REPO_IMPACT_MAX_BYTES, IMPACT_MARKER));
+  artifacts.set("repo-history.truncated.md", truncateClean(new Uint8Array(Buffer.concat(history)), REPO_HISTORY_MAX_BYTES, HISTORY_MARKER));
   return { artifacts, terms };
 }
