@@ -10,6 +10,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
 import { canonicalChangedFile } from "../context/types.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
+import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { resolveStandardsFile } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
@@ -312,6 +313,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("repo-map.md", "");
   }
 
+  // Related-code context (corpus.sh). Built before the requirement ledger:
+  // its anchors and related context are the #796 obligation inputs. It
+  // reads only the diff, the file list and the checkout.
+  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
+  const harnessObligations = relatedInputs === null ? [] : buildHarnessObligations(relatedInputs);
+
   // PR-metadata-derived context (context.sh): linked issues + Linear, the
   // requirement ledger, review threads and human reviews. Built here and
   // again after the CI wait (#812), so edits made while CI runs are seen.
@@ -339,6 +346,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       linkedIssuesMarkdown: ws.readText("linked-issues.md"),
       standardsText: standards.content === null ? null : Buffer.from(standards.content).toString("utf8"),
       standardsRef: standards.resolved === null ? null : standards.resolved.split("/").pop() ?? standards.resolved,
+      harnessObligations,
     });
     const ledgerArtifact = ledgerToArtifact(ledger);
     const ledgerJson = Buffer.from(`${pyJsonDumps(ledgerArtifact)}\n`, "utf8");
@@ -427,8 +435,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
 
   await Promise.all([enrichmentPromise, imageDigestPromise, evidencePromise]);
 
-  // Related-code + PR-thread context (corpus.sh).
-  await buildRelatedCodeSection(ws, env, workspace);
+  // PR-thread context (corpus.sh).
   await buildPrThreadSection(ws, adapter, env);
 
   // Corpus build #1 (initial review owns the primary artifact slot).

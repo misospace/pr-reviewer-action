@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -674,6 +674,50 @@ test("#812: a head that moved during the CI wait skips the metadata refresh", as
     });
     assert.equal(readFileSync(join(runDir, "pr-body.txt"), "utf8"), "Original description.");
     assert.doesNotMatch(requests.at(-1) ?? "", /NEW-HEAD/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#796: an edited function with a caller becomes a harness obligation in the run's ledger", async () => {
+  const requests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    requests.push(String(body));
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "pkg"), { recursive: true });
+    writeFileSync(join(runDir, "pkg", "auth.py"), "def get_session_token(user):\n    return sign(user, ttl=60)\n");
+    writeFileSync(join(runDir, "pkg", "client.py"), "from pkg.auth import get_session_token\n\ndef call(user):\n    return get_session_token(user)\n");
+    gitInit(runDir);
+    const diff = [
+      "diff --git a/pkg/auth.py b/pkg/auth.py",
+      "--- a/pkg/auth.py",
+      "+++ b/pkg/auth.py",
+      "@@ -1,2 +1,2 @@",
+      " def get_session_token(user):",
+      "-    return sign(user)",
+      "+    return sign(user, ttl=60)",
+      "",
+    ].join("\n");
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k" },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({ diff, files: [{ filename: "pkg/auth.py", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as { requirements: Array<{ text: string; provenance: Array<{ source: string; ref: string }> }> };
+    const harness = ledger.requirements.filter((entry) => entry.provenance.some((p) => p.source === "harness" && p.ref === "pkg/auth.py"));
+    assert.ok(harness.length > 0, `no harness obligation in ${JSON.stringify(ledger.requirements)}`);
+    assert.match(harness[0]!.text, /get_session_token/);
+    assert.match(harness[0]!.text, /client\.py/);
+    assert.match(requests.at(-1) ?? "", /get_session_token/);
   } finally {
     await server.close();
     cleanup();

@@ -1,4 +1,6 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import type { ChangeAnchorsArtifact } from "../context/change-anchors.js";
+import type { RelatedContext } from "../context/related-context.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { splitChunks } from "../corpus/diff-priority.js";
 import {
@@ -292,9 +294,12 @@ export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag
 
 const RELATED_ARTIFACTS = ["change-anchors.json", "related-code.json", "related-code.md", "related-code.truncated.md"] as const;
 
-export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, workspace: string): Promise<void> {
+/** Builds the related-code artifacts and returns the anchors + related
+ * context they came from (the #796 obligation inputs), or null when the
+ * section is disabled, errored or empty. */
+export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, workspace: string): Promise<{ anchors: ChangeAnchorsArtifact; related: RelatedContext } | null> {
   for (const name of RELATED_ARTIFACTS) ws.write(name, "");
-  if ((env.RELATED_CODE_CONTEXT ?? "true").toLowerCase() !== "true") return;
+  if ((env.RELATED_CODE_CONTEXT ?? "true").toLowerCase() !== "true") return null;
   const reset = (): void => {
     for (const name of RELATED_ARTIFACTS) ws.write(name, "");
   };
@@ -310,13 +315,15 @@ export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, w
     const errors = (artifact as { errors?: unknown }).errors;
     if (Array.isArray(errors) && errors.length > 0) {
       reset();
-      return;
+      return null;
     }
     const markdown = renderRelatedContextMarkdown(artifact);
     ws.write("related-code.md", markdown);
     ws.write("related-code.truncated.md", clipRelatedCodeMarkdown(Buffer.from(markdown, "utf8"), Number(env.RELATED_CODE_MAX_BYTES ?? "16000") || 16000) ?? new Uint8Array(0));
+    return { anchors: anchorData as ChangeAnchorsArtifact, related };
   } catch {
     reset();
+    return null;
   }
 }
 

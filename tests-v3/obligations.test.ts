@@ -198,3 +198,26 @@ test("the ledger section renders harness obligations like any requirement", () =
   assert.match(markdown, /Does each caller still get what it expects\?/);
   assert.match(markdown, /\[invariant\]/);
 });
+
+test("#796: real artifact shapes — a body edit (enclosing) with callers in related files[] yields an obligation", () => {
+  const anchors = {
+    version: 1,
+    files: [{ path: "pkg/auth.py", language: "python", symbols: [{ name: "get_session_token", kind: "enclosing", confidence: "high", line: 1 }], imports: [], identifiers: [], changed_lines: [[2, 2]] }],
+    anchors: [],
+    truncated: false,
+  };
+  const related = {
+    version: 1,
+    files: [{ path: "pkg/auth.py", symbols: [{ name: "get_session_token", references: [
+      { path: "pkg/auth.py", line: 1, snippet: "def get_session_token(user):" },
+      { path: "pkg/client.py", line: 4, snippet: "    return get_session_token(user)" },
+    ] }], tests: [], manifests: [] }],
+    truncated: false,
+    errors: [],
+    truncation: { truncated: false, reasons: [], omittedSymbols: 0, omittedReferences: 0, omittedTests: 0, omittedManifests: 0, omittedOutputBytes: 0 },
+  };
+  const obligations = buildHarnessObligations({ anchors: anchors as never, related: related as never });
+  assert.equal(obligations.length, 1);
+  // The defining file's own line is not a caller.
+  assert.match(obligations[0]!.text, /callers: `pkg\/client\.py:4`\. Does each caller/);
+});

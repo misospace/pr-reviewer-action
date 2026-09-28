@@ -44,6 +44,9 @@ function siteList(references: ReadonlyArray<{ path: string; line: number }>, lim
   return { list: sites.join(", "), total };
 }
 
+/** Change-anchor symbol kinds that name an edited function or method. */
+const EDITED_FUNCTION_KINDS: ReadonlySet<string> = new Set(["function", "method", "enclosing"]);
+
 /** UP_SNAKE config-style literal: dispatched on rather than called. */
 function isUpperSnakeLiteral(name: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(name);
@@ -98,13 +101,28 @@ export function buildHarnessObligations(input: BuildObligationsInput = {}): Harn
     }
   }
 
+  // Caller sites the related-code layer resolved per changed file + symbol
+  // (`files[].symbols[].references`), excluding the defining file itself.
+  const callersBySymbol = new Map<string, Array<{ path: string; line: number }>>();
+  for (const relatedFile of related?.files ?? []) {
+    for (const relatedSymbol of relatedFile.symbols) {
+      const refs = relatedSymbol.references
+        .filter((ref) => ref.path !== relatedFile.path)
+        .map((ref) => ({ path: ref.path, line: ref.line }));
+      if (refs.length > 0) callersBySymbol.set(`${relatedFile.path}\u0000${relatedSymbol.name}`, refs);
+    }
+  }
+
   for (const file of anchors?.files ?? []) {
-    // 1. Edited functions/methods with callers (#790).
+    // 1. Edited functions/methods with callers (#790). An edit inside a
+    //    function body anchors it as `enclosing`; a changed signature line
+    //    anchors it as `function`.
     for (const symbol of file.symbols) {
-      if (symbol.kind !== "function" && symbol.kind !== "method") continue;
-      const consumers = consumersByKey.get(symbol.name.toLowerCase());
-      if (consumers === undefined || consumers.references.length === 0) continue;
-      const { list, total } = siteList(consumers.references, maxSites);
+      if (!EDITED_FUNCTION_KINDS.has(symbol.kind)) continue;
+      const references = callersBySymbol.get(`${file.path}\u0000${symbol.name}`)
+        ?? consumersByKey.get(symbol.name.toLowerCase())?.references;
+      if (references === undefined || references.length === 0) continue;
+      const { list, total } = siteList(references, maxSites);
       const more = total > maxSites ? ` (+${total - maxSites} more)` : "";
       push({
         text: `\`${symbol.name}\` changed; callers: ${list}${more}. Does each caller still get what it expects?`,
