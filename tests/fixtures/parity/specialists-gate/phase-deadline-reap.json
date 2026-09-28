@@ -1,0 +1,57 @@
+{
+  "fixture": "phase-deadline-reap",
+  "description": "DEEP_REVIEW_TIMEOUT_SEC=1. The tests endpoint answers 503 with Retry-After: 3, so its transport is still backing off when the phase deadline reaps it: v2 and v3 both leave specialist-tests.request.json (written before the first attempt), a response artifact and role artifact carrying the timeout, and an error/timeout entry. The correctness endpoint answers HTTP 200 with an error object (a transport failure whose message quotes the error as Python str()); security succeeds.",
+  "env": {
+    "DEEP_REVIEW": "true",
+    "AI_STREAM": "false",
+    "DEEP_REVIEW_TIMEOUT_SEC": "1"
+  },
+  "corpus": "# PR Review Corpus\n\n## Diff\n\n```diff\n+def load(path):\n+    return open(path).read()\n```\n\nReviewer note: café — unicode survives.\n",
+  "responses": {
+    "correctness": [
+      {
+        "body": {
+          "error": {
+            "message": "upstream overloaded",
+            "code": 529
+          }
+        }
+      }
+    ],
+    "security": [
+      {
+        "body": {
+          "id": "chatcmpl-1",
+          "object": "chat.completion",
+          "model": "fixture-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "{\"leads\": [{\"severity\": \"high\", \"category\": \"security\", \"file\": \"src/load.py\", \"line\": 2, \"message\": \"Untrusted path reaches open(); traversal is possible.\"}]}"
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 90,
+            "completion_tokens": 12,
+            "total_tokens": 102
+          }
+        }
+      }
+    ],
+    "tests": [
+      {
+        "status": 503,
+        "headers": {
+          "Retry-After": "3"
+        },
+        "body": {
+          "error": "busy"
+        }
+      }
+    ]
+  }
+}

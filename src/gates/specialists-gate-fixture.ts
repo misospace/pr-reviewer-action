@@ -25,6 +25,7 @@ import { resolveActionRoot, runSpecialistsGate } from "./specialists-gate.js";
 
 interface MockResponse {
   status?: number;
+  headers?: Record<string, string>;
   body?: unknown;
   raw?: string;
   sse?: string[];
@@ -100,11 +101,11 @@ export async function runSpecialistsGateFixture(fixturePath: string): Promise<{ 
         return;
       }
       if (entry.sse !== undefined) {
-        res.writeHead(entry.status ?? 200, { "Content-Type": "text/event-stream" });
+        res.writeHead(entry.status ?? 200, { ...(entry.headers ?? {}), "Content-Type": "text/event-stream" });
         res.end(entry.sse.map((line) => `${line}\n\n`).join(""));
         return;
       }
-      res.writeHead(entry.status ?? 200, { "Content-Type": "application/json" });
+      res.writeHead(entry.status ?? 200, { ...(entry.headers ?? {}), "Content-Type": "application/json" });
       res.end(entry.raw !== undefined ? entry.raw : JSON.stringify(entry.body ?? null));
     });
   });

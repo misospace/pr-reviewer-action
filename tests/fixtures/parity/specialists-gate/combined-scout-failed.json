@@ -1,0 +1,22 @@
+{
+  "fixture": "combined-scout-failed",
+  "description": "DEEP_REVIEW_EXECUTION=combined_scout and the one scout call fails (HTTP 200 carrying an error object). v2 and v3 both leave specialist-scout.request.json (written before the call) and no scout response artifact; every role gets the shared transport failure.",
+  "env": {
+    "DEEP_REVIEW": "true",
+    "AI_STREAM": "false",
+    "DEEP_REVIEW_EXECUTION": "combined_scout"
+  },
+  "corpus": "# PR Review Corpus\n\n## Diff\n\n```diff\n+def load(path):\n+    return open(path).read()\n```\n\nReviewer note: café — unicode survives.\n",
+  "responses": {
+    "scout": [
+      {
+        "body": {
+          "error": {
+            "message": "context length exceeded",
+            "type": "invalid_request_error"
+          }
+        }
+      }
+    ]
+  }
+}

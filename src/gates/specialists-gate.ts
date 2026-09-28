@@ -396,10 +396,33 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   // Persist every role artifact under the guard, folding refusals back
   // into the entries before the aggregate is rendered.
   const aggregate = result.aggregate;
+  // combined_scout: the one call's request (written even when the call
+  // failed, as v2 writes it before calling) and, on success only, its
+  // response. A refused write fails every role, as in v2's _run_scout.
+  let scoutGuard: string | null = null;
+  if (execution === "combined_scout") {
+    const first = rolesToRun.find((role) => result.artifacts.requests[role] !== undefined);
+    if (first !== undefined) {
+      if (!guardedWrite(root, "specialist-scout.request.json", jsonText(result.artifacts.requests[first]))) {
+        scoutGuard = "guard: refused to write the scout request artifact";
+      } else if (first in result.artifacts.responses) {
+        const response = result.artifacts.responses[first];
+        const body = typeof response === "object" && response !== null ? response : { raw_response: pyStr(response) };
+        if (!guardedWrite(root, "specialist-scout.response.json", jsonText(body))) {
+          scoutGuard = "guard: refused to write the scout response artifact";
+        }
+      }
+    }
+  }
   const entries = (aggregate.roles as SpecialistRoleEntry[]).map((entry) => {
     if (entry.status === "skipped") return entry;
     const role = entry.role;
     if (execution === "combined_scout") {
+      if (scoutGuard !== null) {
+        const failed = emptyArtifact(role);
+        failed.errors.push(scoutGuard);
+        return persistRole(root, role, guardFailure(entry, failed), undefined, undefined, failed);
+      }
       return persistRole(root, role, entry, undefined, undefined, result.artifacts.perRole[role]);
     }
     let response = result.artifacts.responses[role];
@@ -411,14 +434,6 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     }
     return persistRole(root, role, entry, result.artifacts.requests[role], response, artifact);
   });
-  if (execution === "combined_scout") {
-    const first = rolesToRun.find((role) => result.artifacts.requests[role] !== undefined);
-    if (first !== undefined) {
-      guardedWrite(root, "specialist-scout.request.json", jsonText(result.artifacts.requests[first]));
-      const response = result.artifacts.responses[first];
-      guardedWrite(root, "specialist-scout.response.json", jsonText(typeof response === "object" && response !== null ? response : { raw_response: pyStr(response) }));
-    }
-  }
   aggregate.roles = entries;
   aggregate.total_leads = entries.reduce((sum, entry) => sum + entry.lead_count, 0);
   aggregate.any_errors = entries.some((entry) => (entry.status !== "ok" && entry.status !== "skipped") || entry.errors_count > 0);

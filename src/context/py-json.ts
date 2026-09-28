@@ -68,7 +68,6 @@ function encode(value: unknown, indent: number, level: number, options: PyJsonDu
   if (typeof value === "string") return `"${escapeString(value, ensureAscii)}"`;
   if (typeof value === "number") {
     if (key !== null && options.floatKeys?.has(key) === true) return pyFloatRepr(value);
-    if (Number.isInteger(value)) return String(value);
     return String(value);
   }
   if (Array.isArray(value)) {

@@ -23,6 +23,13 @@ import { emptyArtifact, extractSpecialistJson, normalizeSpecialistOutput, parseS
 import { buildSpecialistPayload, overrunRetryPayload, payloadBytes, type SpecialistPayload } from "./payload.js";
 import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, type SpecialistUsage } from "./wire.js";
 import { renderSpecialistLeadsSection } from "./render.js";
+import { redactText } from "../context/redact.js";
+import { pyStr } from "../platform/py.js";
+
+/** v2's `redact_text(str(response["error"]))[:500]` for an error body. */
+function errorBodyText(error: unknown): string {
+  return Array.from(redactText(pyStr(error))).slice(0, 500).join("");
+}
 
 /** Total attempts per role (1 initial + 1 retry) on a transport failure.
  * Timeouts and contract (parse) outcomes are never retried. */
@@ -254,6 +261,10 @@ interface RoleRunOptions {
   cancelled: { value: boolean };
   /** #758: telemetry-only tag for which corpus this role ran against. */
   corpusSource: "standard" | "adversarial";
+  /** Called once the wire payload exists, before any attempt: v2 writes
+   * `specialist-<role>.request.json` at that point, so a role later reaped
+   * at the phase deadline still leaves its request artifact. */
+  onRequest?: (payload: SpecialistPayload) => void;
 }
 
 interface RoleRunOutcome {
@@ -308,6 +319,15 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     stream: config.stream,
   });
   requestBytes = payloadBytes(payload);
+  options.onRequest?.(payload);
+
+  // v2 `_RoleFailure("timeout", ...)`: the message lands in the artifact's
+  // errors and in the response artifact, both prefixed with the kind.
+  const timeoutFailure = (message: string): RoleRunOutcome => {
+    const failureArtifact = emptyArtifact(role);
+    failureArtifact.errors.push(`timeout: ${message}`);
+    return finish(failureArtifact, "error", "timeout", null, payload, { error: `timeout: ${message}` });
+  };
 
   let lastFailure: RoleFailure | null = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -316,7 +336,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     }
     const remaining = deadline - now();
     if (remaining < MIN_ATTEMPT_TIMEOUT_SEC) {
-      return finish(emptyArtifact(role), "error", "timeout", null, payload, null);
+      return timeoutFailure("specialist phase deadline exceeded");
     }
     const attemptTimeout = Math.min(config.roleTimeoutSec, remaining);
     let outcome: SpecialistTransportOutcome;
@@ -328,7 +348,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
 
     if (!outcome.ok) {
       if (outcome.timeout) {
-        return finish(emptyArtifact(role), "error", "timeout", null, payload, { error: outcome.errorMessage });
+        return timeoutFailure(outcome.errorMessage ?? "specialist phase deadline exceeded");
       }
       lastFailure = new RoleFailure("transport", outcome.errorMessage ?? "transport failure");
       if (attempt < MAX_ATTEMPTS) {
@@ -344,7 +364,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // A 200 whose body is an error object is a transport failure (some
     // gateways do this); never parse it as a lead set.
     if (typeof outcome.raw === "object" && outcome.raw !== null && "error" in (outcome.raw as Record<string, unknown>) && (outcome.raw as Record<string, unknown>).error) {
-      const message = `endpoint returned an error body: ${JSON.stringify((outcome.raw as Record<string, unknown>).error).slice(0, 500)}`;
+      const message = `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error)}`;
       const failureArtifact = emptyArtifact(role);
       failureArtifact.errors.push(`transport: ${message}`);
       return finish(failureArtifact, "error", "transport", null, payload, { error: `transport: ${message}` });
@@ -464,9 +484,12 @@ async function runSpecialistScout(
       artifacts[role] = artifact;
       entries.push(roleEntry(role, artifact, "error", message.split(":", 1)[0] ?? "transport", now() - started));
     }
-    return { entries, request: null, response: null, artifacts };
+    // v2 writes specialist-scout.request.json before the call, so a failed
+    // scout still leaves it; there is no response artifact on failure.
+    return { entries, request: builtPayload, response: undefined, artifacts };
   };
 
+  let builtPayload: SpecialistPayload | null = null;
   if (system === undefined) {
     return failureEntries("input: scout prompt unavailable");
   }
@@ -482,6 +505,7 @@ async function runSpecialistScout(
     tokensParam: config.tokensParam,
     stream: config.stream,
   });
+  builtPayload = payload;
 
   let lastError: string | null = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -511,7 +535,7 @@ async function runSpecialistScout(
       break;
     }
     if (typeof outcome.raw === "object" && outcome.raw !== null && (outcome.raw as Record<string, unknown>).error) {
-      lastError = `transport: endpoint returned an error body: ${JSON.stringify((outcome.raw as Record<string, unknown>).error).slice(0, 500)}`;
+      lastError = `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error)}`;
       break;
     }
     const artifacts = parseScoutResponse(extractResponseText(outcome.raw), roles);
@@ -588,7 +612,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
       if (scout.request !== null) {
         for (const role of input.rolesToRun) {
           artifacts.requests[role] = scout.request;
-          artifacts.responses[role] = scout.response;
+          if (scout.response !== undefined) artifacts.responses[role] = scout.response;
         }
       }
       const byRole = new Map(scout.entries.map((entry) => [entry.role, entry] as const));
@@ -621,6 +645,9 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
             requestFn: meteredRequestFn,
             cancelled: roleCancel.get(role)!,
             corpusSource: useAdversarial ? "adversarial" : "standard",
+            onRequest: (payload) => {
+              artifacts.requests[role] = payload;
+            },
           }),
         );
       };

@@ -168,6 +168,7 @@ test("a role reaped at the phase deadline records the timeout on its response ar
   const result = await run({ DEEP_REVIEW: "true", DEEP_REVIEW_TIMEOUT_SEC: "600" }, { requestFn: hanging, sleep: async () => {} });
   assert.equal(result.code, 0);
   assert.deepEqual(JSON.parse(result.read("specialist-correctness.response.json")), { error: "timeout: specialist phase exceeded 600s" });
+  assert.equal((JSON.parse(result.read("specialist-correctness.request.json")) as { model: string }).model, "m", "the request artifact is written before the first attempt, as in v2");
   assert.equal((JSON.parse(result.read("specialists.json")) as { roles: { error_kind: string }[] }).roles[0]!.error_kind, "timeout");
   rmSync(result.root, { recursive: true, force: true });
 });
@@ -262,4 +263,16 @@ test("transport adapter: v2 message text, timeout classification, streamed turns
   assert.equal(seen[2]!.connectTimeoutSec, 12);
   assert.equal(JSON.stringify([failed, timedOut, streamed]).includes("sk-test-key"), false);
   assert.deepEqual(toV2Completion({ id: "", object: "chat.completion", model: "", content: "", toolCalls: [], finishReason: "stop", usage: null, error: { message: "x" } }).error, { message: "x" });
+});
+
+test("a failed combined scout still leaves its request artifact and no response artifact", async () => {
+  const failing: SpecialistRequestFn = async () => ({ ok: true, raw: { error: { message: "context length exceeded" } } });
+  const result = await run({ DEEP_REVIEW: "true", DEEP_REVIEW_EXECUTION: "combined_scout" }, { requestFn: failing });
+  assert.equal(result.code, 0);
+  assert.equal(existsSync(join(result.root, "specialist-scout.request.json")), true);
+  assert.equal(existsSync(join(result.root, "specialist-scout.response.json")), false);
+  assert.deepEqual((JSON.parse(result.read("specialist-tests.json")) as { errors: string[] }).errors, [
+    "transport: endpoint returned an error body: {'message': 'context length exceeded'}",
+  ]);
+  rmSync(result.root, { recursive: true, force: true });
 });

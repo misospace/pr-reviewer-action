@@ -659,7 +659,13 @@ byte for byte. Only `elapsed_sec` values and the mock port are normalized.
 Porting the glue surfaced three runner fixes, now matching v2: skipped
 aggregate entries carry v2's exact keys, `request_bytes` measures Python's
 `json.dumps` (ASCII-escaped, space-separated), and float fields (`elapsed_sec`,
-`temperature`) serialize as Python floats (`0.0`, `1.0`).
+`temperature`) serialize as Python floats (`0.0`, `1.0`). Later fixes, also
+matching v2: a role's request artifact is recorded before its first attempt,
+so a role reaped at the phase deadline still leaves it (`phase-deadline-reap`);
+a failed combined scout leaves `specialist-scout.request.json` and no
+response artifact (`combined-scout-failed`); timeout failures carry the
+`timeout:` message in the role and response artifacts; and an error-body
+message quotes the error as Python `str()` does, redacted.
 
 ## What #680 removed from the Python runtime surface
 

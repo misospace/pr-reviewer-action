@@ -111,6 +111,8 @@ def main() -> int:
                 body = text.encode()
                 content_type = "application/json"
             self.send_response(entry.get("status", 200))
+            for name, value in entry.get("headers", {}).items():
+                self.send_header(name, value)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
