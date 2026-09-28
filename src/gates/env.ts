@@ -20,6 +20,8 @@ import type { EnvAllowlist } from "../runtime/env.js";
  */
 
 export const CI_GATE_ENV_KEYS: EnvAllowlist = [
+  // Recursion guard: a gate child never starts a review or another gate.
+  "PR_REVIEWER_GATE_CHILD",
   // Process/runner basics + benign network transport/runtime config.
   "PATH",
   "HOME",

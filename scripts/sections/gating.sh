@@ -59,6 +59,7 @@ CI_GATE_LOG="ci-status.phase.log"
 # AI_REQUEST_TIMEOUT_SEC (the pre-#634 CI step never received it, so the Forgejo
 # backend keeps its own default).
 _CI_GATE_ENV_KEYS=(
+  PR_REVIEWER_GATE_CHILD
   PATH HOME
   RUNNER_TRACKING_ID
   HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY

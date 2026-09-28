@@ -152,6 +152,20 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
   survivedPids: [],
 });
 
+/** Set on every gate child; a process carrying it never starts a review. */
+export const GATE_CHILD_ENV = "PR_REVIEWER_GATE_CHILD";
+
+/** The bundle a gate child is launched from: an explicit PR_REVIEWER_ENTRY,
+ * or this process's own entry when it is the built `dist/index.js`. Anything
+ * else (a test runner file) is not a runtime entry — launching it would
+ * re-run that file instead of the gate. */
+export function runtimeBundleEntry(env: NodeJS.ProcessEnv): string | null {
+  const explicit = env.PR_REVIEWER_ENTRY ?? "";
+  if (explicit !== "") return explicit;
+  const own = process.argv[1] ?? "";
+  return /(?:^|[\\/])dist[\\/]index\.js$/.test(own) ? own : null;
+}
+
 export async function runReview(options: RunReviewOptions): Promise<RunReviewResult> {
   const clock = options.now ?? ((): number => Date.now() / 1000);
   const started = clock();
@@ -163,6 +177,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     (options.error ?? ((text) => process.stderr.write(`[v3] ERROR: ${text}\n`)))(line);
 
   assertSupportedNode(process.versions.node);
+  if (options.env[GATE_CHILD_ENV] === "1") {
+    throw new RunReviewError("refusing to start a review inside a gate child process");
+  }
   const contract = validateContract(V3_CONTRACT);
 
   // ── Config stage (config.sh) ─────────────────────────────────────────
@@ -441,10 +458,19 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const scope = createCancellationScope();
   let ciFork: ForkedGate | null = null;
   if ((env.CI_STATUS_CHECK ?? "false").toLowerCase() === "true" && options.ciGate !== null) {
-    const entry = options.ciGateEntry ?? process.argv[1] ?? "";
-    ciFork = await forkGate("ci", options.ciGate ?? ciGateBranch({ entry }), { ambientEnv: options.env, scope });
-    log("CI status gating launched concurrently");
-    env.CI_GATE_ACTIVE = "true";
+    const entry = options.ciGate ? "" : (options.ciGateEntry ?? runtimeBundleEntry(options.env));
+    if (options.ciGate || entry !== null) {
+      // The gate child is marked so it can never start a review (or another
+      // gate) itself: the recursion stops at depth one.
+      ciFork = await forkGate("ci", options.ciGate ?? ciGateBranch({ entry: entry ?? "" }), {
+        ambientEnv: { ...options.env, [GATE_CHILD_ENV]: "1" },
+        scope,
+      });
+      log("CI status gating launched concurrently");
+      env.CI_GATE_ACTIVE = "true";
+    } else {
+      log("CI status gating skipped: no runtime bundle entry to launch it from");
+    }
   }
 
   await Promise.all([enrichmentPromise, imageDigestPromise, evidencePromise]);

@@ -127,6 +127,11 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
   const firstArg = argv[0] ?? "";
+  if (process.env.PR_REVIEWER_GATE_CHILD === "1" && firstArg !== CI_GATE_SUBMODE && firstArg !== SPECIALIST_GATE_SUBMODE) {
+    // Recursion guard: a gate child only ever runs its gate workload.
+    process.stderr.write(`v3 runtime: refusing '${firstArg || "<action>"}' inside a gate child process\n`);
+    process.exit(1);
+  }
   if (firstArg === "precheck") {
     assertSupportedNode(process.versions.node);
     precheckMain(process.env)

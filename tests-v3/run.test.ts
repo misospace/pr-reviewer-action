@@ -904,3 +904,40 @@ test("deep review writes its artifacts where the run reads them when the run dir
     rmSync(checkout, { recursive: true, force: true });
   }
 });
+
+test("recursion guard: a gate child process never starts a review", async () => {
+  await assert.rejects(
+    runReview({ env: { PR_REVIEWER_GATE_CHILD: "1" }, inputs: {}, quiet: true }),
+    /inside a gate child/,
+  );
+});
+
+test("the CI gate only launches from a real bundle entry, never the test runner file", async () => {
+  const { runtimeBundleEntry } = await import("../src/run/review.js");
+  // This process's argv[1] is a test file, not dist/index.js.
+  assert.equal(runtimeBundleEntry({}), null);
+  assert.equal(runtimeBundleEntry({ PR_REVIEWER_ENTRY: "/x/dist/index.js" }), "/x/dist/index.js");
+  // CI gating on with no override: skipped with a log line, no child spawned.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const lines: string[] = [];
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k", "ci-status-check": "true" },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: false,
+      log: (line) => lines.push(line),
+    });
+    assert.equal(result.ciGate.ran, false);
+    assert.ok(lines.some((line) => /CI status gating skipped/.test(line)));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
