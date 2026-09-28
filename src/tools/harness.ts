@@ -49,7 +49,6 @@ import {
 } from "./loop.js";
 import {
   computePartialCoverage,
-  isBudgetStopReason,
   loadChangedFilePaths,
   loadSpecialistLeadRefs,
   type PartialCoverage,
