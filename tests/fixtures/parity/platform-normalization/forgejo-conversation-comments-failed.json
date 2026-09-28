@@ -1,0 +1,30 @@
+{
+  "fixture": "forgejo-conversation-comments-failed",
+  "description": "Forgejo quirk: a failed comment listing is an empty, SUCCESSFUL result (the loop just stops).",
+  "platform": "forgejo",
+  "repo": "o/r",
+  "pr_number": 6,
+  "routes": [
+    {
+      "match": "api/v1/repos/o/r/issues/6/comments?page=1&limit=50",
+      "status": 500,
+      "body": {
+        "message": "boom"
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "conversation-comments",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": []
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://forgejo.example/api/v1/repos/o/r/issues/6/comments?page=1&limit=50 auth=1"
+  ]
+}

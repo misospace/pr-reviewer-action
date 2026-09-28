@@ -1,0 +1,149 @@
+{
+  "fixture": "github-review-threads",
+  "description": "GraphQL reviewThreads(last:100): resolved/outdated flags, null line on an outdated thread, missing path, nested comment normalization with a ghost author and unicode bodies; thread order is kept as returned.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "routes": [
+    {
+      "match": "graphql:reviewThreads",
+      "body": {
+        "data": {
+          "repository": {
+            "pullRequest": {
+              "reviewThreads": {
+                "nodes": [
+                  {
+                    "id": "PRRT_1",
+                    "isResolved": false,
+                    "isOutdated": false,
+                    "path": "src/app.py",
+                    "line": 42,
+                    "originalLine": 40,
+                    "comments": {
+                      "nodes": [
+                        {
+                          "databaseId": 101,
+                          "body": "**major** finding \u2014 caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+                          "createdAt": "2026-09-01T00:00:00Z",
+                          "updatedAt": "2026-09-01T00:00:00Z",
+                          "author": {
+                            "login": "pr-reviewer[bot]"
+                          }
+                        },
+                        {
+                          "databaseId": 102,
+                          "body": "Disagree \ud83e\udd14",
+                          "createdAt": "2026-09-01T01:00:00Z",
+                          "updatedAt": "2026-09-01T01:00:00Z",
+                          "author": {
+                            "login": "alice"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "PRRT_2",
+                    "isResolved": true,
+                    "isOutdated": true,
+                    "path": "docs/readme.md",
+                    "line": null,
+                    "originalLine": 7,
+                    "comments": {
+                      "nodes": [
+                        {
+                          "databaseId": 103,
+                          "body": null,
+                          "createdAt": "2026-09-02T00:00:00Z",
+                          "updatedAt": "2026-09-02T00:00:00Z",
+                          "author": null
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "PRRT_3",
+                    "isResolved": null,
+                    "isOutdated": null,
+                    "path": null,
+                    "line": null,
+                    "originalLine": null,
+                    "comments": {
+                      "nodes": []
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "review-threads",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": [
+            {
+              "thread_id": "PRRT_1",
+              "path": "src/app.py",
+              "line": 42,
+              "original_line": 40,
+              "resolved": false,
+              "outdated": false,
+              "comments": [
+                {
+                  "id": 101,
+                  "user": "pr-reviewer[bot]",
+                  "created_at": "2026-09-01T00:00:00Z",
+                  "updated_at": "2026-09-01T00:00:00Z",
+                  "body": "**major** finding \u2014 caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar"
+                },
+                {
+                  "id": 102,
+                  "user": "alice",
+                  "created_at": "2026-09-01T01:00:00Z",
+                  "updated_at": "2026-09-01T01:00:00Z",
+                  "body": "Disagree \ud83e\udd14"
+                }
+              ]
+            },
+            {
+              "thread_id": "PRRT_2",
+              "path": "docs/readme.md",
+              "line": null,
+              "original_line": 7,
+              "resolved": true,
+              "outdated": true,
+              "comments": [
+                {
+                  "id": 103,
+                  "user": "",
+                  "created_at": "2026-09-02T00:00:00Z",
+                  "updated_at": "2026-09-02T00:00:00Z",
+                  "body": ""
+                }
+              ]
+            },
+            {
+              "thread_id": "PRRT_3",
+              "path": "",
+              "line": null,
+              "original_line": null,
+              "resolved": false,
+              "outdated": false,
+              "comments": []
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "POST https://api.github.com/graphql auth=1 {\"query\":\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }\",\"variables\":{\"name\":\"r\",\"number\":7,\"owner\":\"o\"}}"
+  ]
+}

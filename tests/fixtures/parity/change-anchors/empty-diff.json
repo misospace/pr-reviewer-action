@@ -1,0 +1,5 @@
+{
+ "fixture": "empty-diff",
+ "description": "An empty diff with no file list yields an empty, untruncated artifact.",
+ "diff": ""
+}

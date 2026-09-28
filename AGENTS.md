@@ -41,7 +41,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `action.yml` | v2 action definition: inputs/outputs, composite steps (precheck → CI wait → review → publish) |
 | `scripts/` | v2 bash runtime: `run_review.sh` orchestrates the `scripts/sections/` pipeline; plus precheck, CI wait, model call, publish, platform seam |
 | `pr_reviewer/` | v2 Python package: classifier, requirement ledger/coverage, enforcement, escalation, parsers, tools, platform, repo map, specialists |
-| `src/` | v3 TypeScript runtime (in progress): verbatim, parity-tested ports of the v2 boundaries — `platform/`, `precheck/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
+| `src/` | v3 TypeScript runtime (in progress): verbatim, parity-tested ports of the v2 boundaries — `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `tests/`, `tests-v3/` | pytest + shell behavior tests; vitest for v3; parity fixtures under `tests/fixtures/parity/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |

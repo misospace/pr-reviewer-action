@@ -1,0 +1,157 @@
+{
+  "fixture": "github-enrichment",
+  "description": "github.com-pinned linked-source enrichment (gh_api_call): release by tag, tags?per_page=50 and compare, authenticated and anonymous; a 404 release is null.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 7,
+  "routes": [
+    {
+      "match": "repos/up/stream/releases/tags/v1.2.3",
+      "body": {
+        "tag_name": "v1.2.3",
+        "name": "v1.2.3 \ud83d\ude80",
+        "body": "## Changes\n- caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+        "html_url": "https://github.com/up/stream/releases/tag/v1.2.3",
+        "published_at": "2026-09-01T00:00:00Z"
+      }
+    },
+    {
+      "match": "repos/up/stream/tags?per_page=50",
+      "body": [
+        {
+          "name": "v1.2.3",
+          "commit": {
+            "sha": "1111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "name": "v1.2.2",
+          "commit": {
+            "sha": "2222222222222222222222222222222222222222"
+          }
+        }
+      ]
+    },
+    {
+      "match": "repos/up/stream/compare/v1.2.2...v1.2.3",
+      "body": {
+        "status": "ahead",
+        "ahead_by": 2,
+        "behind_by": 0,
+        "total_commits": 2,
+        "html_url": "https://github.com/up/stream/compare/v1.2.2...v1.2.3",
+        "commits": [
+          {
+            "sha": "3333333333333333333333333333333333333333",
+            "commit": {
+              "message": "fix: \u00e9 \ud83d\udc1b\n\nbody",
+              "author": {
+                "name": "A",
+                "date": "2026-09-01T00:00:00Z"
+              }
+            }
+          }
+        ],
+        "files": [
+          {
+            "filename": "src/x.go",
+            "status": "modified",
+            "changes": 4
+          }
+        ]
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "github-enrich",
+      "endpoint": "repos/up/stream/releases/tags/v1.2.3",
+      "token": "fixture-token",
+      "expected": {
+        "result": {
+          "data": {
+            "tag_name": "v1.2.3",
+            "name": "v1.2.3 \ud83d\ude80",
+            "body": "## Changes\n- caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+            "html_url": "https://github.com/up/stream/releases/tag/v1.2.3",
+            "published_at": "2026-09-01T00:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "op": "github-enrich",
+      "endpoint": "repos/up/stream/tags?per_page=50",
+      "token": "",
+      "expected": {
+        "result": {
+          "data": [
+            {
+              "name": "v1.2.3",
+              "commit": {
+                "sha": "1111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "name": "v1.2.2",
+              "commit": {
+                "sha": "2222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "op": "github-enrich",
+      "endpoint": "repos/up/stream/compare/v1.2.2...v1.2.3",
+      "token": "fixture-token",
+      "expected": {
+        "result": {
+          "data": {
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "html_url": "https://github.com/up/stream/compare/v1.2.2...v1.2.3",
+            "commits": [
+              {
+                "sha": "3333333333333333333333333333333333333333",
+                "commit": {
+                  "message": "fix: \u00e9 \ud83d\udc1b\n\nbody",
+                  "author": {
+                    "name": "A",
+                    "date": "2026-09-01T00:00:00Z"
+                  }
+                }
+              }
+            ],
+            "files": [
+              {
+                "filename": "src/x.go",
+                "status": "modified",
+                "changes": 4
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "github-enrich",
+      "endpoint": "repos/up/stream/releases/tags/v9.9.9",
+      "token": "fixture-token",
+      "expected": {
+        "result": {
+          "data": null
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://api.github.com/repos/up/stream/releases/tags/v1.2.3 auth=1",
+    "GET https://api.github.com/repos/up/stream/tags?per_page=50 auth=0",
+    "GET https://api.github.com/repos/up/stream/compare/v1.2.2...v1.2.3 auth=1",
+    "GET https://api.github.com/repos/up/stream/releases/tags/v9.9.9 auth=1"
+  ]
+}

@@ -38,6 +38,7 @@ import { maskAndTruncate } from "../context/redact.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
+import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, type EnvLike } from "./budget.js";
 import {
   STOP_BUDGET,
@@ -985,7 +986,8 @@ export interface HarnessDeps {
   /** Structure-aware specialist-leads renderer seam (whole-lead drops only;
    * the specialists corpus port is a later migration ticket). */
   renderSpecialistLeads?: (roleResults: Record<string, unknown>, maxBytes: number) => string;
-  /** Bundled default system prompt text for the defensive fallback path. */
+  /** Raw default system prompt for the defensive fallback path; defaults to
+   * the bundled `default_system_prompt.txt` (v2 reads that file). */
   defaultSystemPrompt?: string;
 }
 
@@ -995,6 +997,12 @@ export interface HarnessDeps {
  * directly; only fall back to file+inline when it is absent, then to the
  * bundled default with any unsubstituted `{{...}}` placeholder stripped by
  * shape (never by name).
+ *
+ * Orchestrator seam (#706): as in v2, assembly happens upstream — the
+ * orchestrator runs `src/prompt/` (`resolveSystemPrompt` →
+ * `applySystemPromptFragments` → `applySpecialistLeadsFragment`) and passes
+ * the result as `env.SYSTEM_PROMPT`. Assembling here instead would diverge
+ * from v2, whose harness never re-assembles.
  */
 export function resolveReviewSystemPrompt(deps: HarnessDeps): string {
   const raw = deps.env.SYSTEM_PROMPT ?? "";
@@ -1008,7 +1016,7 @@ export function resolveReviewSystemPrompt(deps: HarnessDeps): string {
       return fileText;
     }
   }
-  const defaultText = deps.defaultSystemPrompt ?? "";
+  const defaultText = deps.defaultSystemPrompt ?? BUNDLED_PROMPT_ASSETS.defaultSystemPrompt;
   // Strip any unsubstituted placeholder so the bare base never leaks
   // "{{...}}" tokens to the model. Matched by shape, not by name.
   return defaultText.replace(/\{\{[A-Z0-9_]+\}\}/g, "");

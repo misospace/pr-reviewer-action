@@ -1,0 +1,112 @@
+{
+  "fixture": "forgejo-enrichment",
+  "description": "Forgejo linked-source enrichment: the configured host is read with the credential, any other host anonymously; release normalization with published_at/html_url fallbacks; a tag needing quote(safe='') escaping; compare passthrough; a 404 is null with a nonzero exit.",
+  "platform": "forgejo",
+  "repo": "o/r",
+  "pr_number": 5,
+  "routes": [
+    {
+      "match": "https://forgejo.example/api/v1/repos/up/stream/releases/tags/v1.0.0%2Bbuild.5",
+      "body": {
+        "id": 1,
+        "tag_name": "v1.0.0+build.5",
+        "name": "Release \ud83d\ude80",
+        "body": "notes caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+        "created_at": "2026-09-01T00:00:00Z",
+        "url": "https://forgejo.example/api/v1/repos/up/stream/releases/1"
+      }
+    },
+    {
+      "match": "https://codeberg.org/api/v1/repos/ext/lib/compare/v1...v2",
+      "body": {
+        "total_commits": 1,
+        "commits": [
+          {
+            "sha": "4444444444444444444444444444444444444444",
+            "commit": {
+              "message": "feat: \u00e9"
+            }
+          }
+        ],
+        "files": [
+          {
+            "filename": "a.go",
+            "status": "modified"
+          }
+        ]
+      }
+    },
+    {
+      "match": "https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v3",
+      "status": 404,
+      "body": {
+        "message": "Not Found"
+      }
+    }
+  ],
+  "calls": [
+    {
+      "op": "forgejo-enrich-release",
+      "host": "forgejo.example",
+      "repo": "up/stream",
+      "tag": "v1.0.0+build.5",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": {
+            "tag_name": "v1.0.0+build.5",
+            "name": "Release \ud83d\ude80",
+            "published_at": "2026-09-01T00:00:00Z",
+            "html_url": "https://forgejo.example/api/v1/repos/up/stream/releases/1",
+            "body": "notes caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar"
+          }
+        }
+      }
+    },
+    {
+      "op": "forgejo-enrich-compare",
+      "host": "codeberg.org",
+      "repo": "ext/lib",
+      "spec": "v1...v2",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": {
+            "total_commits": 1,
+            "commits": [
+              {
+                "sha": "4444444444444444444444444444444444444444",
+                "commit": {
+                  "message": "feat: \u00e9"
+                }
+              }
+            ],
+            "files": [
+              {
+                "filename": "a.go",
+                "status": "modified"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "forgejo-enrich-release",
+      "host": "codeberg.org",
+      "repo": "ext/lib",
+      "tag": "v3",
+      "expected": {
+        "result": {
+          "ok": false,
+          "data": null
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://forgejo.example/api/v1/repos/up/stream/releases/tags/v1.0.0%2Bbuild.5 auth=1",
+    "GET https://codeberg.org/api/v1/repos/ext/lib/compare/v1...v2 auth=0",
+    "GET https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v3 auth=0"
+  ]
+}

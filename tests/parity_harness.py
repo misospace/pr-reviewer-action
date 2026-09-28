@@ -1193,6 +1193,72 @@ RELATED_CODE_BOUNDARY = Boundary(
 
 
 # ---------------------------------------------------------------------------
+# Boundary: change anchors (#706)
+# ---------------------------------------------------------------------------
+
+
+from repo_fixture import prepare_workspace  # noqa: E402
+
+
+def _resolve_change_anchors_fixture(fixture: dict[str, Any], workdir: Path) -> tuple[dict[str, Any], Path]:
+    """Inline a `related_code_fixture` reference (its `source_diff`,
+    `repo_files` and expected `anchors`), so the anchors that feed the
+    related-code boundary are proven to be what both extractors produce."""
+    resolved = {key: value for key, value in fixture.items() if key != "_path"}
+    name = fixture.get("related_code_fixture")
+    if name:
+        source = json.loads((FIXTURES / "related-code" / f"{name}.json").read_text(encoding="utf-8"))
+        resolved.setdefault("diff", source["source_diff"])
+        resolved.setdefault("repo_files", source["repo_files"])
+        resolved["expected_anchors"] = source["anchors"]
+    path = workdir / "change-anchors-fixture.json"
+    path.write_text(json.dumps(resolved, ensure_ascii=False), encoding="utf-8")
+    return resolved, path
+
+
+def _change_anchors_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    resolved, fixture_path = _resolve_change_anchors_fixture(fixture, workdir)
+    # Both sides see the same workspace path (prepared fresh for each), so
+    # CLI stderr that echoes it compares without relying on scrubbing.
+    workspace = workdir / "change-anchors-ws"
+    prepare_workspace(workspace, resolved)
+    old = run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_change_anchors.py"), str(fixture_path), str(workspace)],
+        workdir,
+        timeout=120,
+    )
+    prepare_workspace(workspace, resolved)
+    new = run_json_runner(
+        [node, "dist/index.js", "change-anchors-fixture", str(fixture_path)],
+        workdir,
+        timeout=120,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir), "PARITY_REPO_DIR": str(workspace)},
+    )
+    return old, new
+
+
+CHANGE_ANCHORS_BOUNDARY = Boundary(
+    id="change-anchors",
+    description=(
+        "#706 change-anchor parity: the v2 deterministic change-anchor "
+        "extractor (unified-diff parsing with C-quoted, renamed and deleted "
+        "paths; per-language symbols and imports; head-line verification; "
+        "#764 enclosing declarations and changed_lines; #791 changed keys, "
+        "branch keys and referenced counterparts; caps, low-value filters and "
+        "truncation flags; symlink/traversal-safe head reads; the persisted "
+        "JSON document and the CLI) versus the v3 TypeScript port, over "
+        "identical harness-prepared workspaces. Fixtures referencing a "
+        "related-code fixture also prove its anchors are the extractor output."
+    ),
+    fixtures_dir="change-anchors",
+    run=_change_anchors_run,
+)
+
+
+# ---------------------------------------------------------------------------
 # Boundary: image digest provenance (#675)
 # ---------------------------------------------------------------------------
 
@@ -1366,6 +1432,47 @@ METADATA_MARKERS_BOUNDARY = Boundary(
 )
 
 
+PLATFORM_NORMALIZATION_BOUNDARY = Boundary(
+    id="platform-normalization",
+    description=(
+        "#706 platform read-seam parity: raw GitHub REST/GraphQL and Forgejo "
+        "/api/v1 responses served to the real v2 seam (platform_api.sh jq "
+        "projections, forgejo_backend.py normalizers, the pr-files.json "
+        "projection, _gh_api_bounded) through stub gh/curl binaries, versus "
+        "the v3 adapters over an injected fetch serving the same routes. "
+        "Covers PR files, linked issues, conversation comments, review "
+        "threads, paginated reviews, external checks with self-exclusion and "
+        "bounded timeouts, linked-source enrichment, and the semantic-fixture "
+        "adapter; compares normalized values, byte-significant artifacts, and "
+        "the request log."
+    ),
+    fixtures_dir="platform-normalization",
+    run=lambda fixture, workdir: _run_new_boundary("v2_platform_normalization.py", "platform-normalization-fixture", fixture, workdir),
+)
+
+PROMPT_ASSEMBLY_BOUNDARY = Boundary(
+    id="prompt-assembly",
+    description=(
+        "#706 prompt and message layer parity: the real v2 shell functions "
+        "(resolve_system_prompt, apply_system_prompt_fragments, "
+        "apply_specialist_leads_fragment, build_user_message, "
+        "handle_model_failure, annotate_analysis_engine) sourced with each "
+        "fixture's env and presence files, versus the v3 src/prompt/ port "
+        "over the build-time-embedded prompt assets. Covers every fragment "
+        "gate on and off, verbosity, replace vs append with SYSTEM_PROMPT / "
+        "SYSTEM_PROMPT_FILE, specialist leads, classification steering, the "
+        "failure notice and the engine annotation; compares exact bytes "
+        "(plus sha256) of the system prompt and user message."
+    ),
+    fixtures_dir="prompt-assembly",
+    run=lambda fixture, workdir: _run_new_boundary("v2_prompt_assembly.py", "prompt-assembly-fixture", fixture, workdir),
+    error_categories=(
+        (re.compile(r"SYSTEM_PROMPT_FILE does not exist"), "system_prompt_file_missing"),
+        (re.compile(r"Traceback \(most recent call last\)|user message build failed"), "user_message_build_failed"),
+    ),
+    canonical_json_keys={"failure_notices", "engine_annotations"},
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1415,9 +1522,11 @@ NEW_BOUNDARIES = (
     SANITIZE_BOUNDARY,
     INLINE_FINDINGS_BOUNDARY,
     METADATA_MARKERS_BOUNDARY,
+    PLATFORM_NORMALIZATION_BOUNDARY,
+    PROMPT_ASSEMBLY_BOUNDARY,
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
 
 # ---------------------------------------------------------------------------
 # Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)

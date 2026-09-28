@@ -48,7 +48,7 @@ function buildHeaders(opts: RequestOptions, withAuth: boolean): Record<string, s
  *   tokens cannot cross origins, and the v2 curl transport also refuses to
  *   follow redirects, so this is fail-closed parity.
  */
-export async function requestText(url: string, opts: RequestOptions): Promise<{ status: number; text: string }> {
+export async function requestText(url: string, opts: RequestOptions): Promise<{ status: number; text: string; headers: Headers }> {
   const target = new URL(url);
   if (target.origin !== opts.allowedOrigin) {
     throw new PlatformRequestError(
@@ -81,7 +81,7 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
       "redirect-blocked",
     );
   }
-  return { status: response.status, text: await response.text() };
+  return { status: response.status, text: await response.text(), headers: response.headers };
 }
 
 export async function requestJson(url: string, opts: RequestOptions): Promise<{ status: number; data: unknown }> {

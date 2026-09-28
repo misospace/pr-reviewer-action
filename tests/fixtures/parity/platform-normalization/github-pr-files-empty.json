@@ -1,0 +1,29 @@
+{
+  "fixture": "github-pr-files-empty",
+  "description": "An empty PR file list projects to [].",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 9,
+  "routes": [
+    {
+      "match": "repos/o/r/pulls/9/files?per_page=100",
+      "body": []
+    }
+  ],
+  "calls": [
+    {
+      "op": "pr-files",
+      "total_changed_files": 0,
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": []
+        },
+        "text": "[]\n"
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://api.github.com/repos/o/r/pulls/9/files?per_page=100 auth=1"
+  ]
+}

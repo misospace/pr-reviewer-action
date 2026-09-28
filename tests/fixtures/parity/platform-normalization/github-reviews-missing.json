@@ -1,0 +1,21 @@
+{
+  "fixture": "github-reviews-missing",
+  "description": "The reviews endpoint 404s: the paginated read fails.",
+  "platform": "github",
+  "repo": "o/r",
+  "pr_number": 11,
+  "routes": [],
+  "calls": [
+    {
+      "op": "reviews-paginated",
+      "expected": {
+        "result": {
+          "ok": false
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://api.github.com/repos/o/r/pulls/11/reviews?per_page=100 auth=1"
+  ]
+}

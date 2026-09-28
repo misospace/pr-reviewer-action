@@ -1,0 +1,11 @@
+{
+  "fixture": "append-inline",
+  "description": "Append mode: the assembled default plus a blank line plus the inline addendum, whose own placeholder text survives (appended after substitution).",
+  "env": {
+    "SYSTEM_PROMPT_MODE": "append",
+    "SYSTEM_PROMPT": "Repo rule: {{VERBOSITY_GUIDANCE}} stays literal."
+  },
+  "files": {
+    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [], \"must_check\": []}"
+  }
+}

@@ -1,0 +1,15 @@
+{
+ "fixture": "caps-enclosing",
+ "description": "Enclosing caps: seven body-only edits in one file keep MAX_ENCLOSING_PER_FILE=5 (symbols_truncated), and four more files of five edits each exhaust MAX_ENCLOSING=20 across the artifact, so the last file keeps none and is flagged.",
+ "diff": "diff --git a/enc/one.py b/enc/one.py\nindex 1111111..2222222 100644\n--- a/enc/one.py\n+++ b/enc/one.py\n@@ -3 +3 @@\n-    return value\n+    return value + 1\n@@ -8 +8 @@\n-    return value\n+    return value + 1\n@@ -13 +13 @@\n-    return value\n+    return value + 1\n@@ -18 +18 @@\n-    return value\n+    return value + 1\n@@ -23 +23 @@\n-    return value\n+    return value + 1\n@@ -28 +28 @@\n-    return value\n+    return value + 1\n@@ -33 +33 @@\n-    return value\n+    return value + 1\ndiff --git a/enc/gen0.py b/enc/gen0.py\nindex 1111111..2222222 100644\n--- a/enc/gen0.py\n+++ b/enc/gen0.py\n@@ -3 +3 @@\n-    return y\n+    return y * 2\n@@ -8 +8 @@\n-    return y\n+    return y * 2\n@@ -13 +13 @@\n-    return y\n+    return y * 2\n@@ -18 +18 @@\n-    return y\n+    return y * 2\n@@ -23 +23 @@\n-    return y\n+    return y * 2\ndiff --git a/enc/gen1.py b/enc/gen1.py\nindex 1111111..2222222 100644\n--- a/enc/gen1.py\n+++ b/enc/gen1.py\n@@ -3 +3 @@\n-    return y\n+    return y * 2\n@@ -8 +8 @@\n-    return y\n+    return y * 2\n@@ -13 +13 @@\n-    return y\n+    return y * 2\n@@ -18 +18 @@\n-    return y\n+    return y * 2\n@@ -23 +23 @@\n-    return y\n+    return y * 2\ndiff --git a/enc/gen2.py b/enc/gen2.py\nindex 1111111..2222222 100644\n--- a/enc/gen2.py\n+++ b/enc/gen2.py\n@@ -3 +3 @@\n-    return y\n+    return y * 2\n@@ -8 +8 @@\n-    return y\n+    return y * 2\n@@ -13 +13 @@\n-    return y\n+    return y * 2\n@@ -18 +18 @@\n-    return y\n+    return y * 2\n@@ -23 +23 @@\n-    return y\n+    return y * 2\ndiff --git a/enc/gen3.py b/enc/gen3.py\nindex 1111111..2222222 100644\n--- a/enc/gen3.py\n+++ b/enc/gen3.py\n@@ -3 +3 @@\n-    return y\n+    return y * 2\n@@ -8 +8 @@\n-    return y\n+    return y * 2\n@@ -13 +13 @@\n-    return y\n+    return y * 2\n@@ -18 +18 @@\n-    return y\n+    return y * 2\n@@ -23 +23 @@\n-    return y\n+    return y * 2\n",
+ "repo_files": {
+  "enc/one.py": "def body_0_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_1_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_2_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_3_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_4_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_5_fn(a):\n    value = a\n    return value + 1\n\n\ndef body_6_fn(a):\n    value = a\n    return value + 1\n\n\n"
+ },
+ "repo_files_generated": [
+  {
+   "path": "enc/gen{i}.py",
+   "content": "def fn_a{i}(x):\n    y = x\n    return y * 2\n\n\ndef fn_b{i}(x):\n    y = x\n    return y * 2\n\n\ndef fn_c{i}(x):\n    y = x\n    return y * 2\n\n\ndef fn_d{i}(x):\n    y = x\n    return y * 2\n\n\ndef fn_e{i}(x):\n    y = x\n    return y * 2\n",
+   "count": 4
+  }
+ ]
+}

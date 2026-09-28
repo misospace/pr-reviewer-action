@@ -119,3 +119,20 @@ export {
 } from "./image-provenance.js";
 export { redactText } from "./redact.js";
 export { pyJsonDump } from "./py-json.js";
+export {
+  ARTIFACT_VERSION as CHANGE_ANCHORS_ARTIFACT_VERSION,
+  changeAnchorsCli,
+  detectLanguage as changeAnchorLanguage,
+  extractChangeAnchors,
+  loadFileList as loadChangeAnchorFileList,
+  readHeadLines as readChangeAnchorHeadLines,
+  renderChangeAnchorsJson,
+  type ChangeAnchor,
+  type ChangeAnchorCounterpart,
+  type ChangeAnchorFile,
+  type ChangeAnchorKey,
+  type ChangeAnchorsArtifact,
+  type ChangeAnchorsCliResult,
+  type ChangeAnchorSymbol,
+  type ExtractChangeAnchorsOptions,
+} from "./change-anchors.js";

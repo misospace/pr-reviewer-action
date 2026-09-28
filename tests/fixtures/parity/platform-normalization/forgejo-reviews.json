@@ -1,0 +1,116 @@
+{
+  "fixture": "forgejo-reviews",
+  "description": "Forgejo list-pr-reviews normalization (single request, paginate is a no-op): APPROVE->APPROVED, REQUEST_CHANGES->CHANGES_REQUESTED, lowercase state upper-cased, event fallback, COMMENT default, submitted_at falling back to updated_at, unicode bodies.",
+  "platform": "forgejo",
+  "repo": "o/r",
+  "pr_number": 5,
+  "routes": [
+    {
+      "match": "api/v1/repos/o/r/pulls/5/reviews",
+      "body": [
+        {
+          "id": 1,
+          "state": "APPROVE",
+          "body": "ok \ud83d\udc4d",
+          "user": {
+            "login": "alice"
+          },
+          "submitted_at": "2026-09-01T00:00:00Z",
+          "html_url": "h1"
+        },
+        {
+          "id": 2,
+          "state": "REQUEST_CHANGES",
+          "body": "caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+          "user": {
+            "login": "bob"
+          },
+          "updated_at": "2026-09-02T00:00:00Z"
+        },
+        {
+          "id": 3,
+          "state": "approved",
+          "body": "",
+          "user": {
+            "login": "carol"
+          }
+        },
+        {
+          "id": 4,
+          "state": "",
+          "event": "comment",
+          "user": {
+            "login": "dave"
+          }
+        },
+        {
+          "id": 5,
+          "body": "no state"
+        }
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "op": "reviews-paginated",
+      "expected": {
+        "result": {
+          "ok": true,
+          "data": [
+            {
+              "id": 1,
+              "body": "ok \ud83d\udc4d",
+              "state": "APPROVED",
+              "user": {
+                "login": "alice"
+              },
+              "submitted_at": "2026-09-01T00:00:00Z",
+              "html_url": "h1"
+            },
+            {
+              "id": 2,
+              "body": "caf\u00e9 \u4e2d\u6587 \u05e9\u05dc\u05d5\u05dd \ud83d\ude00 \ud83e\uddea line\u2028sep del\u007fchar",
+              "state": "CHANGES_REQUESTED",
+              "user": {
+                "login": "bob"
+              },
+              "submitted_at": "2026-09-02T00:00:00Z",
+              "html_url": ""
+            },
+            {
+              "id": 3,
+              "body": "",
+              "state": "APPROVED",
+              "user": {
+                "login": "carol"
+              },
+              "submitted_at": "",
+              "html_url": ""
+            },
+            {
+              "id": 4,
+              "body": "",
+              "state": "COMMENT",
+              "user": {
+                "login": "dave"
+              },
+              "submitted_at": "",
+              "html_url": ""
+            },
+            {
+              "id": 5,
+              "body": "no state",
+              "state": "COMMENT",
+              "user": {},
+              "submitted_at": "",
+              "html_url": ""
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expected_requests": [
+    "GET https://forgejo.example/api/v1/repos/o/r/pulls/5/reviews auth=1"
+  ]
+}

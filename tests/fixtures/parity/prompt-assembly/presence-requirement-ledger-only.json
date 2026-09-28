@@ -1,0 +1,7 @@
+{
+  "fixture": "presence-requirement-ledger-only",
+  "description": "Only requirement-ledger-present.txt: the ledger guidance alone is substituted.",
+  "files": {
+    "requirement-ledger-present.txt": "1\n"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "fixture": "verbosity-normal-explicit",
+  "description": "REVIEW_VERBOSITY=normal substitutes nothing.",
+  "env": {
+    "REVIEW_VERBOSITY": "normal"
+  }
+}

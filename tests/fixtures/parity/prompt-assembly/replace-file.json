@@ -1,0 +1,11 @@
+{
+  "fixture": "replace-file",
+  "description": "Replace mode with a custom SYSTEM_PROMPT_FILE: its content (trailing newlines stripped by $(<file)) replaces the default.",
+  "env": {
+    "SYSTEM_PROMPT_FILE": "prompts/custom review.md"
+  },
+  "files": {
+    "prompts/custom review.md": "# Repo reviewer\n\nReview only the diff.\n\n\n",
+    "classification.json": "{\"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [], \"must_check\": []}"
+  }
+}

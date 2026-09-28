@@ -1,0 +1,7 @@
+{
+  "fixture": "presence-review-threads-only",
+  "description": "Only review-threads-present.txt: its guidance alone is substituted.",
+  "files": {
+    "review-threads-present.txt": "3\n"
+  }
+}

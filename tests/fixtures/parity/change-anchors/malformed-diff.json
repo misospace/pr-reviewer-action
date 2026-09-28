@@ -1,0 +1,6 @@
+{
+ "fixture": "malformed-diff",
+ "description": "Malformed input degrades cleanly: lines before any header, a rejected diff --git header, lines outside hunks and a hunk header that does not parse are ignored; a hunk start in Arabic-Indic digits parses as Python int() does; every str.splitlines() terminator (CRLF, CR, VT, FS, U+2028, NEL) splits lines; ---/+++ headers are honored even mid-hunk; a Binary marker ends the hunk.",
+ "diff": "garbage before any header\n+def before_header():\ndiff --git nonsense\n+def after_bad_header():\ndiff --git a/src/ok.py b/src/ok.py\n+def outside_hunk():\n@@ bogus @@\n+def still_outside():\n@@ -1 +٣,2 @@ def context_in_header():\n x = 1\n+def arabic_digit_line():\n?malformed line inside hunk\n\\ No newline at end of file\n+def after_no_newline():\r\n+def after_crlf():\r+def after_cr():\u000b+def after_vt():\u001c+def after_fs(): +def after_ls():+def after_nel():\n--- a/src/ok.py\n+++ b/src/renamed_by_header.py\n+def after_late_header():\n@@ -1 +1 @@\n+--- not a header\n-+++ also removed\n+def final_line():\ndiff --git a/src/bin.py b/src/bin.py\n@@ -1 +1 @@\n+def before_binary():\nBinary files a/src/bin.py and b/src/bin.py differ\n+def after_binary():\n",
+ "workspace": false
+}

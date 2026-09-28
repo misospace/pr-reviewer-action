@@ -1,0 +1,8 @@
+{
+  "fixture": "context-dials-off",
+  "description": "RELATED_CODE_CONTEXT=false and PR_THREAD_CONTEXT=FALSE drop both context guidances.",
+  "env": {
+    "RELATED_CODE_CONTEXT": "false",
+    "PR_THREAD_CONTEXT": "FALSE"
+  }
+}

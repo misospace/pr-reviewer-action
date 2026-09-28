@@ -1,0 +1,7 @@
+{
+  "fixture": "steering-python-iteration",
+  "description": "Python iteration semantics: a string risk_flags iterates characters, a string attribution slices to 5 characters, a dict must_check iterates keys; pr_kind false is 'unknown'.",
+  "files": {
+    "classification.json": "{\"pr_kind\": false, \"risk_flags\": \"ab\", \"risk_flags_with_files\": {\"a\": \"abcdefgh\"}, \"must_check\": {\"first check\": 1, \"second check\": 2}}"
+  }
+}
