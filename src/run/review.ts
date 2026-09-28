@@ -10,6 +10,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
 import { canonicalChangedFile } from "../context/types.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
+import { externalChecksConclusion } from "../precheck/decide.js";
 import { resolveStandardsFile } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import type { FetchLike } from "../platform/http.js";
@@ -311,39 +312,46 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("repo-map.md", "");
   }
 
-  // Linked issues + Linear (context.sh).
-  const linked = await buildLinkedIssueContext({
-    pr,
-    repo,
-    adapter: {
-      getIssue: (issueRepo: string, issueNumber: string): Promise<ReadResult<unknown>> => adapter.getIssue(issueRepo, issueNumber),
-    },
-    isForkPr: forkFlag,
-    linear: {
-      apiKey: env.LINEAR_API_KEY ?? "",
-      prefixes: env.LINEAR_ISSUE_PREFIXES ?? "",
-      timeoutSec: env.LINEAR_ISSUE_TIMEOUT_SEC ?? "20",
-      enableForForks: env.LINEAR_ENABLE_FOR_FORKS ?? "false",
-    },
-  });
-  for (const [name, data] of linked.artifacts) ws.write(name, data);
+  // PR-metadata-derived context (context.sh): linked issues + Linear, the
+  // requirement ledger, review threads and human reviews. Built here and
+  // again after the CI wait (#812), so edits made while CI runs are seen.
+  const buildMetadataContext = async (prRecord: typeof pr): Promise<Awaited<ReturnType<typeof buildLinkedIssueContext>>> => {
+    // Linked issues + Linear (context.sh).
+    const linkedResult = await buildLinkedIssueContext({
+      pr: prRecord,
+      repo,
+      adapter: {
+        getIssue: (issueRepo: string, issueNumber: string): Promise<ReadResult<unknown>> => adapter.getIssue(issueRepo, issueNumber),
+      },
+      isForkPr: forkFlag,
+      linear: {
+        apiKey: env.LINEAR_API_KEY ?? "",
+        prefixes: env.LINEAR_ISSUE_PREFIXES ?? "",
+        timeoutSec: env.LINEAR_ISSUE_TIMEOUT_SEC ?? "20",
+        enableForForks: env.LINEAR_ENABLE_FOR_FORKS ?? "false",
+      },
+    });
+    for (const [name, data] of linkedResult.artifacts) ws.write(name, data);
 
-  // Requirement ledger (context.sh): before the fragment gate that reads it.
-  const ledger = extractRequirementLedger({
-    prJson: pr,
-    linkedIssuesMarkdown: ws.readText("linked-issues.md"),
-    standardsText: standards.content === null ? null : Buffer.from(standards.content).toString("utf8"),
-    standardsRef: standards.resolved === null ? null : standards.resolved.split("/").pop() ?? standards.resolved,
-  });
-  const ledgerArtifact = ledgerToArtifact(ledger);
-  const ledgerJson = Buffer.from(`${pyJsonDumps(ledgerArtifact)}\n`, "utf8");
-  const ledgerMd = Buffer.from(renderRequirementLedgerMarkdown(ledgerArtifact), "utf8");
-  const ledgerPresence = requirementLedgerPresence(ledgerMd, ledgerJson, budgets.primary.maxCorpus);
-  for (const [name, data] of ledgerPresence.artifacts) ws.write(name, data);
+    // Requirement ledger (context.sh): before the fragment gate that reads it.
+    const ledger = extractRequirementLedger({
+      prJson: prRecord,
+      linkedIssuesMarkdown: ws.readText("linked-issues.md"),
+      standardsText: standards.content === null ? null : Buffer.from(standards.content).toString("utf8"),
+      standardsRef: standards.resolved === null ? null : standards.resolved.split("/").pop() ?? standards.resolved,
+    });
+    const ledgerArtifact = ledgerToArtifact(ledger);
+    const ledgerJson = Buffer.from(`${pyJsonDumps(ledgerArtifact)}\n`, "utf8");
+    const ledgerMd = Buffer.from(renderRequirementLedgerMarkdown(ledgerArtifact), "utf8");
+    const ledgerPresence = requirementLedgerPresence(ledgerMd, ledgerJson, budgets.primary.maxCorpus);
+    for (const [name, data] of ledgerPresence.artifacts) ws.write(name, data);
 
-  // Review threads + human reviews (context.sh).
-  await buildReviewThreadsSection(ws, adapter, env);
-  await buildHumanReviewsSection(ws, adapter, String(pr.headRefOid ?? ""), env);
+    // Review threads + human reviews (context.sh).
+    await buildReviewThreadsSection(ws, adapter, env);
+    await buildHumanReviewsSection(ws, adapter, String(prRecord.headRefOid ?? ""), env);
+    return linkedResult;
+  };
+  let linked = await buildMetadataContext(pr);
 
   // Manifest context (context.sh tail).
   const manifest = buildManifestContext(prFilesRaw, workspace);
@@ -457,8 +465,26 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     if (!outcome.ok) log("CI status gating exited non-zero; continuing (CI evidence is advisory)");
   }
 
+  // #812: the PR body, linked issues and thread context are re-read after
+  // the CI wait, so edits made while CI ran (push first, then update the
+  // body/issue) reach the model with no extra review. Only when the head is
+  // unchanged: a moved head supersedes this review anyway.
+  if (env.CI_GATE_ACTIVE === "true") {
+    const refreshed = await adapter.getPr().catch(() => null);
+    const next = refreshed === null || refreshed === undefined ? null : projectPr(refreshed, prNumber);
+    if (next !== null && String(next.headRefOid ?? "") === String(pr.headRefOid ?? "")) {
+      log("Refreshing PR metadata context after the CI wait");
+      Object.assign(pr, next);
+      ws.write("pr-object.json", pyJsonDumps(refreshed));
+      ws.write("pr.json", pyJsonDumps(pr));
+      ws.write("pr-body.txt", String(pr.body ?? ""));
+      linked = await buildMetadataContext(pr);
+      await buildPrThreadSection(ws, adapter, env);
+    }
+  }
+
   // Rebuild the corpus with both branches resolved (finalized CI evidence
-  // + any rendered specialist leads).
+  // + any rendered specialist leads + refreshed PR metadata).
   if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md")) {
     log("review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads");
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
@@ -629,6 +655,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // #810: the harness's own deterministic coverage record for the published
   // route (smart when escalated), never the model's claim.
   const partialCoverage = partialCoverageOf(safeJson(ws.read(enforcementHarness)));
+  // #812: the external-CI conclusion this verdict was reached against, folded
+  // exactly as the precheck re-check folds it. Only a carried
+  // request_changes is re-checked, so only it pays the read; a failed read
+  // omits the field and the precheck fails closed.
+  let ciState: string | undefined;
+  const reviewedHead = context.headSha || String(pr.headRefOid ?? "");
+  if (outputs.verdict === "request_changes" && reviewedHead !== "") {
+    const checks = await adapter.externalChecks(reviewedHead).catch(() => null);
+    if (checks !== null) ciState = externalChecksConclusion(checks);
+  }
   const marker = buildRunMetadataMarker({
     // The composite passes PR_HEAD_SHA; fall back to the fetched PR object's
     // head so the marker never claims a wrong binding.
@@ -647,6 +683,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     escalationReason: outputs.escalationReason,
     cacheHitRatio: outputs.cacheHitRatio,
     ...(partialCoverage ? { coverage: "partial", coverageStopReason: partialCoverage.stop_reason } : {}),
+    ...(ciState !== undefined ? { ciState } : {}),
   });
   return {
     outputs,

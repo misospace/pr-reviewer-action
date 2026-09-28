@@ -547,3 +547,89 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     cleanup();
   }
 });
+
+test("#812: PR body edited while CI runs reaches the model (post-CI metadata refresh)", async () => {
+  const requests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    requests.push(String(body));
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  let prBody = "Original description.";
+  const platform = mockPlatform();
+  const base = platform.getPr.bind(platform);
+  platform.getPr = async () => ({ ...(await base() as Record<string, unknown>), body: prBody }) as never;
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      // The author pushes, then edits the PR body while CI is still running.
+      ciGate: { file: "", envAllowlist: [], workload: async () => { prBody = "EDITED-DURING-CI description."; return 0; } },
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(readFileSync(join(runDir, "pr-body.txt"), "utf8"), "EDITED-DURING-CI description.");
+    const reviewRequest = requests.at(-1) ?? "";
+    assert.match(reviewRequest, /EDITED-DURING-CI/);
+    assert.doesNotMatch(reviewRequest, /Original description\./);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#812: a request_changes marker records the CI conclusion it was reached against", async () => {
+  let checksCalls = 0;
+  const platform = mockPlatform();
+  platform.externalChecks = async () => { checksCalls += 1; return [{ name: "build", state: "FAILURE" }]; };
+  const changes = await runWithVerdictOn(platform, { verdict: "request_changes", findings: [finding("major")] });
+  assert.equal(changes.outputs.verdict, "request_changes");
+  assert.match(changes.marker, /"ci_state":"failure"/);
+  assert.equal(checksCalls, 1);
+
+  // An approve is never re-checked by the precheck, so it pays no read.
+  checksCalls = 0;
+  const approve = await runWithVerdictOn(platform, { verdict: "approve", findings: [] });
+  assert.doesNotMatch(approve.marker, /ci_state/);
+  assert.equal(checksCalls, 0);
+
+  // A failed read omits the field (the precheck then fails closed).
+  platform.externalChecks = async () => null;
+  const unknown = await runWithVerdictOn(platform, { verdict: "request_changes", findings: [finding("major")] });
+  assert.doesNotMatch(unknown.marker, /ci_state/);
+});
+
+async function runWithVerdictOn(platform: PlatformReadAdapter, verdict: Record<string, unknown>): Promise<Awaited<ReturnType<typeof runReview>>> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(verdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    return await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k" },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: false,
+      quiet: true,
+    });
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
