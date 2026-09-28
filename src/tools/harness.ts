@@ -39,7 +39,7 @@ import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFram
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
-import { resolveToolMaxRequests, type EnvLike } from "./budget.js";
+import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
   STOP_BUDGET,
   adaptiveLoopBudgets,
@@ -47,6 +47,13 @@ import {
   extractToolCalls,
   type LoopOutcome,
 } from "./loop.js";
+import {
+  computePartialCoverage,
+  isBudgetStopReason,
+  loadChangedFilePaths,
+  loadSpecialistLeadRefs,
+  type PartialCoverage,
+} from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
 import { runProcess } from "../runtime/subprocess.js";
@@ -874,6 +881,13 @@ export type HarnessResult = Record<string, unknown> & {
   tool_request_budget?: number;
   tool_budget_source?: string;
   tool_budget_configured?: number | null;
+  /** #810: the PR-size signal the scaled default was derived from (omitted
+   * when every component was zero). */
+  tool_budget_size?: { changed_files: number; changed_lines: number; specialist_leads: number };
+  /** #810: deterministic partial-coverage record, present only when the
+   * loop stopped on a budget with changed files / specialist leads left
+   * unread (snake_case: persisted verbatim in the harness artifact). */
+  partial_coverage?: PartialCoverage;
   tool_loop_meta?: Record<string, unknown> | null;
 };
 
@@ -1336,6 +1350,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     compaction_summarize: outcome.compactionSummarize,
     compaction_truncate: outcome.compactionTruncate,
   };
+  // #810: on any budget stop, account from the loop's own call log which
+  // changed files and specialist leads were never read/resolved. A degraded
+  // run issued no calls at all and is reported through its own degraded
+  // path, not as a partial tool investigation.
+  if (!outcome.degraded) {
+    const coverage = computePartialCoverage(outcome, {
+      changedFiles: loadChangedFilePaths(deps.readText),
+      leads: loadSpecialistLeadRefs(deps.readText),
+    });
+    if (coverage !== null) input.result.partial_coverage = coverage;
+  }
   if (
     input.tier === "smart" &&
     (outcome.stopReason === "request-error" ||
@@ -1601,7 +1626,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   const corpusMaxBytesRaw = env.TOOL_CORPUS_MAX_BYTES || env.TOOL_PLANNING_MAX_CONTEXT_BYTES || "50000";
   const corpusMaxBytes = pyInt(corpusMaxBytesRaw, "TOOL_CORPUS_MAX_BYTES");
-  const maxRequests = resolveToolMaxRequests(tier, env);
+  // #810: the default budget scales with the PR (changed files/lines +
+  // specialist leads), floored at the tier default; explicit overrides in
+  // the env still win. Artifacts the harness cannot see simply leave the
+  // size signal at zero, which keeps the pre-#810 tier default.
+  const budgetSize = toolBudgetSizeFromArtifacts(deps.readText);
+  const maxRequests = resolveToolMaxRequests(tier, env, budgetSize);
   const requestTimeout = envIntBounded(env, "TOOL_REQUEST_TIMEOUT_SEC", 20, 1, 300);
 
   const allowedHostsRaw = env.ALLOWED_SOURCE_HOSTS ?? "github.com,api.github.com";
@@ -1619,6 +1649,13 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     tool_budget_source: maxRequests.source,
     tool_budget_configured: maxRequests.configured,
   };
+  if (budgetSize.changedFiles > 0 || budgetSize.changedLines > 0 || budgetSize.specialistLeads > 0) {
+    result.tool_budget_size = {
+      changed_files: budgetSize.changedFiles,
+      changed_lines: budgetSize.changedLines,
+      specialist_leads: budgetSize.specialistLeads,
+    };
+  }
 
   const corpusName = tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
   if (tier === "smart") result.tier = tier;

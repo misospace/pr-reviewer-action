@@ -321,3 +321,112 @@ test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds c
   assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "300" }, "smart"), [5, 300]);
   assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5" }, "primary"), [4, 600]);
 });
+
+// ---------------------------------------------------------------------------
+// #810: size-scaled budget + honest partial coverage
+// ---------------------------------------------------------------------------
+
+function specialistArtifact(role: string, leads: Array<{ file: string | null; message: string }>): string {
+  return JSON.stringify({
+    version: 1,
+    role,
+    leads: leads.map((l) => ({ severity: "major", category: "logic", file: l.file, line: 1, message: l.message })),
+    truncated: false,
+    truncation: { truncated: false, reasons: [], omitted_leads: 0, omitted_message_chars: 0, omitted_errors: 0 },
+    errors: [],
+  });
+}
+
+test("#810: a small PR's harness budget matches today's tier default", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "a.ts", status: "modified", additions: 20, deletions: 10, changes: 30 },
+    { filename: "b.ts", status: "modified", additions: 5, deletions: 5, changes: 10 },
+  ]));
+  const { result } = await runToolHarness(deps());
+  assert.equal(result.planning_error, "Missing review-corpus.truncated.md");
+  assert.equal(result.tool_request_budget, 16);
+  assert.equal(result.tool_budget_source, "tier-default");
+  assert.deepEqual(result.tool_budget_size, { changed_files: 2, changed_lines: 40, specialist_leads: 0 });
+});
+
+test("#810: a large PR's harness budget scales above the tier default, under the ceiling", async () => {
+  const { root, deps } = workspace();
+  const files = Array.from({ length: 40 }, (_, i) => ({
+    filename: `src/file${i}.ts`, status: "modified", additions: 100, deletions: 0, changes: 100,
+  }));
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify(files));
+  fs.writeFileSync(path.join(root, "specialist-correctness.json"), specialistArtifact("correctness", [
+    { file: "src/file1.ts", message: "lead one" },
+    { file: "src/file2.ts", message: "lead two" },
+    { file: null, message: "lead three" },
+  ]));
+  // 40 files → ceil(40/4)=10; 4000 lines → ceil(4000/400)=10; 3 leads → 6. 26 total.
+  const { result } = await runToolHarness(deps());
+  assert.equal(result.tool_request_budget, 26);
+  assert.equal(result.tool_budget_source, "size-scaled");
+  assert.equal(result.tool_budget_configured, null);
+  // An explicit operator value still outranks the derivation.
+  const overridden = await runToolHarness(deps({ env: { TOOL_MAX_REQUESTS: "5" } }));
+  assert.equal(overridden.result.tool_request_budget, 5);
+  assert.equal(overridden.result.tool_budget_source, "explicit");
+});
+
+test("#810: a budget-exhausted loop records the exact unread files and leads and persists them", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "src/a.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
+    { filename: "src/b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
+    { filename: "src/c.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
+  ]));
+  fs.writeFileSync(path.join(root, "specialist-security.json"), specialistArtifact("security", [
+    { file: "src/c.ts", message: "unvalidated input" },
+  ]));
+  fs.writeFileSync(path.join(root, "specialist-tests.json"), specialistArtifact("tests", [
+    { file: null, message: "new flag untested" },
+  ]));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.ts"), "export const a = 1;\n");
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src/a.ts"}'), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(transportCalls, 2);
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.native_loop_verdict_produced, true);
+  const coverage = result.partial_coverage;
+  assert.ok(coverage, "partial coverage must be recorded on a budget stop");
+  assert.equal(coverage.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(coverage.changed_files_total, 3);
+  assert.deepEqual(coverage.unread_files, ["src/b.ts", "src/c.ts"]);
+  assert.equal(coverage.leads_total, 2);
+  assert.deepEqual(coverage.unresolved_leads, [
+    { role: "security", file: "src/c.ts", excerpt: "unvalidated input" },
+    { role: "tests", file: null, excerpt: "new flag untested" },
+  ]);
+  // Persisted (redacted) in the harness artifact for the publish layer.
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.deepEqual(artifact.partial_coverage, coverage);
+});
+
+test("#810: a model-chosen stop leaves no partial-coverage record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "src/a.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
+    { filename: "src/b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
+  ]));
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src/a.ts"}'), openAiText("done investigating"), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.partial_coverage, undefined);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.partial_coverage, undefined);
+});

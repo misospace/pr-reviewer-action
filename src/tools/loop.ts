@@ -92,7 +92,9 @@ export interface LoopBudgets {
  * budget is used as-is. #701: the request budget is TIER-AWARE — the caller
  * resolves the effective budget from the route (primary ~16, smart ~32,
  * escalated up to 40 — see resolveToolMaxRequests in src/tools/budget.ts) and
- * passes it in here.
+ * passes it in here. #810: without an explicit override that budget is
+ * scaled from the PR's changed files/lines and specialist leads, floored at
+ * the route's tier default.
  */
 export function adaptiveLoopBudgets(
   maxRounds: number,

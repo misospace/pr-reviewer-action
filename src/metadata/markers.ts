@@ -71,6 +71,11 @@ export interface RunMarkerContext {
   escalationReason?: string;
   /** Cache-hit-ratio step output; "-" or empty means absent. */
   cacheHitRatio?: string;
+  /** #810: "partial" when the tool loop stopped on a budget with changed
+   * files / specialist leads it never read; omitted for complete coverage. */
+  coverage?: string;
+  /** #810: the loop stop reason behind coverage: partial. */
+  coverageStopReason?: string;
 }
 
 /**
@@ -86,6 +91,8 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const route = context.reviewRoute ?? "";
   const esc = context.escalationReason ?? "";
   const chr = context.cacheHitRatio ?? "";
+  const cov = context.coverage ?? "";
+  const covStop = context.coverageStopReason ?? "";
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -102,6 +109,8 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     review_route: route === "" || route === "legacy" ? null : route,
     escalation_reason: esc === "" ? null : esc.split(","),
     cache_hit_ratio: cacheHitRatio,
+    coverage: cov === "" ? null : cov,
+    coverage_stop_reason: covStop === "" ? null : covStop,
   });
 }
 

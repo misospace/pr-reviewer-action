@@ -4,6 +4,7 @@ import {
   APPROVAL_FAILURE_GUIDANCE,
   evaluateApprovalGuardrails,
   publishReview,
+  renderPartialCoverageNotice,
   resolveCleanupFlag,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
@@ -266,4 +267,68 @@ test("Forgejo event mapping and fresh-diff inline position translation", async (
   assert.equal(result.ok, true);
   assert.equal(payloads[0]!.event, "APPROVED");
   assert.deepEqual(payloads[0]!.comments, [{ path: "a.ts", new_position: 2, body: "anchored" }]);
+});
+
+// ---------------------------------------------------------------------------
+// #810: partial-coverage notice and coverage: partial metadata marker
+// ---------------------------------------------------------------------------
+
+const PARTIAL_COVERAGE = {
+  stop_reason: "tool-call-budget-exhausted",
+  changed_files_total: 3,
+  unread_files: ["src/b.ts", "src/c.ts"],
+  leads_total: 2,
+  unresolved_leads: [
+    { role: "security", file: "src/c.ts", excerpt: "unvalidated input" },
+    { role: "tests", file: null, excerpt: "new flag untested" },
+  ],
+};
+
+test("#810: partial coverage renders the notice near the top and records it in the marker", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ partialCoverage: PARTIAL_COVERAGE }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  const body = api.sticky[0]!.body;
+  const noticeAt = body.indexOf("## Partial Coverage Notice");
+  assert.ok(noticeAt > -1, "notice section must be present");
+  // Near the top: after the engine line, before any model-produced text.
+  assert.ok(noticeAt > body.indexOf("_Analysis engine: test-engine_"));
+  assert.ok(noticeAt < body.indexOf("Safe."));
+  assert.match(body, /stopped on its budget \(`tool-call-budget-exhausted`\) before finishing/);
+  assert.match(body, /Changed files never read \(2 of 3\): `src\/b\.ts`, `src\/c\.ts`/);
+  assert.match(body, /Specialist leads never resolved \(2 of 2\): `security` \(`src\/c\.ts`\): unvalidated input; `tests` \(no file path\): new flag untested/);
+  assert.match(body, /Absence of findings in the unread paths is not evidence they are safe\./);
+  // The metadata marker carries coverage: partial plus the stop reason,
+  // appended after the existing keys (insertion order preserved).
+  const marker = body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(marker.includes('"coverage":"partial"'));
+  assert.ok(marker.includes('"coverage_stop_reason":"tool-call-budget-exhausted"'));
+  assert.ok(marker.indexOf('"cache_hit_ratio"') < marker.indexOf('"coverage"'));
+});
+
+test("#810: without partial coverage the body and marker stay byte-identical to the #680 shape", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input(), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(!body.includes("Partial Coverage Notice"));
+  const marker = body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(!marker.includes("coverage"));
+});
+
+test("#810: the notice caps long lists deterministically and escapes code-span content", () => {
+  const many = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
+  const notice = renderPartialCoverageNotice({
+    stop_reason: "max-rounds",
+    changed_files_total: 25,
+    unread_files: many,
+    leads_total: 1,
+    unresolved_leads: [{ role: "security", file: "src/`back`.ts", excerpt: "multi\nline\nmsg" }],
+  });
+  assert.match(notice, /`src\/f19\.ts`, … and 5 more/);
+  assert.ok(!notice.includes("src/f20.ts"));
+  assert.ok(!notice.includes("`src/`back`.ts`"));
+  assert.match(notice, /`src\/'back'\.ts`/);
+  assert.match(notice, /multi line msg/);
 });

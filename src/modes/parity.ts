@@ -182,6 +182,15 @@ export function runRequiredCheckCoverageMode(fixturePath: string): void {
  * (route, budget, source — #702 provenance). Like the v2 runner, an
  * expectation mismatch fails closed (ok:false) so the absolute tier
  * defaults are pinned, not just v2↔v3 agreement.
+ *
+ * #810: without a `size` argument the resolver yields exactly the
+ * pre-#810 tier default, so every fixture case — which carries env only,
+ * no workspace artifacts — stays in the range where the v2 flat default
+ * and the v3 size-scaled default agree (explicit values and the floor).
+ * The scaling itself is pinned by v3-only tests (tests-v3/budget.test.ts),
+ * deliberately NOT by new fixture cases: a size-driven case would need an
+ * approved v2↔v3 divergence, and the fixture set stays honest pinning the
+ * shared contract instead.
  */
 interface BudgetCase {
   name: string;

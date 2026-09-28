@@ -41,6 +41,13 @@ export interface MetadataOptions {
   review_route?: string | null;
   escalation_reason?: string[] | null;
   cache_hit_ratio?: number | null;
+  /** #810: "partial" when the tool loop stopped on a budget with unread
+   * evidence; omitted for complete coverage. Additive at the END of the
+   * insertion order — the marker is a positional wire format, so the
+   * existing keys keep their positions. */
+  coverage?: string | null;
+  /** #810: the loop stop reason behind coverage: partial. */
+  coverage_stop_reason?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -63,6 +70,14 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.cache_hit_ratio !== null && options.cache_hit_ratio !== undefined) {
     data.cache_hit_ratio = options.cache_hit_ratio;
+  }
+  // #810 additive keys: appended last so the pre-existing insertion order is
+  // untouched and older marker parsers ignore what they do not know.
+  if (options.coverage !== null && options.coverage !== undefined && options.coverage !== "") {
+    data.coverage = options.coverage;
+  }
+  if (options.coverage_stop_reason !== null && options.coverage_stop_reason !== undefined && options.coverage_stop_reason !== "") {
+    data.coverage_stop_reason = options.coverage_stop_reason;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

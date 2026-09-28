@@ -15,10 +15,11 @@
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
-import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble } from "../metadata/markers.js";
+import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, type CleanupLog } from "./cleanup.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
+import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -64,6 +65,11 @@ export interface PublishInput {
   rerunLabel?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
+  /** #810: deterministic partial-coverage record from the tool harness.
+   * When set, the published body carries the coverage notice near the top
+   * and the metadata marker records `coverage: partial` with the stop
+   * reason. Presentation beyond this notice is #811's. */
+  partialCoverage?: PartialCoverage;
 }
 
 export interface PublishResult {
@@ -93,14 +99,19 @@ export function sanitizeForPublication(
   );
 }
 
-/** Build the published body: marker preamble + engine line + the strict
- * state block (#811, when present) + sanitized review. */
+/** Build the published body: marker preamble + engine line + the optional
+ * action-owned #810 coverage notice + the strict state block (#811, when
+ * present) + sanitized review. Both blocks are inserted AFTER sanitization
+ * (action-owned, never model text) so no stripping pass can drop them, and
+ * sit near the top so a partial-coverage run cannot read as complete. */
 export function buildPublishedBody(options: {
   markers: string;
   header?: string;
   note?: string;
   analysisEngine: string;
   sanitizedMarkdown: string;
+  /** Rendered #810 tool-loop partial-coverage notice. */
+  coverageNotice?: string;
   /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
   stateBlock?: string | undefined;
 }): string {
@@ -112,11 +123,70 @@ export function buildPublishedBody(options: {
     lines.push(options.note, "");
   }
   lines.push(`_Analysis engine: ${options.analysisEngine}_`, "");
+  if (options.coverageNotice) {
+    lines.push(options.coverageNotice, "");
+  }
   if (options.stateBlock) {
     lines.push(options.stateBlock, "");
   }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Fence-safe single-line code span for untrusted-derived text (changed-file
+ * paths, specialist lead excerpts): backticks cannot be escaped inside a
+ * code span, so they (and control characters) are replaced, and the length
+ * is capped. Deterministic; biases toward rendering less rather than
+ * letting hostile content break the section out.
+ */
+function escapeCodeSpan(text: string, maxChars: number): string {
+  const singleLine = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
+  const stripped = [...singleLine].filter((ch) => ch.charCodeAt(0) >= 0x20).join("").trim();
+  return stripped.length > maxChars ? stripped.slice(0, maxChars) + "…" : stripped;
+}
+
+/**
+ * Render the #810 partial-coverage notice: a short, deterministic section
+ * stating which changed files and specialist leads the tool loop never read
+ * or resolved before a budget stopped it. Full presentation is #811's; this
+ * only makes the gap impossible to miss (and impossible for a
+ * partial-coverage review to pass as a plain clean approve).
+ */
+export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
+  const lines = [
+    "## Partial Coverage Notice",
+    "",
+    `> **This review is incomplete.** The evidence-gathering tool loop stopped on its budget ` +
+      `(\`${escapeCodeSpan(coverage.stop_reason, 80)}\`) before finishing.`,
+  ];
+  if (coverage.unread_files.length > 0) {
+    const listed = coverage.unread_files.slice(0, COVERAGE_NOTICE_MAX_ITEMS);
+    const more = coverage.unread_files.length - listed.length;
+    lines.push(
+      `> Changed files never read (${coverage.unread_files.length} of ` +
+        `${coverage.changed_files_total}): ` +
+        listed.map((path) => `\`${escapeCodeSpan(path, 200)}\``).join(", ") +
+        (more > 0 ? `, … and ${more} more` : ""),
+    );
+  }
+  if (coverage.unresolved_leads.length > 0) {
+    const listed = coverage.unresolved_leads.slice(0, COVERAGE_NOTICE_MAX_ITEMS);
+    const more = coverage.unresolved_leads.length - listed.length;
+    const items = listed.map((lead) =>
+      `\`${escapeCodeSpan(lead.role, 60)}\`` +
+      (lead.file ? ` (\`${escapeCodeSpan(lead.file, 200)}\`)` : " (no file path)") +
+      (lead.excerpt ? `: ${escapeCodeSpan(lead.excerpt, 120)}` : ""),
+    );
+    lines.push(
+      `> Specialist leads never resolved (${coverage.unresolved_leads.length} of ` +
+        `${coverage.leads_total}): ` +
+        items.join("; ") +
+        (more > 0 ? `; … and ${more} more` : ""),
+    );
+  }
+  lines.push("> Absence of findings in the unread paths is not evidence they are safe.");
+  return lines.join("\n");
 }
 
 /** Build inline review comments from structured findings against the diff.
@@ -389,14 +459,17 @@ export async function publishReview(
   // The marker's review_result. Under verdict_policy=strict (#811) it
   // distinguishes the non-blocking states (clean / findings / partial) from
   // issues, from the same still-open findings and coverage the strict
-  // mapping decided the verdict on. Every other policy keeps the binary
-  // clean/issues consumers rely on; the unchanged-diff carry-forward reads
-  // this field (findings/partial carry an approve).
+  // mapping decided the verdict on; a #810 tool-loop coverage gap is also
+  // `partial`. Every other policy keeps the binary clean/issues consumers
+  // rely on; the unchanged-diff carry-forward reads this field
+  // (findings/partial carry an approve).
   const strict = input.verdictPolicy === "strict";
-  const reviewResult: string = strict
+  let reviewResult: string = strict
     ? strictReviewResult(input.verdict, input.findings, input.requiredChecks)
     : input.verdict === "request_changes" ? "issues" : "clean";
-  const metadataMarker = buildRunMetadataMarker({
+  if (strict && input.partialCoverage && reviewResult !== "issues") reviewResult = "partial";
+  const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
+  const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
     reviewResult,
@@ -404,7 +477,14 @@ export async function publishReview(
     reviewRoute: input.reviewRoute,
     escalationReason: input.escalationReason,
     cacheHitRatio: input.cacheHitRatio,
-  });
+  };
+  if (input.partialCoverage) {
+    // #810: the marker records partial coverage additively; a complete run
+    // serializes byte-identically to the pre-#810 marker.
+    markerContext.coverage = "partial";
+    markerContext.coverageStopReason = input.partialCoverage.stop_reason;
+  }
+  const metadataMarker = buildRunMetadataMarker(markerContext);
   const markers = emitReviewMarkers((() => {
     const preamble: MarkerPreamble = { commentMarker: input.commentMarker, metadataMarker };
     if (input.headSha) preamble.headSha = input.headSha;
@@ -450,6 +530,7 @@ export async function publishReview(
         header: prefix,
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        coverageNotice,
         stateBlock: strict
           ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
@@ -464,6 +545,7 @@ export async function publishReview(
         header: "# AI Automated Review",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        coverageNotice,
         stateBlock: strict
           ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
@@ -497,6 +579,7 @@ export async function publishReview(
         note: "_Full PR review._",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
+        coverageNotice,
         stateBlock: strict
           ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,

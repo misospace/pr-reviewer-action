@@ -161,6 +161,54 @@ runs the real v2 harness resolver, and `src/tools/budget.ts` is the v3 port
 expectation mismatch, so #678 cannot regress to a single undifferentiated
 request ceiling.
 
+### Size-scaled default and honest partial coverage (#810)
+
+When no explicit override wins, the v3 default is **size-scaled**: it is
+derived from the PR's changed-file count, changed lines (additions +
+deletions, pr.json totals with the `pr-files.json` manifest as fallback),
+and the number of specialist leads across the `specialist-{role}.json`
+artifacts — `ceil(files/4) + ceil(lines/400) + 2*leads` — floored at the
+route's tier default and capped at the hard ceiling (50). The floor keeps a
+small PR's budget byte-identical to the pre-#810 tier default, and the
+existing wall-clock and per-round budgets still bind. Precedence is
+unchanged: `SMART_TOOL_MAX_REQUESTS` (smart/escalated) >
+`PRIMARY_TOOL_MAX_REQUESTS` (primary) > `tool_max_requests` > the
+size-scaled default. The derivation reads only diff sizes and lead counts —
+provider, model, and forge never enter it. When the scaled derivation does
+not exceed the tier default, the #702 provenance `source` stays
+`tier-default`; when it does, it reports `size-scaled` (a new
+`tool_budget_size` artifact field records the exact signal either way).
+
+The scaling is v3-only by design: the v2 resolver stays at the flat tier
+default until #681. The parity fixture deliberately pins only the range
+where both sides agree — its cases carry env only (no workspace artifacts),
+so both sides resolve the tier defaults, explicit values, and override
+precedence identically, and no approved divergence is needed. The scaling
+itself is pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness
+tests in `tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
+default is to be measured on `evals/corpus-human-findings.json` (3 runs per
+arm) before shipping; that measurement is the merge gate tracked in the PR.
+
+When the native loop stops on ANY budget — `tool-call-budget-exhausted`,
+`max-rounds`, or `wall-clock-exceeded` — the harness now also records a
+deterministic `partial_coverage` artifact field, folded from the loop's own
+executed-call log against the changed-file manifest and the specialist lead
+artifacts (never from the model): which changed files no successful
+workspace-content read covered (`read_file`/`git_blame` by exact path,
+`git_grep` by a file-scoped path or a match line — discovery, API, and web
+calls never count), and which specialist leads were never resolved (a lead
+resolves when its file was read; a lead without a file path reports as
+unresolved on a budget stop). A budget stop that left nothing unread
+records nothing. The publish layer renders this as a short, deterministic
+"Partial Coverage Notice" section near the top of the published body
+(inserted after sanitization, so it is action-owned and cannot be stripped
+or forged), and the metadata marker records it additively: two new keys,
+`coverage: "partial"` and `coverage_stop_reason`, appended at the END of
+the marker's fixed insertion order. Runs with complete coverage serialize
+byte-identically to the pre-#810 marker; the #680 `metadata-markers` parity
+fixtures need no divergence because they never set coverage. Presentation
+beyond the notice (e.g. demoting clean approves) is #811's.
+
 ## Retained outputs
 
 | v2 output | v3 output |
