@@ -50,193 +50,47 @@ jobs:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
           private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
 
-      - name: Review PR with reusable AI reviewer
+      - name: Set up Node 24
+        # Only to build the bundle below; the action itself runs on the
+        # runner's own node24 (`runs.using: node24`).
         if: github.event_name == 'pull_request'
-        id: review
-        # Dogfood: `$/` resolves to this repository at the running commit, so
-        # every PR is reviewed by its own in-flight action code instead of the
-        # last release — a PR that breaks the manifest or publish path now
-        # fails its own review before it can ship. Also ends the renovate
-        # self-pin churn. Requires runner >= 2.336.0
-        # (github.com hosted runners qualify; not available on GHES).
-        # Fork PRs never reach this step: the job-level `if` skips
-        # cross-repository PRs, which are reviewed by the separate
-        # privileged fork-ai-review workflow instead.
-        uses: $/
-        with:
-          github_token: ${{ steps.app-token.outputs.token }}
-          ai_primary_retries: "3"
-          ai_primary_retry_delay_sec: "15"
-          ai_base_url: ${{ vars.LITELLM_URL }}
-          ai_api_format: ${{ vars.PRIMARY_FORMAT }}
-          ai_model: ${{ vars.PRIMARY_MODEL }}
-          ai_api_key: ${{ secrets.LITELLM_API_KEY }}
-          ai_response_format: json_object
-          ai_fallback_base_url: ${{ vars.LITELLM_URL }}
-          ai_fallback_api_format: ${{ vars.FALLBACK_FORMAT }}
-          ai_fallback_model: ${{ vars.FALLBACK_MODEL }}
-          ai_fallback_api_key: ${{ secrets.LITELLM_API_KEY }}
-          ai_max_tokens: "32768"
-          review_routing_mode: auto
-          ai_smart_base_url: ${{ vars.LITELLM_URL }}
-          ai_smart_api_format: ${{ vars.SMART_FORMAT }}
-          ai_smart_model: ${{ vars.SMART_MODEL }}
-          ai_smart_api_key: ${{ secrets.LITELLM_API_KEY }}
-          context_limit_mode: normal
-          ci_status_check: "true"
-          ci_timeout_sec: "600"
-          deep_review: "true"
-          tool_mode: native_loop
-          tool_max_rounds: "4"
-          primary_tool_max_requests: "16"
-          tool_loop_wall_clock_sec: "600"
-          tool_turn_timeout_sec: "300"
-          tool_max_tokens_per_turn: "16000"
-          tool_max_response_bytes: "12000"
-          tool_allowed_gh_api_repos: misospace/pr-reviewer-action
-          tool_request_timeout_sec: "15"
-          tool_enable_for_forks: "false"
-          on_model_failure: notice
-          inline_findings: "true"
-          verdict_policy: findings_severity_gated
-          non_blocking_finding_categories: tests,docs,style,question
-          publish_mode: review_verdict
-          allow_approve: "true"
-
-      - name: Set up Node for the v3 shadow
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: 24
 
-      - name: Build v3 runtime (shadow)
-        # The #809 shadow comparison: build the v3 TypeScript runtime from
-        # the same checkout the v2 review just ran from, then re-run the
-        # review through the v3 entry beside v2. Dogfood only — nothing here
-        # publishes. A build failure fails the job like any other broken
-        # head; the shadow RUN itself is the diagnostic and never gates.
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
+      - name: Build the action bundle
+        # The action ships dist/ only on release tags (#787); this dogfood job
+        # reviews each PR with its own source, so it builds the bundle first.
+        # Consumers of a release tag need none of this.
+        if: github.event_name == 'pull_request'
         run: |
-          cd "$GITHUB_WORKSPACE"
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Run v3 shadow review (never publishes)
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
-        # Diagnostics, not a gate: a shadow failure uploads nothing and never
-        # blocks the merge (unlike the build step, which reflects the head).
-        continue-on-error: true
-        env:
-          # The v2 production run already consumed the shared env file; the
-          # shadow rebuilds its bindings from the same workflow sources.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          AI_BASE_URL: ${{ vars.LITELLM_URL }}
-          AI_API_FORMAT: ${{ vars.PRIMARY_FORMAT }}
-          AI_MODEL: ${{ vars.PRIMARY_MODEL }}
-          AI_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          AI_MAX_TOKENS: "32768"
-          AI_RESPONSE_FORMAT: json_object
-          AI_FALLBACK_BASE_URL: ${{ vars.LITELLM_URL }}
-          AI_FALLBACK_API_FORMAT: ${{ vars.FALLBACK_FORMAT }}
-          AI_FALLBACK_MODEL: ${{ vars.FALLBACK_MODEL }}
-          AI_FALLBACK_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          AI_PRIMARY_RETRIES: "3"
-          AI_PRIMARY_RETRY_DELAY_SEC: "15"
-          REVIEW_ROUTING_MODE: auto
-          AI_SMART_BASE_URL: ${{ vars.LITELLM_URL }}
-          AI_SMART_API_FORMAT: ${{ vars.SMART_FORMAT }}
-          AI_SMART_MODEL: ${{ vars.SMART_MODEL }}
-          AI_SMART_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          CONTEXT_LIMIT_MODE: normal
-          CI_STATUS_CHECK: "true"
-          CI_TIMEOUT_SEC: "600"
-          DEEP_REVIEW: "true"
-          TOOL_MODE: native_loop
-          TOOL_MAX_ROUNDS: "4"
-          PRIMARY_TOOL_MAX_REQUESTS: "16"
-          TOOL_LOOP_WALL_CLOCK_SEC: "600"
-          TOOL_TURN_TIMEOUT_SEC: "300"
-          TOOL_MAX_TOKENS_PER_TURN: "16000"
-          TOOL_MAX_RESPONSE_BYTES: "12000"
-          TOOL_ALLOWED_GH_API_REPOS: misospace/pr-reviewer-action
-          TOOL_REQUEST_TIMEOUT_SEC: "15"
-          TOOL_ENABLE_FOR_FORKS: "false"
-          ON_MODEL_FAILURE: notice
-          VERDICT_POLICY: findings_severity_gated
-          NON_BLOCKING_FINDING_CATEGORIES: tests,docs,style,question
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          SHADOW_DIR="$(mktemp -d "$RUNNER_TEMP/v3-shadow.XXXXXX")"
-          echo "$SHADOW_DIR" > "$RUNNER_TEMP/v3-shadow-dir"
-          PR_REVIEWER_RUN_DIR="$SHADOW_DIR" node scripts/v3_shadow_run.mjs run
-
-      - name: Compare v3 shadow against v2
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
-        # Same diagnostics-only contract as the run step.
-        continue-on-error: true
-        env:
-          SHADOW_V2_VERDICT: ${{ steps.review.outputs.verdict }}
-          SHADOW_V2_VERDICT_SOURCE: ${{ steps.review.outputs.verdict_source }}
-          SHADOW_V2_REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-          SHADOW_V2_ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-          SHADOW_V2_REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-          SHADOW_V2_ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
-          SHADOW_V2_CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
-          SHADOW_V2_FINDINGS: ${{ steps.review.outputs.findings }}
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir" 2>/dev/null || true)"
-          if [ -z "$SHADOW_DIR" ] || [ ! -d "$SHADOW_DIR" ]; then
-            echo "no shadow run directory; nothing to compare"
-            exit 0
-          fi
-          PR_REVIEWER_RUN_DIR="$SHADOW_DIR" SHADOW_REPORT="$SHADOW_DIR/shadow-comparison.md" node scripts/v3_shadow_run.mjs compare
-
-      - name: Upload v3 shadow run
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
-        # Diagnostics-only (continue-on-error): the run step may have failed
-        # before writing the shadow directory. The upload is a fixed
-        # allowlist of known-text artifacts the run itself produced — never
-        # a directory walk — so there is no symlink traversal, no binary
-        # content, and the secret scan runs over exactly those files with a
-        # fixed-string match on each token and its base64 form (GitHub also
-        # masks secret values in logs).
-        continue-on-error: true
-        env:
-          SHADOW_TOKENS: ${{ secrets.LITELLM_API_KEY }} ${{ steps.app-token.outputs.token }}
-        run: |
-          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir" 2>/dev/null || true)"
-          if [ -z "$SHADOW_DIR" ] || [ ! -d "$SHADOW_DIR" ]; then
-            echo "no shadow run directory; nothing to upload"
-            exit 0
-          fi
-          mkdir -p "$RUNNER_TEMP/v3-shadow-artifacts"
-          NAMES="shadow-comparison.md shadow-outputs.txt ai-output.json tool-harness.json review-corpus.truncated.md"
-          LEAKS=0
-          for name in $NAMES; do
-            [ -f "$SHADOW_DIR/$name" ] || continue
-            for token in $SHADOW_TOKENS; do
-              [ -n "$token" ] || continue
-              encoded="$(printf '%s' "$token" | base64 -w0)"
-              if grep -qF -e "$token" -e "$encoded" -- "$SHADOW_DIR/$name" 2>/dev/null; then
-                echo "::warning::redacting $name (contained a token value)"
-                rm -f -- "$SHADOW_DIR/$name"
-                LEAKS=$((LEAKS + 1))
-                break
-              fi
-            done
-          done
-          echo "secret scan: $LEAKS artifact(s) redacted"
-          for name in $NAMES; do
-            cp "$SHADOW_DIR/$name" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          done
-          echo "shadow run directory: $SHADOW_DIR"
-          # The report embeds PR-derived text: suspend workflow commands so
-          # it cannot inject ::commands:: into the job log.
-          STOP_TOKEN="shadow-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-          echo "::stop-commands::$STOP_TOKEN"
-          echo "shadow comparison:" && cat "$RUNNER_TEMP/v3-shadow-artifacts/shadow-comparison.md" 2>/dev/null || true
-          echo "::$STOP_TOKEN::"
+      - name: Review PR with reusable AI reviewer
+        if: github.event_name == 'pull_request'
+        id: review
+        # `$/` resolves to this repository at the running commit, so every PR
+        # is reviewed by its own in-flight action code. Requires runner
+        # >= 2.336.0 (github.com hosted runners qualify; not on GHES). Fork PRs
+        # never reach this step: the job-level `if` skips them.
+        uses: $/
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          ai-base-url: ${{ vars.LITELLM_URL }}
+          ai-api-format: ${{ vars.PRIMARY_FORMAT }}
+          ai-model: ${{ vars.PRIMARY_MODEL }}
+          ai-api-key: ${{ secrets.LITELLM_API_KEY }}
+          ai-response-format: json_object
+          ai-fallback-base-url: ${{ vars.LITELLM_URL }}
+          ai-fallback-api-format: ${{ vars.FALLBACK_FORMAT }}
+          ai-fallback-model: ${{ vars.FALLBACK_MODEL }}
+          ai-fallback-api-key: ${{ secrets.LITELLM_API_KEY }}
+          review-routing-mode: auto
+          ai-smart-base-url: ${{ vars.LITELLM_URL }}
+          ai-smart-api-format: ${{ vars.SMART_FORMAT }}
+          ai-smart-model: ${{ vars.SMART_MODEL }}
+          ai-smart-api-key: ${{ secrets.LITELLM_API_KEY }}
+          ci-timeout-sec: "600"
+          publish-mode: review_verdict
+          allow-approve: "true"

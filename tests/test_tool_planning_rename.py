@@ -47,9 +47,11 @@ _LEGACY_INPUT_NAMES = (
     "tool_planning_max_tokens",
 )
 _NEW_INPUT_NAMES = (
-    "tool_turn_timeout_sec",
-    "tool_corpus_max_bytes",
-    "tool_max_tokens_per_turn",
+    # Kebab-case public IDs since the #706 cutover (action.yml materializes
+    # the v3 contract).
+    "tool-turn-timeout-sec",
+    "tool-corpus-max-bytes",
+    "tool-max-tokens-per-turn",
 )
 _NEW_ENV_NAMES = (
     "TOOL_TURN_TIMEOUT_SEC",
@@ -70,10 +72,14 @@ _ALLOWED_LEGACY_ENV = {
     "scripts/sections/config.sh": 1,  # fallback default
 }
 _ALLOWED_LEGACY_INPUT = {
-    "action.yml": 3,  # declaration + two fallback expressions
-    "README.md": 1,  # deprecation row
+    # #706: action.yml declares only the new kebab IDs and the README table
+    # follows the contract, so the legacy INPUT names survive only as
+    # removed-field rows and the shell fallback reads (which are v2-oracle
+    # code now).
     "contracts/action-v3.yml": 3,  # each removed v2 input is listed once
     "docs/v3-migration.md": 3,  # each removed v2 input is listed once
+    "docs/v3-teardown-audit.md": 1,  # removed-input enumeration
+    "scripts/sections/config.sh": 1,  # v2 oracle fallback default
     "tests/test_action_v3_contract.py": 6,  # removed-field contract assertions
 }
 

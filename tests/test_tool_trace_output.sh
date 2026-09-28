@@ -19,7 +19,7 @@ check_contains "tool_calls output attributes primary calls" "$(cat "$REVIEW")" '
 check_contains "tool_calls output attributes smart calls" "$(cat "$REVIEW")" 'tier:"smart",tool,status'
 check_contains "step summary reports primary tool count" "$(cat "$REVIEW")" 'Primary tools | ${tool_call_count} executed'
 check_contains "step summary reports smart tool use" "$(cat "$REVIEW")" 'Smart tools |'
-check_contains "action exposes tool_calls output" "$(cat "$ACTION")" 'tool_calls:'
+check_contains "action exposes tool_calls output" "$(cat "$ACTION")" 'tool-calls:'
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

@@ -64,7 +64,7 @@ STEP_NAME="Export shared review environment"
 # From the step's `- name:` line up to (not including) the next step.
 step_section="$(awk '/^    - name: / { if (keep) exit; if ($0 ~ "name: " STEP_NAME) keep=1 } keep' STEP_NAME="$STEP_NAME" "$ACTION_YML")"
 precheck_section="$(awk '/name: Check whether review is needed/,/scripts\/check_review_needed.sh/' "$ACTION_YML")"
-review_section="$(awk '/name: Run AI review/,/scripts\/run_review.sh/' "$ACTION_YML")"
+review_section="$(awk '/name: Run AI review/,/dist\/index.js" run/' "$ACTION_YML")"
 action_content="$(cat "$ACTION_YML")"
 
 echo "=== step placement and mechanism ==="
@@ -114,11 +114,11 @@ for var in AI_MODEL TOOL_MODE DEEP_REVIEW SYSTEM_PROMPT; do
   check "$var is no longer duplicated in the precheck block" \
     "$(printf '%s\n' "$precheck_section" | grep -c "^        ${var}:" || true)" "0"
 done
-check_contains "AI_MODEL keeps its historical expression" "$step_section" 'AI_MODEL: ${{ inputs.ai_model }}'
-check_contains "TOOL_MODE keeps its historical expression" "$step_section" 'TOOL_MODE: ${{ inputs.tool_mode }}'
-check_contains "DEEP_REVIEW keeps its historical expression" "$step_section" 'DEEP_REVIEW: ${{ inputs.deep_review }}'
+check_contains "AI_MODEL keeps its historical expression" "$step_section" 'AI_MODEL: ${{ inputs.ai-model }}'
+check_contains "TOOL_MODE keeps its historical expression" "$step_section" 'TOOL_MODE: ${{ inputs.tool-mode }}'
+check_contains "DEEP_REVIEW keeps its historical expression" "$step_section" 'DEEP_REVIEW: ${{ inputs.deep-review }}'
 check_contains "REPO keeps its github-context fallback" "$step_section" 'REPO: ${{ inputs.repo || github.repository }}'
-check_contains "PR_NUMBER keeps its event fallback" "$step_section" 'PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}'
+check_contains "PR_NUMBER keeps its event fallback" "$step_section" 'PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}'
 
 echo ""
 echo "=== representative precheck-derived vars reach the review step via step env ==="

@@ -67,24 +67,19 @@ def test_contract_covers_every_retained_live_field_and_preserves_metadata():
 
     for kind in ("inputs", "outputs"):
         entries = contract[kind]
-        by_v2 = {entry["v2_id"]: entry for entry in entries}
+        by_id = {entry["id"]: entry for entry in entries}
         removed = {
             entry["v2_id"] for entry in contract["removed"] if entry["kind"] == kind
         }
         assert removed == expected_removed[kind]
-        assert set(by_v2) == set(live[kind]) - removed
-        assert len(by_v2) == len(entries)
+        # #706 cutover: the live action.yml keys ARE the contract IDs.
+        assert set(by_id) == set(live[kind])
+        assert len(by_id) == len(entries)
 
-        for old_id, spec in live[kind].items():
-            if old_id in removed:
-                continue
-            entry = by_v2[old_id]
-            assert entry["id"] == old_id.replace("_", "-")
-            divergence = CONTRACT_METADATA_DIVERGENCES.get(old_id, {})
-            if not divergence:
-                # An entry permits the description rewrite that documents
-                # the diverging default; anything not listed stays identical.
-                assert entry["description"] == spec["description"]
+        for public_id, spec in live[kind].items():
+            entry = by_id[public_id]
+            assert entry["id"] == public_id
+            assert entry["description"] == spec["description"]
             if kind == "inputs":
                 assert entry["required"] is spec.get("required", False)
                 if "default" in divergence:
@@ -125,29 +120,20 @@ def test_migration_tables_cover_all_contract_mappings():
         assert pairs == expected, f"{section} migration table differs from contract"
 
 
-def test_live_action_metadata_remains_v2_snake_case_until_cutover():
+def test_live_action_metadata_is_the_kebab_contract_after_cutover():
+    """#706 cutover: the live action.yml IS the v3 contract — kebab-case
+    public IDs, removed inputs gone (never aliased), dogfood workflow
+    consuming the kebab API."""
     live = yaml.safe_load((ROOT / "action.yml").read_text())
     contract = _load()
-    deprecated_v2_inputs = {
-        "tool_planning_timeout_sec",
-        "tool_planning_max_context_bytes",
-        "tool_planning_max_tokens",
-        "escalate_on_incomplete_required_checks",
-        "escalate_on_fast_request_changes",
-        "escalate_on_fast_low_confidence",
-        "escalate_on_tool_or_evidence_blockers",
-        "escalate_on_tool_planning_failure",
-    }
-    incremental_removals = {
-        entry["v2_id"] for entry in contract["removed"] if entry["kind"] == "inputs"
-    } - deprecated_v2_inputs
-    assert set(live["inputs"]) == {
-        entry["v2_id"] for entry in contract["inputs"]
-    } | deprecated_v2_inputs
-    assert not (incremental_removals & set(live["inputs"]))
-    assert set(live["outputs"]) == {entry["v2_id"] for entry in contract["outputs"]}
-    assert all("-" not in name for kind in ("inputs", "outputs") for name in live[kind])
-    assert "with:\n          github_token:" in (ROOT / ".github/workflows/ai-pr-review.yaml").read_text()
+    assert set(live["inputs"]) == {entry["id"] for entry in contract["inputs"]}
+    assert set(live["outputs"]) == {entry["id"] for entry in contract["outputs"]}
+    assert all("_" not in name for kind in ("inputs", "outputs") for name in live[kind])
+    removed_v2 = {entry["v2_id"] for entry in contract["removed"] if entry["kind"] == "inputs"}
+    assert not (removed_v2 & set(live["inputs"]))
+    dogfood = (ROOT / ".github/workflows/ai-pr-review.yaml").read_text()
+    assert "with:\n          github-token:" in dogfood
+    assert not re.search(r"^\s+github_token:", dogfood, re.M)
 
 
 # Credential/endpoint/operator-ceiling inputs (#777): repository config must

@@ -25,7 +25,7 @@ def parse_action_inputs():
             break
         # Match input name definitions (top-level keys under inputs:)
         if in_inputs_section:
-            m = re.match(r"^  (\w+):\s*$", line)
+            m = re.match(r"^  ([a-z][a-z0-9-]*):\s*$", line)
             if m:
                 inputs.add(m.group(1))
     return inputs
@@ -54,8 +54,9 @@ def parse_readme_inputs():
             if line.strip() and not line.startswith("|"):
                 in_table = False
                 continue
-            # Match input name in backticks: | `input_name` |
-            m = re.search(r"\| \s*`(\w+)`\s*\|", line)
+            # Match the input name in the FIRST column (kebab after the
+            # #706 cutover): | `input-name` |
+            m = re.match(r"\|\s*`([a-z][a-z0-9-]*)`\s*\|", line)
             if m:
                 inputs.add(m.group(1))
     return inputs
@@ -107,7 +108,7 @@ def test_removed_incremental_contract_is_migration_only():
         for example in (_REPO_ROOT / "examples").glob("*.yml"):
             assert not re.search(rf"^\s*{name}:\s*", example.read_text(), re.M), example
     assert "review_scope: auto|incremental|full" in migration
-    assert "skip_if_diff_unchanged" in migration
+    assert "`skip-if-diff-unchanged`" in migration or "skip_if_diff_unchanged" in migration
     assert "Stop reading the removed incremental outputs" in migration
 
 
@@ -203,7 +204,7 @@ def test_platform_resolution_centralized_in_precheck():
 def test_comment_marker_input_exists():
     """Verify comment_marker input is declared (regression test for #113)."""
     action_inputs = parse_action_inputs()
-    assert "comment_marker" in action_inputs, (
+    assert "comment-marker" in action_inputs, (
         "comment_marker is documented in README and referenced in action.yml steps, "
         "but is not declared as an input in action.yml."
     )
@@ -220,15 +221,15 @@ def test_fallback_inputs_inherit_from_primary():
     content = (_REPO_ROOT / "action.yml").read_text()
 
     # Check AI_FALLBACK_BASE_URL inherits from ai_base_url
-    assert "AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url || inputs.ai_base_url }}" in content, (
+    assert "AI_FALLBACK_BASE_URL: ${{ inputs.ai-fallback-base-url || inputs.ai-base-url }}" in content, (
         "AI_FALLBACK_BASE_URL must inherit from ai_base_url when blank"
     )
     # Check AI_FALLBACK_API_FORMAT inherits from ai_api_format
-    assert "AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format || inputs.ai_api_format }}" in content, (
+    assert "AI_FALLBACK_API_FORMAT: ${{ inputs.ai-fallback-api-format || inputs.ai-api-format }}" in content, (
         "AI_FALLBACK_API_FORMAT must inherit from ai_api_format when blank"
     )
     # Check AI_FALLBACK_API_KEY inherits from ai_api_key
-    assert "AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key || inputs.ai_api_key }}" in content, (
+    assert "AI_FALLBACK_API_KEY: ${{ inputs.ai-fallback-api-key || inputs.ai-api-key }}" in content, (
         "AI_FALLBACK_API_KEY must inherit from ai_api_key when blank"
     )
 
@@ -286,20 +287,20 @@ def test_fail_on_request_changes_input():
 
     # Declared with a "false" default.
     m = re.search(
-        r"^  fail_on_request_changes:\n(?:^    .*\n)*?^    default: \"false\"\s*$",
+        r"^  fail-on-request-changes:\n(?:^    .*\n)*?^    default: \"false\"\s*$",
         content,
         re.MULTILINE,
     )
     assert m, (
-        "fail_on_request_changes must be declared in action.yml inputs with "
+        "fail-on-request-changes must be declared in action.yml inputs with "
         'default "false" so existing consumers see no behaviour change.'
     )
 
     # The gate step exists, is conditional on the input, and exits non-zero.
     gate_step = _extract_gate_step(content)
     assert (
-        "if: ${{ inputs.fail_on_request_changes == 'true' }}" in gate_step
-    ), "the gate step must be conditional on inputs.fail_on_request_changes."
+        "if: ${{ inputs.fail-on-request-changes == 'true' }}" in gate_step
+    ), "the gate step must be conditional on inputs.fail-on-request-changes."
     assert "exit 1" in gate_step, (
         "the gate step must exit non-zero when the verdict is request_changes."
     )

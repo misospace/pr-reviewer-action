@@ -216,9 +216,9 @@ check_not_contains "standalone CI wait step removed" \
 check_contains "CI timeout input forwarded to the review step" "$ACTION" 'CI_TIMEOUT_SEC:'
 check_contains "CI interval input forwarded to the review step" "$ACTION" 'CI_INTERVAL_SEC:'
 check_contains "ci_status_final output sourced from the review step" \
-  "$ACTION" 'value: ${{ steps.review.outputs.ci_status_final }}'
+  "$ACTION" 'value: ${{ steps.review.outputs.ci-status-final }}'
 check_contains "ci_status_skipped output sourced from the review step" \
-  "$ACTION" 'value: ${{ steps.review.outputs.ci_status_skipped }}'
+  "$ACTION" 'value: ${{ steps.review.outputs.ci-status-skipped }}'
 
 echo ""
 echo "=== final corpus carries finalized CI evidence + usable specialist leads ==="

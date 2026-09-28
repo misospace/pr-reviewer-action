@@ -126,11 +126,11 @@ check "review_route output emitted" "$(grep -c '^echo "review_route=' "$ROOT_DIR
 check "precheck fingerprints routing mode" "$(grep -c '"REVIEW_ROUTING_MODE",' "$ROOT_DIR/pr_reviewer/precheck.py")" "1"
 check "precheck fingerprints escalate flags" "$(grep -c '"ESCALATE_ON_RISK_FLAGS",' "$ROOT_DIR/pr_reviewer/precheck.py")" "1"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
-check_contains "action.yml declares review_routing_mode" "$ACTION" "review_routing_mode:"
-check_contains "action.yml declares ai_smart_model" "$ACTION" "ai_smart_model:"
-check_contains "action.yml declares review_route output" "$ACTION" "review_route:"
+check_contains "action.yml declares review_routing_mode" "$ACTION" "review-routing-mode:"
+check_contains "action.yml declares ai_smart_model" "$ACTION" "ai-smart-model:"
+check_contains "action.yml declares review_route output" "$ACTION" "review-route:"
 check "publish step receives REVIEW_ROUTE" \
-  "$(grep -c 'REVIEW_ROUTE: \${{ steps.review.outputs.review_route }}' "$ROOT_DIR/action.yml")" "1"
+  "$(grep -c 'REVIEW_ROUTE: \${{ steps.review.outputs.review-route }}' "$ROOT_DIR/action.yml")" "1"
 check_contains "marker carries review_route" "$(cat "$ROOT_DIR/scripts/publish_helpers.sh")" "review_route"
 
 echo ""

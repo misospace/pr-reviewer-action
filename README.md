@@ -51,15 +51,15 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v2
+      - uses: misospace/pr-reviewer-action@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          ai_base_url: http://llama-server.internal:8080/v1
-          ai_model: qwen3-32b
-          publish_review_comment: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ai-base-url: http://llama-server.internal:8080/v1
+          ai-model: qwen3-32b
+          publish-review-comment: "true"
 ```
 
-**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3` (3.11 or newer), and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr_number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
+**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3` (3.11 or newer), and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr-number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
 
 ## 📚 Table of contents
 
@@ -166,7 +166,7 @@ These checklists exist to keep weaker local models honest on high-risk PRs: the 
 
 ### 📋 Required-check completeness validation
 
-A `must_check` item is a mandatory **review question**, not automatically an implementation requirement: the model records one structured disposition per item in the verdict's `required_check_dispositions` array — `satisfied`, `not_applicable` (requires a concise rationale grounded in the actual change), or `unresolved` — echoing the check text exactly. The action folds those dispositions against the deterministic list: every check `satisfied` or grounded `not_applicable` is `complete`; missing, duplicate, unknown, or malformed dispositions fail conservatively; invented checks are dropped, never credited. When the verdict carries no structured dispositions at all, a legacy shallow keyword match against `review_markdown` still decides (temporary coexistence behavior, removed when v3 enforcement migrates). Controlled by `validate_required_checks` (`auto` = validate when must_check is non-empty) and `required_check_validation_mode`:
+A `must_check` item is a mandatory **review question**, not automatically an implementation requirement: the model records one structured disposition per item in the verdict's `required_check_dispositions` array — `satisfied`, `not_applicable` (requires a concise rationale grounded in the actual change), or `unresolved` — echoing the check text exactly. The action folds those dispositions against the deterministic list: every check `satisfied` or grounded `not_applicable` is `complete`; missing, duplicate, unknown, or malformed dispositions fail conservatively; invented checks are dropped, never credited. When the verdict carries no structured dispositions at all, a legacy shallow keyword match against `review_markdown` still decides (temporary coexistence behavior, removed when v3 enforcement migrates). Controlled by `validate-required-checks` (`auto` = validate when must_check is non-empty) and `required-check-validation-mode`:
 
 - `warn` (default): an **Unaddressed required checks** section listing the unresolved items is appended to the published review, so a human sees exactly what the model skipped or left unresolved. The verdict is not changed.
 - `fail`: additionally forces a `request_changes` verdict.
@@ -180,9 +180,9 @@ When the linked issues, the PR description, or the repository standards file sta
 
 ### 🔬 Deep review specialist leads
 
-With `deep_review` enabled, the three fixed specialist roles (correctness / security / tests — a closed set, no custom roles) each run a bounded advisory pass concurrently. Rather than ingesting the full final-review corpus, the roles share one compact, deterministic **specialist corpus** built once per review from the collected artifacts (`scripts/build_specialist_corpus.py`, logic in `pr_reviewer/specialist_corpus.py`): PR metadata, deterministic classification, changed files, the PR diff, capped repository standards, the requirement ledger, related-code context, and concise evidence/CI results, in a documented survival priority order under a hard `deep_review_corpus_max_bytes` cap (default 48000). The explicit requirement ledger is **reserved**: its bytes are carved out of the budget before the general fill (mirroring the final review corpus), so a maximum-size ledger survives intact even beside a large changed-file list, diff, and standards. Low-signal final-synthesizer material (repo map, history, linked-source bodies, image provenance) is excluded on purpose, so the corpus is materially smaller than the final review corpus without weakening any specialist contract. Each role's completion budget is independently capped by `deep_review_max_tokens` (default 4096), not `ai_max_tokens`. The final review corpus and the final reviewer's budgets are unchanged. Their structured leads are normalized (`pr_reviewer/specialists.py`, severity capped below a blocker) and the normalized artifacts (`specialist-<role>.json` plus the aggregate `specialists.json`, which also records `specialist_corpus_bytes`, `specialist_max_tokens`, per-role elapsed time, and provider usage tokens when exposed) are rendered into a bounded **Specialist Review Leads** corpus section (`specialists.md`): a reserved block carved out of the corpus budget and appended **last**, after the requirement ledger (authority order: standards > ledger > advisory leads), so specialist content can never evict higher-authority material. The section is capped by the `SPECIALISTS_SECTION_MAX_BYTES` env knob (default 12000; a hard UTF-8 byte cap, dropped when it cannot fit) and is emitted only when at least one usable lead survives. Its presence signal (`specialist-leads-present.txt`) gates the final-review guidance in the bundled default prompt in lockstep, so the guidance is never enabled without the section reaching the model. The leads are **advisory only**: the final reviewer verifies each lead against the PR/repository evidence before adopting it, discards leads it cannot support, merges overlapping leads across roles, and never raises or escalates an issue merely because a specialist did — a specialist's severity is never enforcement (specialist major ≠ blocker), and the verdict, findings schema, and enforcement policy remain the final reviewer's alone. When `deep_review` is disabled the corpus stays byte-identical to a build without deep review, and no specialist-corpus work is performed.
+With `deep-review` enabled, the three fixed specialist roles (correctness / security / tests — a closed set, no custom roles) each run a bounded advisory pass concurrently. Rather than ingesting the full final-review corpus, the roles share one compact, deterministic **specialist corpus** built once per review from the collected artifacts (`scripts/build_specialist_corpus.py`, logic in `pr_reviewer/specialist_corpus.py`): PR metadata, deterministic classification, changed files, the PR diff, capped repository standards, the requirement ledger, related-code context, and concise evidence/CI results, in a documented survival priority order under a hard `deep-review-corpus-max-bytes` cap (default 48000). The explicit requirement ledger is **reserved**: its bytes are carved out of the budget before the general fill (mirroring the final review corpus), so a maximum-size ledger survives intact even beside a large changed-file list, diff, and standards. Low-signal final-synthesizer material (repo map, history, linked-source bodies, image provenance) is excluded on purpose, so the corpus is materially smaller than the final review corpus without weakening any specialist contract. Each role's completion budget is independently capped by `deep-review-max-tokens` (default 4096), not `ai-max-tokens`. The final review corpus and the final reviewer's budgets are unchanged. Their structured leads are normalized (`pr_reviewer/specialists.py`, severity capped below a blocker) and the normalized artifacts (`specialist-<role>.json` plus the aggregate `specialists.json`, which also records `specialist_corpus_bytes`, `specialist_max_tokens`, per-role elapsed time, and provider usage tokens when exposed) are rendered into a bounded **Specialist Review Leads** corpus section (`specialists.md`): a reserved block carved out of the corpus budget and appended **last**, after the requirement ledger (authority order: standards > ledger > advisory leads), so specialist content can never evict higher-authority material. The section is capped by the `SPECIALISTS_SECTION_MAX_BYTES` env knob (default 12000; a hard UTF-8 byte cap, dropped when it cannot fit) and is emitted only when at least one usable lead survives. Its presence signal (`specialist-leads-present.txt`) gates the final-review guidance in the bundled default prompt in lockstep, so the guidance is never enabled without the section reaching the model. The leads are **advisory only**: the final reviewer verifies each lead against the PR/repository evidence before adopting it, discards leads it cannot support, merges overlapping leads across roles, and never raises or escalates an issue merely because a specialist did — a specialist's severity is never enforcement (specialist major ≠ blocker), and the verdict, findings schema, and enforcement policy remain the final reviewer's alone. When `deep-review` is disabled the corpus stays byte-identical to a build without deep review, and no specialist-corpus work is performed.
 
-`deep_review` accepts three values (case-insensitive): `false` (default — no specialists), `true` (all three roles, exactly the v2.5 behavior), or `auto` (#633 — deterministic classifier-driven role selection, possibly zero). In `auto` mode the action picks roles from the classification data it already computed before the specialist phase — `pr_kind`, `risk_flags`, and the changed-file list (`pr_reviewer/role_selection.py`; no model call). The explicit selection mapping:
+`deep-review` accepts three values (case-insensitive): `false` (default — no specialists), `true` (all three roles, exactly the v2.5 behavior), or `auto` (#633 — deterministic classifier-driven role selection, possibly zero). In `auto` mode the action picks roles from the classification data it already computed before the specialist phase — `pr_kind`, `risk_flags`, and the changed-file list (`pr_reviewer/role_selection.py`; no model call). The explicit selection mapping:
 
 | Role | Selected when (pr_kind / risk_flags) |
 | --- | --- |
@@ -194,7 +194,7 @@ Two documented zero-selection gates keep clearly trivial PRs from paying for spe
 
 When the classification gives no deterministic basis to skip a role — a missing or malformed `classification.json`, the classifier's `unknown`-kind failure placeholder, or an unrecognized kind — auto fails **conservatively**: all three roles run with an explicit per-role fallback reason. A selection problem can only over-scrutinize, never silently under-scrutinize.
 
-Fingerprinting: the `deep_review` value participates in the config fingerprint, so switching between `false`/`true`/`auto` invalidates stale managed comments. The selected roles also derive from inputs the diff fingerprint cannot see — linked-issue labels, and Linear state (the classifier maps Linear native priority 1 → `linked_priority_p0` and 2 → `linked_priority_p1`, and consumes Linear labels). In auto mode the precheck therefore hashes a bounded selection signature — PR title + body + linked refs with their fetched labels + configured Linear identifiers with their fetched priority/labels (`scripts/build_selection_fingerprint.py`, reusing the pipeline's own GitHub/Linear abstractions) — into the config-hash half of the fingerprint, so ref/label/priority/title/body changes invalidate a stale managed comment. The fingerprint path fails conservatively: if any required selection input cannot be determined (any linked-issue or Linear lookup failure, when Linear can affect classification), the run exports a per-run unique sentinel that can never match a stored marker and forces a fresh review — unresolved uncertainty is never silently omitted into a diff-unchanged skip.
+Fingerprinting: the `deep-review` value participates in the config fingerprint, so switching between `false`/`true`/`auto` invalidates stale managed comments. The selected roles also derive from inputs the diff fingerprint cannot see — linked-issue labels, and Linear state (the classifier maps Linear native priority 1 → `linked_priority_p0` and 2 → `linked_priority_p1`, and consumes Linear labels). In auto mode the precheck therefore hashes a bounded selection signature — PR title + body + linked refs with their fetched labels + configured Linear identifiers with their fetched priority/labels (`scripts/build_selection_fingerprint.py`, reusing the pipeline's own GitHub/Linear abstractions) — into the config-hash half of the fingerprint, so ref/label/priority/title/body changes invalidate a stale managed comment. The fingerprint path fails conservatively: if any required selection input cannot be determined (any linked-issue or Linear lookup failure, when Linear can affect classification), the run exports a per-run unique sentinel that can never match a stored marker and forces a fresh review — unresolved uncertainty is never silently omitted into a diff-unchanged skip.
 
 ### 🧼 Upstream link sanitizer
 
@@ -210,16 +210,16 @@ The prompt asks for this, and `scripts/strip_empty_conditional_sections.py` enfo
 
 ## 🎛️ Inputs
 
-Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. Everything else has a sensible default. Inputs are grouped by topic below — expand the sections you need.
+Only three inputs are required: `github-token`, `ai-base-url`, and `ai-model`. Everything else has a sensible default. Inputs are grouped by topic below — expand the sections you need.
 
 <details>
 <summary><b>Core</b> — token, repo, PR targeting</summary>
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `github_token` | GitHub token for PR and API access | Yes | - |
+| `github-token` | GitHub token for PR and API access | Yes | - |
 | `repo` | Repository in `owner/name` format | No | current repository |
-| `pr_number` | Pull request number | No | current `pull_request` number |
+| `pr-number` | Pull request number | No | current `pull_request` number |
 
 </details>
 
@@ -228,15 +228,15 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `ai_base_url` | Base URL of the primary AI API | Yes | - |
-| `ai_api_format` | Primary API request/response format: `openai` or `anthropic` | No | `openai` |
-| `ai_model` | Model name for the primary analysis pass | Yes | - |
-| `ai_api_key` | Optional API key for the primary AI endpoint. OpenAI format sends `Authorization: Bearer`; Anthropic format sends `x-api-key` | No | `""` |
-| `ai_max_tokens` | Maximum completion tokens for primary and fallback final review calls. Required by Anthropic-compatible APIs. **Reasoning models** (those that emit a thinking channel, e.g. Gemma) need this headroom — too low a cap is spent on reasoning, leaving empty content (`finish_reason=length`) so the verdict JSON fails to parse and the review needlessly escalates; raise to `16000`+ for verbose reasoners | No | `8192` |
-| `ai_temperature` | Sampling temperature for the review model. Empty string omits the field (some newer cloud models reject non-default temperature) | No | `0.1` |
-| `ai_response_format` | Structured-output mode for OpenAI-compatible endpoints (incl. LiteLLM): `off`, `json_object`, or `json_schema` (enforces the verdict/review_markdown schema). Ignored for `anthropic`. Improves reliability with smaller local models | No | `off` |
-| `ai_tokens_param` | Token-limit field name for OpenAI-compatible requests: `max_tokens` or `max_completion_tokens` (newer OpenAI reasoning models). Ignored for `anthropic` | No | `max_tokens` |
-| `anthropic_version` | `anthropic-version` header used for Anthropic-compatible requests | No | `2023-06-01` |
+| `ai-base-url` | Base URL of the primary AI API | Yes | - |
+| `ai-api-format` | Primary API request/response format: `openai` or `anthropic` | No | `openai` |
+| `ai-model` | Model name for the primary analysis pass | Yes | - |
+| `ai-api-key` | Optional API key for the primary AI endpoint. OpenAI format sends `Authorization: Bearer`; Anthropic format sends `x-api-key` | No | `""` |
+| `ai-max-tokens` | Maximum completion tokens for primary and fallback final review calls. Required by Anthropic-compatible APIs. **Reasoning models** (those that emit a thinking channel, e.g. Gemma) need this headroom — too low a cap is spent on reasoning, leaving empty content (`finish_reason=length`) so the verdict JSON fails to parse and the review needlessly escalates; raise to `16000`+ for verbose reasoners | No | `8192` |
+| `ai-temperature` | Sampling temperature for the review model. Empty string omits the field (some newer cloud models reject non-default temperature) | No | `0.1` |
+| `ai-response-format` | Structured-output mode for OpenAI-compatible endpoints (incl. LiteLLM): `off`, `json_object`, or `json_schema` (enforces the verdict/review_markdown schema). Ignored for `anthropic`. Improves reliability with smaller local models | No | `off` |
+| `ai-tokens-param` | Token-limit field name for OpenAI-compatible requests: `max_tokens` or `max_completion_tokens` (newer OpenAI reasoning models). Ignored for `anthropic` | No | `max_tokens` |
+| `anthropic-version` | `anthropic-version` header used for Anthropic-compatible requests | No | `2023-06-01` |
 
 </details>
 
@@ -245,13 +245,13 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `ai_fallback_base_url` | Optional fallback AI API base URL | No | `""` |
-| `ai_fallback_api_format` | Fallback API request/response format; defaults to `ai_api_format` when blank | No | `""` |
-| `ai_fallback_model` | Optional fallback model name | No | `""` |
-| `ai_fallback_api_key` | Optional API key for the fallback AI endpoint | No | `""` |
-| `ai_primary_retries` | Number of retries for the primary model | No | `8` |
-| `ai_primary_retry_delay_sec` | Delay between retries in seconds | No | `15` |
-| `on_model_failure` | Behavior when primary **and** fallback models fail: `fail` (fail the step) or `notice` (post a visible `request_changes` notice explaining the review could not run — never auto-approves) | No | `fail` |
+| `ai-fallback-base-url` | Optional fallback AI API base URL | No | `""` |
+| `ai-fallback-api-format` | Fallback API request/response format; defaults to `ai-api-format` when blank | No | `""` |
+| `ai-fallback-model` | Optional fallback model name | No | `""` |
+| `ai-fallback-api-key` | Optional API key for the fallback AI endpoint | No | `""` |
+| `ai-primary-retries` | Number of retries for the primary model | No | `8` |
+| `ai-primary-retry-delay-sec` | Delay between retries in seconds | No | `15` |
+| `on-model-failure` | Behavior when primary **and** fallback models fail: `fail` (fail the step) or `notice` (post a visible `request_changes` notice explaining the review could not run — never auto-approves) | No | `fail` |
 
 </details>
 
@@ -260,13 +260,13 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `verdict_policy` | How the final verdict is decided: `model` (the model's own verdict) or `findings_severity_gated` (one-way escalation: model request_changes is preserved; blocker findings can escalate approve to request_changes; non-blocker findings never weaken a rejection). Enforcement settings still apply afterwards | No | `model` |
-| `non_blocking_finding_categories` | Comma-separated finding categories (`tests`, `docs`, `style`, `question`, `performance`, `bug`, `other`; `security` is never allowed) that cannot request changes on their own under `verdict_policy: findings_severity_gated`: their blocker/major findings are capped at minor, and a model `request_changes` backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under `verdict_policy: model`. Empty disables it | No | empty |
-| `fail_on_request_changes` | Fail the action step when the final verdict is `request_changes`, so the review can act as a CI merge gate without a GitHub App. Runs **after** publishing, so the review comment and inline findings still land on the PR. Reads the same final verdict the `verdict` output reports (post-`verdict_policy`, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. `on_model_failure: notice` still passes — a model outage produces no verdict and must not wedge merges; only an actual `request_changes` fails the step | No | `false` |
-| `inline_findings` | Attach diff-anchorable structured findings as native line-anchored review comments in `review_comment`/`review_verdict` modes. Ignored for `comment` mode | No | `false` |
-| `inline_findings_max` | Maximum inline review comments per review when `inline_findings=true` | No | `20` |
-| `validate_required_checks` | Validate the final review against the classifier's `must_check` items: `auto` (when must_check is non-empty), `true`, or `false` | No | `auto` |
-| `required_check_validation_mode` | Action on unaddressed required checks: `warn` (append a section to the review), `fail` (also force `request_changes`), or `metadata_only` | No | `warn` |
+| `verdict-policy` | How the final verdict is decided: `model` (the model's own verdict) or `findings_severity_gated` (one-way escalation: model request_changes is preserved; blocker findings can escalate approve to request_changes; non-blocker findings never weaken a rejection). Enforcement settings still apply afterwards | No | `model` |
+| `non-blocking-finding-categories` | Comma-separated finding categories (`tests`, `docs`, `style`, `question`, `performance`, `bug`, `other`; `security` is never allowed) that cannot request changes on their own under `verdict_policy: findings_severity_gated`: their blocker/major findings are capped at minor, and a model `request_changes` backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under `verdict_policy: model`. Empty disables it | No | empty |
+| `fail-on-request-changes` | Fail the action step when the final verdict is `request_changes`, so the review can act as a CI merge gate without a GitHub App. Runs **after** publishing, so the review comment and inline findings still land on the PR. Reads the same final verdict the `verdict` output reports (post-`verdict-policy`, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. `on_model_failure: notice` still passes — a model outage produces no verdict and must not wedge merges; only an actual `request_changes` fails the step | No | `false` |
+| `inline-findings` | Attach diff-anchorable structured findings as native line-anchored review comments in `review_comment`/`review_verdict` modes. Ignored for `comment` mode | No | `false` |
+| `inline-findings-max` | Maximum inline review comments per review when `inline_findings=true` | No | `20` |
+| `validate-required-checks` | Validate the final review against the classifier's `must_check` items: `auto` (when must_check is non-empty), `true`, or `false` | No | `auto` |
+| `required-check-validation-mode` | Action on unaddressed required checks: `warn` (append a section to the review), `fail` (also force `request_changes`), or `metadata_only` | No | `warn` |
 
 </details>
 
@@ -275,21 +275,16 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `review_routing_mode` | Route reviews between the primary and smart models from the classification: `off` (existing primary/fallback behavior) or `auto` | No | `off` |
-| `ai_primary_model` | Model for the primary route in `auto` mode; defaults to `ai_model` | No | `""` |
-| `ai_primary_base_url` | Base URL for the primary route model; defaults to `ai_base_url` | No | `""` |
-| `ai_primary_api_format` | API format for the primary route model; defaults to `ai_api_format` | No | `""` |
-| `ai_primary_api_key` | API key for the primary route model; defaults to `ai_api_key` | No | `""` |
-| `ai_smart_model` | Opt-in smarter model for high-risk reviews in `auto` mode. No default — when unset, auto-routing stays on the primary model and never escalates. The fallback model is never an escalation target | No | `""` |
-| `ai_smart_base_url` | Base URL for the smart model; defaults to `ai_base_url` | No | `""` |
-| `ai_smart_api_format` | API format for the smart model; defaults to `ai_api_format` | No | `""` |
-| `ai_smart_api_key` | API key for the smart model; defaults to `ai_api_key` | No | `""` |
-| `escalate_on_risk_flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode. Matched against `route_signals` (linked-issue flags + file-based signals backed by an actual changed filename), so a PR whose diff merely mentions a pattern does not route | No | security/priority/auth/route/file-serving/path/secret/db list |
-| `escalate_on_incomplete_required_checks` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only (the primary model's structured `smart_review_requested` verdict field). The value is ignored except for a startup notice | No | `false` |
-| `escalate_on_fast_request_changes` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `true` |
-| `escalate_on_fast_low_confidence` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `true` |
-| `escalate_on_tool_or_evidence_blockers` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. Evidence/tool blockers remain subject to deterministic enforcement. The value is ignored except for a startup notice | No | `true` |
-| `escalate_on_tool_planning_failure` | **Deprecated (#721)** — accepted for backward compatibility; post-primary smart escalation is now reviewer-requested only. The value is ignored except for a startup notice | No | `false` |
+| `review-routing-mode` | Route reviews between the primary and smart models from the classification: `off` (existing primary/fallback behavior) or `auto` | No | `off` |
+| `ai-primary-model` | Model for the primary route in `auto` mode; defaults to `ai-model` | No | `""` |
+| `ai-primary-base-url` | Base URL for the primary route model; defaults to `ai-base-url` | No | `""` |
+| `ai-primary-api-format` | API format for the primary route model; defaults to `ai-api-format` | No | `""` |
+| `ai-primary-api-key` | API key for the primary route model; defaults to `ai-api-key` | No | `""` |
+| `ai-smart-model` | Opt-in smarter model for high-risk reviews in `auto` mode. No default — when unset, auto-routing stays on the primary model and never escalates. The fallback model is never an escalation target | No | `""` |
+| `ai-smart-base-url` | Base URL for the smart model; defaults to `ai-base-url` | No | `""` |
+| `ai-smart-api-format` | API format for the smart model; defaults to `ai-api-format` | No | `""` |
+| `ai-smart-api-key` | API key for the smart model; defaults to `ai-api-key` | No | `""` |
+| `escalate-on-risk-flags` | Comma-separated `pr_kind`/`risk_flag` names that route to the smart model in `auto` mode. Matched against `route_signals` (linked-issue flags + file-based signals backed by an actual changed filename), so a PR whose diff merely mentions a pattern does not route | No | security/priority/auth/route/file-serving/path/secret/db list |
 
 </details>
 
@@ -298,14 +293,14 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `publish_review_comment` | Publish or update a managed PR comment | No | `false` |
-| `publish_mode` | Publish mode for the review verdict: `comment` (sticky PR comment, default), `review_comment` (non-blocking native PR review comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `comment` |
-| `allow_approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
-| `allow_repo_policy_overrides` | If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only. | No | `false` |
-| `approve_forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
-| `cleanup_previous_native_reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
-| `upstream_link_mode` | How upstream GitHub PR/issue/commit/compare URLs in the published review are handled: `inert` (default) rewrites them to plain text; `togithub` rewrites them to `https://togithub.com/...` so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) are inert in both modes. | No | `inert` |
-| `comment_marker` | HTML marker for the managed PR comment | No | `<!-- ai-pr-reviewer -->` |
+| `publish-review-comment` | Publish or update a managed PR comment | No | `false` |
+| `publish-mode` | Publish mode for the review verdict: `comment` (sticky PR comment, default), `review_comment` (non-blocking native PR review comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `comment` |
+| `allow-approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
+| `allow-repo-policy-overrides` | If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only. | No | `false` |
+| `approve-forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
+| `cleanup-previous-native-reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
+| `upstream-link-mode` | How upstream GitHub PR/issue/commit/compare URLs in the published review are handled: `inert` (default) rewrites them to plain text; `togithub` rewrites them to `https://togithub.com/...` so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) are inert in both modes. | No | `inert` |
+| `comment-marker` | HTML marker for the managed PR comment | No | `<!-- ai-pr-reviewer -->` |
 
 </details>
 
@@ -314,12 +309,12 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `system_prompt` | Optional system prompt override | No | bundled prompt |
-| `system_prompt_file` | File in the reviewed repo to use as the full system prompt | No | `""` |
-| `system_prompt_mode` | How a supplied prompt combines with the bundled default: `replace` (verbatim) or `append` (repo addendum on the conditionally-assembled default — no need to copy/re-sync the default) | No | `replace` |
-| `review_verbosity` | Output length of the bundled default prompt: `normal` or `concise` (~300-word target, blocker/major in prose only, no diff restatement) | No | `normal` |
-| `standards_file` | Explicit standards file path; takes priority over candidates | No | `""` |
-| `standards_file_candidates` | Candidate files checked in order; first found is used | No | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` |
+| `system-prompt` | Optional system prompt override | No | bundled prompt |
+| `system-prompt-file` | File in the reviewed repo to use as the full system prompt | No | `""` |
+| `system-prompt-mode` | How a supplied prompt combines with the bundled default: `replace` (verbatim) or `append` (repo addendum on the conditionally-assembled default — no need to copy/re-sync the default) | No | `replace` |
+| `review-verbosity` | Output length of the bundled default prompt: `normal` or `concise` (~300-word target, blocker/major in prose only, no diff restatement) | No | `normal` |
+| `standards-file` | Explicit standards file path; takes priority over candidates | No | `""` |
+| `standards-file-candidates` | Candidate files checked in order; first found is used | No | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` |
 
 </details>
 
@@ -328,27 +323,27 @@ Only three inputs are required: `github_token`, `ai_base_url`, and `ai_model`. E
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `context_limit_mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
-| `model_context_tokens` | The model's real context window in tokens (e.g. `8192`, `32768`). When set, corpus/diff/file byte budgets are derived from it (reserving `ai_max_tokens` for output) instead of `context_limit_mode`. Recommended for local models. Empty uses `context_limit_mode` | No | `""` |
-| `primary_model_context_tokens` | Primary review context window; empty inherits `model_context_tokens` or `context_limit_mode` | No | `""` |
-| `smart_model_context_tokens` | Smart escalation context window; empty inherits `model_context_tokens` or `context_limit_mode`. Explicit tier windows cap the derived corpus budget at 499998 bytes | No | `""` |
-| `primary_request_shape` | Primary review request layout: `default` (task before corpus) or `trailing_task` (task after corpus) | No | `default` |
-| `smart_request_shape` | Smart review request layout, independently selectable with the same modes | No | `default` |
-| `repo_map_context` | Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context | No | `true` |
-| `repo_map_max_bytes` | Maximum UTF-8 bytes for the final trust-framed repository-map section (review corpus + planning slot). The underlying Markdown artifact is rendered slightly smaller to leave room for the framing prefix, so the framed section always fits this cap | No | `12000` |
-| `enrichment_budget_sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
-| `image_digest_budget_sec` | Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. | No | `60` |
-| `allowed_source_hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
-| `related_code_context` | Include deterministic related-code references, test candidates, and nearest manifests derived from changed-file anchors | No | `true` |
-| `related_code_max_bytes` | Maximum bytes of related-code context included in the review corpus; values below `64` are clamped to `64` so the truncation marker remains readable | No | `16000` |
-| `pr_thread_context` | Include bounded recent PR conversation comments (thread context) in the review corpus. The action's own managed comments are filtered out, bodies are secret-redacted and fence-safe, and at most the 50 most recent comments are kept | No | `true` |
-| `pr_thread_max_bytes` | Maximum UTF-8 bytes of PR-thread context in the review corpus; whole comments are dropped to fit, so a fence is never left open | No | `8000` |
-| `review_threads_context` | Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus. The reviewer must disposition each listed thread as `fixed` (with evidence citing current code), `open`, or `disputed`; unsettled threads are re-emitted as findings | No | `true` |
-| `review_threads_max_bytes` | Maximum UTF-8 bytes of review-thread context in the review corpus; whole threads are dropped to fit, newest kept | No | `8000` |
-| `deep_review` | Opt-in specialist leads: `false` disables the phase (default), `true` runs all three fixed specialist roles (correctness / security / tests) concurrently over the compact specialist corpus reusing the primary model settings, and `auto` deterministically selects the roles worth running from the classification data — `pr_kind` / `risk_flags` / changed-file classes, no model call, possibly zero roles (see the deep-review section above for the explicit mapping). Each specialist's structured leads are parsed and normalized (severity capped below a blocker, bounded) and written to `specialist-<role>.json` + `specialists.json`. When enabled and at least one usable lead survives, the leads reach the final reviewer as a bounded, clearly advisory `# Specialist Review Leads` corpus section plus final-review guidance. Advisory only: the leads are unverified signals to verify, not findings — the reviewer verifies before adopting, and a specialist's severity is never enforcement by itself (specialist major ≠ blocker) and never flips the verdict. In `auto` mode skipped roles are telemetry (per-role reasons in `specialists.json`), not failures | No | `false` |
-| `deep_review_timeout_sec` | Maximum wall-clock seconds for the whole deep-review specialist phase (the selected roles run concurrently). Stragglers past the deadline are recorded as errors on their `specialist-<role>.json` / `specialists.json`; the review is never blocked or failed. Default 600 | No | `600` |
-| `deep_review_max_tokens` | Maximum completion tokens for each deep-review specialist role. Independent of `ai_max_tokens` (a narrow advisory scout returns a short structured JSON lead set), so the final reviewer's budget is unaffected. Default 4096 | No | `4096` |
-| `deep_review_corpus_max_bytes` | Hard UTF-8 byte cap on the compact, deterministic specialist corpus built once per review from the collected artifacts (PR metadata/classification, changed files, diff, capped standards, related-code, evidence/CI, requirement ledger) and shared by every specialist role. Independent of the final review corpus; the final corpus keeps its own bytes and budgets. Default 48000 | No | `48000` |
+| `context-limit-mode` | Context budget mode: `normal` (140k/70k/220k), `low` (80k/40k/120k), `minimal` (40k/20k/60k) | No | `normal` |
+| `model-context-tokens` | The model's real context window in tokens (e.g. `8192`, `32768`). When set, corpus/diff/file byte budgets are derived from it (reserving `ai-max-tokens` for output) instead of `context-limit-mode`. Recommended for local models. Empty uses `context-limit-mode` | No | `""` |
+| `primary-model-context-tokens` | Primary review context window; empty inherits `model-context-tokens` or `context-limit-mode` | No | `""` |
+| `smart-model-context-tokens` | Smart escalation context window; empty inherits `model-context-tokens` or `context-limit-mode`. Explicit tier windows cap the derived corpus budget at 499998 bytes | No | `""` |
+| `primary-request-shape` | Primary review request layout: `default` (task before corpus) or `trailing_task` (task after corpus) | No | `default` |
+| `smart-request-shape` | Smart review request layout, independently selectable with the same modes | No | `default` |
+| `repo-map-context` | Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context | No | `true` |
+| `repo-map-max-bytes` | Maximum UTF-8 bytes for the final trust-framed repository-map section (review corpus + planning slot). The underlying Markdown artifact is rendered slightly smaller to leave room for the framing prefix, so the framed section always fits this cap | No | `12000` |
+| `enrichment-budget-sec` | Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. | No | `60` |
+| `image-digest-budget-sec` | Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. | No | `60` |
+| `allowed-source-hosts` | Comma-separated allowlist for linked URL fetching | No | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` |
+| `related-code-context` | Include deterministic related-code references, test candidates, and nearest manifests derived from changed-file anchors | No | `true` |
+| `related-code-max-bytes` | Maximum bytes of related-code context included in the review corpus; values below `64` are clamped to `64` so the truncation marker remains readable | No | `16000` |
+| `pr-thread-context` | Include bounded recent PR conversation comments (thread context) in the review corpus. The action's own managed comments are filtered out, bodies are secret-redacted and fence-safe, and at most the 50 most recent comments are kept | No | `true` |
+| `pr-thread-max-bytes` | Maximum UTF-8 bytes of PR-thread context in the review corpus; whole comments are dropped to fit, so a fence is never left open | No | `8000` |
+| `review-threads-context` | Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus. The reviewer must disposition each listed thread as `fixed` (with evidence citing current code), `open`, or `disputed`; unsettled threads are re-emitted as findings | No | `true` |
+| `review-threads-max-bytes` | Maximum UTF-8 bytes of review-thread context in the review corpus; whole threads are dropped to fit, newest kept | No | `8000` |
+| `deep-review` | Opt-in specialist leads: `false` disables the phase (default), `true` runs all three fixed specialist roles (correctness / security / tests) concurrently over the compact specialist corpus reusing the primary model settings, and `auto` deterministically selects the roles worth running from the classification data — `pr_kind` / `risk_flags` / changed-file classes, no model call, possibly zero roles (see the deep-review section above for the explicit mapping). Each specialist's structured leads are parsed and normalized (severity capped below a blocker, bounded) and written to `specialist-<role>.json` + `specialists.json`. When enabled and at least one usable lead survives, the leads reach the final reviewer as a bounded, clearly advisory `# Specialist Review Leads` corpus section plus final-review guidance. Advisory only: the leads are unverified signals to verify, not findings — the reviewer verifies before adopting, and a specialist's severity is never enforcement by itself (specialist major ≠ blocker) and never flips the verdict. In `auto` mode skipped roles are telemetry (per-role reasons in `specialists.json`), not failures | No | `false` |
+| `deep-review-timeout-sec` | Maximum wall-clock seconds for the whole deep-review specialist phase (the selected roles run concurrently). Stragglers past the deadline are recorded as errors on their `specialist-<role>.json` / `specialists.json`; the review is never blocked or failed. Default 600 | No | `600` |
+| `deep-review-max-tokens` | Maximum completion tokens for each deep-review specialist role. Independent of `ai-max-tokens` (a narrow advisory scout returns a short structured JSON lead set), so the final reviewer's budget is unaffected. Default 4096 | No | `4096` |
+| `deep-review-corpus-max-bytes` | Hard UTF-8 byte cap on the compact, deterministic specialist corpus built once per review from the collected artifacts (PR metadata/classification, changed files, diff, capped standards, related-code, evidence/CI, requirement ledger) and shared by every specialist role. Independent of the final review corpus; the final corpus keeps its own bytes and budgets. Default 48000 | No | `48000` |
 
 </details>
 
@@ -359,18 +354,18 @@ GitHub/Forgejo issues referenced with `Fixes`/`Closes`/`Resolves` in the PR body
 
 ```yaml
 with:
-  linear_api_key: ${{ secrets.LINEAR_API_KEY }}
-  linear_issue_prefixes: DST,LAB
+  linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+  linear-issue-prefixes: DST,LAB
 ```
 
 A title such as `LAB-123: add Linear review context` then contributes that Linear issue's title, description, state, native priority, labels, and URL to the linked-issue review corpus. The adapter is deterministic and does not require `tool_mode: native_loop`. Native Linear priorities also feed deterministic model routing: **Urgent** maps to `linked_priority_p0` and **High** maps to `linked_priority_p1`, so `review_routing_mode: auto` can select the smart model without duplicate priority labels. Because review output may quote tracker content, use a least-privilege Linear key and enable this only when publishing that issue context to the PR is acceptable.
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `linear_api_key` | Linear personal API key used to fetch issue/spec context. Keep this in a GitHub Actions secret | No | `""` |
-| `linear_issue_prefixes` | Comma-separated Linear team keys recognized in PR titles, such as `DST,LAB`. Empty disables the adapter | No | `""` |
-| `linear_issue_timeout_sec` | Timeout in seconds for each Linear GraphQL issue lookup | No | `20` |
-| `linear_enable_for_forks` | Allow private Linear issue context to be fetched and published for cross-repository PRs. Disabled by default to prevent disclosure | No | `false` |
+| `linear-api-key` | Linear personal API key used to fetch issue/spec context. Keep this in a GitHub Actions secret | No | `""` |
+| `linear-issue-prefixes` | Comma-separated Linear team keys recognized in PR titles, such as `DST,LAB`. Empty disables the adapter | No | `""` |
+| `linear-issue-timeout-sec` | Timeout in seconds for each Linear GraphQL issue lookup | No | `20` |
+| `linear-enable-for-forks` | Allow private Linear issue context to be fetched and published for cross-repository PRs. Disabled by default to prevent disclosure | No | `false` |
 
 </details>
 
@@ -379,14 +374,14 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `evidence_providers_file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
-| `sarif_files` | Comma- or newline-delimited workspace-relative SARIF 2.1.0 files to include as evidence | No | `""` |
-| `sarif_max_findings` | Global maximum number of findings combined across all supplied SARIF files | No | `200` |
-| `evidence_provider_timeout_sec` | Default timeout in seconds for each evidence provider command | No | `30` |
-| `evidence_provider_max_output_bytes` | Max stdout or stderr bytes captured per provider command | No | `20000` |
-| `evidence_provider_parallelism` | Max evidence provider commands run concurrently (set `1` to force serial execution) | No | `4` |
-| `evidence_blocker_enforcement` | Force `request_changes` when any provider reports blocker severity | No | `false` |
-| `evidence_enable_for_forks` | Allow evidence providers on cross-repository PRs | No | `false` |
+| `evidence-providers-file` | Optional JSON file in the reviewed repo defining evidence provider commands | No | `""` |
+| `sarif-files` | Comma- or newline-delimited workspace-relative SARIF 2.1.0 files to include as evidence | No | `""` |
+| `sarif-max-findings` | Global maximum number of findings combined across all supplied SARIF files | No | `200` |
+| `evidence-provider-timeout-sec` | Default timeout in seconds for each evidence provider command | No | `30` |
+| `evidence-provider-max-output-bytes` | Max stdout or stderr bytes captured per provider command | No | `20000` |
+| `evidence-provider-parallelism` | Max evidence provider commands run concurrently (set `1` to force serial execution) | No | `4` |
+| `evidence-blocker-enforcement` | Force `request_changes` when any provider reports blocker severity | No | `false` |
+| `evidence-enable-for-forks` | Allow evidence providers on cross-repository PRs | No | `false` |
 
 </details>
 
@@ -395,31 +390,28 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `tool_mode` | Tool harness mode: `off` or `native_loop` (the `plan_execute_*` planner modes were removed in 2.0) | No | `off` |
-| `tool_max_requests` | Maximum tool requests executed in one harness run (total across the loop). Empty resolves a tier-aware budget from the review route: ~16 primary, ~32 smart route, up to 40 escalated. Precedence: `primary_tool_max_requests` (primary route) or `smart_tool_max_requests` (smart/escalated routes) > this input > tier default; explicit values are bounded to 1–50 | No | empty (tier-aware) |
-| `primary_tool_max_requests` | Request budget for the primary route only (1–50); outranks `tool_max_requests` on that route | No | empty (tier default) |
-| `smart_tool_max_requests` | Request budget for the smart and escalated routes only (1–50); outranks `tool_max_requests` on those routes | No | empty (tier defaults) |
-| `tool_max_rounds` | Round budget for `tool_mode=native_loop`: up to twice this (capped at 12) since a round is one model turn | No | `4` |
-| `tool_loop_wall_clock_sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `600` |
-| `tool_loop_summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
-| `tool_loop_summarize_max_tokens` | Maximum completion tokens for each result-summarization call when `tool_loop_summarize` is enabled | No | `512` |
-| `tool_turn_timeout_sec` | Timeout in seconds for each model turn of the `tool_mode=native_loop` exchange | No | `60` |
-| `tool_corpus_max_bytes` | Maximum corpus bytes passed into the `native_loop` conversation's first turn | No | `50000` |
-| `tool_max_tokens_per_turn` | Maximum completion tokens for each model turn of the `tool_mode=native_loop` exchange | No | `400` |
-| `tool_planning_timeout_sec` | **Deprecated** (removed in v3.0.0): use `tool_turn_timeout_sec`. Still honored as a fallback when the new input is left at its default | No | `""` |
-| `tool_planning_max_context_bytes` | **Deprecated** (removed in v3.0.0): use `tool_corpus_max_bytes`. Still honored as a fallback when the new input is left at its default | No | `""` |
-| `tool_planning_max_tokens` | **Deprecated** (removed in v3.0.0): use `tool_max_tokens_per_turn`. Still honored as a fallback when the new input is left at its default | No | `""` |
-| `tool_max_response_bytes` | Maximum bytes captured from each tool response | No | `12000` |
-| `tool_allowed_gh_api_repos` | Comma-separated owner/repo allowlist shared by `gh_api` and `repo_contents`; use `*` to allow any repo endpoint or contents request still permitted by each tool's path restrictions (empty = current repo only) | No | `""` |
-| `tool_request_timeout_sec` | Timeout in seconds for each tool execution request | No | `20` |
-| `search_url` | Search-engine endpoint (e.g. a SearXNG `/search` URL) that enables the read-only `web_search` tool in the native tool loop. When set, the model can search for a page and then `web_fetch` the best result; empty leaves `web_search` un-advertised. The model supplies only the query — the host is fixed by this setting. Subject to the same fork gating as the rest of the tool harness | No | `""` |
-| `tool_max_search_results` | Maximum results returned per `web_search` call | No | `5` |
-| `tool_failure_enforcement` | Force `request_changes` when tool harness planning fails | No | `false` |
-| `tool_min_successful_requests` | Minimum successful tool requests required when `tool_failure_enforcement=true` | No | `0` |
-| `tool_enable_for_forks` | Allow tool harness on cross-repository PRs | No | `false` |
-| `tool_mcp_servers` | Allowlist of read-only MCP servers for `tool_mode: native_loop`, as a newline/comma list of `name=url`. Read-verb tools are advertised as `mcp__<name>__<tool>`; write-verb tools are refused. Empty = off. Fork-gated like the rest of the harness | No | `""` |
-| `tool_mcp_token` | Optional bearer token sent to every configured MCP server | No | `""` |
-| `tool_mcp_name_prefixes` | Comma-separated list of tool name prefixes to strip before the read-only verb check. Used to handle toolhive-style workload prefixes (`prefixFormat: "{workload}_"`) on aggregated MCP servers — e.g. `github-mcp,talos-mcp`. Empty preserves the default-deny boundary | No | `""` |
+| `tool-mode` | Tool harness mode: `off` or `native_loop` (the `plan_execute_*` planner modes were removed in 2.0) | No | `off` |
+| `tool-max-requests` | Maximum tool requests executed in one harness run (total across the loop). Empty resolves a tier-aware budget from the review route: ~16 primary, ~32 smart route, up to 40 escalated. Precedence: `primary-tool-max-requests` (primary route) or `smart-tool-max-requests` (smart/escalated routes) > this input > tier default; explicit values are bounded to 1–50 | No | empty (tier-aware) |
+| `primary-tool-max-requests` | Request budget for the primary route only (1–50); outranks `tool-max-requests` on that route | No | empty (tier default) |
+| `smart-tool-max-requests` | Request budget for the smart and escalated routes only (1–50); outranks `tool-max-requests` on those routes | No | empty (tier defaults) |
+| `tool-max-rounds` | Round budget for `tool_mode=native_loop`: up to twice this (capped at 12) since a round is one model turn | No | `4` |
+| `tool-loop-wall-clock-sec` | Wall-clock ceiling in seconds for the whole `tool_mode=native_loop` exchange. Ignored for other modes | No | `600` |
+| `tool-loop-summarize` | When `true`, `native_loop` folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them (costs one extra model call per compaction). Off = truncation. Ignored for other modes | No | `false` |
+| `tool-loop-summarize-max-tokens` | Maximum completion tokens for each result-summarization call when `tool-loop-summarize` is enabled | No | `512` |
+| `tool-turn-timeout-sec` | Timeout in seconds for each model turn of the `tool_mode=native_loop` exchange | No | `60` |
+| `tool-corpus-max-bytes` | Maximum corpus bytes passed into the `native_loop` conversation's first turn | No | `50000` |
+| `tool-max-tokens-per-turn` | Maximum completion tokens for each model turn of the `tool_mode=native_loop` exchange | No | `400` |
+| `tool-max-response-bytes` | Maximum bytes captured from each tool response | No | `12000` |
+| `tool-allowed-gh-api-repos` | Comma-separated owner/repo allowlist shared by `gh_api` and `repo_contents`; use `*` to allow any repo endpoint or contents request still permitted by each tool's path restrictions (empty = current repo only) | No | `""` |
+| `tool-request-timeout-sec` | Timeout in seconds for each tool execution request | No | `20` |
+| `search-url` | Search-engine endpoint (e.g. a SearXNG `/search` URL) that enables the read-only `web_search` tool in the native tool loop. When set, the model can search for a page and then `web_fetch` the best result; empty leaves `web_search` un-advertised. The model supplies only the query — the host is fixed by this setting. Subject to the same fork gating as the rest of the tool harness | No | `""` |
+| `tool-max-search-results` | Maximum results returned per `web_search` call | No | `5` |
+| `tool-failure-enforcement` | Force `request_changes` when tool harness planning fails | No | `false` |
+| `tool-min-successful-requests` | Minimum successful tool requests required when `tool_failure_enforcement=true` | No | `0` |
+| `tool-enable-for-forks` | Allow tool harness on cross-repository PRs | No | `false` |
+| `tool-mcp-servers` | Allowlist of read-only MCP servers for `tool_mode: native_loop`, as a newline/comma list of `name=url`. Read-verb tools are advertised as `mcp__<name>__<tool>`; write-verb tools are refused. Empty = off. Fork-gated like the rest of the harness | No | `""` |
+| `tool-mcp-token` | Optional bearer token sent to every configured MCP server | No | `""` |
+| `tool-mcp-name-prefixes` | Comma-separated list of tool name prefixes to strip before the read-only verb check. Used to handle toolhive-style workload prefixes (`prefixFormat: "{workload}_"`) on aggregated MCP servers — e.g. `github-mcp,talos-mcp`. Empty preserves the default-deny boundary | No | `""` |
 
 </details>
 
@@ -428,12 +420,12 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `ai_request_timeout_sec` | Timeout in seconds for the primary model API request (`curl --max-time`) | No | `300` |
-| `ai_connect_timeout_sec` | Timeout in seconds for the primary model API connection (`curl --connect-timeout`) | No | `30` |
-| `ai_fallback_request_timeout_sec` | Timeout in seconds for the fallback model API request (`curl --max-time`). Defaults to `ai_request_timeout_sec` when blank. | No | `""` |
-| `ai_fallback_connect_timeout_sec` | Timeout in seconds for the fallback model API connection (`curl --connect-timeout`). Defaults to `ai_connect_timeout_sec` when blank. | No | `""` |
-| `ai_stream` | If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer) | No | `"true"` |
-| `ai_fallback_stream` | If set, overrides ai_stream for the fallback model; defaults to ai_stream value when blank | No | `""` |
+| `ai-request-timeout-sec` | Timeout in seconds for the primary model API request (`curl --max-time`) | No | `300` |
+| `ai-connect-timeout-sec` | Timeout in seconds for the primary model API connection (`curl --connect-timeout`) | No | `30` |
+| `ai-fallback-request-timeout-sec` | Timeout in seconds for the fallback model API request (`curl --max-time`). Defaults to `ai-request-timeout-sec` when blank. | No | `""` |
+| `ai-fallback-connect-timeout-sec` | Timeout in seconds for the fallback model API connection (`curl --connect-timeout`). Defaults to `ai-connect-timeout-sec` when blank. | No | `""` |
+| `ai-stream` | If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer) | No | `"true"` |
+| `ai-fallback-stream` | If set, overrides ai_stream for the fallback model; defaults to ai_stream value when blank | No | `""` |
 
 </details>
 
@@ -443,18 +435,18 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `platform` | Target hosting platform for API capability gating and backend selection. `auto` (default) detects from `GITHUB_SERVER_URL` and `FORGEJO_API_URL`: non-github.com hosts or `FORGEJO_API_URL` set resolves to `forgejo`; otherwise `github`. Set `forgejo` or `github` explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com. | No | `auto` |
-| `forgejo_api_url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
-| `forgejo_token` | Optional Forgejo API token. Defaults to `github_token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
-| `forgejo_auth_method` | Forgejo authentication method. `token` (default) uses a static personal access token via `forgejo_token`. `authorized_integration` uses Forgejo's [authorized integrations](https://forgejo.org/docs/latest/user/api/authorized-integrations/) flow: the action exchanges `forgejo_authorized_integration_audience` for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with `Authorization: Bearer {jwt}`. Requires `forgejo_authorized_integration_audience` and that the workflow sets `enable-openid-connect: true`. | No | `token` |
-| `forgejo_authorized_integration_audience` | Audience identifier for the Forgejo Authorized Integration (the `aud` JWT claim). Not secret — safe to commit to public code. Required when `forgejo_auth_method` is `authorized_integration`; ignored when it is `token`. | No | `""` |
-| `forgejo_skip_permission_preflight` | If `true`, allow the review to proceed when the Forgejo precheck cannot read a recognizable permission from the server response (the token may well be fine; the server just didn't expose the field). Distinct from granting write access — only suppresses the unknown-payload failure with a warning. Enable only after verifying that the token can actually publish reviews, otherwise the model output will be lost. | No | `false` |
-| `skip_if_diff_unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
-| `force_review` | Bypass the diff-unchanged guard and run a fresh review of the current PR even when the fingerprint matches. Set automatically by the `rereview_label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
-| `rereview_label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
-| `ci_status_check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
-| `ci_timeout_sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
-| `ci_interval_sec` | Seconds between CI status polls when ci_status_check=true. | No | `15` |
-| `ci_skip_on_timeout` | If true, proceed with review after timeout instead of failing. | No | `true` |
+| `forgejo-api-url` | Base URL for the Forgejo REST backend. Optional on Forgejo Actions runners when `github.server_url` is the Forgejo instance; set it when running from another host or when `GITHUB_SERVER_URL` is unavailable. | No | `""` |
+| `forgejo-token` | Optional Forgejo API token. Defaults to `github-token` when blank; set it when the token used for GitHub-compatible operations is not valid for the Forgejo REST API. On Forgejo the token must carry effective repository **write** permission — the precheck verifies this before invoking the model and fails with an actionable error otherwise, so no tokens are spent on a review that could not be published. | No | `""` |
+| `forgejo-auth-method` | Forgejo authentication method. `token` (default) uses a static personal access token via `forgejo-token`. `authorized_integration` uses Forgejo's [authorized integrations](https://forgejo.org/docs/latest/user/api/authorized-integrations/) flow: the action exchanges `forgejo-authorized-integration-audience` for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with `Authorization: Bearer {jwt}`. Requires `forgejo-authorized-integration-audience` and that the workflow sets `enable-openid-connect: true`. | No | `token` |
+| `forgejo-authorized-integration-audience` | Audience identifier for the Forgejo Authorized Integration (the `aud` JWT claim). Not secret — safe to commit to public code. Required when `forgejo-auth-method` is `authorized_integration`; ignored when it is `token`. | No | `""` |
+| `forgejo-skip-permission-preflight` | If `true`, allow the review to proceed when the Forgejo precheck cannot read a recognizable permission from the server response (the token may well be fine; the server just didn't expose the field). Distinct from granting write access — only suppresses the unknown-payload failure with a warning. Enable only after verifying that the token can actually publish reviews, otherwise the model output will be lost. | No | `false` |
+| `skip-if-diff-unchanged` | Skip the LLM review when the current PR patch matches the last managed review fingerprint | No | `true` |
+| `force-review` | Bypass the diff-unchanged guard and run a fresh review of the current PR even when the fingerprint matches. Set automatically by the `rereview-label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
+| `rereview-label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
+| `ci-status-check` | Wait for all CI checks to reach a terminal state before starting the AI review. Default false — immediate review. | No | `false` |
+| `ci-timeout-sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
+| `ci-interval-sec` | Seconds between CI status polls when ci_status_check=true. | No | `15` |
+| `ci-skip-on-timeout` | If true, proceed with review after timeout instead of failing. | No | `true` |
 
 </details>
 
@@ -463,7 +455,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | Output | Description |
 |--------|-------------|
 | `verdict` | `approve` or `request_changes` |
-| `verdict_source` | `model`, `findings` (per `verdict_policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
+| `verdict_source` | `model`, `findings` (per `verdict-policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
 | `required_checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
 | `review_route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation_reason` | `primary_requested` when the primary reviewer's structured `smart_review_requested` field triggered the escalated re-review (`review_route` is `escalated`); empty otherwise |
@@ -475,7 +467,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `skip_reason` | Skip reason such as `diff-unchanged` |
 | `diff_fingerprint` | Stable fingerprint of the current PR patch |
 | `ci_status_skipped` | `true` if CI status check was skipped, `false` if it completed |
-| `ci_status_final` | Final CI state (`success`/`failure`) when `ci_status_check` completed |
+| `ci_status_final` | Final CI state (`success`/`failure`) when `ci-status-check` completed |
 
 ## 📖 Usage recipes
 
@@ -502,28 +494,28 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v2
+      - uses: misospace/pr-reviewer-action@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          ai_base_url: https://api.openai.com/v1
-          ai_model: gpt-4.1
-          ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          standards_file: CLAUDE.md
-          publish_review_comment: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ai-base-url: https://api.openai.com/v1
+          ai-model: gpt-4.1
+          ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          standards-file: CLAUDE.md
+          publish-review-comment: "true"
 ```
 
 ### 🧠 Native Anthropic-compatible endpoint
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.anthropic.com/v1
-    ai_api_format: anthropic
-    ai_model: claude-sonnet-4-5
-    ai_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    ai_max_tokens: "8192"
-    publish_review_comment: "true"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.anthropic.com/v1
+    ai-api-format: anthropic
+    ai-model: claude-sonnet-4-5
+    ai-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    ai-max-tokens: "8192"
+    publish-review-comment: "true"
 ```
 
 When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends the `x-api-key` and `anthropic-version` headers, and parses only Anthropic `text` content blocks. Non-text blocks such as `thinking` are ignored so private reasoning is not copied into PR comments.
@@ -531,16 +523,16 @@ When `ai_api_format: anthropic` is set, the action posts to `/messages`, sends t
 ### 🛟 With a fallback model
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   id: review
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    ai_fallback_base_url: https://api.openai.com/v1
-    ai_fallback_api_format: openai
-    ai_fallback_model: gpt-4.1-mini
-    ai_fallback_api_key: ${{ secrets.OPENAI_API_KEY }}
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    ai-fallback-base-url: https://api.openai.com/v1
+    ai-fallback-api-format: openai
+    ai-fallback-model: gpt-4.1-mini
+    ai-fallback-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
 ### 🚦 Waiting for CI checks
@@ -549,26 +541,26 @@ Set `ci_status_check: true` to wait for all CI checks to reach a terminal state 
 
 The per-check outcomes (name, status, conclusion) are also folded into the review corpus as a **CI Check Results** section, so the model cites real test/lint results instead of reporting them as "not verifiable". The reviewer never runs your test suite itself — that would mean executing untrusted PR code with the bot's token — it consumes the results your CI already produced in its own sandbox.
 
-When `deep_review` is also enabled, the advisory specialist passes run **concurrently** with the CI wait instead of after it: the two branches fork after the unchanged-review precheck and are joined before the final reviewer starts, so wall clock composes near `max(CI, specialists)` rather than their sum. The final reviewer still sees the finalized CI evidence plus any usable specialist leads; a CI timeout/failure never blocks the review (same as before), and specialists stay advisory and fail-soft. When CI completes first only the specialists are awaited, and vice versa. The CI wait runs in a least-privilege child process (`env -i` plus an explicit allowlist of CI/runner variables), so moving it into the review step does not expose model, tool, or Linear credentials to it. On an abnormal review exit (failed step, cancellation, TERM/INT) any gate process tree still running — the wrapper, the workload, and its subprocesses — is terminated and reaped with a bounded grace period.
+When `deep-review` is also enabled, the advisory specialist passes run **concurrently** with the CI wait instead of after it: the two branches fork after the unchanged-review precheck and are joined before the final reviewer starts, so wall clock composes near `max(CI, specialists)` rather than their sum. The final reviewer still sees the finalized CI evidence plus any usable specialist leads; a CI timeout/failure never blocks the review (same as before), and specialists stay advisory and fail-soft. When CI completes first only the specialists are awaited, and vice versa. The CI wait runs in a least-privilege child process (`env -i` plus an explicit allowlist of CI/runner variables), so moving it into the review step does not expose model, tool, or Linear credentials to it. On an abnormal review exit (failed step, cancellation, TERM/INT) any gate process tree still running — the wrapper, the workload, and its subprocesses — is terminated and reaped with a bounded grace period.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   id: review
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    ci_status_check: "true"
-    ci_timeout_sec: "300"
-    ci_interval_sec: "15"
-    ci_skip_on_timeout: "true"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    ci-status-check: "true"
+    ci-timeout-sec: "300"
+    ci-interval-sec: "15"
+    ci-skip-on-timeout: "true"
 ```
 
-When `ci_skip_on_timeout: true` (the default), the action proceeds with the review after `ci_timeout_sec` even if checks are still running. Set it to `false` to fail the action on timeout instead. The `ci_status_skipped` and `ci_status_final` outputs indicate whether the CI wait completed and what the final state was.
+When `ci_skip_on_timeout: true` (the default), the action proceeds with the review after `ci-timeout-sec` even if checks are still running. Set it to `false` to fail the action on timeout instead. The `ci_status_skipped` and `ci_status_final` outputs indicate whether the CI wait completed and what the final state was.
 
 ### 🔁 Forcing a re-review
 
-By default an unchanged PR is not re-reviewed — the precheck skips when the diff + config fingerprint matches the last managed review (`skip_if_diff_unchanged`). You'll want to re-review anyway when something the fingerprint can't see has changed: a model repointed behind a stable alias, updated standards, or a flaky first pass.
+By default an unchanged PR is not re-reviewed — the precheck skips when the diff + config fingerprint matches the last managed review (`skip-if-diff-unchanged`). You'll want to re-review anyway when something the fingerprint can't see has changed: a model repointed behind a stable alias, updated standards, or a flaky first pass.
 
 **Add the `ai-review` label to a PR and it re-reviews. That's it.** Enable it with a one-word addition to your existing review workflow:
 
@@ -589,28 +581,28 @@ on:
 >   cancel-in-progress: true
 > ```
 
-Nothing else changes. The action detects the label event itself: if the added label is the `rereview_label` (default `ai-review`) it forces a full review and then **removes the label** so adding it again re-triggers; any other label is ignored. There's no second workflow, no command parsing, and no checkout/authorization dance — labels are inherently maintainer-only (only users with write/triage permission can apply them), and the trigger rides `pull_request`, so there's no privileged-checkout exposure.
+Nothing else changes. The action detects the label event itself: if the added label is the `rereview-label` (default `ai-review`) it forces a full review and then **removes the label** so adding it again re-triggers; any other label is ignored. There's no second workflow, no command parsing, and no checkout/authorization dance — labels are inherently maintainer-only (only users with write/triage permission can apply them), and the trigger rides `pull_request`, so there's no privileged-checkout exposure.
 
-Rename the trigger label with the `rereview_label` input if `ai-review` collides with an existing label. This repository's own [`ai-pr-review.yaml`](.github/workflows/ai-pr-review.yaml) uses exactly this wiring.
+Rename the trigger label with the `rereview-label` input if `ai-review` collides with an existing label. This repository's own [`ai-pr-review.yaml`](.github/workflows/ai-pr-review.yaml) uses exactly this wiring.
 
-For non-interactive callers, `force_review: "true"` bypasses the unchanged-diff guard and runs a full PR review. A `workflow_dispatch` or `repository_dispatch` event only does this when the consuming workflow explicitly maps its input or payload to the action's `force_review` input.
+For non-interactive callers, `force_review: "true"` bypasses the unchanged-diff guard and runs a full PR review. A `workflow_dispatch` or `repository_dispatch` event only does this when the consuming workflow explicitly maps its input or payload to the action's `force-review` input.
 
 Every review is a full review of the current PR, so a forced re-review always sees the complete diff: with `publish_mode: review_verdict`, any PR that needs to clear a previous `request_changes` gets a fresh full review it can act on.
 
 ### 🧾 With evidence providers
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    evidence_providers_file: .github/pr-review-providers.json
-    sarif_files: reports/codeql.sarif, reports/semgrep.sarif
-    sarif_max_findings: "200"
-    evidence_provider_timeout_sec: "30"
-    evidence_provider_max_output_bytes: "20000"
-    evidence_blocker_enforcement: "true"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    evidence-providers-file: .github/pr-review-providers.json
+    sarif-files: reports/codeql.sarif, reports/semgrep.sarif
+    sarif-max-findings: "200"
+    evidence-provider-timeout-sec: "30"
+    evidence-provider-max-output-bytes: "20000"
+    evidence-blocker-enforcement: "true"
 ```
 
 Example provider config (`.github/pr-review-providers.json`):
@@ -628,7 +620,7 @@ Example provider config (`.github/pr-review-providers.json`):
 }
 ```
 
-Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence_blocker_enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict. SARIF files are parsed as data in the requested order, never executed, and their combined findings are capped globally by `sarif_max_findings`; each path must be workspace-relative and remain inside the checked-out workspace. SARIF findings are evidence for the review but do not activate blocker enforcement automatically.
+Provider commands can print plain text, or JSON with fields such as `severity` and `findings`. If `evidence-blocker-enforcement` is `true`, any provider output with blocker severity forces a `request_changes` verdict. SARIF files are parsed as data in the requested order, never executed, and their combined findings are capped globally by `sarif-max-findings`; each path must be workspace-relative and remain inside the checked-out workspace. SARIF findings are evidence for the review but do not activate blocker enforcement automatically.
 
 #### Evidence provider execution model
 
@@ -647,31 +639,31 @@ Evidence providers are **disabled by default on cross-repository pull requests**
 ### 🛠️ With tool harness planning
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    tool_mode: native_loop
-    tool_max_requests: "12"
-    tool_turn_timeout_sec: "30"
-    tool_corpus_max_bytes: "50000"
-    tool_max_tokens_per_turn: "400"
-    tool_max_response_bytes: "12000"
-    tool_allowed_gh_api_repos: "siderolabs/kubelet,siderolabs/talos"
-    tool_request_timeout_sec: "20"
-    tool_failure_enforcement: "true"
-    tool_min_successful_requests: "1"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    tool-mode: native_loop
+    tool-max-requests: "12"
+    tool-turn-timeout-sec: "30"
+    tool-corpus-max-bytes: "50000"
+    tool-max-tokens-per-turn: "400"
+    tool-max-response-bytes: "12000"
+    tool-allowed-gh-api-repos: "siderolabs/kubelet,siderolabs/talos"
+    tool-request-timeout-sec: "20"
+    tool-failure-enforcement: "true"
+    tool-min-successful-requests: "1"
 ```
 
-In `native_loop` mode the reviewing model uses its provider's native tool-calling API (OpenAI `tool_calls` / Anthropic `tool_use`). The tool schemas are sent with the request and the model holds the conversation: it issues a call, sees the result appended as a real tool-result turn, and decides the next call from what came back — so a chain like "read the machineconfig → extract the platform version → fetch that version's published compatibility matrix" is expressed natively, with each hop conditioned on the previous one's content rather than guessed up front. The loop stops when the model replies with no further tool calls, the `tool_max_requests` total budget is spent, the round cap is hit (up to `2 × tool_max_rounds`, capped at 12, since one model turn is one round), or `tool_loop_wall_clock_sec` elapses. When the planning context must clip a large standards file, the action preserves requirement-bearing lines, nearby context, and headings rather than keeping only the file's head. Malformed arguments and duplicate calls are answered with a corrective tool-result the model can react to (duplicates don't cost budget); a transport error mid-loop keeps the evidence already gathered. When the conversation outgrows its context budget the oldest tool results are compacted before the next turn — blunt-truncated by default, or (with `tool_loop_summarize`) folded into a model-generated evidence digest that keeps the salient facts in fewer tokens while the newest results stay verbatim. A model that never emits a tool call **degrades to a corpus-only review** (the verdict is still produced, just without gathered evidence), so `native_loop` is safe to enable on a model whose tool-calling support is uncertain. Loop turns stream by default (`ai_stream`). The request budget is tier-aware (#701): when `tool_max_requests` is unset, the primary route gets ~16 requests, a directly routed smart review ~32, and a post-review escalated run up to 40 (hard ceiling 50 in all cases). Precedence: `SMART_TOOL_MAX_REQUESTS` on smart/escalated runs > `TOOL_MAX_REQUESTS` > the route's tier default. Every turn after the first states the remaining request/round budget in-conversation, and once two or fewer requests remain the loop tells the model to stop broad exploration and spend the rest on unresolved blocker hypotheses. If the budget is exhausted the stop reason stays `tool-call-budget-exhausted` (distinct from a model-initiated stop) and the corpus carries an explicit "missing evidence is unverified, not safe" note. Supported tools are:
+In `native_loop` mode the reviewing model uses its provider's native tool-calling API (OpenAI `tool_calls` / Anthropic `tool_use`). The tool schemas are sent with the request and the model holds the conversation: it issues a call, sees the result appended as a real tool-result turn, and decides the next call from what came back — so a chain like "read the machineconfig → extract the platform version → fetch that version's published compatibility matrix" is expressed natively, with each hop conditioned on the previous one's content rather than guessed up front. The loop stops when the model replies with no further tool calls, the `tool-max-requests` total budget is spent, the round cap is hit (up to `2 × tool_max_rounds`, capped at 12, since one model turn is one round), or `tool-loop-wall-clock-sec` elapses. When the planning context must clip a large standards file, the action preserves requirement-bearing lines, nearby context, and headings rather than keeping only the file's head. Malformed arguments and duplicate calls are answered with a corrective tool-result the model can react to (duplicates don't cost budget); a transport error mid-loop keeps the evidence already gathered. When the conversation outgrows its context budget the oldest tool results are compacted before the next turn — blunt-truncated by default, or (with `tool-loop-summarize`) folded into a model-generated evidence digest that keeps the salient facts in fewer tokens while the newest results stay verbatim. A model that never emits a tool call **degrades to a corpus-only review** (the verdict is still produced, just without gathered evidence), so `native_loop` is safe to enable on a model whose tool-calling support is uncertain. Loop turns stream by default (`ai-stream`). The request budget is tier-aware (#701): when `tool-max-requests` is unset, the primary route gets ~16 requests, a directly routed smart review ~32, and a post-review escalated run up to 40 (hard ceiling 50 in all cases). Precedence: `SMART_TOOL_MAX_REQUESTS` on smart/escalated runs > `TOOL_MAX_REQUESTS` > the route's tier default. Every turn after the first states the remaining request/round budget in-conversation, and once two or fewer requests remain the loop tells the model to stop broad exploration and spend the rest on unresolved blocker hypotheses. If the budget is exhausted the stop reason stays `tool-call-budget-exhausted` (distinct from a model-initiated stop) and the corpus carries an explicit "missing evidence is unverified, not safe" note. Supported tools are:
 
 - `gh_api` with a repo-local path like `repos/owner/repo/pulls/123/files` for structured API metadata
-- `repo_contents` for source files or directory listings from a related GitHub repository, using the same `tool_allowed_gh_api_repos` allowlist
+- `repo_contents` for source files or directory listings from a related GitHub repository, using the same `tool-allowed-gh-api-repos` allowlist
 - `read_file` for files inside the checked-out repository
 - `find_files` to locate files by filename/path glob pattern (e.g. `*config*`, `*.toml`, `*/route.ts`) without first knowing an exact path — returns sorted repo-relative file paths only, capped at `max_results` (default 100, max 300); never descends into `.git` or follows symlinks
 - `list_tree` to list repository entries (names only, no contents) bounded by depth and entry count — returns sorted repo-relative `{path, type}` rows (type is `file` or `dir`), capped at `max_entries` (default 200, max 500); `depth` defaults to 2 and is clamped to 1..4; a file passed as `path` returns a one-row listing; never descends into `.git` or follows symlinks
-- `web_fetch` for allowlisted hosts from `allowed_source_hosts`
+- `web_fetch` for allowlisted hosts from `allowed-source-hosts`
 - `git_grep` for local repository content search (`pattern` is required; an optional `path` scopes the search to a repository subtree and an optional `max_results` (1–200, default 60) caps how many matched lines are returned)
 - `run_command` for a fixed catalog of named read-only commands
 
@@ -683,34 +675,34 @@ In `native_loop` mode the reviewing model uses its provider's native tool-callin
 | `git_diff_stat` | `git diff --stat HEAD` |
 | `git_diff_name_only` | `git diff --name-only HEAD` |
 
-Any other command name is rejected with an error listing the catalog. Output is secret-masked and truncated to `tool_max_response_bytes` like every other tool result.
+Any other command name is rejected with an error listing the catalog. Output is secret-masked and truncated to `tool-max-response-bytes` like every other tool result.
 
-By default, tool harness execution is skipped on cross-repository PRs unless `tool_enable_for_forks` is set to `true`.
+By default, tool harness execution is skipped on cross-repository PRs unless `tool-enable-for-forks` is set to `true`.
 
 ### 📐 Use repo-local review rules
 
 If the destination repo has a `CLAUDE.md`, `claude.md`, `AGENTS.md`, or `.github/ai-review-rules.md`, the action can use that as review policy context.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    standards_file: ""
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    standards-file: ""
 ```
 
 You can also pin a specific rules file:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    standards_file: .github/review-rules.md
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    standards-file: .github/review-rules.md
 ```
 
 ### 🎯 Issue-first review workflows
@@ -722,27 +714,27 @@ If PRs are driven by detailed GitHub issues, include closing references such as 
 If a repo wants more than policy context and needs to fully control the reviewer behavior, it can provide a prompt file:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    system_prompt_file: .github/pr-review-prompt.md
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    system-prompt-file: .github/pr-review-prompt.md
 ```
 
-### 🪶 Shorter reviews with `review_verbosity`
+### 🪶 Shorter reviews with `review-verbosity`
 
 The bundled default prompt is written for thoroughness: it asks for a recommendation, change-by-change findings, sources, and a Standards Compliance section on every review. On a repo of small, low-risk PRs that reads as padding, and reviewers start skimming past it.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    review_verbosity: concise
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    review-verbosity: concise
 ```
 
 `concise` appends a brevity fragment to the assembled default: a ~300-word target, prose limited to blocker/major issues with minor and info left to the `findings` array, no restating the diff back to its author, one sentence per point, and Standards Compliance omitted unless a documented convention is actually violated.
@@ -754,13 +746,13 @@ Two things are explicitly exempt, because brevity must not hide a gap:
 
 Nothing changes at `normal`: the assembled prompt is byte-identical to a run without the input, and the default contributes nothing to the config fingerprint, so upgrading does not trigger a re-review. Switching to `concise` does change the fingerprint, so the next run re-reviews under the new prompt.
 
-For repo-specific wording on top of this, combine it with `system_prompt_mode: append`. A `replace`-mode `system_prompt` (or a `system_prompt_file`) is used verbatim and ignores the dial entirely.
+For repo-specific wording on top of this, combine it with `system_prompt_mode: append`. A `replace`-mode `system-prompt` (or a `system-prompt-file`) is used verbatim and ignores the dial entirely.
 
 ## 📣 Publishing & verdicts
 
 ### 📮 Publish modes
 
-The action supports three publish modes via the `publish_mode` input:
+The action supports three publish modes via the `publish-mode` input:
 
 | Mode | Behavior | Branch protection impact |
 |------|----------|------------------------|
@@ -786,23 +778,23 @@ When `publish_mode=review_verdict` is set, the action submits a native GitHub PR
 
 **Approval guardrails:**
 
-- `allow_approve` defaults to `false`. The model's approve verdict will be blocked unless this input is explicitly set to `true`.
-- `approve_forks` defaults to `false`. Even when `allow_approve=true`, native approvals are blocked for cross-repository (fork) PRs unless this is also set to `true`.
+- `allow-approve` defaults to `false`. The model's approve verdict will be blocked unless this input is explicitly set to `true`.
+- `approve-forks` defaults to `false`. Even when `allow_approve=true`, native approvals are blocked for cross-repository (fork) PRs unless this is also set to `true`.
 - If evidence provider enforcement or tool harness failure enforcement modified the verdict to `request_changes`, approval is automatically blocked.
 - The review body must be non-empty for an approval to be submitted.
 
 > [!WARNING]
-> Native approvals can affect branch protection rules and automerge pipelines. Enable `allow_approve` only when you understand the implications for your repository's merge policy.
+> Native approvals can affect branch protection rules and automerge pipelines. Enable `allow-approve` only when you understand the implications for your repository's merge policy.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    publish_mode: review_verdict
-    allow_approve: "true"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    publish-mode: review_verdict
+    allow-approve: "true"
 ```
 
 #### Example: full workflow with `publish_mode=review_verdict`
@@ -828,21 +820,21 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: misospace/pr-reviewer-action@v2
+      - uses: misospace/pr-reviewer-action@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          ai_base_url: https://api.openai.com/v1
-          ai_model: gpt-4.1
-          ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          publish_review_comment: "true"
-          publish_mode: review_verdict
-          allow_approve: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ai-base-url: https://api.openai.com/v1
+          ai-model: gpt-4.1
+          ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          publish-review-comment: "true"
+          publish-mode: review_verdict
+          allow-approve: "true"
 ```
 
 > [!NOTE]
 > This workflow requires the **Allow GitHub Actions to create and approve pull requests** setting to be enabled for your repository or organization. Without it, native approvals will fail with a 403 error even though `pull-requests: write` is granted.
 
-This configuration allows the AI to submit native approvals when its verdict is `approve`. Fork PRs are still blocked from approval unless `approve_forks` is also set to `"true"`.
+This configuration allows the AI to submit native approvals when its verdict is `approve`. Fork PRs are still blocked from approval unless `approve-forks` is also set to `"true"`.
 
 #### Why approvals may fail even with `pull-requests: write`
 
@@ -854,29 +846,29 @@ Even when your workflow grants `pull-requests: write`, native PR review verdicts
 
 2. **Branch protection rules** — If branch protection requires a review from a specific user or team, the AI's approval may not satisfy that requirement even when it submits successfully.
 
-3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve_forks` is explicitly set to `"true"`.
+3. **Fork PRs without `approve_forks: true`** — Approvals from fork PRs are blocked by default unless `approve-forks` is explicitly set to `"true"`.
 
-When a clean verdict is withheld by policy (`allow_approve: false`, or a fork PR without `approve_forks`), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
+When a clean verdict is withheld by policy (`allow_approve: false`, or a fork PR without `approve-forks`), the action submits a non-blocking `COMMENT` review with an explanation — it never converts a clean verdict into a blocking `request_changes`. A real model `request_changes` verdict remains a native blocking review. A genuine approval failure (the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) still fails the step loudly so the misconfiguration is visible.
 
 ### 💬 Non-blocking review comments
 
 When `publish_mode=review_comment` is set, the action submits a non-blocking native PR review comment via `gh pr review --comment`. This gives you a GitHub-native review entry in the PR's conversation thread without affecting branch protection or status checks.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: https://api.openai.com/v1
-    ai_model: gpt-4.1
-    ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    publish_mode: review_comment
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: https://api.openai.com/v1
+    ai-model: gpt-4.1
+    ai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    publish-mode: review_comment
 ```
 
 ### 🧹 Native review cleanup
 
-When `publish_mode` is set to `review_comment` or `review_verdict`, the action creates a new submitted native PR review on every run. Without cleanup, old AI reviews pile up in the PR timeline and make the conversation noisy.
+When `publish-mode` is set to `review_comment` or `review_verdict`, the action creates a new submitted native PR review on every run. Without cleanup, old AI reviews pile up in the PR timeline and make the conversation noisy.
 
-By default, the action automatically cleans up previous managed native reviews for `review_comment` and `review_verdict` modes. The `cleanup_previous_native_reviews` input controls this behavior:
+By default, the action automatically cleans up previous managed native reviews for `review_comment` and `review_verdict` modes. The `cleanup-previous-native-reviews` input controls this behavior:
 
 - `auto` (default): enables cleanup for `review_comment` and `review_verdict` modes, disabled for `comment` mode (which already edits one sticky comment in place).
 - `true`: always enable cleanup regardless of publish mode.
@@ -918,16 +910,16 @@ The model may return an optional `findings` array alongside the verdict — conc
 
 Findings are normalized (severities mapped to `blocker`/`major`/`minor`/`info`, malformed entries dropped) and exposed as the `findings` output. **Absence is fine** — weaker local models that only produce `verdict`/`review_markdown` keep exactly the previous behavior.
 
-With `verdict_policy: findings_severity_gated`, the policy applies one-way escalation: a model `request_changes` verdict is preserved, and `approve` is escalated to `request_changes` when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. When no findings were produced, the model's verdict stands (the `verdict_source` output tells you which path applied). Enforcement settings (`evidence_blocker_enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
+With `verdict_policy: findings_severity_gated`, the policy applies one-way escalation: a model `request_changes` verdict is preserved, and `approve` is escalated to `request_changes` when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. When no findings were produced, the model's verdict stands (the `verdict_source` output tells you which path applied). Enforcement settings (`evidence-blocker-enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    ai_response_format: json_schema   # schema includes the findings array
-    verdict_policy: findings_severity_gated
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    ai-response-format: json_schema   # schema includes the findings array
+    verdict-policy: findings_severity_gated
 ```
 
 ### 📍 Inline review comments from findings
@@ -938,17 +930,17 @@ With `inline_findings: "true"` and a native publish mode, findings that carry a 
 - `publish_mode: review_comment` — the sticky summary comment is published as usual, plus a separate native `COMMENT` review carrying the inline comments. That review includes the managed marker, so the next run's cleanup marks it superseded.
 - `publish_mode: comment` — ignored.
 
-Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline_findings_max` (default 20).
+Anchors are validated against the diff before submission (GitHub only accepts comments on lines present in the diff); findings without a valid anchor stay in the review body. Comment bodies are secret-masked and @-mention-neutralized like all published output, and capped by `inline-findings-max` (default 20).
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1
-    ai_model: qwen3-32b
-    publish_mode: review_verdict
-    verdict_policy: findings_severity_gated
-    inline_findings: "true"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1
+    ai-model: qwen3-32b
+    publish-mode: review_verdict
+    verdict-policy: findings_severity_gated
+    inline-findings: "true"
 ```
 
 ## 🧭 Routing & escalation
@@ -958,22 +950,22 @@ Anchors are validated against the diff before submission (GitHub only accepts co
 With `review_routing_mode: auto`, the deterministic classification decides which model reviews the PR — boring PRs go to a fast/local model, scary ones go straight to a smarter model:
 
 ```yaml
-- uses: misospace/pr-reviewer-action@v2
+- uses: misospace/pr-reviewer-action@v3
   with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: http://llama-server.internal:8080/v1   # fast (default = primary)
-    ai_model: qwen3-32b
-    ai_smart_base_url: https://api.anthropic.com/v1
-    ai_smart_api_format: anthropic
-    ai_smart_model: claude-sonnet-4-6
-    ai_smart_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    review_routing_mode: auto
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: http://llama-server.internal:8080/v1   # fast (default = primary)
+    ai-model: qwen3-32b
+    ai-smart-base-url: https://api.anthropic.com/v1
+    ai-smart-api-format: anthropic
+    ai-smart-model: claude-sonnet-4-6
+    ai-smart-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    review-routing-mode: auto
 ```
 
 Routing rules:
 
-- A PR whose `route_signals` match `escalate_on_risk_flags` routes to the **smart** model; everything else routes to the **fast** model. `route_signals` are the PR's `pr_kind` plus its `risk_flags`, **excluding content-only pattern matches** — a flag or kind that fired only because the diff text mentioned a pattern (e.g. `os.path`, `token`) does not route unless an actual changed *filename* (or a linked issue) backs it. This keeps benign PRs on the fast model.
-- The fast config defaults to the primary `ai_*` inputs; the smart config's endpoint/format/key default to those same primary inputs, but the smart **model** is opt-in via `ai_smart_model` and is never the fallback model. If a risky PR is detected but no smart model is configured, the review stays on the fast model (logged, never fails).
+- A PR whose `route_signals` match `escalate-on-risk-flags` routes to the **smart** model; everything else routes to the **fast** model. `route_signals` are the PR's `pr_kind` plus its `risk_flags`, **excluding content-only pattern matches** — a flag or kind that fired only because the diff text mentioned a pattern (e.g. `os.path`, `token`) does not route unless an actual changed *filename* (or a linked issue) backs it. This keeps benign PRs on the fast model.
+- The fast config defaults to the primary `ai_*` inputs; the smart config's endpoint/format/key default to those same primary inputs, but the smart **model** is opt-in via `ai-smart-model` and is never the fallback model. If a risky PR is detected but no smart model is configured, the review stays on the fast model (logged, never fails).
 - `off` (the default) preserves the existing primary/fallback behavior exactly (`review_route` output reports `legacy`).
 - The retry and failure-fallback machinery is unchanged — routing only picks which model it talks to.
 - The chosen route appears in the `review_route` output, the step summary, and the managed metadata marker; routing config is part of the precheck fingerprint, so changing it forces a fresh review.
@@ -989,13 +981,13 @@ The former heuristic triggers are **deprecated and inert** (telemetry only; a st
 - `escalate_on_fast_request_changes`, `escalate_on_fast_low_confidence`, `escalate_on_tool_or_evidence_blockers`, `escalate_on_incomplete_required_checks`, `escalate_on_tool_planning_failure` — no longer initiate a smart call.
 - The autonomous incomplete-requirement-coverage retry is removed; unknown coverage stays visible in the coverage artifact and step summary, and the primary reviewer may fold it into its own escalation request.
 
-Unchanged: deterministic direct smart routing **before** the primary runs (`escalate_on_risk_flags`), primary failure → fallback as availability recovery, the fallback never being an escalation target, and deterministic enforcement independent of escalation.
+Unchanged: deterministic direct smart routing **before** the primary runs (`escalate-on-risk-flags`), primary failure → fallback as availability recovery, the fallback never being an escalation target, and deterministic enforcement independent of escalation.
 
 Only the **final** review is published. The primary result is kept on the runner as `ai-output.primary.json` for debugging; if the smart model fails, the primary review is published instead (never a failed run because of escalation). `review_route` reports `escalated` and `escalation_reason` carries `primary_requested`; both also land in the step summary and the managed metadata marker, and the published review's `_Analysis engine:_` line carries the same story in human-readable form (`— routed smart (risk match: …)` vs `— escalated (…)` vs `— fallback (primary failed)`), so you can tell a deliberate smart review from an escalation or an availability fallback at a glance. Worst case is two model calls per review — the unchanged-diff skip keeps that bounded.
 
 ## 💾 Token-saving with the unchanged-diff skip
 
-Every review is a full review of the current PR — there is no incremental/delta mode. What keeps that cheap is the precheck: when the diff + config fingerprint matches the last managed review, the action skips the LLM call entirely and carries the prior verdict forward. It's on by default (`skip_if_diff_unchanged`), so a fresh full review is only ever paid for when something actually changed.
+Every review is a full review of the current PR — there is no incremental/delta mode. What keeps that cheap is the precheck: when the diff + config fingerprint matches the last managed review, the action skips the LLM call entirely and carries the prior verdict forward. It's on by default (`skip-if-diff-unchanged`), so a fresh full review is only ever paid for when something actually changed.
 
 Key behaviors:
 
@@ -1009,7 +1001,7 @@ The action is designed local-model-first (ollama, llama.cpp, vLLM, or anything b
 
 ### 🌐 Base URL examples
 
-`ai_base_url` must point at the **OpenAI-compatible base** (the action appends `/chat/completions`, or `/messages` for `ai_api_format: anthropic`):
+`ai-base-url` must point at the **OpenAI-compatible base** (the action appends `/chat/completions`, or `/messages` for `ai_api_format: anthropic`):
 
 ```yaml
 # ollama on the same runner/host (note the /v1 — ollama's native API is not OpenAI-compatible)
@@ -1028,22 +1020,22 @@ ai_base_url: http://vllm.internal:8000/v1
 ai_base_url: http://litellm.internal:4000/v1
 ```
 
-Self-hosted runners must be able to reach the endpoint — GitHub-hosted runners cannot reach `localhost` or LAN addresses on your network. Leave `ai_api_key` unset if the endpoint is unauthenticated; nothing is sent in that case.
+Self-hosted runners must be able to reach the endpoint — GitHub-hosted runners cannot reach `localhost` or LAN addresses on your network. Leave `ai-api-key` unset if the endpoint is unauthenticated; nothing is sent in that case.
 
-### 📏 Right-size the context budget with `model_context_tokens`
+### 📏 Right-size the context budget with `model-context-tokens`
 
-The named `context_limit_mode` budgets assume large cloud-model windows (`normal` is roughly 55–70k tokens of corpus). Local models commonly run 8k–32k windows, and an overflowing prompt fails in confusing ways: the server returns `context length exceeded` (visible in the action log thanks to error-body preservation), or worse, silently truncates the prompt and the model returns malformed or irrelevant JSON.
+The named `context-limit-mode` budgets assume large cloud-model windows (`normal` is roughly 55–70k tokens of corpus). Local models commonly run 8k–32k windows, and an overflowing prompt fails in confusing ways: the server returns `context length exceeded` (visible in the action log thanks to error-body preservation), or worse, silently truncates the prompt and the model returns malformed or irrelevant JSON.
 
-Set `model_context_tokens` to the window you actually serve the model with (e.g. ollama's `num_ctx`, llama.cpp's `--ctx-size`, vLLM's `--max-model-len`):
+Set `model-context-tokens` to the window you actually serve the model with (e.g. ollama's `num_ctx`, llama.cpp's `--ctx-size`, vLLM's `--max-model-len`):
 
 ```yaml
 model_context_tokens: "16384"   # derive corpus/diff/file budgets from the real window
 ai_max_tokens: "2048"           # reserved for the model's reply within that window
 ```
 
-The action reserves `ai_max_tokens` plus prompt headroom and converts the rest to byte budgets conservatively (~3 bytes/token). Check the run's step summary: it shows the active budget and whether the diff/corpus were truncated.
+The action reserves `ai-max-tokens` plus prompt headroom and converts the rest to byte budgets conservatively (~3 bytes/token). Check the run's step summary: it shows the active budget and whether the diff/corpus were truncated.
 
-### 🧱 Get reliable JSON out of small models with `ai_response_format`
+### 🧱 Get reliable JSON out of small models with `ai-response-format`
 
 Small models often wrap their JSON in prose or markdown fences. The parser tolerates a lot, but structured output is more reliable when the server supports it:
 
@@ -1059,10 +1051,10 @@ If the endpoint rejects the request after enabling this (HTTP 400 mentioning `re
 
 ### ⏱️ Timeouts, streaming, and retries
 
-- **Slow prompt eval** (big corpus, CPU offload): raise `ai_request_timeout_sec` (default 300). Each `tool_mode=native_loop` model turn has its own `tool_turn_timeout_sec` — raise it too if loop turns time out.
+- **Slow prompt eval** (big corpus, CPU offload): raise `ai-request-timeout-sec` (default 300). Each `tool_mode=native_loop` model turn has its own `tool-turn-timeout-sec` — raise it too if loop turns time out.
 - **Proxies with idle-read timeouts** (e.g. Cloudflare's ~100s edge timer): keep `ai_stream: "true"` (the default) so bytes flow before the timer fires.
 - **Models that reject sampling params**: set `ai_temperature: ""` to omit the field entirely; set `ai_tokens_param: max_completion_tokens` for newer OpenAI reasoning models.
-- **Endpoint not always up** (homelab): configure `ai_fallback_base_url`/`ai_fallback_model` (e.g. a small cloud model) or set `on_model_failure: notice` so the PR gets a visible explanation instead of a bare red check.
+- **Endpoint not always up** (homelab): configure `ai-fallback-base-url`/`ai-fallback-model` (e.g. a small cloud model) or set `on_model_failure: notice` so the PR gets a visible explanation instead of a bare red check.
 - **Don't burn 10 minutes on a dead endpoint**: the defaults (`ai_primary_retries: "8"`, 15s delay with backoff, 300s request timeout) are tuned for flaky-but-alive endpoints and can spend ~10 minutes before giving up. If your endpoint is either up or down (typical homelab), use a low-retry profile:
 
 ```yaml
@@ -1076,9 +1068,9 @@ on_model_failure: notice   # visible explanation instead of a long red check
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `curl transport error (exit 7)` in logs | endpoint unreachable from the runner | check `ai_base_url`, runner network, server is listening |
-| HTTP 404 from the endpoint | base URL missing `/v1` (ollama) or wrong `ai_api_format` | use the OpenAI-compatible base path |
-| `context length exceeded` in the logged error body | corpus exceeds the served window | set `model_context_tokens` (and/or lower `ai_max_tokens`) |
+| `curl transport error (exit 7)` in logs | endpoint unreachable from the runner | check `ai-base-url`, runner network, server is listening |
+| HTTP 404 from the endpoint | base URL missing `/v1` (ollama) or wrong `ai-api-format` | use the OpenAI-compatible base path |
+| `context length exceeded` in the logged error body | corpus exceeds the served window | set `model-context-tokens` (and/or lower `ai-max-tokens`) |
 | Verdict parse failures, retries, then fallback | model wraps JSON in prose | set `ai_response_format: json_object` |
 | Reviews time out behind a proxy | idle-read timer on non-streamed response | keep `ai_stream: "true"` |
 | HTTP 400 mentioning `temperature` | model rejects non-default sampling | `ai_temperature: ""` |
@@ -1092,26 +1084,26 @@ on_model_failure: notice   # visible explanation instead of a long red check
   The action strips any matching markers from model output before publishing (see `scripts/strip_metadata_markers.py`). The precheck parser reads only the **first** occurrence of the fingerprint marker for defense in depth; the SHA marker is retained for publication traceability and is never read back.
 - `ai_api_format=openai` posts to `/chat/completions` and parses `choices[0].message.content`.
 - `ai_api_format=anthropic` posts to `/messages` and parses only `content[]` blocks where `type == "text"`.
-- The tool harness planner uses the primary `ai_api_format`; fallback settings apply only to the final review call.
-- `system_prompt` takes precedence over `system_prompt_file`.
-- `system_prompt_file` takes precedence over the bundled generic prompt.
+- The tool harness planner uses the primary `ai-api-format`; fallback settings apply only to the final review call.
+- `system-prompt` takes precedence over `system-prompt-file`.
+- `system-prompt-file` takes precedence over the bundled generic prompt.
 - With `system_prompt_mode: append`, the supplied prompt does not replace the default — it is appended to the conditionally-assembled bundled default as a repo-specific addendum, so you can add conventions without copying (and re-syncing) the whole default.
-- `review_verbosity` tunes the bundled default's output length (`normal` / `concise`) without a prompt override. It is a fragment of the assembled default, so a `replace`-mode `system_prompt` ignores it; with `system_prompt_mode: append` both apply, dial first and repo addendum last.
-- `standards_file` is optional; if blank, the action checks `standards_file_candidates` in order and uses the first file found. `AGENTS.md` is checked first by default, then `CLAUDE.md`, making the action compatible with both Claude Code and non-Claude Code setups.
+- `review-verbosity` tunes the bundled default's output length (`normal` / `concise`) without a prompt override. It is a fragment of the assembled default, so a `replace`-mode `system-prompt` ignores it; with `system_prompt_mode: append` both apply, dial first and repo addendum last.
+- `standards-file` is optional; if blank, the action checks `standards-file-candidates` in order and uses the first file found. `AGENTS.md` is checked first by default, then `CLAUDE.md`, making the action compatible with both Claude Code and non-Claude Code setups.
 - By default, the action fingerprints the raw PR diff with SHA-256 and combines it with a hash of the review-affecting configuration into a marker stored on the managed review comment (`<diff_fp>|cfg:<config_hash>`). The LLM call is skipped only when that whole marker matches, so both a new diff and a changed configuration force a fresh review. This avoids token spend on rebases and other history-only changes.
-- `publish_review_comment` uses `gh pr comment --edit-last --create-if-none`, so the comment is managed by the token identity used in the workflow.
-- `context_limit_mode` reduces the amount of PR data sent to the LLM. Use `minimal` for models with very small context windows. This skips nothing but truncates more aggressively.
-- `evidence_providers_file` accepts JSON only. It can be either an object with `providers: []` or a top-level provider array.
+- `publish-review-comment` uses `gh pr comment --edit-last --create-if-none`, so the comment is managed by the token identity used in the workflow.
+- `context-limit-mode` reduces the amount of PR data sent to the LLM. Use `minimal` for models with very small context windows. This skips nothing but truncates more aggressively.
+- `evidence-providers-file` accepts JSON only. It can be either an object with `providers: []` or a top-level provider array.
 - Provider `command` accepts either a shell string (executed via `bash -lc`) or an argument array (invoked directly). **Argv arrays are strongly recommended** to avoid shell injection risks. Each provider can override `timeout_sec` and `max_output_bytes`.
 - Provider output is appended to the review corpus under an `Evidence Providers` section.
-- `tool_mode=native_loop` lets the model gather read-only evidence via native tool calls before producing the verdict (bounded by `tool_max_requests`, `tool_max_rounds`, and `tool_loop_wall_clock_sec`); a model that issues no tool calls degrades to a corpus-only review.
+- `tool_mode=native_loop` lets the model gather read-only evidence via native tool calls before producing the verdict (bounded by `tool-max-requests`, `tool-max-rounds`, and `tool-loop-wall-clock-sec`); a model that issues no tool calls degrades to a corpus-only review.
 - Tool harness output is appended to the review corpus under `Tool Harness Findings`.
 - Tool harness planning treats corpus content as untrusted data and uses strict tool/path/host allowlists with output redaction. The `run_command` tool does not execute arbitrary shell text; it accepts only named read-only command definitions (`git_status_short`, `git_diff_stat`, `git_diff_name_only`) and runs them argv-only without `bash -lc`.
 - Evidence providers and tool harness are both disabled by default on cross-repository PRs (`*_enable_for_forks=false`).
-- `gh_api` defaults to current-repo scope only. Use `tool_allowed_gh_api_repos` to allow specific upstream repos, or `*` to allow any repository while keeping the path denylist and endpoint allowlist active.
-- For local models, reduce `tool_corpus_max_bytes` and `tool_max_tokens_per_turn`, and increase `tool_turn_timeout_sec` as needed.
+- `gh_api` defaults to current-repo scope only. Use `tool-allowed-gh-api-repos` to allow specific upstream repos, or `*` to allow any repository while keeping the path denylist and endpoint allowlist active.
+- For local models, reduce `tool-corpus-max-bytes` and `tool-max-tokens-per-turn`, and increase `tool-turn-timeout-sec` as needed.
 - Set `tool_failure_enforcement=true` to fail closed when tool harness planning fails or when every tool request fails.
-- Use `tool_min_successful_requests` (for example `1`) to enforce a minimum successful tool-evidence threshold when the planner attempted tool requests.
+- Use `tool-min-successful-requests` (for example `1`) to enforce a minimum successful tool-evidence threshold when the planner attempted tool requests.
 - Model requests use `curl -q` so user-level `.curlrc` timeouts do not unexpectedly cancel long-running local model calls.
 
 ## ✅ Validation
@@ -1144,7 +1136,7 @@ Copyable workflows are included in [`examples/`](examples):
 
 ### 📊 Specialist corpus & deep A/B
 
-The `eval-harness` workflow (`.github/workflows/eval-harness.yaml`) runs `scripts/eval_harness.py` against the graded corpora — `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and `evals/corpus-specialists.json` — on the weekly scheduled sweep and on demand. The specialist corpus adds a deep-review A/B: the `deep` dispatch input (or `--deep-review false|true|both` locally) runs the specialist phase, and deep runs are labelled `<mode>+deep` in the report. Each fixture's `specialist_expectations` is split into two grading scopes: `lead_checks` (`lead_generated`, `lead_disposition`) are deep-only diagnostics graded only on `<mode>+deep` runs — and a `verified` disposition demands concrete evidence (the adopted finding must be grounded in the expected file via `finding_file_any`, so parroting a specialist's wording proves nothing) — while `effectiveness_checks` (`final_findings_count`, `dedupe_final_findings`) are graded identically on standard and deep runs, keeping the headline comparison an apples-to-apples measure of final-review capability (`specialist_effectiveness_*` rates on both labels; `specialist_lead_*` rates on deep labels only). The harness drives the real review boundary end to end: it passes `REPO`/`PR_NUMBER` to `run_review.sh` and consumes the validated `ai-output.json` artifact (verdict, markdown, production-shape findings) plus specialist telemetry from `specialists.json` and `specialist-<role>.json`. The scheduled sweep stays standard-only, and the production default is unchanged: `deep_review` is still off by default.
+The `eval-harness` workflow (`.github/workflows/eval-harness.yaml`) runs `scripts/eval_harness.py` against the graded corpora — `evals/corpus-agentic.json`, `evals/corpus-repo-context.json`, and `evals/corpus-specialists.json` — on the weekly scheduled sweep and on demand. The specialist corpus adds a deep-review A/B: the `deep` dispatch input (or `--deep-review false|true|both` locally) runs the specialist phase, and deep runs are labelled `<mode>+deep` in the report. Each fixture's `specialist_expectations` is split into two grading scopes: `lead_checks` (`lead_generated`, `lead_disposition`) are deep-only diagnostics graded only on `<mode>+deep` runs — and a `verified` disposition demands concrete evidence (the adopted finding must be grounded in the expected file via `finding_file_any`, so parroting a specialist's wording proves nothing) — while `effectiveness_checks` (`final_findings_count`, `dedupe_final_findings`) are graded identically on standard and deep runs, keeping the headline comparison an apples-to-apples measure of final-review capability (`specialist_effectiveness_*` rates on both labels; `specialist_lead_*` rates on deep labels only). The harness drives the real review boundary end to end: it passes `REPO`/`PR_NUMBER` to `run_review.sh` and consumes the validated `ai-output.json` artifact (verdict, markdown, production-shape findings) plus specialist telemetry from `specialists.json` and `specialist-<role>.json`. The scheduled sweep stays standard-only, and the production default is unchanged: `deep-review` is still off by default.
 
 The full evaluation runbook — local runs, CI triggers, merge-safety disposition scoring, the offline semantic gate, and the on-demand semantic judge — lives in [`docs/evals.md`](docs/evals.md).
 
@@ -1154,7 +1146,7 @@ The action is versioned via Git tags (e.g., `v2.0.5`). The examples in this READ
 
 ```yaml
 # Pin to a specific release tag (recommended)
-- uses: misospace/pr-reviewer-action@v2.0.5
+- uses: misospace/pr-reviewer-action@v3.0.5
 
 # Pin to a specific commit (most stable during development)
 - uses: misospace/pr-reviewer-action@b36ea146c6563a3f49a5b9a232d411f6cf970474 # v2.0.5
@@ -1180,7 +1172,7 @@ To stay current, subscribe to [GitHub Releases](https://github.com/misospace/pr-
 
 ### 🚚 v3 breaking changes
 
-If you used `review_scope: auto|incremental|full` in v2, remove the input in v3. There is no replacement: every changed review uses the full current PR. Keep `skip_if_diff_unchanged` for the zero-token unchanged-review skip; it retains the prior overall verdict. The `ai-review` label or `force_review: "true"` still forces a fresh full review.
+If you used `review_scope: auto|incremental|full` in v2, remove the input in v3. There is no replacement: every changed review uses the full current PR. Keep `skip-if-diff-unchanged` for the zero-token unchanged-review skip; it retains the prior overall verdict. The `ai-review` label or `force_review: "true"` still forces a fresh full review.
 
 Stop reading the removed incremental outputs (`effective_review_scope`, `previous_head_sha`, `previous_base_sha`, `baseline_clean`) and remove `escalate_on_dirty_baseline` if configured. Previous findings and evidence are not carried into a new review. No replacement scope or dirty-baseline setting is needed.
 

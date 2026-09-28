@@ -221,15 +221,15 @@ done
 
 echo ""
 echo "=== action.yml: inputs + env bindings ==="
-check_contains "deep_review input declared" "$ACTION" '  deep_review:'
-check "deep_review input defaults to false" \
-  "$(awk '/^  deep_review:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'false'"
-check "deep_review_timeout_sec input defaults to 600" \
-  "$(awk '/^  deep_review_timeout_sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'600'"
-check "deep_review_max_tokens input defaults to 4096" \
-  "$(awk '/^  deep_review_max_tokens:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'4096'"
-check "deep_review_corpus_max_bytes input defaults to 48000" \
-  "$(awk '/^  deep_review_corpus_max_bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'48000'"
+check_contains "deep_review input declared" "$ACTION" '  deep-review:'
+check "deep-review input defaults to false" \
+  "$(awk '/^  deep-review:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'false'"
+check "deep-review-timeout-sec input defaults to 600" \
+  "$(awk '/^  deep-review-timeout-sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'600'"
+check "deep-review-max-tokens input defaults to 4096" \
+  "$(awk '/^  deep-review-max-tokens:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'4096'"
+check "deep-review-corpus-max-bytes input defaults to 48000" \
+  "$(awk '/^  deep-review-corpus-max-bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'48000'"
 
 # #641 moved the shared env bindings into the "Export shared review environment"
 # step (an action-local file consumed by the precheck and the review step), so
@@ -246,7 +246,7 @@ check "DEEP_REVIEW env binding lives in the shared export block" \
   "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW:' || true)" "1"
 check "DEEP_REVIEW env binding is unchanged" \
   "$(printf '%s\n' "$deep_review_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  '${{ inputs.deep_review }}'
+  '${{ inputs.deep-review }}'
 
 deep_review_timeout_env="$(grep -n 'DEEP_REVIEW_TIMEOUT_SEC:' "$ACTION_YML" | cut -d: -f2- || true)"
 check "DEEP_REVIEW_TIMEOUT_SEC appears exactly once among env lines (shared block only)" \
@@ -255,7 +255,7 @@ check "DEEP_REVIEW_TIMEOUT_SEC env binding lives in the shared export block" \
   "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW_TIMEOUT_SEC:' || true)" "1"
 check "DEEP_REVIEW_TIMEOUT_SEC env binding is unchanged" \
   "$(printf '%s\n' "$deep_review_timeout_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  '${{ inputs.deep_review_timeout_sec }}'
+  '${{ inputs.deep-review-timeout-sec }}'
 
 for budget_var in DEEP_REVIEW_MAX_TOKENS DEEP_REVIEW_CORPUS_MAX_BYTES; do
   budget_env="$(grep -n "${budget_var}:" "$ACTION_YML" | cut -d: -f2- || true)"
@@ -266,10 +266,10 @@ for budget_var in DEEP_REVIEW_MAX_TOKENS DEEP_REVIEW_CORPUS_MAX_BYTES; do
 done
 check "DEEP_REVIEW_MAX_TOKENS env binding is unchanged" \
   "$(grep -n 'DEEP_REVIEW_MAX_TOKENS:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  'DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}'
+  'DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep-review-max-tokens }}'
 check "DEEP_REVIEW_CORPUS_MAX_BYTES env binding is unchanged" \
   "$(grep -n 'DEEP_REVIEW_CORPUS_MAX_BYTES:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  'DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}'
+  'DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep-review-corpus-max-bytes }}'
 
 echo ""
 echo "=== precheck.py: deep review config fingerprinted ==="
@@ -312,7 +312,7 @@ check_contains "failure warning explains the forced review" "$CHECK" 'could not 
 # of the config fingerprint.
 PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Run AI review/' "$ACTION_YML")"
 check "precheck step binds LINEAR_API_KEY (auto fingerprint needs it)" \
-  "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear_api_key }}' || true)" "1"
+  "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear-api-key }}' || true)" "1"
 check "LINEAR_API_KEY is bound exactly twice (precheck + review steps; never the shared file)" \
   "$(grep -c 'LINEAR_API_KEY:' "$ACTION_YML" || true)" "2"
 check "LINEAR_API_KEY stays out of the shared export block" \

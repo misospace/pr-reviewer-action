@@ -2,32 +2,32 @@ name: Miso PR Review
 description: Review pull requests with OpenAI- or Anthropic-compatible models and post an optional sticky comment.
 
 inputs:
-  github_token:
+  github-token:
     description: GitHub token for PR and API access
     required: true
   repo:
     description: Repository in owner/name format. Defaults to the current workflow repository.
     required: false
     default: ""
-  pr_number:
+  pr-number:
     description: Pull request number. Defaults to the current pull_request event number.
     required: false
     default: ""
-  ai_base_url:
+  ai-base-url:
     description: Base URL of the primary AI API
     required: true
-  ai_api_format:
+  ai-api-format:
     description: API request/response format for the primary AI endpoint (openai or anthropic)
     required: false
     default: openai
-  ai_model:
+  ai-model:
     description: Model name for the primary analysis pass
     required: true
-  ai_api_key:
+  ai-api-key:
     description: Optional API key for the primary AI endpoint
     required: false
     default: ""
-  ai_max_tokens:
+  ai-max-tokens:
     description: >-
       Maximum completion tokens for the primary and fallback final review calls.
       Default 8192. Reasoning models that emit a thinking channel need this
@@ -37,13 +37,13 @@ inputs:
       verbose reasoning models.
     required: false
     default: "8192"
-  ai_temperature:
+  ai-temperature:
     description: >-
       Sampling temperature for the review model. Default "0.1". Set to an empty string to
       omit the field entirely (some newer cloud models reject any non-default temperature).
     required: false
     default: "0.1"
-  ai_response_format:
+  ai-response-format:
     description: >-
       Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default),
       json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the
@@ -51,41 +51,41 @@ inputs:
       the primary and fallback review calls.
     required: false
     default: "off"
-  ai_tokens_param:
+  ai-tokens-param:
     description: >-
       Token-limit field name for OpenAI-compatible requests: max_tokens (default) or
       max_completion_tokens (required by newer OpenAI reasoning models). Ignored for anthropic.
     required: false
     default: "max_tokens"
-  anthropic_version:
+  anthropic-version:
     description: Anthropic API version header used when ai_api_format or ai_fallback_api_format is anthropic
     required: false
     default: "2023-06-01"
-  ai_fallback_base_url:
+  ai-fallback-base-url:
     description: Optional base URL of a fallback AI API; defaults to ai_base_url when blank
     required: false
     default: ""
-  ai_fallback_api_format:
+  ai-fallback-api-format:
     description: Fallback API request/response format; defaults to ai_api_format when blank
     required: false
     default: ""
-  ai_fallback_model:
+  ai-fallback-model:
     description: Optional model name for the fallback analysis pass
     required: false
     default: ""
-  ai_fallback_api_key:
+  ai-fallback-api-key:
     description: Optional API key for the fallback endpoint; defaults to ai_api_key when blank
     required: false
     default: ""
-  ai_primary_retries:
+  ai-primary-retries:
     description: Number of retries for the primary model
     required: false
     default: "8"
-  ai_primary_retry_delay_sec:
+  ai-primary-retry-delay-sec:
     description: Delay between primary retries in seconds
     required: false
     default: "15"
-  on_model_failure:
+  on-model-failure:
     description: >-
       Behavior when both primary and fallback models fail to return a usable review.
       'fail' (default) fails the action step. 'notice' instead posts a visible
@@ -93,7 +93,7 @@ inputs:
       so reviewers see an explanation instead of only a red check.
     required: false
     default: "fail"
-  fail_on_request_changes:
+  fail-on-request-changes:
     description: >-
       If true, fail the action step when the final verdict is request_changes,
       so the review can act as a CI merge gate without a GitHub App. The gate
@@ -105,7 +105,7 @@ inputs:
       Default false — existing consumers see no behaviour change.
     required: false
     default: "false"
-  verdict_policy:
+  verdict-policy:
     description: >-
       How the final verdict is decided. 'model' (default) uses the model's own verdict.
       'findings_severity_gated' preserves request_changes from the model and escalates
@@ -114,7 +114,7 @@ inputs:
       tool failure) still apply afterwards and can force request_changes.
     required: false
     default: "model"
-  non_blocking_finding_categories:
+  non-blocking-finding-categories:
     description: >-
       Comma-separated finding categories (from tests, docs, style, question, performance,
       bug, other; security is never allowed) that cannot request changes on their own under
@@ -123,7 +123,7 @@ inputs:
       with a security risk flag and under verdict_policy=model. Empty (the default) disables it.
     required: false
     default: ""
-  inline_findings:
+  inline-findings:
     description: >-
       If true, structured findings that anchor to a line in the PR diff are attached as
       native line-anchored review comments when publishing with publish_mode=review_comment
@@ -131,11 +131,11 @@ inputs:
       Default false — no inline comments. Ignored for publish_mode=comment.
     required: false
     default: "false"
-  inline_findings_max:
+  inline-findings-max:
     description: Maximum inline review comments attached per review when inline_findings=true.
     required: false
     default: "20"
-  validate_required_checks:
+  validate-required-checks:
     description: >-
       Whether to validate the final review against the classifier's must_check items.
       'auto' (default) validates whenever must_check is non-empty; 'true' and 'false'
@@ -146,7 +146,7 @@ inputs:
       at all.
     required: false
     default: "auto"
-  required_check_validation_mode:
+  required-check-validation-mode:
     description: >-
       What to do when required checks are unresolved or undispositioned. 'warn'
       (default) appends an 'Unaddressed required checks' section to the published
@@ -156,7 +156,7 @@ inputs:
       (#721).
     required: false
     default: "warn"
-  review_routing_mode:
+  review-routing-mode:
     description: >-
       Route PR reviews between the primary and smart models based on the
       deterministic classification. 'off' (default) preserves existing
@@ -165,39 +165,39 @@ inputs:
       and keeps everything else on the primary model.
     required: false
     default: "off"
-  ai_primary_model:
+  ai-primary-model:
     description: Model for the primary review route when review_routing_mode=auto. Defaults to ai_model.
     required: false
     default: ""
-  ai_primary_base_url:
+  ai-primary-base-url:
     description: Base URL for the primary route model. Defaults to ai_base_url.
     required: false
     default: ""
-  ai_primary_api_format:
+  ai-primary-api-format:
     description: API format for the primary route model (openai or anthropic). Defaults to ai_api_format.
     required: false
     default: ""
-  ai_primary_api_key:
+  ai-primary-api-key:
     description: API key for the primary route model. Defaults to ai_api_key.
     required: false
     default: ""
-  ai_smart_model:
+  ai-smart-model:
     description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
     required: false
     default: ""
-  ai_smart_base_url:
+  ai-smart-base-url:
     description: Base URL for the smart model. Defaults to ai_base_url.
     required: false
     default: ""
-  ai_smart_api_format:
+  ai-smart-api-format:
     description: API format for the smart model (openai or anthropic). Defaults to ai_api_format.
     required: false
     default: ""
-  ai_smart_api_key:
+  ai-smart-api-key:
     description: API key for the smart model. Defaults to ai_api_key.
     required: false
     default: ""
-  escalate_on_risk_flags:
+  escalate-on-risk-flags:
     description: >-
       Comma-separated pr_kind / risk_flag names that route directly to the smart model
       when review_routing_mode=auto. Matched against route_signals — linked-issue flags
@@ -205,76 +205,51 @@ inputs:
       diff merely mentions a pattern (e.g. os.path) does not route.
     required: false
     default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
-  escalate_on_incomplete_required_checks:
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-    required: false
-    default: "false"
-  escalate_on_fast_request_changes:
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-    required: false
-    default: "true"
-  escalate_on_fast_low_confidence:
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-    required: false
-    default: "true"
-  escalate_on_tool_or_evidence_blockers:
-    description: >-
-      Deprecated since #721: accepted for backward compatibility but no longer triggers
-      escalation — post-primary smart escalation is reviewer-requested only (the primary
-      model's structured smart_review_requested verdict field). Evidence/tool blockers
-      remain subject to deterministic enforcement; the value is ignored except for a
-      startup notice.
-    required: false
-    default: "true"
-  escalate_on_tool_planning_failure:
-    description: "Deprecated since #721: accepted for backward compatibility but no longer triggers escalation — post-primary smart escalation is reviewer-requested only (the primary model's structured smart_review_requested verdict field). The value is ignored except for a startup notice."
-    required: false
-    default: "false"
-  ai_stream:
+  ai-stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false
     default: "true"
-  ai_fallback_stream:
+  ai-fallback-stream:
     description: If set, overrides ai_stream for the fallback model; defaults to ai_stream value when blank
     required: false
     default: ""
-  allowed_source_hosts:
+  allowed-source-hosts:
     description: Comma-separated list of hosts allowed for linked source fetching
     required: false
     default: github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io
-  related_code_context:
+  related-code-context:
     description: Include deterministic related-code context discovered from changed-file anchors
     required: false
     default: "true"
-  related_code_max_bytes:
+  related-code-max-bytes:
     description: Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)
     required: false
     default: "16000"
-  linear_api_key:
+  linear-api-key:
     description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
     required: false
     default: ""
-  linear_issue_prefixes:
+  linear-issue-prefixes:
     description: Comma-separated Linear team keys recognized in PR titles (for example DST,LAB); empty disables the Linear adapter
     required: false
     default: ""
-  linear_issue_timeout_sec:
+  linear-issue-timeout-sec:
     description: Timeout in seconds for each Linear GraphQL issue lookup
     required: false
     default: "20"
-  linear_enable_for_forks:
+  linear-enable-for-forks:
     description: If true, allow private Linear issue context to be fetched and included for cross-repository PRs
     required: false
     default: "false"
-  system_prompt:
+  system-prompt:
     description: Optional system prompt override. When both this and system_prompt_file are set, the file content is read first and the inline value is appended (separated by two newlines), combining static repo conventions with per-PR steering.
     required: false
     default: ""
-  system_prompt_file:
+  system-prompt-file:
     description: Optional file path in the reviewed repository to use as the system prompt. When both this and system_prompt are set, the file content is read first and the inline system_prompt is appended (separated by two newlines).
     required: false
     default: ""
-  system_prompt_mode:
+  system-prompt-mode:
     description: >-
       How a supplied system_prompt / system_prompt_file combines with the bundled
       default. 'replace' (default) uses the supplied prompt verbatim. 'append'
@@ -283,7 +258,7 @@ inputs:
       copying (and re-syncing) the whole default.
     required: false
     default: "replace"
-  review_verbosity:
+  review-verbosity:
     description: >-
       Output-length dial for the bundled default prompt. 'normal' (default)
       leaves the prompt unchanged. 'concise' adds a brevity fragment: a ~300-word
@@ -294,19 +269,19 @@ inputs:
       default — a replace-mode system_prompt override is used verbatim.
     required: false
     default: "normal"
-  standards_file:
+  standards-file:
     description: Repository standards file path for conventions and policy context
     required: false
     default: ""
-  standards_file_candidates:
+  standards-file-candidates:
     description: Candidate files to auto-discover when standards_file is not set. First found is used.
     required: false
     default: AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt
-  publish_review_comment:
+  publish-review-comment:
     description: If true, publish or update a PR comment with the generated review
     required: false
     default: "false"
-  publish_mode:
+  publish-mode:
     description: >-
       Publish mode for the review verdict. 'comment' publishes a sticky PR comment (default).
       'review_comment' uses GitHub's native PR review API to submit a non-blocking review comment.
@@ -314,14 +289,14 @@ inputs:
       Requires permissions: pull-requests: write for review_comment and review_verdict modes.
     required: false
     default: "comment"
-  allow_approve:
+  allow-approve:
     description: >-
       If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a
       native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING:
       native approvals can affect branch protection rules and automerge pipelines.
     required: false
     default: "false"
-  allow_repo_policy_overrides:
+  allow-repo-policy-overrides:
     description: >-
       If true, a repository config file may set policy inputs (marked repo-policy in the v3
       contract: verdict policy, blocking categories, required-check and evidence enforcement,
@@ -329,14 +304,14 @@ inputs:
       so a repository cannot loosen a gate its operator enforces. v3 only.
     required: false
     default: "false"
-  approve_forks:
+  approve-forks:
     description: >-
       If true and publish_mode=review_verdict with allow_approve=true, native approvals are also
       allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from
       approval even when allow_approve is set.
     required: false
     default: "false"
-  cleanup_previous_native_reviews:
+  cleanup-previous-native-reviews:
     description: >-
       Mark previous managed native PR reviews as outdated/superseded before publishing a new
       native review. Accepted values: `auto` (default, enables cleanup for review_comment and
@@ -345,7 +320,7 @@ inputs:
       is attempted when permissions allow but is secondary to visual cleanup.
     required: false
     default: "auto"
-  upstream_link_mode:
+  upstream-link-mode:
     description: >-
       How upstream GitHub PR/issue/commit/compare URLs in the published review are handled.
       `inert` (default) rewrites them to plain text so GitHub never auto-links them.
@@ -354,11 +329,11 @@ inputs:
       (owner/repo#123, bare #123) are inert in both modes.
     required: false
     default: "inert"
-  context_limit_mode:
+  context-limit-mode:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
     default: normal
-  model_context_tokens:
+  model-context-tokens:
     description: >-
       The model's real context window in tokens (e.g. 8192, 32768). When set,
       corpus/diff/file byte budgets are derived from it (reserving ai_max_tokens
@@ -367,43 +342,43 @@ inputs:
       context_limit_mode.
     required: false
     default: ""
-  primary_model_context_tokens:
+  primary-model-context-tokens:
     description: Primary tier context window in tokens; empty inherits model_context_tokens/context_limit_mode
     required: false
     default: ""
-  smart_model_context_tokens:
+  smart-model-context-tokens:
     description: Smart tier context window in tokens; empty inherits model_context_tokens/context_limit_mode
     required: false
     default: ""
-  primary_request_shape:
+  primary-request-shape:
     description: Primary request layout (default or trailing_task)
     required: false
     default: default
-  smart_request_shape:
+  smart-request-shape:
     description: Smart request layout (default or trailing_task)
     required: false
     default: default
-  repo_map_context:
+  repo-map-context:
     description: Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context
     required: false
     default: "true"
-  repo_map_max_bytes:
+  repo-map-max-bytes:
     description: Maximum UTF-8 bytes for the repository-map Markdown artifact and planning slot
     required: false
     default: "12000"
-  pr_thread_context:
+  pr-thread-context:
     description: Include bounded recent PR conversation comments (thread context) in the review corpus, with the action's own managed comments filtered out
     required: false
     default: "true"
-  pr_thread_max_bytes:
+  pr-thread-max-bytes:
     description: Maximum UTF-8 bytes of PR-thread context in the review corpus (whole comments are dropped to fit; values above 200000 are rejected)
     required: false
     default: "8000"
-  review_threads_context:
+  review-threads-context:
     description: Include unresolved inline review threads (the action's earlier findings and the replies to them) in the review corpus; the reviewer must disposition each listed thread
     required: false
     default: "true"
-  review_threads_max_bytes:
+  review-threads-max-bytes:
     description: Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected)
     required: false
     default: "8000"
@@ -419,7 +394,7 @@ inputs:
   # specialists.json. Advisory only in this iteration: the leads never touch
   # the verdict, enforcement, or the published review body; skipped roles are
   # telemetry, not failures.
-  deep_review:
+  deep-review:
     description: 'Specialist leads (correctness/security/tests) over the review corpus: false = off, true = all three roles, auto = deterministic classifier-driven selection, possibly zero (advisory only)'
     required: false
     default: 'false'
@@ -428,7 +403,7 @@ inputs:
   # specialist phase (all three roles). Roles still running past the deadline
   # are recorded as errors on their specialist-<role>.json / specialists.json;
   # the review is never delayed or failed.
-  deep_review_timeout_sec:
+  deep-review-timeout-sec:
     description: 'Maximum wall-clock seconds for the whole deep-review specialist phase; stragglers past the deadline are recorded as role errors (advisory only). Default 600.'
     required: false
     default: '600'
@@ -436,7 +411,7 @@ inputs:
   # #632: independent specialist output budget. Deliberately separate from
   # ai_max_tokens so a narrow advisory scout gets a short structured-JSON
   # allowance instead of the final reviewer's much larger budget.
-  deep_review_max_tokens:
+  deep-review-max-tokens:
     description: 'Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096.'
     required: false
     default: '4096'
@@ -444,52 +419,52 @@ inputs:
   # #632: independent specialist corpus cap. A compact deterministic corpus is
   # built from the collected artifacts for the specialist roles only; this hard
   # UTF-8 byte cap is independent of the final review corpus budget.
-  deep_review_corpus_max_bytes:
+  deep-review-corpus-max-bytes:
     description: 'Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000.'
     required: false
     default: '48000'
 
-  enrichment_budget_sec:
+  enrichment-budget-sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false
     default: "60"
-  image_digest_budget_sec:
+  image-digest-budget-sec:
     description: Maximum seconds to spend on image digest provenance lookups (registry tokens, manifests, revision compares). 0 disables the budget. Default 60.
     required: false
     default: "60"
-  evidence_providers_file:
+  evidence-providers-file:
     description: Optional JSON file in the reviewed repository that defines evidence providers to run before review
     required: false
     default: ""
-  sarif_files:
+  sarif-files:
     description: Comma- or newline-delimited workspace-relative SARIF 2.1.0 files to include as evidence
     required: false
     default: ""
-  sarif_max_findings:
+  sarif-max-findings:
     description: Global maximum number of findings combined across all supplied SARIF files
     required: false
     default: "200"
-  evidence_provider_timeout_sec:
+  evidence-provider-timeout-sec:
     description: Default timeout in seconds for each evidence provider command
     required: false
     default: "30"
-  evidence_provider_max_output_bytes:
+  evidence-provider-max-output-bytes:
     description: Maximum stdout or stderr bytes captured per evidence provider command
     required: false
     default: "20000"
-  evidence_provider_parallelism:
+  evidence-provider-parallelism:
     description: Maximum evidence provider commands run concurrently. Set 1 to force serial execution when providers contend on shared files. Default 4.
     required: false
     default: "4"
-  evidence_blocker_enforcement:
+  evidence-blocker-enforcement:
     description: If true, force request_changes when any evidence provider reports blocker severity
     required: false
     default: "false"
-  evidence_enable_for_forks:
+  evidence-enable-for-forks:
     description: If true, allow evidence providers to run on cross-repository pull requests
     required: false
     default: "false"
-  tool_mode:
+  tool-mode:
     description: >-
       Optional tool harness mode: "off" (no evidence tools) or "native_loop". With
       native_loop the model uses its native tool-calling API — it holds the tool
@@ -503,13 +478,13 @@ inputs:
       value is treated as "off".)
     required: false
     default: "off"
-  tool_loop_wall_clock_sec:
+  tool-loop-wall-clock-sec:
     description: >-
       Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange
       (all model round-trips plus tool execution). Ignored for other modes.
     required: false
     default: "600"
-  tool_loop_summarize:
+  tool-loop-summarize:
     description: >-
       When "true", tool_mode=native_loop folds the oldest tool results into a
       model-generated evidence digest once the conversation outgrows its context
@@ -519,13 +494,13 @@ inputs:
       modes.
     required: false
     default: "false"
-  tool_loop_summarize_max_tokens:
+  tool-loop-summarize-max-tokens:
     description: >-
       Maximum completion tokens for each result-summarization call when
       tool_loop_summarize is enabled. Keep it small — the digest should be terse.
     required: false
     default: "512"
-  tool_max_requests:
+  tool-max-requests:
     description: >-
       Maximum number of tool requests the harness executes when tool_mode
       is enabled. Empty (the default) resolves a tier-aware budget from
@@ -538,64 +513,52 @@ inputs:
       and is bounded to 1..50.
     required: false
     default: ""
-  primary_tool_max_requests:
+  primary-tool-max-requests:
     description: >-
       Request budget for the primary route only, bounded to 1..50. Outranks
       tool_max_requests on that route and leaves the smart/escalated tiers
       untouched. Empty (the default) keeps the tier default.
     required: false
     default: ""
-  smart_tool_max_requests:
+  smart-tool-max-requests:
     description: >-
       Request budget for the smart and escalated routes only, bounded to 1..50.
       Outranks tool_max_requests on those routes and leaves the primary tier
       untouched. Empty (the default) keeps the tier defaults.
     required: false
     default: ""
-  tool_max_rounds:
+  tool-max-rounds:
     description: >-
       Round budget for tool_mode=native_loop, where a round is a single model turn:
       the loop allows up to twice this value (capped at 12) to leave room for
       one-call-per-turn chains and repair turns. Ignored when tool_mode=off.
     required: false
     default: "4"
-  tool_turn_timeout_sec:
+  tool-turn-timeout-sec:
     description: Timeout in seconds for each model turn of the tool_mode=native_loop exchange. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts.
     required: false
     default: "60"
-  tool_corpus_max_bytes:
+  tool-corpus-max-bytes:
     description: Maximum corpus bytes passed into the native_loop conversation's first turn
     required: false
     default: "50000"
-  tool_max_tokens_per_turn:
+  tool-max-tokens-per-turn:
     description: Maximum completion tokens for each model turn of the tool_mode=native_loop exchange
     required: false
     default: "400"
-  tool_planning_timeout_sec:
-    description: "DEPRECATED (removed in v3.0.0): use tool_turn_timeout_sec. Still honored as a fallback when tool_turn_timeout_sec is left at its default."
-    required: false
-    default: ""
-  tool_planning_max_context_bytes:
-    description: "DEPRECATED (removed in v3.0.0): use tool_corpus_max_bytes. Still honored as a fallback when tool_corpus_max_bytes is left at its default."
-    required: false
-    default: ""
-  tool_planning_max_tokens:
-    description: "DEPRECATED (removed in v3.0.0): use tool_max_tokens_per_turn. Still honored as a fallback when tool_max_tokens_per_turn is left at its default."
-    required: false
-    default: ""
-  tool_max_response_bytes:
+  tool-max-response-bytes:
     description: Maximum bytes captured from each tool execution result
     required: false
     default: "12000"
-  tool_allowed_gh_api_repos:
+  tool-allowed-gh-api-repos:
     description: Comma-separated owner/repo list allowed for gh_api tool requests; use * to allow any repo still permitted by the path allowlist (empty means current repo only)
     required: false
     default: ""
-  tool_request_timeout_sec:
+  tool-request-timeout-sec:
     description: Timeout in seconds for each tool request execution
     required: false
     default: "20"
-  search_url:
+  search-url:
     description: >-
       Search-engine endpoint (e.g. a SearXNG instance's /search URL) that
       enables the read-only web_search tool in the native tool loop. When set,
@@ -606,23 +569,23 @@ inputs:
       the same fork gating as the rest of the tool harness.
     required: false
     default: ""
-  tool_max_search_results:
+  tool-max-search-results:
     description: Maximum results returned per web_search call
     required: false
     default: "5"
-  tool_failure_enforcement:
+  tool-failure-enforcement:
     description: If true, force request_changes when tool harness planning fails
     required: false
     default: "false"
-  tool_min_successful_requests:
+  tool-min-successful-requests:
     description: Minimum number of successful tool requests required when tool failure enforcement is enabled
     required: false
     default: "0"
-  tool_enable_for_forks:
+  tool-enable-for-forks:
     description: If true, allow the tool harness to run on cross-repository pull requests
     required: false
     default: "false"
-  tool_mcp_servers:
+  tool-mcp-servers:
     description: >-
       Optional allowlist of read-only MCP servers for tool_mode=native_loop, as a
       newline/comma list of name=url (e.g. konflate=https://konflate.example/mcp).
@@ -634,11 +597,11 @@ inputs:
       are dropped.
     required: false
     default: ""
-  tool_mcp_token:
+  tool-mcp-token:
     description: Optional bearer token sent to every configured MCP server (tool_mcp_servers)
     required: false
     default: ""
-  tool_mcp_name_prefixes:
+  tool-mcp-name-prefixes:
     description: >-
       Comma-separated list of tool name prefixes to strip before the
       read-only verb check (e.g. toolhive workload prefixes from
@@ -646,19 +609,19 @@ inputs:
       boundary.
     required: false
     default: ""
-  ai_request_timeout_sec:
+  ai-request-timeout-sec:
     description: Timeout in seconds for the primary model API request (curl --max-time)
     required: false
     default: "300"
-  ai_connect_timeout_sec:
+  ai-connect-timeout-sec:
     description: Timeout in seconds for the primary model API connection (curl --connect-timeout)
     required: false
     default: "30"
-  ai_fallback_request_timeout_sec:
+  ai-fallback-request-timeout-sec:
     description: Timeout in seconds for the fallback model API request (curl --max-time). Defaults to ai_request_timeout_sec when blank.
     required: false
     default: ""
-  ai_fallback_connect_timeout_sec:
+  ai-fallback-connect-timeout-sec:
     description: Timeout in seconds for the fallback model API connection (curl --connect-timeout). Defaults to ai_connect_timeout_sec when blank.
     required: false
     default: ""
@@ -674,7 +637,7 @@ inputs:
       always targets github.com regardless of this setting.
     required: false
     default: "auto"
-  forgejo_api_url:
+  forgejo-api-url:
     description: >-
       Base URL for the Forgejo instance API backend (for example,
       https://forgejo.example.com). Optional on Forgejo Actions runners when
@@ -682,14 +645,14 @@ inputs:
       runner that does not export the Forgejo server URL.
     required: false
     default: ""
-  forgejo_token:
+  forgejo-token:
     description: >-
       Optional Forgejo API token. Defaults to github_token when blank. Use this
       when the token used for GitHub-compatible operations is not also valid for
       the Forgejo REST API.
     required: false
     default: ""
-  forgejo_auth_method:
+  forgejo-auth-method:
     description: >-
       Forgejo authentication method. 'token' (default) uses a static personal
       access token via the forgejo_token input. 'authorized_integration' uses
@@ -700,7 +663,7 @@ inputs:
       and that the workflow sets 'enable-openid-connect: true'.
     required: false
     default: "token"
-  forgejo_authorized_integration_audience:
+  forgejo-authorized-integration-audience:
     description: >-
       Audience identifier for the Forgejo Authorized Integration (the 'aud' JWT
       claim). Not secret — safe to commit to public code. Required when
@@ -708,7 +671,7 @@ inputs:
       forgejo_auth_method is 'token'.
     required: false
     default: ""
-  forgejo_skip_permission_preflight:
+  forgejo-skip-permission-preflight:
     description: >-
       If true, allow the review to proceed when the Forgejo preflight reports
       an unrecognized ("unknown") permission — i.e. the server returned 200 but
@@ -718,11 +681,11 @@ inputs:
       publish reviews, otherwise the model output will be lost.
     required: false
     default: "false"
-  skip_if_diff_unchanged:
+  skip-if-diff-unchanged:
     description: If true, skip the LLM review when the effective PR diff matches the last managed review comment fingerprint
     required: false
     default: "true"
-  force_review:
+  force-review:
     description: >-
       If true, bypass the diff-unchanged guard and run a full PR review, even
       when the fingerprint matches the last managed review. Set automatically
@@ -730,7 +693,7 @@ inputs:
       workflow_dispatch or repository_dispatch. Default false.
     required: false
     default: "false"
-  rereview_label:
+  rereview-label:
     description: >-
       Label that, when added to a PR, forces a fresh review even if nothing
       changed — the easy re-review trigger (only users with write/triage can
@@ -740,23 +703,23 @@ inputs:
       `labeled` to the workflow's pull_request types. Default "ai-review".
     required: false
     default: "ai-review"
-  comment_marker:
+  comment-marker:
     description: HTML marker for the managed PR comment
     required: false
     default: "<!-- ai-pr-reviewer -->"
-  ci_status_check:
+  ci-status-check:
     description: If true, wait for all CI checks to reach a terminal state before starting the AI review, then fold the per-check outcomes into the review corpus as evidence (so the model cites real test/lint results instead of "not verifiable"). Polls the Checks API for the PR head SHA. Default false — immediate review (original behavior).
     required: false
     default: "false"
-  ci_timeout_sec:
+  ci-timeout-sec:
     description: Maximum seconds to wait for CI checks to complete when ci_status_check=true. Default 300.
     required: false
     default: "300"
-  ci_interval_sec:
+  ci-interval-sec:
     description: Seconds between CI status polls when ci_status_check=true. Default 15.
     required: false
     default: "15"
-  ci_skip_on_timeout:
+  ci-skip-on-timeout:
     description: If true, proceed with review after timeout instead of failing. If false, abort the action on timeout. Default true.
     required: false
     default: "true"
@@ -765,48 +728,48 @@ outputs:
   verdict:
     description: AI verdict, approve or request_changes
     value: ${{ steps.review.outputs.verdict || steps.precheck.outputs.verdict }}
-  verdict_source:
+  verdict-source:
     description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)
-    value: ${{ steps.review.outputs.verdict_source || steps.precheck.outputs.verdict_source }}
-  required_checks:
+    value: ${{ steps.review.outputs.verdict-source || steps.precheck.outputs.verdict_source }}
+  required-checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
-    value: ${{ steps.review.outputs.required_checks }}
-  review_route:
+    value: ${{ steps.review.outputs.required-checks }}
+  review-route:
     description: Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')
-    value: ${{ steps.review.outputs.review_route }}
-  escalation_reason:
+    value: ${{ steps.review.outputs.review-route }}
+  escalation-reason:
     description: "primary_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise"
-    value: ${{ steps.review.outputs.escalation_reason }}
+    value: ${{ steps.review.outputs.escalation-reason }}
   findings:
     description: Normalized structured findings as a JSON array (empty array when the model produced none)
     value: ${{ steps.review.outputs.findings }}
-  review_markdown:
+  review-markdown:
     description: Human-readable markdown review body
-    value: ${{ steps.review.outputs.review_markdown }}
-  analysis_engine:
+    value: ${{ steps.review.outputs.review-markdown }}
+  analysis-engine:
     description: Model and endpoint that produced the final result
-    value: ${{ steps.review.outputs.analysis_engine }}
-  should_review:
+    value: ${{ steps.review.outputs.analysis-engine }}
+  should-review:
     description: Whether the action determined a new LLM review is needed
     value: ${{ steps.precheck.outputs.should_review }}
-  skip_reason:
+  skip-reason:
     description: Reason the LLM review was skipped
     value: ${{ steps.precheck.outputs.skip_reason }}
-  diff_fingerprint:
+  diff-fingerprint:
     description: Stable fingerprint of the current pull request patch
     value: ${{ steps.precheck.outputs.diff_fingerprint }}
-  ci_status_skipped:
+  ci-status-skipped:
     description: Whether CI status check was skipped (true) or completed (false)
-    value: ${{ steps.review.outputs.ci_status_skipped }}
-  ci_status_final:
+    value: ${{ steps.review.outputs.ci-status-skipped }}
+  ci-status-final:
     description: Final CI state (success/failure) when ci_status_check completed
-    value: ${{ steps.review.outputs.ci_status_final }}
-  cache_hit_ratio:
+    value: ${{ steps.review.outputs.ci-status-final }}
+  cache-hit-ratio:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
-    value: ${{ steps.review.outputs.cache_hit_ratio }}
-  tool_calls:
+    value: ${{ steps.review.outputs.cache-hit-ratio }}
+  tool-calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
-    value: ${{ steps.review.outputs.tool_calls }}
+    value: ${{ steps.review.outputs.tool-calls }}
 
 runs:
   using: composite
@@ -815,20 +778,32 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        command -v gh >/dev/null
-        command -v jq >/dev/null
-        command -v curl >/dev/null
-        command -v git >/dev/null
-        command -v python3 >/dev/null
-        # PYTHONSAFEPATH (3.11+) keeps the reviewed checkout from shadowing
-        # the action's pr_reviewer package; older interpreters ignore it.
-        if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
-          echo "::error::python3 3.11 or newer is required (found $(python3 -V 2>&1))."
+        # The v3 runtime is the bundled Node CLI (#809/#706): git remains the
+        # repository primitive, pgrep upholds the concurrent-gate cleanup
+        # invariant. Python, jq and curl are no longer runtime prerequisites.
+        command -v node >/dev/null
+        # Every later step resolves the runtime against the ACTION's own
+        # directory (github.action_path): the runner may materialize a local
+        # 'uses: ./' action outside the job workspace, so the composite cwd
+        # is not where the bundle lives. dist/ is committed on release tags;
+        # a source checkout (this repository's dogfood, or a consumer pinning
+        # a branch) builds its own bundle once, in place. A release checkout
+        # never enters the build path.
+        ACTION_DIR="${{ github.action_path }}"
+        if [ ! -f "$ACTION_DIR/dist/index.js" ]; then
+          if [ -f "$ACTION_DIR/package.json" ] && [ -f "$ACTION_DIR/scripts/build-v3.mjs" ]; then
+            echo "dist/index.js missing; building the v3 bundle from the source checkout..."
+            cd "$ACTION_DIR"
+            npm ci --no-audit --no-fund
+            npm run build
+            cd - >/dev/null
+          fi
+        fi
+        if [ ! -f "$ACTION_DIR/dist/index.js" ]; then
+          echo "::error::dist/index.js is missing from the action directory. Consumers install this action from a release tag, where dist/ is committed; source checkouts need node (the action builds itself)."
           exit 1
         fi
-        # Concurrent CI/deep-review gate cleanup walks the forked process tree
-        # (scripts/sections/gating.sh); without pgrep the invariant cannot be
-        # upheld, so it is validated here rather than silently weakened.
+        command -v git >/dev/null
         command -v pgrep >/dev/null
 
     - name: Export shared review environment
@@ -860,91 +835,84 @@ runs:
       # export and load paths end-to-end.
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
-        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
-        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo-token || inputs.github-token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo-auth-method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo-authorized-integration-audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo-skip-permission-preflight }}
         REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        AI_MODEL: ${{ inputs.ai_model }}
-        AI_API_FORMAT: ${{ inputs.ai_api_format }}
-        AI_TEMPERATURE: ${{ inputs.ai_temperature }}
-        AI_RESPONSE_FORMAT: ${{ inputs.ai_response_format }}
-        AI_TOKENS_PARAM: ${{ inputs.ai_tokens_param }}
-        AI_FALLBACK_MODEL: ${{ inputs.ai_fallback_model }}
-        REVIEW_ROUTING_MODE: ${{ inputs.review_routing_mode }}
-        AI_PRIMARY_MODEL: ${{ inputs.ai_primary_model }}
-        AI_SMART_MODEL: ${{ inputs.ai_smart_model }}
-        ESCALATE_ON_RISK_FLAGS: ${{ inputs.escalate_on_risk_flags }}
-        ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS: ${{ inputs.escalate_on_incomplete_required_checks }}
-        ESCALATE_ON_FAST_REQUEST_CHANGES: ${{ inputs.escalate_on_fast_request_changes }}
-        ESCALATE_ON_FAST_LOW_CONFIDENCE: ${{ inputs.escalate_on_fast_low_confidence }}
-        ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS: ${{ inputs.escalate_on_tool_or_evidence_blockers }}
-        ESCALATE_ON_TOOL_PLANNING_FAILURE: ${{ inputs.escalate_on_tool_planning_failure }}
-        ANTHROPIC_VERSION: ${{ inputs.anthropic_version }}
-        SYSTEM_PROMPT: ${{ inputs.system_prompt }}
-        SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
-        SYSTEM_PROMPT_MODE: ${{ inputs.system_prompt_mode }}
-        REVIEW_VERBOSITY: ${{ inputs.review_verbosity }}
-        STANDARDS_FILE: ${{ inputs.standards_file }}
-        STANDARDS_FILE_CANDIDATES: ${{ inputs.standards_file_candidates }}
-        CONTEXT_LIMIT_MODE: ${{ inputs.context_limit_mode }}
-        MODEL_CONTEXT_TOKENS: ${{ inputs.model_context_tokens }}
-        PRIMARY_MODEL_CONTEXT_TOKENS: ${{ inputs.primary_model_context_tokens }}
-        SMART_MODEL_CONTEXT_TOKENS: ${{ inputs.smart_model_context_tokens }}
-        PRIMARY_REQUEST_SHAPE: ${{ inputs.primary_request_shape }}
-        SMART_REQUEST_SHAPE: ${{ inputs.smart_request_shape }}
-        RELATED_CODE_CONTEXT: ${{ inputs.related_code_context }}
-        RELATED_CODE_MAX_BYTES: ${{ inputs.related_code_max_bytes }}
-        REPO_MAP_CONTEXT: ${{ inputs.repo_map_context }}
-        REPO_MAP_MAX_BYTES: ${{ inputs.repo_map_max_bytes }}
-        PR_THREAD_CONTEXT: ${{ inputs.pr_thread_context }}
-        PR_THREAD_MAX_BYTES: ${{ inputs.pr_thread_max_bytes }}
-        REVIEW_THREADS_CONTEXT: ${{ inputs.review_threads_context }}
-        REVIEW_THREADS_MAX_BYTES: ${{ inputs.review_threads_max_bytes }}
-        DEEP_REVIEW: ${{ inputs.deep_review }}
-        DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep_review_timeout_sec }}
-        DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep_review_max_tokens }}
-        DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep_review_corpus_max_bytes }}
-        LINEAR_ISSUE_PREFIXES: ${{ inputs.linear_issue_prefixes }}
-        LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear_issue_timeout_sec }}
-        LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear_enable_for_forks }}
-        EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence_providers_file }}
-        SARIF_FILES: ${{ inputs.sarif_files }}
-        SARIF_MAX_FINDINGS: ${{ inputs.sarif_max_findings }}
-        EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence_provider_timeout_sec }}
-        EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence_provider_max_output_bytes }}
-        EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence_blocker_enforcement }}
-        EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence_enable_for_forks }}
-        TOOL_MODE: ${{ inputs.tool_mode }}
-        TOOL_MCP_SERVERS: ${{ inputs.tool_mcp_servers }}
-        TOOL_MCP_TOKEN: ${{ inputs.tool_mcp_token }}
-        TOOL_MCP_NAME_PREFIXES: ${{ inputs.tool_mcp_name_prefixes }}
-        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}
-        TOOL_LOOP_SUMMARIZE: ${{ inputs.tool_loop_summarize }}
-        TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool_loop_summarize_max_tokens }}
-        TOOL_MAX_REQUESTS: ${{ inputs.tool_max_requests }}
-        PRIMARY_TOOL_MAX_REQUESTS: ${{ inputs.primary_tool_max_requests }}
-        SMART_TOOL_MAX_REQUESTS: ${{ inputs.smart_tool_max_requests }}
-        TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}
-        # #540: new names take precedence; the deprecated tool_planning_* inputs
-        # still work as a fallback for one release (removed in v3.0.0).
-        TOOL_TURN_TIMEOUT_SEC: ${{ inputs.tool_turn_timeout_sec != '' && inputs.tool_turn_timeout_sec || inputs.tool_planning_timeout_sec }}
-        TOOL_CORPUS_MAX_BYTES: ${{ inputs.tool_corpus_max_bytes != '' && inputs.tool_corpus_max_bytes || inputs.tool_planning_max_context_bytes }}
-        TOOL_MAX_TOKENS_PER_TURN: ${{ inputs.tool_max_tokens_per_turn != '' && inputs.tool_max_tokens_per_turn || inputs.tool_planning_max_tokens }}
-        TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool_max_response_bytes }}
-        TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool_allowed_gh_api_repos }}
-        TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool_request_timeout_sec }}
-        SEARCH_URL: ${{ inputs.search_url }}
-        TOOL_MAX_SEARCH_RESULTS: ${{ inputs.tool_max_search_results }}
-        TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool_failure_enforcement }}
-        TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool_min_successful_requests }}
-        TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool_enable_for_forks }}
-        AI_REQUEST_TIMEOUT_SEC: ${{ inputs.ai_request_timeout_sec }}
-        AI_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_connect_timeout_sec }}
-        AI_FALLBACK_REQUEST_TIMEOUT_SEC: ${{ inputs.ai_fallback_request_timeout_sec }}
-        AI_FALLBACK_CONNECT_TIMEOUT_SEC: ${{ inputs.ai_fallback_connect_timeout_sec }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        AI_MODEL: ${{ inputs.ai-model }}
+        AI_API_FORMAT: ${{ inputs.ai-api-format }}
+        AI_TEMPERATURE: ${{ inputs.ai-temperature }}
+        AI_RESPONSE_FORMAT: ${{ inputs.ai-response-format }}
+        AI_TOKENS_PARAM: ${{ inputs.ai-tokens-param }}
+        AI_FALLBACK_MODEL: ${{ inputs.ai-fallback-model }}
+        REVIEW_ROUTING_MODE: ${{ inputs.review-routing-mode }}
+        AI_PRIMARY_MODEL: ${{ inputs.ai-primary-model }}
+        AI_SMART_MODEL: ${{ inputs.ai-smart-model }}
+        ESCALATE_ON_RISK_FLAGS: ${{ inputs.escalate-on-risk-flags }}
+        ANTHROPIC_VERSION: ${{ inputs.anthropic-version }}
+        SYSTEM_PROMPT: ${{ inputs.system-prompt }}
+        SYSTEM_PROMPT_FILE: ${{ inputs.system-prompt-file }}
+        SYSTEM_PROMPT_MODE: ${{ inputs.system-prompt-mode }}
+        REVIEW_VERBOSITY: ${{ inputs.review-verbosity }}
+        STANDARDS_FILE: ${{ inputs.standards-file }}
+        STANDARDS_FILE_CANDIDATES: ${{ inputs.standards-file-candidates }}
+        CONTEXT_LIMIT_MODE: ${{ inputs.context-limit-mode }}
+        MODEL_CONTEXT_TOKENS: ${{ inputs.model-context-tokens }}
+        PRIMARY_MODEL_CONTEXT_TOKENS: ${{ inputs.primary-model-context-tokens }}
+        SMART_MODEL_CONTEXT_TOKENS: ${{ inputs.smart-model-context-tokens }}
+        PRIMARY_REQUEST_SHAPE: ${{ inputs.primary-request-shape }}
+        SMART_REQUEST_SHAPE: ${{ inputs.smart-request-shape }}
+        RELATED_CODE_CONTEXT: ${{ inputs.related-code-context }}
+        RELATED_CODE_MAX_BYTES: ${{ inputs.related-code-max-bytes }}
+        REPO_MAP_CONTEXT: ${{ inputs.repo-map-context }}
+        REPO_MAP_MAX_BYTES: ${{ inputs.repo-map-max-bytes }}
+        PR_THREAD_CONTEXT: ${{ inputs.pr-thread-context }}
+        PR_THREAD_MAX_BYTES: ${{ inputs.pr-thread-max-bytes }}
+        REVIEW_THREADS_CONTEXT: ${{ inputs.review-threads-context }}
+        REVIEW_THREADS_MAX_BYTES: ${{ inputs.review-threads-max-bytes }}
+        DEEP_REVIEW: ${{ inputs.deep-review }}
+        DEEP_REVIEW_TIMEOUT_SEC: ${{ inputs.deep-review-timeout-sec }}
+        DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep-review-max-tokens }}
+        DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep-review-corpus-max-bytes }}
+        LINEAR_ISSUE_PREFIXES: ${{ inputs.linear-issue-prefixes }}
+        LINEAR_ISSUE_TIMEOUT_SEC: ${{ inputs.linear-issue-timeout-sec }}
+        LINEAR_ENABLE_FOR_FORKS: ${{ inputs.linear-enable-for-forks }}
+        EVIDENCE_PROVIDERS_FILE: ${{ inputs.evidence-providers-file }}
+        SARIF_FILES: ${{ inputs.sarif-files }}
+        SARIF_MAX_FINDINGS: ${{ inputs.sarif-max-findings }}
+        EVIDENCE_PROVIDER_TIMEOUT_SEC: ${{ inputs.evidence-provider-timeout-sec }}
+        EVIDENCE_PROVIDER_MAX_OUTPUT_BYTES: ${{ inputs.evidence-provider-max-output-bytes }}
+        EVIDENCE_BLOCKER_ENFORCEMENT: ${{ inputs.evidence-blocker-enforcement }}
+        EVIDENCE_ENABLE_FOR_FORKS: ${{ inputs.evidence-enable-for-forks }}
+        TOOL_MODE: ${{ inputs.tool-mode }}
+        TOOL_MCP_SERVERS: ${{ inputs.tool-mcp-servers }}
+        TOOL_MCP_TOKEN: ${{ inputs.tool-mcp-token }}
+        TOOL_MCP_NAME_PREFIXES: ${{ inputs.tool-mcp-name-prefixes }}
+        TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool-loop-wall-clock-sec }}
+        TOOL_LOOP_SUMMARIZE: ${{ inputs.tool-loop-summarize }}
+        TOOL_LOOP_SUMMARIZE_MAX_TOKENS: ${{ inputs.tool-loop-summarize-max-tokens }}
+        TOOL_MAX_REQUESTS: ${{ inputs.tool-max-requests }}
+        PRIMARY_TOOL_MAX_REQUESTS: ${{ inputs.primary-tool-max-requests }}
+        SMART_TOOL_MAX_REQUESTS: ${{ inputs.smart-tool-max-requests }}
+        TOOL_MAX_ROUNDS: ${{ inputs.tool-max-rounds }}
+        TOOL_TURN_TIMEOUT_SEC: ${{ inputs.tool-turn-timeout-sec }}
+        TOOL_CORPUS_MAX_BYTES: ${{ inputs.tool-corpus-max-bytes }}
+        TOOL_MAX_TOKENS_PER_TURN: ${{ inputs.tool-max-tokens-per-turn }}
+        TOOL_MAX_RESPONSE_BYTES: ${{ inputs.tool-max-response-bytes }}
+        TOOL_ALLOWED_GH_API_REPOS: ${{ inputs.tool-allowed-gh-api-repos }}
+        TOOL_REQUEST_TIMEOUT_SEC: ${{ inputs.tool-request-timeout-sec }}
+        SEARCH_URL: ${{ inputs.search-url }}
+        TOOL_MAX_SEARCH_RESULTS: ${{ inputs.tool-max-search-results }}
+        TOOL_FAILURE_ENFORCEMENT: ${{ inputs.tool-failure-enforcement }}
+        TOOL_MIN_SUCCESSFUL_REQUESTS: ${{ inputs.tool-min-successful-requests }}
+        TOOL_ENABLE_FOR_FORKS: ${{ inputs.tool-enable-for-forks }}
+        AI_REQUEST_TIMEOUT_SEC: ${{ inputs.ai-request-timeout-sec }}
+        AI_CONNECT_TIMEOUT_SEC: ${{ inputs.ai-connect-timeout-sec }}
+        AI_FALLBACK_REQUEST_TIMEOUT_SEC: ${{ inputs.ai-fallback-request-timeout-sec }}
+        AI_FALLBACK_CONNECT_TIMEOUT_SEC: ${{ inputs.ai-fallback-connect-timeout-sec }}
       run: |
         set -euo pipefail
         if [ -z "${GITHUB_OUTPUT:-}" ]; then
@@ -981,11 +949,6 @@ runs:
           AI_PRIMARY_MODEL
           AI_SMART_MODEL
           ESCALATE_ON_RISK_FLAGS
-          ESCALATE_ON_INCOMPLETE_REQUIRED_CHECKS
-          ESCALATE_ON_FAST_REQUEST_CHANGES
-          ESCALATE_ON_FAST_LOW_CONFIDENCE
-          ESCALATE_ON_TOOL_OR_EVIDENCE_BLOCKERS
-          ESCALATE_ON_TOOL_PLANNING_FAILURE
           ANTHROPIC_VERSION
           SYSTEM_PROMPT
           SYSTEM_PROMPT_FILE
@@ -1080,15 +1043,15 @@ runs:
         # resolves (#367) and the precheck-only pass-throughs.
         SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
         PLATFORM: ${{ inputs.platform }}
-        FORGEJO_API_URL: ${{ inputs.forgejo_api_url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
+        FORGEJO_API_URL: ${{ inputs.forgejo-api-url || (github.server_url != 'https://github.com' && github.server_url) || '' }}
         EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        PUBLISH_MODE: ${{ inputs.publish_mode }}
-        SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip_if_diff_unchanged }}
-        FORCE_REVIEW: ${{ inputs.force_review }}
-        REREVIEW_LABEL: ${{ inputs.rereview_label }}
+        COMMENT_MARKER: ${{ inputs.comment-marker }}
+        PUBLISH_MODE: ${{ inputs.publish-mode }}
+        SKIP_IF_DIFF_UNCHANGED: ${{ inputs.skip-if-diff-unchanged }}
+        FORCE_REVIEW: ${{ inputs.force-review }}
+        REREVIEW_LABEL: ${{ inputs.rereview-label }}
         ACTION_REF: ${{ github.action_ref }}
-        LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear_api_key != '' }}
+        LINEAR_API_KEY_CONFIGURED: ${{ inputs.linear-api-key != '' }}
         # #633: with deep_review=auto, the precheck's stale-review detection
         # hashes the same Linear state (priority/labels of configured
         # identifiers) the review pipeline's Linear phase fetches, so a
@@ -1098,14 +1061,19 @@ runs:
         # excluded); the builder uses it solely for the read-only issue
         # lookup, and fork PRs never query Linear unless
         # linear_enable_for_forks is set (the pipeline's own gate).
-        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
+        LINEAR_API_KEY: ${{ inputs.linear-api-key }}
       run: |
         set -euo pipefail
         # Load the shared bindings (REPO, PR_NUMBER, AI_MODEL, TOOL_* , ...)
         # from the action-local file before the precheck runs.
         source "${{ github.action_path }}/scripts/load_shared_env.sh"
         load_shared_env "$SHARED_ENV_FILE"
-        bash "${{ github.action_path }}/scripts/check_review_needed.sh"
+        # The v3 precheck decision path (#674, wired by #706): typed port of
+        # pr_reviewer/precheck.py + the decision layers of the former
+        # check_review_needed.sh. Writes the same $GITHUB_OUTPUT keys and
+        # leaves pr-object.json / pr.diff in the workspace for the review
+        # step's single-fetch reuse.
+        node "${{ github.action_path }}/dist/index.js" precheck
 
     - name: Run AI review
       if: steps.precheck.outputs.should_review == 'true'
@@ -1121,32 +1089,32 @@ runs:
         SHARED_ENV_FILE: ${{ steps.shared_env.outputs.path }}
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
-        AI_BASE_URL: ${{ inputs.ai_base_url }}
-        AI_API_KEY: ${{ inputs.ai_api_key }}
-        AI_MAX_TOKENS: ${{ inputs.ai_max_tokens }}
-        AI_FALLBACK_BASE_URL: ${{ inputs.ai_fallback_base_url || inputs.ai_base_url }}
-        AI_FALLBACK_API_FORMAT: ${{ inputs.ai_fallback_api_format || inputs.ai_api_format }}
-        AI_FALLBACK_API_KEY: ${{ inputs.ai_fallback_api_key || inputs.ai_api_key }}
-        AI_PRIMARY_RETRIES: ${{ inputs.ai_primary_retries }}
-        AI_PRIMARY_RETRY_DELAY_SEC: ${{ inputs.ai_primary_retry_delay_sec }}
-        ON_MODEL_FAILURE: ${{ inputs.on_model_failure }}
-        VERDICT_POLICY: ${{ inputs.verdict_policy }}
-        NON_BLOCKING_FINDING_CATEGORIES: ${{ inputs.non_blocking_finding_categories }}
-        VALIDATE_REQUIRED_CHECKS: ${{ inputs.validate_required_checks }}
-        REQUIRED_CHECK_VALIDATION_MODE: ${{ inputs.required_check_validation_mode }}
-        AI_PRIMARY_BASE_URL: ${{ inputs.ai_primary_base_url }}
-        AI_PRIMARY_API_FORMAT: ${{ inputs.ai_primary_api_format }}
-        AI_PRIMARY_API_KEY: ${{ inputs.ai_primary_api_key }}
-        AI_SMART_BASE_URL: ${{ inputs.ai_smart_base_url }}
-        AI_SMART_API_FORMAT: ${{ inputs.ai_smart_api_format }}
-        AI_SMART_API_KEY: ${{ inputs.ai_smart_api_key }}
-        AI_STREAM: ${{ inputs.ai_stream }}
-        AI_FALLBACK_STREAM: ${{ inputs.ai_fallback_stream }}
-        ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed_source_hosts }}
-        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
-        ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment_budget_sec }}
-        IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image_digest_budget_sec }}
-        EVIDENCE_PROVIDER_PARALLELISM: ${{ inputs.evidence_provider_parallelism }}
+        AI_BASE_URL: ${{ inputs.ai-base-url }}
+        AI_API_KEY: ${{ inputs.ai-api-key }}
+        AI_MAX_TOKENS: ${{ inputs.ai-max-tokens }}
+        AI_FALLBACK_BASE_URL: ${{ inputs.ai-fallback-base-url || inputs.ai-base-url }}
+        AI_FALLBACK_API_FORMAT: ${{ inputs.ai-fallback-api-format || inputs.ai-api-format }}
+        AI_FALLBACK_API_KEY: ${{ inputs.ai-fallback-api-key || inputs.ai-api-key }}
+        AI_PRIMARY_RETRIES: ${{ inputs.ai-primary-retries }}
+        AI_PRIMARY_RETRY_DELAY_SEC: ${{ inputs.ai-primary-retry-delay-sec }}
+        ON_MODEL_FAILURE: ${{ inputs.on-model-failure }}
+        VERDICT_POLICY: ${{ inputs.verdict-policy }}
+        NON_BLOCKING_FINDING_CATEGORIES: ${{ inputs.non-blocking-finding-categories }}
+        VALIDATE_REQUIRED_CHECKS: ${{ inputs.validate-required-checks }}
+        REQUIRED_CHECK_VALIDATION_MODE: ${{ inputs.required-check-validation-mode }}
+        AI_PRIMARY_BASE_URL: ${{ inputs.ai-primary-base-url }}
+        AI_PRIMARY_API_FORMAT: ${{ inputs.ai-primary-api-format }}
+        AI_PRIMARY_API_KEY: ${{ inputs.ai-primary-api-key }}
+        AI_SMART_BASE_URL: ${{ inputs.ai-smart-base-url }}
+        AI_SMART_API_FORMAT: ${{ inputs.ai-smart-api-format }}
+        AI_SMART_API_KEY: ${{ inputs.ai-smart-api-key }}
+        AI_STREAM: ${{ inputs.ai-stream }}
+        AI_FALLBACK_STREAM: ${{ inputs.ai-fallback-stream }}
+        ALLOWED_SOURCE_HOSTS: ${{ inputs.allowed-source-hosts }}
+        LINEAR_API_KEY: ${{ inputs.linear-api-key }}
+        ENRICHMENT_BUDGET_SEC: ${{ inputs.enrichment-budget-sec }}
+        IMAGE_DIGEST_BUDGET_SEC: ${{ inputs.image-digest-budget-sec }}
+        EVIDENCE_PROVIDER_PARALLELISM: ${{ inputs.evidence-provider-parallelism }}
         # #634: CI gating moved into the review pipeline so it forks
         # concurrently with the advisory specialist phase (scripts/sections/
         # gating.sh). wait_for_ci.sh writes ci_status_final / ci_status_skipped
@@ -1154,10 +1122,10 @@ runs:
         # them from steps.review. The historical continue-on-error semantics
         # are preserved inside the pipeline: a CI timeout/failure never blocks
         # the review.
-        CI_STATUS_CHECK: ${{ inputs.ci_status_check }}
-        CI_TIMEOUT_SEC: ${{ inputs.ci_timeout_sec }}
-        CI_INTERVAL_SEC: ${{ inputs.ci_interval_sec }}
-        CI_SKIP_ON_TIMEOUT: ${{ inputs.ci_skip_on_timeout }}
+        CI_STATUS_CHECK: ${{ inputs.ci-status-check }}
+        CI_TIMEOUT_SEC: ${{ inputs.ci-timeout-sec }}
+        CI_INTERVAL_SEC: ${{ inputs.ci-interval-sec }}
+        CI_SKIP_ON_TIMEOUT: ${{ inputs.ci-skip-on-timeout }}
         CI_CHECKS_FILE: ${{ runner.temp }}/ci-checks-context.md
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
@@ -1167,7 +1135,13 @@ runs:
         # from the action-local file before the review runs.
         source "${{ github.action_path }}/scripts/load_shared_env.sh"
         load_shared_env "$SHARED_ENV_FILE"
-        bash "${{ github.action_path }}/scripts/run_review.sh"
+        # The v3 review orchestrator (#809, wired by #706): the full review
+        # pipeline in TypeScript — no Python, no jq/curl. Persists its
+        # artifacts under PR_REVIEWER_RUN_DIR for the publish step and
+        # diagnostics; writes the kebab-case step outputs.
+        export PR_REVIEWER_RUN_DIR="$RUNNER_TEMP/v3-review-run"
+        mkdir -p "$PR_REVIEWER_RUN_DIR"
+        node "${{ github.action_path }}/dist/index.js" run
 
     - name: Clean up shared environment
       # Action-scoped lifecycle for the shared env file (#641): it carries
@@ -1195,57 +1169,61 @@ runs:
       # block makes a duplicate-key manifest error structurally impossible.
       # All per-mode inline `${{ }}` expressions are hoisted into env so the
       # run body is pure bash dispatching on $PUBLISH_MODE.
-      if: steps.precheck.outputs.should_review == 'true' && (inputs.publish_mode == 'review_comment' || inputs.publish_mode == 'review_verdict' || (inputs.publish_mode == 'comment' && inputs.publish_review_comment == 'true'))
+      if: steps.precheck.outputs.should_review == 'true' && (inputs.publish-mode == 'review_comment' || inputs.publish-mode == 'review_verdict' || (inputs.publish-mode == 'comment' && inputs.publish-review-comment == 'true'))
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
-        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
-        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo-token || inputs.github-token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo-auth-method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo-authorized-integration-audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo-skip-permission-preflight }}
         REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
         BROAD_FINGERPRINT: ${{ steps.precheck.outputs.diff_fingerprint }}
         VERDICT: ${{ steps.review.outputs.verdict }}
-        REQUIRED_CHECKS: ${{ steps.review.outputs.required_checks }}
-        REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
-        ESCALATION_REASON: ${{ steps.review.outputs.escalation_reason }}
-        REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
+        REQUIRED_CHECKS: ${{ steps.review.outputs.required-checks }}
+        REVIEW_ROUTE: ${{ steps.review.outputs.review-route }}
+        ESCALATION_REASON: ${{ steps.review.outputs.escalation-reason }}
+        REVIEW_MARKDOWN: ${{ steps.review.outputs.review-markdown }}
         FINDINGS: ${{ steps.review.outputs.findings }}
-        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis_engine }}
-        CACHE_HIT_RATIO: ${{ steps.review.outputs.cache_hit_ratio }}
-        COMMENT_MARKER: ${{ inputs.comment_marker }}
-        INLINE_FINDINGS: ${{ inputs.inline_findings }}
-        INLINE_FINDINGS_MAX: ${{ inputs.inline_findings_max }}
-        CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup_previous_native_reviews }}
-        UPSTREAM_LINK_MODE: ${{ inputs.upstream_link_mode }}
-        ALLOW_APPROVE: ${{ inputs.allow_approve }}
-        APPROVE_FORKS: ${{ inputs.approve_forks }}
-        PUBLISH_MODE: ${{ inputs.publish_mode }}
+        ANALYSIS_ENGINE: ${{ steps.review.outputs.analysis-engine }}
+        CACHE_HIT_RATIO: ${{ steps.review.outputs.cache-hit-ratio }}
+        COMMENT_MARKER: ${{ inputs.comment-marker }}
+        INLINE_FINDINGS: ${{ inputs.inline-findings }}
+        INLINE_FINDINGS_MAX: ${{ inputs.inline-findings-max }}
+        CLEANUP_PREVIOUS_NATIVE_REVIEWS: ${{ inputs.cleanup-previous-native-reviews }}
+        UPSTREAM_LINK_MODE: ${{ inputs.upstream-link-mode }}
+        ALLOW_APPROVE: ${{ inputs.allow-approve }}
+        APPROVE_FORKS: ${{ inputs.approve-forks }}
+        PUBLISH_MODE: ${{ inputs.publish-mode }}
         BASE_SHA: ${{ github.event.pull_request.base.sha || steps.precheck.outputs.base_sha }}
         IS_FORK_PR: ${{ steps.precheck.outputs.is_fork_pr }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
-      run: bash "${{ github.action_path }}/scripts/publish.sh"
+      run: |
+        # The v3 publication path (#680, wired by #706): three-mode
+        # dispatcher with the #451 head re-check and approval guardrails.
+        export PR_REVIEWER_RUN_DIR="$RUNNER_TEMP/v3-review-run"
+        node "${{ github.action_path }}/dist/index.js" publish
 
     - name: Clear re-review label
       # When a label add triggered this review, remove it so re-adding the
       # label re-triggers. Best-effort; never fails the run.
-      if: ${{ github.event.action == 'labeled' && github.event.label.name == inputs.rereview_label && steps.precheck.outputs.should_review == 'true' }}
+      if: ${{ github.event.action == 'labeled' && github.event.label.name == inputs.rereview-label && steps.precheck.outputs.should_review == 'true' }}
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github_token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         PLATFORM: ${{ steps.precheck.outputs.resolved_platform }}
         FORGEJO_API_URL: ${{ steps.precheck.outputs.effective_forgejo_api_url }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo_token || inputs.github_token }}
-        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo_auth_method }}
-        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo_authorized_integration_audience }}
-        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo_skip_permission_preflight }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo-token || inputs.github-token }}
+        FORGEJO_AUTH_METHOD: ${{ inputs.forgejo-auth-method }}
+        FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE: ${{ inputs.forgejo-authorized-integration-audience }}
+        FORGEJO_SKIP_PERMISSION_PREFLIGHT: ${{ inputs.forgejo-skip-permission-preflight }}
         REPO: ${{ inputs.repo || github.repository }}
-        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-        LABEL: ${{ inputs.rereview_label }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        LABEL: ${{ inputs.rereview-label }}
       run: gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${LABEL}" --silent 2>/dev/null || true
 
     - name: Fail on request_changes
@@ -1260,7 +1238,7 @@ runs:
       # between steps, so a grep there always returns empty and the gate is a
       # no-op (#557). A model outage (on_model_failure=notice) writes no
       # request_changes verdict, so it does not wedge merges.
-      if: ${{ inputs.fail_on_request_changes == 'true' }}
+      if: ${{ inputs.fail-on-request-changes == 'true' }}
       shell: bash
       env:
         FINAL_VERDICT: ${{ steps.review.outputs.verdict || steps.precheck.outputs.verdict }}

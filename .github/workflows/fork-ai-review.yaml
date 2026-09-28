@@ -175,9 +175,9 @@ jobs:
         # base-repository code, never the fork's copy of the action.
         uses: ./
         with:
-          github_token: ${{ steps.app-token.outputs.token }}
+          github-token: ${{ steps.app-token.outputs.token }}
           repo: ${{ github.repository }}
-          pr_number: ${{ needs.gate.outputs.pr_number }}
+          pr-number: ${{ needs.gate.outputs.pr_number }}
 
           # ── Local-model-only policy (pinned) ──────────────────────────
           # Primary and smart models come exclusively from the FORK_* repo
@@ -187,36 +187,36 @@ jobs:
           # FORK_LITELLM_API_KEY is a LiteLLM virtual key scoped to exactly
           # the two fork models — a credential-level backstop so even a
           # routing mistake cannot reach another model.
-          ai_base_url: ${{ vars.LITELLM_URL }}
-          ai_api_format: ${{ vars.FORK_PRIMARY_FORMAT }}
-          ai_model: ${{ vars.FORK_PRIMARY_MODEL }}
-          ai_api_key: ${{ secrets.FORK_LITELLM_API_KEY }}
-          ai_response_format: json_object
+          ai-base-url: ${{ vars.LITELLM_URL }}
+          ai-api-format: ${{ vars.FORK_PRIMARY_FORMAT }}
+          ai-model: ${{ vars.FORK_PRIMARY_MODEL }}
+          ai-api-key: ${{ secrets.FORK_LITELLM_API_KEY }}
+          ai-response-format: json_object
 
           # No ai_fallback_* inputs: with ai_fallback_model empty the
           # pipeline never attempts a fallback call, so an unavailable
           # local model degrades to on_model_failure=notice (a visible
           # request_changes notice on the PR) instead of trying another
           # provider. No cloud/MiniMax/OpenAI/Anthropic fallback exists.
-          on_model_failure: notice
+          on-model-failure: notice
 
           # Bounded compute: one retry with a short delay (an outage must
           # not become prolonged load), a capped completion budget, and the
           # reduced `low` context profile.
-          ai_primary_retries: "1"
-          ai_primary_retry_delay_sec: "5"
-          ai_max_tokens: "16384"
-          context_limit_mode: low
+          ai-primary-retries: "1"
+          ai-primary-retry-delay-sec: "5"
+          ai-max-tokens: "16384"
+          context-limit-mode: low
 
           # Smart escalation: the reviewer-requested post-primary path
           # (#721) is the only way the smart model is reached; heuristic
           # escalation is telemetry-only. One smart call at most — no
           # repeated or recursive escalation exists in the pipeline.
-          review_routing_mode: auto
-          ai_smart_base_url: ${{ vars.LITELLM_URL }}
-          ai_smart_api_format: ${{ vars.FORK_SMART_FORMAT }}
-          ai_smart_model: ${{ vars.FORK_SMART_MODEL }}
-          ai_smart_api_key: ${{ secrets.FORK_LITELLM_API_KEY }}
+          review-routing-mode: auto
+          ai-smart-base-url: ${{ vars.LITELLM_URL }}
+          ai-smart-api-format: ${{ vars.FORK_SMART_FORMAT }}
+          ai-smart-model: ${{ vars.FORK_SMART_MODEL }}
+          ai-smart-api-key: ${{ secrets.FORK_LITELLM_API_KEY }}
 
           # ── Fork feature policy (explicitly pinned) ───────────────────
           # Native tool calling is OFF: the tool surface executes repository
@@ -224,36 +224,36 @@ jobs:
           # is the trusted base checkout rather than the fork head, so tool
           # results could only mislead. Every enrichment path that reads a
           # checked-out workspace or private credentials is disabled.
-          tool_mode: "off"
-          tool_enable_for_forks: "false"
-          evidence_enable_for_forks: "false"
-          linear_enable_for_forks: "false"
+          tool-mode: "off"
+          tool-enable-for-forks: "false"
+          evidence-enable-for-forks: "false"
+          linear-enable-for-forks: "false"
 
           # Linked-source URL fetching disabled outright: fork-controlled
           # URLs must not be fetched (even allowlisted hosts) with review
           # credentials in play.
-          allowed_source_hosts: ""
+          allowed-source-hosts: ""
 
           # related-code and repo-map scan the local git worktree. The
           # worktree here is the trusted BASE checkout, not the fork head,
           # so those sections would describe the wrong tree. Disabled rather
           # than checking out the fork into the privileged job (see the v3
           # follow-up note in docs/fork-review.md).
-          related_code_context: "false"
-          repo_map_context: "false"
+          related-code-context: "false"
+          repo-map-context: "false"
 
           # CI already completed — that completion is what triggered this
           # run. Do not spend wall-clock re-polling the Checks API.
-          ci_status_check: "false"
+          ci-status-check: "false"
 
           # Deep review: classifier-driven specialist selection (possibly
           # zero roles), bounded below by deep_review_timeout_sec.
-          deep_review: "auto"
-          deep_review_timeout_sec: "300"
+          deep-review: "auto"
+          deep-review-timeout-sec: "300"
 
           # ── Publication (no native approvals for forks) ───────────────
-          verdict_policy: findings_severity_gated
-          inline_findings: "true"
-          publish_mode: review_verdict
-          allow_approve: "false"
-          approve_forks: "false"
+          verdict-policy: findings_severity_gated
+          inline-findings: "true"
+          publish-mode: review_verdict
+          allow-approve: "false"
+          approve-forks: "false"

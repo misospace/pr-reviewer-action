@@ -160,7 +160,7 @@ run_publish() {
 echo "=== action.yml wiring ==="
 ACTION_YML="$ROOT_DIR/action.yml"
 check_contains "Publish step is a one-liner invoking scripts/publish.sh" \
-  "$(cat "$ACTION_YML")" 'run: bash "${{ github.action_path }}/scripts/publish.sh"'
+  "$(cat "$ACTION_YML")" 'node "${{ github.action_path }}/dist/index.js" publish'
 check "no inline case dispatch remains in action.yml" \
   "$(grep -c 'case "$PUBLISH_MODE"' "$ACTION_YML" || true)" "0"
 check "dispatcher script exists and is executable" \

@@ -37,11 +37,11 @@ check_contains "native_loop runs the harness" "$SRC" 'native_loop) TOOL_HARNESS_
 
 echo ""
 echo "=== action.yml wiring ==="
-check_contains "tool_max_rounds input declared" "$ACTION" "tool_max_rounds:"
-check_contains "TOOL_MAX_ROUNDS passed to steps" "$ACTION" 'TOOL_MAX_ROUNDS: ${{ inputs.tool_max_rounds }}'
+check_contains "tool_max_rounds input declared" "$ACTION" "tool-max-rounds:"
+check_contains "TOOL_MAX_ROUNDS passed to steps" "$ACTION" 'TOOL_MAX_ROUNDS: ${{ inputs.tool-max-rounds }}'
 check_contains "tool_mode description mentions native_loop" "$ACTION" "native_loop"
-check_contains "tool_loop_wall_clock_sec input declared" "$ACTION" "tool_loop_wall_clock_sec:"
-check_contains "TOOL_LOOP_WALL_CLOCK_SEC passed to steps" "$ACTION" 'TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool_loop_wall_clock_sec }}'
+check_contains "tool_loop_wall_clock_sec input declared" "$ACTION" "tool-loop-wall-clock-sec:"
+check_contains "TOOL_LOOP_WALL_CLOCK_SEC passed to steps" "$ACTION" 'TOOL_LOOP_WALL_CLOCK_SEC: ${{ inputs.tool-loop-wall-clock-sec }}'
 
 echo ""
 echo "=== native_loop harness contracts ==="

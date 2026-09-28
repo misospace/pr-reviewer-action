@@ -43,17 +43,37 @@ ambient = {k: str(v) for k, v in fixture.get("ambient", {}).items()}
 action = yaml.safe_load((root / "action.yml").read_text())
 inputs = action.get("inputs") or {}
 
+# #706 cutover: the live action.yml keys are the kebab-case contract IDs;
+# the fixture `raw` keys (and every downstream consumer of this replay) are
+# the v2 snake names. Normalize through the contract's mechanical v2_id map
+# so the oracle replay keeps working against the cut-over metadata.
+_contract_path = root / "contracts" / "action-v3.yml"
+_contract = yaml.safe_load(_contract_path.read_text()) if _contract_path.exists() else {}
+KEBAB_TO_V2 = {
+    entry["id"]: entry["v2_id"]
+    for entry in _contract.get("inputs", [])
+    if entry.get("v2_id")
+}
+
 def resolve_input(vid: str) -> str:
+    # The expression names are kebab (the cut-over action.yml); the fixture
+    # raw map and the metadata defaults may be keyed under either spelling,
+    # so resolve through the mechanical v2_id map and try both.
+    v2 = KEBAB_TO_V2.get(vid, vid)
+    if v2 in raw:
+        return raw[v2]
     if vid in raw:
         return raw[vid]
     default = (inputs.get(vid) or {}).get("default")
+    if default is None:
+        default = (inputs.get(v2) or {}).get("default")
     return "" if default is None else str(default)
 
 env: dict[str, str] = {}
 unresolved: list[str] = []
 wrapper = re.compile(r"^\$\{\{\s*(.+?)\s*\}\}$", re.S)
 ternary = re.compile(
-    r"^inputs\.([a-z_]+)\s*!=\s*''\s*&&\s*inputs\.\1\s*\|\|\s*(.+)$"
+    r"^inputs\.([a-z][a-z0-9_-]*)\s*!=\s*''\s*&&\s*inputs\.\1\s*\|\|\s*(.+)$"
 )
 for step in action.get("runs", {}).get("steps", []):
     for key, expr in (step.get("env") or {}).items():
@@ -70,7 +90,7 @@ for step in action.get("runs", {}).get("steps", []):
         value = ""
         known = True
         for term in terms:
-            input_ref = re.fullmatch(r"inputs\.([a-z_]+)", term)
+            input_ref = re.fullmatch(r"inputs\.([a-z][a-z0-9_-]*)", term)
             context_ref = re.fullmatch(r"github\.[A-Za-z0-9_.]+", term)
             if input_ref:
                 candidate = resolve_input(input_ref.group(1))

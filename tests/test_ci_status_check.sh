@@ -90,9 +90,9 @@ echo "=== Test: action.yml CI status outputs come from run_review ==="
 check_contains "run_review step receives CI_STATUS_CHECK" \
   "$review_step_section" "CI_STATUS_CHECK:"
 check_contains "ci_status_final output sourced from steps.review" \
-  "$action_content" 'value: ${{ steps.review.outputs.ci_status_final }}'
+  "$action_content" 'value: ${{ steps.review.outputs.ci-status-final }}'
 check_contains "ci_status_skipped output sourced from steps.review" \
-  "$action_content" 'value: ${{ steps.review.outputs.ci_status_skipped }}'
+  "$action_content" 'value: ${{ steps.review.outputs.ci-status-skipped }}'
 
 # ── Test 8: wait_for_ci.sh uses strict mode ──
 echo ""
@@ -111,19 +111,19 @@ check_contains "CI_SKIP_ON_TIMEOUT defaults to true" "$wait_content" 'CI_SKIP_ON
 echo ""
 echo "=== Test: action.yml CI input defaults ==="
 check_contains "ci_status_check defaults to false" \
-  "$action_content" 'ci_status_check:'
+  "$action_content" 'ci-status-check:'
 check_contains "ci_timeout_sec defaults to 300" \
-  "$action_content" 'ci_timeout_sec:'
+  "$action_content" 'ci-timeout-sec:'
 check_contains "ci_skip_on_timeout defaults to true" \
-  "$action_content" 'ci_skip_on_timeout:'
+  "$action_content" 'ci-skip-on-timeout:'
 
 # ── Test 11: action.yml outputs for CI status ──
 echo ""
 echo "=== Test: action.yml declares CI status outputs ==="
 check_contains "declares ci_status_skipped output" \
-  "$action_content" "ci_status_skipped:"
+  "$action_content" "ci-status-skipped:"
 check_contains "declares ci_status_final output" \
-  "$action_content" "ci_status_final:"
+  "$action_content" "ci-status-final:"
 
 # ── Test 12: CI gating is inside the review step (after precheck) ──
 echo ""
@@ -138,12 +138,12 @@ else
   echo "  FAIL: action.yml step ordering incorrect (precheck=$precheck_line, review=$review_line)"
   FAIL=$((FAIL + 1))
 fi
-run_review_line="$(grep -n 'run_review.sh' "$ACTION_YML" | head -1 | cut -d: -f1)"
+run_review_line="$(grep -n 'dist/index.js" run' "$ACTION_YML" | head -1 | cut -d: -f1 || true)"
 if [[ -n "$run_review_line" ]] && [[ "$run_review_line" -gt "$review_line" ]]; then
-  echo "  PASS: CI gating is inside the run_review step body"
+  echo "  PASS: CI gating is inside the review step body"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL: run_review.sh not inside the review step (review=$review_line, run_review=$run_review_line)"
+  echo "  FAIL: the Node review entry not inside the review step (review=$review_line, run=$run_review_line)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -272,7 +272,7 @@ echo ""
 echo "--- Pending external check leads to timeout + skip ---"
 echo "{\"check_runs\": [$own_run, $ext_pending], \"total_count\": 2}" > "$CI_TMP/check-runs.json"
 echo '{"state": "pending", "total_count": 0}' > "$CI_TMP/combined.json"
-RESULT="$(CI_TIMEOUT_SEC_OVERRIDE=3 run_wait)"
+RESULT="$(CI_TIMEOUT_SEC_OVERRIDE=6 run_wait)"
 check "exit 1 on timeout with skip=true" "$(echo "$RESULT" | grep '^rc=')" "rc=1"
 check_contains "skipped output written" "$RESULT" "ci_status_skipped=true"
 
@@ -362,7 +362,7 @@ echo '{"check_runs": [], "total_count": 0}' > "$CI_TMP/check-runs.json"
 cat > "$CI_TMP/combined.json" <<'FJEOF'
 {"state":"pending","total_count":2,"statuses":[{"id":10,"context":"pr-reviewer-action","state":"pending","description":"AI PR Review"},{"id":13,"context":"build","state":"pending","description":"Building..."}]}
 FJEOF
-RESULT="$(CI_TIMEOUT_SEC_OVERRIDE=3 run_wait)"
+RESULT="$(CI_TIMEOUT_SEC_OVERRIDE=6 run_wait)"
 check "exit 1 on forgejo timeout with skip=true" "$(echo "$RESULT" | grep '^rc=')" "rc=1"
 check_contains "skipped output written (forgejo)" "$RESULT" "ci_status_skipped=true"
 

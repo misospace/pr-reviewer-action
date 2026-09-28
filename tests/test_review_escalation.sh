@@ -82,20 +82,19 @@ check "escalation_reason output emitted" "$(grep -c '^echo "escalation_reason=' 
 
 echo ""
 echo "=== action.yml wiring ==="
-check_contains "input escalate_on_incomplete_required_checks" "$ACTION" "escalate_on_incomplete_required_checks:"
-check_contains "input escalate_on_fast_request_changes" "$ACTION" "escalate_on_fast_request_changes:"
-check_contains "input escalate_on_fast_low_confidence" "$ACTION" "escalate_on_fast_low_confidence:"
-check_contains "input escalate_on_tool_or_evidence_blockers" "$ACTION" "escalate_on_tool_or_evidence_blockers:"
-check_contains "input escalate_on_tool_planning_failure" "$ACTION" "escalate_on_tool_planning_failure:"
+# The v3 cutover (#777/#706) removed the inert escalate_on_* inputs entirely
+# (#721 made them telemetry-only years ago); only the contract's removed-field
+# rows still name them.
 for input in escalate_on_incomplete_required_checks escalate_on_fast_request_changes \
   escalate_on_fast_low_confidence escalate_on_tool_or_evidence_blockers \
   escalate_on_tool_planning_failure; do
-  check_contains "$input documented as deprecated (#721)" "$ACTION" "Deprecated since #721"
+  check "removed input $input is absent from action.yml" \
+    "$(printf '%s\n' "$ACTION" | grep -c "^  ${input}:" || true)" "0"
 done
-check_contains "ai_smart_model documents reviewer-requested escalation" "$ACTION" "reviewer-requested only"
-check_contains "escalation_reason output declared" "$ACTION" "escalation_reason:"
+check_contains "ai-smart-model documents reviewer-requested escalation" "$ACTION" "smart re-review runs only when the primary reviewer explicitly requests it"
+check_contains "escalation-reason output declared" "$ACTION" "escalation-reason:"
 check "publish step receives ESCALATION_REASON" \
-  "$(grep -c 'ESCALATION_REASON: \${{ steps.review.outputs.escalation_reason }}' "$ROOT_DIR/action.yml")" "1"
+  "$(grep -c 'ESCALATION_REASON: ${{ steps.review.outputs.escalation-reason }}' "$ROOT_DIR/action.yml")" "1"
 # config.sh keeps the knobs accepted (no silent behavior change) and warns.
 check_contains "config.sh keeps the deprecated knobs accepted" "$SRC" "accepted for backward compatibility"
 # Each notice must compare against ITS OWN input's documented default, so a

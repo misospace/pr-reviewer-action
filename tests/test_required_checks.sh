@@ -40,11 +40,11 @@ check "wrapper calls apply_required_check_validation" \
 check "required_checks step output emitted" \
   "$(grep -c '^echo "required_checks=' "$ROOT_DIR/scripts/sections/review.sh")" "1"
 ACTION="$(cat "$ROOT_DIR/action.yml")"
-check_contains "action.yml declares validate_required_checks input" "$ACTION" "validate_required_checks:"
-check_contains "action.yml declares required_check_validation_mode input" "$ACTION" "required_check_validation_mode:"
-check_contains "action.yml declares required_checks output" "$ACTION" "required_checks:"
+check_contains "action.yml declares validate_required_checks input" "$ACTION" "validate-required-checks:"
+check_contains "action.yml declares required_check_validation_mode input" "$ACTION" "required-check-validation-mode:"
+check_contains "action.yml declares required_checks output" "$ACTION" "required-checks:"
 check "publish step receives REQUIRED_CHECKS" \
-  "$(grep -c 'REQUIRED_CHECKS: \${{ steps.review.outputs.required_checks }}' "$ROOT_DIR/action.yml")" "1"
+  "$(grep -c 'REQUIRED_CHECKS: ${{ steps.review.outputs.required-checks }}' "$ROOT_DIR/action.yml")" "1"
 
 echo ""
 echo "=== Functional: build_metadata_marker carries required_checks ==="

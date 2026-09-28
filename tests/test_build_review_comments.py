@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for scripts/build_review_comments.py — diff anchoring, filtering,
-caps, body sanitization — plus action.yml wiring for inline_findings."""
+caps, body sanitization — plus action.yml wiring for inline-findings."""
 
 import json
 import sys
@@ -226,15 +226,15 @@ class TestActionWiring:
     PUBLISH = (_REPO_ROOT / "scripts" / "publish.sh").read_text()
 
     def test_inline_findings_input_declared(self):
-        assert "inline_findings:" in self.ACTION
-        assert "inline_findings_max:" in self.ACTION
+        assert "inline-findings:" in self.ACTION
+        assert "inline-findings-max:" in self.ACTION
 
     def test_all_publish_steps_receive_findings(self):
         # The single publish dispatcher (#303) carries one superset env block
         # serving all three modes (comment, review_comment, review_verdict), so
         # FINDINGS/INLINE_FINDINGS each appear once.
         assert self.ACTION.count("FINDINGS: ${{ steps.review.outputs.findings }}") == 1
-        assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline_findings }}") == 1
+        assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline-findings }}") == 1
 
     def test_review_verdict_falls_back_on_failure(self):
         assert "falling back to plain review" in self.PUBLISH

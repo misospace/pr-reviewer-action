@@ -204,7 +204,7 @@ def test_no_fork_artifacts_or_caches_are_consumed(fork_text) -> None:
 def test_review_inputs_pinned(fork_text) -> None:
     values = _extract_with_block(REVIEW_STEP, fork_text)
     assert values.get("repo") == "${{ github.repository }}"
-    assert values.get("pr_number") == "${{ needs.gate.outputs.pr_number }}"
+    assert values.get("pr-number") == "${{ needs.gate.outputs.pr_number }}"
 
 
 def test_no_fork_controlled_configuration_inputs(fork_text) -> None:
@@ -256,15 +256,15 @@ def test_fork_feature_policy_pinned_off(fork_text) -> None:
     """Tests 9/10: fork-gated features stay explicitly off."""
     values = _extract_with_block(REVIEW_STEP, fork_text)
     expected_off = {
-        "tool_mode": "off",
-        "tool_enable_for_forks": "false",
-        "evidence_enable_for_forks": "false",
-        "linear_enable_for_forks": "false",
-        "allow_approve": "false",
-        "approve_forks": "false",
-        "related_code_context": "false",
-        "repo_map_context": "false",
-        "allowed_source_hosts": "",
+        "tool-mode": "off",
+        "tool-enable-for-forks": "false",
+        "evidence-enable-for-forks": "false",
+        "linear-enable-for-forks": "false",
+        "allow-approve": "false",
+        "approve-forks": "false",
+        "related-code-context": "false",
+        "repo-map-context": "false",
+        "allowed-source-hosts": "",
     }
     for key, want in expected_off.items():
         got = values.get(key)
@@ -273,25 +273,25 @@ def test_fork_feature_policy_pinned_off(fork_text) -> None:
 
 def test_fork_review_publishes_no_native_approval(fork_text) -> None:
     values = _extract_with_block(REVIEW_STEP, fork_text)
-    assert values.get("publish_mode") == "review_verdict"
-    assert values.get("allow_approve") == "false"
-    assert values.get("approve_forks") == "false"
+    assert values.get("publish-mode") == "review_verdict"
+    assert values.get("allow-approve") == "false"
+    assert values.get("approve-forks") == "false"
 
 
 def test_fork_deep_review_is_bounded_auto(fork_text) -> None:
     values = _extract_with_block(REVIEW_STEP, fork_text)
-    assert values.get("deep_review") == "auto"
-    assert values.get("deep_review_timeout_sec") == "300"
+    assert values.get("deep-review") == "auto"
+    assert values.get("deep-review-timeout-sec") == "300"
 
 
 def test_fork_compute_bounds(fork_text) -> None:
     values = _extract_with_block(REVIEW_STEP, fork_text)
-    assert values.get("ai_primary_retries") == "1", (
+    assert values.get("ai-primary-retries") == "1", (
         "fork reviews must not retry enough to turn a local-model outage "
         "into prolonged load"
     )
-    assert values.get("ai_max_tokens") == "16384"
-    assert values.get("context_limit_mode") == "low", (
+    assert values.get("ai-max-tokens") == "16384"
+    assert values.get("context-limit-mode") == "low", (
         "fork reviews use the reduced context profile"
     )
     assert re.search(r"^    timeout-minutes: 30$", fork_text, re.M), (
@@ -307,11 +307,11 @@ def test_fork_compute_bounds(fork_text) -> None:
 def test_fork_model_policy_pinned_to_fork_variables(fork_text) -> None:
     """Tests 11/12: primary and smart models come from the FORK_* pins."""
     values = _extract_with_block(REVIEW_STEP, fork_text)
-    assert values.get("ai_model") == "${{ vars.FORK_PRIMARY_MODEL }}"
-    assert values.get("ai_api_format") == "${{ vars.FORK_PRIMARY_FORMAT }}"
-    assert values.get("ai_smart_model") == "${{ vars.FORK_SMART_MODEL }}"
-    assert values.get("ai_smart_api_format") == "${{ vars.FORK_SMART_FORMAT }}"
-    assert values.get("review_routing_mode") == "auto"
+    assert values.get("ai-model") == "${{ vars.FORK_PRIMARY_MODEL }}"
+    assert values.get("ai-api-format") == "${{ vars.FORK_PRIMARY_FORMAT }}"
+    assert values.get("ai-smart-model") == "${{ vars.FORK_SMART_MODEL }}"
+    assert values.get("ai-smart-api-format") == "${{ vars.FORK_SMART_FORMAT }}"
+    assert values.get("review-routing-mode") == "auto"
 
 
 def test_fork_model_policy_ignores_org_dogfood_variables(fork_text) -> None:
@@ -333,10 +333,10 @@ def test_fork_path_has_no_fallback_provider(fork_text) -> None:
     """Tests 13/14: no cloud/MiniMax/OpenAI/Anthropic fallback exists."""
     values = _extract_with_block(REVIEW_STEP, fork_text)
     for key in values:
-        assert not key.startswith("ai_fallback_"), (
+        assert not key.startswith("ai-fallback-"), (
             f"the fork workflow must not configure a fallback ({key})"
         )
-    assert values.get("on_model_failure") == "notice", (
+    assert values.get("on-model-failure") == "notice", (
         "an unavailable local model must degrade visibly, never try another provider"
     )
 

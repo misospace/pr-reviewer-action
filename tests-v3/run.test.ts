@@ -312,6 +312,67 @@ test("missing required inputs fail closed with the v2 message", async () => {
   }
 });
 
+test("contract inputs resolve from the literal kebab INPUT_ names the runner exports", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    // Only the literal hyphenated form is set — the underscore fallback and
+    // the SCREAMING_SNAKE v2 names are absent.
+    const result = await runReview({
+      env: {
+        "INPUT_GITHUB-TOKEN": "tok",
+        "INPUT_AI-BASE-URL": server.url,
+        "INPUT_AI-MODEL": "m",
+        "INPUT_AI-STREAM": "false",
+        "INPUT_AI-API-KEY": "k",
+        "INPUT_PR-NUMBER": "7",
+        "INPUT_REPO": "o/r",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.reviewArtifact.verdict, "approve");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("github-token resolves from the shared GH_TOKEN binding when no INPUT_ form is exported", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: {
+        GH_TOKEN: "shared-token",
+        REPO: "o/r",
+        PR_NUMBER: "7",
+        "INPUT_AI-BASE-URL": server.url,
+        "INPUT_AI-MODEL": "m",
+        "INPUT_AI-STREAM": "false",
+        "INPUT_AI-API-KEY": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("embedded specialist prompts equal the committed fragment files", async () => {
   // Guards the #809 switch from disk reads to the build-time asset map.
   const { loadSpecialistPrompt } = await import("../src/specialists/prompts.js");

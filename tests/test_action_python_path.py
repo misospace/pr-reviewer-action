@@ -62,27 +62,30 @@ def test_checkout_pr_reviewer_package_cannot_shadow_the_action(tmp_path: Path) -
 def _dependency_check_script() -> str:
     action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
     step = next(s for s in action["runs"]["steps"] if s.get("name") == "Validate runtime dependencies")
-    return step["run"]
+    # The runner substitutes composite expressions; the test substitutes
+    # github.action_path with this repository (a source checkout).
+    return step["run"].replace("${{ github.action_path }}", str(ROOT))
 
 
-def test_dependency_check_rejects_python_older_than_3_11(tmp_path: Path) -> None:
-    shim = tmp_path / "python3"
-    shim.write_text(
-        "#!/usr/bin/env bash\n"
-        'if [ "${1:-}" = "-V" ]; then echo "Python 3.10.14"; exit 0; fi\n'
-        'case "$*" in *"version_info < (3, 11)"*) exit 1 ;; esac\n'
-        f'exec {sys.executable} "$@"\n',
-        encoding="utf-8",
-    )
-    shim.chmod(0o755)
-    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"}
+def test_dependency_check_rejects_an_unbuildable_action_dir(tmp_path: Path) -> None:
+    """#706: a checkout with neither dist/ nor the build recipe is refused
+    loudly — never a silently degraded review."""
+    script = _dependency_check_script().replace(str(ROOT), str(tmp_path))
     result = subprocess.run(
-        ["bash", "-c", _dependency_check_script() + "\necho REACHED_END"],
-        env=env, capture_output=True, text=True, check=False,
+        ["bash", "-c", script + "\necho REACHED_END"],
+        capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
-    assert "::error::python3 3.11 or newer is required (found Python 3.10.14)." in result.stdout
+    assert "dist/index.js is missing" in result.stdout + result.stderr
     assert "REACHED_END" not in result.stdout
+
+
+def test_dependency_gate_names_only_the_v3_prerequisites() -> None:
+    script = _dependency_check_script()
+    for required in ("command -v node", "command -v git", "command -v pgrep", "dist/index.js"):
+        assert required in script, required
+    for removed in ("command -v python3", "command -v jq", "command -v curl", "command -v gh"):
+        assert removed not in script, removed
 
 
 def test_dependency_check_accepts_the_current_interpreter() -> None:

@@ -112,11 +112,11 @@ def test_dogfood_workflow_exists() -> None:
 def test_dogfood_runs_all_specialists() -> None:
     """The self-review canary opts into all three roles, not auto selection."""
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
-    assert values.get("deep_review") == "true", (
+    assert values.get("deep-review") == "true", (
         "dogfood deep_review must be true to exercise correctness, security, "
         f"and tests on every review; found {values.get('deep_review')!r}"
     )
-    assert _extract_action_defaults().get("deep_review") == "false", (
+    assert _extract_action_defaults().get("deep-review") == "false", (
         "the public deep_review default must remain false"
     )
 
@@ -130,20 +130,20 @@ def test_dogfood_native_loop_budget() -> None:
     """
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
 
-    assert values.get("tool_mode") == "native_loop", (
+    assert values.get("tool-mode") == "native_loop", (
         "the dogfood workflow must review with tool_mode=native_loop"
     )
-    assert values.get("tool_max_rounds") == "4", (
+    assert values.get("tool-max-rounds") == "4", (
         f"dogfood tool_max_rounds must stay \"4\" (issue #565); found {values.get('tool_max_rounds')!r}"
     )
     assert values.get("tool_max_requests") in (None, ""), (
         "dogfood tool_max_requests must stay unset so the #701 tier budget "
         f"applies; found {values.get('tool_max_requests')!r}"
     )
-    assert values.get("primary_tool_max_requests") == "16", (
+    assert values.get("primary-tool-max-requests") == "16", (
         f"dogfood primary_tool_max_requests must be \"16\"; found {values.get('primary_tool_max_requests')!r}"
     )
-    assert values.get("tool_loop_wall_clock_sec") == "600", (
+    assert values.get("tool-loop-wall-clock-sec") == "600", (
         f"dogfood tool_loop_wall_clock_sec must stay \"600\" (issue #565); "
         f"found {values.get('tool_loop_wall_clock_sec')!r}"
     )
@@ -157,7 +157,7 @@ def test_dogfood_untouched_inputs_stay_put() -> None:
     """
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
 
-    assert values.get("tool_turn_timeout_sec") == "300", (
+    assert values.get("tool-turn-timeout-sec") == "300", (
         f"dogfood tool_turn_timeout_sec must stay \"300\"; found {values.get('tool_turn_timeout_sec')!r}"
     )
     # Unset inherits the 50000 action default; 15000 starved the planning
@@ -165,11 +165,11 @@ def test_dogfood_untouched_inputs_stay_put() -> None:
     assert values.get("tool_corpus_max_bytes") in (None, ""), (
         f"dogfood tool_corpus_max_bytes must stay unset; found {values.get('tool_corpus_max_bytes')!r}"
     )
-    assert values.get("tool_max_tokens_per_turn") == "16000", (
+    assert values.get("tool-max-tokens-per-turn") == "16000", (
         f"dogfood tool_max_tokens_per_turn must stay \"16000\"; "
         f"found {values.get('tool_max_tokens_per_turn')!r}"
     )
-    assert values.get("tool_max_response_bytes") == "12000", (
+    assert values.get("tool-max-response-bytes") == "12000", (
         f"dogfood tool_max_response_bytes must stay \"12000\"; "
         f"found {values.get('tool_max_response_bytes')!r}"
     )
@@ -188,13 +188,14 @@ def test_public_action_defaults_unchanged() -> None:
     defaults = _extract_action_defaults()
 
     expected = {
-        "tool_loop_wall_clock_sec": "600",
-        "tool_max_requests": "",
-        "tool_max_rounds": "4",
-        "tool_turn_timeout_sec": "60",
-        "tool_corpus_max_bytes": "50000",
-        "tool_max_tokens_per_turn": "400",
-        "tool_max_response_bytes": "12000",
+        # Kebab-case public IDs since the #706 cutover.
+        "tool-loop-wall-clock-sec": "600",
+        "tool-max-requests": "",
+        "tool-max-rounds": "4",
+        "tool-turn-timeout-sec": "60",
+        "tool-corpus-max-bytes": "50000",
+        "tool-max-tokens-per-turn": "400",
+        "tool-max-response-bytes": "12000",
     }
     for name, want in expected.items():
         got = defaults.get(name)

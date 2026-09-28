@@ -37,9 +37,9 @@ import yaml
 
 steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["runs"]["steps"]
 step = next(s for s in steps if s["name"] == "Check whether review is needed")
-assert step["env"]["LINEAR_API_KEY"] == "${{ inputs.linear_api_key }}"
+assert step["env"]["LINEAR_API_KEY"] == "${{ inputs.linear-api-key }}"
 assert step["env"]["SHARED_ENV_FILE"] == "${{ steps.shared_env.outputs.path }}"
-assert step["run"].index('load_shared_env "$SHARED_ENV_FILE"') < step["run"].index('check_review_needed.sh')
+assert step["run"].index('load_shared_env "$SHARED_ENV_FILE"') < step["run"].index('dist/index.js" precheck')
 PY
 
 PASS=0
