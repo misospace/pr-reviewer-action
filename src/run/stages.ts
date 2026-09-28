@@ -41,7 +41,7 @@ import { pyJsonDumps } from "../evidence/pyjson.js";
 import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
-import type { TransportWirePayload } from "../model/types.js";
+import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
 import type { RunWorkspace } from "./workspace.js";
@@ -457,8 +457,39 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
     });
     if (outcome.status === "failure") throw new Error(outcome.failure.message);
-    return outcome.raw;
+    // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
+    // provider JSON. The loop's tool-call extraction and usage accounting
+    // read the OpenAI chat shape (as v2's reassembler produced), so project
+    // it; a non-streamed turn's raw provider JSON passes through untouched.
+    return outcome.raw === outcome.response ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
   };
+}
+
+/** A NormalizedModelResponse in the OpenAI chat-completion shape. */
+export function normalizedToOpenAiChat(response: NormalizedModelResponse): Record<string, unknown> {
+  const message: Record<string, unknown> = { role: "assistant", content: response.content };
+  if (response.toolCalls.length > 0) {
+    message.tool_calls = response.toolCalls.map((call) => ({
+      id: call.id,
+      type: "function",
+      function: { name: call.function.name, arguments: call.function.arguments },
+    }));
+  }
+  const shaped: Record<string, unknown> = {
+    id: response.id,
+    object: "chat.completion",
+    model: response.model,
+    choices: [{ index: 0, message, finish_reason: response.finishReason }],
+  };
+  if (response.usage) {
+    shaped.usage = {
+      prompt_tokens: response.usage.promptTokens,
+      completion_tokens: response.usage.completionTokens,
+      total_tokens: response.usage.totalTokens,
+    };
+  }
+  if (response.error) shaped.error = response.error;
+  return shaped;
 }
 
 export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void): Promise<void> {

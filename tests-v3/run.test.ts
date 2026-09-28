@@ -723,3 +723,123 @@ test("#796: an edited function with a caller becomes a harness obligation in the
     cleanup();
   }
 });
+
+/** SSE bodies for a streamed tool-call turn and a streamed text turn. */
+function sseToolCall(apiFormat: "openai" | "anthropic", path: string): string {
+  const args = JSON.stringify({ path });
+  if (apiFormat === "anthropic") {
+    return [
+      { type: "message_start", message: { id: "m1", model: "m", usage: { input_tokens: 50, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: "read_file", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 9 } },
+      { type: "message_stop" },
+    ].map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+  }
+  return [
+    { id: "c1", model: "m", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "tc1", type: "function", function: { name: "read_file", arguments: args } }] } }] },
+    { id: "c1", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 50, completion_tokens: 9, total_tokens: 59 } },
+  ].map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
+function sseText(apiFormat: "openai" | "anthropic", text: string): string {
+  if (apiFormat === "anthropic") {
+    return [
+      { type: "message_start", message: { id: "m2", model: "m", usage: { input_tokens: 60, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } },
+      { type: "message_stop" },
+    ].map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+  }
+  return [
+    { id: "c2", model: "m", choices: [{ index: 0, delta: { role: "assistant", content: text } }] },
+    { id: "c2", model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 60, completion_tokens: 20, total_tokens: 80 } },
+  ].map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
+for (const apiFormat of ["openai", "anthropic"] as const) {
+  test(`streamed ${apiFormat} tool calls reach the loop and read the checkout, not the run dir`, async () => {
+    let toolTurns = 0;
+    const server = await startMockServer((_req, body, res) => {
+      const payload = JSON.parse(body) as { tools?: unknown[] };
+      res.setHeader("Content-Type", "text/event-stream");
+      if (Array.isArray(payload.tools) && payload.tools.length > 0 && toolTurns === 0) {
+        toolTurns += 1;
+        res.end(sseToolCall(apiFormat, "README.md"));
+        return;
+      }
+      res.end(sseText(apiFormat, JSON.stringify(baseVerdict())));
+    });
+    const checkout = mkdtempSync(join(tmpdir(), "v3-checkout-"));
+    const { runDir, cleanup } = withRunDir();
+    try {
+      writeFileSync(join(checkout, "README.md"), "hello\nworld-from-the-checkout\n");
+      gitInit(checkout);
+      await runReview({
+        env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": server.url, "ai-model": "m", "ai-api-format": apiFormat, "ai-stream": "true", "ai-api-key": "k",
+          "tool-mode": "native_loop",
+        },
+        runDir,
+        workspace: checkout,
+        platformAdapter: mockPlatform(),
+        persistArtifacts: true,
+        quiet: true,
+      });
+      const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+        executed_request_count: number;
+        stop_reason: string;
+        native_loop_degraded?: string;
+        tool_results: Array<{ tool: string; status: string; result: { content?: string } }>;
+        usage?: { prompt_tokens: number };
+      };
+      assert.equal(harness.native_loop_degraded, undefined, `loop degraded: ${harness.stop_reason}`);
+      assert.equal(harness.executed_request_count, 1);
+      assert.equal(harness.tool_results[0]!.tool, "read_file");
+      assert.equal(harness.tool_results[0]!.status, "ok");
+      assert.match(harness.tool_results[0]!.result.content ?? "", /world-from-the-checkout/);
+      assert.ok((harness.usage?.prompt_tokens ?? 0) > 0, `streamed usage must be counted: ${JSON.stringify(harness.usage)}`);
+    } finally {
+      await server.close();
+      cleanup();
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+}
+
+test("deep review writes its artifacts where the run reads them when the run dir is not the checkout", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const checkout = mkdtempSync(join(tmpdir(), "v3-checkout-"));
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(checkout, "README.md"), "hello\nworld\n");
+    gitInit(checkout);
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false", GITHUB_WORKSPACE: checkout },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+        "deep-review": "true",
+      },
+      runDir,
+      workspace: checkout,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.ok(existsSync(join(runDir, "specialists.json")), "specialists.json must land in the run dir");
+    assert.ok(!existsSync(join(checkout, "specialists.json")), "the checkout must not receive run artifacts");
+  } finally {
+    await server.close();
+    cleanup();
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});

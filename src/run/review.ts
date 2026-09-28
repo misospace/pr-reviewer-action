@@ -457,7 +457,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       envAllowlist: [],
       workload: async () => runSpecialistsGate({
         env,
-        argv: ["--corpus", "specialist-corpus.md"],
+        // The gate's artifacts (role files, specialists.json/.md) must land
+        // in the run dir this workspace reads, not GITHUB_WORKSPACE.
+        argv: ["--corpus", "specialist-corpus.md", "--workspace-root", runDir],
         cwd: runDir,
         stdout: (line) => log(line),
         stderr: (line) => errorLog(line),
@@ -511,7 +513,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     } else {
       log(`Running tool harness in mode: ${toolMode}`);
       env.TOOL_HARNESS_TIER = "primary";
-      await runToolHarnessPhase(ws, env, runDir, log);
+      await runToolHarnessPhase(ws, env, workspace, log);
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     if (corpusResult.overBudget) errorLog(`ERROR: assembled corpus exceeds its context budget`);
@@ -544,7 +546,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
       env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
-      budgets, generatedPaths, standards, runDir,
+      budgets, generatedPaths, standards, runDir, workspace,
     });
     delete env.TOOL_ESCALATION;
     if (smart.ok) {
@@ -960,6 +962,8 @@ interface SmartReviewInput extends ReviewCallInput {
   generatedPaths: ReadonlySet<string>;
   standards: { resolved: string | null; content: Uint8Array | null };
   runDir: string;
+  /** The checkout the tool executors read (never the artifact run dir). */
+  workspace: string;
 }
 
 /** review.sh `run_smart_review`: the escalated smart review with its own
@@ -979,7 +983,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
     } else {
       env.TOOL_HARNESS_TIER = "smart";
       try {
-        await runToolHarnessPhase(ws, env, input.runDir, log);
+        await runToolHarnessPhase(ws, env, input.workspace, log);
       } catch {
         ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
       }
