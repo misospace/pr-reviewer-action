@@ -250,18 +250,52 @@ def test_fetch_bot_branch_corpus_at_non_list_vulnerable_is_hard_failure(monkeypa
         mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
 
 
+def test_fetch_bot_branch_corpus_at_missing_real_pr_corpus_is_hard_failure(monkeypatch):
+    """An existing bot branch whose corpus is `{}` (missing the block
+    entirely) must fail loud, not be treated as "nothing to merge"."""
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout="{}"),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+def test_fetch_bot_branch_corpus_at_missing_vulnerable_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout='{"real_pr_corpus": {}}'),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
 # ---------------------------------------------------------------------------
 # _validate_real_pr_corpus_shape: shared shape check, used on both the
 # remote (bot-branch) and local (main-checkout) corpus.
 # ---------------------------------------------------------------------------
 
 
-def test_validate_shape_missing_real_pr_corpus_is_fine():
-    mbc._validate_real_pr_corpus_shape({}, "source")  # no raise
+def test_validate_shape_missing_real_pr_corpus_raises():
+    """A missing block is the same data-loss path as the wrong type: an
+    existing bot branch whose file lacks it would otherwise be treated as
+    "nothing to merge" and get replaced. The harvested corpus on main
+    always has both a real_pr_corpus object and a vulnerable list."""
+    with pytest.raises(mbc.CorpusReadError):
+        mbc._validate_real_pr_corpus_shape({}, "source")
 
 
-def test_validate_shape_missing_vulnerable_is_fine():
-    mbc._validate_real_pr_corpus_shape({"real_pr_corpus": {}}, "source")  # no raise
+def test_validate_shape_missing_vulnerable_raises():
+    with pytest.raises(mbc.CorpusReadError):
+        mbc._validate_real_pr_corpus_shape({"real_pr_corpus": {}}, "source")
 
 
 def test_validate_shape_non_object_real_pr_corpus_raises():
@@ -459,6 +493,36 @@ def test_main_local_corpus_non_object_real_pr_corpus_is_hard_failure(tmp_path, m
 def test_main_local_corpus_non_list_vulnerable_is_hard_failure(tmp_path, monkeypatch):
     corpus_path = tmp_path / "corpus.json"
     original = '{"real_pr_corpus": {"vulnerable": "not-a-list"}}'
+    corpus_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: (None, True))
+    output_path = tmp_path / "github_output"
+    rc = mbc.main(
+        ["--branch", "bot/x", "--corpus", str(corpus_path), "--github-output", str(output_path)]
+    )
+    assert rc != 0
+    assert corpus_path.read_text(encoding="utf-8") == original
+    assert not output_path.exists()
+
+
+def test_main_local_corpus_missing_real_pr_corpus_is_hard_failure(tmp_path, monkeypatch):
+    """Same data-loss path as the wrong type: a local corpus file that
+    lacks real_pr_corpus entirely (`{}`) must fail loud, not be silently
+    setdefault-normalized into an empty snapshot."""
+    corpus_path = tmp_path / "corpus.json"
+    corpus_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: (None, True))
+    output_path = tmp_path / "github_output"
+    rc = mbc.main(
+        ["--branch", "bot/x", "--corpus", str(corpus_path), "--github-output", str(output_path)]
+    )
+    assert rc != 0
+    assert corpus_path.read_text(encoding="utf-8") == "{}"
+    assert not output_path.exists()
+
+
+def test_main_local_corpus_missing_vulnerable_is_hard_failure(tmp_path, monkeypatch):
+    corpus_path = tmp_path / "corpus.json"
+    original = '{"real_pr_corpus": {}}'
     corpus_path.write_text(original, encoding="utf-8")
     monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: (None, True))
     output_path = tmp_path / "github_output"

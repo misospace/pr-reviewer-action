@@ -64,13 +64,18 @@ not any ref still points at it) or fails outright (treated as the hard
 failure above) -- it can never silently return a different commit's data.
 
 Schema validation, on both sides (#801 fourth follow-up): a corpus is only
-a valid snapshot if ``real_pr_corpus`` (when present) is an object and its
-``vulnerable`` (when present) is a list. That's checked for the remote
-bot-branch corpus before merging it (folded into the hard-failure path
-above), and equivalently for the *local* on-disk corpus before this script
-normalizes it -- silently ``setdefault``-ing a malformed ``real_pr_corpus``
-or ``vulnerable`` into an empty list would paper over corrupted state
-instead of failing on it.
+a valid snapshot if ``real_pr_corpus`` is present and an object, and its
+``vulnerable`` is present and a list -- the harvested corpus on main
+always has both (a dict with a list inside), so either one being missing
+is exactly as much a red flag as the wrong type. Anything else raises
+``CorpusReadError``. That's checked for the remote bot-branch corpus
+before merging it (folded into the hard-failure path above), and
+equivalently for the *local* on-disk corpus before this script would
+otherwise silently ``setdefault`` a missing/malformed ``real_pr_corpus``
+or ``vulnerable`` into an empty default, papering over corrupted state
+instead of failing on it. Only a genuinely absent bot branch (``bot_sha is
+None``, checked separately before any of this) is safe to treat as an
+empty snapshot.
 
 GitHub reads only (ls-remote + a fetch of one commit); never writes to
 GitHub.
@@ -117,24 +122,25 @@ class CorpusReadError(RuntimeError):
 
 
 def _validate_real_pr_corpus_shape(data: dict[str, Any], source: str) -> None:
-    """Raise ``CorpusReadError`` if ``data["real_pr_corpus"]`` is present
-    but not an object, or its ``vulnerable`` is present but not a list.
-    Absence of either key is fine -- callers treat that as empty -- but a
-    key present with the wrong type is malformed state that must fail
-    loud, not be silently normalized into an empty default.
+    """Raise ``CorpusReadError`` unless ``data["real_pr_corpus"]`` is
+    present and an object, and its ``vulnerable`` is present and a list.
+
+    A missing block or a missing ``vulnerable`` is *not* a safe default to
+    silently fill in: the harvested corpus on main always has both (a dict
+    containing a list), so their absence is exactly as much a sign of
+    corrupted/unexpected state as the wrong type would be. Only a
+    genuinely absent bot branch (checked separately, before this is ever
+    called) is safe to treat as empty.
     """
     block = data.get("real_pr_corpus")
-    if block is None:
-        return
     if not isinstance(block, dict):
-        raise CorpusReadError(
-            f"{source}: real_pr_corpus must be an object, got {type(block).__name__}"
-        )
+        got = "missing" if block is None else type(block).__name__
+        raise CorpusReadError(f"{source}: real_pr_corpus must be an object, got {got}")
     vulnerable = block.get("vulnerable")
-    if vulnerable is not None and not isinstance(vulnerable, list):
+    if not isinstance(vulnerable, list):
+        got = "missing" if vulnerable is None else type(vulnerable).__name__
         raise CorpusReadError(
-            f"{source}: real_pr_corpus.vulnerable must be a list, got "
-            f"{type(vulnerable).__name__}"
+            f"{source}: real_pr_corpus.vulnerable must be a list, got {got}"
         )
 
 
@@ -269,8 +275,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
 
-    block = corpus_data.setdefault("real_pr_corpus", {"vulnerable": [], "clean": []})
-    main_vulnerable = block.setdefault("vulnerable", [])
+    # _validate_real_pr_corpus_shape already confirmed both of these are
+    # present with the right type -- no setdefault-style normalization.
+    block = corpus_data["real_pr_corpus"]
+    main_vulnerable = block["vulnerable"]
 
     if bot_sha is None:
         print(f"merge_bot_branch_corpus: no existing {args.branch} on the remote; nothing to merge")
@@ -288,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        bot_vulnerable = (bot_corpus.get("real_pr_corpus") or {}).get("vulnerable") or []
+        # fetch_bot_branch_corpus_at already confirmed this shape too.
+        bot_vulnerable = bot_corpus["real_pr_corpus"]["vulnerable"]
         merged = merge_vulnerable(main_vulnerable, bot_vulnerable)
         added = len(merged) - len(_valid_entries(main_vulnerable))
         block["vulnerable"] = merged

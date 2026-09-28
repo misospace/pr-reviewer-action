@@ -185,6 +185,27 @@ seed_bot_branch_malformed_schema() {
   rm -rf "$seed"
 }
 
+seed_bot_branch_empty_object_corpus() {
+  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file is
+  # valid JSON, present, and readable -- just `{}`, missing real_pr_corpus
+  # entirely. Same data-loss path as the wrong type: without hard-failing
+  # here, this would be treated as "nothing to merge" and the branch's
+  # existing (if any) entries would be silently replaced.
+  local remote="$1" seed="$TMPDIR/seed-bot-emptyobj-$RANDOM"
+  git clone -q --branch main "$remote" "$seed"
+  (
+    cd "$seed"
+    git config user.email t@example.com
+    git config user.name "Test Seed"
+    git checkout -q -b "$BRANCH"
+    echo '{}' > evals/corpus-human-findings.json
+    git add evals/corpus-human-findings.json
+    git commit -q -m "prior harvest (empty object corpus)" --allow-empty
+    git push -q origin "$BRANCH"
+  )
+  rm -rf "$seed"
+}
+
 push_concurrent_update() {
   # $1: bare remote, $2: corpus JSON to force-push onto $BRANCH from a
   # brand-new clone. Simulates a different (faster) run's REAL push landing
@@ -470,6 +491,19 @@ check "existing branch with malformed schema (vulnerable not a list) fails the m
   "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
 AFTER_SHA12="$(git --git-dir="$REMOTE12" rev-parse "$BRANCH")"
 check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA12" "$BEFORE_SHA12"
+
+REMOTE13="$TMPDIR/remote13.git"
+make_bare_remote_with_main "$REMOTE13"
+seed_bot_branch_empty_object_corpus "$REMOTE13"
+CLONE13="$TMPDIR/clone13"
+fresh_single_branch_clone "$REMOTE13" "$CLONE13"
+BEFORE_SHA13="$(git --git-dir="$REMOTE13" rev-parse "$BRANCH")"
+
+run_merge_script "$CLONE13"
+check "existing branch whose corpus is {} (missing real_pr_corpus) fails the merge step" \
+  "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
+AFTER_SHA13="$(git --git-dir="$REMOTE13" rev-parse "$BRANCH")"
+check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA13" "$BEFORE_SHA13"
 
 echo ""
 echo "=== no diff: exits 0 without touching git at all ==="
