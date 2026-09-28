@@ -305,18 +305,27 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
           const marker = parseMetadata(lastCommentBody);
           const storedCiState = typeof marker?.ci_state === "string" ? marker.ci_state : "";
           const headSha = typeof marker?.head_sha === "string" ? marker.head_sha : "";
-          if (headSha !== "" && storedCiState !== "none") {
-            const checks = await readAdapter.externalChecks(headSha).catch(() => null);
-            const live = checks === null ? null : externalChecksConclusion(checks);
-            // Transient/unknown read, a marker from before #812 (no stored
-            // state), or a changed conclusion: the verdict-relevant input
-            // cannot be proven unchanged — review afresh.
-            if (live === null || live !== storedCiState) {
-              process.stderr.write(
-                "warning: carried request_changes is CI-stale (stored: " + (storedCiState || "unrecorded") + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
-              );
-              return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
-            }
+          // Fail closed: a marker without a usable head binding (or without
+          // a stored state) cannot PROVE the verdict-relevant inputs
+          // unchanged — "none" is a real recorded conclusion too, and
+          // none→success/failure/pending is exactly the transition that
+          // must re-open the review.
+          if (headSha === "" || storedCiState === "") {
+            process.stderr.write(
+              "warning: carried request_changes marker lacks " + (headSha === "" ? "head_sha" : "ci_state") + "; forcing a fresh review (fail closed)\n",
+            );
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+          }
+          const checks = await readAdapter.externalChecks(headSha).catch(() => null);
+          const live = checks === null ? null : externalChecksConclusion(checks);
+          // Transient/unknown read or a changed conclusion: the
+          // verdict-relevant input cannot be proven unchanged — review
+          // afresh.
+          if (live === null || live !== storedCiState) {
+            process.stderr.write(
+              "warning: carried request_changes is CI-stale (stored: " + storedCiState + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
+            );
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
           }
         }
       }
@@ -337,8 +346,6 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       effectiveForgejoApiUrl,
     );
   }
-
-  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "");
 
   // ── Review path (shared by the fall-through and the #812 stale-skip
   // re-entry): PR object once → SHAs/fork → superseded guard → Forgejo

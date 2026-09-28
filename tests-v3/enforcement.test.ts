@@ -358,3 +358,16 @@ test("#792: the same blocker claimed fixed WITHOUT code evidence stays open and 
   assert.equal(reemitted.severity, "blocker");
   assert.equal(reemitted.thread_id, "t1");
 });
+
+// ---------------------------------------------------------------------------
+// #812: the publish path records the folded external-CI conclusion in the
+// managed marker so the next diff-unchanged skip can compare it.
+// ---------------------------------------------------------------------------
+
+test("#812: publish ciState reaches the marker; omitted when not read", () => {
+  const withCi = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "issues", ciState: "failure" });
+  assert.match(withCi, /"ci_state":"failure"/);
+  assert.ok(withCi.endsWith('"ci_state":"failure"} -->'), "ci_state is the trailing field");
+  const without = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "issues" });
+  assert.ok(!without.includes("ci_state"), "markers without a CI read stay byte-identical to pre-#812");
+});

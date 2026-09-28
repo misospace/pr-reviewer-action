@@ -400,6 +400,23 @@ test("#812: a pre-#812 marker (no stored ci_state) forces one fresh review", asy
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
 });
 
+test("#812: stored ci_state=none transitioning to a real conclusion forces a fresh review", async () => {
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "none"));
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#812: a marker without head_sha fails closed — fresh review, not a silent skip", async () => {
+  const adapter = skipAdapter812(
+    [{ name: "ci", state: "failure" }],
+    issuesCommentBody812("issues", "failure").replace('"head_sha":"head-old"', '"head_sha":""'),
+  );
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
 test("#812: externalChecksConclusion folds the check states", () => {
   assert.equal(externalChecksConclusion([{ name: "a", state: "failure" }, { name: "b", state: "success" }]), "failure");
   assert.equal(externalChecksConclusion([{ name: "a", state: "pending" }, { name: "b", state: "success" }]), "pending");
