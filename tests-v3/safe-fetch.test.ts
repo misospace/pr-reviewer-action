@@ -10,11 +10,13 @@ import type { AddressInfo } from "node:net";
 import type { LookupAddress } from "node:dns";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { ForgejoEnrichClient } from "../src/platform/enrich.js";
 import { isPublicAddress, parseIPv6 } from "../src/platform/ip-policy.js";
 import {
   createNodeExchange,
   fetchSource,
   hostAllowed,
+  MAX_ENRICH_API_BYTES,
   MAX_REDIRECTS,
   pinnedLookup,
   safeFetchLike,
@@ -386,4 +388,27 @@ test("proxy environment variables never divert the pinned transport", async () =
       assert.deepEqual(proxyHits, [], "no request or CONNECT ever reached the proxy");
     });
   });
+});
+
+test("the Forgejo enrich transport accepts responses up to 32 MiB and fails closed above", async () => {
+  assert.equal(MAX_ENRICH_API_BYTES, 32 * 1024 * 1024);
+  // A JSON document of exactly `size` bytes.
+  const doc = (size: number): Buffer => Buffer.from(`{"b":"${"x".repeat(size - 8)}"}`);
+  await withServer((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(req.url === "/under" ? doc(MAX_ENRICH_API_BYTES) : doc(MAX_ENRICH_API_BYTES + 1));
+  }, async (port) => {
+    const fetchLike = safeFetchLike({
+      resolver: fakeResolver({ "forge.test": ["127.0.0.1"] }), addressPolicy: loopbackOnly, exchange: createNodeExchange(loopbackOnly),
+    });
+    const under = await fetchLike(`http://forge.test:${port}/under`);
+    assert.equal(under.status, 200);
+    assert.equal((await under.arrayBuffer()).byteLength, MAX_ENRICH_API_BYTES);
+    await assert.rejects(fetchLike(`http://forge.test:${port}/over`), /exceeds|closed before/);
+  });
+  // An injected transport that ignores maxBytes is still capped.
+  const oversize: Exchange = async () => ({ status: 200, headers: {}, body: Buffer.alloc(MAX_ENRICH_API_BYTES + 1) });
+  await assert.rejects(safeFetchLike({ resolver: fakeResolver({ "forge.test": [PUBLIC] }), exchange: oversize })("https://forge.test/api/v1/x"), /exceeds/);
+  const client = new ForgejoEnrichClient({ fetchImpl: safeFetchLike({ resolver: fakeResolver({ "forge.test": [PUBLIC] }), exchange: oversize }) });
+  assert.equal(await client.compare("forge.test", "o/r", "a...b"), null, "the enrich client fails closed over the cap");
 });

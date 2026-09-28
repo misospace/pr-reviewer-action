@@ -544,8 +544,9 @@ Approved divergences (all fail closed):
 
 - `100.64.0.0/10` (CGNAT) and `fec0::/10` (site-local) are blocked; CPython
   classifies neither as private or reserved.
-- Raw source bodies are capped at 5 MiB and Forgejo enrich API responses at
-  32 MiB; v2 read both unbounded.
+- Raw source bodies are capped at 5 MiB (fixture `oversize-over-cap`) and
+  Forgejo enrich API responses at 32 MiB (pinned in
+  `tests-v3/safe-fetch.test.ts`); v2 read both unbounded.
 - Raw fetching honors `ALLOWED_SOURCE_HOSTS` as the input documents
   (maintainer-approved fix). v2's `_fetch_sections` never passed it to
   `fetch_url`, which re-checked against its built-in
@@ -571,9 +572,9 @@ Approved divergences (all fail closed):
 v2 behavior kept: github.com is never fetched raw (its release/compare
 metadata comes from the API), and gitlab.com/bitbucket.org are skipped as
 known non-Forgejo hosts whose pages are client-rendered. JSON goes
-through `JSON.parse`, so integer-valued
-floats, integers beyond 2^53 and integer-like object keys do not round-trip
-byte for byte.
+through `JSON.parse`, so integer-valued floats, integers beyond 2^53 and
+integer-like object keys do not round-trip byte for byte (approved
+divergence, fixture `json-number-precision`).
 
 ### The `context-producers` boundary (#706)
 

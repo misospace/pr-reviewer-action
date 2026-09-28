@@ -386,6 +386,8 @@ export function safeFetchLike(options: SafeFetchLikeOptions = {}): (input: strin
       maxBytes: options.maxBytes ?? MAX_ENRICH_API_BYTES,
       signal: init?.signal ?? undefined,
     });
+    const cap = options.maxBytes ?? MAX_ENRICH_API_BYTES;
+    if (response.body.length > cap) throw new SourceFetchError(`response exceeds ${cap} bytes`);
     if (response.status < 200 || response.status > 599) throw new SourceFetchError(`unexpected status ${response.status}`);
     const nullBody = response.status === 204 || response.status === 205 || response.status === 304;
     const headers = new Headers();
