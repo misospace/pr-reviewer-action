@@ -126,6 +126,45 @@ seed_existing_bot_branch() {
   rm -rf "$seed"
 }
 
+seed_bot_branch_missing_corpus_file() {
+  # $1: bare remote path. Pushes a commit onto $BRANCH that does NOT carry
+  # the corpus file at all -- an existing branch whose corpus can't be
+  # read must be a hard failure, not "nothing to merge" (#801 third
+  # follow-up, blocker 1).
+  local remote="$1" seed="$TMPDIR/seed-bot-nofile-$RANDOM"
+  git clone -q --branch main "$remote" "$seed"
+  (
+    cd "$seed"
+    git config user.email t@example.com
+    git config user.name "Test Seed"
+    git checkout -q -b "$BRANCH"
+    rm -f evals/corpus-human-findings.json
+    echo "no corpus here" > evals/README-placeholder.txt
+    git add -A
+    git commit -q -m "prior harvest (no corpus file)" --allow-empty
+    git push -q origin "$BRANCH"
+  )
+  rm -rf "$seed"
+}
+
+seed_bot_branch_invalid_corpus_json() {
+  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file
+  # is not valid JSON.
+  local remote="$1" seed="$TMPDIR/seed-bot-badjson-$RANDOM"
+  git clone -q --branch main "$remote" "$seed"
+  (
+    cd "$seed"
+    git config user.email t@example.com
+    git config user.name "Test Seed"
+    git checkout -q -b "$BRANCH"
+    echo "this is not { valid json" > evals/corpus-human-findings.json
+    git add evals/corpus-human-findings.json
+    git commit -q -m "prior harvest (invalid json)" --allow-empty
+    git push -q origin "$BRANCH"
+  )
+  rm -rf "$seed"
+}
+
 push_concurrent_update() {
   # $1: bare remote, $2: corpus JSON to force-push onto $BRANCH from a
   # brand-new clone. Simulates a different (faster) run's REAL push landing
@@ -367,6 +406,37 @@ fresh_single_branch_clone "$REMOTE8" "$CLONE8"
 run_merge_script "$CLONE8"
 check "missing-branch (reachable remote) merge step succeeds" "$MERGE_RC" "0"
 check "missing-branch sha is empty, not an error" "$MERGE_SHA" ""
+
+echo ""
+echo "=== existing bot branch with an unreadable corpus: hard failure, no push ==="
+echo "    (BLOCKER, #801 third follow-up): once the branch is known to exist,"
+echo "    a failure to read its corpus must fail the merge step -- never"
+echo "    silently \"nothing to merge\"."
+REMOTE10="$TMPDIR/remote10.git"
+make_bare_remote_with_main "$REMOTE10"
+seed_bot_branch_missing_corpus_file "$REMOTE10"
+CLONE10="$TMPDIR/clone10"
+fresh_single_branch_clone "$REMOTE10" "$CLONE10"
+BEFORE_SHA10="$(git --git-dir="$REMOTE10" rev-parse "$BRANCH")"
+
+run_merge_script "$CLONE10"
+check "existing branch with a missing corpus file fails the merge step" \
+  "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
+AFTER_SHA10="$(git --git-dir="$REMOTE10" rev-parse "$BRANCH")"
+check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA10" "$BEFORE_SHA10"
+
+REMOTE11="$TMPDIR/remote11.git"
+make_bare_remote_with_main "$REMOTE11"
+seed_bot_branch_invalid_corpus_json "$REMOTE11"
+CLONE11="$TMPDIR/clone11"
+fresh_single_branch_clone "$REMOTE11" "$CLONE11"
+BEFORE_SHA11="$(git --git-dir="$REMOTE11" rev-parse "$BRANCH")"
+
+run_merge_script "$CLONE11"
+check "existing branch with invalid corpus JSON fails the merge step" \
+  "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
+AFTER_SHA11="$(git --git-dir="$REMOTE11" rev-parse "$BRANCH")"
+check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA11" "$BEFORE_SHA11"
 
 echo ""
 echo "=== no diff: exits 0 without touching git at all ==="

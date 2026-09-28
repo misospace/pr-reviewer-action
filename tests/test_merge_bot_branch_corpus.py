@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -27,6 +29,23 @@ def _fake_run(returncode: int, stdout: str = "", stderr: str = ""):
         return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
 
     return _inner
+
+
+def _fake_run_sequence(*results: subprocess.CompletedProcess):
+    calls = iter(results)
+
+    def _inner(*args, **kwargs):
+        return next(calls)
+
+    return _inner
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"git {args} failed: {result.stderr}"
+    return result.stdout
 
 
 def test_merge_vulnerable_unions_by_id():
@@ -132,6 +151,140 @@ def test_resolve_bot_branch_sha_other_failure_is_not_ok(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# fetch_bot_branch_corpus_at: once bot_sha is known, any read failure is
+# hard (BLOCKER, #801 third follow-up) -- never a soft "nothing to merge".
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_bot_branch_corpus_at_success(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),  # git fetch origin <sha>
+            subprocess.CompletedProcess(  # git show <sha>:path
+                [], 0, stdout='{"real_pr_corpus": {"vulnerable": [{"id": "a"}]}}'
+            ),
+        ),
+    )
+    data = mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+    assert data["real_pr_corpus"]["vulnerable"] == [{"id": "a"}]
+
+
+def test_fetch_bot_branch_corpus_at_fetch_failure_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc, "_run", _fake_run(128, stderr="fatal: unable to access remote")
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+def test_fetch_bot_branch_corpus_at_missing_file_is_hard_failure(monkeypatch):
+    """The branch exists, but the corpus file isn't present at that commit
+    (`git show` fails) -- not a safe "no entries", a hard failure."""
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess(
+                [], 128, stderr="fatal: path 'evals/corpus.json' does not exist"
+            ),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+def test_fetch_bot_branch_corpus_at_invalid_json_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout="not { valid json"),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+def test_fetch_bot_branch_corpus_at_non_dict_json_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout="[1, 2, 3]"),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+# ---------------------------------------------------------------------------
+# Atomicity: a real git race between ls-remote and the fetch of its result.
+# ---------------------------------------------------------------------------
+
+
+def test_atomicity_branch_moves_between_ls_remote_and_fetch_merges_s1_exactly(
+    tmp_path, monkeypatch
+):
+    """The bug this guards: fetching the (moving) branch ref instead of the
+    exact captured sha would let a concurrent force-push landing in this
+    window substitute its own content. This reproduces the race for real:
+    resolve_bot_branch_sha captures S1, a concurrent run then force-pushes
+    S2 onto the same branch, and fetch_bot_branch_corpus_at(sha=S1) must
+    still recover exactly S1's content -- never S2's, and never fail
+    silently."""
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", "-q", "-b", "main", str(remote))
+
+    seed = tmp_path / "seed"
+    _git(tmp_path, "init", "-q", "-b", "main", str(seed))
+    _git(seed, "config", "user.email", "t@example.com")
+    _git(seed, "config", "user.name", "Test Seed")
+    (seed / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(seed, "add", "README.md")
+    _git(seed, "commit", "-q", "-m", "init")
+    _git(seed, "remote", "add", "origin", str(remote))
+    _git(seed, "push", "-q", "origin", "main")
+    _git(seed, "checkout", "-q", "-b", "bot/x")
+    (seed / "corpus.json").write_text(
+        '{"real_pr_corpus": {"vulnerable": [{"id": "s1"}]}}', encoding="utf-8"
+    )
+    _git(seed, "add", "corpus.json")
+    _git(seed, "commit", "-q", "-m", "S1")
+    _git(seed, "push", "-q", "origin", "bot/x")
+
+    ours = tmp_path / "ours"
+    _git(tmp_path, "clone", "-q", "--single-branch", "--branch", "main", str(remote), str(ours))
+
+    monkeypatch.chdir(ours)
+    s1_sha, ok = mbc.resolve_bot_branch_sha("bot/x")
+    assert ok is True
+    assert s1_sha is not None
+
+    # A concurrent run's real push lands on the remote RIGHT NOW -- after
+    # our ls-remote captured S1, before we fetch its content.
+    concurrent = tmp_path / "concurrent"
+    _git(tmp_path, "clone", "-q", str(remote), str(concurrent))
+    _git(concurrent, "config", "user.email", "t@example.com")
+    _git(concurrent, "config", "user.name", "Test Concurrent")
+    _git(concurrent, "checkout", "-q", "-B", "bot/x", "origin/main")
+    (concurrent / "corpus.json").write_text(
+        '{"real_pr_corpus": {"vulnerable": [{"id": "s2"}]}}', encoding="utf-8"
+    )
+    _git(concurrent, "add", "corpus.json")
+    _git(concurrent, "commit", "-q", "-m", "S2")
+    _git(concurrent, "push", "-q", "--force", "origin", "bot/x")
+
+    data = mbc.fetch_bot_branch_corpus_at("bot/x", s1_sha, "corpus.json")
+    ids = [e["id"] for e in data["real_pr_corpus"]["vulnerable"]]
+    assert ids == ["s1"], "must merge exactly S1's content, never S2's"
+
+
+# ---------------------------------------------------------------------------
 # main(): sha/output wiring
 # ---------------------------------------------------------------------------
 
@@ -166,7 +319,7 @@ def test_main_merges_fetched_bot_corpus_and_writes_its_sha(tmp_path, monkeypatch
     monkeypatch.setattr(
         mbc,
         "fetch_bot_branch_corpus_at",
-        lambda branch, path: {"real_pr_corpus": {"vulnerable": [{"id": "a"}]}},
+        lambda branch, sha, path: {"real_pr_corpus": {"vulnerable": [{"id": "a"}]}},
     )
     output_path = tmp_path / "github_output"
     rc = mbc.main(
@@ -179,26 +332,35 @@ def test_main_merges_fetched_bot_corpus_and_writes_its_sha(tmp_path, monkeypatch
     assert output_path.read_text(encoding="utf-8") == "bot_branch_sha=deadbeef\n"
 
 
-def test_main_branch_exists_but_content_unreadable_still_writes_sha(tmp_path, monkeypatch):
-    """The branch exists (a real SHA) but its corpus couldn't be fetched or
-    parsed -- nothing gets merged, but the SHA is still recorded for the
-    push step's lease (the branch genuinely is at that SHA)."""
+def test_main_branch_exists_but_content_unreadable_is_hard_failure(tmp_path, monkeypatch):
+    """BLOCKER (#801 third follow-up): once bot_sha is known (the branch
+    exists), a failure to fetch/read/parse its corpus must be a hard
+    failure -- never "nothing merged" with the sha still written, since
+    that would let the push step's lease succeed against a sha whose
+    entries were never actually carried forward, silently dropping them."""
     corpus_path = tmp_path / "corpus.json"
     corpus_path.write_text(
         '{"real_pr_corpus": {"vulnerable": [{"id": "a"}], "clean": []}}',
         encoding="utf-8",
     )
     monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: ("deadbeef", True))
-    monkeypatch.setattr(mbc, "fetch_bot_branch_corpus_at", lambda branch, path: None)
+
+    def _raise(branch, sha, path):
+        raise mbc.CorpusReadError("boom")
+
+    monkeypatch.setattr(mbc, "fetch_bot_branch_corpus_at", _raise)
     output_path = tmp_path / "github_output"
     rc = mbc.main(
         ["--branch", "bot/x", "--corpus", str(corpus_path), "--github-output", str(output_path)]
     )
-    assert rc == 0
+    assert rc != 0
 
     data = json.loads(corpus_path.read_text(encoding="utf-8"))
     assert data["real_pr_corpus"]["vulnerable"] == [{"id": "a"}]
-    assert output_path.read_text(encoding="utf-8") == "bot_branch_sha=deadbeef\n"
+    assert not output_path.exists(), (
+        "no bot_branch_sha output must be written on a hard failure -- a "
+        "caller must never read a sha and proceed as if this step succeeded"
+    )
 
 
 def test_main_hard_failure_when_sha_check_fails(tmp_path, monkeypatch):

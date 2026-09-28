@@ -43,7 +43,28 @@ A real error here fails this script (and so the workflow step), rather
 than silently proceeding as "nothing to merge" and letting the next push
 clobber whatever's actually on the branch.
 
-GitHub reads only (ls-remote + a fetch of one ref); never writes to GitHub.
+Once the branch is known to exist (a real ``bot_sha``), any failure to
+fetch it, ``git show`` its corpus file, or parse that file as JSON is
+*also* a hard failure (#801 third follow-up) -- never silently "nothing
+merged". Collapsing those into a soft "nothing to merge" would still write
+``bot_branch_sha`` and return success, so push_harvest_branch.sh's lease
+would then succeed against a real SHA whose entries were never actually
+carried forward, silently dropping them exactly like the original bug this
+script exists to fix. Only a genuinely absent branch (``bot_sha is None``)
+is safe to treat as "nothing to merge, empty snapshot".
+
+Atomicity of the read itself: this fetches ``bot_sha`` *by that exact
+object id*, not the (moving) branch ref, and reads the corpus from that
+same sha -- so a concurrent run's force-push landing between the
+``ls-remote`` that captured ``bot_sha`` and the fetch that reads its
+content can't substitute a newer commit's entries for the snapshot this
+run already committed to exporting. Fetching by sha either recovers
+exactly that commit's content (the object is still present, whether or
+not any ref still points at it) or fails outright (treated as the hard
+failure above) -- it can never silently return a different commit's data.
+
+GitHub reads only (ls-remote + a fetch of one commit); never writes to
+GitHub.
 """
 
 from __future__ import annotations
@@ -79,22 +100,48 @@ def resolve_bot_branch_sha(branch: str) -> tuple[str | None, bool]:
     return None, False  # transport/auth/other error
 
 
-def fetch_bot_branch_corpus_at(branch: str, corpus_path: str) -> dict[str, Any] | None:
-    """The bot branch's corpus JSON (parsed) for a branch already known (via
-    ``resolve_bot_branch_sha``) to exist, or ``None`` if fetching it or
-    reading/parsing the file fails."""
-    remote_ref = f"refs/remotes/origin/{branch}"
-    fetch = _run("git", "fetch", "origin", f"refs/heads/{branch}:{remote_ref}")
+class CorpusReadError(RuntimeError):
+    """A bot branch is known to exist, but its corpus couldn't be read at
+    the exact sha it was known to exist at. Callers must treat this as a
+    hard failure (see module docstring) -- never as "nothing to merge"."""
+
+
+def fetch_bot_branch_corpus_at(branch: str, sha: str, corpus_path: str) -> dict[str, Any]:
+    """The corpus JSON (parsed) at the bot branch's exact ``sha`` (already
+    known, via ``resolve_bot_branch_sha``, to exist).
+
+    Fetches ``sha`` itself -- not the branch ref, which may have moved --
+    so a concurrent push landing between the ``ls-remote`` that produced
+    ``sha`` and this call can't substitute a different commit's content.
+    Raises ``CorpusReadError`` if the fetch fails, the file is missing at
+    that commit, it isn't valid JSON, or it doesn't parse to a JSON object.
+    A bot branch that exists but is missing the corpus file (or has one
+    that doesn't parse) is not a safe substitute for "no entries to merge"
+    -- it's unexpected, and callers must fail loud rather than merge
+    nothing while still reporting success.
+    """
+    fetch = _run("git", "fetch", "origin", sha)
     if fetch.returncode != 0:
-        return None
-    show = _run("git", "show", f"{remote_ref}:{corpus_path}")
+        raise CorpusReadError(
+            f"git fetch of {branch}@{sha} failed: {fetch.stderr.strip()}"
+        )
+    show = _run("git", "show", f"{sha}:{corpus_path}")
     if show.returncode != 0:
-        return None
+        raise CorpusReadError(
+            f"{corpus_path} not found on {branch}@{sha} (git show failed): "
+            f"{show.stderr.strip()}"
+        )
     try:
         data = json.loads(show.stdout)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    except json.JSONDecodeError as exc:
+        raise CorpusReadError(
+            f"{corpus_path} on {branch}@{sha} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise CorpusReadError(
+            f"{corpus_path} on {branch}@{sha} did not parse to a JSON object"
+        )
+    return data
 
 
 def _valid_entries(entries: list[Any]) -> list[dict[str, Any]]:
@@ -177,26 +224,31 @@ def main(argv: list[str] | None = None) -> int:
     if bot_sha is None:
         print(f"merge_bot_branch_corpus: no existing {args.branch} on the remote; nothing to merge")
     else:
-        bot_corpus = fetch_bot_branch_corpus_at(args.branch, str(args.corpus))
-        if bot_corpus is None:
+        try:
+            bot_corpus = fetch_bot_branch_corpus_at(args.branch, bot_sha, str(args.corpus))
+        except CorpusReadError as exc:
             print(
-                f"merge_bot_branch_corpus: {args.branch} exists at {bot_sha} "
-                "but its corpus couldn't be read; nothing merged (the SHA is "
-                "still recorded for the push step's lease)"
+                f"::error::{args.branch} exists at {bot_sha} but its corpus "
+                f"could not be read: {exc} -- treating this as a hard "
+                "failure, not \"nothing to merge\", since the lease must "
+                "never succeed against a sha whose entries were never "
+                "actually carried forward",
+                file=sys.stderr,
             )
-        else:
-            bot_vulnerable = (bot_corpus.get("real_pr_corpus") or {}).get("vulnerable") or []
-            merged = merge_vulnerable(main_vulnerable, bot_vulnerable)
-            added = len(merged) - len(_valid_entries(main_vulnerable))
-            block["vulnerable"] = merged
-            args.corpus.write_text(
-                json.dumps(corpus_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-            )
-            noun = "entry" if added == 1 else "entries"
-            print(
-                f"merge_bot_branch_corpus: carried forward {added} unmerged "
-                f"{args.branch} {noun} (remote at {bot_sha})"
-            )
+            return 1
+
+        bot_vulnerable = (bot_corpus.get("real_pr_corpus") or {}).get("vulnerable") or []
+        merged = merge_vulnerable(main_vulnerable, bot_vulnerable)
+        added = len(merged) - len(_valid_entries(main_vulnerable))
+        block["vulnerable"] = merged
+        args.corpus.write_text(
+            json.dumps(corpus_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        noun = "entry" if added == 1 else "entries"
+        print(
+            f"merge_bot_branch_corpus: carried forward {added} unmerged "
+            f"{args.branch} {noun} (remote at {bot_sha})"
+        )
 
     if github_output is not None:
         with github_output.open("a", encoding="utf-8") as fh:
