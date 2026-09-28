@@ -124,9 +124,10 @@ def test_corpus_evidence_negative_and_positive_controls():
 
     # The action step must feed the same CI result file the assembler reads;
     # a green-looking scratch file under another name is a broken arrow.
-    steps = yaml.safe_load((ROOT / "action.yml").read_text())["runs"]["steps"]
-    review = next(s for s in steps if s["name"] == "Run AI review")
-    assert review["env"]["CI_CHECKS_FILE"] == "${{ runner.temp }}/ci-checks-context.md"
+    # The v3 action entry sets it in-process (the composite env block is gone).
+    action_entry = (ROOT / "src/run/action.ts").read_text()
+    assert 'const temp = env.RUNNER_TEMP' in action_entry
+    assert 'stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md")' in action_entry
     gate = (ROOT / "scripts/sections/gating.sh").read_text()
     assert "CI_CHECKS_FILE CI_STATUS_CONTEXT" in gate
     assert 'join_ci_gate' in corpus_section

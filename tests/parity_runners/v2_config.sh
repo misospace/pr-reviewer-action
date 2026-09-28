@@ -40,7 +40,9 @@ fixture_path, root, work = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
 fixture = json.loads(Path(fixture_path).read_text())
 raw = {k: str(v) for k, v in fixture.get("raw", {}).items()}
 ambient = {k: str(v) for k, v in fixture.get("ambient", {}).items()}
-action = yaml.safe_load((root / "action.yml").read_text())
+# The v2 composite action.yml, frozen at the #706 cutover: the oracle for the
+# v2 env-block wiring (the live action.yml is the v3 JavaScript action).
+action = yaml.safe_load((root / "tests" / "parity_runners" / "v2-action.yml").read_text())
 inputs = action.get("inputs") or {}
 
 # #706 cutover: the live action.yml keys are the kebab-case contract IDs;

@@ -616,6 +616,146 @@
         "new": "GET https://ghcr.io/token?scope=repository:acme%2Fapp:pull auth=- accept=*/*\nGET https://ghcr.io/v2/acme/app/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa auth=Bearer ghcr-anon-token accept=*/*\nGET https://ghcr.io/v2/acme/app/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb auth=Bearer ghcr-anon-token accept=*/*\nGET https://ghcr.io/v2/acme/app/manifests/sha256:1111111111111111111111111111111111111111111111111111111111111111 auth=Bearer ghcr-anon-token accept=application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json\nGET https://ghcr.io/v2/acme/app/manifests/sha256:2222222222222222222222222222222222222222222222222222222222222222 auth=Bearer ghcr-anon-token accept=application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
       },
       "reason": "SSRF fence on redirect hops (#806 review): v3 never sends the request to the refused internal hop, and so never runs the compare driven by the internal responses' revision labels; v2 requested both internal targets."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "aiMaxTokens",
+      "expected": {
+        "old": "8192",
+        "new": "16384"
+      },
+      "reason": "v3 recommended default (#706): ai-max-tokens 16384 (v2 8192) so reasoning models are not cut off before the verdict."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "ciStatusCheck",
+      "expected": {
+        "old": "false",
+        "new": "true"
+      },
+      "reason": "v3 recommended default (#706): ci-status-check true (v2 false); CI results are review evidence by default."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "deepReview",
+      "expected": {
+        "old": "false",
+        "new": "auto"
+      },
+      "reason": "v3 recommended default (#706): deep-review auto (v2 false); classifier-selected specialists, possibly none."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "inlineFindings",
+      "expected": {
+        "old": "false",
+        "new": "true"
+      },
+      "reason": "v3 recommended default (#706): inline-findings true (v2 false); findings anchor to diff lines in review modes."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "onModelFailure",
+      "expected": {
+        "old": "fail",
+        "new": "notice"
+      },
+      "reason": "v3 recommended default (#706): on-model-failure notice (v2 fail); a provider outage does not fail the check."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "publishMode",
+      "expected": {
+        "old": "comment",
+        "new": "review_comment"
+      },
+      "reason": "v3 recommended default (#706): publish-mode review_comment (v2 comment); a non-blocking native review so findings can anchor inline."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolMaxTokensPerTurn",
+      "expected": {
+        "old": "400",
+        "new": "16384"
+      },
+      "reason": "v3 recommended default (#706): tool-max-tokens-per-turn 16384 (v2 400); reasoning models need room to emit the tool call."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolMode",
+      "expected": {
+        "old": "off",
+        "new": "native_loop"
+      },
+      "reason": "v3 recommended default (#706): tool-mode native_loop (v2 off); evidence gathering is on by default and degrades without tool calls."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolTurnTimeoutSec",
+      "expected": {
+        "old": "60",
+        "new": "180"
+      },
+      "reason": "v3 recommended default (#706): tool-turn-timeout-sec 180 (v2 60); a ceiling that protects slow local prompt eval."
     }
   ]
 }

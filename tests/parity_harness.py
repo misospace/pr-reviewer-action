@@ -452,7 +452,7 @@ def run_v2_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
 def run_v3_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     contract = load_contract()
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -464,7 +464,7 @@ def run_v3_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
         if item["v2_id"] in raw:
             env[f"INPUT_{item['v2_id'].upper()}"] = str(raw[item["v2_id"]])
     proc = subprocess.run(
-        [node, "dist/index.js"],
+        [node, "dist/index.js", "config"],
         cwd=str(ROOT),
         env=env,
         capture_output=True,
@@ -605,7 +605,7 @@ def run_v2_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
 def run_v3_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     proc = subprocess.run(
         [node, "dist/index.js", "precheck-fixture", str(_fixture_path(fixture))],
         cwd=str(ROOT),
@@ -671,7 +671,7 @@ def _v3_parity_env() -> dict[str, str]:
 def run_v3_request(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     return run_json_runner(
         [node, "dist/index.js", str(_fixture_path(fixture))],
         workdir,
@@ -719,7 +719,7 @@ def run_v2_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
 def run_v3_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
@@ -763,7 +763,7 @@ def run_v2_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult
 def run_v3_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
@@ -808,7 +808,7 @@ def run_v2_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
 def run_v3_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     return run_json_runner(
         [node, "dist/index.js", str(_fixture_path(fixture))],
         workdir,
@@ -855,7 +855,7 @@ def run_v2_classification(fixture: dict[str, Any], workdir: Path) -> SideResult:
 def _run_v3_fixture_mode(mode_argv: list[str], fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     return run_json_runner(
         [node, "dist/index.js", *mode_argv, str(_fixture_path(fixture))],
         workdir,
@@ -982,7 +982,7 @@ def run_v3_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
     repo = prepare_repo(workdir / "repo-v3", fixture)
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     return run_json_runner(
         [node, "dist/index.js", "repo-map-fixture", str(_fixture_path(fixture))],
         workdir,
@@ -1163,7 +1163,7 @@ def run_v3_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
     repo = prepare_repo(workdir / "repo-v3", fixture)
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     return run_json_runner(
         [node, "dist/index.js", "related-code-fixture", str(_fixture_path(fixture))],
         workdir,
@@ -1219,7 +1219,7 @@ def _resolve_change_anchors_fixture(fixture: dict[str, Any], workdir: Path) -> t
 def _change_anchors_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     resolved, fixture_path = _resolve_change_anchors_fixture(fixture, workdir)
     # Both sides see the same workspace path (prepared fresh for each), so
     # CLI stderr that echoes it compares without relying on scrubbing.
@@ -1336,7 +1336,7 @@ CORPUS_BOUNDARY = Boundary(
 def _run_new_boundary(runner: str, cli: str, fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     old = run_json_runner([sys.executable, str(ROOT / "tests" / "parity_runners" / runner), str(_fixture_path(fixture))], workdir, timeout=120)
     new = run_json_runner([node, "dist/index.js", cli, str(_fixture_path(fixture))], workdir, timeout=120, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)})
     return old, new
@@ -1514,7 +1514,7 @@ def _producer_git_env() -> dict[str, str]:
 def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
-        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     repo_v2 = prepare_repo(workdir / "repo-v2", fixture)
     old = run_json_runner(
         [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_context_producers.py"), str(_fixture_path(fixture)), str(repo_v2)],

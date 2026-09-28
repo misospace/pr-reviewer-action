@@ -29,17 +29,17 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# The test's step-shaped env is valid only if the composite step really binds
-# the credential and loads the shared file before invoking the entrypoint.
-python3 - "$ROOT_DIR/action.yml" <<'PY'
+# The test's step-shaped env is valid only if the action entry really binds
+# the credential before the precheck: stageEnvFromConfig projects
+# linear-api-key as LINEAR_API_KEY, and the precheck runs over that stage env.
+python3 - "$ROOT_DIR/src/run/action.ts" <<'PY'
 import sys
-import yaml
 
-steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["runs"]["steps"]
-step = next(s for s in steps if s["name"] == "Check whether review is needed")
-assert step["env"]["LINEAR_API_KEY"] == "${{ inputs.linear-api-key }}"
-assert step["env"]["SHARED_ENV_FILE"] == "${{ steps.shared_env.outputs.path }}"
-assert step["run"].index('load_shared_env "$SHARED_ENV_FILE"') < step["run"].index('dist/index.js" precheck')
+source = open(sys.argv[1], encoding="utf-8").read()
+assert "const stage: Env = { ...env, ...stageEnvFromConfig(config) };" in source
+assert 'stage.LINEAR_API_KEY_CONFIGURED = stage.LINEAR_API_KEY ? "true" : "false";' in source
+assert source.index("actionStageEnv(env)") < source.index("await runPrecheck(")
+assert "env: stage as Record<string, string>" in source
 PY
 
 PASS=0

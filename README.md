@@ -40,26 +40,28 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: read
 
 jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: misospace/pr-reviewer-action@v3
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          ai-base-url: http://llama-server.internal:8080/v1
-          ai-model: qwen3-32b
-          publish-review-comment: "true"
+          ai-base-url: ${{ vars.AI_BASE_URL }}
+          ai-api-key: ${{ secrets.AI_API_KEY }}
+          ai-model: ${{ vars.AI_MODEL }}
 ```
 
-**Requirements:** the repository under review is already checked out; the runner has `gh`, `jq`, `curl`, `git`, `python3` (3.11 or newer), and `pgrep` (procps on Linux, built in on macOS); the workflow runs on `pull_request` events (or passes explicit `repo` and `pr-number` inputs). `pgrep` is validated before the review starts because the concurrent CI/deep-review gates use it to reap their forked process tree on abnormal exit.
+That is the whole setup: an OpenAI-compatible endpoint (set `ai-api-format: anthropic` for an Anthropic-compatible one), its key, and a model. The defaults are the recommended configuration: the native tool loop gathers evidence from the checkout, specialist leads run when the change warrants them, CI results are folded in as evidence, and findings post as a non-blocking review anchored to the diff. `github-token` defaults to the job token.
+
+**Requirements:** it is a JavaScript action (`runs.using: node24`), so GitHub-hosted runners need nothing installed; the runner provides Node. The repository under review must be checked out (`fetch-depth: 0` gives the history context). `checks: read` lets the review wait for CI; without it the CI evidence is skipped. On Forgejo, use runner 9 or newer with a job image that has Node 22+ and `git`.
 
 ## 📚 Table of contents
 
