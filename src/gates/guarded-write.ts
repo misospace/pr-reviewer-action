@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readlinkSync, realpathSync, writeSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -85,15 +85,20 @@ export function resolveArtifactPath(name: string, workspaceRoot: string): string
 export function guardedWrite(workspaceRoot: string, name: string, text: string): boolean {
   const target = resolveArtifactPath(name, workspaceRoot);
   if (target === null) return false;
+  // O_NOFOLLOW makes "not a symlink" and the open one step, so a link swapped
+  // in after resolution is refused rather than followed.
+  let fd: number;
   try {
-    if (lstatSync(target).isSymbolicLink()) return false;
+    fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
   } catch {
-    // Missing target: a fresh write.
+    return false;
   }
   try {
-    writeFileSync(target, text, "utf8");
+    writeSync(fd, Buffer.from(text, "utf8"));
     return true;
   } catch {
     return false;
+  } finally {
+    closeSync(fd);
   }
 }
