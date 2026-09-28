@@ -291,6 +291,12 @@ function maskCaptured(
   return { text: `${raw.subarray(0, maxOutput).toString("utf8")}\n[truncated]`, truncated: true };
 }
 
+/** Per-stream capture bound: `4 * max_output_bytes + 64 KiB` (v2 read the
+ * streams unbounded). */
+export function providerCaptureCap(maxOutput: number): number {
+  return Math.min(maxOutput * 4 + 65_536, Number.MAX_SAFE_INTEGER);
+}
+
 function signalExitCode(signal: NodeJS.Signals | null): number {
   const number = signal === null ? undefined : (osConstants.signals as Record<string, number | undefined>)[signal];
   return number === undefined ? -1 : -number;
@@ -361,7 +367,7 @@ export async function runEvidenceProvider(
     options.ambientEnv ?? process.env,
   );
 
-  const captureCap = Math.min(maxOutput * 4 + 65_536, Number.MAX_SAFE_INTEGER);
+  const captureCap = providerCaptureCap(maxOutput);
   const start = clock();
   let handle;
   try {

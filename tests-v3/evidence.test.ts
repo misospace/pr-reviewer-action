@@ -8,6 +8,7 @@ import {
   MAX_PROVIDER_FINDINGS,
   normalizeSeverity,
   parseProviderFindings,
+  providerCaptureCap,
   runEvidenceProvider,
   severityRank,
   type ProviderSpec,
@@ -306,3 +307,48 @@ function readPidFile(path: string): string | null {
     return null;
   }
 }
+
+// #252-style adversarial regression: a credential straddling the capture
+// cap. The prefix is made of long tokens that redaction shrinks ~20x, so the
+// masked capture fits inside max_output_bytes and a fragment cut at the cap
+// WOULD land in the visible window if the whitespace cut-back were missing.
+// The fragment is too short to match the patterns once split, so only the
+// cut-back keeps it out.
+test("a secret straddling the capture cap never leaks, whatever the cut offset", async () => {
+  const maxOutput = 20_000;
+  const cap = providerCaptureCap(maxOutput);
+  const dir = mkdtempSync(join(tmpdir(), "v3-ev-straddle-"));
+  const filler = `ghp_${"a".repeat(200)} `;
+  // Offsets put the cap inside the token where the captured fragment is
+  // too short to match its pattern (ghp_ needs 30+ chars after the prefix,
+  // key=value needs 8+ value chars), plus the just-after cases.
+  const secrets = [
+    { name: "ghp", text: `ghp_${"Q".repeat(80)}`, needle: "Q", fragments: [5, 12, 33] },
+    { name: "kv", text: `api_key=${"Z".repeat(80)}`, needle: "Z", fragments: [9, 12, 15] },
+  ];
+  for (const secret of secrets) {
+    const offsets: Array<readonly [string, number]> = [
+      ...secret.fragments.map((n) => [`mid-token ${n}`, n] as const),
+      ["just after token", secret.text.length],
+      ["just after trailing space", secret.text.length + 1],
+    ];
+    for (const [label, offset] of offsets) {
+      const start = cap - offset;
+      const prefix = filler.repeat(Math.floor(start / filler.length));
+      const body = `${prefix}${" ".repeat(start - prefix.length)}${secret.text} after-secret\n${"tail ".repeat(20_000)}`;
+      assert.equal(Buffer.byteLength(body.slice(0, start)), start);
+      const file = join(dir, `${secret.name}-${offset}.txt`);
+      writeFileSync(file, body);
+      const entry = await runEvidenceProvider(
+        { id: "straddle", command: ["cat", file], max_output_bytes: maxOutput, timeout_sec: 30 },
+        { ambientEnv: ambientBase },
+      );
+      const where = `${secret.name} / ${label}`;
+      assert.equal(entry.status, "ok", where);
+      assert.equal(entry.stdout_truncated, true, where);
+      assert.ok(Buffer.byteLength(entry.stdout) < maxOutput, `${where}: the masked capture fits the window, so a fragment would be visible`);
+      assert.equal(entry.stdout.includes(secret.needle), false, `${where}: no part of the secret survives`);
+      assert.equal(entry.stdout.includes("aaaa"), false, `${where}: filler tokens are masked too`);
+    }
+  }
+});

@@ -344,7 +344,7 @@ export function pyJsonLoads(text: string): unknown {
         continue;
       }
       next += 1;
-      let end = next + 4;
+      const end = next + 4;
       if (end >= n) fail("Invalid \\uXXXX escape", next - 1);
       let c = 0;
       for (let k = next; k < end; k += 1) {
@@ -368,7 +368,6 @@ export function pyJsonLoads(text: string): unknown {
       }
       out += String.fromCharCode(c);
       i = end;
-      end = i;
     }
   };
 

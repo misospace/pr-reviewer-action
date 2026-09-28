@@ -5,6 +5,7 @@ export {
   MAX_PROVIDER_FINDINGS,
   normalizeSeverity,
   parseProviderFindings,
+  providerCaptureCap,
   runEvidenceProvider,
   severityRank,
   type EvidenceProviderEntry,
