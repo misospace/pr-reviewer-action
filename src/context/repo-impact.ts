@@ -76,7 +76,9 @@ export function extractImpactTerms(pr: unknown, versionHintsTruncated: Uint8Arra
   return [...terms].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const escapeTerm = (term: string): string => term.replace(/\./g, "\\.");
+// Terms are [a-z0-9._/-] only, so this matches v2's `sed 's/\./\\./g'`;
+// backslash is escaped too so the grep pattern stays literal regardless.
+const escapeTerm = (term: string): string => term.replace(/[\\.]/g, "\\$&");
 
 function runGitStdout(argv: string[], workspace: string): Promise<Buffer> {
   return new Promise((resolve) => {
