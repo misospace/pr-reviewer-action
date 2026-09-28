@@ -1594,8 +1594,9 @@ SPECIALISTS_GATE_BOUNDARY = Boundary(
         "and the mock port are normalized. Covers three_call, auto selection "
         "(including zero roles), streamed Anthropic SSE, a missing corpus, "
         "a transport retry, the completion-overrun retry, the MAX_CORPUS fit "
-        "check, a role reaped at the phase deadline, and combined_scout "
-        "(success and failure)."
+        "check, a role reaped at the phase deadline, combined_scout "
+        "(success and failure), and raw responses whose integer fields share "
+        "names with the contract floats."
     ),
     fixtures_dir="specialists-gate",
     run=lambda fixture, workdir: _run_new_boundary("v2_specialists_gate.py", "specialists-gate-fixture", fixture, workdir),

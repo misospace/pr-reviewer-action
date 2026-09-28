@@ -658,8 +658,13 @@ endpoints serving the same per-role responses, and compares every artifact
 byte for byte. Only `elapsed_sec` values and the mock port are normalized.
 Porting the glue surfaced three runner fixes, now matching v2: skipped
 aggregate entries carry v2's exact keys, `request_bytes` measures Python's
-`json.dumps` (ASCII-escaped, space-separated), and float fields (`elapsed_sec`,
-`temperature`) serialize as Python floats (`0.0`, `1.0`). Later fixes, also
+`json.dumps` (ASCII-escaped, space-separated), and the contract's float fields
+serialize as Python floats (`0.0`, `1.0`). Float coercion is scoped by exact
+path per artifact (`temperature` in a request, `aggregate_elapsed_sec` and
+`roles[].elapsed_sec` in `specialists.json`), never by bare key name: raw
+provider response bodies are written as v2's `json.dumps(json.loads(body))`,
+so a same-named integer field in them stays an integer
+(`raw-response-integer-fields`). Later fixes, also
 matching v2: a role's request artifact is recorded before its first attempt,
 so a role reaped at the phase deadline still leaves it (`phase-deadline-reap`);
 a failed combined scout leaves `specialist-scout.request.json` and no

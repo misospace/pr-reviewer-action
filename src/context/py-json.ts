@@ -53,13 +53,21 @@ function escapeString(text: string, ensureAscii = false): string {
 export interface PyJsonDumpOptions {
   /** Python's default `ensure_ascii`: escape everything above `~`. */
   ensureAscii?: boolean;
-  /** Object keys whose numeric values are Python floats (`round(x, 3)`,
-   * `float(raw)`): rendered as `repr(float)` — `0.0`, not `0` — because a
-   * JavaScript number cannot remember that it was a float. */
-  floatKeys?: ReadonlySet<string>;
+  /** Exact document paths whose numbers are Python floats (`round(x, 3)`,
+   * `float(raw)`), rendered as `repr(float)` — `0.0`, not `0` — because a
+   * JavaScript number cannot remember that it was a float. A path names
+   * object keys from the root joined by `.`, with `[]` for "every element of
+   * this array": `temperature`, `roles[].elapsed_sec`. Nothing else is
+   * coerced, so a same-named field anywhere else (for example inside an
+   * untrusted provider body) keeps its own representation. */
+  floatPaths?: ReadonlySet<string>;
 }
 
-function encode(value: unknown, indent: number, level: number, options: PyJsonDumpOptions = {}, key: string | null = null): string {
+function childPath(parent: string, name: string): string {
+  return parent === "" ? name : `${parent}.${name}`;
+}
+
+function encode(value: unknown, indent: number, level: number, options: PyJsonDumpOptions = {}, path = ""): string {
   const ensureAscii = options.ensureAscii === true;
   const pad = " ".repeat(indent * (level + 1));
   const closePad = " ".repeat(indent * level);
@@ -67,14 +75,12 @@ function encode(value: unknown, indent: number, level: number, options: PyJsonDu
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "string") return `"${escapeString(value, ensureAscii)}"`;
   if (typeof value === "number") {
-    if (key !== null && options.floatKeys?.has(key) === true) return pyFloatRepr(value);
+    if (path !== "" && options.floatPaths?.has(path) === true) return pyFloatRepr(value);
     return String(value);
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
-    // Float marking is for a key's direct scalar only: container elements
-    // keep their own number representation.
-    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, options)}`);
+    const items = value.map((item) => `${pad}${encode(item, indent, level + 1, options, `${path}[]`)}`);
     return `[\n${items.join(",\n")}\n${closePad}]`;
   }
   if (typeof value === "object") {
@@ -82,7 +88,7 @@ function encode(value: unknown, indent: number, level: number, options: PyJsonDu
     if (entries.length === 0) return "{}";
     const items = entries.map(([name, item]) => {
       const keyText = ensureAscii ? `"${escapeString(name, true)}"` : JSON.stringify(name);
-      return `${pad}${keyText}: ${encode(item, indent, level + 1, options, name)}`;
+      return `${pad}${keyText}: ${encode(item, indent, level + 1, options, childPath(path, name))}`;
     });
     return `{\n${items.join(",\n")}\n${closePad}}`;
   }
@@ -91,7 +97,8 @@ function encode(value: unknown, indent: number, level: number, options: PyJsonDu
 
 /** `json.dumps(value, ensure_ascii=ensureAscii, indent=indent)` — insertion
  * order. `ensureAscii` (Python's default) escapes everything above `~`;
- * `options.floatKeys` renders the named keys' numbers as Python floats. */
+ * `options.floatPaths` renders the numbers at those exact paths as Python
+ * floats. */
 export function pyJsonDump(value: unknown, indent = 2, ensureAscii = false, options: Omit<PyJsonDumpOptions, "ensureAscii"> = {}): string {
   return encode(value, Math.min(Math.max(0, indent), 8), 0, { ...options, ensureAscii });
 }

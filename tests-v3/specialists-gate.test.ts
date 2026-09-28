@@ -212,16 +212,43 @@ test("resolveArtifactPath/guardedWrite: workspace-relative, escapes refused, in-
   rmSync(root, { recursive: true, force: true });
 });
 
-test("pyJsonDump floatKeys renders Python floats; payloadBytes measures Python's json.dumps", () => {
-  assert.equal(pyJsonDump({ elapsed_sec: 0, other: 0, temperature: 1 }, 2, false, { floatKeys: new Set(["elapsed_sec", "temperature"]) }), '{\n  "elapsed_sec": 0.0,\n  "other": 0,\n  "temperature": 1.0\n}');
-  assert.equal(pyJsonDump({ elapsed_sec: 0.25 }, 2, false, { floatKeys: new Set(["elapsed_sec"]) }), '{\n  "elapsed_sec": 0.25\n}');
-  // Float marking applies to the key's direct scalar only, never through a
-  // container it holds.
-  const marked = new Set(["temperature"]);
-  assert.equal(pyJsonDump({ temperature: [1, 2.5, { n: 3 }] }, 0, false, { floatKeys: marked }).replace(/\n\s*/g, ""), '{"temperature": [1,2.5,{"n": 3}]}');
-  assert.equal(pyJsonDump({ temperature: { value: 1, inner: [2] } }, 0, false, { floatKeys: marked }).replace(/\n\s*/g, ""), '{"temperature": {"value": 1,"inner": [2]}}');
+test("pyJsonDump floatPaths renders Python floats at exact paths only; payloadBytes measures Python's json.dumps", () => {
+  const paths = new Set(["temperature", "roles[].elapsed_sec"]);
+  const flat = (value: unknown): string => pyJsonDump(value, 0, false, { floatPaths: paths }).replace(/\n\s*/g, "");
+  assert.equal(pyJsonDump({ temperature: 1, other: 0 }, 2, false, { floatPaths: paths }), '{\n  "temperature": 1.0,\n  "other": 0\n}');
+  assert.equal(flat({ roles: [{ elapsed_sec: 0 }, { elapsed_sec: 0.25 }] }), '{"roles": [{"elapsed_sec": 0.0},{"elapsed_sec": 0.25}]}');
+  // Adversarial: same-named fields anywhere but the exact path keep their form.
+  assert.equal(flat({ nested: { temperature: 1, elapsed_sec: 1 }, elapsed_sec: 2 }), '{"nested": {"temperature": 1,"elapsed_sec": 1},"elapsed_sec": 2}');
+  assert.equal(flat({ temperature: [1, 2.5, { n: 3 }] }), '{"temperature": [1,2.5,{"n": 3}]}');
+  assert.equal(flat({ temperature: { temperature: 1 } }), '{"temperature": {"temperature": 1}}');
+  assert.equal(flat({ roles: { elapsed_sec: 1 } }), '{"roles": {"elapsed_sec": 1}}', "roles[] means array elements only");
   // json.dumps({"model": "m", "temperature": 1.0, "messages": ["café"]}) == '{"model": "m", "temperature": 1.0, "messages": ["caf\\u00e9"]}'
   assert.equal(payloadBytes({ model: "m", temperature: 1, messages: ["café"] }), '{"model": "m", "temperature": 1.0, "messages": ["caf\\u00e9"]}'.length);
+  assert.equal(payloadBytes({ model: "m", messages: [{ temperature: 1 }] }), '{"model": "m", "messages": [{"temperature": 1}]}'.length);
+});
+
+test("raw provider responses keep same-named integer fields; contract temperature/elapsed_sec still render as floats", async () => {
+  const hostile: SpecialistRequestFn = async () => ({
+    ok: true,
+    raw: {
+      ...(leadsResponse([]) as Record<string, unknown>),
+      temperature: 1,
+      elapsed_sec: 2,
+      nested: { temperature: 1, elapsed_sec: 1, roles: [{ elapsed_sec: 3 }] },
+      roles: [{ elapsed_sec: 4 }],
+    },
+  });
+  const result = await run({ DEEP_REVIEW: "true", AI_TEMPERATURE: "1" }, { requestFn: hostile });
+  assert.equal(result.code, 0);
+  const response = result.read("specialist-tests.response.json");
+  assert.match(response, /\n  "temperature": 1,\n  "elapsed_sec": 2,\n/);
+  assert.match(response, /"nested": \{\n    "temperature": 1,\n    "elapsed_sec": 1,/);
+  assert.match(response, /"elapsed_sec": 3\n/);
+  assert.match(response, /"elapsed_sec": 4\n/);
+  assert.equal(/\d\.0\b/.test(response), false, "no integer in a raw response is coerced to a float");
+  assert.match(result.read("specialist-tests.request.json"), /\n  "temperature": 1\.0/);
+  assert.match(result.read("specialists.json"), /"elapsed_sec": \d+\.\d+,/);
+  rmSync(result.root, { recursive: true, force: true });
 });
 
 test("transport adapter: v2 message text, timeout classification, streamed turns in the v2 completion shape", async () => {

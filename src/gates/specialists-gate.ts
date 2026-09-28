@@ -40,8 +40,12 @@ import { specialistRequestFn } from "./specialist-transport.js";
  * re-read from disk, as v2 does.
  */
 
-/** Keys whose values are Python floats in the v2 artifacts. */
-const FLOAT_KEYS: ReadonlySet<string> = new Set(["elapsed_sec", "aggregate_elapsed_sec", "temperature"]);
+/** Where each v2 artifact holds a Python float, by exact document path.
+ * Role artifacts and raw provider response bodies have none: a response is
+ * `json.dumps(json.loads(body))` in v2, so its numbers keep their own form. */
+const REQUEST_FLOATS: ReadonlySet<string> = new Set(["temperature"]);
+const AGGREGATE_FLOATS: ReadonlySet<string> = new Set(["aggregate_elapsed_sec", "roles[].elapsed_sec"]);
+const NO_FLOATS: ReadonlySet<string> = new Set();
 
 const ROLE_GUARD_MESSAGE = "refused to write the role artifact: workspace escape or symlink";
 
@@ -173,8 +177,8 @@ function cancellableSleep(): { sleep: (seconds: number) => Promise<void>; cancel
   };
 }
 
-function jsonText(value: unknown): string {
-  return `${pyJsonDump(value, 2, false, { floatKeys: FLOAT_KEYS })}\n`;
+function jsonText(value: unknown, floatPaths: ReadonlySet<string> = NO_FLOATS): string {
+  return `${pyJsonDump(value, 2, false, { floatPaths })}\n`;
 }
 
 /** The action checkout that holds `scripts/prompt_fragments/`: the nearest
@@ -235,7 +239,7 @@ function persistRole(
   let current = entry;
   let roleArtifact: SpecialistArtifact = artifact ?? emptyArtifact(role);
   let guardMessage: string | null = null;
-  if (request !== undefined && !guardedWrite(root, `specialist-${role}.request.json`, jsonText(request))) {
+  if (request !== undefined && !guardedWrite(root, `specialist-${role}.request.json`, jsonText(request, REQUEST_FLOATS))) {
     guardMessage = "guard: refused to write the request artifact";
   } else if (response !== undefined) {
     const body = typeof response === "object" && response !== null ? response : { raw_response: pyStr(response) };
@@ -403,7 +407,7 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   if (execution === "combined_scout") {
     const first = rolesToRun.find((role) => result.artifacts.requests[role] !== undefined);
     if (first !== undefined) {
-      if (!guardedWrite(root, "specialist-scout.request.json", jsonText(result.artifacts.requests[first]))) {
+      if (!guardedWrite(root, "specialist-scout.request.json", jsonText(result.artifacts.requests[first], REQUEST_FLOATS))) {
         scoutGuard = "guard: refused to write the scout request artifact";
       } else if (first in result.artifacts.responses) {
         const response = result.artifacts.responses[first];
@@ -441,7 +445,7 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   stdout(`specialist corpus: ${corpus.bytes} bytes; specialist max_tokens: ${maxTokens}`);
   for (const entry of entries) stdout(roleLine(entry));
 
-  if (!guardedWrite(root, "specialists.json", jsonText(aggregate))) {
+  if (!guardedWrite(root, "specialists.json", jsonText(aggregate, AGGREGATE_FLOATS))) {
     stderr("ERROR: refused to write specialists.json (workspace escape or symlink at the aggregate path)");
     return 1;
   }

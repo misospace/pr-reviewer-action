@@ -58,12 +58,12 @@ export function buildSpecialistPayload(input: SpecialistPayloadInput): Specialis
 
 /** `json.dumps(value)` with Python's defaults — `", "` / `": "` separators,
  * `ensure_ascii=True` (`\uXXXX` for every non-ASCII UTF-16 unit) — and the
- * payload's one float field (`temperature`) as `repr(float)`. */
-function pyDumpsAscii(value: unknown, key: string | null = null): string {
+ * payload's one float field (the top-level `temperature`) as `repr(float)`. */
+function pyDumpsAscii(value: unknown, path = ""): string {
   if (value === null || value === undefined) return "null";
   if (value === true) return "true";
   if (value === false) return "false";
-  if (typeof value === "number") return key === "temperature" ? pyFloatRepr(value) : String(value);
+  if (typeof value === "number") return path === "temperature" ? pyFloatRepr(value) : String(value);
   if (typeof value === "string") {
     let out = '"';
     for (let index = 0; index < value.length; index += 1) {
@@ -81,9 +81,9 @@ function pyDumpsAscii(value: unknown, key: string | null = null): string {
     }
     return `${out}"`;
   }
-  if (Array.isArray(value)) return `[${value.map((item) => pyDumpsAscii(item, key)).join(", ")}]`;
+  if (Array.isArray(value)) return `[${value.map((item) => pyDumpsAscii(item, `${path}[]`)).join(", ")}]`;
   if (typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>).map(([name, item]) => `${pyDumpsAscii(name)}: ${pyDumpsAscii(item, name)}`).join(", ")}}`;
+    return `{${Object.entries(value as Record<string, unknown>).map(([name, item]) => `${pyDumpsAscii(name)}: ${pyDumpsAscii(item, path === "" ? name : `${path}.${name}`)}`).join(", ")}}`;
   }
   return "null";
 }

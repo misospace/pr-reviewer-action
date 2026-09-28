@@ -44,7 +44,9 @@ const SCOUT_PREFIX = "You are performing three specialist review passes";
 
 export function normalizeSpecialistText(text: string): string {
   return text
-    .replace(/("(?:aggregate_)?elapsed_sec": )-?[0-9][0-9.e+-]*/g, '$1"<ELAPSED>"')
+    // Only a float (the contract's round(x, 3)) is a wall-clock value; an
+    // integer field of the same name (e.g. in a provider body) is compared.
+    .replace(/("(?:aggregate_)?elapsed_sec": )-?[0-9]+\.[0-9]+/g, '$1"<ELAPSED>"')
     .replace(/error\(s\), [0-9][0-9.e+-]*s/g, "error(s), <ELAPSED>s")
     .replace(/roles in [0-9][0-9.e+-]*s/g, "roles in <ELAPSED>s")
     .replace(/127\.0\.0\.1:[0-9]+/g, "127.0.0.1:<PORT>");

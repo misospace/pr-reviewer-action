@@ -37,7 +37,9 @@ SCOUT_PREFIX = "You are performing three specialist review passes"
 
 
 def normalize(text: str) -> str:
-    text = re.sub(r'("(?:aggregate_)?elapsed_sec": )-?[0-9][0-9.e+-]*', r'\1"<ELAPSED>"', text)
+    # Only a float (the contract's round(x, 3)) is a wall-clock value; an
+    # integer field of the same name (e.g. in a provider body) is compared.
+    text = re.sub(r'("(?:aggregate_)?elapsed_sec": )-?[0-9]+\.[0-9]+', r'\1"<ELAPSED>"', text)
     text = re.sub(r"error\(s\), [0-9][0-9.e+-]*s", "error(s), <ELAPSED>s", text)
     text = re.sub(r"roles in [0-9][0-9.e+-]*s", "roles in <ELAPSED>s", text)
     return re.sub(r"127\.0\.0\.1:[0-9]+", "127.0.0.1:<PORT>", text)
