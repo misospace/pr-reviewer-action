@@ -141,9 +141,10 @@ def test_action_yml_does_not_forward_legacy_env_names():
         f"names (use the TOOL_TURN_TIMEOUT_SEC / TOOL_CORPUS_MAX_BYTES / "
         f"TOOL_MAX_TOKENS_PER_TURN bindings): {offenders}"
     )
+    contract = (_REPO_ROOT / "contracts" / "action-v3.yml").read_text()
     for name in _NEW_ENV_NAMES:
-        assert re.search(rf"^\s+{re.escape(name)}: \${{{{ inputs\.", action, re.M), (
-            f"action.yml must forward the renamed env var '{name}' from inputs"
+        assert re.search(rf"^    v2_id: {re.escape(name.lower())}$", contract, re.M), (
+            f"the contract must carry the renamed input '{name.lower()}'"
         )
 
 
@@ -156,6 +157,8 @@ def test_legacy_names_confined_to_deprecation_sites():
     """
     violations = []
     for rel, path in _iter_files():
+        if rel.as_posix() == "tests/parity_runners/v2-action.yml":
+            continue  # the frozen v2 composite: an oracle, not live wiring
         text = path.read_text(encoding="utf-8", errors="replace")
         mentions = list(_legacy_mentions(rel, text))
         if not mentions:

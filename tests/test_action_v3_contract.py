@@ -82,12 +82,10 @@ def test_contract_covers_every_retained_live_field_and_preserves_metadata():
             assert entry["description"] == spec["description"]
             if kind == "inputs":
                 assert entry["required"] is spec.get("required", False)
-                if "default" in divergence:
-                    old_default, new_default = divergence["default"]
-                    assert spec.get("default") == old_default, old_id
-                    assert entry.get("default") == new_default, old_id
-                else:
-                    assert entry.get("default") == spec.get("default")
+                # action.yml is generated from the contract, so the
+                # defaults are identical (stringified by the generator).
+                expected = entry.get("default")
+                assert spec.get("default") == (None if expected is None else str(expected)), public_id
 
 
 def test_removed_fields_are_documented_and_have_no_aliases():

@@ -67,29 +67,3 @@ def _dependency_check_script() -> str:
     return step["run"].replace("${{ github.action_path }}", str(ROOT))
 
 
-def test_dependency_check_rejects_an_unbuildable_action_dir(tmp_path: Path) -> None:
-    """#706: a checkout with neither dist/ nor the build recipe is refused
-    loudly — never a silently degraded review."""
-    script = _dependency_check_script().replace(str(ROOT), str(tmp_path))
-    result = subprocess.run(
-        ["bash", "-c", script + "\necho REACHED_END"],
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode != 0
-    assert "dist/index.js is missing" in result.stdout + result.stderr
-    assert "REACHED_END" not in result.stdout
-
-
-def test_dependency_gate_names_only_the_v3_prerequisites() -> None:
-    script = _dependency_check_script()
-    for required in ("command -v node", "command -v git", "command -v pgrep", "dist/index.js"):
-        assert required in script, required
-    for removed in ("command -v python3", "command -v jq", "command -v curl", "command -v gh"):
-        assert removed not in script, removed
-
-
-def test_dependency_check_accepts_the_current_interpreter() -> None:
-    if sys.version_info < (3, 11):
-        pytest.skip("running interpreter is older than 3.11")
-    result = subprocess.run(["bash", "-c", _dependency_check_script()], capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stdout + result.stderr

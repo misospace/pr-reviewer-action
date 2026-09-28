@@ -4,7 +4,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse, stringify } from "yaml";
+import { Scalar, parse, stringify } from "yaml";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const contract = parse(readFileSync(join(root, "contracts", "action-v3.yml"), "utf8"));
@@ -12,7 +12,13 @@ const contract = parse(readFileSync(join(root, "contracts", "action-v3.yml"), "u
 const inputs = {};
 for (const input of contract.inputs) {
   const entry = { description: input.description, required: Boolean(input.required) };
-  if (input.default !== undefined) entry.default = String(input.default);
+  if (input.default !== undefined) {
+    // Always quoted: a plain `off`/`on`/`yes`/`no` reads as a boolean under
+    // YAML 1.1 parsers.
+    const value = new Scalar(String(input.default));
+    value.type = Scalar.QUOTE_DOUBLE;
+    entry.default = value;
+  }
   inputs[input.id] = entry;
 }
 const outputs = {};

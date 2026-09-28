@@ -6,7 +6,7 @@ inputs:
   github-token:
     description: GitHub token for PR and API access. Defaults to the workflow's own token.
     required: false
-    default: ${{ github.token }}
+    default: "${{ github.token }}"
   repo:
     description: Repository in owner/name format. Defaults to the current workflow repository.
     required: false
@@ -21,7 +21,7 @@ inputs:
   ai-api-format:
     description: API request/response format for the primary AI endpoint (openai or anthropic)
     required: false
-    default: openai
+    default: "openai"
   ai-model:
     description: Model name for the primary analysis pass
     required: true
@@ -40,15 +40,15 @@ inputs:
   ai-response-format:
     description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Applies to both the primary and fallback review calls."
     required: false
-    default: off
+    default: "off"
   ai-tokens-param:
     description: "Token-limit field name for OpenAI-compatible requests: max_tokens (default) or max_completion_tokens (required by newer OpenAI reasoning models). Ignored for anthropic."
     required: false
-    default: max_tokens
+    default: "max_tokens"
   anthropic-version:
     description: Anthropic API version header used when ai_api_format or ai_fallback_api_format is anthropic
     required: false
-    default: 2023-06-01
+    default: "2023-06-01"
   ai-fallback-base-url:
     description: Optional base URL of a fallback AI API; defaults to ai_base_url when blank
     required: false
@@ -76,7 +76,7 @@ inputs:
   on-model-failure:
     description: Behavior when both primary and fallback models fail to return a usable review. 'notice' (default) posts a visible request_changes notice explaining the review could not run (never auto-approves), so a provider outage does not fail the check. 'fail' fails the action step instead.
     required: false
-    default: notice
+    default: "notice"
   fail-on-request-changes:
     description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change."
     required: false
@@ -84,7 +84,7 @@ inputs:
   verdict-policy:
     description: "How the final verdict is decided. 'strict' (the v3 default, #811) derives the published verdict deterministically from the normalized still-open findings and required-check coverage: request_changes only when at least one still-open finding is blocker or major; otherwise approve. The metadata marker's review_result distinguishes clean (no open findings, coverage complete), findings (minor/info-only findings) and partial (coverage gap), and the findings plus the coverage gap render at the top of the published review. The model's verdict is an input, not the final answer: when the policy overrides it, the review says so in one line. 'model' keeps the v2 passthrough for consumers that gate merges on the model's own verdict — set it to opt out of the strict mapping. 'findings_severity_gated' keeps its v2 behavior: request_changes from the model is preserved and approve escalates to request_changes when any blocker-severity finding exists, with the opt-in non-blocking category capping. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes under every policy."
     required: false
-    default: strict
+    default: "strict"
   non-blocking-finding-categories:
     description: Comma-separated finding categories (from tests, docs, style, question, performance, bug, other; security is never allowed) that cannot request changes on their own under verdict_policy=findings_severity_gated. Their blocker/major findings are capped at minor, and a model request_changes backed only by them is relaxed to approve. Ignored on PRs with a security risk flag and under verdict_policy=model. Empty (the default) disables it.
     required: false
@@ -100,15 +100,15 @@ inputs:
   validate-required-checks:
     description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all."
     required: false
-    default: auto
+    default: "auto"
   required-check-validation-mode:
     description: What to do when required checks are unresolved or undispositioned. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required_checks output and metadata marker) without changing the published review. Incompleteness never triggers smart escalation by itself (#721).
     required: false
-    default: warn
+    default: "warn"
   review-routing-mode:
     description: Route PR reviews between the primary and smart models based on the deterministic classification. 'off' (default) preserves existing primary/fallback behavior. 'auto' sends PRs whose pr_kind or risk_flags match escalate_on_risk_flags to the smart model (when one is configured) and keeps everything else on the primary model.
     required: false
-    default: off
+    default: "off"
   ai-primary-model:
     description: Model for the primary review route when review_routing_mode=auto. Defaults to ai_model.
     required: false
@@ -144,7 +144,7 @@ inputs:
   escalate-on-risk-flags:
     description: Comma-separated pr_kind / risk_flag names that route directly to the smart model when review_routing_mode=auto. Matched against route_signals — linked-issue flags and file-based signals backed by an actual changed filename — so a benign PR whose diff merely mentions a pattern (e.g. os.path) does not route.
     required: false
-    default: linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes
+    default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
   ai-stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false
@@ -156,7 +156,7 @@ inputs:
   allowed-source-hosts:
     description: Comma-separated list of hosts allowed for linked source fetching
     required: false
-    default: github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io
+    default: "github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io"
   related-code-context:
     description: Include deterministic related-code context discovered from changed-file anchors
     required: false
@@ -192,11 +192,11 @@ inputs:
   system-prompt-mode:
     description: How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim. 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default.
     required: false
-    default: replace
+    default: "replace"
   review-verbosity:
     description: "Output-length dial for the bundled default prompt. 'normal' (default) leaves the prompt unchanged. 'concise' adds a brevity fragment: a ~300-word target, prose limited to blocker/major issues with minor/info left to the findings array, no diff restatement, and Standards Compliance omitted unless a convention is violated. must_check coverage and the Unknowns section are explicitly exempt, so brevity cannot hide a gap. Applies only to the bundled default — a replace-mode system_prompt override is used verbatim."
     required: false
-    default: normal
+    default: "normal"
   standards-file:
     description: Repository standards file path for conventions and policy context
     required: false
@@ -204,7 +204,7 @@ inputs:
   standards-file-candidates:
     description: Candidate files to auto-discover when standards_file is not set. First found is used.
     required: false
-    default: AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt
+    default: "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt"
   publish-review-comment:
     description: If true, publish or update a PR comment with the generated review
     required: false
@@ -212,7 +212,7 @@ inputs:
   publish-mode:
     description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead. 'review_verdict' submits approve/request_changes. review_comment and review_verdict need permissions: pull-requests: write."
     required: false
-    default: review_comment
+    default: "review_comment"
   allow-approve:
     description: "If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines."
     required: false
@@ -228,15 +228,15 @@ inputs:
   cleanup-previous-native-reviews:
     description: "Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action and carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup."
     required: false
-    default: auto
+    default: "auto"
   upstream-link-mode:
     description: "How upstream GitHub PR/issue/commit/compare URLs in the published review are handled. `inert` (default) rewrites them to plain text so GitHub never auto-links them. `togithub` rewrites them to https://togithub.com/... so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (owner/repo#123, bare #123) are inert in both modes."
     required: false
-    default: inert
+    default: "inert"
   context-limit-mode:
     description: Context budget mode - normal (140k/70k/220k), low (80k/40k/120k), minimal (40k/20k/60k)
     required: false
-    default: normal
+    default: "normal"
   model-context-tokens:
     description: The model's real context window in tokens (e.g. 8192, 32768). When set, corpus/diff/file byte budgets are derived from it (reserving ai_max_tokens for output) instead of context_limit_mode — recommended for local models whose windows are smaller than the named modes assume. Empty uses context_limit_mode.
     required: false
@@ -252,11 +252,11 @@ inputs:
   primary-request-shape:
     description: Primary request layout (default or trailing_task)
     required: false
-    default: default
+    default: "default"
   smart-request-shape:
     description: Smart request layout (default or trailing_task)
     required: false
-    default: default
+    default: "default"
   repo-map-context:
     description: Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context
     required: false
@@ -284,7 +284,7 @@ inputs:
   deep-review:
     description: "Specialist leads (correctness/security/tests) over the review corpus: auto (default) = deterministic classifier-driven selection, possibly zero; true = all three roles; false = off. Advisory only."
     required: false
-    default: auto
+    default: "auto"
   deep-review-timeout-sec:
     description: Maximum wall-clock seconds for the whole deep-review specialist phase; stragglers past the deadline are recorded as role errors (advisory only). Default 600.
     required: false
@@ -340,7 +340,7 @@ inputs:
   tool-mode:
     description: "Optional tool harness mode: \"off\" (no evidence tools) or \"native_loop\". With native_loop the model uses its native tool-calling API — it holds the tool schemas and decides each next read-only call from the previous result, enabling multi-hop evidence chains. A model that never emits a tool call degrades to a corpus-only review (the verdict is still produced). Loop turns stream by default (controlled by ai_stream) so long turns don't time out behind a short-idle proxy; a stream that can't be reassembled is retried non-streamed for that turn. Budgets: tool_max_requests, tool_max_rounds, and tool_loop_wall_clock_sec. (The legacy plan_execute_once / plan_execute_loop planner modes were removed in 2.0; a stale value is treated as \"off\".)"
     required: false
-    default: native_loop
+    default: "native_loop"
   tool-loop-wall-clock-sec:
     description: Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes.
     required: false
@@ -444,7 +444,7 @@ inputs:
   platform:
     description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL: non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo' or 'github' explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
     required: false
-    default: auto
+    default: "auto"
   forgejo-api-url:
     description: Base URL for the Forgejo instance API backend (for example, https://forgejo.example.com). Optional on Forgejo Actions runners when GITHUB_SERVER_URL is set; set it when running from GitHub Actions or any runner that does not export the Forgejo server URL.
     required: false
@@ -456,7 +456,7 @@ inputs:
   forgejo-auth-method:
     description: "Forgejo authentication method. 'token' (default) uses a static personal access token via the forgejo_token input. 'authorized_integration' uses Forgejo's authorized integrations flow: the action exchanges the forgejo_authorized_integration_audience for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with 'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience and that the workflow sets 'enable-openid-connect: true'."
     required: false
-    default: token
+    default: "token"
   forgejo-authorized-integration-audience:
     description: Audience identifier for the Forgejo Authorized Integration (the 'aud' JWT claim). Not secret — safe to commit to public code. Required when forgejo_auth_method is 'authorized_integration'. Ignored when forgejo_auth_method is 'token'.
     required: false
@@ -476,11 +476,11 @@ inputs:
   rereview-label:
     description: Label that, when added to a PR, forces a fresh review even if nothing changed — the easy re-review trigger (only users with write/triage can label, so it is self-authorizing). On a `labeled` event the action reviews iff the added label matches this, then removes the label so re-adding re-triggers; any other label add is ignored. To enable, add `labeled` to the workflow's pull_request types. Default "ai-review".
     required: false
-    default: ai-review
+    default: "ai-review"
   comment-marker:
     description: HTML marker for the managed PR comment
     required: false
-    default: <!-- ai-pr-reviewer -->
+    default: "<!-- ai-pr-reviewer -->"
   ci-status-check:
     description: "If true (default), wait for CI checks to reach a terminal state before starting the AI review, then fold the per-check outcomes into the review corpus as evidence. Polls the Checks API for the PR head SHA; degrades when the token cannot read checks (grant checks: read). Set false for an immediate review."
     required: false

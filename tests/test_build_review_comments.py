@@ -229,13 +229,6 @@ class TestActionWiring:
         assert "inline-findings:" in self.ACTION
         assert "inline-findings-max:" in self.ACTION
 
-    def test_all_publish_steps_receive_findings(self):
-        # The single publish dispatcher (#303) carries one superset env block
-        # serving all three modes (comment, review_comment, review_verdict), so
-        # FINDINGS/INLINE_FINDINGS each appear once.
-        assert self.ACTION.count("FINDINGS: ${{ steps.review.outputs.findings }}") == 1
-        assert self.ACTION.count("INLINE_FINDINGS: ${{ inputs.inline-findings }}") == 1
-
     def test_review_verdict_falls_back_on_failure(self):
         assert "falling back to plain review" in self.PUBLISH
         assert "submit_native_review APPROVE" in self.PUBLISH

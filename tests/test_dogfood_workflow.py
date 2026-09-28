@@ -109,105 +109,61 @@ def test_dogfood_workflow_exists() -> None:
     assert WORKFLOW.is_file(), f"{WORKFLOW} must exist (the dogfood self-review workflow)"
 
 
-def test_dogfood_runs_all_specialists() -> None:
-    """The self-review canary opts into all three roles, not auto selection."""
+# The dogfood workflow runs the recommended setup (#706): the action defaults,
+# plus only the overrides that are genuinely this repository's choice.
+DOGFOOD_OVERRIDES = {
+    "github-token",
+    "ai-base-url",
+    "ai-api-format",
+    "ai-model",
+    "ai-api-key",
+    "ai-response-format",
+    "ai-fallback-base-url",
+    "ai-fallback-api-format",
+    "ai-fallback-model",
+    "ai-fallback-api-key",
+    "review-routing-mode",
+    "ai-smart-base-url",
+    "ai-smart-api-format",
+    "ai-smart-model",
+    "ai-smart-api-key",
+    "ci-timeout-sec",
+    "publish-mode",
+    "allow-approve",
+}
+
+
+def test_dogfood_overrides_only_what_is_ours() -> None:
+    """Endpoint/models/auth, our CI timeout and approving: everything else is default."""
     values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
-    assert values.get("deep-review") == "true", (
-        "dogfood deep_review must be true to exercise correctness, security, "
-        f"and tests on every review; found {values.get('deep_review')!r}"
-    )
-    assert _extract_action_defaults().get("deep-review") == "false", (
-        "the public deep_review default must remain false"
-    )
+    assert set(values) <= DOGFOOD_OVERRIDES, sorted(set(values) - DOGFOOD_OVERRIDES)
+    assert values.get("publish-mode") == "review_verdict"
+    assert values.get("allow-approve") == "true"
 
 
-def test_dogfood_native_loop_budget() -> None:
-    """The dogfood loop keeps the #565 rounds/wall-clock and the #701 tier budget.
-
-    tool_max_requests must stay unset: an explicit value outranks the #701
-    tier resolver, so a fixed pin would silently cap smart and escalated
-    reviews at the primary tier's request budget instead of 32/40.
-    """
-    values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
-
-    assert values.get("tool-mode") == "native_loop", (
-        "the dogfood workflow must review with tool_mode=native_loop"
-    )
-    assert values.get("tool-max-rounds") == "4", (
-        f"dogfood tool_max_rounds must stay \"4\" (issue #565); found {values.get('tool_max_rounds')!r}"
-    )
-    assert values.get("tool_max_requests") in (None, ""), (
-        "dogfood tool_max_requests must stay unset so the #701 tier budget "
-        f"applies; found {values.get('tool_max_requests')!r}"
-    )
-    assert values.get("primary-tool-max-requests") == "16", (
-        f"dogfood primary_tool_max_requests must be \"16\"; found {values.get('primary_tool_max_requests')!r}"
-    )
-    assert values.get("tool-loop-wall-clock-sec") == "600", (
-        f"dogfood tool_loop_wall_clock_sec must stay \"600\" (issue #565); "
-        f"found {values.get('tool_loop_wall_clock_sec')!r}"
-    )
-
-
-def test_dogfood_untouched_inputs_stay_put() -> None:
-    """#565 is a narrow change: the other dogfood tool inputs must not move.
-
-    Guards against unrelated workflow/model tuning being bundled into a
-    follow-up edit of the same block.
-    """
-    values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
-
-    assert values.get("tool-turn-timeout-sec") == "300", (
-        f"dogfood tool_turn_timeout_sec must stay \"300\"; found {values.get('tool_turn_timeout_sec')!r}"
-    )
-    # Unset inherits the 50000 action default; 15000 starved the planning
-    # turns of the diff on large PRs (see build_planning_context).
-    assert values.get("tool_corpus_max_bytes") in (None, ""), (
-        f"dogfood tool_corpus_max_bytes must stay unset; found {values.get('tool_corpus_max_bytes')!r}"
-    )
-    assert values.get("tool-max-tokens-per-turn") == "16000", (
-        f"dogfood tool_max_tokens_per_turn must stay \"16000\"; "
-        f"found {values.get('tool_max_tokens_per_turn')!r}"
-    )
-    assert values.get("tool-max-response-bytes") == "12000", (
-        f"dogfood tool_max_response_bytes must stay \"12000\"; "
-        f"found {values.get('tool_max_response_bytes')!r}"
-    )
-
-
-def test_public_action_defaults_unchanged() -> None:
-    """The public action.yml defaults for the tool budget inputs stay as-is.
-
-    #701 moved tool_max_requests to a tier-aware resolver: the input default is
-    now empty and the route decides the effective budget (primary 16, smart 32,
-    escalated 40). #794 raised the tool_max_rounds and tool_loop_wall_clock_sec
-    defaults to match the dogfood workflow's long-standing values (issue #565),
-    so the two are now identical rather than dogfood-only. The other
-    tool-budget inputs keep their #565 defaults.
-    """
+def test_public_action_defaults_are_the_recommended_setup() -> None:
+    """The drop-in defaults agreed for v3 (#706)."""
     defaults = _extract_action_defaults()
-
     expected = {
-        # Kebab-case public IDs since the #706 cutover.
-        "tool-loop-wall-clock-sec": "600",
+        "github-token": "${{ github.token }}",
+        "tool-mode": "native_loop",
+        "tool-max-tokens-per-turn": "16384",
+        "tool-turn-timeout-sec": "180",
+        "deep-review": "auto",
+        "ci-status-check": "true",
+        "on-model-failure": "notice",
+        "ai-max-tokens": "16384",
+        "publish-mode": "review_comment",
+        "inline-findings": "true",
+        "verdict-policy": "strict",
+        "allow-approve": "false",
         "tool-max-requests": "",
         "tool-max-rounds": "4",
-        "tool-turn-timeout-sec": "60",
+        "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "50000",
-        "tool-max-tokens-per-turn": "400",
         "tool-max-response-bytes": "12000",
     }
     for name, want in expected.items():
-        got = defaults.get(name)
-        assert got == want, (
-            f"action.yml default for {name} must stay {want!r}; found {got!r}"
-        )
+        assert defaults.get(name) == want, f"{name}: {defaults.get(name)!r} != {want!r}"
 
 
-if __name__ == "__main__":
-    test_dogfood_workflow_exists()
-    test_dogfood_runs_all_specialists()
-    test_dogfood_native_loop_budget()
-    test_dogfood_untouched_inputs_stay_put()
-    test_public_action_defaults_unchanged()
-    print("All dogfood workflow tests passed!")
