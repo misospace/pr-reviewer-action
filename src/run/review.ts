@@ -220,6 +220,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   env.SMART_MAX_DIFF = String(budgets.smart.maxDiff);
   env.SMART_MAX_FILES = String(budgets.smart.maxFiles);
 
+  // Every ws.write below persists forge/model-read data as run artifacts —
+  // untrusted data on disk is the pipeline's design (CodeQL
+  // js/http-to-file-access); the trust boundaries are the publication
+  // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, options.persistArtifacts ?? true);
   const adapter: PlatformReadAdapter = options.platformAdapter ?? buildPlatformReadAdapter(env, options.fetchImpl);
   const profiles: TierProfiles = resolveTierProfiles(env);

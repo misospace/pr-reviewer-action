@@ -33,10 +33,6 @@ export interface RunContext {
   baseRef: string;
 }
 
-function contractEnvName(id: string): string {
-  return `INPUT_${id.toUpperCase().replaceAll("-", "_")}`;
-}
-
 /** Every contract input, projected to the SCREAMING_SNAKE env keys the ported
  * stages read (no INPUT_ prefix — v2's env-block names are the stage ABI). */
 export function stageEnvFromConfig(config: RuntimeConfig): Record<string, string> {

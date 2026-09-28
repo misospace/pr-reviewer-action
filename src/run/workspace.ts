@@ -29,8 +29,12 @@ export class RunWorkspace {
     const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
     this.files.set(name, bytes);
     if (this.persist && resolveArtifactPath(name, this.root) !== null) {
-      // guardedWrite is text-shaped; write bytes through the same resolved
-      // path with the same no-symlink-follow guarantee.
+      // CodeQL js/http-to-file-access: these bytes are the run's diagnostic
+      // artifacts (model output, CI evidence, corpus sections) — untrusted
+      // PR/model data written to the run directory is the pipeline's whole
+      // purpose. The trust boundary holds downstream: publication sanitizes
+      // (stripReservedMarkers/neutralization), corpus sections are fenced,
+      // and the artifacts are never executed or dereferenced as paths.
       try {
         const target = resolveArtifactPath(name, this.root)!;
         writeFileSync(target, bytes);

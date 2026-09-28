@@ -480,6 +480,11 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
 
 export function persistOutputs(outputFilePath: string, formatted: string): void {
   if (outputFilePath === "" || outputFilePath === "/dev/null" || formatted === "") return;
+  // CodeQL js/http-to-file-access: the formatted assignments carry the
+  // review's step outputs (verdict, model-controlled review_markdown behind
+  // a random delimiter). $GITHUB_OUTPUT is the sanctioned Actions channel
+  // for exactly this data; the random-delimiter heredoc form is what keeps
+  // model text from forging additional output keys.
   appendFileSync(outputFilePath, formatted);
 }
 
