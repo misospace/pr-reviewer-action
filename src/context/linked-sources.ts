@@ -34,7 +34,6 @@ import { compareCodePoints } from "../platform/jq.js";
 import { pyFloatRepr, pyTruthy } from "../platform/py.js";
 import { pyUrlHost, PyUrlValueError } from "../platform/py-url.js";
 import {
-  DEFAULT_FETCH_HOSTS,
   fetchSource,
   hostAllowed,
   safeFetchLike,
@@ -246,8 +245,8 @@ export interface LinkedSourcesDeps {
   forgejo: ForgejoEnrichApi;
   /** DNS for the `host_allowed` gate. */
   resolver: Resolver;
-  /** `fetch_url(url, timeout=25)` restricted to `allowedHosts` (initial URL
-   * and every redirect hop). */
+  /** `fetch_url(url, timeout=25)` restricted to `allowedHosts`
+   * (ALLOWED_SOURCE_HOSTS) for the initial URL and every redirect hop. */
   fetchSource: (url: string, allowedHosts: ReadonlySet<string>) => Promise<Uint8Array | null>;
 }
 
@@ -406,9 +405,11 @@ async function fetchSections(ctx: Ctx): Promise<Map<number, Uint8Array | null>> 
   }
   const fetched = new Map<number, Uint8Array | null>();
   if (fetchUrls.length > 0 && budget.ok()) {
-    // v2 re-checks the host inside fetch_url against its default allowlist;
-    // redirect hops must also stay inside ALLOWED_SOURCE_HOSTS.
-    const fetchAllowlist = new Set([...DEFAULT_FETCH_HOSTS].filter((host) => input.allowedHosts.has(host)));
+    // Approved divergence: v2 never passed ALLOWED_SOURCE_HOSTS to fetch_url,
+    // which then re-checked against its built-in four-host list, so
+    // operator-added hosts always failed. v3 fetches under the configured
+    // allowlist, for the initial URL and every redirect hop.
+    const fetchAllowlist = input.allowedHosts;
     const submitted: Array<[number, string]> = [];
     for (const entry of fetchUrls) {
       if (!budget.ok()) break;

@@ -110,7 +110,7 @@ function deps(overrides: Partial<LinkedSourcesDeps> = {}): LinkedSourcesDeps {
   };
 }
 
-test("renderLinkedSources hands the fetcher DEFAULT ∩ ALLOWED_SOURCE_HOSTS for every hop", async () => {
+test("renderLinkedSources fetches under the configured ALLOWED_SOURCE_HOSTS for every hop", async () => {
   const allowlists: string[][] = [];
   const md = await renderLinkedSources(
     { urls: ["https://artifacthub.io/p"], allowedHosts: new Set(["artifacthub.io", "docs.example"]), targetVersion: "", ghcrImages: [], compareShas: null },
@@ -121,7 +121,7 @@ test("renderLinkedSources hands the fetcher DEFAULT ∩ ALLOWED_SOURCE_HOSTS for
       },
     }),
   );
-  assert.deepEqual(allowlists, [["artifacthub.io"]]);
+  assert.deepEqual(allowlists, [["artifacthub.io", "docs.example"]]);
   assert.equal(md, "## Source 1\nURL: https://artifacthub.io/p\n\n### Fetched Content (truncated)\n```text\nhi\n\n```\n\n");
   assert.equal(await renderLinkedSources({ urls: [], allowedHosts: new Set(), targetVersion: "", ghcrImages: [], compareShas: null }, deps()), "");
 });

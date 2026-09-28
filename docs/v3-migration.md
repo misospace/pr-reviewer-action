@@ -546,8 +546,14 @@ Approved divergences (all fail closed):
   classifies neither as private or reserved.
 - Raw source bodies are capped at 5 MiB and Forgejo enrich API responses at
   32 MiB; v2 read both unbounded.
+- Raw fetching honors `ALLOWED_SOURCE_HOSTS` as the input documents
+  (maintainer-approved fix). v2's `_fetch_sections` never passed it to
+  `fetch_url`, which re-checked against its built-in
+  `{github.com, gitlab.com, registry.terraform.io, artifacthub.io}`, so an
+  operator-added host always rendered "Failed to fetch". Every SSRF gate
+  still applies to it.
 - Every redirect hop must stay inside `ALLOWED_SOURCE_HOSTS`; v2 checked hops
-  only against `fetch_url`'s default allowlist.
+  only against `fetch_url`'s built-in list.
 - Redirect hops go only to http/https (urllib also followed `ftp://`), and
   proxy environment variables are not honored.
 - A URL whose Python hostname and connection target disagree (userinfo,
@@ -562,10 +568,9 @@ Approved divergences (all fail closed):
   related-code `_fenced` approach), so a page cannot close the fence and turn
   the rest of the corpus into code.
 
-v2 behavior kept for parity: the raw fetch is effectively limited to
-`ALLOWED_SOURCE_HOSTS` ∩ `{github.com, gitlab.com, registry.terraform.io,
-artifacthub.io}` (v2's `_fetch_sections` never passes its allowlist to
-`fetch_url`), and github.com/gitlab.com are never fetched raw. JSON goes
+v2 behavior kept: github.com is never fetched raw (its release/compare
+metadata comes from the API), and gitlab.com/bitbucket.org are skipped as
+known non-Forgejo hosts whose pages are client-rendered. JSON goes
 through `JSON.parse`, so integer-valued
 floats, integers beyond 2^53 and integer-like object keys do not round-trip
 byte for byte.
