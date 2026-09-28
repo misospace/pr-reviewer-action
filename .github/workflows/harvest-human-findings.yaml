@@ -42,8 +42,40 @@ on:
 permissions: {}
 
 jobs:
+  resolve-scope:
+    name: Resolve app-token scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      owner: ${{ steps.scope.outputs.owner }}
+      repos: ${{ steps.scope.outputs.repos }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # actions/create-github-app-token scopes an installation token to a
+      # single owner. Derive that owner (and the repo-name list under it,
+      # including this repo so the PR-opening step below keeps working)
+      # from the configured harvest scope, instead of leaving the token
+      # unscoped (installation-wide) as before. Repos spanning more than
+      # one owner aren't supported by a single token -- fail clearly rather
+      # than silently widening or narrowing the scope. Logic lives in
+      # scripts/resolve_harvest_scope.sh so it's covered by an executable
+      # test (tests/test_resolve_harvest_scope.sh).
+      - name: Compute owner/repos for the app token
+        id: scope
+        env:
+          REPOS: ${{ inputs.repos || vars.HARVEST_REPOS }}
+          CURRENT_REPO: ${{ github.repository }}
+        run: scripts/resolve_harvest_scope.sh
+
   harvest:
     name: Harvest human findings
+    needs: resolve-scope
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -55,6 +87,8 @@ jobs:
         with:
           app-id: ${{ secrets.MISO_APP_ID }}
           private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
+          owner: ${{ needs.resolve-scope.outputs.owner }}
+          repositories: ${{ needs.resolve-scope.outputs.repos }}
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +99,26 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.14'
+
+      # A prior run's harvest may still be sitting in an unmerged bot-branch
+      # PR. push_harvest_branch.sh resets that branch to main's tip and
+      # commits this run's output on top, so anything only on the unmerged
+      # PR would otherwise be silently dropped. Carry it forward into this
+      # run's input corpus (before the harvest script appends anything new)
+      # so the duplicate-id check sees it and the next push carries both.
+      #
+      # This step's bot_branch_sha output is the exact remote SHA the merge
+      # was based on (or empty, if absent) and is threaded through to the
+      # push step's lease unmodified -- see push_harvest_branch.sh for why
+      # re-fetching there instead would race a concurrent run.
+      - name: Merge unmerged bot-branch corpus entries
+        id: merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: >
+          scripts/merge_bot_branch_corpus.py
+          --branch bot/harvest-human-findings
+          --corpus evals/corpus-human-findings.json
 
       - name: Run harvest script
         env:
@@ -91,35 +145,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: bot/harvest-human-findings
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet -- evals/corpus-human-findings.json; then
-            echo "No new findings; nothing to open a PR for."
-            exit 0
-          fi
-
-          git config user.name "miso[bot]"
-          git config user.email "miso[bot]@users.noreply.github.com"
-
-          # checkout ran with persist-credentials: false, so push auth comes
-          # from the app token here, not a persisted default GITHUB_TOKEN.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          # The branch only ever carries this one kind of change, so resetting
-          # it to the current main tip each run is equivalent to "update the
-          # existing PR": no manual merge/rebase step, and it never touches main.
-          git checkout -B "$BRANCH"
-          git add evals/corpus-human-findings.json
-          git commit -m "chore(evals): harvest human findings from maintainer reviews"
-          git push --force-with-lease origin "$BRANCH"
-
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            echo "PR for $BRANCH already open; branch push above updated it."
-          else
-            gh pr create \
-              --head "$BRANCH" \
-              --base main \
-              --title "chore(evals): harvest human findings" \
-              --body "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
-          fi
+          BASE_BRANCH: main
+          CORPUS_PATH: evals/corpus-human-findings.json
+          COMMIT_MESSAGE: "chore(evals): harvest human findings from maintainer reviews"
+          PR_TITLE: "chore(evals): harvest human findings"
+          PR_BODY: "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
+          EXPECTED_BOT_SHA: ${{ steps.merge.outputs.bot_branch_sha }}
+        run: scripts/push_harvest_branch.sh
