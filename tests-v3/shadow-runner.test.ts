@@ -80,3 +80,31 @@ test("compare mode flags a verdict divergence as != (the qualification signal)",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("run-mode mapping projects v2 names onto the v3 INPUT_ contract", () => {
+  const out = execFileSync(process.execPath, [SCRIPT, "map"], {
+    env: {
+      PATH: process.env.PATH ?? "",
+      ai_model: "m",
+      ai_temperature: "",
+      AI_BASE_URL: "https://example.invalid/v1",
+      REPO: "o/r",
+      GH_TOKEN: "t",
+      NOT_A_CONTRACT_KEY: "x",
+    },
+  }).toString();
+  const mapped = new Map(JSON.parse(out) as Array<[string, string]>);
+  // Contract inputs bind both the hyphen and the underscore INPUT_ forms.
+  assert.equal(mapped.get("INPUT_AI-MODEL"), "m");
+  assert.equal(mapped.get("INPUT_AI_MODEL"), "m");
+  // Empty bindings are forwarded, like the composite's env blocks.
+  assert.equal(mapped.get("INPUT_AI_TEMPERATURE"), "");
+  // Review-step raw names pass through and bind their contract input.
+  assert.equal(mapped.get("AI_BASE_URL"), "https://example.invalid/v1");
+  assert.equal(mapped.get("INPUT_AI_BASE_URL"), "https://example.invalid/v1");
+  // Ambient runner context passes through; nothing else does.
+  assert.equal(mapped.get("REPO"), "o/r");
+  assert.equal(mapped.get("GH_TOKEN"), "t");
+  assert.equal(mapped.has("NOT_A_CONTRACT_KEY"), false);
+  assert.equal(mapped.has("PATH"), false);
+});

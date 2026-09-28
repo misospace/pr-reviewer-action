@@ -39,9 +39,9 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, applySystemPromptFragments, applySpecialistLeadsFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, strictReviewResult } from "../enforcement/verdict-policy.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
-import { applyAllEnforcement } from "../enforcement/enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -535,16 +535,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
 
   // ── Enforcement (review.sh) + requirement coverage ───────────────────
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
-  applyVerdictPolicy(reviewRecord as never, env.VERDICT_POLICY ?? "model", {
-    nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
-    securityFlagged: isSecurityFlagged(classificationArtifact),
-  });
-  applyRequiredCheckValidation(reviewRecord as never, {
+  const verdictPolicy = env.VERDICT_POLICY ?? "strict";
+  // Captured before any layer mutates it: the strict mapping (#811) takes the
+  // model verdict as an input, not as the final answer.
+  const modelVerdict = String(reviewRecord.verdict ?? "");
+  const completenessOptions = {
     enabled: env.VALIDATE_REQUIRED_CHECKS ?? "auto",
     mode: env.REQUIRED_CHECK_VALIDATION_MODE ?? "warn",
     mustCheck: stringList(classificationArtifact.must_check),
-  });
-  applyAllEnforcement(reviewRecord as never, {
+  };
+  const enforcementInputs: EnforcementInputs = {
     evidenceBlockerEnabled: (env.EVIDENCE_BLOCKER_ENFORCEMENT ?? "false").toLowerCase() === "true",
     toolFailureEnabled: toolMode !== "off" && (env.TOOL_FAILURE_ENFORCEMENT ?? "false").toLowerCase() === "true",
     toolMinSuccessful: Number(env.TOOL_MIN_SUCCESSFUL_REQUESTS ?? "0") || 0,
@@ -552,8 +552,25 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     toolHarness: safeJson(ws.read(enforcementHarness)) as never,
     threads: safeJson(ws.read("review-threads.json")) as never,
     humanReviews: safeJson(ws.read("human-reviews.json")) as never,
-    verdictPolicy: env.VERDICT_POLICY ?? "model",
-  });
+    verdictPolicy,
+  };
+  if (verdictPolicy === "strict") {
+    // #811 composition (same order as the enforcement-pipeline fixture):
+    // coverage, then the enforcement overlays, then the strict mapping over
+    // the final still-open findings set.
+    const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    const forced = failClosedEnforcementFired(enforcementInputs)
+      || (completeness.status === "incomplete" && completeness.mode === "fail");
+    applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+  } else {
+    applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
+      nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
+      securityFlagged: isSecurityFlagged(classificationArtifact),
+    });
+    applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    applyAllEnforcement(reviewRecord as never, enforcementInputs);
+  }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
   // Requirement coverage fold (#624) — advisory, never alters a verdict.
@@ -612,7 +629,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // head so the marker never claims a wrong binding.
     headSha: context.headSha || String(pr.headRefOid ?? ""),
     baseSha: identity.baseSha ?? "",
-    reviewResult: outputs.verdict === "approve" ? "clean" : "issues",
+    // Same derivation as the publish path's marker (#811).
+    reviewResult: verdictPolicy === "strict"
+      ? strictReviewResult(outputs.verdict, reviewRecord.findings, outputs.requiredChecks)
+      : outputs.verdict === "request_changes" ? "issues" : "clean",
     requiredChecks: outputs.requiredChecks,
     reviewRoute: outputs.reviewRoute,
     escalationReason: outputs.escalationReason,

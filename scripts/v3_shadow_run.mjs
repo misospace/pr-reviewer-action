@@ -14,6 +14,8 @@
 //   node scripts/v3_shadow_run.mjs compare   — read the v2 review step's
 //       outputs (passed as SHADOW_V2_* env) and the v3 run's artifacts, and
 //       write a line-by-line diff report to $SHADOW_REPORT.
+//   node scripts/v3_shadow_run.mjs map       — print the run-mode env mapping
+//       as JSON (test seam; runs nothing).
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -26,7 +28,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 
 function contractInputMap() {
-  const { parse } = require(join(repoRoot, "node_modules", "yaml", "dist", "index.js"));
+  const { parse } = require("yaml");
   const contract = parse(readFileSync(join(repoRoot, "contracts", "action-v3.yml"), "utf8"));
   const map = new Map();
   for (const input of contract.inputs) {
@@ -35,18 +37,11 @@ function contractInputMap() {
   return map;
 }
 
-function runMode() {
-  const distEntry = join(repoRoot, "dist", "index.js");
-  if (!existsSync(distEntry)) {
-    console.error("dist/index.js is missing; build first (npm run build)");
-    process.exit(2);
-  }
-  const runDir = process.env.PR_REVIEWER_RUN_DIR ?? execFileSync("mktemp", ["-d"]).toString().trim();
-  mkdirSync(runDir, { recursive: true });
+function mappedEnv(env) {
   const mapped = {};
   const map = contractInputMap();
   for (const [v2Key, v3Id] of map) {
-    const value = process.env[v2Key];
+    const value = env[v2Key];
     // Forward empty bindings too: the composite's env blocks bind empty
     // strings and the contract loader applies defaults for "" — the shadow
     // must see exactly what production sees.
@@ -57,18 +52,30 @@ function runMode() {
   }
   // Ambient runner context the run entry reads as plain env.
   for (const key of ["REPO", "PR_NUMBER", "PR_HEAD_SHA", "IS_FORK_PR", "PLATFORM", "FORGEJO_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_VERSION"]) {
-    if (process.env[key] !== undefined) mapped[key] = process.env[key];
+    if (env[key] !== undefined) mapped[key] = env[key];
   }
   // Inputs the composite resolves outside the shared env file (review-step
   // env block): forward the raw v2 names; the contract map above covers the
   // retained inputs and the removed ones simply never match.
   for (const key of ["AI_BASE_URL", "AI_API_KEY", "AI_MAX_TOKENS", "AI_FALLBACK_BASE_URL", "AI_FALLBACK_API_FORMAT", "AI_FALLBACK_API_KEY", "AI_PRIMARY_BASE_URL", "AI_PRIMARY_API_FORMAT", "AI_PRIMARY_API_KEY", "AI_SMART_BASE_URL", "AI_SMART_API_FORMAT", "AI_SMART_API_KEY", "AI_STREAM", "AI_FALLBACK_STREAM", "ON_MODEL_FAILURE", "VERDICT_POLICY", "NON_BLOCKING_FINDING_CATEGORIES", "VALIDATE_REQUIRED_CHECKS", "REQUIRED_CHECK_VALIDATION_MODE", "AI_PRIMARY_RETRIES", "AI_PRIMARY_RETRY_DELAY_SEC", "CI_STATUS_CHECK", "CI_TIMEOUT_SEC", "CI_INTERVAL_SEC", "CI_SKIP_ON_TIMEOUT", "ENRICHMENT_BUDGET_SEC", "IMAGE_DIGEST_BUDGET_SEC", "EVIDENCE_PROVIDER_PARALLELISM", "ALLOWED_SOURCE_HOSTS", "LINEAR_API_KEY"]) {
-    if (process.env[key] !== undefined) mapped[key] = process.env[key];
+    if (env[key] !== undefined) mapped[key] = env[key];
     const v3Id = map.get(key.toLowerCase());
-    if (v3Id !== undefined && process.env[key] !== undefined && process.env[key] !== "") {
-      mapped[`INPUT_${v3Id.toUpperCase().replaceAll("-", "_")}`] = process.env[key];
+    if (v3Id !== undefined && env[key] !== undefined && env[key] !== "") {
+      mapped[`INPUT_${v3Id.toUpperCase().replaceAll("-", "_")}`] = env[key];
     }
   }
+  return mapped;
+}
+
+function runMode() {
+  const distEntry = join(repoRoot, "dist", "index.js");
+  if (!existsSync(distEntry)) {
+    console.error("dist/index.js is missing; build first (npm run build)");
+    process.exit(2);
+  }
+  const runDir = process.env.PR_REVIEWER_RUN_DIR ?? execFileSync("mktemp", ["-d"]).toString().trim();
+  mkdirSync(runDir, { recursive: true });
+  const mapped = mappedEnv(process.env);
   const child = spawnSync("node", [distEntry, "run"], {
     cwd: runDir,
     env: {
@@ -148,6 +155,7 @@ function compareMode() {
 const mode = process.argv[2] ?? "run";
 if (mode === "run") runMode();
 else if (mode === "compare") compareMode();
+else if (mode === "map") console.log(JSON.stringify(Object.keys(mappedEnv(process.env)).sort().map((key) => [key, mappedEnv(process.env)[key]])));
 else {
   console.error(`unknown mode: ${mode}`);
   process.exit(2);

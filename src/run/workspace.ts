@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { guardedWrite, resolveArtifactPath } from "../gates/guarded-write.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
 

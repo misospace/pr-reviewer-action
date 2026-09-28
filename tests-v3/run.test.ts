@@ -354,3 +354,82 @@ test("the run entry never writes to a repo checkout other than the run dir", asy
     cleanup();
   }
 });
+
+/** Drives a scripted model verdict through the full run and returns the
+ * published outputs plus the marker (#809 review: the enforcement stage). */
+async function runWithVerdict(verdict: Record<string, unknown>, inputs: Record<string, string> = {}): Promise<Awaited<ReturnType<typeof runReview>>> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(verdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    return await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        ...inputs,
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: false,
+      quiet: true,
+    });
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+const finding = (severity: string): Record<string, unknown> => ({
+  severity, category: "bug", title: `${severity} finding`, detail: "d", file: "README.md", line: 2,
+});
+
+test("strict (default) policy: minor/info-only findings cannot request changes", async () => {
+  const result = await runWithVerdict({ verdict: "request_changes", findings: [finding("minor"), finding("info")] });
+  assert.equal(result.outputs.verdict, "approve");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.match(result.outputs.reviewMarkdown, /no blocker or major finding out of 2 open/);
+  assert.match(result.marker, /review_result.{0,4}findings/);
+});
+
+test("strict (default) policy: a major finding requests changes over a model approve", async () => {
+  const result = await runWithVerdict({ verdict: "approve", findings: [finding("major")] });
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.match(result.marker, /review_result.{0,4}issues/);
+});
+
+test("strict (default) policy: no findings and a model approve publishes clean", async () => {
+  const result = await runWithVerdict({ verdict: "approve", findings: [] });
+  assert.equal(result.outputs.verdict, "approve");
+  assert.equal(result.outputs.verdictSource, "model");
+  assert.match(result.marker, /review_result.{0,4}clean/);
+});
+
+test("findings_severity_gated policy: a blocker escalates a model approve", async () => {
+  const result = await runWithVerdict(
+    { verdict: "approve", findings: [finding("blocker")] },
+    { "verdict-policy": "findings_severity_gated" },
+  );
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.match(result.outputs.reviewMarkdown, /Verdict escalated from structured findings/);
+});
+
+test("model policy: the model verdict passes through minor findings", async () => {
+  const result = await runWithVerdict(
+    { verdict: "request_changes", findings: [finding("minor")] },
+    { "verdict-policy": "model" },
+  );
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "model");
+  assert.match(result.marker, /review_result.{0,4}issues/);
+});

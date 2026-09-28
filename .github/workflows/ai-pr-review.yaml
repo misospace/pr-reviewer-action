@@ -109,14 +109,14 @@ jobs:
         # review through the v3 entry beside v2. Dogfood only — nothing here
         # publishes. A build failure fails the job like any other broken
         # head; the shadow RUN itself is the diagnostic and never gates.
-        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
         run: |
           cd "$GITHUB_WORKSPACE"
           npm ci --no-audit --no-fund
           npm run build
 
       - name: Run v3 shadow review (never publishes)
-        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
         # Diagnostics, not a gate: a shadow failure uploads nothing and never
         # blocks the merge (unlike the build step, which reflects the head).
         continue-on-error: true
@@ -168,7 +168,7 @@ jobs:
           PR_REVIEWER_RUN_DIR="$SHADOW_DIR" node scripts/v3_shadow_run.mjs run
 
       - name: Compare v3 shadow against v2
-        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
         # Same diagnostics-only contract as the run step.
         continue-on-error: true
         env:
@@ -182,17 +182,22 @@ jobs:
           SHADOW_V2_FINDINGS: ${{ steps.review.outputs.findings }}
         run: |
           cd "$GITHUB_WORKSPACE"
-          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir")"
+          SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir" 2>/dev/null || true)"
+          if [ -z "$SHADOW_DIR" ] || [ ! -d "$SHADOW_DIR" ]; then
+            echo "no shadow run directory; nothing to compare"
+            exit 0
+          fi
           PR_REVIEWER_RUN_DIR="$SHADOW_DIR" SHADOW_REPORT="$SHADOW_DIR/shadow-comparison.md" node scripts/v3_shadow_run.mjs compare
 
       - name: Upload v3 shadow run
-        if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
         # Diagnostics-only (continue-on-error): the run step may have failed
         # before writing the shadow directory. The upload is a fixed
         # allowlist of known-text artifacts the run itself produced — never
         # a directory walk — so there is no symlink traversal, no binary
         # content, and the secret scan runs over exactly those files with a
-        # plain fixed-string match (GitHub also masks secret values in logs).
+        # fixed-string match on each token and its base64 form (GitHub also
+        # masks secret values in logs).
         continue-on-error: true
         env:
           SHADOW_TOKENS: ${{ secrets.LITELLM_API_KEY }} ${{ steps.app-token.outputs.token }}
@@ -209,7 +214,8 @@ jobs:
             [ -f "$SHADOW_DIR/$name" ] || continue
             for token in $SHADOW_TOKENS; do
               [ -n "$token" ] || continue
-              if grep -qF -- "$token" "$SHADOW_DIR/$name" 2>/dev/null; then
+              encoded="$(printf '%s' "$token" | base64 -w0)"
+              if grep -qF -e "$token" -e "$encoded" -- "$SHADOW_DIR/$name" 2>/dev/null; then
                 echo "::warning::redacting $name (contained a token value)"
                 rm -f -- "$SHADOW_DIR/$name"
                 LEAKS=$((LEAKS + 1))

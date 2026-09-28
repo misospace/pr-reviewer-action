@@ -4,7 +4,6 @@ import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { validateContract } from "../src/config/contract.js";
 import { loadConfig } from "../src/config/load-config.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
-import { resolveRepositoryConfig } from "../src/config/repository-config.js";
 
 /**
  * The kebab→SCREAMING_SNAKE projection the orchestrator feeds the ported
