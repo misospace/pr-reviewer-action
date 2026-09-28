@@ -461,7 +461,7 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project
     // it; a non-streamed turn's raw provider JSON passes through untouched.
-    return outcome.raw === outcome.response ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    return (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
   };
 }
 
