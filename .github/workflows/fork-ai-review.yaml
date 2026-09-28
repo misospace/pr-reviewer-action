@@ -170,6 +170,18 @@ jobs:
             --pr-number "$GATE_PR_NUMBER" \
             --expected-sha "$GATE_HEAD_SHA"
 
+      - name: Set up Node 24
+        # Only to build the bundle from the trusted checkout; the action runs
+        # on the runner's own node24 (`runs.using: node24`).
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Build the action bundle
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run build
+
       - name: Review fork PR with the trusted reviewer
         # `./` is the action code checked out in the step above — trusted
         # base-repository code, never the fork's copy of the action.
