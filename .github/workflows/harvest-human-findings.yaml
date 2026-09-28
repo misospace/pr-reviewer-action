@@ -106,7 +106,13 @@ jobs:
       # PR would otherwise be silently dropped. Carry it forward into this
       # run's input corpus (before the harvest script appends anything new)
       # so the duplicate-id check sees it and the next push carries both.
+      #
+      # This step's bot_branch_sha output is the exact remote SHA the merge
+      # was based on (or empty, if absent) and is threaded through to the
+      # push step's lease unmodified -- see push_harvest_branch.sh for why
+      # re-fetching there instead would race a concurrent run.
       - name: Merge unmerged bot-branch corpus entries
+        id: merge
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: >
@@ -144,4 +150,5 @@ jobs:
           COMMIT_MESSAGE: "chore(evals): harvest human findings from maintainer reviews"
           PR_TITLE: "chore(evals): harvest human findings"
           PR_BODY: "Automated harvest of maintainer CHANGES_REQUESTED reviews / blocking PR comments at heads the reviewer bot approved (#798). Human curation welcome before merge."
+          EXPECTED_BOT_SHA: ${{ steps.merge.outputs.bot_branch_sha }}
         run: scripts/push_harvest_branch.sh

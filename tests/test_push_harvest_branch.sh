@@ -24,6 +24,17 @@ set -euo pipefail
 # corpus afterwards has both the carried-forward and the newly harvested
 # entry. A further scenario covers an entry that was on the bot branch and
 # has since merged to main: no duplicate.
+#
+# And the atomic-lease follow-up (#801, third round): merge_bot_branch_corpus.py
+# captures the bot branch's exact remote SHA (or "absent") and that value is
+# threaded through to push_harvest_branch.sh's --force-with-lease UNCHANGED
+# -- it must not be refreshed by re-fetching at push time, or a concurrent
+# run's push landing in between would go undetected and get silently
+# clobbered. The "concurrency" scenario below reproduces exactly that
+# window and asserts the stale push is rejected and the remote keeps the
+# newer (concurrent) run's content. A further scenario asserts an
+# unreachable remote fails the merge step outright, as opposed to a
+# genuinely missing branch on a reachable remote, which must still proceed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -115,26 +126,57 @@ seed_existing_bot_branch() {
   rm -rf "$seed"
 }
 
+push_concurrent_update() {
+  # $1: bare remote, $2: corpus JSON to force-push onto $BRANCH from a
+  # brand-new clone. Simulates a different (faster) run's REAL push landing
+  # on the remote in the window between this run's merge and push steps --
+  # exactly like push_harvest_branch.sh itself: reset a fresh local branch
+  # from main's tip, commit, force-push.
+  local remote="$1" corpus_json="$2" seed="$TMPDIR/seed-concurrent-$RANDOM"
+  git clone -q --branch main "$remote" "$seed"
+  (
+    cd "$seed"
+    git config user.email t@example.com
+    git config user.name "Test Seed"
+    git checkout -q -B "$BRANCH"
+    echo "$corpus_json" > evals/corpus-human-findings.json
+    git add evals/corpus-human-findings.json
+    git commit -q -m "concurrent harvest" --allow-empty
+    git push -q --force origin "$BRANCH"
+  )
+  rm -rf "$seed"
+}
+
 fresh_single_branch_clone() {
   # $1: bare remote, $2: destination. Mirrors actions/checkout's default:
   # only the triggering branch (main) is known locally, nothing else.
   git clone -q --single-branch --branch main "file://$1" "$2"
 }
 
+# Sets MERGE_RC (the script's exit code) and MERGE_SHA (its captured
+# bot_branch_sha output, "" when the branch is absent) as a side effect.
+# Never itself trips `set -e`: callers that expect a possible failure (the
+# unreachable-remote scenario) read MERGE_RC explicitly instead.
 run_merge_script() {
   # $1: clone dir. Mirrors the "Merge unmerged bot-branch corpus entries"
   # workflow step: carries any unmerged bot-branch corpus entries forward
   # into the clone's local (base-branch) corpus, in place, before the
   # harvest step (simulated by append_harvested_entry below) appends
   # anything new.
-  local clone="$1"
+  local clone="$1" out="$TMPDIR/merge-output-$RANDOM"
+  : > "$out"
+  set +e
   (
     cd "$clone"
     PATH="$TMPDIR/bin:$PATH" \
       GH_TOKEN=dummy-test-token \
+      GITHUB_OUTPUT="$out" \
       python3 "$MERGE_SCRIPT" --branch "$BRANCH" --corpus evals/corpus-human-findings.json \
       >/dev/null 2>&1
   )
+  MERGE_RC=$?
+  set -e
+  MERGE_SHA="$(grep '^bot_branch_sha=' "$out" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
 }
 
 append_harvested_entry() {
@@ -157,8 +199,8 @@ PYEOF
 }
 
 run_push_script() {
-  # $1: clone dir, $2: new corpus content, rest: extra env assignments
-  local clone="$1" content="$2"
+  # $1: clone dir, $2: new corpus content, $3: EXPECTED_BOT_SHA
+  local clone="$1" content="$2" expected_sha="$3"
   echo "$content" > "$clone/evals/corpus-human-findings.json"
   (
     cd "$clone"
@@ -170,6 +212,7 @@ run_push_script() {
       COMMIT_MESSAGE="chore(evals): harvest human findings from maintainer reviews" \
       PR_TITLE="chore(evals): harvest human findings" \
       PR_BODY="test body" \
+      EXPECTED_BOT_SHA="$expected_sha" \
       bash "$PUSH_SCRIPT" >/dev/null 2>&1
   )
 }
@@ -177,7 +220,8 @@ run_push_script() {
 run_push_script_no_overwrite() {
   # Like run_push_script, but doesn't stomp the clone's working-tree corpus
   # (which run_merge_script / append_harvested_entry already built up).
-  local clone="$1"
+  # $1: clone dir, $2: EXPECTED_BOT_SHA
+  local clone="$1" expected_sha="$2"
   (
     cd "$clone"
     PATH="$TMPDIR/bin:$PATH" \
@@ -188,6 +232,7 @@ run_push_script_no_overwrite() {
       COMMIT_MESSAGE="chore(evals): harvest human findings from maintainer reviews" \
       PR_TITLE="chore(evals): harvest human findings" \
       PR_BODY="test body" \
+      EXPECTED_BOT_SHA="$expected_sha" \
       bash "$PUSH_SCRIPT" >/dev/null 2>&1
   )
 }
@@ -198,9 +243,13 @@ make_bare_remote_with_main "$REMOTE1"
 CLONE1="$TMPDIR/clone1"
 fresh_single_branch_clone "$REMOTE1" "$CLONE1"
 
+run_merge_script "$CLONE1"
+check "merge step succeeds (nothing to merge)" "$MERGE_RC" "0"
+check "captured sha for an absent branch is empty" "$MERGE_SHA" ""
+
 : > "$GH_CALL_LOG"
 set +e
-run_push_script "$CLONE1" '{"real_pr_corpus": {"vulnerable": [{"id": "new-1"}], "clean": []}}'
+run_push_script "$CLONE1" '{"real_pr_corpus": {"vulnerable": [{"id": "new-1"}], "clean": []}}' "$MERGE_SHA"
 RC=$?
 set -e
 check "first run exits 0" "$RC" "0"
@@ -221,11 +270,13 @@ CLONE2="$TMPDIR/clone2"
 fresh_single_branch_clone "$REMOTE2" "$CLONE2"
 
 run_merge_script "$CLONE2"
+check "merge step succeeds" "$MERGE_RC" "0"
+check "captured a real sha for the existing branch" "$([ -n "$MERGE_SHA" ] && echo yes || echo no)" "yes"
 append_harvested_entry "$CLONE2" "new-2"
 
 : > "$GH_CALL_LOG"
 set +e
-TEST_PR_EXISTS=1 run_push_script_no_overwrite "$CLONE2"
+TEST_PR_EXISTS=1 run_push_script_no_overwrite "$CLONE2" "$MERGE_SHA"
 RC=$?
 set -e
 check "second run (existing bot branch) exits 0, not rejected as stale" "$RC" "0"
@@ -248,11 +299,12 @@ CLONE4="$TMPDIR/clone4"
 fresh_single_branch_clone "$REMOTE4" "$CLONE4"
 
 run_merge_script "$CLONE4"
+check "merge step succeeds" "$MERGE_RC" "0"
 append_harvested_entry "$CLONE4" "new-4"
 
 : > "$GH_CALL_LOG"
 set +e
-run_push_script_no_overwrite "$CLONE4"
+run_push_script_no_overwrite "$CLONE4" "$MERGE_SHA"
 RC=$?
 set -e
 check "merged-to-main case exits 0" "$RC" "0"
@@ -260,6 +312,61 @@ REMOTE_CORPUS4="$(git --git-dir="$REMOTE4" show "$BRANCH":evals/corpus-human-fin
 SHARED_COUNT="$(echo "$REMOTE_CORPUS4" | grep -c '"id": "shared"')"
 check "the already-merged entry is not duplicated" "$SHARED_COUNT" "1"
 check_contains "the newly harvested entry is present" "$REMOTE_CORPUS4" '"id": "new-4"'
+
+echo ""
+echo "=== concurrency: a run pushes between this run's merge and push -> stale lease"
+echo "    rejected, remote keeps the newer (concurrent) run's content ==="
+REMOTE6="$TMPDIR/remote6.git"
+make_bare_remote_with_main "$REMOTE6"
+seed_existing_bot_branch "$REMOTE6" '{"real_pr_corpus": {"vulnerable": [{"id": "s1-prior"}], "clean": []}}'
+CLONE6="$TMPDIR/clone6"
+fresh_single_branch_clone "$REMOTE6" "$CLONE6"
+
+run_merge_script "$CLONE6"
+check "merge step succeeds" "$MERGE_RC" "0"
+S1_SHA="$MERGE_SHA"
+check "captured a real S1 sha before the concurrent push" "$([ -n "$S1_SHA" ] && echo yes || echo no)" "yes"
+
+# A different (faster) run's real push lands on the remote right now --
+# after our merge captured S1, before our push happens.
+push_concurrent_update "$REMOTE6" '{"real_pr_corpus": {"vulnerable": [{"id": "s2-concurrent"}], "clean": []}}'
+
+# Our run, unaware of S2, appends its own new finding on top of its
+# S1-based merge, then pushes using the SHA captured *before* S2 landed --
+# never refreshed by re-fetching.
+append_harvested_entry "$CLONE6" "new-6"
+: > "$GH_CALL_LOG"
+set +e
+run_push_script_no_overwrite "$CLONE6" "$S1_SHA"
+RC=$?
+set -e
+check "the stale push is rejected (non-zero exit)" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+
+REMOTE_CORPUS6="$(git --git-dir="$REMOTE6" show "$BRANCH":evals/corpus-human-findings.json)"
+check_contains "remote still has the CONCURRENT run's entry" "$REMOTE_CORPUS6" '"id": "s2-concurrent"'
+check_not_contains "remote does NOT have this (stale) run's entry" "$REMOTE_CORPUS6" '"id": "new-6"'
+check_not_contains "remote does NOT still have the original prior entry (S2 superseded it)" "$REMOTE_CORPUS6" '"id": "s1-prior"'
+
+echo ""
+echo "=== fetch failure: an unreachable remote is a hard failure for the merge step ==="
+REMOTE7="$TMPDIR/remote7.git"
+make_bare_remote_with_main "$REMOTE7"
+CLONE7="$TMPDIR/clone7"
+fresh_single_branch_clone "$REMOTE7" "$CLONE7"
+git -C "$CLONE7" remote set-url origin "$TMPDIR/this-path-does-not-exist.git"
+
+run_merge_script "$CLONE7"
+check "unreachable remote fails the merge step (non-zero)" "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "    (contrast) a genuinely missing branch on a REACHABLE remote proceeds fine:"
+REMOTE8="$TMPDIR/remote8.git"
+make_bare_remote_with_main "$REMOTE8"
+CLONE8="$TMPDIR/clone8"
+fresh_single_branch_clone "$REMOTE8" "$CLONE8"
+run_merge_script "$CLONE8"
+check "missing-branch (reachable remote) merge step succeeds" "$MERGE_RC" "0"
+check "missing-branch sha is empty, not an error" "$MERGE_SHA" ""
 
 echo ""
 echo "=== no diff: exits 0 without touching git at all ==="
@@ -273,13 +380,33 @@ set +e
   cd "$CLONE3"
   PATH="$TMPDIR/bin:$PATH" GH_TOKEN=dummy BRANCH="$BRANCH" BASE_BRANCH=main \
     CORPUS_PATH=evals/corpus-human-findings.json \
-    COMMIT_MESSAGE=x PR_TITLE=x PR_BODY=x \
+    COMMIT_MESSAGE=x PR_TITLE=x PR_BODY=x EXPECTED_BOT_SHA="" \
     bash "$PUSH_SCRIPT" >/dev/null 2>&1
 )
 RC=$?
 set -e
 check "unchanged corpus exits 0" "$RC" "0"
 check "gh was never invoked" "$(cat "$GH_CALL_LOG")" ""
+
+echo ""
+echo "=== EXPECTED_BOT_SHA omitted entirely is a hard failure (never silently empty) ==="
+REMOTE9="$TMPDIR/remote9.git"
+make_bare_remote_with_main "$REMOTE9"
+CLONE9="$TMPDIR/clone9"
+fresh_single_branch_clone "$REMOTE9" "$CLONE9"
+echo '{"real_pr_corpus": {"vulnerable": [{"id": "x"}], "clean": []}}' > "$CLONE9/evals/corpus-human-findings.json"
+set +e
+(
+  cd "$CLONE9"
+  unset EXPECTED_BOT_SHA
+  PATH="$TMPDIR/bin:$PATH" GH_TOKEN=dummy BRANCH="$BRANCH" BASE_BRANCH=main \
+    CORPUS_PATH=evals/corpus-human-findings.json \
+    COMMIT_MESSAGE=x PR_TITLE=x PR_BODY=x \
+    bash "$PUSH_SCRIPT" >/dev/null 2>&1
+)
+RC=$?
+set -e
+check "omitted EXPECTED_BOT_SHA is rejected (non-zero)" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

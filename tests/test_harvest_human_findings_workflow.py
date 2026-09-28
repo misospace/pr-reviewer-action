@@ -185,20 +185,41 @@ def test_push_script_is_executable() -> None:
     assert PUSH_SCRIPT.stat().st_mode & 0o111, "push_harvest_branch.sh must be executable"
 
 
-def test_push_script_fetches_remote_bot_branch_before_pushing() -> None:
-    """The bug this guards: actions/checkout only fetches the triggering
-    ref, so a fresh checkout has no local remote-tracking ref for the bot
-    branch. A bare `--force-with-lease` then gets rejected as stale info on
-    every run after the first. The fix must fetch the remote bot ref (or
-    tolerate its absence) and push with an explicit expected value."""
+def test_push_script_uses_expected_bot_sha_without_refetching() -> None:
+    """Atomic-lease guard (#801, third follow-up): push_harvest_branch.sh
+    must push with an explicit --force-with-lease built from
+    $EXPECTED_BOT_SHA, and must NOT re-fetch the bot branch itself to
+    compute that value. Re-fetching here would race a concurrent run: the
+    merge step's SHA snapshot could be silently replaced by a newer one,
+    making the lease check pass and clobbering the concurrent run's
+    content instead of rejecting the stale push."""
     text = PUSH_SCRIPT.read_text(encoding="utf-8")
-    assert "git fetch origin" in text and "${BRANCH}" in text, (
-        "must fetch the remote bot branch (or discover it's absent) before "
-        "computing the force-with-lease expected value"
+    assert re.search(r"--force-with-lease=[^\s]*\$\{?\{?EXPECTED_BOT_SHA", text), (
+        "must push with an explicit --force-with-lease=<ref>:$EXPECTED_BOT_SHA"
     )
-    assert re.search(r"--force-with-lease=[^\s]*\$\{?\{?expected_sha", text), (
-        "must push with an explicit --force-with-lease=<ref>:<expected-sha>, "
-        "not the bare form (which has no local record on a fresh checkout)"
+    assert "EXPECTED_BOT_SHA" in text, "must require EXPECTED_BOT_SHA as an input"
+    assert not re.search(r"git fetch origin[^\n]*BRANCH", text), (
+        "must not re-fetch the bot branch itself -- that would refresh the "
+        "lease's expected value out from under the merge step's snapshot, "
+        "defeating the whole point of the atomic lease"
+    )
+
+
+def test_workflow_threads_merge_sha_into_push_step_unmodified() -> None:
+    """The merge step's captured bot_branch_sha output must flow straight
+    into the push step's EXPECTED_BOT_SHA env, not be recomputed."""
+    workflow = yaml.safe_load(_text())
+    steps = workflow["jobs"]["harvest"]["steps"]
+    merge_step = next(s for s in steps if s.get("id") == "merge")
+    push_step = next(
+        s for s in steps if "push_harvest_branch.sh" in (s.get("run") or "")
+    )
+    assert merge_step, "expected the merge step to have id: merge"
+    env = push_step.get("env", {})
+    assert "EXPECTED_BOT_SHA" in env, "push step must set EXPECTED_BOT_SHA"
+    assert "steps.merge.outputs.bot_branch_sha" in env["EXPECTED_BOT_SHA"], (
+        "EXPECTED_BOT_SHA must come from the merge step's own output, not "
+        "be recomputed independently"
     )
 
 
