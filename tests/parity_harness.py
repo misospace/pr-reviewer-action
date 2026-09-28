@@ -1473,6 +1473,68 @@ PROMPT_ASSEMBLY_BOUNDARY = Boundary(
     canonical_json_keys={"failure_notices", "engine_annotations"},
 )
 
+
+def _producer_git_env() -> dict[str, str]:
+    """Both sides run git against their own prepared worktree; neither may
+    see the operator's global/system git config (decoration, quoting, or
+    abbreviation settings would change the captured bytes)."""
+    return {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C"}
+
+
+def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+    node = os.environ.get("PARITY_NODE") or shutil.which("node")
+    if not node:
+        raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 24)")
+    repo_v2 = prepare_repo(workdir / "repo-v2", fixture)
+    old = run_json_runner(
+        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_context_producers.py"), str(_fixture_path(fixture)), str(repo_v2)],
+        workdir,
+        timeout=180,
+        env={**os.environ, **_producer_git_env()},
+    )
+    repo_v3 = prepare_repo(workdir / "repo-v3", fixture)
+    new = run_json_runner(
+        [node, "dist/index.js", "context-producers-fixture", str(_fixture_path(fixture))],
+        workdir,
+        timeout=180,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(workdir),
+            "PARITY_REPO_DIR": str(repo_v3),
+            **_producer_git_env(),
+        },
+    )
+    # Adversarial containment fixtures (#805) name content that lives outside
+    # the worktree behind a symlink: it must never reach either runtime's
+    # output, whatever the two sides agree on.
+    for marker in fixture.get("forbidden_output") or []:
+        for side, result in (("v2", old), ("v3", new)):
+            leaked = [key for key, value in result.values.items() if marker in str(value)]
+            if leaked or marker in (result.error or ""):
+                raise RuntimeError(f"{side} output leaked out-of-checkout content {marker!r} via {leaked or ['<error>']}")
+    return old, new
+
+
+CONTEXT_PRODUCERS_BOUNDARY = Boundary(
+    id="context-producers",
+    description=(
+        "#706 PR 3 deterministic context producers: the production shell "
+        "slices (context.sh changed-manifest block, classification.sh repo "
+        "impact/history scan, context.sh linked-issue fetch/render/label "
+        "merge with the real Linear adapter and metadata status, "
+        "build_requirement_ledger's presence signal, config.sh "
+        "resolve_standards_file, corpus.sh's fence-safe related-code clip) "
+        "run in a harness-prepared worktree with only external seams "
+        "stubbed, versus the v3 producers over an identical worktree; every "
+        "artifact compared byte for byte."
+    ),
+    fixtures_dir="context-producers",
+    run=_context_producers_run,
+    error_categories=(
+        (re.compile(r"jq: error|jq: projection failed"), "projection-failed"),
+    ),
+)
+
 NEW_BOUNDARIES = (
     Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
     Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
@@ -1524,6 +1586,7 @@ NEW_BOUNDARIES = (
     METADATA_MARKERS_BOUNDARY,
     PLATFORM_NORMALIZATION_BOUNDARY,
     PROMPT_ASSEMBLY_BOUNDARY,
+    CONTEXT_PRODUCERS_BOUNDARY,
 )
 
 BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)

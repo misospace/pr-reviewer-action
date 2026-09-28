@@ -1,0 +1,59 @@
+{
+  "fixture": "manifest-symlink-escape",
+  "description": "ADVERSARIAL (#805): tracked symlinks named like manifests — a file link and a directory link pointing outside the checkout, plus a `..` escape — are never read; their outside content must not appear in either runtime's output. A real manifest beside them is still embedded.",
+  "producer": "manifest",
+  "pr_files_raw": [
+    {
+      "filename": "apps/deployment.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "linked/kustomization.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "ok/../../outside/helmrelease.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "ok/statefulset.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "inner/deployment.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    }
+  ],
+  "repo_files": {
+    "ok/statefulset.yaml": "kind: StatefulSet\n",
+    "real/deployment.yaml": "kind: Deployment\n"
+  },
+  "outside_files": {
+    "secret.yaml": "RUNNER-SECRET-MANIFEST-FILE\n",
+    "dir/kustomization.yaml": "RUNNER-SECRET-MANIFEST-DIR\n",
+    "helmrelease.yaml": "RUNNER-SECRET-MANIFEST-DOTDOT\n"
+  },
+  "symlinks": {
+    "apps/deployment.yaml": "../../outside/secret.yaml",
+    "linked": "../outside/dir",
+    "inner/deployment.yaml": "../real/deployment.yaml"
+  },
+  "forbidden_output": [
+    "RUNNER-SECRET"
+  ]
+}

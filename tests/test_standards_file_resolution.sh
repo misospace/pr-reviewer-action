@@ -15,29 +15,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=_lib/assert.sh
 source "$SCRIPT_DIR/_lib/assert.sh"
 
-# Source just the resolve_standards_file function
-resolve_standards_file() {
-  if [[ -n "$STANDARDS_FILE" && -f "$STANDARDS_FILE" ]]; then
-    return
-  fi
-
-  local candidate matches m
-  IFS=',' read -ra candidates <<< "$STANDARDS_FILE_CANDIDATES"
-  shopt -s nullglob
-  for candidate in "${candidates[@]}"; do
-    candidate="$(printf '%s' "$candidate" | xargs)"
-    [[ -n "$candidate" ]] || continue
-    matches=( $candidate )
-    for m in "${matches[@]}"; do
-      if [[ -f "$m" ]]; then
-        STANDARDS_FILE="$m"
-        shopt -u nullglob
-        return
-      fi
-    done
-  done
-  shopt -u nullglob
-}
+# Source the production resolve_standards_file and its containment guard
+# (workspace_regular_file, scripts/sections/common.sh) verbatim.
+# shellcheck source=/dev/null
+source <(python3 - "$ROOT_DIR/scripts/sections/common.sh" "$ROOT_DIR/scripts/sections/config.sh" <<'PY2'
+import sys
+common = open(sys.argv[1], encoding="utf-8").read()
+config = open(sys.argv[2], encoding="utf-8").read()
+print(common[common.index("workspace_regular_file() {"):])
+print(config[config.index("resolve_standards_file() {"):config.index("resolve_system_prompt() {")])
+PY2
+)
 
 PASS=0
 FAIL=0
@@ -100,6 +88,47 @@ STANDARDS_FILE=""
 STANDARDS_FILE_CANDIDATES="${SPACE_PATH},$TMPDIR/CLAUDE.md"
 resolve_standards_file
 check "whitespace trimmed" "$STANDARDS_FILE" "$TMPDIR/AGENTS.md"
+
+# ── Containment (#805): PR-controlled symlinks never resolve ──────────
+WS="$TMPDIR/ws"
+mkdir -p "$WS/real" "$TMPDIR/outside"
+echo "runner secret" > "$TMPDIR/outside/secret.md"
+echo "real rules" > "$WS/CLAUDE.md"
+ln -s "$TMPDIR/outside/secret.md" "$WS/AGENTS.md"
+ln -s "$TMPDIR/outside" "$WS/docs"
+pushd "$WS" >/dev/null
+
+STANDARDS_FILE=""
+STANDARDS_FILE_CANDIDATES="AGENTS.md,CLAUDE.md"
+resolve_standards_file
+check "file symlink candidate skipped" "$STANDARDS_FILE" "CLAUDE.md"
+
+STANDARDS_FILE=""
+STANDARDS_FILE_CANDIDATES="docs/*.md,docs/secret.md"
+resolve_standards_file
+check "directory symlink candidate skipped" "$STANDARDS_FILE" ""
+
+STANDARDS_FILE="AGENTS.md"
+STANDARDS_FILE_CANDIDATES="nope.md"
+resolve_standards_file
+check "symlinked standards_file refused and cleared" "$STANDARDS_FILE" ""
+
+STANDARDS_FILE="../outside/secret.md"
+STANDARDS_FILE_CANDIDATES="nope.md"
+resolve_standards_file
+check "relative escape refused and cleared" "$STANDARDS_FILE" ""
+
+STANDARDS_FILE="$WS/docs/secret.md"
+STANDARDS_FILE_CANDIDATES="nope.md"
+resolve_standards_file
+check "absolute path through a checkout symlink refused" "$STANDARDS_FILE" ""
+
+STANDARDS_FILE="$TMPDIR/outside/secret.md"
+STANDARDS_FILE_CANDIDATES="CLAUDE.md"
+resolve_standards_file
+check "operator absolute standards_file outside the checkout kept" "$STANDARDS_FILE" "$TMPDIR/outside/secret.md"
+
+popd >/dev/null
 
 # ── Results ───────────────────────────────────────────────────────────
 echo ""

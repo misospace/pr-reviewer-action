@@ -1,0 +1,8 @@
+{
+  "fixture": "related-clip-within",
+  "description": "Markdown within the cap is copied unchanged.",
+  "producer": "related-clip",
+  "markdown": "# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n",
+  "max_bytes": 100000,
+  "repo_files": {}
+}

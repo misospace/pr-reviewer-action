@@ -1,0 +1,12 @@
+{
+  "fixture": "standards-literal-in-glob-dir",
+  "description": "A glob directory component with a literal file component checks existence per directory.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "*/AGENTS.md",
+  "repo_files": {
+    "b/AGENTS.md": "b\n",
+    "a/README.md": "a\n",
+    "c/AGENTS.md": "c\n"
+  }
+}

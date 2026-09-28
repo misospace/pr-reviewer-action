@@ -141,3 +141,27 @@ export function jqSortBy<T>(items: readonly T[], key: (item: T) => unknown): T[]
 export function jqCompact(value: unknown): string {
   return JSON.stringify(value).replace(/\u007f/g, "\\u007f");
 }
+
+/** Default (pretty) `jq` output for one value, no trailing newline: two-space
+ * indent, `"key": value`, empty containers as `[]` / `{}`, scalars and keys
+ * escaped exactly like `jqCompact`. */
+export function jqPretty(value: unknown, level = 0): string {
+  const pad = "  ".repeat(level + 1);
+  const closePad = "  ".repeat(level);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    return `[\n${value.map((item) => `${pad}${jqPretty(item, level + 1)}`).join(",\n")}\n${closePad}]`;
+  }
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return "{}";
+    return `{\n${entries.map(([key, item]) => `${pad}${jqCompact(key)}: ${jqPretty(item, level + 1)}`).join(",\n")}\n${closePad}}`;
+  }
+  return jqCompact(value ?? null);
+}
+
+/** One `jq -r` output record, no trailing newline: a string prints raw,
+ * anything else in the default pretty form. */
+export function jqRaw(value: unknown): string {
+  return typeof value === "string" ? value : jqPretty(value);
+}

@@ -1,0 +1,33 @@
+{
+  "fixture": "repo-impact-basic",
+  "description": "Terms from title, body and version hints (lowercased, stopwords dropped, byte-sorted, deduped); one combined grep re-attributed per term by content only (the `path:lineno:` prefix is stripped, so a colon-digit path does not leak its name into attribution); the escaped `.` matches literally; binary files are skipped; per-term git log context, including the decorated HEAD commit.",
+  "producer": "repo-impact",
+  "pr": {
+    "title": "Bump Foo-Lib to v1.2.3",
+    "body": "Updates foo-lib and bar.baz config from renovate; unrelated\n"
+  },
+  "version_hints": "foo-lib 1.2.3\n",
+  "repo_files": {
+    "src/uses.py": "import foo-lib\nbarxbaz = 1\nbar.baz = 2\nconfig = foo-lib.config\n",
+    "notes/foo-lib:7:x.txt": "bar.baz here\n",
+    "assets/blob.bin": "foo-lib\u0000binary\n"
+  },
+  "commits": [
+    {
+      "message": "chore: initial import of foo-lib",
+      "files": {}
+    },
+    {
+      "message": "fix: bar.baz config drift",
+      "files": {
+        "src/extra.txt": "updates\n"
+      }
+    },
+    {
+      "message": "feat: unrelated change",
+      "files": {
+        "src/more.txt": "more\n"
+      }
+    }
+  ]
+}

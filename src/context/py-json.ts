@@ -80,3 +80,43 @@ function encode(value: unknown, indent: number, level: number, ensureAscii: bool
 export function pyJsonDump(value: unknown, indent = 2, ensureAscii = false): string {
   return encode(value, Math.min(Math.max(0, indent), 8), 0, ensureAscii);
 }
+
+function escapeAscii(text: string): string {
+  let out = "";
+  for (const unit of escapeString(text)) {
+    const code = unit.codePointAt(0) ?? 0;
+    if (code < 0x80) {
+      out += unit;
+    } else if (code > 0xffff) {
+      const offset = code - 0x10000;
+      out += `\\u${(0xd800 + (offset >> 10)).toString(16)}\\u${(0xdc00 + (offset & 0x3ff)).toString(16)}`;
+    } else {
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    }
+  }
+  return out;
+}
+
+/** Single-line `json.dumps(value, ensure_ascii=..., separators=...)` —
+ * insertion order. Python's defaults are `ensure_ascii=True` and the
+ * `(", ", ": ")` separators. */
+export function pyJsonDumpsLine(
+  value: unknown,
+  options: { ensureAscii?: boolean; separators?: readonly [string, string] } = {},
+): string {
+  const ensureAscii = options.ensureAscii ?? true;
+  const [itemSep, keySep] = options.separators ?? [", ", ": "];
+  const str = (text: string): string => `"${ensureAscii ? escapeAscii(text) : escapeString(text)}"`;
+  const walk = (item: unknown): string => {
+    if (item === null || item === undefined) return "null";
+    if (typeof item === "boolean") return item ? "true" : "false";
+    if (typeof item === "string") return str(item);
+    if (typeof item === "number") return String(item);
+    if (Array.isArray(item)) return `[${item.map(walk).join(itemSep)}]`;
+    if (typeof item === "object") {
+      return `{${Object.entries(item as Record<string, unknown>).map(([key, entry]) => `${str(key)}${keySep}${walk(entry)}`).join(itemSep)}}`;
+    }
+    throw new TypeError(`pyJsonDumpsLine: unsupported value ${typeof item}`);
+  };
+  return walk(value);
+}

@@ -1,0 +1,9 @@
+{
+  "fixture": "ledger-fit-boundary-fits",
+  "description": "ledger bytes + 31 framing bytes one below MAX_CORPUS: fits.",
+  "producer": "ledger-signal",
+  "ledger_md": "- [R1] Must validate input\n- [R2] Must log errors\n",
+  "ledger_json": "{\"sha\": \"s1\"}",
+  "max_corpus": 82,
+  "repo_files": {}
+}

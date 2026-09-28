@@ -1,0 +1,19 @@
+{
+  "fixture": "standards-symlink-dir-escape",
+  "description": "ADVERSARIAL (#805): a `docs` directory symlink to outside the checkout yields no candidate through a glob or a literal path, and a configured standards_file through it is refused and cleared (the readers only test -f).",
+  "producer": "standards",
+  "standards_file": "docs/rules.md",
+  "candidates": "docs/*.md,docs/rules.md",
+  "repo_files": {
+    "README.md": "r\n"
+  },
+  "outside_files": {
+    "docsdir/rules.md": "RUNNER-SECRET-STANDARDS-DIR\n"
+  },
+  "symlinks": {
+    "docs": "../outside/docsdir"
+  },
+  "forbidden_output": [
+    "RUNNER-SECRET"
+  ]
+}

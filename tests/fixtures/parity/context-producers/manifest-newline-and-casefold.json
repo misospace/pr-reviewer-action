@@ -1,0 +1,31 @@
+{
+  "fixture": "manifest-newline-and-casefold",
+  "description": "jq's `$` also matches before a final newline (the trailing newline becomes an empty, skipped `read` line), an embedded newline elsewhere does not match, and the Kelvin sign case-folds to k under jq's Unicode `i` flag (listed only: not on disk).",
+  "producer": "manifest",
+  "pr_files_raw": [
+    {
+      "filename": "ops/deployment.yaml\n",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "ops/deployment.yaml\nextra",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "filename": "ops/Kustomization.yaml",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    }
+  ],
+  "repo_files": {
+    "ops/deployment.yaml": "kind: Deployment\n"
+  }
+}

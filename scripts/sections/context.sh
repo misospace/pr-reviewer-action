@@ -416,9 +416,14 @@ if [ -n "$CHANGED_MANIFESTS" ]; then
   TOTAL=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if [ ! -f "$f" ]; then
+    # Never follow a PR-controlled symlink (or '..') out of the checkout (#805).
+    if ! workspace_regular_file "$f"; then
       echo "## File: $f" >> manifest-context.md
-      echo "(file not present in checked-out tree at this ref)" >> manifest-context.md
+      if [ -e "$f" ] || [ -L "$f" ]; then
+        echo "(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)" >> manifest-context.md
+      else
+        echo "(file not present in checked-out tree at this ref)" >> manifest-context.md
+      fi
       echo >> manifest-context.md
       continue
     fi

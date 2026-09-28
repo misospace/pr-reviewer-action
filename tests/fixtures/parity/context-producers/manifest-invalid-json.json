@@ -1,0 +1,9 @@
+{
+  "fixture": "manifest-invalid-json",
+  "description": "pr-files.raw.json that jq cannot parse selects nothing.",
+  "producer": "manifest",
+  "pr_files_raw_text": "{not json",
+  "repo_files": {
+    "deployment.yaml": "kind: Deployment\n"
+  }
+}

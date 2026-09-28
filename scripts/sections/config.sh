@@ -512,7 +512,11 @@ if [[ -z "$AI_FALLBACK_BASE_URL" && -n "$AI_FALLBACK_MODEL" ]]; then
 fi
 
 resolve_standards_file() {
-  if [[ -n "$STANDARDS_FILE" && -f "$STANDARDS_FILE" ]]; then
+  # Repository paths are containment-checked (#805): a PR-controlled symlink,
+  # or a '..' escape, never resolves. An absolute standards_file (or
+  # candidate) outside the checkout is an operator-owned location and keeps
+  # working.
+  if [[ -n "$STANDARDS_FILE" ]] && workspace_regular_file "$STANDARDS_FILE" allow-external; then
     return
   fi
 
@@ -524,7 +528,7 @@ resolve_standards_file() {
     [[ -n "$candidate" ]] || continue
     matches=( $candidate )
     for m in "${matches[@]}"; do
-      if [[ -f "$m" ]]; then
+      if workspace_regular_file "$m" allow-external; then
         STANDARDS_FILE="$m"
         shopt -u nullglob
         return
@@ -532,6 +536,11 @@ resolve_standards_file() {
     done
   done
   shopt -u nullglob
+  # The corpus and ledger readers only test -f, so a refused standards_file
+  # that still reads as a file must not survive resolution.
+  if [[ -f "$STANDARDS_FILE" ]]; then
+    STANDARDS_FILE=""
+  fi
 }
 
 resolve_system_prompt() {

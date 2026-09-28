@@ -101,3 +101,43 @@ gate_feature_for_forks() {
   fi
   return 1
 }
+
+# Containment guard for reading a repository path out of the reviewed
+# checkout (#805). The checkout is PR-controlled, so a tracked symlink named
+# like a manifest or standards file could point anywhere on the runner. A
+# path passes only when it names a regular file reachable WITHOUT following
+# any symlink: every component below the workspace ($PWD) is checked with
+# -L, and '..' components are refused. A relative path, or an absolute one
+# inside the workspace, is a checkout path. With $2=allow-external, an
+# absolute path outside the workspace is an operator-owned location (an
+# explicit standards_file or candidate) and only needs to be a regular file.
+workspace_regular_file() {
+  local path="$1" mode="${2:-}" ws="$PWD" rest part cur
+  [[ -n "$path" ]] || return 1
+  if [[ "$path" == /* ]]; then
+    if [[ "$path" == "$ws"/* ]]; then
+      rest="${path#"$ws"/}"
+      cur="$ws"
+    else
+      [[ "$mode" == allow-external && -f "$path" ]]
+      return
+    fi
+  else
+    rest="$path"
+    cur=""
+  fi
+  while :; do
+    part="${rest%%/*}"
+    case "$part" in
+      ..) return 1 ;;
+      ""|.) ;;
+      *)
+        cur="${cur:+$cur/}$part"
+        [[ -L "$cur" ]] && return 1
+        ;;
+    esac
+    [[ "$rest" == */* ]] || break
+    rest="${rest#*/}"
+  done
+  [[ -f "$path" ]]
+}

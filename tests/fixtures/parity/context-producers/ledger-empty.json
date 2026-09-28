@@ -1,0 +1,9 @@
+{
+  "fixture": "ledger-empty",
+  "description": "An empty ledger leaves the signal empty and empties requirement-ledger.json.",
+  "producer": "ledger-signal",
+  "ledger_md": null,
+  "ledger_json": "{\"sha\": \"stale\"}",
+  "max_corpus": 10000,
+  "repo_files": {}
+}

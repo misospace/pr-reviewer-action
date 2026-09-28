@@ -1,0 +1,10 @@
+{
+  "fixture": "standards-none",
+  "description": "Nothing matches: the configured (missing) value is returned unchanged.",
+  "producer": "standards",
+  "standards_file": "missing.md",
+  "candidates": "AGENTS.md,*.nope",
+  "repo_files": {
+    "README.md": "r\n"
+  }
+}

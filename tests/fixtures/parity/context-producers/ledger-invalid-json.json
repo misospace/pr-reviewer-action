@@ -1,0 +1,9 @@
+{
+  "fixture": "ledger-invalid-json",
+  "description": "Unparseable ledger JSON yields no sha (signal `1`).",
+  "producer": "ledger-signal",
+  "ledger_md": "- [R1] Must validate input\n- [R2] Must log errors\n",
+  "ledger_json": "not json",
+  "max_corpus": 10000,
+  "repo_files": {}
+}

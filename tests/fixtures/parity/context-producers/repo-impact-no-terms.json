@@ -1,0 +1,13 @@
+{
+  "fixture": "repo-impact-no-terms",
+  "description": "No candidate terms: all four files carry the fixed notice and the term lists are empty.",
+  "producer": "repo-impact",
+  "pr": {
+    "title": "A b",
+    "body": "x y"
+  },
+  "version_hints": null,
+  "repo_files": {
+    "a.txt": "a\n"
+  }
+}

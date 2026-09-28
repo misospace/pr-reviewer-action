@@ -1,0 +1,12 @@
+{
+  "fixture": "standards-negated-bracket",
+  "description": "`[!a]*.md` skips a.md.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "[!a]*.md",
+  "repo_files": {
+    "a.md": "a\n",
+    "c.md": "c\n",
+    "b.md": "b\n"
+  }
+}

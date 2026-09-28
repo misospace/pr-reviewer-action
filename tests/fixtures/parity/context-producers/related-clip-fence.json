@@ -1,0 +1,8 @@
+{
+  "fixture": "related-clip-fence",
+  "description": "A cut inside a fenced block drops back to before its opener.",
+  "producer": "related-clip",
+  "markdown": "# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n",
+  "max_bytes": 96,
+  "repo_files": {}
+}

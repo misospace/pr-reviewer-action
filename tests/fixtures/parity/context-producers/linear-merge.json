@@ -1,0 +1,88 @@
+{
+  "fixture": "linear-merge",
+  "description": "Linear issues from the title are fetched through the real adapter, rendered as compact fenced JSON appended to linked-issues.md, and merged after the GitHub issues (jq pretty); a GraphQL error is a per-identifier failure listed in the status.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "ENG-12: ship it (eng-7, ENG-12)",
+    "body": "Fixes #12"
+  },
+  "issues": {
+    "owner/repo#12": {
+      "data": {
+        "number": 12,
+        "title": "Harden auth",
+        "state": "open",
+        "html_url": "https://github.com/owner/repo/issues/12",
+        "labels": [
+          {
+            "name": "security",
+            "color": "red"
+          },
+          {
+            "name": "priority/high"
+          }
+        ],
+        "body": "Details\n```\nfence\n```\n",
+        "user": {
+          "login": "x"
+        }
+      }
+    }
+  },
+  "linear": {
+    "api_key": "lin_api_x",
+    "prefixes": "eng, ops",
+    "timeout": "20",
+    "enable_for_forks": "false",
+    "responses": {
+      "ENG-12": {
+        "json": {
+          "data": {
+            "issue": {
+              "id": "x",
+              "identifier": "ENG-12",
+              "title": "Spec `fence` ```",
+              "description": "Line 1\n```\nclose\n```",
+              "url": "https://linear.app/x/ENG-12",
+              "state": {
+                "name": "In Progress"
+              },
+              "priority": 2,
+              "labels": {
+                "nodes": [
+                  {
+                    "name": "Security"
+                  },
+                  {
+                    "name": ""
+                  },
+                  {
+                    "x": 1
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ENG-7": {
+        "json": {
+          "errors": [
+            {
+              "message": "Entity not found"
+            },
+            {
+              "message": ""
+            },
+            {
+              "code": 1
+            }
+          ]
+        }
+      }
+    }
+  },
+  "repo_files": {}
+}

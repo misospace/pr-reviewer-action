@@ -1,0 +1,38 @@
+{
+  "fixture": "linked-github-basic",
+  "description": "GitHub refs deduped in order; a fetched issue renders the pretty jq projection and feeds its labels back into linked-issues.json (jq pretty form); a failed fetch renders the notice, gets empty labels, and is listed in the metadata status.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "Harden auth",
+    "body": "Fixes #12\nCloses other/repo#3\nresolves #12\n"
+  },
+  "issues": {
+    "owner/repo#12": {
+      "data": {
+        "number": 12,
+        "title": "Harden auth",
+        "state": "open",
+        "html_url": "https://github.com/owner/repo/issues/12",
+        "labels": [
+          {
+            "name": "security",
+            "color": "red"
+          },
+          {
+            "name": "priority/high"
+          }
+        ],
+        "body": "Details\n```\nfence\n```\n",
+        "user": {
+          "login": "x"
+        }
+      }
+    },
+    "other/repo#3": {
+      "fail": true
+    }
+  },
+  "repo_files": {}
+}

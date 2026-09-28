@@ -1,0 +1,10 @@
+{
+  "fixture": "standards-first-line-only",
+  "description": "`read` stops at the first newline: candidates after it are ignored.",
+  "producer": "standards",
+  "standards_file": "",
+  "candidates": "AGENTS.md\nCLAUDE.md",
+  "repo_files": {
+    "CLAUDE.md": "c\n"
+  }
+}

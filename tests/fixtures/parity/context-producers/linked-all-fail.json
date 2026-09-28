@@ -1,0 +1,13 @@
+{
+  "fixture": "linked-all-fail",
+  "description": "Every fetch fails: no label merge, so linked-issues.json keeps Python's one-line form.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "t",
+    "body": "Fixes #1 and fixes: #2"
+  },
+  "issues": {},
+  "repo_files": {}
+}

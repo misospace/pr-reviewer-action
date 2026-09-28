@@ -1,0 +1,17 @@
+{
+  "fixture": "linked-null-issue",
+  "description": "A read that succeeds with null (the Forgejo failed-fetch quirk) projects to all-null fields and empty labels.",
+  "producer": "linked-issues",
+  "repo": "owner/repo",
+  "is_fork_pr": "false",
+  "pr": {
+    "title": "t",
+    "body": "Fixed #7"
+  },
+  "issues": {
+    "owner/repo#7": {
+      "data": null
+    }
+  },
+  "repo_files": {}
+}

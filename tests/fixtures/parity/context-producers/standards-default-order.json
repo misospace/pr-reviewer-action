@@ -1,0 +1,11 @@
+{
+  "fixture": "standards-default-order",
+  "description": "A missing preset falls through the default candidate list in order.",
+  "producer": "standards",
+  "standards_file": "nope.md",
+  "candidates": "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt",
+  "repo_files": {
+    ".github/ai-review-rules.txt": "t\n",
+    "CLAUDE.md": "c\n"
+  }
+}

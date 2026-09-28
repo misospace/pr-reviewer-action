@@ -1,0 +1,11 @@
+{
+  "fixture": "standards-preset-file",
+  "description": "A configured STANDARDS_FILE that is a regular file wins.",
+  "producer": "standards",
+  "standards_file": "docs/rules.md",
+  "candidates": "AGENTS.md",
+  "repo_files": {
+    "docs/rules.md": "r\n",
+    "AGENTS.md": "a\n"
+  }
+}

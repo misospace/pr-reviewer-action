@@ -1,0 +1,14 @@
+{
+  "fixture": "repo-impact-not-a-repo",
+  "description": "Outside a git repository both git commands fail: their stdout is empty and the sections render empty text fences (`2>/dev/null || true`).",
+  "producer": "repo-impact",
+  "repo": false,
+  "pr": {
+    "title": "Upgrade widget-core",
+    "body": ""
+  },
+  "version_hints": null,
+  "repo_files": {
+    "widget.txt": "widget-core\n"
+  }
+}
