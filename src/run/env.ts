@@ -82,13 +82,17 @@ export function buildStageEnv(
     const value = ambient[key];
     if (value !== undefined) env[key] = value;
   }
-  // v2 binding: GH_TOKEN := GH_TOKEN || GITHUB_TOKEN (config.sh); the token
-  // input lands under its contract name, the runner's GITHUB_TOKEN under
-  // ambient. The stage ABI reads GH_TOKEN.
+  // v2 binding: GH_TOKEN := GH_TOKEN || GITHUB_TOKEN (config.sh) — the
+  // ambient binding wins. The token input lands under its contract name and
+  // feeds GH_TOKEN only when the ambient has neither.
   if (env.GH_TOKEN === undefined || env.GH_TOKEN === "") {
-    const token = config.githubToken;
-    const revealed = typeof token === "object" && token !== null && "reveal" in token ? token.reveal() : "";
-    env.GH_TOKEN = revealed || ambient.GH_TOKEN || ambient.GITHUB_TOKEN || "";
+    const ambientToken = ambient.GH_TOKEN || ambient.GITHUB_TOKEN || "";
+    if (ambientToken !== "") {
+      env.GH_TOKEN = ambientToken;
+    } else {
+      const token = config.githubToken;
+      env.GH_TOKEN = typeof token === "object" && token !== null && "reveal" in token ? token.reveal() : "";
+    }
   }
   // v2: empty means "unset" everywhere down the stages.
   for (const key of Object.keys(env)) {

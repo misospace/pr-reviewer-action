@@ -126,7 +126,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
           AI_BASE_URL: ${{ vars.LITELLM_URL }}
           AI_API_FORMAT: ${{ vars.PRIMARY_FORMAT }}
           AI_MODEL: ${{ vars.PRIMARY_MODEL }}
@@ -187,14 +187,31 @@ jobs:
 
       - name: Upload v3 shadow run
         if: github.event_name == 'pull_request' && steps.review.outputs.should_review == 'true'
+        env:
+          # Deliberate secret-hygiene check (#809 review "Unknowns"): the run
+          # directory holds model requests and corpus mirrors. Before
+          # anything is packaged, every file is scanned for the live token
+          # values; a match is deleted and reported, and the tar is built
+          # only after the scan. GitHub also masks secret values in logs, so
+          # a leaked value cannot survive into the visible report either.
+          SHADOW_TOKENS: ${{ secrets.LITELLM_API_KEY }} ${{ steps.app-token.outputs.token }}
         run: |
           SHADOW_DIR="$(cat "$RUNNER_TEMP/v3-shadow-dir")"
           mkdir -p "$RUNNER_TEMP/v3-shadow-artifacts"
-          cp "$SHADOW_DIR/shadow-comparison.md" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          cp "$SHADOW_DIR/shadow-outputs.txt" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          cp "$SHADOW_DIR/ai-output.json" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          cp "$SHADOW_DIR/tool-harness.json" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          cp "$SHADOW_DIR/review-corpus.truncated.md" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
-          tar -czf "$RUNNER_TEMP/v3-shadow-artifacts/run.tar.gz" -C "$SHADOW_DIR" . 2>/dev/null || true
+          LEAKS=0
+          for token in $SHADOW_TOKENS; do
+            [ -n "$token" ] || continue
+            while IFS= read -r match; do
+              [ -n "$match" ] || continue
+              echo "::warning::redacting $match (contained a token value)"
+              rm -f -- "$match"
+              LEAKS=$((LEAKS + 1))
+            done < <(grep -RIlF -- "$token" "$SHADOW_DIR" 2>/dev/null || true)
+          done
+          echo "secret scan: $LEAKS file(s) redacted"
+          for name in shadow-comparison.md shadow-outputs.txt ai-output.json tool-harness.json review-corpus.truncated.md; do
+            cp "$SHADOW_DIR/$name" "$RUNNER_TEMP/v3-shadow-artifacts/" 2>/dev/null || true
+          done
+          tar -czf "$RUNNER_TEMP/v3-shadow-artifacts/run-redacted.tar.gz" --exclude='*.tar.gz' -C "$SHADOW_DIR" . 2>/dev/null || true
           echo "shadow run directory: $SHADOW_DIR"
           echo "shadow comparison:" && cat "$RUNNER_TEMP/v3-shadow-artifacts/shadow-comparison.md" 2>/dev/null || true

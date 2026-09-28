@@ -47,7 +47,11 @@ function runMode() {
   const map = contractInputMap();
   for (const [v2Key, v3Id] of map) {
     const value = process.env[v2Key];
-    if (value !== undefined && value !== "") {
+    // Forward empty bindings too: the composite's env blocks bind empty
+    // strings and the contract loader applies defaults for "" — the shadow
+    // must see exactly what production sees.
+    if (value !== undefined) {
+      mapped[`INPUT_${v3Id.toUpperCase()}`] = value;
       mapped[`INPUT_${v3Id.toUpperCase().replaceAll("-", "_")}`] = value;
     }
   }
