@@ -229,6 +229,13 @@ def determine_bot_approval(
     posted later still (e.g. the bot flagging issues after the fact) can't
     retroactively disqualify it either.
 
+    Fails closed on missing timestamps rather than treating them as
+    "earliest possible": a bot review with no ``submitted_at`` is never
+    counted as time-bounded evidence (an empty string would otherwise
+    lexicographically compare as `<=` everything), and a finding with no
+    ``finding_created_at`` can't be time-bounded against anything either —
+    both cases return unapproved rather than silently qualifying.
+
     Among the reviews at or before that timestamp, prefers the bot's
     ``ai-pr-reviewer:{...}`` metadata marker (``review_result == "clean"``)
     over the review's raw ``state``, since a later dismissal (the bot
@@ -237,13 +244,17 @@ def determine_bot_approval(
     ``(approved, base_sha)`` — ``base_sha`` is the marker's ``base_sha``
     field when it is a full 40-hex commit sha, else ``None``.
     """
+    if not finding_created_at:
+        return False, None
+
     bots_lower = {b.lower() for b in bots}
     candidates = [
         r
         for r in reviews
         if (r.get("user") or {}).get("login", "").lower() in bots_lower
         and r.get("commit_id") == head_sha
-        and (r.get("submitted_at") or "") <= finding_created_at
+        and r.get("submitted_at")
+        and r["submitted_at"] <= finding_created_at
     ]
     if not candidates:
         return False, None

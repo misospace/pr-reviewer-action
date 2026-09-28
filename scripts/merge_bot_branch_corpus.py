@@ -63,6 +63,15 @@ exactly that commit's content (the object is still present, whether or
 not any ref still points at it) or fails outright (treated as the hard
 failure above) -- it can never silently return a different commit's data.
 
+Schema validation, on both sides (#801 fourth follow-up): a corpus is only
+a valid snapshot if ``real_pr_corpus`` (when present) is an object and its
+``vulnerable`` (when present) is a list. That's checked for the remote
+bot-branch corpus before merging it (folded into the hard-failure path
+above), and equivalently for the *local* on-disk corpus before this script
+normalizes it -- silently ``setdefault``-ing a malformed ``real_pr_corpus``
+or ``vulnerable`` into an empty list would paper over corrupted state
+instead of failing on it.
+
 GitHub reads only (ls-remote + a fetch of one commit); never writes to
 GitHub.
 """
@@ -101,9 +110,32 @@ def resolve_bot_branch_sha(branch: str) -> tuple[str | None, bool]:
 
 
 class CorpusReadError(RuntimeError):
-    """A bot branch is known to exist, but its corpus couldn't be read at
-    the exact sha it was known to exist at. Callers must treat this as a
-    hard failure (see module docstring) -- never as "nothing to merge"."""
+    """A corpus (remote bot-branch or local) is known to exist but isn't
+    safely usable -- unreadable, unparseable, or the wrong shape. Callers
+    must treat this as a hard failure (see module docstring) -- never as
+    "nothing to merge" or a silently-normalized default."""
+
+
+def _validate_real_pr_corpus_shape(data: dict[str, Any], source: str) -> None:
+    """Raise ``CorpusReadError`` if ``data["real_pr_corpus"]`` is present
+    but not an object, or its ``vulnerable`` is present but not a list.
+    Absence of either key is fine -- callers treat that as empty -- but a
+    key present with the wrong type is malformed state that must fail
+    loud, not be silently normalized into an empty default.
+    """
+    block = data.get("real_pr_corpus")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        raise CorpusReadError(
+            f"{source}: real_pr_corpus must be an object, got {type(block).__name__}"
+        )
+    vulnerable = block.get("vulnerable")
+    if vulnerable is not None and not isinstance(vulnerable, list):
+        raise CorpusReadError(
+            f"{source}: real_pr_corpus.vulnerable must be a list, got "
+            f"{type(vulnerable).__name__}"
+        )
 
 
 def fetch_bot_branch_corpus_at(branch: str, sha: str, corpus_path: str) -> dict[str, Any]:
@@ -114,11 +146,13 @@ def fetch_bot_branch_corpus_at(branch: str, sha: str, corpus_path: str) -> dict[
     so a concurrent push landing between the ``ls-remote`` that produced
     ``sha`` and this call can't substitute a different commit's content.
     Raises ``CorpusReadError`` if the fetch fails, the file is missing at
-    that commit, it isn't valid JSON, or it doesn't parse to a JSON object.
-    A bot branch that exists but is missing the corpus file (or has one
-    that doesn't parse) is not a safe substitute for "no entries to merge"
-    -- it's unexpected, and callers must fail loud rather than merge
-    nothing while still reporting success.
+    that commit, it isn't valid JSON, it doesn't parse to a JSON object, or
+    its ``real_pr_corpus``/``vulnerable`` shape is wrong (see
+    ``_validate_real_pr_corpus_shape``). A bot branch that exists but is
+    missing the corpus file (or has one that doesn't parse or validate) is
+    not a safe substitute for "no entries to merge" -- it's unexpected, and
+    callers must fail loud rather than merge nothing while still reporting
+    success.
     """
     fetch = _run("git", "fetch", "origin", sha)
     if fetch.returncode != 0:
@@ -141,6 +175,7 @@ def fetch_bot_branch_corpus_at(branch: str, sha: str, corpus_path: str) -> dict[
         raise CorpusReadError(
             f"{corpus_path} on {branch}@{sha} did not parse to a JSON object"
         )
+    _validate_real_pr_corpus_shape(data, f"{branch}@{sha}:{corpus_path}")
     return data
 
 
@@ -217,7 +252,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    corpus_data = json.loads(args.corpus.read_text(encoding="utf-8"))
+    try:
+        corpus_data = json.loads(args.corpus.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"::error::failed to read {args.corpus}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(corpus_data, dict):
+        print(f"::error::{args.corpus} did not parse to a JSON object", file=sys.stderr)
+        return 1
+    try:
+        _validate_real_pr_corpus_shape(corpus_data, str(args.corpus))
+    except CorpusReadError as exc:
+        # Malformed local state must fail loud too, not be silently
+        # normalized into an empty real_pr_corpus/vulnerable default --
+        # see _validate_real_pr_corpus_shape.
+        print(f"::error::{exc}", file=sys.stderr)
+        return 1
+
     block = corpus_data.setdefault("real_pr_corpus", {"vulnerable": [], "clean": []})
     main_vulnerable = block.setdefault("vulnerable", [])
 

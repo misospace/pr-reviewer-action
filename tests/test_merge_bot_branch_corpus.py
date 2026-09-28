@@ -222,6 +222,60 @@ def test_fetch_bot_branch_corpus_at_non_dict_json_is_hard_failure(monkeypatch):
         mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
 
 
+def test_fetch_bot_branch_corpus_at_non_object_real_pr_corpus_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout='{"real_pr_corpus": "oops"}'),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+def test_fetch_bot_branch_corpus_at_non_list_vulnerable_is_hard_failure(monkeypatch):
+    monkeypatch.setattr(
+        mbc,
+        "_run",
+        _fake_run_sequence(
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess(
+                [], 0, stdout='{"real_pr_corpus": {"vulnerable": "not-a-list"}}'
+            ),
+        ),
+    )
+    with pytest.raises(mbc.CorpusReadError):
+        mbc.fetch_bot_branch_corpus_at("bot/x", "deadbeef", "evals/corpus.json")
+
+
+# ---------------------------------------------------------------------------
+# _validate_real_pr_corpus_shape: shared shape check, used on both the
+# remote (bot-branch) and local (main-checkout) corpus.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_shape_missing_real_pr_corpus_is_fine():
+    mbc._validate_real_pr_corpus_shape({}, "source")  # no raise
+
+
+def test_validate_shape_missing_vulnerable_is_fine():
+    mbc._validate_real_pr_corpus_shape({"real_pr_corpus": {}}, "source")  # no raise
+
+
+def test_validate_shape_non_object_real_pr_corpus_raises():
+    with pytest.raises(mbc.CorpusReadError):
+        mbc._validate_real_pr_corpus_shape({"real_pr_corpus": ["nope"]}, "source")
+
+
+def test_validate_shape_non_list_vulnerable_raises():
+    with pytest.raises(mbc.CorpusReadError):
+        mbc._validate_real_pr_corpus_shape(
+            {"real_pr_corpus": {"vulnerable": {"nope": True}}}, "source"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Atomicity: a real git race between ls-remote and the fetch of its result.
 # ---------------------------------------------------------------------------
@@ -382,6 +436,37 @@ def test_main_hard_failure_when_sha_check_fails(tmp_path, monkeypatch):
     # a stale/absent bot_branch_sha and proceed as if this step succeeded).
     data = json.loads(corpus_path.read_text(encoding="utf-8"))
     assert data["real_pr_corpus"]["vulnerable"] == [{"id": "a"}]
+    assert not output_path.exists()
+
+
+def test_main_local_corpus_non_object_real_pr_corpus_is_hard_failure(tmp_path, monkeypatch):
+    """Nit/blocker (#801 fourth follow-up): a malformed *local* corpus must
+    fail loud, not be silently normalized by setdefault into an empty
+    real_pr_corpus/vulnerable default."""
+    corpus_path = tmp_path / "corpus.json"
+    corpus_path.write_text('{"real_pr_corpus": "not-an-object"}', encoding="utf-8")
+    monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: (None, True))
+    output_path = tmp_path / "github_output"
+    rc = mbc.main(
+        ["--branch", "bot/x", "--corpus", str(corpus_path), "--github-output", str(output_path)]
+    )
+    assert rc != 0
+    # The file on disk must be left exactly as it was -- no normalization.
+    assert corpus_path.read_text(encoding="utf-8") == '{"real_pr_corpus": "not-an-object"}'
+    assert not output_path.exists()
+
+
+def test_main_local_corpus_non_list_vulnerable_is_hard_failure(tmp_path, monkeypatch):
+    corpus_path = tmp_path / "corpus.json"
+    original = '{"real_pr_corpus": {"vulnerable": "not-a-list"}}'
+    corpus_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(mbc, "resolve_bot_branch_sha", lambda branch: (None, True))
+    output_path = tmp_path / "github_output"
+    rc = mbc.main(
+        ["--branch", "bot/x", "--corpus", str(corpus_path), "--github-output", str(output_path)]
+    )
+    assert rc != 0
+    assert corpus_path.read_text(encoding="utf-8") == original
     assert not output_path.exists()
 
 

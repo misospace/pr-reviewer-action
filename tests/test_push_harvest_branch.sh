@@ -165,6 +165,26 @@ seed_bot_branch_invalid_corpus_json() {
   rm -rf "$seed"
 }
 
+seed_bot_branch_malformed_schema() {
+  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file is
+  # valid JSON but the wrong shape (real_pr_corpus.vulnerable is not a
+  # list) -- #801 fourth follow-up: a known-existing corpus with the wrong
+  # schema must be a hard failure too, not just outright-unparseable JSON.
+  local remote="$1" seed="$TMPDIR/seed-bot-badschema-$RANDOM"
+  git clone -q --branch main "$remote" "$seed"
+  (
+    cd "$seed"
+    git config user.email t@example.com
+    git config user.name "Test Seed"
+    git checkout -q -b "$BRANCH"
+    echo '{"real_pr_corpus": {"vulnerable": "not-a-list"}}' > evals/corpus-human-findings.json
+    git add evals/corpus-human-findings.json
+    git commit -q -m "prior harvest (malformed schema)" --allow-empty
+    git push -q origin "$BRANCH"
+  )
+  rm -rf "$seed"
+}
+
 push_concurrent_update() {
   # $1: bare remote, $2: corpus JSON to force-push onto $BRANCH from a
   # brand-new clone. Simulates a different (faster) run's REAL push landing
@@ -437,6 +457,19 @@ check "existing branch with invalid corpus JSON fails the merge step" \
   "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
 AFTER_SHA11="$(git --git-dir="$REMOTE11" rev-parse "$BRANCH")"
 check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA11" "$BEFORE_SHA11"
+
+REMOTE12="$TMPDIR/remote12.git"
+make_bare_remote_with_main "$REMOTE12"
+seed_bot_branch_malformed_schema "$REMOTE12"
+CLONE12="$TMPDIR/clone12"
+fresh_single_branch_clone "$REMOTE12" "$CLONE12"
+BEFORE_SHA12="$(git --git-dir="$REMOTE12" rev-parse "$BRANCH")"
+
+run_merge_script "$CLONE12"
+check "existing branch with malformed schema (vulnerable not a list) fails the merge step" \
+  "$([ "$MERGE_RC" -ne 0 ] && echo yes || echo no)" "yes"
+AFTER_SHA12="$(git --git-dir="$REMOTE12" rev-parse "$BRANCH")"
+check "remote bot branch is unchanged (no push happened)" "$AFTER_SHA12" "$BEFORE_SHA12"
 
 echo ""
 echo "=== no diff: exits 0 without touching git at all ==="

@@ -220,6 +220,53 @@ def test_determine_bot_approval_uses_review_at_finding_time_not_later_one():
     assert base_sha == BASE
 
 
+def test_determine_bot_approval_missing_bot_submitted_at_fails_closed():
+    """A bot review with no submitted_at must never qualify as time-bounded
+    evidence: an exact-head clean marker with a missing timestamp is
+    otherwise indistinguishable from the empty string, which would
+    lexicographically compare `<=` any finding_created_at and wrongly
+    qualify."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "submitted_at": None,
+            "body": _marker(review_result="clean"),
+        }
+    ]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T10:00:00Z")
+    assert approved is False
+    assert base_sha is None
+
+    # Also missing entirely (not just None).
+    del reviews[0]["submitted_at"]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T10:00:00Z")
+    assert approved is False
+    assert base_sha is None
+
+
+def test_determine_bot_approval_missing_finding_timestamp_fails_closed():
+    """A finding with no created_at can't be time-bounded against anything,
+    so it must never credit an otherwise-valid bot approval."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T09:00:00Z",
+            "body": _marker(review_result="clean"),
+        }
+    ]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "")
+    assert approved is False
+    assert base_sha is None
+
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, None)
+    assert approved is False
+    assert base_sha is None
+
+
 # ---------------------------------------------------------------------------
 # Anchor resolution: inline vs named-path
 # ---------------------------------------------------------------------------
