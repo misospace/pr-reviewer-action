@@ -103,6 +103,12 @@ jobs:
           publish_mode: review_verdict
           allow_approve: "true"
 
+      - name: Set up Node for the v3 shadow
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.should_review == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
       - name: Build v3 runtime (shadow)
         # The #809 shadow comparison: build the v3 TypeScript runtime from
         # the same checkout the v2 review just ran from, then re-run the
