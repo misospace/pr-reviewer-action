@@ -198,3 +198,18 @@ test("the bundle assembles prompts without the repository's scripts/ directory",
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("rawFragment: a missing fragment fails loud with a typed error (v2's set -e abort)", async () => {
+  const { rawFragment, MissingPromptFragmentError } = await import("../src/prompt/assets.js");
+  const assets = { defaultSystemPrompt: "base", fragments: { present: "text\n" } };
+  assert.equal(rawFragment(assets, "present"), "text\n");
+  for (const name of ["specialist_leads", "", "constructor", "__proto__", "toString"]) {
+    assert.throws(
+      () => rawFragment(assets, name),
+      (error: unknown) => error instanceof MissingPromptFragmentError
+        && error.name === "MissingPromptFragmentError"
+        && error.message === `prompt fragment not bundled: ${name}.txt`,
+      name,
+    );
+  }
+});
