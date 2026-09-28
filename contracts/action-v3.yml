@@ -4,8 +4,9 @@ contract: github-action
 inputs:
   - id: github-token
     v2_id: github_token
-    required: true
-    description: "GitHub token for PR and API access"
+    required: false
+    default: "${{ github.token }}"
+    description: "GitHub token for PR and API access. Defaults to the workflow's own token."
   - id: repo
     v2_id: repo
     required: false
@@ -37,8 +38,8 @@ inputs:
   - id: ai-max-tokens
     v2_id: ai_max_tokens
     required: false
-    default: "8192"
-    description: "Maximum completion tokens for the primary and fallback final review calls. Default 8192. Reasoning models that emit a thinking channel need this headroom — too low a cap is consumed by reasoning, leaving empty content with finish_reason=length, so the verdict JSON fails to parse and the review needlessly escalates or fails. Raise further (e.g. 16000) for verbose reasoning models."
+    default: "16384"
+    description: "Maximum completion tokens for the primary and fallback final review calls. Default 16384. Reasoning models that emit a thinking channel need this headroom — too low a cap is consumed by reasoning, leaving empty content with finish_reason=length, so the verdict JSON fails to parse and the review needlessly escalates or fails."
   - id: ai-temperature
     v2_id: ai_temperature
     required: false
@@ -92,8 +93,8 @@ inputs:
   - id: on-model-failure
     v2_id: on_model_failure
     required: false
-    default: "fail"
-    description: "Behavior when both primary and fallback models fail to return a usable review. 'fail' (default) fails the action step. 'notice' instead posts a visible request_changes notice explaining the review could not run (never auto-approves), so reviewers see an explanation instead of only a red check."
+    default: "notice"
+    description: "Behavior when both primary and fallback models fail to return a usable review. 'notice' (default) posts a visible request_changes notice explaining the review could not run (never auto-approves), so a provider outage does not fail the check. 'fail' fails the action step instead."
   - id: fail-on-request-changes
     v2_id: fail_on_request_changes
     required: false
@@ -118,8 +119,8 @@ inputs:
   - id: inline-findings
     v2_id: inline_findings
     required: false
-    default: "false"
-    description: "If true, structured findings that anchor to a line in the PR diff are attached as native line-anchored review comments when publishing with publish_mode=review_comment or review_verdict. Findings that cannot be anchored stay in the review body only. Default false — no inline comments. Ignored for publish_mode=comment."
+    default: "true"
+    description: "If true (default), structured findings that anchor to a line in the PR diff are attached as native line-anchored review comments when publishing with publish-mode=review_comment or review_verdict. Findings that cannot be anchored stay in the review body only. Ignored for publish-mode=comment."
     repo-configurable: true
   - id: inline-findings-max
     v2_id: inline_findings_max
@@ -280,8 +281,8 @@ inputs:
   - id: publish-mode
     v2_id: publish_mode
     required: false
-    default: "comment"
-    description: "Publish mode for the review verdict. 'comment' publishes a sticky PR comment (default). 'review_comment' uses GitHub's native PR review API to submit a non-blocking review comment. 'review_verdict' uses GitHub's native PR review API to submit approve/request_changes. Requires permissions: pull-requests: write for review_comment and review_verdict modes."
+    default: "review_comment"
+    description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead. 'review_verdict' submits approve/request_changes. review_comment and review_verdict need permissions: pull-requests: write."
   - id: allow-approve
     v2_id: allow_approve
     required: false
@@ -377,8 +378,8 @@ inputs:
   - id: deep-review
     v2_id: deep_review
     required: false
-    default: "false"
-    description: "Specialist leads (correctness/security/tests) over the review corpus: false = off, true = all three roles, auto = deterministic classifier-driven selection, possibly zero (advisory only)"
+    default: "auto"
+    description: "Specialist leads (correctness/security/tests) over the review corpus: auto (default) = deterministic classifier-driven selection, possibly zero; true = all three roles; false = off. Advisory only."
     repo-configurable: true
   - id: deep-review-timeout-sec
     v2_id: deep_review_timeout_sec
@@ -459,7 +460,7 @@ inputs:
   - id: tool-mode
     v2_id: tool_mode
     required: false
-    default: "off"
+    default: "native_loop"
     description: "Optional tool harness mode: \"off\" (no evidence tools) or \"native_loop\". With native_loop the model uses its native tool-calling API — it holds the tool schemas and decides each next read-only call from the previous result, enabling multi-hop evidence chains. A model that never emits a tool call degrades to a corpus-only review (the verdict is still produced). Loop turns stream by default (controlled by ai_stream) so long turns don't time out behind a short-idle proxy; a stream that can't be reassembled is retried non-streamed for that turn. Budgets: tool_max_requests, tool_max_rounds, and tool_loop_wall_clock_sec. (The legacy plan_execute_once / plan_execute_loop planner modes were removed in 2.0; a stale value is treated as \"off\".)"
   - id: tool-loop-wall-clock-sec
     v2_id: tool_loop_wall_clock_sec
@@ -499,8 +500,8 @@ inputs:
   - id: tool-turn-timeout-sec
     v2_id: tool_turn_timeout_sec
     required: false
-    default: "60"
-    description: "Timeout in seconds for each model turn of the tool_mode=native_loop exchange. Set generously for local models with slow prompt eval; native_loop streams turns by default (ai_stream) to avoid short-idle-proxy timeouts."
+    default: "180"
+    description: "Timeout in seconds for each model turn of the tool-mode=native_loop exchange. Default 180: a ceiling, not a cost — fast endpoints finish well within it, while local models with slow prompt eval need the headroom. native_loop streams turns by default (ai-stream) to avoid short-idle-proxy timeouts."
   - id: tool-corpus-max-bytes
     v2_id: tool_corpus_max_bytes
     required: false
@@ -509,8 +510,8 @@ inputs:
   - id: tool-max-tokens-per-turn
     v2_id: tool_max_tokens_per_turn
     required: false
-    default: "400"
-    description: "Maximum completion tokens for each model turn of the tool_mode=native_loop exchange"
+    default: "16384"
+    description: "Maximum completion tokens for each model turn of the tool-mode=native_loop exchange. Default 16384, so reasoning models are not cut off before they emit the tool call."
   - id: tool-max-response-bytes
     v2_id: tool_max_response_bytes
     required: false
@@ -640,8 +641,8 @@ inputs:
   - id: ci-status-check
     v2_id: ci_status_check
     required: false
-    default: "false"
-    description: "If true, wait for all CI checks to reach a terminal state before starting the AI review, then fold the per-check outcomes into the review corpus as evidence (so the model cites real test/lint results instead of \"not verifiable\"). Polls the Checks API for the PR head SHA. Default false — immediate review (original behavior)."
+    default: "true"
+    description: "If true (default), wait for CI checks to reach a terminal state before starting the AI review, then fold the per-check outcomes into the review corpus as evidence. Polls the Checks API for the PR head SHA; degrades when the token cannot read checks (grant checks: read). Set false for an immediate review."
   - id: ci-timeout-sec
     v2_id: ci_timeout_sec
     required: false

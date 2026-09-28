@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { validateContract } from "../src/config/contract.js";
+import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { loadConfig, toCamelCase } from "../src/config/load-config.js";
 import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
@@ -52,7 +53,9 @@ test("contract defaults and typed parsing agree for every input", () => {
   };
   for (const input of contract.inputs) {
     const key = toCamelCase(input.id) as keyof typeof config;
-    const text = input.required ? required[input.id]! : input.default === undefined ? "" : String(input.default);
+    // A `${{ ... }}` default is evaluated by the runner, not the loader.
+    const runnerExpression = typeof input.default === "string" && input.default.startsWith("${{");
+    const text = input.required ? required[input.id]! : input.default === undefined || runnerExpression ? "" : String(input.default);
     const expected = BOOLEAN_INPUTS.has(input.id) && text !== "" ? text === "true"
       : (INTEGER_INPUTS.has(input.id) || FLOAT_INPUTS.has(input.id)) && text !== "" ? Number(text) : text;
     const inheritedKey = inherited[input.id];
@@ -102,7 +105,7 @@ test("defaults are contract sourced and parsing is explicit", () => {
   const config = loadConfig(contract, raw);
   assert.equal(config.aiStream, false);
   assert.equal(config.aiMaxTokens, 8192);
-  assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "" }).aiMaxTokens, 8192);
+  assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "" }).aiMaxTokens, 16384);
   assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "12" }).aiMaxTokens, 12);
   assert.equal(config.aiTemperature, 0.1);
   assert.equal(loadConfig(contract, { ...raw, "ai-temperature": "" }).aiTemperature, "");
@@ -119,7 +122,10 @@ test("defaults are contract sourced and parsing is explicit", () => {
   assert.throws(() => loadConfig(contract, { ...raw, "tool-max-requests": "0" }), /between 1 and 50/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-api-format": "provider" }), /must be one of/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-stream": "yes" }), /must be 'true' or 'false'/);
-  assert.throws(() => loadConfig(contract, { ...raw, "github-token": "" }), /Required input 'github-token' is missing/);
+  // github-token defaults to the runner's `${{ github.token }}`; the loader
+  // never treats that expression as a value.
+  const noToken = loadConfig(contract, { ...raw, "github-token": "" }).githubToken;
+  assert.ok(isSecretValue(noToken) && !noToken.present);
   raw["ai-temperature"] = "NaN";
   assert.throws(() => loadConfig(contract, raw), /finite number/);
 });
@@ -151,9 +157,16 @@ test("secret values are redacted and never included in validation errors", () =>
   }
 });
 
-test("Node baseline accepts 24+ and rejects old or malformed versions", () => {
+test("Node baseline accepts 22+ and rejects old or malformed versions", () => {
+  assert.doesNotThrow(() => assertSupportedNode("v22.0.0"));
   assert.doesNotThrow(() => assertSupportedNode("v24.0.0"));
   assert.doesNotThrow(() => assertSupportedNode("26.9.0"));
-  assert.throws(() => assertSupportedNode("23.99.0"), /24 or newer/);
+  assert.throws(() => assertSupportedNode("21.99.0"), /22 or newer/);
   assert.throws(() => assertSupportedNode("node-latest"), /parse/);
+});
+
+test("a runner-expression default is never used as a value outside the runner", () => {
+  const contract = validateContract(V3_CONTRACT);
+  const config = loadConfig(contract, { "ai-base-url": "https://example.invalid", "ai-model": "m" });
+  assert.ok(isSecretValue(config.githubToken) && !config.githubToken.present);
 });

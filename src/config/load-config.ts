@@ -24,10 +24,16 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
   const config: MutableConfig = {};
   for (const input of contract.inputs) {
     const external = raw[input.id];
+    // A `${{ ... }}` default (github-token's `${{ github.token }}`) is a
+    // runner expression the action runner evaluates before exporting the
+    // input; outside the runner it is not a value and must never be used.
+    const fallback = typeof input.default === "string" && /^\$\{\{.*\}\}$/s.test(input.default.trim())
+      ? ""
+      : input.default;
     const source = external === undefined
-      ? input.default
-      : external === "" && input.default !== undefined && input.id !== "ai-temperature"
-        ? String(input.default)
+      ? fallback
+      : external === "" && fallback !== undefined && input.id !== "ai-temperature"
+        ? String(fallback)
         : external;
     if (source === undefined) {
       if (input.required) throw new Error(`Required input '${input.id}' is missing`);

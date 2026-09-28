@@ -6,7 +6,7 @@ const output = await build({
   tsconfig: 'tsconfig.build.json',
   bundle: true,
   platform: 'node',
-  target: 'node24',
+  target: 'node22',
   format: 'cjs',
   outfile: 'dist/index.js',
   sourcemap: false,
