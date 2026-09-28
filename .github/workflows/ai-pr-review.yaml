@@ -126,7 +126,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.precheck.outputs.head_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AI_BASE_URL: ${{ vars.LITELLM_URL }}
           AI_API_FORMAT: ${{ vars.PRIMARY_FORMAT }}
           AI_MODEL: ${{ vars.PRIMARY_MODEL }}
