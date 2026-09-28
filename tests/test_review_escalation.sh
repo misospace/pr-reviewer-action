@@ -93,8 +93,8 @@ for input in escalate_on_incomplete_required_checks escalate_on_fast_request_cha
 done
 check_contains "ai-smart-model documents reviewer-requested escalation" "$ACTION" "smart re-review runs only when the primary reviewer explicitly requests it"
 check_contains "escalation-reason output declared" "$ACTION" "escalation-reason:"
-check "publish step receives ESCALATION_REASON" \
-  "$(grep -c 'ESCALATION_REASON: ${{ steps.review.outputs.escalation-reason }}' "$ROOT_DIR/action.yml")" "1"
+check "the action entry passes ESCALATION_REASON to publish" \
+  "$(grep -c 'ESCALATION_REASON: review.outputs.escalationReason,' "$ROOT_DIR/src/run/action.ts")" "1"
 # config.sh keeps the knobs accepted (no silent behavior change) and warns.
 check_contains "config.sh keeps the deprecated knobs accepted" "$SRC" "accepted for backward compatibility"
 # Each notice must compare against ITS OWN input's documented default, so a

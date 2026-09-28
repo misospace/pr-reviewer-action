@@ -143,8 +143,6 @@ check_contains "review_verdict arm uses METADATA_MARKER in body" \
 
 # The dispatcher wires COMMENT_MARKER into its (shared) env block; every arm
 # emits it through emit_review_markers (asserted below).
-check_contains "publish step wires COMMENT_MARKER in env" \
-  "$PUBLISH_STEP_BODY" "COMMENT_MARKER:"
 
 # Every published body must emit the marker preamble (sticky COMMENT_MARKER +
 # METADATA_MARKER + head-sha + fingerprint) so the precheck can find prior
@@ -188,8 +186,6 @@ echo "=== Cleanup logic presence validation ==="
 # The publish step runs the v3 runtime entrypoint, which sources the helper
 # script once (before the case); the review_comment / review_verdict arms each
 # run the cleanup.
-check_contains "publish step runs the v3 runtime entrypoint" \
-  "$PUBLISH_STEP_BODY" 'dist/index.js" publish'
 
 check_contains "publish.sh sources publish_helpers.sh" \
   "$(cat "$PUBLISH_SH")" "publish_helpers.sh"

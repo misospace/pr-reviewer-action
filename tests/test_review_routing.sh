@@ -129,8 +129,8 @@ ACTION="$(cat "$ROOT_DIR/action.yml")"
 check_contains "action.yml declares review_routing_mode" "$ACTION" "review-routing-mode:"
 check_contains "action.yml declares ai_smart_model" "$ACTION" "ai-smart-model:"
 check_contains "action.yml declares review_route output" "$ACTION" "review-route:"
-check "publish step receives REVIEW_ROUTE" \
-  "$(grep -c 'REVIEW_ROUTE: \${{ steps.review.outputs.review-route }}' "$ROOT_DIR/action.yml")" "1"
+check "the action entry passes REVIEW_ROUTE to publish" \
+  "$(grep -c 'REVIEW_ROUTE: review.outputs.reviewRoute,' "$ROOT_DIR/src/run/action.ts")" "1"
 check_contains "marker carries review_route" "$(cat "$ROOT_DIR/scripts/publish_helpers.sh")" "review_route"
 
 echo ""

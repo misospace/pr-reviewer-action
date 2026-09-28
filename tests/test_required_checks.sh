@@ -43,8 +43,8 @@ ACTION="$(cat "$ROOT_DIR/action.yml")"
 check_contains "action.yml declares validate_required_checks input" "$ACTION" "validate-required-checks:"
 check_contains "action.yml declares required_check_validation_mode input" "$ACTION" "required-check-validation-mode:"
 check_contains "action.yml declares required_checks output" "$ACTION" "required-checks:"
-check "publish step receives REQUIRED_CHECKS" \
-  "$(grep -c 'REQUIRED_CHECKS: ${{ steps.review.outputs.required-checks }}' "$ROOT_DIR/action.yml")" "1"
+check "the action entry passes REQUIRED_CHECKS to publish" \
+  "$(grep -c 'REQUIRED_CHECKS: review.outputs.requiredChecks,' "$ROOT_DIR/src/run/action.ts")" "1"
 
 echo ""
 echo "=== Functional: build_metadata_marker carries required_checks ==="

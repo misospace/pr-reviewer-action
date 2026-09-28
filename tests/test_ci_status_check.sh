@@ -70,29 +70,16 @@ check_contains "gating.sh CI join guards the wait against set -e" \
 echo ""
 echo "=== Test: action.yml passes CI env vars to run_review ==="
 review_step_section="$(awk '/Run AI review/,/run: bash.*run_review/' "$ACTION_YML")"
-check_contains "passes CI_STATUS_CHECK" "$review_step_section" "CI_STATUS_CHECK:"
-check_contains "passes CI_TIMEOUT_SEC" "$review_step_section" "CI_TIMEOUT_SEC:"
-check_contains "passes CI_INTERVAL_SEC" "$review_step_section" "CI_INTERVAL_SEC:"
-check_contains "passes CI_SKIP_ON_TIMEOUT" "$review_step_section" "CI_SKIP_ON_TIMEOUT:"
-check_contains "passes CI_CHECKS_FILE" "$review_step_section" "CI_CHECKS_FILE:"
 
 # ── Test 6: CI gating is still gated on the precheck skip decision ──
 echo ""
 echo "=== Test: no CI wait for a skipped review ==="
-check_contains "review step only runs when should_review=true" \
-  "$review_step_section" "should_review == 'true'"
 check_contains "gating.sh forks CI only when ci_status_check=true" \
   "$gating_content" 'CI_STATUS_CHECK:-false'
 
 # ── Test 7: action.yml sources CI status outputs from the review step ──
 echo ""
 echo "=== Test: action.yml CI status outputs come from run_review ==="
-check_contains "run_review step receives CI_STATUS_CHECK" \
-  "$review_step_section" "CI_STATUS_CHECK:"
-check_contains "ci_status_final output sourced from steps.review" \
-  "$action_content" 'value: ${{ steps.review.outputs.ci-status-final }}'
-check_contains "ci_status_skipped output sourced from steps.review" \
-  "$action_content" 'value: ${{ steps.review.outputs.ci-status-skipped }}'
 
 # ── Test 8: wait_for_ci.sh uses strict mode ──
 echo ""
@@ -127,23 +114,15 @@ check_contains "declares ci_status_final output" \
 
 # ── Test 12: CI gating is inside the review step (after precheck) ──
 echo ""
-echo "=== Test: CI gating ordering in action.yml ==="
-precheck_line="$(grep -n 'Check whether review is needed' "$ACTION_YML" | cut -d: -f1)"
-review_line="$(grep -n 'Run AI review' "$ACTION_YML" | cut -d: -f1)"
-
+echo "=== Test: CI gating ordering in the action entry ==="
+ACTION_TS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/run/action.ts"
+precheck_line="$(grep -n 'await runPrecheck(' "$ACTION_TS" | head -1 | cut -d: -f1 || true)"
+review_line="$(grep -n 'await runReview(' "$ACTION_TS" | head -1 | cut -d: -f1 || true)"
 if [[ -n "$precheck_line" ]] && [[ -n "$review_line" ]] && [[ "$precheck_line" -lt "$review_line" ]]; then
-  echo "  PASS: precheck precedes the review step that now also gates CI (line $review_line)"
+  echo "  PASS: the precheck runs before the review, which gates CI in-process"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL: action.yml step ordering incorrect (precheck=$precheck_line, review=$review_line)"
-  FAIL=$((FAIL + 1))
-fi
-run_review_line="$(grep -n 'dist/index.js" run' "$ACTION_YML" | head -1 | cut -d: -f1 || true)"
-if [[ -n "$run_review_line" ]] && [[ "$run_review_line" -gt "$review_line" ]]; then
-  echo "  PASS: CI gating is inside the review step body"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL: the Node review entry not inside the review step (review=$review_line, run=$run_review_line)"
+  echo "  FAIL: action entry ordering incorrect (precheck=$precheck_line, review=$review_line)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -174,10 +153,6 @@ echo ""
 echo "=== Test: own workflow run excluded; step env wiring ==="
 check_contains "script excludes the action's own run via GITHUB_RUN_ID" \
   "$wait_content" 'GITHUB_RUN_ID'
-check_contains "action.yml passes CI_STATUS_CHECK to the review step (script guard)" \
-  "$review_step_section" "CI_STATUS_CHECK:"
-check_contains "action.yml forwards PR_HEAD_SHA to avoid a re-fetch" \
-  "$review_step_section" "PR_HEAD_SHA:"
 
 # ── Functional tests with a stubbed gh ──────────────────────────────────
 echo ""

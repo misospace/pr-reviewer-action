@@ -209,16 +209,8 @@ check_contains "CI launch is inside the ci_status_check gate" \
 echo ""
 echo "=== action.yml: precheck still gates both branches (no specialist calls for skips) ==="
 ACTION="$(cat "$ROOT_DIR/action.yml")"
-check_contains "review step still gated on should_review" \
-  "$ACTION" "steps.precheck.outputs.should_review == 'true'"
 check_not_contains "standalone CI wait step removed" \
   "$ACTION" 'name: Wait for CI checks to complete'
-check_contains "CI timeout input forwarded to the review step" "$ACTION" 'CI_TIMEOUT_SEC:'
-check_contains "CI interval input forwarded to the review step" "$ACTION" 'CI_INTERVAL_SEC:'
-check_contains "ci_status_final output sourced from the review step" \
-  "$ACTION" 'value: ${{ steps.review.outputs.ci-status-final }}'
-check_contains "ci_status_skipped output sourced from the review step" \
-  "$ACTION" 'value: ${{ steps.review.outputs.ci-status-skipped }}'
 
 echo ""
 echo "=== final corpus carries finalized CI evidence + usable specialist leads ==="
@@ -521,8 +513,6 @@ check "no specialist corpus build ran in the no-pgrep mode" \
   "$([ -e "$TMP/nopgrep-build-ran" ] && echo ran || echo skipped)" "skipped"
 check "require_gate_tree_cleanup succeeds when pgrep is present" \
   "$(source "$ROOT_DIR/scripts/sections/gating.sh"; log() { :; }; error() { :; }; require_gate_tree_cleanup && echo available)" "available"
-check_contains "action.yml validates pgrep as a runtime dependency" \
-  "$ACTION" "command -v pgrep"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

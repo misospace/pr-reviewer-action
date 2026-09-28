@@ -222,54 +222,17 @@ done
 echo ""
 echo "=== action.yml: inputs + env bindings ==="
 check_contains "deep_review input declared" "$ACTION" '  deep-review:'
-check "deep-review input defaults to false" \
-  "$(awk '/^  deep-review:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'false'"
+check "deep-review input defaults to auto (v3 recommended default)" \
+  "$(awk '/^  deep-review:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" '"auto"'
 check "deep-review-timeout-sec input defaults to 600" \
-  "$(awk '/^  deep-review-timeout-sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'600'"
+  "$(awk '/^  deep-review-timeout-sec:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" '"600"'
 check "deep-review-max-tokens input defaults to 4096" \
-  "$(awk '/^  deep-review-max-tokens:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'4096'"
+  "$(awk '/^  deep-review-max-tokens:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" '"4096"'
 check "deep-review-corpus-max-bytes input defaults to 48000" \
-  "$(awk '/^  deep-review-corpus-max-bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" "'48000'"
+  "$(awk '/^  deep-review-corpus-max-bytes:$/{f=1; next} f && /default:/{print $2; exit}' "$ACTION_YML")" '"48000"'
 
-# #641 moved the shared env bindings into the "Export shared review environment"
-# step (an action-local file consumed by the precheck and the review step), so
-# each binding now appears exactly once — in that step's env block — instead of
-# being duplicated across the precheck and review blocks. The assertion pins the
-# count AND the location, so a future edit that re-duplicates the binding or
-# drops it from the shared block fails here.
-shared_env_section="$(awk '/name: Export shared review environment/,/name: Check whether review is needed/' "$ACTION_YML")"
-
-deep_review_env="$(grep -n 'DEEP_REVIEW:' "$ACTION_YML" | cut -d: -f2- || true)"
-check "DEEP_REVIEW appears exactly once among env lines (shared block only)" \
-  "$(printf '%s\n' "$deep_review_env" | grep -c . || true)" "1"
-check "DEEP_REVIEW env binding lives in the shared export block" \
-  "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW:' || true)" "1"
-check "DEEP_REVIEW env binding is unchanged" \
-  "$(printf '%s\n' "$deep_review_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  '${{ inputs.deep-review }}'
-
-deep_review_timeout_env="$(grep -n 'DEEP_REVIEW_TIMEOUT_SEC:' "$ACTION_YML" | cut -d: -f2- || true)"
-check "DEEP_REVIEW_TIMEOUT_SEC appears exactly once among env lines (shared block only)" \
-  "$(printf '%s\n' "$deep_review_timeout_env" | grep -c . || true)" "1"
-check "DEEP_REVIEW_TIMEOUT_SEC env binding lives in the shared export block" \
-  "$(printf '%s\n' "$shared_env_section" | grep -c 'DEEP_REVIEW_TIMEOUT_SEC:' || true)" "1"
-check "DEEP_REVIEW_TIMEOUT_SEC env binding is unchanged" \
-  "$(printf '%s\n' "$deep_review_timeout_env" | sed -n 1p | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  '${{ inputs.deep-review-timeout-sec }}'
-
-for budget_var in DEEP_REVIEW_MAX_TOKENS DEEP_REVIEW_CORPUS_MAX_BYTES; do
-  budget_env="$(grep -n "${budget_var}:" "$ACTION_YML" | cut -d: -f2- || true)"
-  check "${budget_var} appears exactly once among env lines (shared block only)" \
-    "$(printf '%s\n' "$budget_env" | grep -c . || true)" "1"
-  check "${budget_var} env binding lives in the shared export block" \
-    "$(printf '%s\n' "$shared_env_section" | grep -c "${budget_var}:" || true)" "1"
-done
-check "DEEP_REVIEW_MAX_TOKENS env binding is unchanged" \
-  "$(grep -n 'DEEP_REVIEW_MAX_TOKENS:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  'DEEP_REVIEW_MAX_TOKENS: ${{ inputs.deep-review-max-tokens }}'
-check "DEEP_REVIEW_CORPUS_MAX_BYTES env binding is unchanged" \
-  "$(grep -n 'DEEP_REVIEW_CORPUS_MAX_BYTES:' "$ACTION_YML" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
-  'DEEP_REVIEW_CORPUS_MAX_BYTES: ${{ inputs.deep-review-corpus-max-bytes }}'
+# The v3 JavaScript action has no env blocks: every input reaches the stages
+# through stageEnvFromConfig (covered by tests-v3/run-env.test.ts).
 
 echo ""
 echo "=== precheck.py: deep review config fingerprinted ==="
@@ -306,17 +269,8 @@ check_contains "build failure forces a fresh review (unique sentinel, never a st
   "$CHECK" 'unavailable-$$-$(date +%s)-${RANDOM:-0}'
 check_contains "failure warning explains the forced review" "$CHECK" 'could not determine every selection input'
 
-# #633: the precheck step must receive the Linear credential — the builder
-# hashes the same Linear state the review pipeline fetches. Bound on the
-# step only (never the shared env file); the *_API_KEY suffix keeps it out
-# of the config fingerprint.
-PRECHECK_STEP="$(awk '/name: Check whether review is needed/,/name: Run AI review/' "$ACTION_YML")"
-check "precheck step binds LINEAR_API_KEY (auto fingerprint needs it)" \
-  "$(printf '%s\n' "$PRECHECK_STEP" | grep -c 'LINEAR_API_KEY: \${{ inputs.linear-api-key }}' || true)" "1"
-check "LINEAR_API_KEY is bound exactly twice (precheck + review steps; never the shared file)" \
-  "$(grep -c 'LINEAR_API_KEY:' "$ACTION_YML" || true)" "2"
-check "LINEAR_API_KEY stays out of the shared export block" \
-  "$(printf '%s\n' "$shared_env_section" | grep -c 'LINEAR_API_KEY' || true)" "0"
+# #633: the precheck must see the Linear credential; the action entry runs it
+# over the stage env that carries LINEAR_API_KEY (tests/test_precheck_linear_fingerprint.sh).
 check_contains "DEEP_REVIEW_MAX_TOKENS in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_MAX_TOKENS"'
 check_contains "DEEP_REVIEW_CORPUS_MAX_BYTES in _EXACT_CONFIG_KEYS" "$frozen_block" '"DEEP_REVIEW_CORPUS_MAX_BYTES"'
 
