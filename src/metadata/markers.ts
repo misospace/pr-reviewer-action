@@ -76,6 +76,9 @@ export interface RunMarkerContext {
   coverage?: string;
   /** #810: the loop stop reason behind coverage: partial. */
   coverageStopReason?: string;
+  /** #812: folded external-CI conclusion at the reviewed head; omitted when
+   * CI was not read so complete runs keep their pre-#812 marker bytes. */
+  ciState?: string;
 }
 
 /**
@@ -111,6 +114,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     cache_hit_ratio: cacheHitRatio,
     coverage: cov === "" ? null : cov,
     coverage_stop_reason: covStop === "" ? null : covStop,
+    ci_state: context.ciState ?? null,
   });
 }
 

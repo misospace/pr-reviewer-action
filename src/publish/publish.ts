@@ -63,6 +63,11 @@ export interface PublishInput {
   conditionalPresence: ConditionalSectionPresence;
   /** When set, removed after publish (the re-review label cleanup). */
   rerunLabel?: string;
+  /** #812: folded external-CI conclusion at headSha ("success" | "failure"
+   * | "pending" | "none"), recorded in the marker so the next diff-unchanged
+   * skip can tell a stale carried request_changes from a live one. Omitted
+   * when the caller did not read CI. */
+  ciState?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -491,6 +496,7 @@ export async function publishReview(
     reviewRoute: input.reviewRoute,
     escalationReason: input.escalationReason,
     cacheHitRatio: input.cacheHitRatio,
+    ...(input.ciState !== undefined && input.ciState !== "" ? { ciState: input.ciState } : {}),
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run

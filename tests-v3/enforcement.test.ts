@@ -325,3 +325,36 @@ test("metadata preamble, managed-body identity, and forged marker stripping", ()
   assert.equal(isManagedBody("prefix <!-- ai-pr-reviewer: v3 -->"), false);
   assert.equal(stripReservedMarkers("before <!-- AI-PR-REVIEW-SHA: forged --> middle <!--ai-pr-review-fingerprint:bad--> after"), "before  middle  after");
 });
+
+// ---------------------------------------------------------------------------
+// #792 regression (v3 disposition, #812): a carried thread blocker the same
+// review settles as `fixed` — with evidence citing current code — is NOT
+// re-emitted into the findings array, so the findings-severity gate counts
+// only what is still open. (The v2 incremental carry-forward this bug lived
+// in was removed with #619; the thread settlement is the remaining path a
+// "resolved" item could re-enter the gate through.)
+// ---------------------------------------------------------------------------
+
+test("#792: a thread blocker settled as fixed with code evidence is not counted by the severity gate", () => {
+  const a = artifact({ verdict: "approve", findings: [] });
+  const threads = [
+    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: false, replies: 0 },
+  ];
+  a.thread_dispositions = [{ thread_id: "t1", disposition: "fixed", evidence: "the leak is gone; see src/a.py:5 handling" }];
+  applyReviewThreadEnforcement(a, threads, "findings_severity_gated");
+  assert.equal(a.findings.length, 0, "a settled thread must not re-enter the open findings");
+  assert.equal(a.verdict, "approve", "the gate must not escalate on a resolved blocker");
+});
+
+test("#792: the same blocker claimed fixed WITHOUT code evidence stays open and escalates", () => {
+  const a = artifact({ verdict: "approve", findings: [] });
+  const threads = [
+    { thread_id: "t1", path: "src/a.py", line: 3, severity: "blocker", message: "handles leak", own_finding: false, replies: 0 },
+  ];
+  a.thread_dispositions = [{ thread_id: "t1", disposition: "fixed", evidence: "trust me it is fixed" }];
+  applyReviewThreadEnforcement(a, threads, "findings_severity_gated");
+  assert.equal(a.findings.length, 1, "an unevidenced resolution downgrades to open");
+  const reemitted = a.findings[0] as unknown as { severity: string; thread_id?: string };
+  assert.equal(reemitted.severity, "blocker");
+  assert.equal(reemitted.thread_id, "t1");
+});

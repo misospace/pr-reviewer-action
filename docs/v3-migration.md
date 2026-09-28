@@ -444,6 +444,26 @@ placeholder while the diff half and the forced-review decision still compare
 as-is. Error cases compare through the boundary's category table
 (missing input, unsupported platform, Forgejo permission refusal modes).
 
+### The #812 consistent re-reviews change
+
+v3 fixes the stale carried verdict: when the diff/config fingerprint matches
+(`skip_if_diff_unchanged`) and the carried verdict is `request_changes`, the
+precheck re-reads the external-CI conclusion through the platform adapter's
+`externalChecks` seam and compares it with the `ci_state` recorded in the
+managed marker. A changed conclusion, a transient/unknown read, or a
+pre-#812 marker without a stored state forces a fresh review (fail closed) —
+CI turning green can no longer leave a stale CHANGES_REQUESTED stuck until
+the next push. A carried `approve` is never re-checked (the CI check itself
+gates merges), and adapters without the read seam (the parity fixture
+surface) keep the exact v2 skip, so the `precheck-decision` boundary is
+unchanged. The marker gains an optional trailing `ci_state`
+("success" | "failure" | "pending" | "none") written by the publish path;
+markers without it serialize byte-identically to before. #792's
+resolved-blocker gate needs no code change in v3 — the incremental
+carry-forward it lived in was removed with #619, and the thread-settlement
+path already prunes `fixed` threads from the open findings (pinned by
+regression tests).
+
 ### The `conversation-rendering` boundary (#678)
 
 Pins the v3 `Conversation` port (`src/model/conversation.ts`) against

@@ -31,6 +31,7 @@ import {
   extractStoredFingerprint,
   lastManagedBody,
   runPrecheck,
+  externalChecksConclusion,
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
 
@@ -298,4 +299,110 @@ test("runPrecheck refuses Forgejo publish paths conservatively", async () => {
     runPrecheck({ env: denied.env, adapter: new FixtureAdapter("forgejo", denied.platform) }),
     /lacks Forgejo write permission/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// #812: consistent re-reviews — the CI-aware skip re-check
+// ---------------------------------------------------------------------------
+
+import type { PlatformAdapter } from "../src/platform/types.js";
+import type { ExternalCheck } from "../src/platform/normalize.js";
+
+const FP_812 = "3be6193409646aae05d5319a7ed87a0531aaec5f32783eba9661e926299cc474|cfg:dd7c82b6b211fa0ef17693822887e061aa6a94ce03645cb7e9b88ac6dcc60f4b";
+const MARKER_HEAD_812 = "head-old";
+
+/** The published managed comment: fingerprint matches the fixed diff,
+ * marker carries review_result=issues bound to a CI state under test. */
+function issuesCommentBody812(reviewResult: string, ciState: string): string {
+  return `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${FP_812} -->
+## Review
+Needs work.
+<!-- ai-pr-reviewer:{"version":1,"head_sha":"${MARKER_HEAD_812}","base_sha":"base-old","review_result":"${reviewResult}","ci_state":"${ciState}"} -->
+`;
+}
+
+interface SkipAdapter extends PlatformAdapter {
+  externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
+}
+
+function skipAdapter812(external: ExternalCheck[] | null, body: string): SkipAdapter {
+  let reads = 0;
+  return {
+    platform: "github",
+    getPr: () => Promise.resolve({ number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
+    listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z" }]),
+    listPrReviews: () => Promise.resolve([]),
+    repoPermission: () => Promise.resolve(null),
+    ghApi: () => Promise.resolve({ error: "n/a" }),
+    externalChecks: (sha: string) => {
+      reads += 1;
+      if (external === null) return Promise.resolve(null);
+      assert.equal(sha, MARKER_HEAD_812);
+      return Promise.resolve(external);
+    },
+  } as unknown as SkipAdapter & { readCount(): number };
+}
+
+function skipEnv812(): Record<string, string> {
+  return { REPO: "misospace/demo", PR_NUMBER: "42", PUBLISH_MODE: "comment", AI_MODEL: "test-model" };
+}
+
+test("#812: CI turned green under a carried request_changes — the review is not skipped", async () => {
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "failure"));
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#812: diff, config and CI all unchanged — still skipped with the carried verdict", async () => {
+  const adapter = skipAdapter812([{ name: "ci", state: "failure" }], issuesCommentBody812("issues", "failure"));
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "request_changes");
+  assert.equal(output.verdict_source, "carry_forward");
+});
+
+test("#812: a transient external-checks read fails closed — fresh review, never a silent skip", async () => {
+  const adapter = skipAdapter812(null, issuesCommentBody812("issues", "failure"));
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#812: an adapter without the externalChecks seam keeps the exact v2 skip", async () => {
+  const adapter = skipAdapter812([], issuesCommentBody812("issues", "failure"));
+  delete (adapter as { externalChecks?: unknown }).externalChecks;
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "request_changes");
+});
+
+test("#812: a carried approve is never re-checked (zero extra API reads)", async () => {
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("clean", "success"));
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "approve");
+  assert.equal(output.verdict_source, "carry_forward");
+});
+
+test("#812: a pre-#812 marker (no stored ci_state) forces one fresh review", async () => {
+  const adapter = skipAdapter812(
+    [{ name: "ci", state: "success" }],
+    issuesCommentBody812("issues", "").replace(',"ci_state":""', ""),
+  );
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#812: externalChecksConclusion folds the check states", () => {
+  assert.equal(externalChecksConclusion([{ name: "a", state: "failure" }, { name: "b", state: "success" }]), "failure");
+  assert.equal(externalChecksConclusion([{ name: "a", state: "pending" }, { name: "b", state: "success" }]), "pending");
+  assert.equal(externalChecksConclusion([{ name: "a", state: "success" }]), "success");
+  assert.equal(externalChecksConclusion([]), "none");
 });

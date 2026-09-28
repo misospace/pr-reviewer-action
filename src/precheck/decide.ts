@@ -1,3 +1,5 @@
+import type { PlatformReadAdapter } from "../platform/types.js";
+import type { ExternalCheck } from "../platform/normalize.js";
 import { deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import type { PlatformAdapter } from "../platform/types.js";
@@ -75,6 +77,24 @@ export function evaluatePrecheck(
     broad_fingerprint: broad,
     reason: "New or forced changes detected",
   };
+}
+
+/** Fold normalized external checks into one verdict-relevant conclusion
+ * (#812): `failure` when any check failed, `pending` when none failed but
+ * some are incomplete, `success` when every check passed, `none` when no
+ * external check ran. The same states `checkRunState`/`statusState` emit. */
+export function externalChecksConclusion(checks: readonly ExternalCheck[]): "success" | "failure" | "pending" | "none" {
+  let sawPending = false;
+  let sawSuccess = false;
+  for (const check of checks) {
+    const state = String(check.state ?? "").toLowerCase();
+    if (state === "failure") return "failure";
+    if (state === "pending") sawPending = true;
+    if (state === "success") sawSuccess = true;
+  }
+  if (sawPending) return "pending";
+  if (sawSuccess) return "success";
+  return checks.length === 0 ? "none" : "pending";
 }
 
 /** Map a decision to the action's (should_review, skip_reason). */
@@ -267,22 +287,75 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   const broadFingerprint = result.broad_fingerprint;
 
   if (!shouldReview) {
-    const output = platformOutputs(
-      { should_review: "false", skip_reason: skipReason, diff_fingerprint: broadFingerprint },
-      resolvedPlatform,
-      effectiveForgejoApiUrl,
-    );
     if (skipReason === "diff-unchanged") {
       const carried = carriedVerdict(lastCommentBody);
+      // ── #812: the stale carried verdict ──────────────────────────────
+      // A carried request_changes binds to the CI conclusion (and the
+      // required-checks state) the review saw. When the forge exposes the
+      // external-checks read seam, re-read it on the skip: a changed or
+      // unknown conclusion forces a fresh review (fail closed), so CI
+      // turning green — or a transient API failure — can never leave a
+      // stale CHANGES_REQUESTED stuck until the next push. Adapters
+      // without the seam (the parity fixture surface, the base
+      // PlatformAdapter) keep the exact v2 skip behavior; a carried
+      // approve is never re-checked (the CI check itself gates merges).
+      if (carried?.verdict === "request_changes") {
+        const readAdapter = spec.adapter as Partial<PlatformReadAdapter>;
+        if (typeof readAdapter.externalChecks === "function") {
+          const marker = parseMetadata(lastCommentBody);
+          const storedCiState = typeof marker?.ci_state === "string" ? marker.ci_state : "";
+          const headSha = typeof marker?.head_sha === "string" ? marker.head_sha : "";
+          if (headSha !== "" && storedCiState !== "none") {
+            const checks = await readAdapter.externalChecks(headSha).catch(() => null);
+            const live = checks === null ? null : externalChecksConclusion(checks);
+            // Transient/unknown read, a marker from before #812 (no stored
+            // state), or a changed conclusion: the verdict-relevant input
+            // cannot be proven unchanged — review afresh.
+            if (live === null || live !== storedCiState) {
+              process.stderr.write(
+                "warning: carried request_changes is CI-stale (stored: " + (storedCiState || "unrecorded") + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
+              );
+              return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+            }
+          }
+        }
+      }
+      const output = platformOutputs(
+        { should_review: "false", skip_reason: skipReason, diff_fingerprint: broadFingerprint },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
       if (carried) {
         output.verdict = carried.verdict;
         output.verdict_source = carried.verdictSource;
       }
+      return output;
     }
-    return output;
+    return platformOutputs(
+      { should_review: "false", skip_reason: skipReason, diff_fingerprint: broadFingerprint },
+      resolvedPlatform,
+      effectiveForgejoApiUrl,
+    );
   }
 
-  // ── Review path: PR object once → SHAs/fork → superseded guard ────────
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "");
+
+  // ── Review path (shared by the fall-through and the #812 stale-skip
+  // re-entry): PR object once → SHAs/fork → superseded guard → Forgejo
+  // preflight → proceed. `skip_reason` is non-empty only for the re-entry,
+  // where it documents WHY the skip was refused (still should_review=true).
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "");
+}
+
+async function reviewPathOutputs(
+  spec: PrecheckSpec,
+  env: Record<string, string>,
+  resolvedPlatform: string,
+  effectiveForgejoApiUrl: string,
+  broadFingerprint: string,
+  staleReason: string,
+): Promise<PrecheckOutput> {
+  const repo = env.REPO ?? "";
   const prObject = await spec.adapter.getPr();
   const identity = normalizePrIdentity(prObject ?? {});
 
@@ -324,7 +397,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   return platformOutputs(
     {
       should_review: "true",
-      skip_reason: "",
+      skip_reason: staleReason,
       diff_fingerprint: broadFingerprint,
       head_sha: identity.headSha,
       base_sha: identity.baseSha,

@@ -48,6 +48,11 @@ export interface MetadataOptions {
   coverage?: string | null;
   /** #810: the loop stop reason behind coverage: partial. */
   coverage_stop_reason?: string | null;
+  /** #812: the folded external-CI conclusion at the reviewed head
+   * ("success" | "failure" | "pending" | "none"). The skip re-check compares
+   * it against the live state; omitted (null/empty) when unknown so the
+   * marker stays byte-identical to pre-#812 whenever CI was not read. */
+  ci_state?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -78,6 +83,9 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.coverage_stop_reason !== null && options.coverage_stop_reason !== undefined && options.coverage_stop_reason !== "") {
     data.coverage_stop_reason = options.coverage_stop_reason;
+  }
+  if (options.ci_state !== null && options.ci_state !== undefined && options.ci_state !== "") {
+    data.ci_state = options.ci_state;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
