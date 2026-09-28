@@ -39,7 +39,9 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, applySystemPromptFragments, applySpecialistLeadsFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, strictReviewResult } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { markerReviewResult } from "../publish/publish.js";
+import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
@@ -624,19 +626,27 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   });
 
   const finished = clock();
+  // #810: the harness's own deterministic coverage record for the published
+  // route (smart when escalated), never the model's claim.
+  const partialCoverage = partialCoverageOf(safeJson(ws.read(enforcementHarness)));
   const marker = buildRunMetadataMarker({
     // The composite passes PR_HEAD_SHA; fall back to the fetched PR object's
     // head so the marker never claims a wrong binding.
     headSha: context.headSha || String(pr.headRefOid ?? ""),
     baseSha: identity.baseSha ?? "",
-    // Same derivation as the publish path's marker (#811).
-    reviewResult: verdictPolicy === "strict"
-      ? strictReviewResult(outputs.verdict, reviewRecord.findings, outputs.requiredChecks)
-      : outputs.verdict === "request_changes" ? "issues" : "clean",
+    // Same derivation as the publish path's marker (#811, #810).
+    reviewResult: markerReviewResult({
+      verdictPolicy,
+      verdict: outputs.verdict,
+      findings: reviewRecord.findings,
+      requiredChecks: outputs.requiredChecks,
+      partialCoverage,
+    }),
     requiredChecks: outputs.requiredChecks,
     reviewRoute: outputs.reviewRoute,
     escalationReason: outputs.escalationReason,
     cacheHitRatio: outputs.cacheHitRatio,
+    ...(partialCoverage ? { coverage: "partial", coverageStopReason: partialCoverage.stop_reason } : {}),
   });
   return {
     outputs,
@@ -661,6 +671,14 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
   const value = safeJson(bytes);
   const number = value?.number;
   return typeof number === "number" ? number : null;
+}
+
+function partialCoverageOf(harness: Record<string, unknown> | null): PartialCoverage | undefined {
+  const value = harness?.partial_coverage;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && typeof (value as { stop_reason?: unknown }).stop_reason === "string"
+    ? value as PartialCoverage
+    : undefined;
 }
 
 function splitCsv(raw: string): string[] {

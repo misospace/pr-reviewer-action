@@ -187,7 +187,7 @@ precedence identically, and no approved divergence is needed. The scaling
 itself is pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness
 tests in `tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
 default is to be measured on `evals/corpus-human-findings.json` (3 runs per
-arm) before shipping; that measurement is the merge gate tracked in the PR.
+arm) before shipping; that measurement is part of the #681 release qualification (the scaled default only reaches consumers at the v3 release).
 
 When the native loop stops on ANY budget — `tool-call-budget-exhausted`,
 `max-rounds`, or `wall-clock-exceeded` — the harness now also records a

@@ -332,3 +332,16 @@ test("#810: the notice caps long lists deterministically and escapes code-span c
   assert.match(notice, /`src\/'back'\.ts`/);
   assert.match(notice, /multi line msg/);
 });
+
+test("#810: control characters and NUL in coverage paths are stripped, never rendered", () => {
+  const notice = renderPartialCoverageNotice({
+    stop_reason: "max-rounds\u0000",
+    changed_files_total: 1,
+    unread_files: ["src/a\u0000b\u001b[31m.ts\u0007"],
+    leads_total: 0,
+    unresolved_leads: [],
+  });
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f]/.test(notice));
+  assert.match(notice, /`src\/ab\[31m\.ts`/);
+  assert.match(notice, /`max-rounds`/);
+});

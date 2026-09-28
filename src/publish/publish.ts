@@ -99,6 +99,23 @@ export function sanitizeForPublication(
   );
 }
 
+/** The metadata marker's review_result, shared by publish and the run
+ * entry. Under verdict_policy=strict (#811): clean / findings / partial /
+ * issues from the still-open findings and required-check coverage, with a
+ * #810 tool-loop coverage gap also reported as `partial`. Any other policy
+ * keeps the binary clean/issues v2 consumers rely on. */
+export function markerReviewResult(input: {
+  verdictPolicy?: string | undefined;
+  verdict: string;
+  findings?: unknown;
+  requiredChecks: string;
+  partialCoverage?: PartialCoverage | undefined;
+}): string {
+  if (input.verdictPolicy !== "strict") return input.verdict === "request_changes" ? "issues" : "clean";
+  const result = strictReviewResult(input.verdict, input.findings, input.requiredChecks);
+  return input.partialCoverage && result !== "issues" ? "partial" : result;
+}
+
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
  * present) + sanitized review. Both blocks are inserted AFTER sanitization
@@ -464,10 +481,7 @@ export async function publishReview(
   // rely on; the unchanged-diff carry-forward reads this field
   // (findings/partial carry an approve).
   const strict = input.verdictPolicy === "strict";
-  let reviewResult: string = strict
-    ? strictReviewResult(input.verdict, input.findings, input.requiredChecks)
-    : input.verdict === "request_changes" ? "issues" : "clean";
-  if (strict && input.partialCoverage && reviewResult !== "issues") reviewResult = "partial";
+  const reviewResult = markerReviewResult(input);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
 import { forkGate } from "../src/gates/gates.js";
@@ -11,7 +12,7 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
  * the feature flags the tests set. */
-function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string } = {}): PlatformReadAdapter {
+function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number } = {}): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
@@ -23,8 +24,8 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
         base: { ref: "main" },
         user: { login: "someone" },
         changed_files: options.files?.length ?? 1,
-        additions: 4,
-        deletions: 1,
+        additions: options.additions ?? 4,
+        deletions: options.deletions ?? 1,
         html_url: "https://github.com/o/r/pull/7",
       });
     },
@@ -442,4 +443,107 @@ test("findings_severity_gated policy: CSV non-blocking categories are split, not
   assert.equal(result.outputs.verdict, "approve");
   assert.equal(result.outputs.verdictSource, "findings");
   assert.match(result.outputs.reviewMarkdown, /Verdict relaxed from structured findings/);
+});
+
+/** The native loop only reads tracked files: make the run dir a checkout. */
+function gitInit(dir: string): void {
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { cwd: dir });
+}
+
+test("#810: a budget-exhausted tool loop publishes partial coverage in the run marker", async () => {
+  let calls = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    calls += 1;
+    res.setHeader("Content-Type", "application/json");
+    if (calls === 1) {
+      // One read of a file the PR did not change, then the budget (1) is spent.
+      res.end(JSON.stringify({
+        id: "c0", object: "chat.completion", model: "m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"OTHER.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    writeFileSync(join(runDir, "OTHER.md"), "unrelated\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "tool-mode": "native_loop",
+        "tool-max-requests": "1",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.deepEqual((harness.partial_coverage as { unread_files: string[] }).unread_files, ["README.md"]);
+    // The strict default reports the gap instead of a plain clean approve.
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.marker, /review_result.{0,4}partial/);
+    assert.match(result.marker, /coverage.{0,4}partial/);
+    assert.match(result.marker, /coverage_stop_reason.{0,4}tool-call-budget-exhausted/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#810: a large PR gets a size-scaled tool budget through the run entry", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    // 54 files, +4346/-181: the #806 shape.
+    const files = Array.from({ length: 54 }, (_, i) => ({
+      filename: `src/f${i}.ts`, status: "modified", additions: i === 0 ? 4346 - 53 * 80 : 80, deletions: i === 0 ? 181 - 53 * 3 : 3, changes: 0,
+    }));
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "tool-mode": "native_loop",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({ files, additions: 4346, deletions: 181 }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(harness.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+    // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
+    assert.equal(harness.tool_request_budget, 26);
+    assert.equal(harness.tool_budget_source, "size-scaled");
+  } finally {
+    await server.close();
+    cleanup();
+  }
 });
