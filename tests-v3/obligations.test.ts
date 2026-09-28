@@ -204,6 +204,8 @@ test("injection: obligations dropped at an exactly-full cap are visible in trunc
       { text: "`gn` changed; callers: `d.py:1`. Does each caller still get what it expects?", source: "s", line: 2, connects: 1 },
       // A duplicate of an extracted requirement is not an omission.
       { text: base.requirements[0]!.text, source: "s", line: 3, connects: 1 },
+      // Nor is a repeat of an obligation already omitted at the cap.
+      { text: "`fn` changed; callers: `c.py:1`. Does each caller still get what it expects?", source: "s", line: 4, connects: 1 },
     ],
   });
   assert.equal(ledger.requirements.length, MAX_REQUIREMENTS);

@@ -409,14 +409,14 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
   // requirements are dropped (first occurrence owns the entry).
   // Eligible (non-duplicate) obligations the cap drops are omissions too,
   // and must show in the truncation metadata like any other drop.
-  let omittedObligations = 0;
+  const omittedKeys = new Set<string>();
   for (const obligation of input.harnessObligations ?? []) {
     const { text, truncated } = obligationText(obligation);
     const key = text.toLowerCase();
     const index = indexByKey.get(key);
-    if (index !== undefined) continue;
+    if (index !== undefined || omittedKeys.has(key)) continue;
     if (entries.length >= MAX_REQUIREMENTS) {
-      omittedObligations += 1;
+      omittedKeys.add(key);
       continue;
     }
     indexByKey.set(key, entries.length);
@@ -430,7 +430,7 @@ export function extractRequirementLedger(input: LedgerInput = {}): RequirementLe
     });
   }
 
-  const omitted = Math.max(0, entries.length - MAX_REQUIREMENTS) + omittedObligations;
+  const omitted = Math.max(0, entries.length - MAX_REQUIREMENTS) + omittedKeys.size;
   const kept = entries.length > MAX_REQUIREMENTS ? entries.slice(0, MAX_REQUIREMENTS) : entries;
   return {
     version: ARTIFACT_VERSION,
