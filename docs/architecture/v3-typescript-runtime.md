@@ -20,7 +20,13 @@ The isolated proof is `.github/workflows/v3-runtime-spike.yml` and `tests/fixtur
 
 ## Decision
 
-**Select B: composite compatibility wrapper + bundled Node CLI.** The real GitHub run proved both options, but Forgejo JavaScript-action `node24` support is not established. Composite is the already-working production runner contract and keeps the launcher trivial; TypeScript owns application orchestration, state, and domain logic. Native Node lost on cross-platform confidence, not GitHub functionality. Keep the action metadata composite until a separately evidenced cross-platform change.
+**Revised at the #706 cutover: A, a native JavaScript action** (`runs: {using: node24, main: dist/index.js}`). The original decision (B, a composite wrapper around `node dist/index.js`) rested on Forgejo `node24` support being unverified, and it assumed a Node 24 executable on the runner's PATH. That assumption broke the drop-in goal: GitHub-hosted runners ship Node 22 on PATH, so the composite needed an extra `setup-node` step in every consumer workflow. The native action gets a runner-managed Node 24 on GitHub with nothing installed.
+
+Forgejo evidence (2026-09-28, the disposable `tests/forgejo_e2e_smoke.sh` harness with the native fixture from `tests/fixtures/v3-runtime/native/` added): `forgejo/runner` 6.3.1, 7 and 8 fail to load a `using: node24` action (`no action model available`); runners 9, 10, 11 and 13 run it to success on a `node:24-bullseye` job image. Forgejo executes JavaScript actions with the job image's Node, the same requirement the composite had, so the documented Forgejo baseline is runner 9 or newer with a job image that has Node 22+ and `git`. The runtime floor is Node 22 (nothing in `src/` needs 24; the full suite passes on 22), so a Forgejo image with Node 22 works while GitHub always provides 24.
+
+The original option B text is kept below for the record.
+
+**Superseded — Select B: composite compatibility wrapper + bundled Node CLI.** The real GitHub run proved both options, but Forgejo JavaScript-action `node24` support is not established. Composite is the already-working production runner contract and keeps the launcher trivial; TypeScript owns application orchestration, state, and domain logic. Native Node lost on cross-platform confidence, not GitHub functionality. Keep the action metadata composite until a separately evidenced cross-platform change.
 
 ## Lifecycle and platform boundary
 

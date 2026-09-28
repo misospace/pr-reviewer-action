@@ -6,6 +6,27 @@ contract documents the future API; the production `action.yml` remains on the
 v2 snake_case IDs until the atomic cutover in #681. Do not use v3 IDs before
 that cutover.
 
+## Runtime and recommended defaults (#706)
+
+v3 is a JavaScript action (`runs.using: node24`, `main: dist/index.js`): GitHub-hosted runners need nothing installed, and the whole review runs in one process (precheck, review, publish). On Forgejo, use runner 9 or newer with a job image that has Node 22+ and `git`.
+
+The defaults are the recommended setup, so a drop-in workflow sets only `ai-base-url`, `ai-api-key` and `ai-model`:
+
+| Input | v2 default | v3 default |
+| --- | --- | --- |
+| `github-token` | required | the job token (`${{ github.token }}`) |
+| `tool-mode` | `off` | `native_loop` |
+| `tool-max-tokens-per-turn` | `400` | `16384` |
+| `tool-turn-timeout-sec` | `60` | `180` |
+| `deep-review` | `false` | `auto` |
+| `ci-status-check` | `false` | `true` (grant `checks: read`) |
+| `on-model-failure` | `fail` | `notice` |
+| `ai-max-tokens` | `8192` | `16384` |
+| `publish-mode` | `comment` | `review_comment` |
+| `inline-findings` | `false` | `true` |
+
+Set any of them explicitly to keep the v2 behavior; the parity harness pins each change as an approved divergence.
+
 ## Retained inputs
 
 | v2 input | v3 input |

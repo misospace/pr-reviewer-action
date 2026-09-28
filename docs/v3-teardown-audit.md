@@ -1,6 +1,6 @@
 # v3 production cutover: legacy consumer audit (#706)
 
-The atomic cutover (#706) switched the shipped composite to the qualified
+The atomic cutover (#706) switched the shipped action (now a `node24` JavaScript action, see the runtime ADR) to the qualified
 TypeScript runtime. This document is the required consumer audit: every
 legacy Bash/Python path is dispositioned into one of the #706 categories —
 
@@ -81,19 +81,19 @@ category 5 (delete) in a follow-up commit.
 Nothing in this category at cutover time: every legacy file either retains a
 named oracle/tooling consumer (categories 3/4) or the shim role (category 2).
 The #706 teardown is therefore "no production caller" by construction —
-proven by the composite step list above, which invokes only
-`node dist/index.js` subcommands plus the #641 env-file loader.
+proven by the action entry (`src/run/action.ts`), which runs every stage
+in-process from `dist/index.js`.
 
 ## Verification performed
 
-- `action.yml` composite steps: precheck/review/publish run the Node
-  runtime; the dependency gate requires `node`, `git`, `pgrep` (and a
-  present `dist/index.js`) and no longer requires Python, `jq`, or `curl`.
-- Public input/output IDs are kebab-case, materialized from
-  `contracts/action-v3.yml` (the removed `review_scope`, `escalate_on_*`,
-  `tool_planning_*` inputs are gone, not aliased).
-- The run entry accepts the composite's SCREAMING_SNAKE bindings through the
-  mechanical `v2_id` name map, so the composite env blocks are unchanged
-  except for the renamed `${{ inputs.* }}` expressions.
-- `pytest tests/` (oracles + gates) and `npm test` remain green; the
-  dogfood workflow exercises the cut-over path on every PR.
+- `action.yml` is a `node24` JavaScript action generated from
+  `contracts/action-v3.yml` (`scripts/generate-action-yml.mjs`; a test fails
+  on drift). `node dist/index.js` runs precheck, review and publish in one
+  process; no composite steps, dependency gate or shared env file remain in
+  the shipped action.
+- Public input/output IDs are kebab-case (the removed `review_scope`,
+  `escalate_on_*`, `tool_planning_*` inputs are gone, not aliased).
+- The v2 composite is frozen at `tests/parity_runners/v2-action.yml` as the
+  config parity oracle.
+- `pytest tests/` (oracles + gates), full parity and `npm test` remain green;
+  the dogfood workflow builds the bundle and reviews every PR through it.
