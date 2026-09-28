@@ -1,7 +1,8 @@
 """Regression tests for the dogfood self-review workflow (issue #565).
 
 The dogfood workflow (``.github/workflows/ai-pr-review.yaml``) reviews every
-PR with the repository's own in-flight action code (``uses: $/``). Its
+PR with the repository's own in-flight action code (``uses: ./`` after
+building dist/ in the PR-head checkout). Its
 native-loop budget was raised from the shallow 2-round / 4-request / 300s
 profile to 4 rounds / 8 requests / 600s wall clock so the reviewer can
 actually explore repository context (discover the tree, locate a related

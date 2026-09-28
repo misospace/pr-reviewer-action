@@ -1,9 +1,11 @@
-# actionlint (pinned in ci.yaml) does not yet understand GitHub's
-# self-repository `uses: $/` syntax (2026-07-30 changelog): it parses the spec
-# as {owner}/{repo}@{ref} and reports a missing ref. Scope the ignore to the
-# dogfood workflow only, and delete this block once actionlint learns the
-# syntax.
+# The action ships dist/ only on release tags (#787). The dogfood and fork
+# workflows build it in a step before `uses: ./`, so actionlint's static
+# check of the local action's `main` file cannot see it. Scope the ignore to
+# exactly that message in the two workflows that use the local action.
 paths:
   .github/workflows/ai-pr-review.yaml:
     ignore:
-      - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
+      - 'file "dist/index\.js" does not exist in "[^"]*"\. it is specified at "main" key in "runs" section'
+  .github/workflows/fork-ai-review.yaml:
+    ignore:
+      - 'file "dist/index\.js" does not exist in "[^"]*"\. it is specified at "main" key in "runs" section'

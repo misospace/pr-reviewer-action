@@ -70,11 +70,11 @@ jobs:
       - name: Review PR with reusable AI reviewer
         if: github.event_name == 'pull_request'
         id: review
-        # `$/` resolves to this repository at the running commit, so every PR
-        # is reviewed by its own in-flight action code. Requires runner
-        # >= 2.336.0 (github.com hosted runners qualify; not on GHES). Fork PRs
-        # never reach this step: the job-level `if` skips them.
-        uses: $/
+        # `./` is the checkout at the PR head, where the step above built
+        # dist/, so every PR is reviewed by its own in-flight action code.
+        # (`$/` would fetch a separate copy of the ref without dist/.) Fork
+        # PRs never reach this step: the job-level `if` skips them.
+        uses: ./
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           ai-base-url: ${{ vars.LITELLM_URL }}

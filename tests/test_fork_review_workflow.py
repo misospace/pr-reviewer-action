@@ -425,9 +425,14 @@ def test_dogfood_workflow_skips_forks_cleanly() -> None:
     ), "the dogfood review job must skip cross-repository PRs cleanly"
 
 
-def test_dogfood_workflow_keeps_self_repository_syntax() -> None:
+def test_dogfood_workflow_reviews_with_the_built_checkout() -> None:
+    """The action ships dist/ only on tags (#787): the dogfood job builds it in
+    the PR-head checkout and must use that checkout (`uses: ./`); `$/` fetches
+    a separate copy of the ref that has no dist/."""
     text = DOGFOOD_WORKFLOW.read_text(encoding="utf-8")
-    assert "uses: $/" in text, "same-repo dogfood behavior must remain unchanged"
+    assert re.search(r"^\s+uses: \./\s*$", text, re.M), "the dogfood review must use the built checkout"
+    assert "uses: $/" not in text
+    assert text.index("npm run build") < text.index("uses: ./")
 
 
 def test_normal_ci_does_not_gain_privileges() -> None:
