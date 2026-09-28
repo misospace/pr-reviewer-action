@@ -28,6 +28,20 @@ REMOVED_OUTPUTS = {
     "baseline_clean",
 }
 
+# Deliberate, issue-sanctioned divergences between the v3 contract metadata
+# and v2's action.yml. Everything not listed here must stay byte-identical.
+# Each entry pins the EXACT old (v2) and new (v3) values for the diverging
+# default and permits the description rewrite that documents it; the change
+# is documented in docs/v3-migration.md and the resolved-value drift is
+# pinned for the config-default-resolution parity boundary in
+# tests/fixtures/parity/approved-divergences.json.
+CONTRACT_METADATA_DIVERGENCES = {
+    # #811: the v3 default for verdict-policy is "strict" — the published
+    # verdict is derived from the still-open findings and coverage. v2's
+    # "model" passthrough remains the explicit v3 opt-out.
+    "verdict_policy": {"default": ("model", "strict")},
+}
+
 
 def _load():
     return yaml.safe_load(CONTRACT_PATH.read_text())
@@ -66,10 +80,19 @@ def test_contract_covers_every_retained_live_field_and_preserves_metadata():
                 continue
             entry = by_v2[old_id]
             assert entry["id"] == old_id.replace("_", "-")
-            assert entry["description"] == spec["description"]
+            divergence = CONTRACT_METADATA_DIVERGENCES.get(old_id, {})
+            if not divergence:
+                # An entry permits the description rewrite that documents
+                # the diverging default; anything not listed stays identical.
+                assert entry["description"] == spec["description"]
             if kind == "inputs":
                 assert entry["required"] is spec.get("required", False)
-                assert entry.get("default") == spec.get("default")
+                if "default" in divergence:
+                    old_default, new_default = divergence["default"]
+                    assert spec.get("default") == old_default, old_id
+                    assert entry.get("default") == new_default, old_id
+                else:
+                    assert entry.get("default") == spec.get("default")
 
 
 def test_removed_fields_are_documented_and_have_no_aliases():

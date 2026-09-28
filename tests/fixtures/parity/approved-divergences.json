@@ -43,6 +43,21 @@
         "defaults-only",
         "empty-temperature-omitted",
         "tier-inheritance",
+        "numeric-bounds"
+      ],
+      "key": "verdictPolicy",
+      "expected": {
+        "old": "model",
+        "new": "strict"
+      },
+      "reason": "#811: the v3 contract default for verdict-policy is 'strict' — the published verdict is derived deterministically from the still-open findings and coverage. v2's default (and the explicit v3 opt-out) is 'model' passthrough, so every fixture that leaves verdict_policy unset resolves differently by design."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "tier-inheritance",
         "explicit-values",
         "numeric-bounds"
       ],

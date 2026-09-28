@@ -30,7 +30,7 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   "ai-response-format": ["off", "json_object", "json_schema"],
   "ai-tokens-param": ["max_tokens", "max_completion_tokens"],
   "on-model-failure": ["fail", "notice"],
-  "verdict-policy": ["model", "findings_severity_gated"],
+  "verdict-policy": ["model", "findings_severity_gated", "strict"],
   "validate-required-checks": ["auto", "true", "false"],
   "required-check-validation-mode": ["warn", "fail", "metadata_only"],
   "review-routing-mode": ["off", "auto"],

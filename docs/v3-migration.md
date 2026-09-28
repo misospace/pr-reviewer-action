@@ -135,6 +135,10 @@ that cutover.
 | `ci_interval_sec` | `ci-interval-sec` |
 | `ci_skip_on_timeout` | `ci-skip-on-timeout` |
 
+One default differs on purpose: v2's `verdict_policy` defaults to `model`;
+v3's `verdict-policy` defaults to `strict` (#811, below). Set
+`verdict-policy: model` to keep the v2 passthrough.
+
 ### Tier-aware tool request budget (#701)
 
 `tool_max_requests` defaults to **empty** on both sides. The empty value is
@@ -235,6 +239,75 @@ repository config can only narrow it, never replace or exceed it: `related_code_
 tier-aware budget resolved at harness time), so there is no config-time
 ceiling to narrow against — see `docs/repository-config.md` for why falling
 back to the type's hard range would be unsafe.
+
+## The strict verdict default (#811)
+
+Under the v3 default `verdict-policy: strict`, the published verdict is a
+deterministic function of the normalized still-open findings and the
+required-check coverage. The model's verdict is an input to that mapping,
+not the final answer:
+
+| Highest open severity | Coverage | Published verdict | Marker `review_result` |
+| --- | --- | --- | --- |
+| blocker or major present | any | `request_changes` | `issues` |
+| none, minor or info only | incomplete | `approve` | `partial` |
+| none, minor or info only | complete | `approve` | `findings` when any open finding exists, else `clean` |
+
+- Minor and info findings can never request changes on their own; a model
+  `request_changes` backed only by them publishes as the non-blocking state
+  (the regression row of the verdict table in
+  `tests-v3/strict-verdict.test.ts`).
+- Enforcement overlays (evidence blockers, tool-harness failure,
+  min-successful, `required_check_validation_mode=fail`) run after the
+  coverage pass and still force `request_changes`; the mapping never
+  relaxes a forced verdict.
+- The mapping runs last in the enforcement pipeline, so the findings it
+  decides on are the final still-open set — the same normalized array the
+  publish step renders and the `findings` output carries, including threads
+  the #770 settlement pass re-emitted. "Still-open" is that one set; there
+  is no second open-findings state to reconcile (#792). #812 (separate
+  change) fixes the stale-carried-verdict fingerprint; this change only
+  consumes the resolved set.
+- When the mapping overrides the model's verdict, the review says so in one
+  line — `_Verdict set from open findings (verdict_policy=strict): …_` —
+  exactly as `findings_severity_gated` discloses its own overrides. The
+  `verdict-source` output stays in the existing `model`/`findings`
+  vocabulary.
+- The published review renders the coverage gap and the still-open findings
+  near the top of the body — severity counts on the verdict line in comment
+  mode, a `### Findings (…)` table with one row per finding — so an approve
+  with findings never reads as clean (#752). Messages are redacted,
+  upstream-neutralized and table-escaped; the table caps at 50 rows with a
+  visible "N more" line.
+- The metadata marker's `review_result` distinguishes `clean`, `findings`
+  and `partial` beside the v2 `issues`. The unchanged-diff carry-forward
+  consumes the new values: `findings` and `partial` carry an `approve`,
+  like `clean`.
+
+`verdict_source` under strict remains `model` when the published verdict
+equals the model's and `findings` when the mapping overrode it.
+
+### Opting out
+
+Consumers that gate merges on the model's own verdict set:
+
+```yaml
+verdict-policy: model
+```
+
+Under `model` (and under `findings_severity_gated`), v3 keeps today's
+behavior: the binary `clean`/`issues` marker, no findings section, no
+coverage-gap notice, and the model verdict passthrough (with
+`findings_severity_gated`'s existing blocker escalation). The `verdict`
+output remains `approve` | `request_changes` under every policy.
+
+The default change is pinned as the `verdictPolicy` divergence on the
+`config-default-resolution` fixtures in
+[`tests/fixtures/parity/approved-divergences.json`](../tests/fixtures/parity/approved-divergences.json).
+The publish-side rendering and the marker states are v3-only behavior
+covered by `tests-v3/strict-verdict.test.ts`; no parity fixture exercises
+them, because the enforcement-pipeline boundary pins the v2 policies, whose
+behavior is unchanged.
 
 ## Parity harness (#673)
 

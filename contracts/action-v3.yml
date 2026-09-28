@@ -104,8 +104,8 @@ inputs:
   - id: verdict-policy
     v2_id: verdict_policy
     required: false
-    default: "model"
-    description: "How the final verdict is decided. 'model' (default) uses the model's own verdict. 'findings_severity_gated' preserves request_changes from the model and escalates approve to request_changes when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes."
+    default: "strict"
+    description: "How the final verdict is decided. 'strict' (the v3 default, #811) derives the published verdict deterministically from the normalized still-open findings and required-check coverage: request_changes only when at least one still-open finding is blocker or major; otherwise approve. The metadata marker's review_result distinguishes clean (no open findings, coverage complete), findings (minor/info-only findings) and partial (coverage gap), and the findings plus the coverage gap render at the top of the published review. The model's verdict is an input, not the final answer: when the policy overrides it, the review says so in one line. 'model' keeps the v2 passthrough for consumers that gate merges on the model's own verdict — set it to opt out of the strict mapping. 'findings_severity_gated' keeps its v2 behavior: request_changes from the model is preserved and approve escalates to request_changes when any blocker-severity finding exists, with the opt-in non-blocking category capping. Enforcement settings (evidence blockers, tool failure) still apply afterwards and can force request_changes under every policy."
     repo-configurable: true
     repo-policy: true
   - id: non-blocking-finding-categories
