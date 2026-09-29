@@ -709,9 +709,12 @@ seam's ordering — `buildPublishApi`, `ciAdapterFromEnv`, `clearRereviewLabel`,
 and `runPrecheck`), so no code path can construct a GitHub URL or adapter for
 a Tangled environment. The v2 seam mirrors this fail-loud guard
 (`TANGLED_NOT_IMPLEMENTED`, `_platform_tangled_guard`). The Spindle runtime
-context normalization lives in `pr_reviewer/tangled_context.py` and
-`src/platform/tangled.ts` (`TangledContext`); Tangled API/XRPC/Bobbin calls
-stay out of scope until the #564 backend tickets.
+context normalization lives in `src/platform/tangled.ts` (`TangledContext`),
+the port of the original branch's `pr_reviewer/tangled_context.py`, which
+was not resurrected after the v2 teardown; the retained Python/shell pieces
+(`pr_reviewer/platform.py`, `scripts/platform_api.sh`) are resolver/parity
+oracles only. Tangled API/XRPC/Bobbin calls stay out of scope until the #564
+backend tickets.
 
 ### The `prompt-assembly` boundary (#706)
 
