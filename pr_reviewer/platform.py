@@ -5,8 +5,10 @@ Mirror of ``scripts/platform_api.sh`` for the Python consumers
 ``gh_api`` tool migrates here in #226). The github backend is argv-identical
 to the pre-seam code; forgejo support arrives per-consumer across the 1.4.x
 line, and until then unsupported operations raise instead of failing
-silently. Tangled (#583) is resolvable as a platform; its runtime context
-lives in ``pr_reviewer/tangled_context.py``.
+silently. Tangled (#583) is resolvable as a platform; the Spindle runtime
+context port lives in ``src/platform/tangled.ts`` (the original branch's
+``pr_reviewer/tangled_context.py`` was not resurrected after the v2
+teardown).
 """
 
 from __future__ import annotations
