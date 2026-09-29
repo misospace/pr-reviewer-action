@@ -6,9 +6,11 @@
 # does not trigger other workflows, and this repo's consumers pin @vX, so the
 # floating major tag has to be advanced after every stable release.
 #
-# dist/ is not committed to main. After release-please tags the release commit,
-# publish-release-build commits the built bundle on top of it (off main) and
-# moves both vX.Y.Z and vX to that commit.
+# dist/ is not committed to main. release-please only maintains the release PR
+# (skip-github-release). When a release PR merges, publish-release-build commits
+# the built bundle on top of the release commit (off main), smokes it as
+# consumers get it, and only then points vX.Y.Z and vX at it and creates the
+# GitHub Release.
 name: Release Please
 
 on:
@@ -25,10 +27,11 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      major: ${{ steps.release.outputs.major }}
-      sha: ${{ steps.release.outputs.sha }}
+      release_created: ${{ steps.detect.outputs.release_created }}
+      tag_name: ${{ steps.detect.outputs.tag_name }}
+      major: ${{ steps.detect.outputs.major }}
+      sha: ${{ steps.detect.outputs.sha }}
+      needs_build: ${{ steps.detect.outputs.needs_build }}
     steps:
       - name: Generate bot token
         id: app-token
@@ -44,10 +47,42 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # release-please only maintains the release PR (skip-github-release):
+      # it creates no tag or GitHub Release, so consumers never see a version
+      # before its dist build passes the smoke. The release is the manifest's
+      # version at the last commit that changed the manifest; it is unfinished
+      # until every publication piece exists (converge.sh), so any later push
+      # to main converges a partially published release.
+      - name: Checkout pushed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect an unfinished release
+        id: detect
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '."."' .release-please-manifest.json)"
+          TAG="v$VERSION"
+          SHA="$(git log -1 --format=%H -- .release-please-manifest.json)"
+          STATE="$(scripts/release/converge.sh state "$TAG" "$SHA")"
+          echo "$STATE"
+          get() { printf '%s\n' "$STATE" | sed -n "s/^$1=//p"; }
+          {
+            echo "release_created=$([ "$(get complete)" = true ] && echo false || echo true)"
+            echo "needs_build=$(get needs_build)"
+            echo "tag_name=$TAG"
+            echo "major=${VERSION%%.*}"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
   build-release-dist:
     name: Build release dist
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.needs_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -80,6 +115,11 @@ jobs:
   publish-release-build:
     name: Publish release build
     needs: [release-please, build-release-dist]
+    # Runs for any unfinished release; the build job is skipped when the
+    # version tag already exists (only the remaining pieces are repaired).
+    if: >-
+      always() && needs.release-please.outputs.release_created == 'true'
+      && (needs.build-release-dist.result == 'success' || needs.build-release-dist.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -98,15 +138,25 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Download dist
+        if: needs.release-please.outputs.needs_build == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-dist
           path: dist
 
+      # tag-with-dist.sh smokes the build before publishing; run it on the
+      # Node the action declares (runs.using: node24).
+      - name: Set up Node 24 for the release smoke
+        if: needs.release-please.outputs.needs_build == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
       # The base sha comes from release-please's own output, not the tag, so a
       # rerun rebuilds from the release commit rather than stacking on the
       # previous build commit. A pre-release never moves the floating major tag.
       - name: Commit dist and point vX.Y.Z and vX at it
+        if: needs.release-please.outputs.needs_build == 'true'
         env:
           BASE_SHA: ${{ needs.release-please.outputs.sha }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
@@ -116,3 +166,15 @@ jobs:
           [[ "$TAG" == *-* ]] && MAJOR_TAG=""
           SHA=$(scripts/release/tag-with-dist.sh "$BASE_SHA" "$TAG" "$MAJOR_TAG")
           echo "$TAG${MAJOR_TAG:+, $MAJOR_TAG} -> $SHA"
+
+      # Converge the rest idempotently: a stale floating tag moves to the
+      # (already smoked) version tag, a missing GitHub Release is created
+      # against it, and a pending release PR is marked tagged (release-please
+      # refuses to open the next release PR while one is still pending).
+      - name: Finish the release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          BASE_SHA: ${{ needs.release-please.outputs.sha }}
+        run: scripts/release/converge.sh finish "$TAG" "$BASE_SHA"
+
