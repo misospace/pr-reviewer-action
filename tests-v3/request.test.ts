@@ -1,8 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { ModelRequestConfig } from "../src/model/types.js";
+
+// Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
+// json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
+// in teardown wave 1; this snapshot keeps the byte-for-byte pin without
+// reading v2 at test time.
+const V2_RF_JSON_SCHEMA_LITERAL =
+  '{"type":"json_schema","json_schema":{"name":"pr_review","strict":true,"schema":{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","request_changes"]},"review_markdown":{"type":"string"},"smart_review_requested":{"type":"boolean"},"smart_review_reason":{"type":["string","null"]},"findings":{"type":["array","null"],"items":{"type":"object","properties":{"severity":{"type":"string","enum":["blocker","major","minor","info"]},"category":{"type":["string","null"]},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"message":{"type":"string"},"preliminary_finding":{"type":["integer","null"]}},"required":["severity","category","file","line","message","preliminary_finding"],"additionalProperties":false}},"requirement_coverage":{"type":["array","null"],"items":{"type":"object","properties":{"requirement_id":{"type":"string"},"status":{"type":"string","enum":["satisfied","violated","unknown"]},"evidence":{"type":["array","null"],"items":{"type":"object","properties":{"kind":{"type":"string","enum":["file","test","tool","ci","diff"]},"ref":{"type":["string","null"]},"detail":{"type":["string","null"]}},"required":["kind","ref","detail"],"additionalProperties":false}}},"required":["requirement_id","status","evidence"],"additionalProperties":false}},"required_check_dispositions":{"type":["array","null"],"items":{"type":"object","properties":{"check":{"type":"string"},"status":{"type":"string","enum":["satisfied","not_applicable","unresolved"]},"rationale":{"type":["string","null"]}},"required":["check","status","rationale"],"additionalProperties":false}}},"required":["verdict","review_markdown","smart_review_requested","smart_review_reason","findings","requirement_coverage","required_check_dispositions"],"additionalProperties":false}}}';
 
 function config(overrides: Partial<ModelRequestConfig> = {}): ModelRequestConfig {
   return {
@@ -119,12 +125,8 @@ test("request construction is provider-neutral: no branching on model names", ()
   );
 });
 
-test("the strict verdict schema matches the v2 bash literal byte for byte", () => {
-  const shell = readFileSync("scripts/model_call.sh", "utf8");
-  const match = shell.match(/rf_json='(\{"type":"json_schema".*?)' ;;/s);
-  assert.ok(match, "json_schema rf_json literal not found in scripts/model_call.sh");
-  const literal = JSON.parse(match[1]!) as unknown;
-  assert.deepEqual(OPENAI_VERDICT_JSON_SCHEMA, literal);
+test("the strict verdict schema matches the frozen v2 bash literal byte for byte", () => {
+  assert.deepEqual(OPENAI_VERDICT_JSON_SCHEMA, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });
 
 test("the strict verdict schema requires every property (OpenAI strict mode)", () => {
