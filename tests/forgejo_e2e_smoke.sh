@@ -214,7 +214,8 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
   # The publish seam is the sticky-comment mechanism: upsert the managed
   # comment (with the exact-head guard against the live Forgejo head) and
   # verify it landed through the REST API.
-  export REVIEW_MARKDOWN="$(printf '%s\n%s\n' "$COMMENT_MARKER" 'Forgejo E2E sticky comment')"
+  REVIEW_MARKDOWN="$(printf '%s\n%s\n' "$COMMENT_MARKER" 'Forgejo E2E sticky comment')"
+  export REVIEW_MARKDOWN
   export VERDICT=approve
   node "$ROOT_DIR/dist/index.js" publish
   api "$FORGEJO_API_URL/api/v1/repos/reviewer/sample/issues/${PR_NUMBER}/comments" |
