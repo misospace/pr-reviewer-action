@@ -151,8 +151,9 @@ if (require.main === module) {
       });
   } else if (firstArg === "run") {
     // The end-to-end review orchestrator (#809): the typed successor of
-    // scripts/run_review.sh. Never publishes — the publish boundary stays
-    // with the composite's publish step until #706/#681.
+    // scripts/run_review.sh. Review only — it never publishes. The normal
+    // action entry (`actionMain`) is what sequences precheck → review →
+    // publish in one Node process; this standalone CLI stays review-only.
     runReview({ env: process.env })
       .then(() => { exitAfterFlush(0); })
       .catch((error: unknown) => {
