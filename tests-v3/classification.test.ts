@@ -98,6 +98,46 @@ test("Linear priority only escalates on the integer values 1 and 2", () => {
   assert.deepEqual(github.riskFlags, []);
 });
 
+// The run seam (buildLinkedIssueContext → classifyPr) passes the raw
+// collection, not the normalized one: GitHub refs carry `labels` only when
+// their fetch succeeded and never carry `source` (only Linear records do).
+// v2 defaulted every read; the port must classify these shapes, not crash.
+
+test("a fetched GitHub-linked issue (labels present, no source field) classifies without crashing", () => {
+  const result = classifyPr({
+    prFiles: files("src/a.py"),
+    linkedIssues: [{ ref: "o/r#824", repo: "o/r", number: 824, labels: [{ name: "Security" }, { name: "audit" }] }] as never,
+  });
+  assert.deepEqual(result.riskFlags, ["linked_security_issue", "linked_audit_issue"]);
+  assert.deepEqual(result.linkedIssueLabels, ["Security", "audit"]);
+});
+
+test("an unfetched GitHub-linked ref (no labels array at all) contributes nothing and never crashes", () => {
+  const result = classifyPr({
+    prFiles: files("src/a.py"),
+    linkedIssues: [{ ref: "o/r#9", repo: "o/r", number: 9 }] as never,
+  });
+  assert.deepEqual(result.riskFlags, []);
+  assert.deepEqual(result.linkedIssueLabels, []);
+});
+
+test("a projected label without a name is treated as an empty label, never a crash", () => {
+  const result = classifyPr({
+    prFiles: files("src/a.py"),
+    linkedIssues: [{ ref: "o/r#10", repo: "o/r", number: 10, labels: [{}, { name: "security" }] }] as never,
+  });
+  assert.deepEqual(result.riskFlags, ["linked_security_issue"]);
+  assert.deepEqual(result.linkedIssueLabels, ["security"]);
+});
+
+test("a Linear record still synthesizes priority labels through the raw shape", () => {
+  const result = classifyPr({
+    prFiles: files("src/a.py"),
+    linkedIssues: [{ source: "linear", ref: "ENG-12", labels: [], priority: 2 }] as never,
+  });
+  assert.deepEqual(result.riskFlags, ["linked_priority_p1"]);
+});
+
 test("file-based flags attribute triggering files; diff-only matches attribute an empty list", () => {
   const attributed = classifyPr({ prFiles: files("src/middleware/auth.ts", "readme.md") });
   assert.deepEqual(attributed.riskFlagsWithFiles["auth_changes"], ["src/middleware/auth.ts"]);

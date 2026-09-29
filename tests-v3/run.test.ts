@@ -1073,3 +1073,53 @@ test("#824: every tool loop turn clamps the same way and the review still publis
     cleanup();
   }
 });
+
+test("a PR whose body keyword-links a fetched issue classifies without crashing", async () => {
+  // The dogfood crash (#825 CI): buildLinkedIssueContext's GitHub refs carry
+  // labels but never `source`, and classifyPr's v2-parity defaults must
+  // absorb that instead of crashing the deterministic classifier mid-run.
+  const platform = mockPlatform({ body: "Closes #824.\n\nA clamp fix.\n" });
+  platform.getIssue = async () => ({
+    ok: true,
+    data: {
+      number: 824,
+      title: "clamp max_tokens",
+      state: "open",
+      html_url: "https://forge.example/o/r/issues/824",
+      labels: [{ name: "enhancement" }, { name: "priority/p1" }],
+      body: "Clamp the transport token field.",
+    },
+  }) as never;
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
+    assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
+    assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
