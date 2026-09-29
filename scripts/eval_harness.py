@@ -1761,6 +1761,12 @@ def _checkout_pinned_commit(
         )
 
 
+# The built runtime bundle the default (no review_script) execution invokes.
+# Module-level so tests can point it at a placeholder without touching the
+# real dist/ on disk.
+RUNTIME_ENTRYPOINT = Path(__file__).resolve().parent.parent / "dist" / "index.js"
+
+
 def run_review_for_pr(
     pr_entry: dict[str, Any],
     mode: str,
@@ -1943,7 +1949,7 @@ def run_review_for_pr(
         # provided.
         command: list[str] | None = None
         if review_script is None:
-            entrypoint = Path(__file__).resolve().parent.parent / "dist" / "index.js"
+            entrypoint = RUNTIME_ENTRYPOINT
             node = shutil.which("node")
             if node is None:
                 run.error = "node not found on PATH; the review runtime requires Node"

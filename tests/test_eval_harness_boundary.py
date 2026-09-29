@@ -29,6 +29,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from eval_harness import evaluate_specialist_expectations, run_review_for_pr
+import eval_harness
 
 
 REPO = "misospace/pr-reviewer-action"
@@ -781,7 +782,9 @@ class TestDefaultRuntimeInvocation:
     """The default (no review_script) execution runs the built TypeScript
     runtime — `node <repo>/dist/index.js run` in the run cwd, with the same
     env contract and artifact names — not a bundled shell orchestrator
-    (#706 wave 0)."""
+    (#706 wave 0). Both tests point RUNTIME_ENTRYPOINT at a tmp placeholder
+    via monkeypatch, so the repo's real dist/ is never touched and the
+    tests cannot race a parallel runner over shared disk state."""
 
     def test_default_branch_invokes_the_v3_runtime_entry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         repo_path = _work_dir_with_repo(tmp_path)
@@ -790,13 +793,10 @@ class TestDefaultRuntimeInvocation:
         # assertion covers both the invocation shape and the parse path.
         shim_dir = tmp_path / "bin"
         shim_dir.mkdir()
-        repo_root = Path(__file__).resolve().parent.parent
-        dist_dir = repo_root / "dist"
-        created_dist = False
-        if not (dist_dir / "index.js").is_file():
-            dist_dir.mkdir(exist_ok=True)
-            (dist_dir / "index.js").write_text("// test placeholder\n", encoding="utf-8")
-            created_dist = True
+        entrypoint = tmp_path / "dist" / "index.js"
+        entrypoint.parent.mkdir()
+        entrypoint.write_text("// test placeholder\n", encoding="utf-8")
+        monkeypatch.setattr(eval_harness, "RUNTIME_ENTRYPOINT", entrypoint)
         shim = shim_dir / "node"
         shim.write_text(
             "#!/usr/bin/env bash\n"
@@ -812,47 +812,39 @@ class TestDefaultRuntimeInvocation:
         )
         shim.chmod(0o755)
         monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
-        try:
-            run = run_review_for_pr(
-                PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
-            )
-        finally:
-            if created_dist:
-                (dist_dir / "index.js").unlink()
+
+        run = run_review_for_pr(
+            PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
+        )
 
         assert run.error is None, run.error
         # The runtime entry, not a shell orchestrator: argv is the bundle
         # path plus the `run` subcommand, executed in the run cwd.
         argv = (repo_path / "argv.txt").read_text(encoding="utf-8").splitlines()
-        assert argv == [str(dist_dir / "index.js"), "run"]
+        assert argv == [str(entrypoint), "run"]
         assert run.verdict == "request_changes"
         assert run.review_markdown == "v3 body"
         assert "test-model" in run.model_used
 
     def test_default_branch_fails_closed_without_the_bundle(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         repo_path = _work_dir_with_repo(tmp_path)
-        repo_root = Path(__file__).resolve().parent.parent
-        dist_index = repo_root / "dist" / "index.js"
-        saved = dist_index.read_bytes() if dist_index.is_file() else None
-        if saved is not None:
-            dist_index.unlink()
+        entrypoint = tmp_path / "absent" / "index.js"
+        monkeypatch.setattr(eval_harness, "RUNTIME_ENTRYPOINT", entrypoint)
         shim_dir = tmp_path / "bin"
         shim_dir.mkdir()
         shim = shim_dir / "node"
         shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         shim.chmod(0o755)
         monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
-        try:
-            run = run_review_for_pr(
-                PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
-            )
-        finally:
-            if saved is not None:
-                dist_index.write_bytes(saved)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
+        )
 
         # Fail closed with the bundle path in the message; nothing ran.
         assert run.error is not None
         assert "review runtime bundle not found" in run.error
+        assert str(entrypoint) in run.error
         assert not (repo_path / "argv.txt").exists()
         assert not (repo_path / "ai-output.json").exists()
 
