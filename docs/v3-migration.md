@@ -1038,3 +1038,15 @@ Kebab-case is limited to the project-owned public Action API. Internal
 TypeScript properties should use camelCase; external payloads, environment
 variables, and existing versioned machine schemas retain their established
 names.
+
+## Teardown status (#706)
+
+Wave 0 of the #706 teardown has landed: `scripts/eval_harness.py` drives the
+v3 runtime (`node dist/index.js run`, fixture mode served by the
+`SemanticFixtureAdapter` through the same platform seam), the Forgejo E2E
+smoke exercises the v3 precheck / `gate-ci` / publish entries, the strict
+verdict-schema pin is inlined in `tests-v3/request.test.ts`, and the
+docs describe v3 as the authoritative runtime. Nothing is deleted yet: the
+v2 trees remain as parity/eval oracles per
+[`docs/v3-teardown-audit.md`](v3-teardown-audit.md) — wave 1 deletes the v2
+runtime and its tests, wave 2 (at #681) freezes the parity boundaries.

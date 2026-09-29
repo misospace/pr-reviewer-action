@@ -158,8 +158,8 @@ jobs:
         # The gate decided minutes ago; re-check that the PR's CURRENT head
         # still equals the head this run will review before spending any
         # model compute. Publication is guarded again inside the action
-        # (scripts/verify_pr_head.sh), so a push landing mid-review can
-        # never publish a stale verdict.
+        # (the publish boundary's exact-head guard in src/publish/publish.ts),
+        # so a push landing mid-review can never publish a stale verdict.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GATE_PR_NUMBER: ${{ needs.gate.outputs.pr_number }}

@@ -8,7 +8,7 @@ This file is the durable standards context injected into every agent and reviewe
 
 `pr-reviewer-action` must remain:
 
-- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`scripts/platform_api.sh` / `pr_reviewer/platform.py`; v3 `src/platform/`). No forge-specific logic outside the adapters.
+- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`; the v2 `scripts/platform_api.sh` / `pr_reviewer/platform.py` survive only as parity oracles pending the #706 teardown). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
 - **Deployment/runtime agnostic** — GitHub Actions and Forgejo Actions (composite wrapper + committed Node bundle).
@@ -18,7 +18,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 
 ## Authority model (normative)
 
-- **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (`pr_reviewer/classifier.py`, `precheck.py`, `enforcement.py`, `completeness.py`, and their v3 ports) are rule-based; models do not override them.
+- **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (the v3 `src/classification/`, `src/precheck/`, `src/enforcement/` ports; the v2 `pr_reviewer/` modules survive only as parity oracles) are rule-based; models do not override them.
 - **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. The v2 module and the v3 `src/classification/classify.ts` implement the same signal model; parity fixtures pin it.
 - **The final reviewer owns the model verdict.** Specialist leads, tool-harness output, and evidence-provider findings are advisory evidence sources — they never flip or produce the verdict, and specialist severity is capped below `blocker`.
 - **Fallback is availability recovery, not quality escalation.** A fallback model call exists only to complete a review the primary could not.
@@ -32,18 +32,18 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 - **MCP mutation/write operations are denied.** Only read-only tool operations exist.
 - **Fork privilege separation must not be weakened.** See `docs/fork-review.md`: no fork code checked out or executed in privileged runs; fork feature flags (`tool_mode`, evidence providers, Linear, related-code, repo-map, approvals) default off for forks; secrets and private linked-source enrichment never cross the fork trust boundary.
 - **Fail closed where required.** Uncertain authorization/metadata/fingerprint state forces a fresh review or refusal — never a silent skip (selection-signature sentinel, gate preflight, publish-boundary exact-head guard).
-- **Adversarial-boundary tests (#252):** every sanitizer or fence (untrusted-data delimiters, secret redaction, exfil guards) gets a test that feeds the boundary token / hostile delimiter *itself*, not just benign input — a mock that omits the attack encodes the same blind spot as the code. See `tests/test_native_loop_exfil_redteam.py` and `tests/test_outbound_user_agent.py` for the pattern; add one when introducing a new fence.
+- **Adversarial-boundary tests (#252):** every sanitizer or fence (untrusted-data delimiters, secret redaction, exfil guards) gets a test that feeds the boundary token / hostile delimiter *itself*, not just benign input — a mock that omits the attack encodes the same blind spot as the code. See `tests-v3/tools-executors.test.ts` (workspace/allowlist/red-team coverage and the outbound User-Agent assertions) and the hostile-body fixture tests for the pattern; add one when introducing a new fence.
 
 ## Code map (orientation)
 
 | Area | Purpose |
 |---|---|
-| `action.yml` | v2 action definition: inputs/outputs, composite steps (precheck → CI wait → review → publish) |
-| `scripts/` | v2 bash runtime: `run_review.sh` orchestrates the `scripts/sections/` pipeline; plus precheck, CI wait, model call, publish, platform seam |
-| `pr_reviewer/` | v2 Python package: classifier, requirement ledger/coverage, enforcement, escalation, parsers, tools, platform, repo map, specialists |
-| `src/` | v3 TypeScript runtime (in progress): verbatim, parity-tested ports of the v2 boundaries — `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
-| `tests/`, `tests-v3/` | pytest + shell behavior tests; vitest for v3; parity fixtures under `tests/fixtures/parity/` |
-| `evals/` | graded eval corpora driven by `scripts/eval_harness.py` (runbook: `docs/evals.md`) |
+| `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
+| `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
+| `scripts/` | Retained tooling (eval, harvest, fork gate, release, v3 build) plus the retired v2 bash runtime — parity oracles only, teardown-pending (`docs/v3-teardown-audit.md`) |
+| `pr_reviewer/` | Retained eval-tooling modules plus the retired v2 Python package — parity oracles only, teardown-pending (`docs/v3-teardown-audit.md`) |
+| `tests/`, `tests-v3/` | pytest + shell tests (oracles, eval tooling, retained gates); vitest for v3; parity fixtures under `tests/fixtures/parity/` |
+| `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
 Full per-module detail, the pipeline architecture, corpus section order, and descriptive behavioral contracts: [`docs/architecture/code-map.md`](docs/architecture/code-map.md).
@@ -53,9 +53,8 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 ```bash
 npm ci && npm run typecheck && npm test     # v3 TypeScript (vitest via node --test)
 npm run build                                # dist/ is not committed; npm test and the parity harness need it built
-pytest tests/ -v --tb=short                 # Python unit tests (CI gate)
-tests/test_check_review_needed.sh           # shell behavior tests run standalone
-PR_NUMBER=6757 tests/smoke_test.sh          # end-to-end against a real PR with a mock API server
+pytest tests/ -v --tb=short                 # Python tests: parity/eval oracles + retained gates
+GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity boundaries (needs dist/ built)
 ```
 
 ## Development conventions (normative)

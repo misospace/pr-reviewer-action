@@ -5,6 +5,18 @@ pipeline architecture, the review-corpus section order, and the behavioral
 contracts that are descriptive of the current implementation (rather than
 durable agent rules, which live in [`AGENTS.md`](../../AGENTS.md)).
 
+> **Runtime status (post-#815 cutover).** The shipped action is the
+> TypeScript runtime: `node dist/index.js` over `src/` (action entry
+> `src/run/action.ts`), with `action.yml` generated from
+> `contracts/action-v3.yml`. The `scripts/` and `pr_reviewer/` material
+> below describes the retired v2 runtime, retained only as parity/eval
+> oracles pending the #706 teardown — see
+> [`docs/v3-teardown-audit.md`](../v3-teardown-audit.md) for the
+> file-by-file disposition and deletion waves. Where a v2 file is cited
+> below, the live implementation is its `src/` port; the pre-cutover
+> `action.yml` composite description is historical (the manifest is now a
+> generated `node24` action with no composite steps).
+
 ## Key files
 
 ### Action definition and orchestration

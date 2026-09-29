@@ -9,6 +9,7 @@ import {
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
+import { USER_AGENT } from "../src/platform/user-agent.js";
 
 function fixture(fn: (root: string, outside: string) => Promise<void> | void): Promise<void> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "tools-test-")), root = path.join(base, "x"), outside = path.join(base, "xy");
@@ -73,6 +74,25 @@ test("web fetch checks exact hosts and every redirect; search sanitizes result s
   let called = "";
   const search = ctx("/tmp", { searchUrl: "https://search.test/search", deps: { ...deps(), fetch: async (url: string) => { called = url; return { status: 200, body: JSON.stringify({ results: [{ title: "x", url: "javascript:alert(1)", content: "y" }, { url: "file:///etc/passwd" }] }) }; } } });
   const res = await webSearch("x&host=evil", search); assert.equal(new URL(called).hostname, "search.test"); assert.deepEqual(res.results.map((x: any) => x.url), ["", ""]);
+});
+
+test("outbound tool fetches carry the non-default reviewer User-Agent (#221/#252)", async () => {
+  // Cloudflare bot-fight fronting self-hosted forges blocks the default
+  // fetch/curl agents: every outbound tool request must identify itself.
+  const seen: Array<Record<string, unknown> | undefined> = [];
+  const fetchDep = async (_url: string, init?: { headers?: Record<string, string> }) => {
+    seen.push(init?.headers);
+    return { status: 200, body: JSON.stringify({ results: [] }) };
+  };
+  const fetched = await webFetch("https://github.com/", ctx("/tmp", { allowedHosts: ["github.com"], deps: { ...deps(), fetch: fetchDep } }));
+  assert.equal(fetched.error, undefined);
+  const searched = await webSearch("q", ctx("/tmp", { searchUrl: "https://search.test/search", deps: { ...deps(), fetch: fetchDep } }));
+  assert.equal(searched.error, undefined);
+  assert.ok(seen.length >= 2, "both tool fetches must have issued a request");
+  for (const headers of seen) {
+    assert.equal(headers?.["User-Agent"], USER_AGENT);
+    assert.notEqual(headers?.["User-Agent"], "undici");
+  }
 });
 
 test("tool wrapper applies byte truncation and redaction", async () => fixture(async (root) => {

@@ -1816,7 +1816,7 @@ def run_review_for_pr(
     try:
         start = time.monotonic()
 
-        # Determine tool_mode argument for run_review.sh
+        # Determine tool_mode argument for the runtime invocation
         if mode == "tools_off":
             tool_mode_arg = ""
         elif mode == "native_loop":
@@ -3086,8 +3086,8 @@ def main() -> int:
 
     # Fail when zero runs completed (#711): every pass rate is undefined, so
     # reporting success would hide a broken sweep (e.g. the scheduled run
-    # where run_review.sh had lost its executable bit). Partial failures
-    # stay non-fatal — those reports carry real pass rates.
+    # where the runtime entrypoint could not be invoked at all). Partial
+    # failures stay non-fatal — those reports carry real pass rates.
     completed_runs = count_completed_runs(report)
     if completed_runs == 0:
         print(
