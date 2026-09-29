@@ -4,10 +4,11 @@ set -euo pipefail
 # End-to-end Forgejo smoke harness for the platform backend and the v3
 # runner-facing contract (#683). It is opt-in because it starts disposable
 # Forgejo + act_runner containers and needs Docker. It exercises the real
-# Forgejo REST seam that the composite action uses: precheck PR metadata/diff,
-# CI commit-status polling, and sticky comments — then registers an ephemeral
-# Forgejo Actions runner and executes the retained v3 runtime compatibility
-# fixture (#682) as a real workflow job.
+# Forgejo REST seam through the v3 runtime: the precheck decision, CI
+# commit-status polling (the gate-ci workload), and the publish seam's
+# sticky comment — then registers an ephemeral Forgejo Actions runner and
+# executes the retained v3 runtime compatibility fixture (#682) as a real
+# workflow job.
 if [[ "${FORGEJO_E2E:-}" != "true" ]]; then
   echo "SKIP: set FORGEJO_E2E=true to run the Docker-backed Forgejo smoke test"
   exit 0
@@ -60,6 +61,18 @@ safe_value "FORGEJO_E2E_RUNNER_IMAGE" "$RUNNER_IMAGE"
 safe_value "FORGEJO_E2E_JOB_IMAGE" "$JOB_IMAGE"
 safe_value PASSWORD "$PASSWORD"
 safe_value TOKEN_NAME "$TOKEN_NAME"
+
+# The v3 seam phase drives the built runtime bundle; dist/ is not committed,
+# so build it here when missing (after the validation gates above, so bad
+# values still refuse fast without a build).
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required on PATH to drive the v3 platform seam" >&2
+  exit 1
+fi
+if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
+  echo "dist/index.js missing; building the v3 runtime bundle"
+  (cd "$ROOT_DIR" && npm ci --no-audit --no-fund && npm run build)
+fi
 
 cleanup() {
   docker rm -f "$NAME" "$RUNNER_NAME" >/dev/null 2>&1 || true
@@ -129,7 +142,6 @@ export PLATFORM=forgejo
 export FORGEJO_API_URL="http://127.0.0.1:${HTTP_PORT}"
 export FORGEJO_TOKEN
 export GH_TOKEN="$FORGEJO_TOKEN"
-export PYTHONPATH="$ROOT_DIR"
 
 api_json POST "$FORGEJO_API_URL/api/v1/user/repos" \
   '{"name":"sample","auto_init":true,"default_branch":"main"}' >/dev/null
@@ -182,10 +194,13 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
   export SKIP_IF_DIFF_UNCHANGED=true
   export FORCE_REVIEW=false
   export PUBLISH_MODE=comment
-  bash "$ROOT_DIR/scripts/check_review_needed.sh"
+  node "$ROOT_DIR/dist/index.js" precheck
 
   grep -q '^should_review=true$' "$TMPDIR/precheck.out"
-  jq -e '.head.sha == env.HEAD_SHA and .base.ref == "main"' pr-object.json >/dev/null
+  # The PR metadata really came from the Forgejo REST seam: the resolved
+  # head matches the PR created above, on the forgejo backend.
+  grep -q "^head_sha=${HEAD_SHA}$" "$TMPDIR/precheck.out"
+  grep -q '^resolved_platform=forgejo$' "$TMPDIR/precheck.out"
 
   export PR_HEAD_SHA="$HEAD_SHA"
   export GITHUB_OUTPUT="$TMPDIR/ci.out"
@@ -193,13 +208,17 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
   export CI_TIMEOUT_SEC=6
   export CI_INTERVAL_SEC=1
   export CI_CHECKS_FILE="$TMPDIR/ci-checks.md"
-  bash "$ROOT_DIR/scripts/wait_for_ci.sh"
+  node "$ROOT_DIR/dist/index.js" gate-ci
   grep -q '^ci_status_final=success$' "$TMPDIR/ci.out"
 
-  source "$ROOT_DIR/scripts/platform_api.sh"
-  printf '%s\n' "$COMMENT_MARKER" "Forgejo E2E sticky comment" > "$TMPDIR/comment.md"
-  platform_comment_sticky "$REPO" "$PR_NUMBER" "$TMPDIR/comment.md"
-  platform_issue_comments "$REPO" "$PR_NUMBER" | jq -e '.[] | select(.body | contains("Forgejo E2E sticky comment"))' >/dev/null
+  # The publish seam is the sticky-comment mechanism: upsert the managed
+  # comment (with the exact-head guard against the live Forgejo head) and
+  # verify it landed through the REST API.
+  export REVIEW_MARKDOWN="$(printf '%s\n%s\n' "$COMMENT_MARKER" 'Forgejo E2E sticky comment')"
+  export VERDICT=approve
+  node "$ROOT_DIR/dist/index.js" publish
+  api "$FORGEJO_API_URL/api/v1/repos/reviewer/sample/issues/${PR_NUMBER}/comments" |
+    jq -e '.[] | select(.body | contains("Forgejo E2E sticky comment"))' >/dev/null
 )
 
 echo "PASS: Forgejo backend E2E smoke completed against $IMAGE"
