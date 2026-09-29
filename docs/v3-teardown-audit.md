@@ -104,8 +104,12 @@ harness (re-pointed in wave 0) consumes any file listed here.
 | `scripts/sections/enrichment.sh` | Sourced only by `run_review.sh`. |
 | `scripts/verify_pr_head.sh` | Only executable consumer is v2 `scripts/publish.sh`; the fork workflow verifies heads via `scripts/fork_review_gate.py verify` (it only mentions this script in a comment). |
 | `scripts/summarize_tool_loop_telemetry.py` | Invoked only by `scripts/run_tool_harness.py` and its v2 test. |
-| `scripts/v3_shadow_run.mjs` | The v2-vs-v3 shadow comparison was dropped by maintainer decision (#706, 2026-09-29). Its one remaining consumer is `tests-v3/shadow-runner.test.ts:13`, which executes the script's CLI — a `join("scripts", "v3_shadow_run.mjs")` path invisible to a literal-path grep. Delete both together in wave 1; the qualification evidence already captured under `evals/reports/` is data and stays. |
-| `scripts/redact.py` | Imported only by v2 modules (`pr_thread`, `tool_executors`, `transport`, `forgejo_backend`) and the v2 pr-thread runner. The v3 port `src/context/redact.ts` is self-contained — port-provenance comment only, no runtime invocation (verified for wave 1). |
+| `scripts/v3_shadow_run.mjs` | The v2-vs-v3 shadow comparison was dropped by maintainer decision (#706, 2026-09-29). Wave 1 deletes this script **together with** its only consumer, `tests-v3/shadow-runner.test.ts:13`, listed here so the suite deletion cannot be missed — the test executes the script's CLI via a `join("scripts", ...)` path invisible to a literal-path grep. The qualification evidence already captured under `evals/reports/` is data and stays. |
+
+`scripts/redact.py` is deliberately **not** in this table: although the v3
+port is self-contained, its importers are wave-2 (c) files, so it moves to
+the (c) table below — deleting it at wave 1 would break the wave-2 oracle
+runs.
 
 `scripts/sections/gating.sh` is deliberately **not** in this table: the
 dataflow-qualification gate reads it, so it is (c) until wave 2 (see below).
@@ -292,11 +296,12 @@ deleted together with the runner.
 | `scripts/build_repo_map.py` | `tests/parity_runners/v2_repo_map.py`; eval pipeline (`sections/context.sh`). | Freeze the repo-map boundary. |
 | `scripts/build_related_context.py` | `tests/parity_runners/v2_related_code.py`; eval pipeline. | Freeze the related-code boundary. |
 | `scripts/prioritize_diff.py` | `tests/parity_runners/v2_diff_priority.py`; eval pipeline (`sections/corpus.sh`). | Freeze the diff-priority boundary. |
-| `scripts/strip_source_text.py` | Dual-side goldens `tests/test_strip_source_text_diff.py` (v2 side vs `node dist/index.js strip-source-text-fixture`); v2 `pr_reviewer/linked_sources.py`. | Freeze the linked-sources boundary; re-freeze the goldens v3-only. |
+| `scripts/strip_source_text.py` | Dual-side goldens `tests/test_strip_source_text_diff.py` (v2 side vs `node dist/index.js strip-source-text-fixture`); bare-imported by `pr_reviewer/linked_sources.py`. | Freeze the linked-sources boundary; re-freeze the goldens v3-only. |
+| `scripts/redact.py` | Bare-imported (the sys.path trick) by `pr_reviewer/{forgejo_backend,pr_thread,related_context,specialists,tool_executors,transport}.py` and `scripts/{build_review_comments,run_evidence_providers,run_specialists,run_tool_harness}.py`; executed by `tests/parity_runners/v2_pr_thread.py`; unit-tested by `tests/test_redact.py`. The v3 port `src/context/redact.ts` is self-contained (port-provenance comment only, no runtime invocation). | Wave 2 — with the last importer. |
 | `scripts/publish.sh` | `tests/parity_runners/v2_metadata_markers.py` chain; referenced by the frozen `tests/parity_runners/v2-action.yml` composite oracle. | Freeze the publication boundaries. Not on the eval path (the harness never publishes). |
 | `scripts/publish_helpers.sh` | `tests/parity_runners/v2_metadata_markers.py`; frozen `v2-action.yml`. | Freeze the metadata-marker boundary. |
 | `scripts/build_review_comments.py` | `tests/parity_runners/v2_inline_findings.py`; `scripts/publish_helpers.sh`. | Freeze the inline-findings boundary. |
-| `scripts/sanitize_review_markdown.py` | `tests/parity_runners/v2_sanitize.py`; `scripts/publish_helpers.sh`. | Freeze the sanitize boundary. |
+| `scripts/sanitize_review_markdown.py` | `tests/parity_runners/v2_sanitize.py`; `scripts/publish_helpers.sh`; bare-imported by `scripts/build_review_comments.py`. | Freeze the sanitize boundary. |
 | `scripts/strip_metadata_markers.py` | `tests/parity_runners/v2_metadata_markers.py`; `scripts/publish_helpers.sh`. | Freeze the metadata-marker boundary. |
 | `scripts/strip_empty_conditional_sections.py` | `scripts/publish_helpers.sh` (and the sanitize runner chain). | Freeze the publication boundaries. |
 | `scripts/load_shared_env.sh` | Sourced by the frozen `tests/parity_runners/v2-action.yml` composite oracle (lines 1106–1107 and 1168–1169). | Freeze the config-default-resolution boundary. |
