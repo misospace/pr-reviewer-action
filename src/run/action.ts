@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
@@ -38,6 +38,15 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
     text += `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
   }
   if (text !== "") appendFileSync(file, text);
+}
+
+/** A fresh run directory per invocation: the run workspace reads through to
+ * disk (it reuses pr.diff / pr-object.json when present), so a directory
+ * shared by two invocations in one job would feed the second the first's
+ * artifacts. */
+export function createRunDir(temp: string): string {
+  mkdirSync(temp, { recursive: true });
+  return mkdtempSync(join(temp, "v3-review-run-"));
 }
 
 /** The label a `labeled` event carries (GitHub sends `{ name }`). */
@@ -103,8 +112,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   stage.IS_FORK_PR = pre.is_fork_pr;
   const temp = env.RUNNER_TEMP || env.TMPDIR || "/tmp";
   stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md");
-  const runDir = join(temp, "v3-review-run");
-  mkdirSync(runDir, { recursive: true });
+  const runDir = createRunDir(temp);
   stage.PR_REVIEWER_RUN_DIR = runDir;
   const review = await runReview({ env: stage as NodeJS.ProcessEnv, runDir, workspace: env.GITHUB_WORKSPACE ?? process.cwd() });
 

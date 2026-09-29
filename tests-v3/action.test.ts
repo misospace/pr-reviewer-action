@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { actionStageEnv, eventLabelName, writeOutputs } from "../src/run/action.js";
+import { actionStageEnv, createRunDir, eventLabelName, writeOutputs } from "../src/run/action.js";
+import { existsSync } from "node:fs";
 
 function withDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "v3-action-"));
@@ -63,4 +64,19 @@ test("labeled events carry the label as an object with a name", () => {
   assert.equal(eventLabelName({ name: "ai-review" }), "ai-review");
   assert.equal(eventLabelName("ai-review"), "ai-review");
   assert.equal(eventLabelName(undefined), "");
+});
+
+test("each action invocation gets its own run dir, so a second one never reads the first's artifacts", () => {
+  const { dir, cleanup } = withDir();
+  try {
+    const first = createRunDir(dir);
+    writeFileSync(join(first, "pr.diff"), "diff --git a/one b/one\n");
+    writeFileSync(join(first, "pr-object.json"), "{\"number\": 1}");
+    const second = createRunDir(dir);
+    assert.notEqual(first, second);
+    assert.equal(existsSync(join(second, "pr.diff")), false);
+    assert.equal(existsSync(join(second, "pr-object.json")), false);
+  } finally {
+    cleanup();
+  }
 });
