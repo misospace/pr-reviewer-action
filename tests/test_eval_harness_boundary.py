@@ -29,7 +29,12 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import eval_harness
-from eval_harness import evaluate_specialist_expectations, run_review_for_pr
+
+# One import style: the module object stays importable for the
+# RUNTIME_ENTRYPOINT monkeypatching, and the two call-site names are bound
+# from it explicitly (the CodeQL mixed-import finding).
+evaluate_specialist_expectations = eval_harness.evaluate_specialist_expectations
+run_review_for_pr = eval_harness.run_review_for_pr
 
 
 REPO = "misospace/pr-reviewer-action"
