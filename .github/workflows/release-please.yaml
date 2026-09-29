@@ -6,10 +6,11 @@
 # does not trigger other workflows, and this repo's consumers pin @vX, so the
 # floating major tag has to be advanced after every stable release.
 #
-# dist/ is not committed to main. release-please opens the release as a draft
-# (no tag), then publish-release-build commits the built bundle on top of the
-# release commit (off main), smokes it as consumers get it, and only then
-# points vX.Y.Z and vX at it and publishes the draft.
+# dist/ is not committed to main. release-please only maintains the release PR
+# (skip-github-release). When a release PR merges, publish-release-build commits
+# the built bundle on top of the release commit (off main), smokes it as
+# consumers get it, and only then points vX.Y.Z and vX at it and creates the
+# GitHub Release.
 name: Release Please
 
 on:
@@ -26,10 +27,10 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      major: ${{ steps.release.outputs.major }}
-      sha: ${{ steps.release.outputs.sha }}
+      release_created: ${{ steps.detect.outputs.release_created }}
+      tag_name: ${{ steps.detect.outputs.tag_name }}
+      major: ${{ steps.detect.outputs.major }}
+      sha: ${{ steps.detect.outputs.sha }}
     steps:
       - name: Generate bot token
         id: app-token
@@ -44,6 +45,34 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # release-please only maintains the release PR (skip-github-release):
+      # it creates no tag or GitHub Release, so consumers never see a version
+      # before its dist build passes the smoke. A merged release PR shows up
+      # as a manifest version with no tag yet; publish-release-build owns the
+      # tag and the Release from there.
+      - name: Checkout pushed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect an unpublished release
+        id: detect
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '."."' .release-please-manifest.json)"
+          TAG="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "release_created=true"
+            echo "tag_name=$TAG"
+            echo "major=${VERSION%%.*}"
+            echo "sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "unpublished release: $TAG at $GITHUB_SHA"
 
   build-release-dist:
     name: Build release dist
@@ -125,15 +154,29 @@ jobs:
           SHA=$(scripts/release/tag-with-dist.sh "$BASE_SHA" "$TAG" "$MAJOR_TAG")
           echo "$TAG${MAJOR_TAG:+, $MAJOR_TAG} -> $SHA"
 
-      # release-please opens the release as a draft (no tag yet), so consumers
-      # never see vX.Y.Z before the smoked dist build is tagged; publish it now.
-      - name: Publish the draft release
+      # The tag now points at the smoked dist build: create the Release
+      # against it, then mark the merged release PR as tagged (release-please
+      # refuses to open the next release PR while one is still pending).
+      - name: Create the GitHub Release and mark the release PR tagged
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
+          BASE_SHA: ${{ needs.release-please.outputs.sha }}
         run: |
           set -euo pipefail
-          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          VERSION="${TAG#v}"
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; if (index($0, "[" v "]") || index($0, " " v " ")) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          PRERELEASE=()
+          [[ "$TAG" == *-* ]] && PRERELEASE=(--prerelease)
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" "${PRERELEASE[@]}"
+          fi
+          PR="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA/pulls" --jq '.[0].number // empty')"
+          if [ -n "$PR" ]; then
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
           fi
 
