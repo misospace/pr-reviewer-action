@@ -7,8 +7,9 @@
 #
 # A release is complete when the version tag exists, the floating major tag
 # (stable releases) points at the version tag's commit, the GitHub Release
-# exists, and the merged release PR is marked `autorelease: tagged`. Every step
-# is idempotent, so any later run converges a partially published release.
+# exists, and the merged release PR is marked `autorelease: tagged` (and not
+# `autorelease: pending`). Every step is idempotent, so any later run
+# converges a partially published release; the PR check fails closed.
 # Needs `git` (with an `origin` remote), `gh`, and GITHUB_REPOSITORY.
 set -euo pipefail
 
@@ -22,11 +23,22 @@ TAGGED="autorelease: tagged"
 remote_sha() { git ls-remote origin "refs/tags/$1" | cut -f1; }
 stable() { [[ "$TAG" != *-* ]]; }
 major_tag() { local version=${TAG#v}; echo "v${version%%.*}"; }
-release_pr() { gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true; }
-pr_pending() {
-  local pr=$1
-  [ -n "$pr" ] || return 1
-  gh api "repos/$REPO/issues/$pr/labels" --jq '.[].name' 2>/dev/null | grep -qxF "$PENDING"
+# The release PR and its labels are read fail-closed: any lookup failure
+# leaves the PR state unknown, which never counts as complete.
+PR=""
+PR_STATE=unknown   # tagged | pending | unlabeled | unknown
+read_pr_state() {
+  local labels
+  PR="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty')" || return 1
+  [ -n "$PR" ] || return 1
+  labels="$(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name')" || return 1
+  local tagged=false pending=false
+  printf '%s\n' "$labels" | grep -qxF "$TAGGED" && tagged=true
+  printf '%s\n' "$labels" | grep -qxF "$PENDING" && pending=true
+  if [ "$pending" = true ]; then PR_STATE=pending
+  elif [ "$tagged" = true ]; then PR_STATE=tagged
+  else PR_STATE=unlabeled
+  fi
 }
 
 tag_sha="$(remote_sha "$TAG")"
@@ -37,19 +49,17 @@ if stable && [ "$tag_present" = true ] && [ "$(remote_sha "$(major_tag)")" != "$
 fi
 release_present=false
 gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && release_present=true
-pr="$(release_pr)"
-pending=false
-pr_pending "$pr" && pending=true
+read_pr_state 2>/dev/null || PR_STATE=unknown
 
 complete=false
-if [ "$tag_present" = true ] && [ "$major_ok" = true ] && [ "$release_present" = true ] && [ "$pending" = false ]; then
+if [ "$tag_present" = true ] && [ "$major_ok" = true ] && [ "$release_present" = true ] && [ "$PR_STATE" = tagged ]; then
   complete=true
 fi
 
 if [ "$MODE" = state ]; then
   printf '%s\n' \
     "tag_present=$tag_present" "major_ok=$major_ok" "release_present=$release_present" \
-    "pr_pending=$pending" "complete=$complete" "needs_build=$([ "$tag_present" = true ] && echo false || echo true)"
+    "pr_state=$PR_STATE" "complete=$complete" "needs_build=$([ "$tag_present" = true ] && echo false || echo true)"
   exit 0
 fi
 
@@ -77,8 +87,16 @@ if [ "$release_present" = false ]; then
   echo "converge: created the GitHub Release $TAG"
 fi
 
-if [ "$pending" = true ]; then
-  gh pr edit "$pr" --repo "$REPO" --remove-label "$PENDING" --add-label "$TAGGED" >&2
-  echo "converge: marked release PR #$pr tagged"
-fi
+case "$PR_STATE" in
+  tagged) ;;
+  pending)
+    gh pr edit "$PR" --repo "$REPO" --remove-label "$PENDING" --add-label "$TAGGED" >&2
+    echo "converge: marked release PR #$PR tagged" ;;
+  unlabeled)
+    gh pr edit "$PR" --repo "$REPO" --add-label "$TAGGED" >&2
+    echo "converge: marked release PR #$PR tagged" ;;
+  *)
+    echo "converge: could not resolve the release PR for $SHA or read its labels; $TAG is not converged" >&2
+    exit 1 ;;
+esac
 echo "converge: $TAG complete"

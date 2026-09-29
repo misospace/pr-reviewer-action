@@ -21,8 +21,8 @@ cat > "$FAKE/bin/gh" <<'GH'
 #!/usr/bin/env bash
 state="$FAKE_STATE"
 case "$1 $2" in
-  "api repos/o/r/commits/"*) cat "$state/pr" 2>/dev/null || true ;;
-  "api repos/o/r/issues/"*) cat "$state/labels" 2>/dev/null || true ;;
+  "api repos/o/r/commits/"*) [ ! -f "$state/pr_fail" ] || exit 1; cat "$state/pr" 2>/dev/null || true ;;
+  "api repos/o/r/issues/"*) [ ! -f "$state/labels_fail" ] || exit 1; cat "$state/labels" 2>/dev/null || true ;;
   "release view") [ -f "$state/release" ] ;;
   "release create") echo "release create $3" >> "$state/log"; touch "$state/release" ;;
   "pr edit") echo "pr edit $3" >> "$state/log"; printf 'autorelease: tagged\n' > "$state/labels" ;;
@@ -44,7 +44,8 @@ BUILD="$(git rev-parse HEAD)"
 git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m "older build"
 OLD="$(git rev-parse HEAD)"
 
-reset_state() { rm -f "$FAKE/release" "$FAKE/log" "$FAKE/labels" "$FAKE/pr"; git push -q origin --delete v3.0.0 v3 2>/dev/null || true; }
+reset_state() { rm -f "$FAKE/release" "$FAKE/log" "$FAKE/labels" "$FAKE/pr" "$FAKE/pr_fail" "$FAKE/labels_fail"; for t in v3.0.0 v3 v3.1.0-rc.1; do git push -q origin --delete "$t" 2>/dev/null || true; done; }
+published() { git push -q origin "$BUILD:refs/tags/v3.0.0" "$BUILD:refs/tags/v3"; touch "$FAKE/release"; echo 42 > "$FAKE/pr"; }
 state() { bash "$SCRIPT" state v3.0.0 "$BASE" | grep "^$1=" | cut -d= -f2; }
 
 echo "=== nothing published: build needed ==="
@@ -89,11 +90,45 @@ rm -f "$FAKE/log"
 bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
 check "no writes" '[ ! -s "$FAKE/log" ]'
 
-echo "=== pre-release: the floating tag is never required ==="
+echo "=== release PR exists with neither label ==="
+reset_state; published; : > "$FAKE/labels"
+check "incomplete (not pending is not tagged)" '[ "$(state complete)" = false ]'
+check "reported unlabeled" '[ "$(state pr_state)" = unlabeled ]'
+bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
+check "finish adds the tagged label" '[ "$(cat "$FAKE/log")" = "pr edit 42" ] && grep -qx "autorelease: tagged" "$FAKE/labels"'
+check "complete afterwards" '[ "$(state complete)" = true ]'
+
+echo "=== PR lookup fails: fail closed ==="
+reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"; touch "$FAKE/pr_fail"
+check "never complete" '[ "$(state complete)" = false ]'
+check "reported unknown" '[ "$(state pr_state)" = unknown ]'
+check "finish exits non-zero" '! bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1'
+
+echo "=== label lookup fails: fail closed ==="
+reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"; touch "$FAKE/labels_fail"
+check "never complete" '[ "$(state complete)" = false ]'
+check "finish exits non-zero" '! bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1'
+
+echo "=== no release PR resolvable: fail closed ==="
+reset_state; git push -q origin "$BUILD:refs/tags/v3.0.0" "$BUILD:refs/tags/v3"; touch "$FAKE/release"
+check "never complete" '[ "$(state complete)" = false ]'
+check "finish exits non-zero" '! bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1'
+
+echo "=== PR already tagged: complete, finish is a no-op ==="
+reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"
+check "complete" '[ "$(state complete)" = true ]'
+bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
+check "no writes" '[ ! -s "$FAKE/log" ]'
+
+echo "=== pre-release: no floating tag, same tagged terminal state ==="
 reset_state
 git push -q origin "$BUILD:refs/tags/v3.1.0-rc.1"
-touch "$FAKE/release"
-check "complete without a floating tag" '[ "$(bash "$SCRIPT" state v3.1.0-rc.1 "$BASE" | grep ^complete= | cut -d= -f2)" = true ]'
+touch "$FAKE/release"; echo 43 > "$FAKE/pr"; printf 'autorelease: pending\n' > "$FAKE/labels"
+prestate() { bash "$SCRIPT" state v3.1.0-rc.1 "$BASE" | grep "^$1=" | cut -d= -f2; }
+check "incomplete while the release PR is pending" '[ "$(prestate complete)" = false ]'
+bash "$SCRIPT" finish v3.1.0-rc.1 "$BASE" >/dev/null 2>&1
+check "complete once tagged, without a floating tag" '[ "$(prestate complete)" = true ]'
+check "no floating tag was created" '[ -z "$(git ls-remote origin refs/tags/v3)" ]'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
