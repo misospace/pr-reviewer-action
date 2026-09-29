@@ -20,7 +20,6 @@ jobs:
       - validate-python
       - validate-static
       - validate-bash-timeout
-      - validate-bash-gating
       - validate-bash
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -37,7 +36,6 @@ jobs:
             "validate-python ${{ needs.validate-python.result }}" \
             "validate-static ${{ needs.validate-static.result }}" \
             "validate-bash-timeout ${{ needs.validate-bash-timeout.result }}" \
-            "validate-bash-gating ${{ needs.validate-bash-gating.result }}" \
             "validate-bash ${{ needs.validate-bash.result }}"; do
             job="${job_result%% *}"
             result="${job_result#* }"
@@ -121,11 +119,15 @@ jobs:
 
       # Coverage is scoped to pr_reviewer/ and scripts/ — the bash test suites
       # cover the shell side, which pytest-cov can't measure.
-      # Threshold: measured baseline was 76% (2026-07-03); gate at 72 to absorb
-      # small fluctuations. Ratchet toward the audit's 80% as coverage grows.
-      - name: Run Python tests (auto-discover all 215)
+      # Threshold: measured 76% pre-teardown, gated at 72. After #706 wave 1
+      # the (c) parity oracles under those trees are exercised only by the
+      # parity-harness subprocesses, which pytest-cov cannot see, so the
+      # measured baseline is 23% and the gate re-baselined to 20 to absorb
+      # small fluctuations. Ratchets back up at wave 2 when the v2 trees
+      # shrink to the (b) tooling.
+      - name: Run Python tests (auto-discover)
         run: |
-          COV_FAIL_UNDER=72
+          COV_FAIL_UNDER=20
           pytest tests/ -v --tb=short \
             --cov=pr_reviewer --cov=scripts \
             --cov-report=term-missing:skip-covered \
@@ -195,9 +197,6 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck
 
-      - name: Verify smoke test helper is executable
-        run: test -x tests/smoke_test.sh
-
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
@@ -244,42 +243,6 @@ jobs:
           done
           exit "$failed"
 
-  validate-bash-gating:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          # Same pinned interpreter as validate-python so bash suites that shell
-          # out to python3 see the same version (see the skew note above).
-          python-version: '3.14'
-
-      - name: Install test dependencies
-        # See the note in validate-bash-timeout: suites import PyYAML transitively.
-        run: pip install -r requirements.txt
-
-      - name: Run assigned slow bash suite
-        run: |
-          set -euo pipefail
-          mapfile -t suites < <(awk -v job="$GITHUB_JOB" '$1 !~ /^#/ && $1 == job {print $2}' tests/slow-bash-suites.txt)
-          if (( ${#suites[@]} == 0 )); then
-            echo "::error::no slow suite assigned to job '$GITHUB_JOB' in tests/slow-bash-suites.txt"
-            exit 1
-          fi
-          failed=0
-          for t in "${suites[@]}"; do
-            echo "::group::$t"
-            if ! bash "$t"; then
-              echo "::error::$t failed"
-              failed=1
-            fi
-            echo "::endgroup::"
-          done
-          exit "$failed"
-
   validate-bash:
     runs-on: ubuntu-latest
     steps:
@@ -296,9 +259,6 @@ jobs:
       - name: Install test dependencies
         # See the note in validate-bash-slow: suites import PyYAML transitively.
         run: pip install -r requirements.txt
-
-      - name: Run smoke test
-        run: tests/smoke_test.sh
 
       # Auto-discover every bash suite except the slow ones assigned in
       # tests/slow-bash-suites.txt (run by their validate-bash-* jobs) so a

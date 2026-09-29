@@ -54,10 +54,10 @@ shell=bash
 #            so adding a second dependency is a one-line change.
 #
 #   SC2206 - Quote to prevent word splitting/globbing.
-#            scripts/sections/config.sh and tests/test_standards_file_resolution.sh
-#            intentionally word-split glob patterns from the standards-file
-#            candidate list; the candidates are user-controlled paths whose
-#            glob semantics are the feature.
+#            scripts/sections/config.sh intentionally word-split glob
+#            patterns from the standards-file candidate list; the
+#            candidates are user-controlled paths whose glob semantics
+#            are the feature.
 #
 #   SC2086 - Double quote to prevent globbing and word splitting.
 #            tests/forgejo_e2e_smoke.sh line 130 builds `pull/${PR_NUMBER}/head`
@@ -70,9 +70,9 @@ shell=bash
 #            form); shellcheck flags the escaping but the test wants it.
 #
 #   SC2329 - This function is never invoked.
-#            tests/test_system_prompt_fragments.sh defines helper functions
-#            that are sourced by other test files; shellcheck does not see
-#            the cross-file invocations.
+#            Some bash suites define helper functions that other test
+#            files source; shellcheck does not see the cross-file
+#            invocations.
 #
 #   SC2317 - Command appears to be unreachable.
 #            scripts/platform_api.sh line 47 uses `return ... || exit 0` as a
@@ -85,15 +85,14 @@ shell=bash
 #
 #   SC2030/SC2031 - Modification of PLATFORM is local to subshell / was modified
 #                   in a subshell.
-#            tests/test_platform_api.sh intentionally mutates PLATFORM inside
-#            `(...)` groups to verify the seam's subshell isolation; the
-#            mutation is the test.
+#            scripts/platform_api.sh intentionally mutates PLATFORM inside
+#            `(...)` groups to keep the seam's subshell isolation; the
+#            mutation is the mechanism.
 #
 #   SC2015 - Note that A && B || C is not if-then-else.
-#            tests/test_cleanup_native_reviews_behavior.sh line 111 uses
-#            `cond && { PASS+=1; ... } || FAIL+=1` where the `||` branch is
-#            intentionally unreachable; the test wants the side-effect-only
-#            increment form.
+#            Some suites use `cond && { PASS+=1; ... } || FAIL+=1` where
+#            the `||` branch is intentionally unreachable; the side-effect
+#            -only increment form is the point of the assertion.
 #
 #   SC2005 - Useless echo? Instead of 'echo $(cmd)', just use 'cmd'.
 #            scripts/sections/review.sh line 323 wraps `jq` in `echo $(...)`
@@ -101,7 +100,7 @@ shell=bash
 #            file-write-then-redact pipeline that follows.
 #
 #   SC1090 - ShellCheck can't follow non-constant source.
-#            tests/test_platform_api.sh sources the platform seam via a
-#            variable path; a `# shellcheck source=` directive is not
-#            applicable because the path is resolved at test runtime.
+#            Suites source the platform seam via a variable path; a
+#            `# shellcheck source=` directive is not applicable because
+#            the path is resolved at runtime.
 disable=SC2154,SC2034,SC1091,SC2129,SC2153,SC2016,SC1007,SC2164,SC2043,SC2206,SC2086,SC1003,SC2329,SC2317,SC2181,SC2030,SC2031,SC2015,SC2005,SC1090
