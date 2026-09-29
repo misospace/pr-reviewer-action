@@ -74,6 +74,7 @@ still also set them as a workflow `with:` input:
 | `validate-required-checks` | enum | operator-explicit wins |
 | `required-check-validation-mode` | enum | operator-explicit wins |
 | `related-code-context` | boolean | operator-explicit wins |
+| `harness-obligations` | boolean | operator-explicit wins |
 | `system-prompt-mode` | enum | operator-explicit wins |
 | `review-verbosity` | enum | operator-explicit wins |
 | `standards-file` | string (path) | operator-explicit wins |

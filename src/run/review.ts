@@ -396,7 +396,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // its anchors and related context are the #796 obligation inputs. It
   // reads only the diff, the file list and the checkout.
   const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
-  const harnessObligations = relatedInputs === null ? [] : buildHarnessObligations(relatedInputs);
+  const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
+  const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 
   // PR-metadata-derived context (context.sh): linked issues + Linear, the
   // requirement ledger, review threads and human reviews. Built here and

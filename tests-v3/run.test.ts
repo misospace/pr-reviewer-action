@@ -742,7 +742,7 @@ test("#812: a head that moved during the CI wait skips the metadata refresh", as
   }
 });
 
-test("#796: an edited function with a caller becomes a harness obligation in the run's ledger", async () => {
+async function obligationRun(extraInputs: Record<string, string>): Promise<{ harness: Array<{ text: string }>; lastRequest: string }> {
   const requests: string[] = [];
   const server = await startMockServer((_req, body, res) => {
     requests.push(String(body));
@@ -767,7 +767,7 @@ test("#796: an edited function with a caller becomes a harness obligation in the
     ].join("\n");
     await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
-      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k" },
+      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k", ...extraInputs },
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform({ diff, files: [{ filename: "pkg/auth.py", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
@@ -776,14 +776,24 @@ test("#796: an edited function with a caller becomes a harness obligation in the
     });
     const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as { requirements: Array<{ text: string; provenance: Array<{ source: string; ref: string }> }> };
     const harness = ledger.requirements.filter((entry) => entry.provenance.some((p) => p.source === "harness" && p.ref === "pkg/auth.py"));
-    assert.ok(harness.length > 0, `no harness obligation in ${JSON.stringify(ledger.requirements)}`);
-    assert.match(harness[0]!.text, /get_session_token/);
-    assert.match(harness[0]!.text, /client\.py/);
-    assert.match(requests.at(-1) ?? "", /get_session_token/);
+    return { harness, lastRequest: requests.at(-1) ?? "" };
   } finally {
     await server.close();
     cleanup();
   }
+}
+
+test("#796: with harness-obligations on, an edited function with a caller becomes a harness obligation in the run's ledger", async () => {
+  const { harness, lastRequest } = await obligationRun({ "harness-obligations": "true" });
+  assert.ok(harness.length > 0, "no harness obligation in the ledger");
+  assert.match(harness[0]!.text, /get_session_token/);
+  assert.match(harness[0]!.text, /client\.py/);
+  assert.match(lastRequest, /get_session_token/);
+});
+
+test("#796: harness obligations are off by default", async () => {
+  const { harness } = await obligationRun({});
+  assert.deepEqual(harness, []);
 });
 
 /** SSE bodies for a streamed tool-call turn and a streamed text turn. */

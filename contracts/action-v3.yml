@@ -219,6 +219,12 @@ inputs:
     default: "16000"
     description: "Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)"
     repo-configurable: true
+  - id: harness-obligations
+    v2_id: harness_obligations
+    required: false
+    default: "false"
+    description: "Add harness-authored verification obligations (derived from related-code context) to the requirement ledger. Off by default: measured with no recall gain."
+    repo-configurable: true
   - id: linear-api-key
     v2_id: linear_api_key
     required: false

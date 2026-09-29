@@ -165,6 +165,10 @@ inputs:
     description: Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64)
     required: false
     default: "16000"
+  harness-obligations:
+    description: "Add harness-authored verification obligations (derived from related-code context) to the requirement ledger. Off by default: measured with no recall gain."
+    required: false
+    default: "false"
   linear-api-key:
     description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
     required: false

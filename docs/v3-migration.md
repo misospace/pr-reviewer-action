@@ -71,6 +71,7 @@ Set any of them explicitly to keep the v2 behavior; the parity harness pins each
 | `ai_fallback_stream` | `ai-fallback-stream` |
 | `allowed_source_hosts` | `allowed-source-hosts` |
 | `related_code_context` | `related-code-context` |
+| `harness_obligations` | `harness-obligations` |
 | `related_code_max_bytes` | `related-code-max-bytes` |
 | `linear_api_key` | `linear-api-key` |
 | `linear_issue_prefixes` | `linear-issue-prefixes` |
@@ -1009,9 +1010,12 @@ The ledger sha covers them (they are ledger entries like any other), the
 strict requirement-coverage fold and evidence-gated normalizer are unchanged,
 and the verdict remains the reviewer's. The requirement-ledger prompt
 fragment adds one rule: a `violated` obligation must come with a finding.
-Pending merge gate: the human-findings corpus measurement (ledger-on vs
-off, 3 runs per PR per arm) must be recorded before the injection ships
-enabled in production.
+The injection is opt-in (`harness-obligations: true`, default `false`). On
+the 37 human-findings PRs where an obligation names the defect file (3 runs
+per PR per arm, one model), it showed no recall gain: strict recall 32.4% on
+vs 34.2% off, a paired per-PR delta of -1.8pp (95% bootstrap CI -11.7 to
++7.2), with request_changes 4.5pp more frequent and the same tool-call and
+finding counts.
 
 ## Workflow examples
 
