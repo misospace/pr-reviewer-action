@@ -46,41 +46,47 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
    gates. Four pytest goldens tests also execute runners directly
    (listed in the tests table).
 2. **The eval harness** (`scripts/eval_harness.py`) — run by
-   `.github/workflows/eval-harness.yaml`. Its `run_review_for_pr` resolves
-   and executes the bundled `scripts/run_review.sh`, which sources
-   `scripts/platform_api.sh`, `scripts/artifact_paths.sh` and every
-   `scripts/sections/*.sh`, which in turn invoke the v2 Python entry points
-   — i.e. the whole v2 pipeline is still transitively alive through the eval
-   tooling. It also imports `pr_reviewer.semantic_eval`. #706's own sequence
-   requires re-pointing it at the v3 entry before `run_review.sh` goes.
+   `.github/workflows/eval-harness.yaml`. Since the #706 wave-0 re-point its
+   `run_review_for_pr` invokes the built v3 runtime (`node dist/index.js
+   run`, bundle resolved next to the harness) with the same env contract and
+   artifact names; semantic-fixture entries are served offline through the
+   `SemanticFixtureAdapter` on the same platform seam
+   (`SEMANTIC_FIXTURE_MODE`/`SEMANTIC_FIXTURE_DIR` survive the
+   `buildStageEnv` projection as ambient keys). The harness no longer
+   reaches `scripts/run_review.sh`, `scripts/sections/*` or the v2 Python
+   review entry points. It still imports `pr_reviewer.semantic_eval` — the
+   retained (b) eval-tooling module — and the workflow now builds `dist/`
+   before running the harness.
 3. **The Forgejo E2E smoke** (`tests/forgejo_e2e_smoke.sh`, the #683
    qualification harness, guarded by `tests/test_forgejo_e2e_smoke_safety.sh`)
-   — it exercises `scripts/platform_api.sh`, `scripts/check_review_needed.sh`
-   and `scripts/wait_for_ci.sh` against real Forgejo REST endpoints.
+   — since the wave-0 re-point it exercises the v3 seam against real
+   Forgejo REST endpoints: `node dist/index.js precheck`, the `gate-ci`
+   workload, and the publish boundary's sticky comment. It no longer
+   touches `scripts/platform_api.sh`, `scripts/check_review_needed.sh` or
+   `scripts/wait_for_ci.sh`.
 4. **The v3 build and v3 tests** — `scripts/generate-v3-contract.mjs` embeds
    `scripts/default_system_prompt.txt` and `scripts/prompt_fragments/*.txt`
-   into `src/prompt/assets.ts`; `tests-v3/request.test.ts` reads
-   `scripts/model_call.sh` to pin the `rf_json` literal across the port;
-   `tests-v3/specialists-gate.test.ts` reads
-   `scripts/prompt_fragments/specialist_correctness_adversarial.txt`.
+   into `src/prompt/assets.ts`; `tests-v3/specialists-gate.test.ts` reads
+   `scripts/prompt_fragments/specialist_correctness_adversarial.txt`. (The
+   `rf_json` pin in `tests-v3/request.test.ts` was inlined from
+   `scripts/model_call.sh` in wave 0 and no longer reads the shell file.)
 
 ## Deletion waves
 
-- **Wave 0 — preparation (no deletions).** Re-point `scripts/eval_harness.py`
-  at the v3 entry (`node dist/index.js run`) and adjust its tests
-  (`tests/test_eval_harness_real_pr_corpus.py` fake-orchestrator names,
-  `tests/test_eval_harness_repo_context.py` expectations). This re-point must
-  land before the #681 measurement work (#810, #796), which has to measure
-  v3. Inline the
-  `rf_json` assertion in `tests-v3/request.test.ts` so it stops reading
-  `scripts/model_call.sh`. Re-point `tests/forgejo_e2e_smoke.sh` at the v3
-  platform seam. Confirm the adversarial-boundary pattern exemplars cited by
-  AGENTS.md (#252: `tests/test_native_loop_exfil_redteam.py`,
-  `tests/test_outbound_user_agent.py`) have v3-side equivalents, then update
-  the AGENTS.md pointers. Update docs that still describe v2 as live
-  (AGENTS.md code map, `README.md`, `docs/architecture/code-map.md`,
-  `docs/v3-migration.md`, `SECURITY.md`, `.github/ai-review-rules.md`, and the
-  `scripts/verify_pr_head.sh` mention in `.github/workflows/fork-ai-review.yaml`).
+- **Wave 0 — preparation (no deletions). LANDED** (the #706 wave-0 PR):
+  `scripts/eval_harness.py` re-pointed at the v3 entry
+  (`node dist/index.js run`; the fixture-env bridge through `buildStageEnv`
+  included) with its tests adjusted — the corpus path strings in
+  `test_eval_harness_real_pr_corpus.py` / `test_eval_harness_repo_context.py`
+  are historical replay data and stay; the `rf_json` assertion inlined in
+  `tests-v3/request.test.ts`; `tests/forgejo_e2e_smoke.sh` re-pointed at the
+  v3 platform seam; the #252 exemplar coverage confirmed on the v3 side
+  (`tests-v3/tools-executors.test.ts`) and AGENTS.md pointed at it; the
+  docs that described v2 as live updated (AGENTS.md code map, `README.md`,
+  `docs/architecture/code-map.md`, `docs/v3-migration.md`, `SECURITY.md`,
+  `.github/ai-review-rules.md`, and the `scripts/verify_pr_head.sh` mention
+  in `.github/workflows/fork-ai-review.yaml`). This re-point landed before
+  the #681 measurement work (#810, #796), which has to measure v3.
   Port-provenance comments inside `src/` are history, not consumers, and stay.
 - **Wave 1 — delete the (a) set** (v2 production runtime, its tests, and the
   dead CI jobs/steps listed below). The (c) set and the parity harness stay.
@@ -93,14 +99,15 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
 
 Nothing outside the v2 runtime itself, its test suites — including
 `tests-v3/shadow-runner.test.ts`, the one v3-side consumer in this section,
-deleted in the same commit as its subject — the smoke test, or the eval
-harness (re-pointed in wave 0) consumes any file listed here.
+deleted in the same commit as its subject — or the smoke test consumes any
+file listed here. The eval harness reached `run_review.sh` until the wave-0
+re-point; it now invokes the v3 runtime and touches nothing in this table.
 
 ### scripts/
 
 | File | Note |
 | --- | --- |
-| `scripts/run_review.sh` | v2 orchestrator; executed only by the eval harness (re-pointed in wave 0) and v2 tests. |
+| `scripts/run_review.sh` | v2 orchestrator; v2 tests only since the wave-0 eval-harness re-point. |
 | `scripts/sections/enrichment.sh` | Sourced only by `run_review.sh`. |
 | `scripts/verify_pr_head.sh` | Only executable consumer is v2 `scripts/publish.sh`; the fork workflow verifies heads via `scripts/fork_review_gate.py verify` (it only mentions this script in a comment). |
 | `scripts/summarize_tool_loop_telemetry.py` | Invoked only by `scripts/run_tool_harness.py` and its v2 test. |
@@ -254,7 +261,7 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `test_dogfood_workflow.py` | Pins `.github/workflows/ai-pr-review.yaml` + `action.yml` defaults. |
 | `test_html_entities_table.py` | Pins `src/context/html-entities.ts` (v3) to CPython's `html.entities` tables. |
 | `test_parity_harness.py` | The parity harness itself (CLI/exit-code contract). |
-| `test_eval_harness.py`, `test_eval_harness_boundary.py`, `test_eval_harness_fixture_fork.py`, `test_eval_harness_real_pr_corpus.py`, `test_eval_harness_repo_context.py`, `test_eval_harness_scout.py`, `test_eval_harness_semantic.py`, `test_eval_harness_specialists.py`, `test_eval_harness_specialists_corpus.py`, `test_eval_harness_workflow_lint.py`, `test_eval_weekly_summary.py` | Import/exercise `scripts/eval_harness.py` and `scripts/eval_weekly_summary.py`. Wave-0 notes: the first two re-point their `run_review.sh` string fixtures when the harness moves; `test_eval_harness_repo_context.py` touches v2 sections only through the harness's repo-context mode. |
+| `test_eval_harness.py`, `test_eval_harness_boundary.py`, `test_eval_harness_fixture_fork.py`, `test_eval_harness_real_pr_corpus.py`, `test_eval_harness_repo_context.py`, `test_eval_harness_scout.py`, `test_eval_harness_semantic.py`, `test_eval_harness_specialists.py`, `test_eval_harness_specialists_corpus.py`, `test_eval_harness_workflow_lint.py`, `test_eval_weekly_summary.py` | Import/exercise `scripts/eval_harness.py` and `scripts/eval_weekly_summary.py`. Wave-0 landed: the boundary tests drive the default branch through the v3 invocation (the `RUNTIME_ENTRYPOINT` seam) and the corpus path strings stay as historical replay data; `test_eval_harness_repo_context.py` is a pure grader over historical corpus facts and never executed the pipeline. |
 | `test_semantic_eval.py`, `test_semantic_judge.py` | Import `pr_reviewer/semantic_eval.py` / `semantic_judge.py`; `test_semantic_eval.py` also asserts `scripts/sections/corpus.sh` content — re-point that assertion in wave 2 when the sections go. |
 | `test_live_judge_score.py`, `test_run_judge_calibration.py` | The judge tooling above. |
 | `test_harvest_human_findings.py`, `test_harvest_human_findings_workflow.py`, `test_merge_bot_branch_corpus.py`, `test_push_harvest_branch.sh`, `test_resolve_harvest_scope.sh` | The harvest tooling and its workflow. |
@@ -280,22 +287,22 @@ deleted together with the runner.
 
 | File | Concrete consumer(s) | Deletion condition |
 | --- | --- | --- |
-| `scripts/check_review_needed.sh` | `tests/parity_harness.py` (precheck boundary, direct) and `tests/parity_runners/v2_precheck.py`; `tests/forgejo_e2e_smoke.sh`. | Freeze the precheck boundary **and** re-point the Forgejo smoke (wave 0). |
+| `scripts/check_review_needed.sh` | `tests/parity_harness.py` (precheck boundary, direct) and `tests/parity_runners/v2_precheck.py`. | Freeze the precheck boundary (the Forgejo smoke was re-pointed at the v3 seam in wave 0). |
 | `scripts/build_selection_fingerprint.py` | Invoked by `scripts/check_review_needed.sh`; `tests/parity_runners/v2_precheck.py`. | Freeze the precheck boundary. |
-| `scripts/wait_for_ci.sh` | `tests/parity_harness.py` (ci-gate boundary, direct); `tests/parity_runners/v2_ci_gate.py`; `tests/forgejo_e2e_smoke.sh`. | Freeze the ci-gate boundary **and** re-point the Forgejo smoke. |
+| `scripts/wait_for_ci.sh` | `tests/parity_harness.py` (ci-gate boundary, direct); `tests/parity_runners/v2_ci_gate.py`. | Freeze the ci-gate boundary (the Forgejo smoke was re-pointed at the v3 seam in wave 0). |
 | `scripts/run_specialists.py` | `tests/parity_harness.py` (specialists-gate boundary, direct); `tests/parity_runners/v2_specialists_gate.py`, `v2_specialist_normalize.py`, `v2_specialist_payload.py`. | Freeze the specialists-gate boundary. |
 | `scripts/build_specialist_corpus.py` | Invoked by `scripts/run_specialists.py`. | Same as `run_specialists.py`. |
-| `scripts/platform_api.sh` | `tests/parity_runners/v2_platform_normalization.py`; `tests/forgejo_e2e_smoke.sh`. | Freeze the platform-normalization boundary **and** re-point the Forgejo smoke. |
+| `scripts/platform_api.sh` | `tests/parity_runners/v2_platform_normalization.py`. | Freeze the platform-normalization boundary (the Forgejo smoke was re-pointed at the v3 seam in wave 0). |
 | `scripts/model_call.sh` | `tests/parity_runners/v2_request.sh` (model-request boundary); read by `tests-v3/request.test.ts` (inlined in wave 0). | Freeze the model-request boundary. |
 | `scripts/artifact_paths.sh` | Sourced by `check_review_needed.sh`, `run_specialists.py` and the sections below. | Wave 2 with the last file that sources it. |
-| `scripts/run_enrichment.py` | `tests/parity_runners/v2_enrichment.py`, `v2_linked_sources.py`; eval pipeline (`sections/context.sh`/`enrichment.sh`). | Freeze the enrichment/linked-sources boundaries; eval re-pointed in wave 0. |
-| `scripts/image_digest_analysis.py` | `tests/parity_runners/v2_image_provenance.py`; eval pipeline. | Freeze the image-provenance boundary. |
-| `scripts/run_evidence_providers.py` | `tests/parity_runners/v2_evidence_providers.py` (which sources `sections/classification.sh` + `common.sh` around it); eval pipeline. | Freeze the evidence boundary. |
-| `scripts/run_tool_harness.py` | `tests/parity_runners/v2_corpus.sh`, `v2_tool_budget.py`; eval pipeline (`sections/corpus.sh`, `review.sh`). | Freeze the corpus and tool-budget boundaries. |
+| `scripts/run_enrichment.py` | `tests/parity_runners/v2_enrichment.py`, `v2_linked_sources.py`. | Freeze the enrichment/linked-sources boundaries (the eval-pipeline consumers disappeared in the wave-0 re-point). |
+| `scripts/image_digest_analysis.py` | `tests/parity_runners/v2_image_provenance.py`. | Freeze the image-provenance boundary. |
+| `scripts/run_evidence_providers.py` | `tests/parity_runners/v2_evidence_providers.py` (which sources `sections/classification.sh` + `common.sh` around it). | Freeze the evidence boundary. |
+| `scripts/run_tool_harness.py` | `tests/parity_runners/v2_corpus.sh`, `v2_tool_budget.py`. | Freeze the corpus and tool-budget boundaries. |
 | `scripts/summarize_tool_loop_telemetry.py` | Invoked by `scripts/run_tool_harness.py`. | Wave 2 with `run_tool_harness.py`. |
-| `scripts/build_repo_map.py` | `tests/parity_runners/v2_repo_map.py`; eval pipeline (`sections/context.sh`). | Freeze the repo-map boundary. |
-| `scripts/build_related_context.py` | `tests/parity_runners/v2_related_code.py`; eval pipeline. | Freeze the related-code boundary. |
-| `scripts/prioritize_diff.py` | `tests/parity_runners/v2_diff_priority.py`; eval pipeline (`sections/corpus.sh`). | Freeze the diff-priority boundary. |
+| `scripts/build_repo_map.py` | `tests/parity_runners/v2_repo_map.py`. | Freeze the repo-map boundary. |
+| `scripts/build_related_context.py` | `tests/parity_runners/v2_related_code.py`. | Freeze the related-code boundary. |
+| `scripts/prioritize_diff.py` | `tests/parity_runners/v2_diff_priority.py`. | Freeze the diff-priority boundary. |
 | `scripts/strip_source_text.py` | Dual-side goldens `tests/test_strip_source_text_diff.py` (v2 side vs `node dist/index.js strip-source-text-fixture`); bare-imported by `pr_reviewer/linked_sources.py`. | Freeze the linked-sources boundary; re-freeze the goldens v3-only. |
 | `scripts/redact.py` | Bare-imported (the sys.path trick) by `pr_reviewer/{forgejo_backend,pr_thread,related_context,specialists,tool_executors,transport}.py` and `scripts/{build_review_comments,run_evidence_providers,run_specialists,run_tool_harness}.py`; executed by `tests/parity_runners/v2_pr_thread.py`; unit-tested by `tests/test_redact.py`. The v3 port `src/context/redact.ts` is self-contained (port-provenance comment only, no runtime invocation). | Wave 2 — with the last importer. |
 | `scripts/publish.sh` | `tests/parity_runners/v2_metadata_markers.py` chain; referenced by the frozen `tests/parity_runners/v2-action.yml` composite oracle. | Freeze the publication boundaries. Not on the eval path (the harness never publishes). |
@@ -305,20 +312,21 @@ deleted together with the runner.
 | `scripts/strip_metadata_markers.py` | `tests/parity_runners/v2_metadata_markers.py`; `scripts/publish_helpers.sh`. | Freeze the metadata-marker boundary. |
 | `scripts/strip_empty_conditional_sections.py` | `scripts/publish_helpers.sh` (and the sanitize runner chain). | Freeze the publication boundaries. |
 | `scripts/load_shared_env.sh` | Sourced by the frozen `tests/parity_runners/v2-action.yml` composite oracle (lines 1106–1107 and 1168–1169). | Freeze the config-default-resolution boundary. |
-| `scripts/sections/common.sh` | `tests/parity_runners/v2_config.sh`, `v2_corpus_slicer.py`, `v2_evidence_providers.py`; eval pipeline. | Freeze the config/evidence boundaries. |
-| `scripts/sections/config.sh` | `tests/parity_runners/v2_config.sh` + `dump_v2_config.py`, `v2_context_producers.py`, `v2_prompt_assembly.py`; eval pipeline. | Freeze the config/prompt-assembly boundaries. |
-| `scripts/sections/classification.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_evidence_providers.py`; eval pipeline. | Freeze the context-producers/evidence boundaries. |
-| `scripts/sections/context.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_platform_normalization.py`; eval pipeline. | Freeze the context-producers/platform boundaries. |
-| `scripts/sections/corpus.sh` | `tests/parity_runners/v2_corpus.sh` + `v2_corpus_slicer.py`, `v2_context_producers.py`; eval pipeline. | Freeze the corpus boundary. |
-| `scripts/sections/review.sh` | `tests/parity_runners/v2_prompt_assembly.py`; eval pipeline. | Freeze the prompt-assembly boundary. |
-| `scripts/sections/gating.sh` | `tests/test_issue_662_dataflow.py:131` reads it directly for the harness's `dataflow-qualification-698` gate; eval pipeline. | Re-point or retire the dataflow gate, then wave 2. |
+| `scripts/sections/common.sh` | `tests/parity_runners/v2_config.sh`, `v2_corpus_slicer.py`, `v2_evidence_providers.py`. | Freeze the config/evidence boundaries. |
+| `scripts/sections/config.sh` | `tests/parity_runners/v2_config.sh` + `dump_v2_config.py`, `v2_context_producers.py`, `v2_prompt_assembly.py`. | Freeze the config/prompt-assembly boundaries. |
+| `scripts/sections/classification.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_evidence_providers.py`. | Freeze the context-producers/evidence boundaries. |
+| `scripts/sections/context.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_platform_normalization.py`. | Freeze the context-producers/platform boundaries. |
+| `scripts/sections/corpus.sh` | `tests/parity_runners/v2_corpus.sh` + `v2_corpus_slicer.py`, `v2_context_producers.py`. | Freeze the corpus boundary. |
+| `scripts/sections/review.sh` | `tests/parity_runners/v2_prompt_assembly.py`. | Freeze the prompt-assembly boundary. |
+| `scripts/sections/gating.sh` | `tests/test_issue_662_dataflow.py:131` reads it directly for the harness's `dataflow-qualification-698` gate. | Re-point or retire the dataflow gate, then wave 2. |
 
 ### pr_reviewer/
 
 Every module below is executed by a named parity runner (the harness's v2
-side) and/or by the eval pipeline via the sections above. Deletion condition
-for all of them: **freeze the boundary/boundaries that exercise it** (eval
-pipeline consumers disappear in wave 0). `pr_reviewer/__init__.py` goes last.
+side); the eval pipeline reached them through the sections until the wave-0
+re-point removed that path. Deletion condition
+for all of them: **freeze the boundary/boundaries that exercise it** (the
+eval-pipeline consumers disappeared in the wave-0 re-point). `pr_reviewer/__init__.py` goes last.
 
 | Module | Runner(s) / direct harness use |
 | --- | --- |

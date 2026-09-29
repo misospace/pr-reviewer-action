@@ -1,8 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { validateContract } from "../src/config/contract.js";
 import { loadConfig } from "../src/config/load-config.js";
+import { SemanticFixtureAdapter } from "../src/platform/semantic-fixture.js";
+import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
 
 /**
@@ -80,4 +85,41 @@ test("validateStageEnv fails closed with the v2 messages on missing bindings", (
     /Missing GitHub token/,
   );
   assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t" } as never), null);
+});
+
+test("eval fixture keys survive the stage-env projection and yield the offline adapter", async () => {
+  // The real run path is buildStageEnv -> buildPlatformReadAdapter, so the
+  // projection must carry the eval harness's SEMANTIC_FIXTURE_* keys —
+  // they are not contract inputs or RunContext fields (#706 wave 0).
+  const dir = mkdtempSync(join(tmpdir(), "semantic-"));
+  try {
+    mkdirSync(join(dir, ".semantic-fixture"));
+    writeFileSync(join(dir, ".semantic-fixture", "pr.json"), JSON.stringify({ number: 9 }));
+    const config = loadConfig(contract, {
+      "repo": "o/r", "pr-number": "9",
+      "ai-base-url": "http://m/v1", "ai-model": "m", "github-token": "tok",
+    });
+    const base: RunContext = {
+      workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "9", headSha: "",
+      isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: "",
+      outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+    };
+    const env = buildStageEnv(config, base, {
+      REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok",
+      SEMANTIC_FIXTURE_MODE: "true", SEMANTIC_FIXTURE_DIR: dir,
+    });
+    assert.equal(env.SEMANTIC_FIXTURE_MODE, "true");
+    assert.equal(env.SEMANTIC_FIXTURE_DIR, dir);
+    const adapter = buildPlatformReadAdapter(env);
+    assert.ok(adapter instanceof SemanticFixtureAdapter);
+    // Offline by construction: the read is served from the fixture file,
+    // never from a forge.
+    assert.deepEqual(await adapter.getPr(), { number: 9 });
+    // Without the keys the projection strips nothing and a real adapter
+    // is built.
+    const plain = buildPlatformReadAdapter(buildStageEnv(config, base, { REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok" }));
+    assert.ok(!(plain instanceof SemanticFixtureAdapter));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

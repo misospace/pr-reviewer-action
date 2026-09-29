@@ -28,8 +28,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from eval_harness import evaluate_specialist_expectations, run_review_for_pr
 import eval_harness
+from eval_harness import evaluate_specialist_expectations, run_review_for_pr
 
 
 REPO = "misospace/pr-reviewer-action"

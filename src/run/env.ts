@@ -65,10 +65,15 @@ export function stageEnvFromContext(context: RunContext): Record<string, string>
 
 /** Ambient runner keys the ports read directly (identity/self-exclusion,
  * forge auth family, runner plumbing). Deliberately NOT a general
- * passthrough: anything else must arrive through config or RunContext. */
+ * passthrough: anything else must arrive through config or RunContext.
+ * The two SEMANTIC_FIXTURE_* keys are the eval harness's offline-mode
+ * seam (#706 wave 0): `buildPlatformReadAdapter` serves every platform
+ * read from the fixture directory when both are set. Production runs
+ * never set them. */
 const AMBIENT_KEYS = [
   "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID",
   "GITHUB_SHA", "CI_STATUS_CONTEXT", "GH_HOST", "ANTHROPIC_VERSION",
+  "SEMANTIC_FIXTURE_MODE", "SEMANTIC_FIXTURE_DIR",
 ] as const;
 
 export function buildStageEnv(
