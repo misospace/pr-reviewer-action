@@ -91,8 +91,10 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
 
 ## (a) delete — v2 production runtime and its tests
 
-Nothing outside the v2 runtime itself, the v2 test suites, the smoke test, or
-the eval harness (re-pointed in wave 0) consumes any file in this section.
+Nothing outside the v2 runtime itself, its test suites — including
+`tests-v3/shadow-runner.test.ts`, the one v3-side consumer in this section,
+deleted in the same commit as its subject — the smoke test, or the eval
+harness (re-pointed in wave 0) consumes any file listed here.
 
 ### scripts/
 
@@ -102,8 +104,8 @@ the eval harness (re-pointed in wave 0) consumes any file in this section.
 | `scripts/sections/enrichment.sh` | Sourced only by `run_review.sh`. |
 | `scripts/verify_pr_head.sh` | Only executable consumer is v2 `scripts/publish.sh`; the fork workflow verifies heads via `scripts/fork_review_gate.py verify` (it only mentions this script in a comment). |
 | `scripts/summarize_tool_loop_telemetry.py` | Invoked only by `scripts/run_tool_harness.py` and its v2 test. |
-| `scripts/v3_shadow_run.mjs` | The v2-vs-v3 shadow comparison was dropped (#706, 2026-09-29); only doc references remain. |
-| `scripts/redact.py` | Imported only by v2 modules (`pr_thread`, `tool_executors`, `transport`, `forgejo_backend`) and the v2 pr-thread runner. |
+| `scripts/v3_shadow_run.mjs` | The v2-vs-v3 shadow comparison was dropped by maintainer decision (#706, 2026-09-29). Its one remaining consumer is `tests-v3/shadow-runner.test.ts:13`, which executes the script's CLI — a `join("scripts", "v3_shadow_run.mjs")` path invisible to a literal-path grep. Delete both together in wave 1; the qualification evidence already captured under `evals/reports/` is data and stays. |
+| `scripts/redact.py` | Imported only by v2 modules (`pr_thread`, `tool_executors`, `transport`, `forgejo_backend`) and the v2 pr-thread runner. The v3 port `src/context/redact.ts` is self-contained — port-provenance comment only, no runtime invocation (verified for wave 1). |
 
 `scripts/sections/gating.sh` is deliberately **not** in this table: the
 dataflow-qualification gate reads it, so it is (c) until wave 2 (see below).
@@ -297,14 +299,14 @@ deleted together with the runner.
 | `scripts/sanitize_review_markdown.py` | `tests/parity_runners/v2_sanitize.py`; `scripts/publish_helpers.sh`. | Freeze the sanitize boundary. |
 | `scripts/strip_metadata_markers.py` | `tests/parity_runners/v2_metadata_markers.py`; `scripts/publish_helpers.sh`. | Freeze the metadata-marker boundary. |
 | `scripts/strip_empty_conditional_sections.py` | `scripts/publish_helpers.sh` (and the sanitize runner chain). | Freeze the publication boundaries. |
-| `scripts/load_shared_env.sh` | Referenced by the frozen `tests/parity_runners/v2-action.yml` composite oracle. | Freeze the config-default-resolution boundary. |
+| `scripts/load_shared_env.sh` | Sourced by the frozen `tests/parity_runners/v2-action.yml` composite oracle (lines 1106–1107 and 1168–1169). | Freeze the config-default-resolution boundary. |
 | `scripts/sections/common.sh` | `tests/parity_runners/v2_config.sh`, `v2_corpus_slicer.py`, `v2_evidence_providers.py`; eval pipeline. | Freeze the config/evidence boundaries. |
 | `scripts/sections/config.sh` | `tests/parity_runners/v2_config.sh` + `dump_v2_config.py`, `v2_context_producers.py`, `v2_prompt_assembly.py`; eval pipeline. | Freeze the config/prompt-assembly boundaries. |
 | `scripts/sections/classification.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_evidence_providers.py`; eval pipeline. | Freeze the context-producers/evidence boundaries. |
 | `scripts/sections/context.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_platform_normalization.py`; eval pipeline. | Freeze the context-producers/platform boundaries. |
 | `scripts/sections/corpus.sh` | `tests/parity_runners/v2_corpus.sh` + `v2_corpus_slicer.py`, `v2_context_producers.py`; eval pipeline. | Freeze the corpus boundary. |
 | `scripts/sections/review.sh` | `tests/parity_runners/v2_prompt_assembly.py`; eval pipeline. | Freeze the prompt-assembly boundary. |
-| `scripts/sections/gating.sh` | `tests/test_issue_662_dataflow.py` (the harness's `dataflow-qualification-698` gate reads it); eval pipeline. | Re-point or retire the dataflow gate, then wave 2. |
+| `scripts/sections/gating.sh` | `tests/test_issue_662_dataflow.py:131` reads it directly for the harness's `dataflow-qualification-698` gate; eval pipeline. | Re-point or retire the dataflow gate, then wave 2. |
 
 ### pr_reviewer/
 
