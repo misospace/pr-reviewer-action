@@ -1,10 +1,13 @@
 # v2 teardown plan: file-by-file consumer audit (#706)
 
 The cutover (#815) made the TypeScript runtime the shipped production path:
-`node dist/index.js {precheck,run,publish}` (`src/run/entrypoints.ts`) runs
-every stage in-process — no Python interpreter, and no `jq`/`curl`/`gh` for
-internal orchestration. `src/` invokes no `scripts/` or `pr_reviewer/` file at
-runtime (every match in `src/` is a port-provenance comment).
+the no-subcommand JavaScript action entry (`src/run/action.ts`, the
+`firstArg === ""` branch of the bundled `dist/index.js`) runs every stage
+in-process — no Python interpreter, and no `jq`/`curl`/`gh` for internal
+orchestration. The `{precheck,run,publish}` subcommands remain only as CLI
+entrypoints (`src/run/entrypoints.ts`). `src/` invokes no `scripts/` or
+`pr_reviewer/` file at runtime (every match in `src/` is a port-provenance
+comment).
 
 The cutover-time revision of this document recorded the consumer audit at
 switch-over. This revision is the **teardown plan** the #706 sequence calls
@@ -66,7 +69,9 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
 - **Wave 0 — preparation (no deletions).** Re-point `scripts/eval_harness.py`
   at the v3 entry (`node dist/index.js run`) and adjust its tests
   (`tests/test_eval_harness_real_pr_corpus.py` fake-orchestrator names,
-  `tests/test_eval_harness_repo_context.py` expectations). Inline the
+  `tests/test_eval_harness_repo_context.py` expectations). This re-point must
+  land before the #681 measurement work (#810, #796), which has to measure
+  v3. Inline the
   `rf_json` assertion in `tests-v3/request.test.ts` so it stops reading
   `scripts/model_call.sh`. Re-point `tests/forgejo_e2e_smoke.sh` at the v3
   platform seam. Confirm the adversarial-boundary pattern exemplars cited by
@@ -81,7 +86,8 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   dead CI jobs/steps listed below). The (c) set and the parity harness stay.
 - **Wave 2 — at the #681 release gate.** Freeze or retire each parity
   boundary, then delete the (c) set, the runners, and the remaining
-  oracle-only tests. After wave 2 the repository ships no Bash and no Python.
+  oracle-only tests. After wave 2 the **shipped action** contains no Bash and
+  no Python; the repository retains only the (b) keep-list tooling.
 
 ## (a) delete — v2 production runtime and its tests
 
@@ -118,7 +124,11 @@ module or executes a v2 script/section), even when its subject happens to be
 a (c) file — the retained oracle surface is the harness, the runners, and the
 pytest goldens listed under (c). Deletable in wave 1 unless noted.
 
-Python (`tests/`): `test_api_key_argv.py`, `test_budget.py`,
+Python (`tests/`): `test_action_python_path.py` (its remaining assertions pin
+the v2 runtime's `PYTHONPATH`/`PYTHONSAFEPATH` export and `pr_reviewer`
+package-shadowing behavior in `run_review.sh`/`check_review_needed.sh`/
+`platform_api.sh` — v2 behavior, not the v3 `action.yml`),
+`test_api_key_argv.py`, `test_budget.py`,
 `test_build_review_comments.py`, `test_change_anchors.py`,
 `test_classifier.py`, `test_compare_url_regex.py`, `test_completeness.py`,
 `test_conversation.py`, `test_diff_priority.py`, `test_empty_completion.py`,
@@ -233,7 +243,7 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 
 | File | Consumer(s) / subject |
 | --- | --- |
-| `test_action_inputs.py`, `test_action_v3_contract.py`, `test_action_python_path.py` | Pin the shipped `action.yml` / `contracts/action-v3.yml` (v3 CI). |
+| `test_action_inputs.py`, `test_action_v3_contract.py` | Pin the shipped `action.yml` / `contracts/action-v3.yml` (v3 CI). |
 | `test_agents_md_budget.py` | AGENTS.md budget regression guard (repo hygiene, not v2). |
 | `test_dogfood_workflow.py` | Pins `.github/workflows/ai-pr-review.yaml` + `action.yml` defaults. |
 | `test_html_entities_table.py` | Pins `src/context/html-entities.ts` (v3) to CPython's `html.entities` tables. |
