@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { precheckMain, publishMain } from "../src/run/entrypoints.js";
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { buildAdapter, buildPublishApi, precheckMain, publishMain } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 
 function mockAdapter(): PlatformReadAdapter {
@@ -88,4 +89,23 @@ test("precheck entrypoint output file receives the v2-compatible keys", async ()
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Tangled fail-loud boundaries (#583) ──────────────────────────────────
+
+test("a resolved tangled platform fails loudly at every adapter boundary", () => {
+  const env = { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" } as NodeJS.ProcessEnv;
+  // Precheck adapter: the guard throws before either adapter branch runs.
+  assert.throws(() => buildAdapter(env), TangledNotImplementedError);
+  // Publish seam: GitHubPublishApi is never constructed, so no GitHub API
+  // request can be assembled as a fallback.
+  assert.throws(() => buildPublishApi(env), TangledNotImplementedError);
+});
+
+test("explicit tangled without its identity fails with the resolver diagnostic", () => {
+  const env = { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled" } as NodeJS.ProcessEnv;
+  assert.throws(
+    () => buildAdapter(env),
+    (e: unknown) => e instanceof Error && /TANGLED_REPO_DID/.test(e.message),
+  );
 });

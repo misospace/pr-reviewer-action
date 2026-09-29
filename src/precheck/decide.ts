@@ -2,6 +2,7 @@ import type { PlatformReadAdapter } from "../platform/types.js";
 import type { ExternalCheck } from "../platform/normalize.js";
 import { deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { requireImplementedBackend } from "../platform/tangled.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import {
   buildMarkerFingerprint,
@@ -214,7 +215,8 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     throw new Error("Missing REPO or PR_NUMBER for review precheck");
   }
 
-  const resolvedPlatform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
+  const resolvedPlatform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(resolvedPlatform);
   const effectiveForgejoApiUrl = resolvedPlatform === "forgejo" ? env.FORGEJO_API_URL ?? "" : "";
 
   // ── Label-driven re-review (#231) ─────────────────────────────────────

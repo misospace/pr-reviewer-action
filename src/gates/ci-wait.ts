@@ -5,6 +5,7 @@ import { GitHubAdapter } from "../platform/github.js";
 import { jqCompact } from "../platform/jq.js";
 import type { ExternalCheck } from "../platform/normalize.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/types.js";
 
 /**
@@ -81,7 +82,8 @@ function localClock(epochMs: number): string {
  * select the backend exactly like `platform_resolve`; GitHub uses
  * `GITHUB_API_URL` when the runner provides one. */
 export function ciAdapterFromEnv(ciEnv: CiEnv, repo: string, prNumber: string, token: string): PlatformReadAdapter {
-  const platform = resolvePlatform(ciEnv.PLATFORM, ciEnv.FORGEJO_API_URL ?? "", ciEnv.GITHUB_SERVER_URL ?? "");
+  const platform = resolvePlatform(ciEnv.PLATFORM, ciEnv.FORGEJO_API_URL ?? "", ciEnv.GITHUB_SERVER_URL ?? "", ciEnv.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
   if (platform === "forgejo") {
     const forgejoToken = ciEnv.FORGEJO_TOKEN || ciEnv.GITHUB_TOKEN || ciEnv.GH_TOKEN || "";
     return new ForgejoAdapter({

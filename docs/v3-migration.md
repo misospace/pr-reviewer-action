@@ -685,6 +685,34 @@ list; a failed or unparseable commit-status read folds to `[]` ("no external
 CI") rather than to the empty transient signal; and the Forgejo
 conversation branch is newest-first while GitHub's is oldest-first.
 
+### Tangled resolution and fail-loud backend (#583)
+
+`platform` resolution accepts `tangled` on all three seams —
+`pr_reviewer/platform.py::resolve_platform`,
+`scripts/platform_api.sh::platform_resolve`, and
+`src/platform/resolve.ts::resolvePlatform` — with
+identical semantics: an explicit `tangled` requires a non-empty
+`TANGLED_REPO_DID` (the repository *owner* DID; descriptive failure when
+missing), and `auto` checks `TANGLED_REPO_DID` first so a Spindle runner is
+never misclassified as Forgejo merely because its server URL is
+non-GitHub. The unsupported-value diagnostic reads
+`unsupported PLATFORM '…' (expected github|forgejo|tangled|auto)` on every
+seam.
+
+A resolved `tangled` is an identity, not a backend: `ResolvedPlatform`
+includes `"tangled"`, while every adapter and publish type (`PlatformAdapter`,
+`PlatformReadAdapter`, `PublishPlatformApi`) stays `"github" | "forgejo"`.
+`requireImplementedBackend` in `src/platform/tangled.ts` is an assertion
+guard every adapter-construction boundary runs (`buildAdapter`,
+`buildPlatformReadAdapter` — before fixture interception, matching the shell
+seam's ordering — `buildPublishApi`, `ciAdapterFromEnv`, `clearRereviewLabel`,
+and `runPrecheck`), so no code path can construct a GitHub URL or adapter for
+a Tangled environment. The v2 seam mirrors this fail-loud guard
+(`TANGLED_NOT_IMPLEMENTED`, `_platform_tangled_guard`). The Spindle runtime
+context normalization lives in `pr_reviewer/tangled_context.py` and
+`src/platform/tangled.ts` (`TangledContext`); Tangled API/XRPC/Bobbin calls
+stay out of scope until the #564 backend tickets.
+
 ### The `prompt-assembly` boundary (#706)
 
 Pins the prompt and message layer (`src/prompt/`): the v2 runner

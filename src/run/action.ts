@@ -5,6 +5,7 @@ import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
 import { runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
@@ -166,7 +167,8 @@ function failOnRequestChanges(stage: Env, verdict: string): number {
 }
 
 async function clearRereviewLabel(stage: Env): Promise<void> {
-  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "");
+  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
   const label = stage.REREVIEW_LABEL ?? "";
   const pr = stage.PR_NUMBER ?? "";
   if (label === "" || !/^\d+$/.test(pr)) return;

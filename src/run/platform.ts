@@ -2,6 +2,7 @@ import type { FetchLike } from "../platform/http.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { requireImplementedBackend } from "../platform/tangled.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../platform/semantic-fixture.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { StageEnv } from "./env.js";
@@ -19,7 +20,10 @@ import type { StageEnv } from "./env.js";
  * semantic-corpus runs. Production runs never set those variables.
  */
 export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): PlatformReadAdapter {
-  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
+  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  // Fail closed before anything else — fixture interception included — the
+  // same ordering `_platform_tangled_guard` gives the v2 shell seam.
+  requireImplementedBackend(platform);
   const fixtureDir = semanticFixtureDir(env);
   if (fixtureDir !== null) {
     return new SemanticFixtureAdapter({ dir: fixtureDir, platform });

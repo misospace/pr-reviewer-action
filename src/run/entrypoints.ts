@@ -1,6 +1,7 @@
 import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
+import { requireImplementedBackend } from "../platform/tangled.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import type { PlatformAdapter } from "../platform/types.js";
@@ -35,7 +36,8 @@ function ghToken(env: NodeJS.ProcessEnv): string {
 export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
-  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
+  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
   if (platform === "forgejo") {
     return new ForgejoAdapter({
       repo,
@@ -136,7 +138,8 @@ function isFileNonEmpty(env: NodeJS.ProcessEnv, name: string): boolean {
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
-  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "");
+  const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
   const token = platform === "forgejo"
     ? (env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || "")
     : ghToken(env);

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { escapeTableCell, runCiWait, type CiWaitDeps } from "../src/gates/ci-wait.js";
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { ciAdapterFromEnv, escapeTableCell, runCiWait, type CiWaitDeps } from "../src/gates/ci-wait.js";
 import { isTransientCiRead } from "../src/platform/bounded.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
@@ -261,4 +262,20 @@ test("runCiWait: hostile check names still render one table row per check", asyn
   }
   assert.equal(lines.some((line) => line.startsWith("#")), false, "no forged heading");
   rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("the CI gate never drives GitHub or Forgejo for a resolved tangled platform", () => {
+  assert.throws(
+    () => ciAdapterFromEnv({ PLATFORM: "auto", TANGLED_REPO_DID: "did:plc:repo" }, "o/r", "9", "tok"),
+    TangledNotImplementedError,
+  );
+  // Explicit tangled is equally refused; a missing DID fails at resolution.
+  assert.throws(
+    () => ciAdapterFromEnv({ PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, "o/r", "9", "tok"),
+    TangledNotImplementedError,
+  );
+  assert.throws(
+    () => ciAdapterFromEnv({ PLATFORM: "tangled" }, "o/r", "9", "tok"),
+    /TANGLED_REPO_DID/,
+  );
 });

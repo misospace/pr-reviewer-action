@@ -13,6 +13,7 @@ import { GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITH
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 
 interface Seen {
@@ -547,4 +548,23 @@ test("github getPrBodyRevision returns body and lastEditedAt from ONE GraphQL do
   assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl: errored.fetchImpl }).getPrBodyRevision(), null);
   const failing = recorder(() => { throw new Error("down"); });
   assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl: failing.fetchImpl }).getPrBodyRevision(), null);
+});
+
+test("a resolved tangled platform fails closed before fixture interception (#583)", () => {
+  // Same ordering as `_platform_tangled_guard` in scripts/platform_api.sh:
+  // the guard runs before the eval fixture seam, so tangled can never fall
+  // back into any adapter construction path, fixture or real.
+  const dir = mkdtempSync(join(tmpdir(), "semantic-"));
+  try {
+    mkdirSync(join(dir, ".semantic-fixture"));
+    writeFileSync(join(dir, ".semantic-fixture", "pr.json"), "{}");
+    const env: Record<string, string> = {
+      REPO: "o/r", PR_NUMBER: "9",
+      PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo",
+      SEMANTIC_FIXTURE_MODE: "true", SEMANTIC_FIXTURE_DIR: dir,
+    };
+    assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

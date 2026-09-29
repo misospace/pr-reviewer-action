@@ -6,7 +6,8 @@ import type { EnvAllowlist } from "../runtime/env.js";
  * `CI_GATE_ENV_KEYS` mirrors `_CI_GATE_ENV_KEYS` in
  * `scripts/sections/gating.sh` key-for-key: the CI child keeps exactly the
  * pre-#634 standalone-step authority (runner basics, transport config,
- * GitHub/Forgejo auth + repository identity, the CI-wait controls) and never
+ * GitHub/Forgejo/Tangled identity + repository auth, the CI-wait controls)
+ * and never
  * sees the review step's model/tool/Linear secrets. Deliberately NOT
  * included: AI_*_API_KEY, TOOL_MCP_TOKEN, LINEAR_API_KEY,
  * AI_REQUEST_TIMEOUT_SEC. `tests-v3/gates.test.ts` cross-checks this list
@@ -59,6 +60,7 @@ export const CI_GATE_ENV_KEYS: EnvAllowlist = [
   "PR_HEAD_SHA",
   "PLATFORM",
   "FORGEJO_API_URL",
+  "TANGLED_REPO_DID",
   "FORGEJO_TOKEN",
   "FORGEJO_AUTH_METHOD",
   "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE",

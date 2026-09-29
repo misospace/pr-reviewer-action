@@ -4,7 +4,8 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import { PlatformRequestError, requestText } from "../src/platform/http.js";
 import { deriveIsFork } from "../src/platform/pr.js";
-import { resolvePlatform } from "../src/platform/resolve.js";
+import { resolvePlatform, type ResolvedPlatform } from "../src/platform/resolve.js";
+import type { PlatformAdapter } from "../src/platform/types.js";
 import { validateEndpoint } from "../src/platform/endpoint.js";
 import { parsePlatformBaseUrl, PlatformUrlError, GITHUB_API_BASE } from "../src/platform/urls.js";
 import type { FetchLike } from "../src/platform/http.js";
@@ -66,15 +67,57 @@ test("redirects are never followed and never carry credentials", async () => {
 // ── Platform resolution ─────────────────────────────────────────────────
 
 test("platform auto-detection mirrors the v2 seam", () => {
-  assert.equal(resolvePlatform(undefined, "", ""), "github");
-  assert.equal(resolvePlatform("auto", "", ""), "github");
-  assert.equal(resolvePlatform("auto", "", "https://github.com"), "github");
-  assert.equal(resolvePlatform("auto", "", "https://github.com/"), "github");
-  assert.equal(resolvePlatform("auto", "https://git.example.com", ""), "forgejo");
-  assert.equal(resolvePlatform("auto", "", "https://git.example.com"), "forgejo");
-  assert.equal(resolvePlatform("AUTO", "https://git.example.com", ""), "forgejo");
-  assert.equal(resolvePlatform("forgejo", "", ""), "forgejo");
-  assert.throws(() => resolvePlatform("gitea", "", ""), /unsupported PLATFORM/);
+  assert.equal(resolvePlatform(undefined, "", "", ""), "github");
+  assert.equal(resolvePlatform("auto", "", "", ""), "github");
+  assert.equal(resolvePlatform("auto", "", "https://github.com", ""), "github");
+  assert.equal(resolvePlatform("auto", "", "https://github.com/", ""), "github");
+  assert.equal(resolvePlatform("auto", "https://git.example.com", "", ""), "forgejo");
+  assert.equal(resolvePlatform("auto", "", "https://git.example.com", ""), "forgejo");
+  assert.equal(resolvePlatform("AUTO", "https://git.example.com", "", ""), "forgejo");
+  assert.equal(resolvePlatform("forgejo", "", "", ""), "forgejo");
+  assert.throws(() => resolvePlatform("gitea", "", "", ""), /unsupported PLATFORM/);
+});
+
+test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#583)", () => {
+  // Explicit tangled requires the owner DID, trimmed.
+  assert.equal(resolvePlatform("tangled", "", "", "did:plc:repo"), "tangled");
+  assert.equal(resolvePlatform(" Tangled ", "", "", "  did:plc:repo  "), "tangled");
+  const missing = "platform 'tangled' requires TANGLED_REPO_DID (Tangled repository owner DID) to be set";
+  assert.throws(
+    () => resolvePlatform("tangled", "", "", ""),
+    (e: unknown) => e instanceof Error && e.message === missing,
+  );
+  assert.throws(
+    () => resolvePlatform("tangled", "", "", "   "),
+    (e: unknown) => e instanceof Error && e.message === missing,
+  );
+  // auto: the DID is checked first, so a Spindle runner is never
+  // misclassified as Forgejo merely because its server URL is non-GitHub.
+  assert.equal(resolvePlatform("auto", "", "", "did:plc:repo"), "tangled");
+  assert.equal(resolvePlatform("auto", "https://git.example.com", "", "did:plc:repo"), "tangled");
+  assert.equal(resolvePlatform("auto", "", "https://git.example.com", "did:plc:repo"), "tangled");
+  assert.equal(resolvePlatform("auto", "https://git.example.com", "https://git.example.com", "did:plc:repo"), "tangled");
+  // A blank DID is no signal: auto falls through unchanged.
+  assert.equal(resolvePlatform("auto", "", "", "   "), "github");
+  assert.equal(resolvePlatform("auto", "https://git.example.com", "", "   "), "forgejo");
+  // The unsupported-value diagnostic lists every resolvable platform.
+  assert.throws(
+    () => resolvePlatform("gitlab", "", "", ""),
+    (e: unknown) => e instanceof Error && e.message === "unsupported PLATFORM 'gitlab' (expected github|forgejo|tangled|auto)",
+  );
+});
+
+test("adapter types stay narrower than resolved identities", () => {
+  // "tangled" is a resolved identity (#583), not an implemented backend:
+  // the adapter/publish seams keep rejecting it at compile time.
+  const identity: ResolvedPlatform = "tangled";
+  assert.equal(identity, "tangled");
+  type Backend = PlatformAdapter["platform"];
+  // @ts-expect-error — a resolved tangled identity is not an adapter backend
+  const backend: Backend = "tangled";
+  // Compile-time pin only: the assignment above must stay a type error, or
+  // the adapter seam has silently widened to the unimplemented backend.
+  void backend;
 });
 
 // ── Endpoint validation (cross-backend security decisions) ──────────────

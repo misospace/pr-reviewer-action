@@ -74,6 +74,9 @@ const AMBIENT_KEYS = [
   "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID",
   "GITHUB_SHA", "CI_STATUS_CONTEXT", "GH_HOST", "ANTHROPIC_VERSION",
   "SEMANTIC_FIXTURE_MODE", "SEMANTIC_FIXTURE_DIR",
+  // Tangled identity signal (#583): DID-first auto resolution in
+  // src/platform/resolve.ts reads it from the projected stage env.
+  "TANGLED_REPO_DID",
 ] as const;
 
 export function buildStageEnv(

@@ -52,7 +52,7 @@ CI_GATE_LOG="ci-status.phase.log"
 #   - runner metadata: $GITHUB_OUTPUT (ci_status_* results), $GITHUB_RUN_ID +
 #     $CI_STATUS_CONTEXT (own check/status self-exclusion), and the OIDC
 #     request vars the Forgejo authorized-integration backend reads;
-#   - GitHub/Forgejo auth + repository identity;
+#   - GitHub/Forgejo/Tangled identity + repository auth;
 #   - the CI gate controls wait_for_ci.sh reads (timings, skip-on-timeout,
 #     the published evidence path).
 # Deliberately NOT included: model/tool/Linear/reviewer config and secrets, and
@@ -71,7 +71,7 @@ _CI_GATE_ENV_KEYS=(
   ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
   GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
   REPO PR_NUMBER PR_HEAD_SHA
-  PLATFORM FORGEJO_API_URL
+  PLATFORM FORGEJO_API_URL TANGLED_REPO_DID
   FORGEJO_TOKEN FORGEJO_AUTH_METHOD
   FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE FORGEJO_SKIP_PERMISSION_PREFLIGHT
   CI_STATUS_CHECK CI_TIMEOUT_SEC CI_INTERVAL_SEC CI_SKIP_ON_TIMEOUT

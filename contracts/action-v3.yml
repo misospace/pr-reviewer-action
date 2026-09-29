@@ -592,7 +592,7 @@ inputs:
     v2_id: platform
     required: false
     default: "auto"
-    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from GITHUB_SERVER_URL and FORGEJO_API_URL: non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo' or 'github' explicitly to override auto-detection. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
+    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from TANGLED_REPO_DID (the Tangled repository owner DID), GITHUB_SERVER_URL, and FORGEJO_API_URL: a set TANGLED_REPO_DID resolves to 'tangled' (checked before the GitHub/Forgejo signals); otherwise non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo', 'github', or 'tangled' explicitly to override auto-detection; explicit 'tangled' requires a non-empty TANGLED_REPO_DID and fails with a descriptive error when it is missing. Tangled is resolution-only for now: Tangled backend operations are not implemented yet and fail loudly until the follow-up work lands. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
   - id: forgejo-api-url
     v2_id: forgejo_api_url
     required: false

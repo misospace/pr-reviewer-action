@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { validateContract } from "../src/config/contract.js";
 import { loadConfig } from "../src/config/load-config.js";
+import { GitHubAdapter } from "../src/platform/github.js";
 import { SemanticFixtureAdapter } from "../src/platform/semantic-fixture.js";
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
 
@@ -122,4 +124,32 @@ test("eval fixture keys survive the stage-env projection and yield the offline a
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the Tangled identity signal survives the stage-env projection (#583)", () => {
+  // The real run path is buildStageEnv -> buildPlatformReadAdapter; if the
+  // projection dropped TANGLED_REPO_DID, auto resolution would silently
+  // fall through to a GitHub adapter instead of a tangled identity.
+  const config = loadConfig(contract, {
+    "repo": "o/r", "pr-number": "9",
+    "ai-base-url": "http://m/v1", "ai-model": "m", "github-token": "tok",
+  });
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "9", headSha: "",
+    isForkPr: "false", platform: "auto", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  const env = buildStageEnv(config, base, {
+    REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok",
+    TANGLED_REPO_DID: "did:plc:repo",
+  });
+  assert.equal(env.TANGLED_REPO_DID, "did:plc:repo");
+  // End to end through the real adapter boundary: the projected DID flips
+  // auto to tangled, which fails loudly instead of constructing an adapter.
+  assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+  // Without the signal the same projection builds the GitHub adapter.
+  const plain = buildPlatformReadAdapter(
+    buildStageEnv(config, base, { REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok" }),
+  );
+  assert.ok(plain instanceof GitHubAdapter);
 });

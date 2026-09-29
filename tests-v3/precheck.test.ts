@@ -305,6 +305,7 @@ test("runPrecheck refuses Forgejo publish paths conservatively", async () => {
 // #812: consistent re-reviews — the CI-aware skip re-check
 // ---------------------------------------------------------------------------
 
+import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
 import type { ExternalCheck } from "../src/platform/normalize.js";
 
@@ -424,4 +425,22 @@ test("#812: externalChecksConclusion folds the check states", () => {
   assert.equal(externalChecksConclusion([{ name: "a", state: "pending" }, { name: "b", state: "success" }]), "pending");
   assert.equal(externalChecksConclusion([{ name: "a", state: "success" }]), "success");
   assert.equal(externalChecksConclusion([]), "none");
+});
+
+test("precheck fails loudly on a resolved tangled platform before any backend op", async () => {
+  let adapterCalls = 0;
+  const counting: PlatformAdapter = {
+    platform: "github",
+    getPr: async () => { adapterCalls += 1; return null; },
+    getPrDiff: async () => { adapterCalls += 1; return ""; },
+    listIssueComments: async () => { adapterCalls += 1; return []; },
+    listPrReviews: async () => { adapterCalls += 1; return []; },
+    repoPermission: async () => { adapterCalls += 1; return "unknown"; },
+    ghApi: async () => { adapterCalls += 1; return {}; },
+  };
+  await assert.rejects(
+    runPrecheck({ env: { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, adapter: counting }),
+    TangledNotImplementedError,
+  );
+  assert.equal(adapterCalls, 0, "no backend operation may run for tangled");
 });
