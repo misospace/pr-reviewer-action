@@ -116,3 +116,10 @@ jobs:
           [[ "$TAG" == *-* ]] && MAJOR_TAG=""
           SHA=$(scripts/release/tag-with-dist.sh "$BASE_SHA" "$TAG" "$MAJOR_TAG")
           echo "$TAG${MAJOR_TAG:+, $MAJOR_TAG} -> $SHA"
+
+      # Consumers run the tag as-is: a clean fetch must start the node24
+      # action with only the drop-in inputs.
+      - name: Smoke-test the tag as consumers get it
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: scripts/release/smoke-tag.sh "$(git remote get-url origin)" "$TAG"

@@ -120,6 +120,13 @@ jobs:
           [ "$PRERELEASE" = "true" ] && MAJOR_TAG=""
           scripts/release/tag-with-dist.sh "$SHA" "$TAG" "$MAJOR_TAG"
 
+      # Consumers run the tag as-is: a clean fetch must start the node24
+      # action with only the drop-in inputs.
+      - name: Smoke-test the tag as consumers get it
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: scripts/release/smoke-tag.sh "$(git remote get-url origin)" "$TAG"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
