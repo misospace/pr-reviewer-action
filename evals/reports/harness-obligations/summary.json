@@ -1,0 +1,708 @@
+{
+ "issue": 796,
+ "generated": "2026-09-29",
+ "model": "MiniMax-M3 (anthropic format)",
+ "mode": "native_loop",
+ "runs_per_arm": 3,
+ "corpus": "evals/corpus-human-findings.json, entries where an obligation cites the defect file",
+ "arms": {
+  "on": "harness obligations injected",
+  "off": "same build, obligations suppressed"
+ },
+ "totals": {
+  "on": {
+   "runs": 111,
+   "strict_hits": 36,
+   "file_hits": 41,
+   "request_changes": 42,
+   "findings": 235,
+   "tool_calls": 1497
+  },
+  "off": {
+   "runs": 111,
+   "strict_hits": 38,
+   "file_hits": 46,
+   "request_changes": 37,
+   "findings": 233,
+   "tool_calls": 1466
+  }
+ },
+ "paired_strict_delta_pp": {
+  "mean": -1.8,
+  "ci95": [
+   -11.7,
+   7.2
+  ],
+  "prs_on_better": 8,
+  "prs_on_worse": 8,
+  "prs_tied": 21
+ },
+ "per_pr": {
+  "joryirving/home-ops#5853@63a55be5": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 18,
+    "tool_calls": 41
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 20,
+    "tool_calls": 52
+   }
+  },
+  "joryirving/home-ops#9075@b3d77613": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 1,
+    "findings": 3,
+    "tool_calls": 37
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 33
+   }
+  },
+  "misospace/alert-triage#140@b2bdaa9f": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 1,
+    "request_changes": 1,
+    "findings": 2,
+    "tool_calls": 50
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 41
+   }
+  },
+  "misospace/alert-triage#148@2451194d": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 1,
+    "tool_calls": 45
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 42
+   }
+  },
+  "misospace/alert-triage#148@b024b6d9": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 3,
+    "findings": 17,
+    "tool_calls": 48
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 11,
+    "tool_calls": 47
+   }
+  },
+  "misospace/alert-triage#149@94819ca8": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 43
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 5,
+    "tool_calls": 41
+   }
+  },
+  "misospace/alert-triage#151@e47f8aaa": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 10,
+    "tool_calls": 43
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 9,
+    "tool_calls": 47
+   }
+  },
+  "misospace/alert-triage#152@cbddd536": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 3,
+    "tool_calls": 28
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 7,
+    "tool_calls": 37
+   }
+  },
+  "misospace/alert-triage#153@ec4db76d": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 1,
+    "tool_calls": 43
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 3,
+    "tool_calls": 38
+   }
+  },
+  "misospace/alert-triage#165@ef6572f9": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 30
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 1,
+    "tool_calls": 20
+   }
+  },
+  "misospace/alert-triage#24@0776111f": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 30
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 33
+   }
+  },
+  "misospace/courier#130@88a642dc": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 4,
+    "tool_calls": 39
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 41
+   }
+  },
+  "misospace/courier#132@f2487524": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 45
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 6,
+    "tool_calls": 50
+   }
+  },
+  "misospace/courier#89@7cf9c0c9": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 35
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 1,
+    "findings": 5,
+    "tool_calls": 30
+   }
+  },
+  "misospace/courier#92@51d7e5b3": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 6,
+    "tool_calls": 39
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 7,
+    "tool_calls": 21
+   }
+  },
+  "misospace/dispatch#806@5726bc9c": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 28
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 1,
+    "tool_calls": 21
+   }
+  },
+  "misospace/dispatch#842@f48bdf79": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 2,
+    "findings": 6,
+    "tool_calls": 40
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 8,
+    "tool_calls": 39
+   }
+  },
+  "misospace/dispatch#845@1a333129": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 10,
+    "tool_calls": 51
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 5,
+    "tool_calls": 38
+   }
+  },
+  "misospace/dispatch#863@bbd678b0": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 3,
+    "tool_calls": 38
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 42
+   }
+  },
+  "misospace/foreman-dispatch-bridge#207@a58dc536": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 8,
+    "tool_calls": 40
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 1,
+    "request_changes": 1,
+    "findings": 4,
+    "tool_calls": 39
+   }
+  },
+  "misospace/pr-reviewer-action#233@25854c65": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 43
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 37
+   }
+  },
+  "misospace/pr-reviewer-action#234@e508aecb": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 2,
+    "findings": 18,
+    "tool_calls": 37
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 21,
+    "tool_calls": 32
+   }
+  },
+  "misospace/pr-reviewer-action#235@4c77a88d": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 8,
+    "tool_calls": 35
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 34
+   }
+  },
+  "misospace/pr-reviewer-action#262@d2cfd711": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 8,
+    "tool_calls": 49
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 42
+   }
+  },
+  "misospace/pr-reviewer-action#294@f6e284e4": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 4,
+    "tool_calls": 38
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 5,
+    "tool_calls": 46
+   }
+  },
+  "misospace/pr-reviewer-action#336@c81ffbf9": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 29
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 1,
+    "tool_calls": 30
+   }
+  },
+  "misospace/pr-reviewer-action#502@a9439a3e": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 21,
+    "tool_calls": 46
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 35,
+    "tool_calls": 42
+   }
+  },
+  "misospace/pr-reviewer-action#596@0e6d66ee": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 44
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 6,
+    "tool_calls": 42
+   }
+  },
+  "misospace/pr-reviewer-action#597@69671c23": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 26
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 1,
+    "findings": 4,
+    "tool_calls": 46
+   }
+  },
+  "misospace/pr-reviewer-action#598@880247c1": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 1,
+    "findings": 4,
+    "tool_calls": 43
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 0,
+    "findings": 4,
+    "tool_calls": 34
+   }
+  },
+  "misospace/pr-reviewer-action#611@e3e47de6": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 6,
+    "tool_calls": 28
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 33
+   }
+  },
+  "misospace/pr-reviewer-action#629@fb04d85f": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 0,
+    "tool_calls": 48
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 3,
+    "tool_calls": 44
+   }
+  },
+  "misospace/pr-reviewer-action#780@09cdd4c5": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 1,
+    "findings": 4,
+    "tool_calls": 65
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 0,
+    "findings": 2,
+    "tool_calls": 59
+   }
+  },
+  "misospace/pr-reviewer-action#784@2699234c": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 2,
+    "file_hits": 2,
+    "request_changes": 2,
+    "findings": 9,
+    "tool_calls": 57
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 0,
+    "findings": 4,
+    "tool_calls": 61
+   }
+  },
+  "misospace/pr-reviewer-action#793@f1b999bc": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 2,
+    "findings": 12,
+    "tool_calls": 33
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 3,
+    "findings": 13,
+    "tool_calls": 63
+   }
+  },
+  "misospace/pr-reviewer-action#793@f1b999bc-2": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 1,
+    "file_hits": 1,
+    "request_changes": 3,
+    "findings": 14,
+    "tool_calls": 50
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 0,
+    "file_hits": 0,
+    "request_changes": 3,
+    "findings": 11,
+    "tool_calls": 41
+   }
+  },
+  "misospace/windowstead#129@33d81fd0": {
+   "on": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 13,
+    "tool_calls": 33
+   },
+   "off": {
+    "runs": 3,
+    "strict_hits": 3,
+    "file_hits": 3,
+    "request_changes": 3,
+    "findings": 22,
+    "tool_calls": 28
+   }
+  }
+ }
+}
