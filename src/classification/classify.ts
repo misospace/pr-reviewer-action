@@ -1046,15 +1046,8 @@ const FILE_RISK_RULES: readonly { patterns: readonly RegExp[]; flag: string }[] 
   { patterns: SECRET_HANDLING_PATTERNS, flag: "secret_handling_changes" },
 ];
 
-/** The labels a linked issue contributes, defaulting every read like v2
- * (`lb.get("name", "").lower()` over `issue.get("labels", [])`): the runtime
- * shapes reaching the classifier are wider than `LinkedIssue` — a
- * GitHub-linked entry carries `labels` only when its fetch succeeded, and a
- * projected label may have no name. Deterministic classification renders
- * flags from untrusted metadata and never crashes on its absence. */
 function issueLabels(issue: LinkedIssue): Set<string> {
-  const entries = Array.isArray(issue.labels) ? issue.labels : [];
-  return new Set(entries.map((label: IssueLabel) => String(label?.name ?? "").toLowerCase()));
+  return new Set(issue.labels.map((label: IssueLabel) => label.name.toLowerCase()));
 }
 
 function detectRiskFlags(
@@ -1072,10 +1065,7 @@ function detectRiskFlags(
   // need to duplicate Linear priority as a custom label.
   for (const issue of linkedIssues) {
     const labels = issueLabels(issue);
-    // v2 parity: `str(issue.get("source", "")).lower() == "linear"` — only
-    // Linear records carry `source`; GitHub-linked entries never do.
-    const source = typeof issue.source === "string" ? issue.source : "";
-    if (source.toLowerCase() === "linear") {
+    if (issue.source.toLowerCase() === "linear") {
       // Python: `type(priority) is int` — booleans and floats excluded.
       if (typeof issue.priority === "number" && Number.isInteger(issue.priority)) {
         if (issue.priority === 1) labels.add("priority/p0");
@@ -1314,13 +1304,11 @@ export function classifyPr(input: ClassifyInput): PRClassification {
   const changedFilesSummary = fileNames.slice(0, maxSummaryFiles);
   const routeSignalsList = routeSignals(prKind, fileNames, flags, flagsWithFiles);
 
-  // Collect linked issue labels (case-sensitive, encounter order), with the
-  // same defaulted reads as issueLabels above.
+  // Collect linked issue labels (case-sensitive, encounter order).
   const linkedIssueLabels: string[] = [];
   for (const issue of linkedIssues) {
-    const entries = Array.isArray(issue.labels) ? issue.labels : [];
-    for (const label of entries) {
-      const name = label?.name;
+    for (const label of issue.labels) {
+      const name = label.name;
       if (name && !linkedIssueLabels.includes(name)) linkedIssueLabels.push(name);
     }
   }

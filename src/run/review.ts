@@ -9,7 +9,7 @@ import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalChangedFile } from "../context/types.js";
+import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
@@ -461,7 +461,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const classification = classifyPr({
     prFiles: rawFilesList.map((raw) => canonicalChangedFile(raw)),
     diffText: ws.readText("pr.diff.truncated") ?? "",
-    linkedIssues: linked.linkedIssues as never,
+    // classifyPr sits behind the canonical LinkedIssue boundary
+    // (src/context/types.ts): the linked-issue stage's raw collection —
+    // GitHub refs with labels only when fetched, Linear records — is
+    // normalized here, exactly like the classification fixture path.
+    linkedIssues: normalizeLinkedIssues(linked.linkedIssues, repo),
     metadataStatus: safeJson(ws.read("linked-metadata-status.json")),
   });
   const classificationArtifact = classificationToArtifact(classification) as Record<string, unknown>;

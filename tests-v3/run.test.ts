@@ -1075,9 +1075,10 @@ test("#824: every tool loop turn clamps the same way and the review still publis
 });
 
 test("a PR whose body keyword-links a fetched issue classifies without crashing", async () => {
-  // The dogfood crash (#825 CI): buildLinkedIssueContext's GitHub refs carry
-  // labels but never `source`, and classifyPr's v2-parity defaults must
-  // absorb that instead of crashing the deterministic classifier mid-run.
+  // Regression for the dogfood crash (#825 CI): buildLinkedIssueContext's
+  // GitHub refs carry labels but never `source`. The run seam normalizes
+  // the raw collection through normalizeLinkedIssues before classifyPr, so
+  // the canonical classifier never sees the raw shape.
   const platform = mockPlatform({ body: "Closes #824.\n\nA clamp fix.\n" });
   platform.getIssue = async () => ({
     ok: true,
