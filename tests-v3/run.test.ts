@@ -954,3 +954,122 @@ test("the CI gate's v2 step outputs are republished under the contract's kebab n
     cleanup();
   }
 });
+
+// ── #824: transport max_tokens clamp-and-retry, end to end ──────────────────
+// A provider that refuses an oversized max_tokens with an HTTP 400 stating
+// the real cap must not fail the review: the transport retries the same
+// request once at the stated cap, for the final review and for every tool
+// loop turn.
+
+const CAP_MESSAGE = (requested: number | undefined): string =>
+  `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`;
+
+/** Refuses every request whose max_tokens exceeds 8192 with the Anthropic-
+ * style 400; records the token field and value of every request. */
+async function startClampServer(handleAllowed: (sent: Record<string, unknown>, served: { toolTurnServed: boolean }) => string): Promise<{
+  server: Awaited<ReturnType<typeof startMockServer>>;
+  requested: Array<number | undefined>;
+}> {
+  const requested: Array<number | undefined> = [];
+  const served = { toolTurnServed: false };
+  const server = await startMockServer((_req, body, res) => {
+    const sent = JSON.parse(body) as Record<string, unknown>;
+    requested.push(sent.max_tokens as number | undefined);
+    if ((sent.max_tokens as number | undefined ?? 0) > 8192) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: CAP_MESSAGE(sent.max_tokens as number) } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(handleAllowed(sent, served));
+  });
+  return { server, requested };
+}
+
+test("#824: a run against a provider that 400s oversized max_tokens completes at the stated cap", async () => {
+  const { server, requested } = await startClampServer(() => verdictBody(baseVerdict()));
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-max-tokens": "16384",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ci-status-check": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: false,
+      quiet: true,
+    });
+    // The review completes on the clamped retry, not despite the 400.
+    assert.equal(result.outputs.verdict, "approve");
+    assert.deepEqual(requested, [16384, 8192]);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#824: every tool loop turn clamps the same way and the review still publishes", async () => {
+  const { server, requested } = await startClampServer((sent, served) => {
+    if (!served.toolTurnServed && Array.isArray(sent.tools) && sent.tools.length > 0) {
+      served.toolTurnServed = true;
+      return JSON.stringify({
+        id: "c0", object: "chat.completion", model: "m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+    }
+    return verdictBody(baseVerdict());
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "tool-mode": "native_loop",
+        "tool-max-tokens-per-turn": "16384",
+        "tool-max-requests": "1",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ci-status-check": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // Each loop turn was refused once at 16384 and re-sent at 8192: the tool
+    // turn and the verdict turn alike.
+    assert.deepEqual(requested, [16384, 8192, 16384, 8192]);
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { stop_reason: string; tool_results: Array<{ tool: string; status: string }> };
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(harness.tool_results[0]!.tool, "read_file");
+    assert.equal(harness.tool_results[0]!.status, "ok");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});

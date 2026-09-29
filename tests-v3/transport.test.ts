@@ -8,7 +8,7 @@ import {
   DEFAULT_MAX_RESPONSE_BYTES,
   OVERSIZE_ERROR_BODY_PREFIX_BYTES,
 } from "../src/transport/http.js";
-import { runChatRequest } from "../src/transport/transport.js";
+import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
 
@@ -806,5 +806,269 @@ test("Retry-After is capped at the maximum delay; HTTP-date forms are ignored", 
     assert.deepEqual(slept2, [1000]);
   } finally {
     await dated.server.close();
+  }
+});
+
+// ── max_tokens clamp-and-retry on HTTP 400 (#824) ───────────────────────────
+// Some providers reject a max_tokens above the model's output cap with a 400
+// instead of truncating. The transport parses only an explicitly stated cap
+// and retries the same request once at that cap.
+
+/** Swallows and records stderr while a clamp log line is expected. */
+function captureStderr(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: unknown): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return { lines, restore: (): void => { process.stderr.write = original; } };
+}
+
+const okCompletion = JSON.stringify({ id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] });
+
+test("parseStatedTokenCap: the fixtured error shapes and the no-retry shapes", () => {
+  const anthropicText = "max_tokens: 16384 > 8192, which is the maximum allowed number of output tokens for <model>";
+  const openaiText = "max_tokens is too large: 16384. This model supports at most 4096 completion tokens, whereas you provided 16384.";
+  const contextText = "This model's maximum context length is 8192 tokens and your request has 6000 input tokens.";
+
+  assert.deepEqual(parseStatedTokenCap(anthropicText), { cap: 8192, reason: "provider limit" });
+  assert.deepEqual(parseStatedTokenCap(JSON.stringify({ error: { message: anthropicText } })), { cap: 8192, reason: "provider limit" });
+  assert.deepEqual(parseStatedTokenCap(openaiText), { cap: 4096, reason: "provider limit" });
+  assert.deepEqual(parseStatedTokenCap(JSON.stringify({ error: { message: openaiText, type: "invalid_request_error" } })), { cap: 4096, reason: "provider limit" });
+  assert.deepEqual(parseStatedTokenCap("max_completion_tokens: 16384 > 8192, which is the maximum allowed number of output tokens"), { cap: 8192, reason: "provider limit" });
+  assert.deepEqual(parseStatedTokenCap(contextText), { cap: 2192, reason: "context window" });
+  // Context-length without both numbers, or with no room left, never clamps.
+  assert.equal(parseStatedTokenCap("This model's maximum context length is 8192 tokens."), null);
+  assert.equal(parseStatedTokenCap("the maximum context length is 4096 tokens and your request has 4096 input tokens"), null);
+  // Unparseable / unrelated / absent bodies never clamp.
+  assert.equal(parseStatedTokenCap("invalid_request_error"), null);
+  assert.equal(parseStatedTokenCap('{"error":{"message":"invalid api key"}}'), null);
+  assert.equal(parseStatedTokenCap('{"error":{"code":"context_too_large"}}'), null);
+  assert.equal(parseStatedTokenCap(""), null);
+  assert.equal(parseStatedTokenCap(undefined), null);
+});
+
+/** A mock endpoint that refuses every request whose token field exceeds the
+ * cap with a JSON 400 carrying `message(requested)`, and serves a minimal
+ * completion otherwise. Records each request's token field and value. */
+async function cappedServer(
+  cap: number,
+  message: (requested: number) => string,
+): Promise<{ server: Awaited<ReturnType<typeof startMockServer>>; requests: Array<{ requested: number | undefined; field: string }> }> {
+  const requests: Array<{ requested: number | undefined; field: string }> = [];
+  const server = await startMockServer((_req, body, res) => {
+    const sent = JSON.parse(body) as Record<string, unknown>;
+    const field = sent.max_completion_tokens !== undefined ? "max_completion_tokens" : "max_tokens";
+    const requested = sent[field] as number | undefined;
+    requests.push({ requested, field });
+    if (requested !== undefined && requested > cap) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: message(requested) } }));
+      return;
+    }
+    res.end(okCompletion);
+  });
+  return { server, requests };
+}
+
+test("a 400 stating an output cap retries once with the token field at the cap", async () => {
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const stderr = captureStderr();
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    if (outcome.status === "ok") assert.equal(outcome.response.content, "ok");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]!.requested, 16384);
+    assert.equal(requests[1]!.requested, 8192);
+    // One log line, numbers and reason only — no body contents.
+    assert.deepEqual(stderr.lines.filter((line) => line.includes("clamped")),
+      ["clamped max_tokens 16384 -> 8192 (provider limit)\n"]);
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
+test("the OpenAI too-large shape clamps max_completion_tokens without introducing max_tokens", async () => {
+  const { server, requests } = await cappedServer(4096, (requested) =>
+    `max_completion_tokens is too large: ${requested}. This model supports at most 4096 completion tokens, whereas you provided ${requested}.`);
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_completion_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1]!.requested, 4096);
+    assert.equal(requests[1]!.field, "max_completion_tokens");
+    const secondBody = JSON.parse(server.requests[1]!.body) as Record<string, unknown>;
+    assert.equal(secondBody.max_completion_tokens, 4096);
+    assert.equal(secondBody.max_tokens, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a context-length 400 clamps to window minus input when both are stated", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const sent = JSON.parse(body) as { max_tokens?: number };
+    if ((sent.max_tokens ?? 0) > 8192) {
+      res.statusCode = 400;
+      res.end("the maximum context length is 8192 tokens and your request has 6000 input tokens");
+      return;
+    }
+    res.end(okCompletion);
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal((JSON.parse(server.requests[1]!.body) as { max_tokens: number }).max_tokens, 2192);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a stated cap at or above the sent value does not retry", async () => {
+  // The body claims a cap larger than what was actually sent: not the error
+  // we are looking for, so the original failure stands untouched.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 400;
+    res.end("max_tokens: 4096 > 16384, which is the maximum allowed number of output tokens for <model>");
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 4096 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(server.requests.length, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("an unparseable or unrelated 400 is returned unchanged, with no retry", async () => {
+  for (const body of ["invalid_request_error", '{"error":{"message":"invalid api key"}}', '{"error":{"code":"bad"}}']) {
+    const server = await startMockServer((_req, _body, res) => {
+      res.statusCode = 400;
+      res.end(body);
+    });
+    try {
+      const outcome = await runChatRequest({
+        baseUrl: server.url,
+        apiFormat: "openai",
+        payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+        apiKey: "",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+      });
+      assert.equal(outcome.status, "failure");
+      if (outcome.status === "failure") assert.equal(outcome.failure.body, body);
+      assert.equal(server.requests.length, 1);
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("a clamped request that still fails returns the second failure, never a third attempt", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests += 1;
+    res.statusCode = 400;
+    res.end("max_tokens: 16384 > 8192, which is the maximum allowed number of output tokens for <model>");
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status === "failure") {
+      assert.equal(outcome.failure.kind, "http_status");
+      assert.equal(outcome.failure.status, 400);
+      assert.match(outcome.failure.body ?? "", /8192/);
+    }
+    assert.equal(requests, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the clamp sits before the 429/5xx decision and does not consume its attempts", async () => {
+  // First request: clampable 400. The clamped retry then hits a 429 (with
+  // Retry-After 0) and finally succeeds — so the clamped request re-enters
+  // the ordinary retry loop with its backoff intact.
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests += 1;
+    const sent = JSON.parse(body) as { max_tokens?: number };
+    if ((sent.max_tokens ?? 0) > 8192) {
+      res.statusCode = 400;
+      res.end("max_tokens: 16384 > 8192, which is the maximum allowed number of output tokens for <model>");
+      return;
+    }
+    if (requests === 2) {
+      res.statusCode = 429;
+      res.setHeader("Retry-After", "0");
+      res.end('{"error":{"message":"slow down"}}');
+      return;
+    }
+    res.end(okCompletion);
+  });
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      sleep: async (ms: number) => { slept.push(ms); },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 3);
+    assert.deepEqual(slept, [0]);
+    assert.equal((JSON.parse(server.requests[2]!.body) as { max_tokens: number }).max_tokens, 8192);
+  } finally {
+    await server.close();
   }
 });
