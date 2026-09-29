@@ -13,6 +13,7 @@ import { GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITH
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
+import { buildPlatformReadAdapter } from "../src/run/platform.js";
 
 interface Seen {
   url: string;
@@ -445,6 +446,25 @@ test("semantic fixture adapter serves .semantic-fixture files and empty stubs, a
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("buildPlatformReadAdapter: fixture env wins with an offline adapter; without it a real adapter is built", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-"));
+  try {
+    mkdirSync(join(dir, ".semantic-fixture"));
+    writeFileSync(join(dir, ".semantic-fixture", "pr.json"), JSON.stringify({ number: 9 }));
+    const fixture = buildPlatformReadAdapter({
+      REPO: "o/r", PR_NUMBER: "9", PLATFORM: "github", GH_TOKEN: "t",
+      SEMANTIC_FIXTURE_MODE: "true", SEMANTIC_FIXTURE_DIR: dir,
+    });
+    assert.ok(fixture instanceof SemanticFixtureAdapter);
+    assert.deepEqual(await fixture.getPr(), { number: 9 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const real = buildPlatformReadAdapter({ REPO: "o/r", PR_NUMBER: "9", PLATFORM: "github", GH_TOKEN: "t" });
+  assert.ok(!(real instanceof SemanticFixtureAdapter));
+  assert.ok(real instanceof GitHubAdapter);
 });
 
 // ── Normalization helpers ───────────────────────────────────────────────

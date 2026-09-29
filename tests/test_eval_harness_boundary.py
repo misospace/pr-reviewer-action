@@ -1,7 +1,7 @@
 """Integration boundary tests for run_review_for_pr (deep-review #610).
 
-Materializes a fake run_review.sh orchestrator in tmp_path (no network, no
-live models) and verifies end-to-end:
+Materializes a fake orchestrator in tmp_path (no network, no live models)
+and verifies end-to-end:
   - the env contract (REPO / PR_NUMBER / DEEP_REVIEW / TOOL_MODE),
   - the stale-artifact reset (a leftover ai-output.json is removed before
     the orchestrator runs),
@@ -9,7 +9,9 @@ live models) and verifies end-to-end:
     -> model_used, ai-response.primary.json -> tokens, tool-harness.json ->
     tool_calls, specialists.json + specialist-<role>.json -> telemetry),
   - adversarial boundary tokens: symlinked stale artifacts, NUL/control
-    bytes in finding content, path-shaped finding files.
+    bytes in finding content, path-shaped finding files,
+  - the default (no review_script) execution invoking the built TypeScript
+    runtime entry, `node dist/index.js run` (#706 wave 0).
 """
 
 from __future__ import annotations
@@ -773,6 +775,86 @@ class TestRevisionFidelity:
         assert run.error is None
         assert run.commit_sha == shas[547]
         assert run.verdict == "request_changes"
+
+
+class TestDefaultRuntimeInvocation:
+    """The default (no review_script) execution runs the built TypeScript
+    runtime — `node <repo>/dist/index.js run` in the run cwd, with the same
+    env contract and artifact names — not a bundled shell orchestrator
+    (#706 wave 0)."""
+
+    def test_default_branch_invokes_the_v3_runtime_entry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        # The shim stands in for node: it records its argv, writes the run
+        # artifacts under the names the runtime uses, and exits 0 — so the
+        # assertion covers both the invocation shape and the parse path.
+        shim_dir = tmp_path / "bin"
+        shim_dir.mkdir()
+        repo_root = Path(__file__).resolve().parent.parent
+        dist_dir = repo_root / "dist"
+        created_dist = False
+        if not (dist_dir / "index.js").is_file():
+            dist_dir.mkdir(exist_ok=True)
+            (dist_dir / "index.js").write_text("// test placeholder\n", encoding="utf-8")
+            created_dist = True
+        shim = shim_dir / "node"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'printf \'%s\\n\' "$@" > argv.txt\n'
+            "cat > ai-output.json <<'JSON'\n"
+            '{"verdict": "request_changes", "review_markdown": "v3 body", '
+            '"verdict_source": "findings_severity_gated", "findings": []}\n'
+            "JSON\n"
+            "printf 'test-model@http://localhost:1/v1 (openai)\\n' > analysis_engine.txt\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
+        try:
+            run = run_review_for_pr(
+                PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
+            )
+        finally:
+            if created_dist:
+                (dist_dir / "index.js").unlink()
+
+        assert run.error is None, run.error
+        # The runtime entry, not a shell orchestrator: argv is the bundle
+        # path plus the `run` subcommand, executed in the run cwd.
+        argv = (repo_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+        assert argv == [str(dist_dir / "index.js"), "run"]
+        assert run.verdict == "request_changes"
+        assert run.review_markdown == "v3 body"
+        assert "test-model" in run.model_used
+
+    def test_default_branch_fails_closed_without_the_bundle(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        repo_root = Path(__file__).resolve().parent.parent
+        dist_index = repo_root / "dist" / "index.js"
+        saved = dist_index.read_bytes() if dist_index.is_file() else None
+        if saved is not None:
+            dist_index.unlink()
+        shim_dir = tmp_path / "bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "node"
+        shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
+        try:
+            run = run_review_for_pr(
+                PR_ENTRY, "tools_off", tmp_path, MODEL_CONFIG,
+            )
+        finally:
+            if saved is not None:
+                dist_index.write_bytes(saved)
+
+        # Fail closed with the bundle path in the message; nothing ran.
+        assert run.error is not None
+        assert "review runtime bundle not found" in run.error
+        assert not (repo_path / "argv.txt").exists()
+        assert not (repo_path / "ai-output.json").exists()
 
 
 PROMPT_OVERRIDE_SNAPSHOT_TEMPLATE = """#!/usr/bin/env bash

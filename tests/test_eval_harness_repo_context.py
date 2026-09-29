@@ -1,3 +1,12 @@
+"""Grader tests for the repository-context evaluation corpus (#779).
+
+The corpus (evals/corpus-repo-context.json) replays historical PRs of this
+repository: its read targets and changed-file sets record the paths those
+PRs actually touched, including files the v2 teardown (#706) later deletes.
+The graders are pure string predicates over a run's tool trace — they never
+execute a pipeline, so historical paths are data here, not consumers.
+"""
+
 from __future__ import annotations
 
 import sys

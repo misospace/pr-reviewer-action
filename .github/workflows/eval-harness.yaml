@@ -73,6 +73,18 @@ jobs:
           # local 3.9, ModuleNotFoundError on CI 3.x).
           python-version: '3.14'
 
+      - name: Set up Node.js
+        # The harness drives the TypeScript runtime (`node dist/index.js run`).
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build the review runtime bundle
+        # dist/ is not committed; the harness invokes the built entrypoint.
+        run: npm ci --no-audit --no-fund && npm run build
+
       - name: Run eval harness
         env:
           AI_MODEL: ${{ secrets.AI_MODEL }}

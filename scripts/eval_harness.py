@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -421,8 +422,8 @@ def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:
 
     Findings may report a path relative to the repo root, or (less
     commonly) something shorter/longer; treat a match as either exact or a
-    suffix aligned on a '/' boundary so ``run_review.sh`` doesn't
-    false-positive-match ``scripts/other_run_review.sh``.
+    suffix aligned on a '/' boundary so ``foo.sh`` doesn't
+    false-positive-match ``scripts/other_foo.sh``.
     """
     if not isinstance(finding_file, str) or not finding_file:
         return False
@@ -759,7 +760,7 @@ def evaluate_capability(
 #                             explicit max overrides)
 #
 # Finding predicates consume the PRODUCTION finding shape
-# (pr_reviewer.response_parser: severity/category/file/line/message — there
+# (the ai-output.json artifact: severity/category/file/line/message — there
 # is no "description" key), so description needles match `finding["description"]`
 # when present, else `finding["message"]`. All finding-consuming scorer paths
 # flow through the single _finding_predicate_matches. Same loose,
@@ -813,7 +814,7 @@ def _lead_predicate_matches(lead: dict[str, Any], check: dict[str, Any]) -> bool
 def _finding_predicate_matches(finding: dict[str, Any], check: dict[str, Any]) -> bool:
     """Case-insensitive substring match of a final finding against a check.
 
-    The production finding shape (pr_reviewer.response_parser) is
+    The production finding shape (the ai-output.json artifact) is
     severity/category/file/line/message with NO "description" key, so the
     description needles match `finding["description"]` when that key is
     present, else `finding["message"]`. finding_category_any /
@@ -1079,7 +1080,7 @@ def populate_tool_trace(run: ReviewRun, repo_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Review execution (stub — to be wired with actual review scripts)
+# Review execution
 # ---------------------------------------------------------------------------
 
 def run_label(mode: str, deep: bool, execution: str = "three_call") -> str:
@@ -1397,7 +1398,7 @@ def _normalize_harness_finding(item: Any) -> dict[str, Any] | None:
     Keeps exactly the five production keys (severity / category / file /
     line / message — there is NO 'description' key); non-dict entries
     degrade to None and junk values degrade field-by-field the way
-    pr_reviewer.response_parser does (bool/float/str line junk -> None).
+    the runtime's verdict parser does (bool/float/str line junk -> None).
     """
     if not isinstance(item, dict):
         return None
@@ -1789,9 +1790,10 @@ def run_review_for_pr(
         deep_review: When True, run the deep-review specialist phase
             (DEEP_REVIEW=true) and collect specialist telemetry into
             run.specialists. The run's mode is labelled via run_label.
-        review_script: Orchestrator script to execute, verbatim. When None
-            (default) the bundled run_review.sh next to this harness is
-            resolved. Test seam for substituting a fake orchestrator.
+        review_script: Orchestrator command to execute, verbatim. When None
+            (default) the built TypeScript runtime bundle next to this
+            harness (`node dist/index.js run`) is invoked. Test seam for
+            substituting a fake orchestrator script.
         deep_execution: Specialist execution shape for deep runs (#635):
             "three_call" (production default), "combined_scout", or
             "prime_then_fanout". Forwarded as DEEP_REVIEW_EXECUTION and
@@ -1883,8 +1885,8 @@ def run_review_for_pr(
             (repo_path / name).unlink(missing_ok=True)
 
         # Set environment for the review run. REPO + PR_NUMBER are required
-        # by scripts/sections/config.sh (it exits without them); AI_* are the
-        # model endpoint.
+        # by the runtime's env validation (it exits without them); AI_* are
+        # the model endpoint.
         env = os.environ.copy()
         python_dir = str(Path(sys.executable).resolve().parent)
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
@@ -1932,16 +1934,31 @@ def run_review_for_pr(
             env.pop("DEEP_REVIEW_EXECUTION", None)
         env.update(model_config.get("extra_env") or {})
 
-        # Run the review via the orchestrator script. By default that is
-        # run_review.sh next to this harness (resolved relative to this
-        # script, so the harness is not pinned to one machine's checkout
-        # path); `review_script` is the test seam that substitutes a fake
-        # orchestrator and is used verbatim when provided.
+        # Run the review through the TypeScript runtime (the v3 `run`
+        # entrypoint: same env contract, same artifact names in the run
+        # cwd). By default that is the built bundle next to this harness
+        # (resolved relative to this script, so the harness is not pinned
+        # to one machine's checkout path); `review_script` is the test seam
+        # that substitutes a fake orchestrator and is used verbatim when
+        # provided.
+        command: list[str] | None = None
         if review_script is None:
-            review_script = Path(__file__).resolve().parent / "run_review.sh"
-        if review_script.exists():
+            entrypoint = Path(__file__).resolve().parent.parent / "dist" / "index.js"
+            node = shutil.which("node")
+            if node is None:
+                run.error = "node not found on PATH; the review runtime requires Node"
+            elif not entrypoint.is_file():
+                run.error = f"review runtime bundle not found at {entrypoint} (run `npm run build`)"
+            else:
+                command = [node, str(entrypoint), "run"]
+        elif review_script.exists():
+            command = [str(review_script)]
+        else:
+            run.error = f"orchestrator script not found at {review_script}"
+
+        if command is not None:
             result = subprocess.run(
-                [str(review_script)],
+                command,
                 cwd=str(repo_path),
                 env=env,
                 capture_output=True,
@@ -1967,7 +1984,9 @@ def run_review_for_pr(
                             output_lines[key] = value
                 except OSError:
                     pass
-                route = output_lines.get("review_route", "").strip()
+                # The runtime writes kebab-case output keys; the v2
+                # orchestrator's snake_case form stays a fallback.
+                route = output_lines.get("review-route", output_lines.get("review_route", "")).strip()
                 if route:
                     run.route = route
                 if run.route == "escalated":
@@ -1987,8 +2006,6 @@ def run_review_for_pr(
                         ]
             else:
                 run.error = f"Review failed (exit {result.returncode}): {result.stderr[:500]}"
-        else:
-            run.error = f"run_review.sh not found at {review_script}"
 
     except subprocess.TimeoutExpired:
         run.wall_clock_sec = time.monotonic() - start
