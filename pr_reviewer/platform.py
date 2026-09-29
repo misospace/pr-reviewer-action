@@ -4,7 +4,9 @@ Mirror of ``scripts/platform_api.sh`` for the Python consumers
 (``scripts/resolve_finding_threads.py`` now; ``scripts/run_tool_harness.py``'s
 ``gh_api`` tool migrates here in #226). The github backend is argv-identical
 to the pre-seam code; forgejo support arrives per-consumer across the 1.4.x
-line, and until then unsupported operations raise instead of failing silently.
+line, and until then unsupported operations raise instead of failing
+silently. Tangled (#583) is resolvable as a platform; its runtime context
+lives in ``pr_reviewer/tangled_context.py``.
 """
 
 from __future__ import annotations
@@ -109,12 +111,15 @@ GH_API_ROOT_PREFIXES = (
 def resolve_platform(
     platform: str | None = None, forgejo_api_url: str | None = None
 ) -> str:
-    """Resolve PLATFORM (github|forgejo|auto) to a concrete backend name.
+    """Resolve PLATFORM (github|forgejo|tangled|auto) to a concrete backend name.
 
     Mirrors ``platform_resolve`` in scripts/platform_api.sh: ``auto`` maps to
-    forgejo when FORGEJO_API_URL is set or GITHUB_SERVER_URL names a
-    non-github.com host (Forgejo Actions runners populate it with the
-    instance URL), github otherwise.
+    tangled when TANGLED_REPO_DID is set (checked first so a Tangled runner
+    is never misclassified as Forgejo), else to forgejo when FORGEJO_API_URL
+    is set or GITHUB_SERVER_URL names a non-github.com host (Forgejo Actions
+    runners populate it with the instance URL), github otherwise. An
+    explicit ``tangled`` requires a non-empty TANGLED_REPO_DID and fails
+    with a descriptive error when it is missing.
 
     ``platform`` and ``forgejo_api_url`` are optional overrides for the two
     env vars this function otherwise reads. They exist so a caller that
@@ -127,7 +132,17 @@ def resolve_platform(
     if platform is None:
         platform = os.environ.get("PLATFORM", "github")
     platform = platform.strip().lower() or "github"
+    if platform in ("github", "forgejo"):
+        return platform
+    if platform == "tangled":
+        if not os.environ.get("TANGLED_REPO_DID", "").strip():
+            raise ValueError(
+                "platform 'tangled' requires TANGLED_REPO_DID (Tangled repository owner DID) to be set"
+            )
+        return "tangled"
     if platform == "auto":
+        if os.environ.get("TANGLED_REPO_DID", "").strip():
+            return "tangled"
         api = (
             forgejo_api_url
             if forgejo_api_url is not None
@@ -139,9 +154,15 @@ def resolve_platform(
         if server and server != "https://github.com":
             return "forgejo"
         return "github"
-    if platform in ("github", "forgejo"):
-        return platform
-    raise ValueError(f"unsupported PLATFORM {platform!r} (expected github|forgejo|auto)")
+    raise ValueError(
+        f"unsupported PLATFORM {platform!r} (expected github|forgejo|tangled|auto)"
+    )
+
+
+# Tangled (#583) is resolvable as a platform, but the v2 seam has no Tangled
+# backend: consumers that would otherwise fall through to the GitHub code
+# path must fail loudly instead of silently driving gh / api.github.com.
+TANGLED_NOT_IMPLEMENTED = "the 'tangled' platform backend is not implemented yet (#583)"
 
 
 def gh_argv(args: list) -> list:
@@ -151,8 +172,13 @@ def gh_argv(args: list) -> list:
     forgejo: raises PlatformUnsupported; the consumers that reach this
     (finding-thread resolution, the tool harness) get Forgejo backends in
     #224/#226.
+    tangled: raises PlatformUnsupported (TANGLED_NOT_IMPLEMENTED) — falling
+    through to the gh CLI would silently drive GitHub from a Tangled env.
     """
-    if resolve_platform() == "forgejo":
+    platform = resolve_platform()
+    if platform == "tangled":
+        raise PlatformUnsupported(TANGLED_NOT_IMPLEMENTED)
+    if platform == "forgejo":
         raise PlatformUnsupported(
             "gh CLI operations are not available on PLATFORM=forgejo; "
             "this consumer's Forgejo backend lands later in the 1.4.x line"
@@ -568,7 +594,10 @@ def repo_contents(repo, path="", ref=None, allowed_repos=None, current_repo="", 
         max_entries = max(1, min(int(max_entries), REPO_CONTENTS_MAX_ENTRIES))
     except (TypeError, ValueError):
         max_entries = REPO_CONTENTS_DEFAULT_MAX_ENTRIES
-    if resolve_platform() == "forgejo":
+    platform = resolve_platform()
+    if platform == "tangled":
+        return {"error": TANGLED_NOT_IMPLEMENTED}
+    if platform == "forgejo":
         return {"error": "repo_contents is not supported on PLATFORM=forgejo"}
     return _repo_contents_github(
         validated["repo"], validated["path"], validated["ref"], max_entries, request_timeout
@@ -592,6 +621,8 @@ def gh_api(endpoint, allowed_repos, current_repo, request_timeout=25):
     repo_key = validated["repo_key"]
 
     platform = resolve_platform()
+    if platform == "tangled":
+        return {"error": TANGLED_NOT_IMPLEMENTED}
     if platform == "forgejo":
         return _gh_api_forgejo(full_path, repo_key, request_timeout)
     return _gh_api_github(full_path, request_timeout)

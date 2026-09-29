@@ -13,7 +13,18 @@
 #   forgejo – operations via pr_reviewer/forgejo_backend.py (curl /api/v1).
 #             Requires FORGEJO_API_URL. Implemented per-operation across the
 #             1.4.x line; unimplemented operations fail loudly, never silently.
-#   auto    – resolved here: forgejo when FORGEJO_API_URL is set or when
+#   tangled – Tangled/Spindle runtime; identity is TANGLED_REPO_DID (the
+#             repository owner's DID), which `platform_resolve` requires. No
+#             Tangled API operations are implemented here yet (later issue): every
+#             platform_* operation fails loudly with `operation '<name>' is
+#             not yet implemented for PLATFORM=tangled` (rc 1) — nothing may
+#             silently fall through to the GitHub branch. The guard also fails
+#             closed when PLATFORM itself is unresolvable (explicit tangled
+#             without its DID, or an unsupported value): the operation exits
+#             nonzero with the `platform_resolve` error instead of silently
+#             taking the GitHub branch.
+#   auto    – resolved here: tangled when TANGLED_REPO_DID is set, else
+#             forgejo when FORGEJO_API_URL is set or when
 #             GITHUB_SERVER_URL names a non-github.com host (Forgejo Actions
 #             runners populate it with the instance URL), github otherwise.
 #
@@ -51,26 +62,43 @@ _PLATFORM_API_SOURCED=1
 _PLATFORM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 platform_resolve() {
-  # Normalize PLATFORM, resolving `auto` from explicit Forgejo config or host.
+  # Normalize PLATFORM, resolving `auto` from Tangled identity, explicit
+  # Forgejo config, or host. `tangled` requires TANGLED_REPO_DID.
   local p="${PLATFORM:-github}"
   p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$p" == "auto" ]]; then
-    if [[ -n "${FORGEJO_API_URL:-}" ]]; then
-      p="forgejo"
-      printf '%s' "$p"
-      return 0
-    fi
-    local server="${GITHUB_SERVER_URL:-}"
-    if [[ -n "$server" && "$server" != "https://github.com" && "$server" != "https://github.com/" ]]; then
-      p="forgejo"
-    else
-      p="github"
-    fi
-  fi
+  p="${p#"${p%%[![:space:]]*}"}"
+  p="${p%"${p##*[![:space:]]}"}"
+  [[ -n "$p" ]] || p="github"
+  local did="${TANGLED_REPO_DID:-}"
+  did="${did#"${did%%[![:space:]]*}"}"
+  did="${did%"${did##*[![:space:]]}"}"
   case "$p" in
-    github|forgejo) printf '%s' "$p" ;;
+    tangled)
+      if [[ -z "$did" ]]; then
+        echo "platform_api: platform 'tangled' requires TANGLED_REPO_DID (Tangled repository owner DID) to be set" >&2
+        return 1
+      fi
+      ;;
+    auto)
+      if [[ -n "$did" ]]; then
+        p="tangled"
+      elif [[ -n "${FORGEJO_API_URL:-}" ]]; then
+        p="forgejo"
+      else
+        local server="${GITHUB_SERVER_URL:-}"
+        while [[ "$server" == */ ]]; do server="${server%/}"; done
+        if [[ -n "$server" && "$server" != "https://github.com" ]]; then
+          p="forgejo"
+        else
+          p="github"
+        fi
+      fi
+      ;;
+  esac
+  case "$p" in
+    github|forgejo|tangled) printf '%s' "$p" ;;
     *)
-      echo "platform_api: unsupported PLATFORM '$p' (expected github|forgejo|auto)" >&2
+      echo "platform_api: unsupported PLATFORM '$p' (expected github|forgejo|tangled|auto)" >&2
       return 1
       ;;
   esac
@@ -94,6 +122,27 @@ _forgejo_py() {
 _forgejo_unimplemented() {
   # Operations that land later in the 1.4.x line (#223–#226) fail loudly.
   echo "platform_api: operation '$1' is not yet implemented for PLATFORM=forgejo" >&2
+  return 1
+}
+
+_platform_tangled_guard() {
+  # Fail closed: an unresolvable PLATFORM (explicit tangled without its DID,
+  # or an unsupported value) must never fall through to the GitHub branch.
+  local resolved
+  if ! resolved="$(platform_resolve)"; then
+    return 1
+  fi
+  if [[ "$resolved" == "tangled" ]]; then
+    _tangled_unimplemented "$1"
+    return 1
+  fi
+  return 0
+}
+
+_tangled_unimplemented() {
+  # Tangled backend operations land in a later issue; until they do, every
+  # outward platform_* operation fails loudly — never a silent GitHub branch.
+  echo "platform_api: operation '$1' is not yet implemented for PLATFORM=tangled" >&2
   return 1
 }
 
@@ -133,6 +182,7 @@ platform_authenticated_repo_permission() {
   # $1=repo → read|write|admin on stdout (Forgejo), or "unknown" on GitHub:
   # GitHub App/GITHUB_TOKEN permissions are unit-scoped and cannot be inferred
   # from the coarse repo permission, so callers must not gate on it there.
+  _platform_tangled_guard "platform_authenticated_repo_permission" || return 1
   if _platform_is_forgejo; then
     _forgejo_py repo-permission "$1"
   else
@@ -143,6 +193,7 @@ platform_authenticated_repo_permission() {
 platform_pr_get() {
   # $1=repo $2=pr_number [extra gh api flags, e.g. --jq] → PR object
   # (GitHub REST shape, or the --jq projection) on stdout
+  _platform_tangled_guard "platform_pr_get" || return 1
   if _platform_fixture_enabled; then
     _platform_fixture_file pr.json
   elif _platform_is_forgejo; then
@@ -159,6 +210,7 @@ platform_pr_head_sha() {
   # Bounded on GitHub (#663): wait_for_ci.sh resolves the head SHA here
   # before its poll loop, so a hung call would stall ahead of the loop's
   # own timeout accounting. verify_pr_head.sh already `|| true`s a failure.
+  _platform_tangled_guard "platform_pr_head_sha" || return 1
   if _platform_fixture_enabled; then
     git -C "${SEMANTIC_FIXTURE_DIR}" rev-parse HEAD
   elif _platform_is_forgejo; then
@@ -170,6 +222,7 @@ platform_pr_head_sha() {
 
 platform_pr_diff() {
   # $1=repo $2=pr_number → unified diff on stdout
+  _platform_tangled_guard "platform_pr_diff" || return 1
   if _platform_fixture_enabled; then
     _platform_fixture_file diff
   elif _platform_is_forgejo; then
@@ -181,6 +234,7 @@ platform_pr_diff() {
 
 platform_pr_files() {
   # $1=repo $2=pr_number → first page of changed files (GitHub REST shape)
+  _platform_tangled_guard "platform_pr_files" || return 1
   if _platform_fixture_enabled; then
     _platform_fixture_file files.json
   elif _platform_is_forgejo; then
@@ -192,6 +246,7 @@ platform_pr_files() {
 
 platform_issue_get() {
   # $1=repo $2=issue_number → issue object on stdout
+  _platform_tangled_guard "platform_issue_get" || return 1
   if _platform_fixture_enabled; then
     printf '{"number":%s,"title":"","state":"open","html_url":"","labels":[],"body":""}\n' "$2"
   elif _platform_is_forgejo; then
@@ -203,6 +258,7 @@ platform_issue_get() {
 
 platform_issue_comments() {
   # $1=repo $2=issue_number → first page of issue comments
+  _platform_tangled_guard "platform_issue_comments" || return 1
   if _platform_fixture_enabled; then
     printf '[]\n'
   elif _platform_is_forgejo; then
@@ -214,6 +270,7 @@ platform_issue_comments() {
 
 platform_pr_review_comments() {
   # $1=repo $2=pr_number → up to the 100 most recent PR conversation
+  _platform_tangled_guard "platform_pr_review_comments" || return 1
   if _platform_fixture_enabled; then
     printf '[]\n'
     return 0
@@ -245,6 +302,7 @@ platform_review_threads() {
   # comments:[{id,user,created_at,updated_at,body}]} for review_threads.py
   # (#766). GitHub exposes threads and their resolution state only through
   # GraphQL; Forgejo groups review comments by path and position instead.
+  _platform_tangled_guard "platform_review_threads" || return 1
   if _platform_fixture_enabled; then
     printf '[]\n'
     return 0
@@ -263,6 +321,7 @@ platform_review_threads() {
 
 platform_compare() {
   # $1=repo $2=base...head spec [extra gh api flags, e.g. --jq] → compare
+  _platform_tangled_guard "platform_compare" || return 1
   if _platform_fixture_enabled; then
     printf '{"commits":[],"files":[],"total_commits":0}\n'
     return 0
@@ -281,6 +340,7 @@ platform_compare() {
 
 platform_comment_sticky() {
   # $1=repo $2=pr_number $3=body_file — edit the managed comment or create it
+  _platform_tangled_guard "platform_comment_sticky" || return 1
   if _platform_fixture_enabled; then
     return 0
   elif _platform_is_forgejo; then
@@ -292,6 +352,7 @@ platform_comment_sticky() {
 
 platform_pr_reviews() {
   # $1=repo $2=pr_number [first-page|paginate] → reviews JSON
+  _platform_tangled_guard "platform_pr_reviews" || return 1
   if _platform_fixture_enabled; then
     printf '[]\n'
   elif _platform_is_forgejo; then
@@ -305,6 +366,7 @@ platform_pr_reviews() {
 
 platform_review_create_json() {
   # $1=repo $2=pr_number $3=request_json_file — POST a review (inline comments)
+  _platform_tangled_guard "platform_review_create_json" || return 1
   if _platform_fixture_enabled; then
     return 0
   elif _platform_is_forgejo; then
@@ -316,6 +378,7 @@ platform_review_create_json() {
 
 platform_review_native() {
   # $1=repo $2=pr_number $3=APPROVE|REQUEST_CHANGES|COMMENT $4=body_file
+  _platform_tangled_guard "platform_review_native" || return 1
   if _platform_fixture_enabled; then
     return 0
   fi
@@ -336,6 +399,7 @@ platform_review_native() {
 
 platform_review_dismiss() {
   # $1=repo $2=pr_number $3=review_id $4=message
+  _platform_tangled_guard "platform_review_dismiss" || return 1
   if _platform_fixture_enabled; then
     return 0
   elif _platform_is_forgejo; then
@@ -347,11 +411,12 @@ platform_review_dismiss() {
 
 platform_graphql() {
   # GraphQL passthrough (comment minimisation). GitHub-only API surface; the
+  # forgejo path must degrade at the call site per #227, not crash here.
+  _platform_tangled_guard "platform_graphql" || return 1
   if _platform_fixture_enabled; then
     printf '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[]}}}}}\n'
     return 0
   fi
-  # forgejo path must degrade at the call site per #227, not crash here.
   if _platform_is_forgejo; then
     _forgejo_unimplemented "graphql"
   else
@@ -361,6 +426,7 @@ platform_graphql() {
 
 platform_collaborator_permission() {
   # $1=repo $2=login → permission string (admin|write|read|none) on stdout
+  _platform_tangled_guard "platform_collaborator_permission" || return 1
   if _platform_is_forgejo; then
     _forgejo_unimplemented "collaborator_permission"   # comment-trigger wiring is GitHub-only today
   else
@@ -491,6 +557,7 @@ _gh_api_bounded() {
 
 platform_check_runs() {
   # $1=repo $2=sha → check-runs JSON
+  _platform_tangled_guard "platform_check_runs" || return 1
   if _platform_fixture_enabled; then
     printf '{"check_runs":[],"total_count":0}\n'
   elif _platform_is_forgejo; then
@@ -505,6 +572,7 @@ platform_check_runs() {
 
 platform_commit_status() {
   # $1=repo $2=sha → combined commit status JSON
+  _platform_tangled_guard "platform_commit_status" || return 1
   if _platform_fixture_enabled; then
     printf '{"statuses":[],"total_count":0,"state":"pending"}\n'
   elif _platform_is_forgejo; then
@@ -538,6 +606,7 @@ platform_external_checks() {
   # caller can distinguish a transient failure (retry) from "no external CI"
   # (an empty JSON array). Falls back to the aggregate combined-status state
   # when the endpoint reports total_count>0 but carries no per-status detail.
+  _platform_tangled_guard "platform_external_checks" || return 1
   local repo="$1" sha="$2"
   local runs combined
   runs="$(platform_check_runs "$repo" "$sha" 2>/dev/null || echo "")"
