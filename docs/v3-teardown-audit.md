@@ -103,9 +103,13 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   appeared in both this table and the (c) table and the grep showed zero
   surviving consumers — the (c) row was an error. `tests/test_corpus_standards_survival.sh`
   is on disk but absent from every list here — left unclassified, wave-2 doc
-  pass to disposition it. Wave-2 checklist addition: after the (c) set goes,
-  confirm the api-keys-never-in-argv invariant still has v3-side coverage
-  (the v2 guard `tests/test_api_key_argv.py` died in wave 1).
+  pass to disposition it. The v2 argv guard (`tests/test_api_key_argv.py`)
+  died with this wave as planned; the durable secret-transport invariant it
+  guarded — model API credentials ride only the provider auth headers, never
+  process argv, request URLs or bodies, or locally generated diagnostics —
+  is pinned normatively in AGENTS.md and by `tests-v3/transport.test.ts`
+  ("the api key rides only the auth headers — never the URL, body, or
+  failure diagnostics"), so no wave-2 follow-up is needed.
 - **Wave 2 — at the #681 release gate.** Freeze or retire each parity
   boundary, then delete the (c) set, the runners, and the remaining
   oracle-only tests. After wave 2 the **shipped action** contains no Bash and

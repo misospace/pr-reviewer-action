@@ -102,6 +102,88 @@ test("empty api key sends no auth header", async () => {
   }
 });
 
+test("the api key rides only the auth headers — never the URL, body, or failure diagnostics", async () => {
+  // The durable secret-transport invariant (successor of the deleted v2
+  // argv guard, #706 wave 1): credentials travel exclusively in the auth
+  // header; they must not appear in the request URL, the serialized wire
+  // body, or any locally generated failure/diagnostic text.
+  const key = "sk-secret-7f4c9a1d-no-leak";
+  const seenUrls: string[] = [];
+
+  for (const apiFormat of ["openai", "anthropic"] as const) {
+    const server = await startMockServer((req, _body, res) => {
+      seenUrls.push(req.url ?? "");
+      res.statusCode = 200;
+      res.end(apiFormat === "openai"
+        ? '{"id":"1","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}'
+        : '{"id":"m1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}');
+    });
+    try {
+      const outcome = await runChatRequest({
+        baseUrl: server.url,
+        apiFormat,
+        payload: apiFormat === "openai"
+          ? payload({ model: "m", stream: false })
+          : ({ endpointPath: "/messages", body: { model: "m", stream: false, max_tokens: 8 } } as unknown as TransportWirePayload),
+        apiKey: key,
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+      });
+      assert.equal(outcome.status, "ok");
+      // Positive control: the key was sent, and only via the auth header.
+      const headers = server.requests.at(-1)!.headers;
+      assert.ok(
+        headers.authorization === `Bearer ${key}` || headers["x-api-key"] === key,
+        "the key must ride the provider's auth header",
+      );
+      assert.ok(!seenUrls.at(-1)!.includes(key), "the request URL must not carry the key");
+      assert.ok(!server.requests.at(-1)!.body.includes(key), "the wire body must not carry the key");
+    } finally {
+      await server.close();
+    }
+  }
+
+  // Typed failures are locally generated diagnostics: neither the message
+  // nor the preserved body may echo the credential.
+  const failServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "bad request" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: failServer.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: key,
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.ok(!outcome.failure.message.includes(key), "the failure message must not carry the key");
+    assert.ok(!String(outcome.failure.body ?? "").includes(key), "the preserved failure body must not carry the key");
+    assert.ok(!JSON.stringify(outcome.failure, ["kind", "status", "body"]).includes(key), "the serialized failure must not carry the key");
+  } finally {
+    await failServer.close();
+  }
+
+  const refused = await runChatRequest({
+    baseUrl: "http://127.0.0.1:1",
+    apiFormat: "anthropic",
+    payload: { endpointPath: "/messages", body: { model: "m", stream: false, max_tokens: 8 } } as unknown as TransportWirePayload,
+    apiKey: key,
+    anthropicVersion: "2023-06-01",
+    requestTimeoutSec: 5,
+    connectTimeoutSec: 5,
+  });
+  assert.equal(refused.status, "failure");
+  if (refused.status !== "failure") return;
+  assert.equal(refused.failure.kind, "network");
+  assert.ok(!refused.failure.message.includes(key), "the network-failure message must not carry the key");
+});
+
 test("streamed responses reassemble through the transport", async () => {
   const server = await startMockServer(sseResponse([
     'data: {"choices":[{"delta":{"content":"a"}}]}',

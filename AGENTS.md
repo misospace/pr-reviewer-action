@@ -62,7 +62,7 @@ GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity bou
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
 - **Parity boundaries**: v3 ports must stay byte-identical to v2 at the serialization boundary. When porting a new boundary, add JSON-only fixtures under `tests/fixtures/parity/<boundary>/` and a v2 runner in `tests/parity_runners/`; pin snake_case shapes there.
 - **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
-- **Model calls use `curl -q`** so a user `.curlrc` cannot interfere with local models; API keys pass via 0600 config files, never argv.
+- **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.
 - **Documentation**: keep runbooks and implementation detail in `docs/`; `AGENTS.md` carries durable rules and pointers only.
 
