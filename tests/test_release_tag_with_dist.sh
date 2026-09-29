@@ -18,7 +18,8 @@ git init -q -b main "$WORK/repo"
 cd "$WORK/repo"
 git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m base
 printf 'dist/\n' > .gitignore
-git add .gitignore
+printf 'name: t\nruns:\n  using: node24\n  main: dist/index.js\n' > action.yml
+git add .gitignore action.yml
 git -c user.name=t -c user.email=t@example.com commit -q -m ignore-dist
 git remote add origin "$WORK/remote.git"
 git push -q origin main
@@ -42,6 +43,14 @@ echo "=== Test: empty major tag leaves it alone (pre-release) ==="
 PRE="$("$SCRIPT" "$BASE" v1.3.0-rc.1 "" 2>/dev/null)"
 check "pre-release tag created" '[ "$(git ls-remote origin refs/tags/v1.3.0-rc.1 | cut -f1)" = "$PRE" ]'
 check "major tag unchanged" '[ "$(git ls-remote origin refs/tags/v1 | cut -f1)" = "$SHA" ]'
+
+echo "=== Test: a build that fails the consumer smoke publishes nothing ==="
+V1_BEFORE="$(git ls-remote origin refs/tags/v1 | cut -f1)"
+echo 'process.exit(1)' > dist/index.js
+check "exits non-zero" '! "$SCRIPT" "$BASE" v1.4.0 v1 >/dev/null 2>&1'
+check "new version tag not published" '[ -z "$(git ls-remote --tags origin v1.4.0)" ]'
+check "floating major tag untouched" '[ "$(git ls-remote origin refs/tags/v1 | cut -f1)" = "$V1_BEFORE" ]'
+check "no candidate ref left behind" '[ -z "$(git for-each-ref refs/release-candidate)" ]'
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

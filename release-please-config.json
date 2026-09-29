@@ -56,7 +56,8 @@
   ],
   "packages": {
     ".": {
-      "include-v-in-tag": true
+      "include-v-in-tag": true,
+      "draft": true
     }
   }
 }

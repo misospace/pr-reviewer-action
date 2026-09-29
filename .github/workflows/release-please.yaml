@@ -6,9 +6,10 @@
 # does not trigger other workflows, and this repo's consumers pin @vX, so the
 # floating major tag has to be advanced after every stable release.
 #
-# dist/ is not committed to main. After release-please tags the release commit,
-# publish-release-build commits the built bundle on top of it (off main) and
-# moves both vX.Y.Z and vX to that commit.
+# dist/ is not committed to main. release-please opens the release as a draft
+# (no tag), then publish-release-build commits the built bundle on top of the
+# release commit (off main), smokes it as consumers get it, and only then
+# points vX.Y.Z and vX at it and publishes the draft.
 name: Release Please
 
 on:
@@ -103,6 +104,13 @@ jobs:
           name: release-dist
           path: dist
 
+      # tag-with-dist.sh smokes the build before publishing; run it on the
+      # Node the action declares (runs.using: node24).
+      - name: Set up Node 24 for the release smoke
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
       # The base sha comes from release-please's own output, not the tag, so a
       # rerun rebuilds from the release commit rather than stacking on the
       # previous build commit. A pre-release never moves the floating major tag.
@@ -117,9 +125,15 @@ jobs:
           SHA=$(scripts/release/tag-with-dist.sh "$BASE_SHA" "$TAG" "$MAJOR_TAG")
           echo "$TAG${MAJOR_TAG:+, $MAJOR_TAG} -> $SHA"
 
-      # Consumers run the tag as-is: a clean fetch must start the node24
-      # action with only the drop-in inputs.
-      - name: Smoke-test the tag as consumers get it
+      # release-please opens the release as a draft (no tag yet), so consumers
+      # never see vX.Y.Z before the smoked dist build is tagged; publish it now.
+      - name: Publish the draft release
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: scripts/release/smoke-tag.sh "$(git remote get-url origin)" "$TAG"
+        run: |
+          set -euo pipefail
+          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+
