@@ -841,6 +841,9 @@ test("parseStatedTokenCap: the fixtured error shapes and the no-retry shapes", (
   // Context-length without both numbers, or with no room left, never clamps.
   assert.equal(parseStatedTokenCap("This model's maximum context length is 8192 tokens."), null);
   assert.equal(parseStatedTokenCap("the maximum context length is 4096 tokens and your request has 4096 input tokens"), null);
+  // An unrelated "supports at most <N>" figure (tools, not tokens) in the
+  // same sentence is never taken as the output cap.
+  assert.equal(parseStatedTokenCap("max_tokens is too large: 16384. This model supports at most 128 tools and 4096 completion tokens."), null);
   // Unparseable / unrelated / absent bodies never clamp.
   assert.equal(parseStatedTokenCap("invalid_request_error"), null);
   assert.equal(parseStatedTokenCap('{"error":{"message":"invalid api key"}}'), null);
@@ -972,6 +975,34 @@ test("a stated cap at or above the sent value does not retry", async () => {
     });
     assert.equal(outcome.status, "failure");
     assert.equal(server.requests.length, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("an unrelated 'supports at most <N>' figure before the completion-token cap is never the output cap", async () => {
+  // Adversarial: the body does state a real completion-token cap (4096), but
+  // an unrelated 128 sits between "supports at most" and the unit. Parsing
+  // is conservative: no unambiguous cap, no retry.
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests += 1;
+    res.statusCode = 400;
+    res.end("max_tokens is too large: 16384. This model supports at most 128 tools and 4096 completion tokens.");
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 16384 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status === "failure") assert.equal(outcome.failure.status, 400);
+    assert.equal(requests, 1);
   } finally {
     await server.close();
   }

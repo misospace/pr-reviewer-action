@@ -99,10 +99,11 @@ export interface StatedTokenCap {
 // tokens ...` — the comparison form itself states the cap.
 const COMPARISON_CAP = /\bmax_(?:completion_)?tokens:\s*\d+\s*>\s*(\d+)\b/;
 // `<field> is too large: <sent>. This model supports at most <cap> completion
-// tokens ...` — both halves are required, so a bare "supports at most"
-// phrase in unrelated prose never fires.
+// tokens ...` — both halves are required, and the cap number is bound to the
+// completion-tokens unit it must name, so an unrelated "supports at most <N>
+// tools" figure in the same sentence is never taken as the output cap.
 const TOO_LARGE_SENT = /\bmax_(?:completion_)?tokens is too large:\s*\d+\b/;
-const SUPPORTS_AT_MOST = /\bsupports at most (\d+)\b/;
+const SUPPORTS_AT_MOST = /\bsupports at most (\d+) completion tokens\b/i;
 // `maximum context length is <window> tokens ... request has <input> input
 // tokens` — clamps to window - input, only when both numbers are present.
 const CONTEXT_WINDOW = /\bmaximum context length is (\d+) tokens\b/i;
