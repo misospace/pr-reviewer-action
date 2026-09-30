@@ -410,6 +410,48 @@ its own scorer (`score_vulnerable_run` / `score_clean_run` /
   `request_changes`, clean should not), so it moves together with recall and
   the FP rate instead of trading off against them silently.
 
+### Adjudicating recall (#841)
+
+The strict/file-level hit scorer above is a cheap, automatic screen, but
+`#796`'s manual adjudication (`evals/reports/harness-obligations/`) found it
+overstates real catches by about half: a finding landing near the defect's
+file/lines is often a *different* issue than the one a human flagged, not a
+catch. That report's adjudicated recall (21.6%/24.3%) was roughly two-thirds
+of the automatic strict-hit rate (32.4%/34.2%) on the same 468 findings. Any
+recall number meant to be trusted — not just a smoke-test screen — should be
+backed by adjudication, not the line-match score alone.
+
+`scripts/eval_adjudicate.py` packages that manual process into two
+subcommands, pure stdlib, no network:
+
+- `pack` reads one or more `eval_harness.py` real-PR reports (each tagged
+  with an arm label, e.g. `--arm on=report-a.json --arm off=report-b.json`),
+  strips every finding of its arm/run identity, shuffles PRs and findings
+  with a fixed seed, and splits them into N blind `packet{k}.json` files for
+  adjudicators — plus a separate `unblind-key.json` (fid → arm/run/PR) and
+  `roster.json` (every run, including zero-finding ones, so rates can be
+  computed over the full run count rather than just the labelled findings).
+- Adjudicators — human or agent — read a packet and write a matching
+  `verdicts{k}.json`: one `{fid, same_defect, fp_label, note}` per finding.
+  `same_defect` (yes/partial/no) is judged against the defect description.
+  `fp_label` (real/false_positive/unverifiable) is set only for
+  blocker/major findings that aren't `same_defect: yes`, checked against the
+  code at the PR's `head_sha`. Run `eval_adjudicate.py --help` for the full
+  rubric text to hand adjudicators verbatim.
+- `score` validates every fid is labelled exactly once, unblinds, and
+  reports per-arm adjudicated totals (catches, catches incl. partial,
+  blocker/major false positives) plus paired per-PR deltas between two named
+  arms with a 95% bootstrap CI (10k resamples, fixed seed). `--out-adjudication`
+  exports the flat per-finding record (`pr`, `arm`, `run`, `severity`,
+  `file`, `line`, `message`, labels, `note`) in the same shape as
+  `evals/reports/harness-obligations/adjudication.json`; `--redact-host-pattern`
+  takes a regex to scrub hostnames from exported messages.
+
+Feeding `evals/reports/harness-obligations/adjudication.json`'s own labels
+back through `score` reproduces that report's committed adjudicated totals
+exactly (`tests/test_eval_adjudicate.py`) — see its `README.md` for the
+full worked example this tool packages.
+
 The corpus's `vulnerable` and `clean` PRs span five repos
 (`misospace/pr-reviewer-action`, `misospace/dispatch`, `misospace/courier`,
 `misospace/alert-triage`, `misospace/miso-gallery`, all public), so each
