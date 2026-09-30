@@ -185,6 +185,45 @@ test("primary failure with a configured fallback publishes the fallback review",
   }
 });
 
+for (const withFallback of [false, true]) {
+  test(`#863: on-model-failure=notice publishes the notice when every model route fails (fallback configured: ${withFallback})`, async () => {
+    const deadServer = await startMockServer((_req, _body, res) => {
+      res.statusCode = 500;
+      res.end('{"error":"down"}');
+    });
+    const { runDir, cleanup } = withRunDir();
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": deadServer.url,
+          "ai-model": "m",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-primary-retries": "0",
+          "ai-primary-retry-delay-sec": "0",
+          "on-model-failure": "notice",
+          ...(withFallback ? { "ai-fallback-model": "fb", "ai-fallback-base-url": deadServer.url } : {}),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        quiet: true,
+      });
+      assert.equal(result.outputs.verdict, "request_changes");
+      const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
+      assert.equal(artifact.verdict, "request_changes");
+      assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
+    } finally {
+      await deadServer.close();
+      cleanup();
+    }
+  });
+}
+
 test("reviewer-requested escalation publishes the smart review", async () => {
   let call = 0;
   const server = await startMockServer((_req, body, res) => {
@@ -586,7 +625,7 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     const files = Array.from({ length: 54 }, (_, i) => ({
       filename: `src/f${i}.ts`, status: "modified", additions: i === 0 ? 4346 - 53 * 80 : 80, deletions: i === 0 ? 181 - 53 * 3 : 3, changes: 0,
     }));
-    await runReview({
+    const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
       inputs: {
         "github-token": "tok",
@@ -609,6 +648,11 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
     assert.equal(harness.tool_request_budget, 26);
     assert.equal(harness.tool_budget_source, "size-scaled");
+    // #847: the same provenance reaches the published metadata marker, so the
+    // size-scaled default is measurable from real reviews without artifacts.
+    assert.match(result.marker, /"tool_budget":26/);
+    assert.match(result.marker, /"tool_budget_source":"size-scaled"/);
+    assert.match(result.marker, /"tool_calls":\d+/);
   } finally {
     await server.close();
     cleanup();

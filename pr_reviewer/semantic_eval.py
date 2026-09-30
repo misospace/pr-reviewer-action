@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -690,19 +691,20 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
 
     with tempfile.TemporaryDirectory(prefix="semantic-fixture-") as directory:
         repo = Path(directory)
-        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True)
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
         for relative_name, content in expected.items():
             destination = repo / relative_name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
-        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True, env=env)
 
         result = subprocess.run(
             ["git", "-C", str(repo), "apply", "--check", "--reverse"],
-            input=diff.encode("utf-8"), capture_output=True,
+            input=diff.encode("utf-8"), capture_output=True, env=env,
         )
         if result.returncode != 0:
             raise SemanticCorpusError(
@@ -711,20 +713,20 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
             )
         subprocess.run(
             ["git", "-C", str(repo), "apply", "--reverse"],
-            input=diff.encode("utf-8"), check=True, capture_output=True,
+            input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         subprocess.run(
             ["git", "-C", str(repo), "apply", "--check"],
-            input=diff.encode("utf-8"), check=True, capture_output=True,
+            input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         subprocess.run(
             ["git", "-C", str(repo), "apply"],
-            input=diff.encode("utf-8"), check=True, capture_output=True,
+            input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         actual_paths = {
             path.decode("utf-8")
             for path in subprocess.run(
-                ["git", "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True,
+                ["git", "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True, env=env,
             ).stdout.split(b"\0")
             if path
         }

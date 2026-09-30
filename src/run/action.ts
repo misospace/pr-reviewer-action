@@ -142,6 +142,11 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       // published marker and body only through these.
       ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
       ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+      // #847: the #810/#702 tool-budget provenance reaches the published
+      // marker only through these, same as partialCoverage/ciState above.
+      ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
+      ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
+      ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
     };
     publishFailed = (await publishWith(input, seam)) !== 0;
   }

@@ -79,6 +79,14 @@ export interface RunMarkerContext {
   /** #812: folded external-CI conclusion at the reviewed head; omitted when
    * CI was not read so complete runs keep their pre-#812 marker bytes. */
   ciState?: string;
+  /** #847: the #810/#702 tool-loop request budget this run resolved
+   * (resolveToolMaxRequests()'s `budget`), omitted when no tool harness ran. */
+  toolBudget?: number;
+  /** #847: the #810/#702 budget provenance ("primary-override" |
+   * "smart-override" | "explicit" | "tier-default" | "size-scaled"). */
+  toolBudgetSource?: string;
+  /** #847: tool calls the loop actually executed against that budget. */
+  toolCalls?: number;
 }
 
 /**
@@ -115,6 +123,9 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     coverage: cov === "" ? null : cov,
     coverage_stop_reason: covStop === "" ? null : covStop,
     ci_state: context.ciState ?? null,
+    tool_budget: context.toolBudget ?? null,
+    tool_budget_source: context.toolBudgetSource ?? null,
+    tool_calls: context.toolCalls ?? null,
   });
 }
 

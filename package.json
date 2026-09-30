@@ -7,7 +7,7 @@
   },
   "scripts": {
     "typecheck": "node scripts/generate-v3-contract.mjs && tsc --noEmit",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test .test-build/tests-v3/*.test.js",
+    "test": "node -e \"require('fs').rmSync('.test-build',{recursive:true,force:true})\" && npm run build && tsc -p tsconfig.test.json && node --test .test-build/tests-v3/*.test.js",
     "build": "node scripts/generate-v3-contract.mjs && node scripts/build-v3.mjs"
   },
   "devDependencies": {

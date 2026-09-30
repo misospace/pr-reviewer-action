@@ -53,6 +53,18 @@ export interface MetadataOptions {
    * it against the live state; omitted (null/empty) when unknown so the
    * marker stays byte-identical to pre-#812 whenever CI was not read. */
   ci_state?: string | null;
+  /** #847: the effective #810/#702 tool-loop request budget
+   * (resolveToolMaxRequests()'s `budget`), so the size-scaled default can be
+   * measured from published reviews alone. Omitted when no tool harness ran
+   * (tool_mode=off, or an abort before the budget was resolved). */
+  tool_budget?: number | null;
+  /** #847: which source won ("primary-override" | "smart-override" |
+   * "explicit" | "tier-default" | "size-scaled"), matching
+   * `ToolBudgetSource`. Omitted alongside `tool_budget`. */
+  tool_budget_source?: string | null;
+  /** #847: tool calls the loop actually executed against that budget.
+   * Omitted alongside `tool_budget`. */
+  tool_calls?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -86,6 +98,18 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.ci_state !== null && options.ci_state !== undefined && options.ci_state !== "") {
     data.ci_state = options.ci_state;
+  }
+  // #847 additive keys: appended last, same discipline as the #810/#812 keys
+  // above — a complete run with no tool harness serializes byte-identically
+  // to the pre-#847 marker.
+  if (options.tool_budget !== null && options.tool_budget !== undefined) {
+    data.tool_budget = options.tool_budget;
+  }
+  if (options.tool_budget_source !== null && options.tool_budget_source !== undefined && options.tool_budget_source !== "") {
+    data.tool_budget_source = options.tool_budget_source;
+  }
+  if (options.tool_calls !== null && options.tool_calls !== undefined) {
+    data.tool_calls = options.tool_calls;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

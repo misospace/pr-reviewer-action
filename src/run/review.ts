@@ -40,7 +40,7 @@ import { runSpecialistsGate } from "../gates/specialists-gate.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
@@ -146,6 +146,15 @@ export interface RunReviewResult {
   verdictPolicy: string;
   partialCoverage?: PartialCoverage;
   ciState?: string;
+  /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
+   * harness's `tool_request_budget` for the route the marker was built
+   * from); undefined when no tool harness ran. */
+  toolBudget?: number;
+  /** #847: which source won ("primary-override" | "smart-override" |
+   * "explicit" | "tier-default" | "size-scaled"). */
+  toolBudgetSource?: string;
+  /** #847: tool calls the loop actually executed against that budget. */
+  toolCallsUsed?: number;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -732,7 +741,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
-  if (verdictPolicy === "strict") {
+  if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
+    // on-model-failure=notice (#863): no model reviewed this PR, so the
+    // notice's request_changes is final; no verdict policy may relax it.
+  } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
     // the final still-open findings set.
@@ -802,9 +814,15 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   });
 
   const finished = clock();
+  const harnessForMarker = safeJson(ws.read(enforcementHarness));
   // #810: the harness's own deterministic coverage record for the published
   // route (smart when escalated), never the model's claim.
-  const partialCoverage = partialCoverageOf(safeJson(ws.read(enforcementHarness)));
+  const partialCoverage = partialCoverageOf(harnessForMarker);
+  // #847: the #810/#702 tool-budget provenance for the same route, recorded
+  // on every review (not only partial-coverage ones) so #810's size-scaled
+  // default can be measured from published reviews without needing the
+  // harness artifact.
+  const toolBudgetTelemetry = toolBudgetTelemetryOf(harnessForMarker);
   // #812: the external-CI conclusion this verdict was reached against, folded
   // exactly as the precheck re-check folds it. Only a carried
   // request_changes is re-checked, so only it pays the read; a failed read
@@ -834,6 +852,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     cacheHitRatio: outputs.cacheHitRatio,
     ...(partialCoverage ? { coverage: "partial", coverageStopReason: partialCoverage.stop_reason } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
+    ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
+    ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
   });
   return {
     outputs,
@@ -850,6 +871,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     verdictPolicy,
     ...(partialCoverage ? { partialCoverage } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
+    ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
+    ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
   };
 }
 
@@ -869,6 +893,30 @@ function partialCoverageOf(harness: Record<string, unknown> | null): PartialCove
     && typeof (value as { stop_reason?: unknown }).stop_reason === "string"
     ? value as PartialCoverage
     : undefined;
+}
+
+/**
+ * #847: the harness's own #810/#702 budget-resolution telemetry
+ * (`tool_request_budget` / `tool_budget_source` / `executed_request_count`,
+ * written by `runToolHarness` — src/tools/harness.ts), lifted for the run
+ * marker. Every field is independently optional: a harness that aborted
+ * before the budget was resolved (or never ran) contributes nothing, and
+ * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
+ * exactly as it did before #847.
+ */
+function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
+  budget?: number;
+  source?: string;
+  calls?: number;
+} {
+  if (harness === null) return {};
+  const out: { budget?: number; source?: string; calls?: number } = {};
+  if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
+  if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
+    out.source = harness.tool_budget_source;
+  }
+  if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
+  return out;
 }
 
 function splitCsv(raw: string): string[] {
@@ -1069,10 +1117,7 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
     const outcome = handleModelFailure("Primary model unavailable and no fallback model configured", env.ON_MODEL_FAILURE ?? "fail");
     if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
     log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
-    const parsed = parseVerdictResponse(JSON.parse(outcome.aiOutputJson));
-    const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
-    ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-    return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false };
+    return noticeResult(ws, outcome);
   }
 
   errorLog(`Primary model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
@@ -1095,7 +1140,17 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
   const outcome = handleModelFailure("Fallback model failed", env.ON_MODEL_FAILURE ?? "fail");
   if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
   log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
-  const parsed = parseVerdictResponse(JSON.parse(outcome.aiOutputJson));
+  return noticeResult(ws, outcome);
+}
+
+/** `on-model-failure: notice`: the notice verdict is already final JSON, so
+ * it is parsed as the content of a provider reply (the same validation and
+ * artifact normalization a model answer gets), never as the reply itself. */
+function noticeResult(
+  ws: RunWorkspace,
+  outcome: { aiOutputJson: string; analysisEngine: string },
+): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false } {
+  const parsed = parseVerdictResponse({ choices: [{ message: { content: outcome.aiOutputJson } }] });
   const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
   return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false };

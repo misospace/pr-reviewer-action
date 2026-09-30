@@ -1582,10 +1582,11 @@ def _materialize_semantic_fixture(
     repo_full_name: str | None = None,
 ) -> str:
     repo_path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(repo_path), "init"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_path), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "eval@test"], check=True)
-    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "semantic-eval"], check=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "-C", str(repo_path), "init"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo_path), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.email", "eval@test"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "semantic-eval"], check=True, env=env)
     for entry in fixture.get("files", []):
         relative_name = entry["path"]
         if not _safe_relative_path(relative_name):
@@ -1594,8 +1595,8 @@ def _materialize_semantic_fixture(
         destination = repo_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(str(entry["content"]), encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_path), "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo_path), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True, env=env)
     api_root = repo_path / ".semantic-fixture"
     api_root.mkdir()
     (api_root / "pr.json").write_text(
@@ -1605,7 +1606,7 @@ def _materialize_semantic_fixture(
     (api_root / "files.json").write_text(json.dumps(fixture["pr_files"]), encoding="utf-8")
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=env,
     )
     return result.stdout.strip()
 
