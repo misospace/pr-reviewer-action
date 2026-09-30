@@ -9,7 +9,7 @@ import {
   DEFAULT_MAX_RESPONSE_BYTES,
   OVERSIZE_ERROR_BODY_PREFIX_BYTES,
 } from "../src/transport/http.js";
-import { maskKnownSecrets, redactText } from "../src/context/redact.js";
+import { KNOWN_SECRET_REDACTED, maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
@@ -1196,17 +1196,17 @@ function redactTextLeaksTheSecret(body: string, secret: string): boolean {
 
 test("maskKnownSecrets: exact, URL-encoded, and base64 forms of a known secret are all masked", () => {
   const secret = "sk-primary-key-value";
-  assert.equal(maskKnownSecrets(`credential ${secret} rejected`, [secret]), "credential [REDACTED] rejected");
+  assert.equal(maskKnownSecrets(`credential ${secret} rejected`, [secret]), `credential ${KNOWN_SECRET_REDACTED} rejected`);
   assert.equal(
     maskKnownSecrets(`token=${encodeURIComponent(secret)}`, [secret]),
-    "token=[REDACTED]",
+    `token=${KNOWN_SECRET_REDACTED}`,
   );
   assert.equal(
     maskKnownSecrets(`b64:${Buffer.from(secret, "utf8").toString("base64")}`, [secret]),
-    "b64:[REDACTED]",
+    `b64:${KNOWN_SECRET_REDACTED}`,
   );
   // Multiple secrets, only the relevant one present; empty/undefined entries are skipped safely.
-  assert.equal(maskKnownSecrets(`x=${secret}`, ["", undefined, secret]), "x=[REDACTED]");
+  assert.equal(maskKnownSecrets(`x=${secret}`, ["", undefined, secret]), `x=${KNOWN_SECRET_REDACTED}`);
   // No known secret present: text passes through unchanged.
   assert.equal(maskKnownSecrets("nothing sensitive here", [secret]), "nothing sensitive here");
 });
@@ -1216,12 +1216,46 @@ test("maskKnownSecrets: a configured key of any length is masked — ai-api-key 
   // surrounding words with no incidental match, so the exact-equality
   // assertion is unambiguous; a separate case below shows over-redaction
   // (an accepted cost) when the letter also appears elsewhere.
-  assert.equal(maskKnownSecrets("credential k rejected", ["k"]), "credential [REDACTED] rejected");
+  assert.equal(maskKnownSecrets("credential k rejected", ["k"]), `credential ${KNOWN_SECRET_REDACTED} rejected`);
   assert.equal(maskKnownSecrets("token k rejected", ["k"]).includes("k"), false);
   // A three-character key.
-  assert.equal(maskKnownSecrets("credential abc was rejected", ["abc"]), "credential [REDACTED] was rejected");
+  assert.equal(maskKnownSecrets("credential abc was rejected", ["abc"]), `credential ${KNOWN_SECRET_REDACTED} was rejected`);
   // Only an empty string is skipped; a merely-short one is still masked.
-  assert.equal(maskKnownSecrets("abc stays abc", ["abc", ""]), "[REDACTED] stays [REDACTED]");
+  assert.equal(maskKnownSecrets("abc stays abc", ["abc", ""]), `${KNOWN_SECRET_REDACTED} stays ${KNOWN_SECRET_REDACTED}`);
+});
+
+test("#882: configured keys 'E', 'R', 'A' and 'ED' — letters of the old '[REDACTED]' marker — are fully absent from the masked output", () => {
+  // Before #882, a one-character key equal to a letter inside the known-secret
+  // marker itself ('R', 'E', 'D', 'A', 'C', 'T') could never be fully masked:
+  // every replacement reintroduced the character via the marker text. The
+  // marker is now non-alphanumeric, so this no longer collides.
+  for (const key of ["E", "R", "A", "ED"]) {
+    const masked = maskKnownSecrets(`credential ${key} rejected`, [key]);
+    assert.ok(!masked.includes(key), `key ${JSON.stringify(key)} survived in: ${masked}`);
+    assert.ok(masked.includes(KNOWN_SECRET_REDACTED), `expected the marker in: ${masked}`);
+  }
+});
+
+test("#882: a configured key equal to a character IN the new marker itself is a documented, non-looping edge case", () => {
+  // Document the choice for the one edge #882 leaves open: a configured
+  // secret exactly equal to one of the marker's own literal characters
+  // ('⟦', '•', '⟧') is pathological — masking it necessarily reintroduces
+  // that character as part of the freshly-inserted marker, the same way a
+  // one-character key equal to a letter of the OLD '[REDACTED]' marker did.
+  // The fix doesn't special-case this (an extremely unlikely configured
+  // secret), it only removes the collision for any ALPHANUMERIC secret.
+  // What matters is that a single `maskKnownSecrets` call always finishes in
+  // one bounded pass over the input — it never loops trying to re-mask its
+  // own output — so repeated calls (as `maskDiagnostic`'s documented second
+  // whole-string pass does) nest the marker by exactly one level per call,
+  // rather than growing without bound.
+  const once = maskKnownSecrets("credential • rejected", ["•"]);
+  assert.equal(once, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+  const twice = maskKnownSecrets(once, ["•"]);
+  assert.equal(twice, "credential ⟦⟦•⟧⟧ rejected", "a second pass nests by exactly one level — bounded, not unbounded");
+  // A third pass nests by exactly one more level (linear growth per call),
+  // never an unbounded/infinite loop within a single call.
+  assert.equal(maskKnownSecrets(twice, ["•"]), "credential ⟦⟦⟦•⟧⟧⟧ rejected");
 });
 
 test("describeTransportFailure: a known secret echoed bare in the body is masked even though it matches no redactText pattern", () => {
@@ -1234,7 +1268,7 @@ test("describeTransportFailure: a known secret echoed bare in the body is masked
   assert.match(detail, /HTTP 404/);
   assert.match(detail, /check ai-api-format for this model \(openai vs anthropic\)/);
   assert.ok(!detail.includes(secret), `expected the known secret to be masked, got: ${detail}`);
-  assert.match(detail, /\[REDACTED\]/);
+  assert.ok(detail.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${detail}`);
 
   // Without the plain-prose framing that redactText's heuristics look for
   // (no "key="/"Bearer "/etc.), the SAME body leaks the secret if only
@@ -1257,7 +1291,7 @@ test("describeTransportFailure: secrets are masked before truncation, so a secre
   assert.ok(!detail.includes(secret));
   // The masked marker survives even though the raw secret would have
   // straddled the 300-char truncation boundary.
-  assert.match(detail, /\[REDACTED\]/);
+  assert.ok(detail.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${detail}`);
 });
 
 test("describeTransportFailure: a secret in a status-less failure's bare message is also masked", () => {

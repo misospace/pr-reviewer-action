@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
 import { pyJsonDump } from "../src/context/py-json.js";
 import { guardedWrite, resolveArtifactPath } from "../src/gates/guarded-write.js";
 import { specialistRequestFn, toV2Completion } from "../src/gates/specialist-transport.js";
@@ -310,7 +311,10 @@ test("transport adapter: v2 message text, timeout classification, streamed turns
   const failed = await requestFn({ model: "m", stream: false }, "openai", 30);
   assert.equal(failed.ok, false);
   assert.equal(failed.timeout, false);
-  assert.equal(failed.errorMessage, 'planner model request failed with HTTP 401: {"error":"bad [REDACTED] and key [REDACTED] leaked"}');
+  assert.equal(
+    failed.errorMessage,
+    `planner model request failed with HTTP 401: {"error":"bad [REDACTED] and key ${KNOWN_SECRET_REDACTED} leaked"}`,
+  );
   const timedOut = await requestFn({ model: "m", stream: false }, "openai", 30);
   assert.equal(timedOut.timeout, true);
   const streamed = await requestFn({ model: "m", stream: true }, "anthropic", 12);

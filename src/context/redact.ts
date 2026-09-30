@@ -193,6 +193,29 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   return redacted;
 }
 
+/** Marker used for known-secret masking (`maskKnownSecrets`/`maskDiagnostic`/
+ * `describeTransportFailure`). Deliberately distinct from the heuristic
+ * `[REDACTED]` marker and contains NO alphanumeric characters (#882): that
+ * marker's own letters ("R", "E", "D", "A", "C", "T") collide with any
+ * single-character configured secret equal to one of them, and every
+ * replacement pass reintroduces the very character it was meant to remove,
+ * so the "configured credential never appears in the output" invariant
+ * could never be asserted for such a key. A marker built entirely from
+ * non-alphanumeric characters cannot collide with an alphanumeric secret of
+ * any length, closing that class of collision entirely.
+ *
+ * Documented residual edge, deliberately not special-cased: a configured
+ * secret that is itself exactly one of this marker's own characters (`⟦`,
+ * `•`, `⟧`) still collides the same way, since masking it necessarily
+ * inserts a marker containing that same character. This is accepted as
+ * pathological (an operator-configured secret equal to a lone decorative
+ * bracket/bullet is not a realistic credential) rather than worth extra
+ * masking logic. It never loops: each `maskKnownSecrets` call is a single
+ * bounded pass over its input, so repeated calls (e.g. `maskDiagnostic`'s
+ * documented second whole-string pass) nest the marker by exactly one level
+ * per call rather than growing unboundedly. */
+export const KNOWN_SECRET_REDACTED = "⟦•⟧";
+
 /**
  * #846/security-review: mask every literal occurrence of a caller-supplied
  * secret (an operator's configured model API key), plus its URL-encoded and
@@ -228,7 +251,7 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
     }
     for (const variant of variants) {
       if (variant === "") continue;
-      masked = masked.split(variant).join(REDACTED);
+      masked = masked.split(variant).join(KNOWN_SECRET_REDACTED);
     }
   }
   return masked;
@@ -246,11 +269,16 @@ export const DIAGNOSTIC_MAX_CHARS = 300;
  * split across the cap is never partially exposed), then `redactText`'s
  * pattern heuristics, then cap length, then — because a very short
  * configured key (down to one character; `ai-api-key` has no minimum) can
- * coincide with ordinary letters in whatever static prose the caller wraps
- * this text in — mask the caller's *final*, fully-assembled string again.
- * That last step is why every caller should build its full message (static
- * prefix included) and pass the WHOLE thing through `maskDiagnostic` once,
- * rather than only masking the untrusted substring before splicing it in.
+ * coincide with ordinary characters in whatever static prose the caller
+ * wraps this text in — mask the caller's *final*, fully-assembled string
+ * again. That last step is why every caller should build its full message
+ * (static prefix included) and pass the WHOLE thing through `maskDiagnostic`
+ * once, rather than only masking the untrusted substring before splicing it
+ * in. Since #882, `KNOWN_SECRET_REDACTED` has no alphanumeric characters, so
+ * this second pass can no longer reintroduce an alphanumeric secret it just
+ * masked on the first pass; it now only re-masks characters that were
+ * already in the static prose (never in the untrusted `text`), plus the
+ * marker's own pathological edge documented on `KNOWN_SECRET_REDACTED`.
  */
 export function maskDiagnostic(
   text: string,
