@@ -40,7 +40,7 @@ import { runSpecialistsGate } from "../gates/specialists-gate.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
@@ -732,7 +732,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
-  if (verdictPolicy === "strict") {
+  if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
+    // on-model-failure=notice (#863): no model reviewed this PR, so the
+    // notice's request_changes is final; no verdict policy may relax it.
+  } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
     // the final still-open findings set.
@@ -1069,10 +1072,7 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
     const outcome = handleModelFailure("Primary model unavailable and no fallback model configured", env.ON_MODEL_FAILURE ?? "fail");
     if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
     log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
-    const parsed = parseVerdictResponse(JSON.parse(outcome.aiOutputJson));
-    const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
-    ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-    return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false };
+    return noticeResult(ws, outcome);
   }
 
   errorLog(`Primary model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
@@ -1095,7 +1095,17 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
   const outcome = handleModelFailure("Fallback model failed", env.ON_MODEL_FAILURE ?? "fail");
   if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
   log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
-  const parsed = parseVerdictResponse(JSON.parse(outcome.aiOutputJson));
+  return noticeResult(ws, outcome);
+}
+
+/** `on-model-failure: notice`: the notice verdict is already final JSON, so
+ * it is parsed as the content of a provider reply (the same validation and
+ * artifact normalization a model answer gets), never as the reply itself. */
+function noticeResult(
+  ws: RunWorkspace,
+  outcome: { aiOutputJson: string; analysisEngine: string },
+): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false } {
+  const parsed = parseVerdictResponse({ choices: [{ message: { content: outcome.aiOutputJson } }] });
   const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
   return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false };
