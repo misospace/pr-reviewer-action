@@ -189,12 +189,46 @@ test("the adversarial corpus runs correctness on the adversarial prompt only", a
 });
 
 test("parseSpecialistsArgs mirrors the run_specialists.py argparse surface", () => {
-  assert.deepEqual(parseSpecialistsArgs([]), { corpus: "specialist-corpus.md", adversarialCorpus: "", workspaceRoot: "", classification: "classification.json" });
-  assert.deepEqual(parseSpecialistsArgs(["--corpus", "c.md", "--adversarial-corpus=a.md", "--workspace-root", "/w", "--classification", "k.json"]), {
-    corpus: "c.md", adversarialCorpus: "a.md", workspaceRoot: "/w", classification: "k.json",
+  assert.deepEqual(parseSpecialistsArgs([]), {
+    corpus: "specialist-corpus.md", adversarialCorpus: "", equivalentPaths: "", workspaceRoot: "", classification: "classification.json",
   });
+  assert.deepEqual(
+    parseSpecialistsArgs(["--corpus", "c.md", "--adversarial-corpus=a.md", "--equivalent-paths", "e.md", "--workspace-root", "/w", "--classification", "k.json"]),
+    { corpus: "c.md", adversarialCorpus: "a.md", equivalentPaths: "e.md", workspaceRoot: "/w", classification: "k.json" },
+  );
   assert.throws(() => parseSpecialistsArgs(["--bogus"]), /unrecognized arguments/);
   assert.throws(() => parseSpecialistsArgs(["--corpus"]), /expected one argument/);
+});
+
+test("#875: the equivalent-paths section reaches the correctness role's user message only", async () => {
+  const calls: { hasSection: boolean }[] = [];
+  const transport: SpecialistRequestFn = async (payload) => {
+    const messages = payload.messages as { role: string; content: string }[];
+    const user = messages.find((m) => m.role === "user")?.content ?? "";
+    calls.push({ hasSection: user.includes("Equivalent Paths to Compare") });
+    const lead = { severity: "minor", category: "x", file: null, line: null, message: "m" };
+    return { ok: true, raw: leadsResponse([lead]) };
+  };
+  const result = await run({ DEEP_REVIEW: "true" }, {
+    requestFn: transport,
+    argv: ["--equivalent-paths", "eq.md"],
+    setup: (root) => writeFileSync(join(root, "eq.md"), "# Equivalent Paths to Compare\n\nGroup 1...\n"),
+  });
+  assert.equal(result.code, 0);
+  // Exactly one of the three role calls (correctness) sees the section.
+  assert.equal(calls.filter((c) => c.hasSection).length, 1);
+  assert.equal(calls.filter((c) => !c.hasSection).length, 2);
+  rmSync(result.root, { recursive: true, force: true });
+});
+
+test("#875: an unreadable equivalent-paths file is a soft skip, not a failure", async () => {
+  const result = await run({ DEEP_REVIEW: "true" }, {
+    requestFn: mockTransport(),
+    argv: ["--equivalent-paths", "missing.md"],
+  });
+  assert.equal(result.code, 0);
+  assert.ok(result.out.some((line) => line.includes("equivalent-paths section unreadable")));
+  rmSync(result.root, { recursive: true, force: true });
 });
 
 test("resolveArtifactPath/guardedWrite: workspace-relative, escapes refused, in-workspace symlinks followed like Path.resolve", () => {

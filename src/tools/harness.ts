@@ -753,6 +753,7 @@ export function buildPlanningContext(
     ["PR Classification", "PR Classification", "classification.json", 4000, "json"],
     ["Linked Issue Context", "Linked Issue Context", "linked-issues.md", 3000, null],
     ["Related Code Context", "Related Code Context", "related-code.truncated.md", 10000, null],
+    ["Equivalent Paths", "Equivalent Paths to Compare", "equivalent-paths.truncated.md", 6000, null],
     ["PR Files (truncated)", "Changed Files", "pr-files.truncated.json", 6000, "json"],
     ["Version Hints from Diff", "Version Hints from Diff", "version-hints.truncated.txt", 2500, "text"],
     ["standards", "Repository Standards and Conventions", "standards-context.capped.md", 6000, null],

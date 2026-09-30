@@ -1,6 +1,6 @@
 export const BOOLEAN_INPUTS = new Set([
   "fail-on-request-changes", "inline-findings",
-  "ai-stream", "related-code-context", "harness-obligations", "linear-enable-for-forks",
+  "ai-stream", "related-code-context", "harness-obligations", "equivalent-paths", "linear-enable-for-forks",
   "ai-fallback-stream",
   "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
@@ -10,7 +10,7 @@ export const BOOLEAN_INPUTS = new Set([
 
 export const INTEGER_INPUTS = new Set([
   "pr-number", "ai-max-tokens", "ai-primary-retries", "ai-primary-retry-delay-sec", "inline-findings-max",
-  "related-code-max-bytes", "linear-issue-timeout-sec", "model-context-tokens", "primary-model-context-tokens",
+  "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec", "model-context-tokens", "primary-model-context-tokens",
   "smart-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
   "deep-review-max-tokens", "deep-review-corpus-max-bytes", "enrichment-budget-sec", "image-digest-budget-sec",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",

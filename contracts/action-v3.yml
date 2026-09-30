@@ -225,6 +225,18 @@ inputs:
     default: "false"
     description: "Add harness-authored verification obligations (derived from related-code context) to the requirement ledger. Off by default: measured with no recall gain."
     repo-configurable: true
+  - id: equivalent-paths
+    v2_id: equivalent_paths
+    required: false
+    default: "false"
+    description: "Detect bounded groups of changed functions/methods that are alternate implementations of the same result (dispatcher branches, adapter siblings, or same-privileged-operation call sites) and give the correctness specialist a compact 'Equivalent Paths to Compare' hint listing each member's file:line, so it checks sibling paths for the same invariants the others enforce. Off by default until measured."
+    repo-configurable: true
+  - id: equivalent-paths-max-bytes
+    v2_id: equivalent_paths_max_bytes
+    required: false
+    default: "6000"
+    description: "Maximum bytes of the equivalent-paths section included in context"
+    repo-configurable: true
   - id: linear-api-key
     v2_id: linear_api_key
     required: false

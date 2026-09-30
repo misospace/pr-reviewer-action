@@ -1094,6 +1094,83 @@ test("#796: harness obligations are off by default", async () => {
   assert.deepEqual(harness, []);
 });
 
+async function equivalentPathsRun(extraInputs: Record<string, string>): Promise<string> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    const sourceTs = [
+      "export function resolveExplicit(uri: string, ctxRepoDid: string): PullIdentity {", // 1
+      "  const targetRepo = fetchTarget(uri); // touched", // 2
+      "  if (targetRepo !== ctxRepoDid) {", // 3
+      "    throw new Error('mismatch');", // 4
+      "  }", // 5
+      "  return { repoDid: targetRepo };", // 6
+      "}", // 7
+      "", // 8
+      "export function resolveFromList(ctxRepoDid: string): PullIdentity {", // 9
+      "  const targetRepo = fetchFirst(ctxRepoDid); // touched", // 10
+      "  return { repoDid: targetRepo };", // 11
+      "}", // 12
+      "",
+    ].join("\n");
+    writeFileSync(join(runDir, "src", "resolve.ts"), sourceTs);
+    gitInit(runDir);
+    // Both functions must be touched by the diff (change-anchor extraction
+    // only surfaces a function untouched by any hunk as an "enclosing"
+    // symbol for the hunk that changed *inside* it, not for the whole file).
+    const diff = [
+      "diff --git a/src/resolve.ts b/src/resolve.ts",
+      "--- a/src/resolve.ts",
+      "+++ b/src/resolve.ts",
+      "@@ -1,7 +1,7 @@",
+      " export function resolveExplicit(uri: string, ctxRepoDid: string): PullIdentity {",
+      "-  const targetRepo = fetchTarget(uri);",
+      "+  const targetRepo = fetchTarget(uri); // touched",
+      "   if (targetRepo !== ctxRepoDid) {",
+      "     throw new Error('mismatch');",
+      "   }",
+      "   return { repoDid: targetRepo };",
+      " }",
+      "@@ -9,4 +9,4 @@",
+      " export function resolveFromList(ctxRepoDid: string): PullIdentity {",
+      "-  const targetRepo = fetchFirst(ctxRepoDid);",
+      "+  const targetRepo = fetchFirst(ctxRepoDid); // touched",
+      "   return { repoDid: targetRepo };",
+      " }",
+      "",
+    ].join("\n");
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: { "github-token": "tok", repo: "o/r", "pr-number": "9", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k", ...extraInputs },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({ diff, files: [{ filename: "src/resolve.ts", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return existsSync(join(runDir, "equivalent-paths.md")) ? readFileSync(join(runDir, "equivalent-paths.md"), "utf8") : "";
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#875: with equivalent-paths on, a return-type-sharing pair produces the 'Equivalent Paths to Compare' section", async () => {
+  const md = await equivalentPathsRun({ "equivalent-paths": "true" });
+  assert.match(md, /# Equivalent Paths to Compare/);
+  assert.match(md, /resolveExplicit/);
+  assert.match(md, /resolveFromList/);
+});
+
+test("#875: equivalent-paths is off by default (no section written)", async () => {
+  const md = await equivalentPathsRun({});
+  assert.equal(md, "");
+});
+
 /** SSE bodies for a streamed tool-call turn and a streamed text turn. */
 function sseToolCall(apiFormat: "openai" | "anthropic", path: string): string {
   const args = JSON.stringify({ path });

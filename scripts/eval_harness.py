@@ -2906,7 +2906,7 @@ def run_real_pr_corpus(
                 )
         return None
 
-    extra_env = {**REPLAY_ENV, **(CONTEXT_ONLY_ENV if context_only else {})}
+    extra_env = {**(model_config.get("extra_env") or {}), **REPLAY_ENV, **(CONTEXT_ONLY_ENV if context_only else {})}
     model_config = {**model_config, "extra_env": extra_env}
     if context_only:
         modes = ["tools_off"]
@@ -3109,6 +3109,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--equivalent-paths",
+        choices=["true", "false"],
+        default=None,
+        help=(
+            "#875 A/B knob: forward EQUIVALENT_PATHS to the runtime "
+            "('true' turns on the bounded equivalent-implementation-path "
+            "detector and its correctness-specialist hint). Omit to leave "
+            "the runtime's own default (off) in force."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned runs without executing",
@@ -3265,6 +3276,11 @@ def main() -> int:
             print(f"Error: system prompt file not found: {args.system_prompt_file}", file=sys.stderr)
             return 1
         model_config["system_prompt_file"] = str(args.system_prompt_file)
+    if args.equivalent_paths is not None:
+        model_config["extra_env"] = {
+            **(model_config.get("extra_env") or {}),
+            "EQUIVALENT_PATHS": args.equivalent_paths,
+        }
 
     print(f"Loaded {len(corpus.prs)} PRs from corpus, running {len(prs)}...", file=sys.stderr)
     print(f"Modes: {args.modes}", file=sys.stderr)

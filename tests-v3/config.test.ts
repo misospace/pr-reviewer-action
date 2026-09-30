@@ -20,7 +20,10 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 126);
+<<<<<<< HEAD
+  assert.equal(contract.inputs.length, 128);
+=======
+>>>>>>> bfb0cac (feat(reviewer): compare invariants across equivalent implementation paths (#875))
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 

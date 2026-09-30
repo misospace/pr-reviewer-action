@@ -1,6 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import type { ChangeAnchorsArtifact } from "../context/change-anchors.js";
 import type { RelatedContext } from "../context/related-context.js";
+import { detectEquivalentPathGroups, renderEquivalentPathsJson, renderEquivalentPathsMarkdown } from "../context/equivalent-paths.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { splitChunks } from "../corpus/diff-priority.js";
 import {
@@ -356,6 +357,36 @@ export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, w
   } catch {
     reset();
     return null;
+  }
+}
+
+const EQUIVALENT_PATHS_ARTIFACTS = ["equivalent-paths.json", "equivalent-paths.md", "equivalent-paths.truncated.md"] as const;
+
+/** Builds the #875 "equivalent paths to compare" artifacts from the anchors
+ * `buildRelatedCodeSection` already extracted. Off by default
+ * (`EQUIVALENT_PATHS`); a no-op (empty artifacts) when disabled, anchors are
+ * unavailable, or no bounded group can be justified. */
+export function buildEquivalentPathsSection(
+  ws: RunWorkspace,
+  env: StageEnv,
+  workspace: string,
+  anchors: ChangeAnchorsArtifact | null,
+): void {
+  for (const name of EQUIVALENT_PATHS_ARTIFACTS) ws.write(name, "");
+  if ((env.EQUIVALENT_PATHS ?? "false").toLowerCase() !== "true") return;
+  if (anchors === null) return;
+  try {
+    const artifact = detectEquivalentPathGroups(anchors, workspace);
+    if (artifact.groups.length === 0) return;
+    ws.write("equivalent-paths.json", renderEquivalentPathsJson(artifact));
+    const markdown = renderEquivalentPathsMarkdown(artifact);
+    ws.write("equivalent-paths.md", markdown);
+    ws.write(
+      "equivalent-paths.truncated.md",
+      clipRelatedCodeMarkdown(Buffer.from(markdown, "utf8"), Number(env.EQUIVALENT_PATHS_MAX_BYTES ?? "6000") || 6000) ?? new Uint8Array(0),
+    );
+  } catch {
+    for (const name of EQUIVALENT_PATHS_ARTIFACTS) ws.write(name, "");
   }
 }
 

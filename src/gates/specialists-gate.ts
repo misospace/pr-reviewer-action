@@ -53,6 +53,10 @@ const ROLE_GUARD_MESSAGE = "refused to write the role artifact: workspace escape
 export interface SpecialistsGateArgs {
   corpus: string;
   adversarialCorpus: string;
+  /** #875: an optional path to the correctness-only "Equivalent Paths to
+   * Compare" section; empty means the feature is off or produced no
+   * groups for this run. */
+  equivalentPaths: string;
   workspaceRoot: string;
   classification: string;
 }
@@ -74,10 +78,17 @@ export interface SpecialistsGateDeps {
 
 /** argparse for run_specialists.py: `--flag value` and `--flag=value`. */
 export function parseSpecialistsArgs(argv: readonly string[]): SpecialistsGateArgs {
-  const args: SpecialistsGateArgs = { corpus: "specialist-corpus.md", adversarialCorpus: "", workspaceRoot: "", classification: "classification.json" };
+  const args: SpecialistsGateArgs = {
+    corpus: "specialist-corpus.md",
+    adversarialCorpus: "",
+    equivalentPaths: "",
+    workspaceRoot: "",
+    classification: "classification.json",
+  };
   const flags: Record<string, keyof SpecialistsGateArgs> = {
     "--corpus": "corpus",
     "--adversarial-corpus": "adversarialCorpus",
+    "--equivalent-paths": "equivalentPaths",
     "--workspace-root": "workspaceRoot",
     "--classification": "classification",
   };
@@ -354,6 +365,19 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     stdout("WARNING: adversarial correctness corpus is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call");
   }
 
+  // #875: an optional correctness-only "Equivalent Paths to Compare"
+  // section. Unreadable/empty is a soft skip — the reviewer still runs
+  // without the hint.
+  let equivalentPathsSection: string | null = null;
+  if (args.equivalentPaths) {
+    const read = readCorpus(args.equivalentPaths, cwd);
+    if (read.text) {
+      equivalentPathsSection = read.text;
+    } else if (read.error) {
+      stdout(`WARNING: equivalent-paths section unreadable (${read.error}); continuing without it`);
+    }
+  }
+
   const rolePrompts: Partial<Record<string, string>> = {};
   for (const role of SPECIALIST_ROLES_ORDER) {
     // #758: an active adversarial arm runs correctness on its own variant.
@@ -395,6 +419,7 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     ...(selectionArtifact !== undefined ? { selectionArtifact } : {}),
     deepReviewMode: deepMode,
     ...(adversarialActive ? { adversarial: { corpus: adversarial.text, corpusBytes: adversarial.bytes } } : {}),
+    ...(equivalentPathsSection !== null ? { equivalentPaths: { section: equivalentPathsSection } } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     sleep: deps.sleep ?? timers.sleep,
   }).finally(timers.cancelAll);

@@ -65,6 +65,7 @@ import {
 } from "../publish/outputs.js";
 import {
   assembleCorpus,
+  buildEquivalentPathsSection,
   buildHumanReviewsSection,
   buildPrThreadSection,
   buildRelatedCodeSection,
@@ -473,6 +474,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 
+  // #875: bounded equivalent-implementation-path detection, from the same
+  // anchors. Off by default; a lead-generation hint, not a ledger entry —
+  // see the correctness specialist wiring below.
+  buildEquivalentPathsSection(ws, env, workspace, relatedInputs === null ? null : relatedInputs.anchors);
+
   // PR-metadata-derived context (context.sh): linked issues + Linear, the
   // requirement ledger, review threads and human reviews. Built here and
   // again after the CI wait (#812), so edits made while CI runs are seen.
@@ -697,6 +703,15 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // artifacts collected so far — never the final review corpus.
     const corpus = buildSpecialistCorpus(specialistWorkspace(ws, ciChecksBytes(env)));
     ws.write("specialist-corpus.md", corpus[0]);
+    // #875: the equivalent-paths section is a correctness-only hint, kept
+    // out of the shared specialist corpus above and passed as its own file
+    // so the gate can inject it into just the correctness role's input.
+    const equivalentPathsMd = ws.readText("equivalent-paths.truncated.md") ?? "";
+    const equivalentPathsArgv: string[] = [];
+    if (equivalentPathsMd.trim() !== "") {
+      ws.write("specialist-equivalent-paths.md", equivalentPathsMd);
+      equivalentPathsArgv.push("--equivalent-paths", "specialist-equivalent-paths.md");
+    }
     const specialistFork = await forkGate("specialists", {
       file: "",
       envAllowlist: [],
@@ -704,7 +719,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
         env,
         // The gate's artifacts (role files, specialists.json/.md) must land
         // in the run dir this workspace reads, not GITHUB_WORKSPACE.
-        argv: ["--corpus", "specialist-corpus.md", "--workspace-root", runDir],
+        argv: ["--corpus", "specialist-corpus.md", "--workspace-root", runDir, ...equivalentPathsArgv],
         cwd: runDir,
         stdout: (line) => log(line),
         stderr: (line) => errorLog(line),

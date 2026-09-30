@@ -429,6 +429,8 @@ Inputs with no v2 implementation.
 | --- | --- |
 | `harness-obligations` | `false` |
 | `claim-falsification` | `false` |
+| `equivalent-paths` | `false` |
+| `equivalent-paths-max-bytes` | `6000` |
 
 ## New outputs
 

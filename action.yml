@@ -169,6 +169,14 @@ inputs:
     description: "Add harness-authored verification obligations (derived from related-code context) to the requirement ledger. Off by default: measured with no recall gain."
     required: false
     default: "false"
+  equivalent-paths:
+    description: Detect bounded groups of changed functions/methods that are alternate implementations of the same result (dispatcher branches, adapter siblings, or same-privileged-operation call sites) and give the correctness specialist a compact 'Equivalent Paths to Compare' hint listing each member's file:line, so it checks sibling paths for the same invariants the others enforce. Off by default until measured.
+    required: false
+    default: "false"
+  equivalent-paths-max-bytes:
+    description: Maximum bytes of the equivalent-paths section included in context
+    required: false
+    default: "6000"
   linear-api-key:
     description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
     required: false
