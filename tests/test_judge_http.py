@@ -18,18 +18,27 @@ from pr_reviewer.judge_http import JudgeHTTPError, chat_completion  # noqa: E402
 SECRET = "judge-test-credential"
 
 
-def _serve(status: int, body: bytes):
+def _serve(status: int, body: bytes, location: str | None = None):
     seen: dict = {}
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def _handle(self):
+            seen["requests"] = seen.get("requests", 0) + 1
             seen["path"] = self.path
             seen["auth"] = self.headers.get("Authorization")
-            seen["body"] = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode()
+            seen["body"] = self.rfile.read(int(self.headers.get("Content-Length", "0") or 0)).decode()
             self.send_response(status)
+            if location:
+                self.send_header("Location", location)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802
+            self._handle()
+
+        def do_GET(self):  # noqa: N802
+            self._handle()
 
         def log_message(self, *_args):
             pass
@@ -59,4 +68,20 @@ def test_http_errors_never_echo_the_key():
     finally:
         server.shutdown()
     assert "401" in str(caught.value)
+    assert SECRET not in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirects_are_refused_and_never_forward_the_key(status: int):
+    target, target_seen = _serve(200, json.dumps({"choices": [{"message": {"content": "leak"}}]}).encode())
+    origin, origin_seen = _serve(status, b"{}", location=f"http://127.0.0.1:{target.server_port}/v1/chat/completions")
+    try:
+        with pytest.raises(JudgeHTTPError) as caught:
+            chat_completion(f"http://127.0.0.1:{origin.server_port}/v1", {"model": "m"}, SECRET, 5)
+    finally:
+        origin.shutdown()
+        target.shutdown()
+    assert origin_seen["requests"] == 1
+    assert "requests" not in target_seen, "the redirect target must never be contacted"
+    assert "redirect" in str(caught.value)
     assert SECRET not in str(caught.value)
