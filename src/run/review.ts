@@ -520,6 +520,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const classificationArtifact = classificationToArtifact(classification) as Record<string, unknown>;
   ws.write("classification.json", `${pythonJsonStringify(classificationArtifact)}\n`);
   log(`PR classification complete: ${String(classificationArtifact.pr_kind ?? "unknown")}`);
+  // #871: substantialCodeChange isn't part of the persisted classification
+  // artifact (see PRClassification's field doc); thread it to the
+  // specialists gate through env instead, so role selection can force the
+  // correctness lane for a substantial PR regardless of what pr_kind ended
+  // up being.
+  env.SUBSTANTIAL_CODE_CHANGE = classification.substantialCodeChange ? "true" : "false";
 
   const { route, reason } = resolveReviewRoute({
     routingMode: env.REVIEW_ROUTING_MODE ?? "off",
