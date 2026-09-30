@@ -454,11 +454,33 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
   ["symlink_sensitive", [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
-  // Identifier-shaped path references (`filepath`, `pathname`) — variables
-  // and identifiers named after the path they denote. More specific than the
+  // Identifier-shaped path references (`filepath`) — variables and
+  // identifiers named after the path they denote. More specific than the
   // removed `pathlib`/`os.path` mention patterns and kept deliberately.
-  ["path_reference_identifier", [/filepath|pathname/i]],
+  // `pathname` is handled separately below (PATHNAME_IDENTIFIER_PATTERN):
+  // unlike `filepath`, it has a common non-filesystem meaning (a WHATWG
+  // URL's `.pathname`, `location.pathname`) that is syntactically identical
+  // to a path variable named `pathname` (#854/#871).
+  ["path_reference_identifier", [/filepath/i]],
 ];
+
+/** #871 follow-up: `pathname` alone (`url.pathname`, `const pathname = ...`)
+ * is exactly as likely to be a WHATWG URL component as a filesystem path —
+ * #854's false positive was `const pathname = base.pathname.replace(...)` in
+ * a network client with no filesystem access at all. #749's own principle
+ * ("path handling requires a real untrusted-PATH surface") says a bare
+ * mention is not that surface. It only counts as the
+ * path_reference_identifier signal when the same file/hunk ALSO shows
+ * evidence of a filesystem/path-construction API — the same head vocabulary
+ * PATH_CONSTRUCTION_HEADS recognizes (fs.*, path.join/resolve, open/fopen,
+ * readFile, os.path.*, Path(...), send_file, shutil.*, ...). A file that
+ * only ever touches URLs (#854's shape) never shows that evidence, so
+ * `pathname` never fires there; a file that also does real path
+ * construction keeps the signal. This is deliberately coarser than the
+ * per-call operand scan used elsewhere (file-wide, not call-scoped) — it is
+ * a permissive gate that only ever makes `pathname` fire LESS often, so the
+ * imprecision only trades in the safe direction. */
+const PATHNAME_IDENTIFIER_PATTERN = /\bpathname\b/i;
 
 /** Path construction heads: a callee that opens a filesystem-path
  * construction call. The untrusted-source scan reads ONLY the call's
@@ -487,6 +509,17 @@ const PATH_CONSTRUCTION_HEAD_PATTERNS: readonly { pattern: RegExp; isPathlib: bo
     pattern: new RegExp(`${head}\\s*\\(`, `${flags}g`),
     isPathlib,
   }));
+
+/** #871 follow-up: file-wide (not call-scoped) existence check for "this file
+ * touches a filesystem/path-construction API somewhere" — see
+ * PATHNAME_IDENTIFIER_PATTERN above. Built from the same head vocabulary as
+ * PATH_CONSTRUCTION_HEADS but as a fresh, non-global regex (a `.test()` used
+ * for existence-only, never `matchAll`, so no `lastIndex` state to leak
+ * across calls, unlike PATH_CONSTRUCTION_HEAD_PATTERNS above). */
+const FS_API_EVIDENCE_PATTERN = new RegExp(
+  PATH_CONSTRUCTION_HEADS.map(([head]) => `(?:${head})\\s*\\(`).join("|"),
+  "i",
+);
 
 /** Cap on continuation lines accumulated for one open construction call.
  * Continuation lines are operand-list text by construction (the call is
@@ -521,6 +554,13 @@ const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /\.\s*filename\b/i,
   /\boriginalname\b/i,
   /\buntrusted|\bunsanitized|\battacker/i,
+  // #871 follow-up: a WHATWG URL's `.pathname` (or `.pathname =`) is an
+  // untrusted URL component exactly like `.filename` is an untrusted upload
+  // name — real when it reaches a filesystem/path-construction call
+  // (`path.join(root, url.pathname)`), bookkeeping-adjacent noise otherwise.
+  // Property-access-only, like `.filename` above: a bare `pathname`
+  // identifier is not itself proof of an untrusted URL component.
+  /\.\s*pathname\b/i,
 ];
 
 /** Test/fixture file conventions, cross-language. Signals found only in test
@@ -834,6 +874,25 @@ export function evaluatePathHandlingSignals(
         if (!matchesAny(scanLine, patterns)) continue;
         recordSignal(buckets, className, source, chunkFile, pathSample(lines[index] ?? ""));
         break; // one bucket entry per class per chunk; samples merge across chunks
+      }
+    }
+
+    // #871 follow-up: `pathname` alone only counts as the
+    // path_reference_identifier signal when this file/hunk also shows
+    // filesystem/path-construction API evidence — otherwise it is exactly
+    // as likely to be a WHATWG URL component (`url.pathname`,
+    // `location.pathname`) as a filesystem path variable (#854/#749).
+    if (!isDocumentation) {
+      const fsEvidence = lines.some((line) =>
+        FS_API_EVIDENCE_PATTERN.test(stripCodeComments(stripStaticStringLiterals(line))),
+      );
+      if (fsEvidence) {
+        for (let index = 0; index < neutralized.length; index++) {
+          const scanLine = stripCodeComments(neutralized[index] ?? "");
+          if (!PATHNAME_IDENTIFIER_PATTERN.test(scanLine)) continue;
+          recordSignal(buckets, "path_reference_identifier", source, chunkFile, pathSample(lines[index] ?? ""));
+          break;
+        }
       }
     }
 

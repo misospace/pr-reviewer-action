@@ -614,6 +614,14 @@ test("path-classification-untrusted-surface: #871 a content-only file_serving/pa
   assert.ok(!result.mustCheck.some((c) => c.includes("directory traversal")));
   assert.ok(!result.mustCheck.some((c) => c.includes("file path sanitization")));
 
+  // #871 follow-up: `.pathname` is a WHATWG URL component here (the file
+  // never touches a filesystem/path-construction API), not a real
+  // untrusted-path surface — path_handling_changes must not fire either.
+  assert.notEqual(result.prKind, "path_handling_changes");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+  assert.equal(result.pathHandlingProvenance.fired, false);
+  assert.equal(result.prKind, "app_code");
+
   // The correctness specialist is not skipped on a substantial PR just
   // because a weak content-only signal happened to pick a non-correctness
   // pr_kind.
