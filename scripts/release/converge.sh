@@ -21,7 +21,7 @@
 # Needs `git` (with an `origin` remote), `gh`, and GITHUB_REPOSITORY.
 set -euo pipefail
 
-MODE=${1:?mode required (state|finish)}
+MODE=${1:?mode required (state|finish|anchor)}
 TAG=${2:?tag required}
 SHA=${3:?release sha required}
 REPO=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}
