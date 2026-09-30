@@ -429,6 +429,26 @@ def test_ensure_dataflow_gate_built_always_recompiles_even_when_test_build_exist
     assert stale.read_text(encoding="utf-8") == "export {};\n"
 
 
+def test_ensure_dataflow_gate_built_fails_when_tsc_leaves_no_output(tmp_path: Path, monkeypatch) -> None:
+    """tsc does not clean its outDir: a successful compile that no longer
+    emits the gate's test file (renamed/removed source) must fail the build
+    instead of reusing the stale copy (#852 review)."""
+    import scripts.run_semantic_eval_ci as runner
+
+    stale = tmp_path / runner.DATAFLOW_GATE_TEST_FILE
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("stale bogus content a false green would reuse\n", encoding="utf-8")
+    tsc = tmp_path / "node_modules/typescript/bin/tsc"
+    tsc.parent.mkdir(parents=True, exist_ok=True)
+    tsc.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    error = runner._ensure_dataflow_gate_built("node")
+    assert error is not None and runner.DATAFLOW_GATE_TEST_FILE in error
+    assert not stale.exists()
+
+
 def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
     corpus = SemanticCorpus.from_file(CORPUS)
     negative = next(item for item in corpus.scenarios if item.number == 6451)

@@ -48,11 +48,14 @@ def _ensure_dataflow_gate_built(node: str) -> str | None:
     before `node --test`, so the gate can run against the compiled v3
     runtime without depending on a prior `npm test` invocation. Always
     recompiles: `.test-build` is gitignored and can persist locally between
-    runs, so trusting a pre-existing copy risks a stale-JS false green.
+    runs, so trusting a pre-existing copy risks a stale-JS false green. The
+    expected output is removed first, because tsc does not clean its outDir:
+    a renamed or removed test source would otherwise leave the old JS behind.
     Returns an error string on failure, None on success."""
     tsc = ROOT / "node_modules/typescript/bin/tsc"
     if not tsc.is_file():
         return f"{tsc} not found; run `npm ci` first"
+    (ROOT / DATAFLOW_GATE_TEST_FILE).unlink(missing_ok=True)
     completed = subprocess.run(
         [node, str(tsc), "-p", "tsconfig.test.json"], cwd=ROOT, capture_output=True, text=True, timeout=180, check=False,
     )
