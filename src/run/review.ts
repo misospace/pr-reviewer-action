@@ -8,7 +8,7 @@ import { resolveTierBudgets } from "../corpus/budgets.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
@@ -1183,7 +1183,8 @@ function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: 
  * reviews it. An absolute operator path is read from disk; with no base ref
  * the checkout is used. Never the run's artifact directory. */
 function promptFileWorkspace(workspace: string, baseRef: string): PromptWorkspace {
-  if (baseRef === "") return workspaceAt(workspace);
+  const checkout = workspaceAt(workspace);
+  if (baseRef === "") return checkout;
   const cache = new Map<string, Buffer | null>();
   const read = (path: string): Buffer | null => {
     if (!cache.has(path)) {
@@ -1199,9 +1200,9 @@ function promptFileWorkspace(workspace: string, baseRef: string): PromptWorkspac
     return cache.get(path) ?? null;
   };
   return {
-    isFile: (path) => read(path) !== null,
-    isNonEmpty: (path) => (read(path)?.length ?? 0) > 0,
-    readBytes: read,
+    isFile: (path) => (isAbsolute(path) ? checkout.isFile(path) : read(path) !== null),
+    isNonEmpty: (path) => (isAbsolute(path) ? checkout.isNonEmpty(path) : (read(path)?.length ?? 0) > 0),
+    readBytes: (path) => (isAbsolute(path) ? checkout.readBytes(path) : read(path)),
   };
 }
 

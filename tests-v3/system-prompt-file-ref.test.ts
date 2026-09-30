@@ -71,13 +71,6 @@ function commit(root: string, message: string): string {
   return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { env: GIT_ENV }).toString("utf8").trim();
 }
 
-interface RunFixture { runDir: string; cleanup: () => void }
-function withRunDir(): RunFixture {
-  const runDir = mkdtempSync(join(tmpdir(), "v3-run-test-"));
-  return { runDir, cleanup: (): void => rmSync(runDir, { recursive: true, force: true }) };
-}
-
-
 function repo(): { workspace: string; runDir: string; cleanup: () => void } {
   const workspace = mkdtempSync(join(tmpdir(), "v3-prompt-ws-"));
   const runDir = mkdtempSync(join(tmpdir(), "v3-prompt-run-"));
@@ -85,7 +78,7 @@ function repo(): { workspace: string; runDir: string; cleanup: () => void } {
   return { workspace, runDir, cleanup: (): void => { rmSync(workspace, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); } };
 }
 
-async function reviewWithPrompt(workspace: string, runDir: string, env: Record<string, string>): Promise<string[]> {
+async function reviewWithPrompt(workspace: string, runDir: string, env: Record<string, string>, promptFile = ".agents/review.md"): Promise<string[]> {
   const bodies: string[] = [];
   const server = await startMockServer((_req, reqBody, res) => {
     bodies.push(String(reqBody));
@@ -98,7 +91,7 @@ async function reviewWithPrompt(workspace: string, runDir: string, env: Record<s
       inputs: {
         "github-token": "tok", repo: "o/r", "pr-number": "7",
         "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
-        "system-prompt-file": ".agents/review.md", "system-prompt-mode": "append",
+        "system-prompt-file": promptFile, "system-prompt-mode": "append",
       },
       runDir, workspace, platformAdapter: mockPlatform(), persistArtifacts: true, quiet: true,
     });
@@ -133,6 +126,21 @@ test("#904: with no base ref the prompt file is read from the checkout", async (
 
     const bodies = await reviewWithPrompt(workspace, runDir, {});
     assert.ok(bodies.some((b) => b.includes("CHECKOUT PROMPT RULE")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("#904: an absolute operator prompt path is read from disk even when the base ref is unavailable", async () => {
+  const { workspace, runDir, cleanup } = repo();
+  try {
+    write(workspace, "README.md", "x\n");
+    commit(workspace, "init");
+    const promptPath = join(runDir, "operator-prompt.md");
+    writeFileSync(promptPath, "OPERATOR PROMPT RULE\n");
+
+    const bodies = await reviewWithPrompt(workspace, runDir, { PR_REVIEWER_BASE_REF: "f".repeat(40) }, promptPath);
+    assert.ok(bodies.some((b) => b.includes("OPERATOR PROMPT RULE")));
   } finally {
     cleanup();
   }
