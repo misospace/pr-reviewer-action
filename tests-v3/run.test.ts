@@ -2221,3 +2221,354 @@ test("#846 security review: a one-character or three-character configured API ke
     }
   }
 });
+
+// ── #874: requirement-trace end-to-end ──────────────────────────────────
+
+/** The distinctive substring of the linked issue's MUST line — used to find
+ * that requirement's content-derived id inside the rendered ledger the
+ * request body carries, without hardcoding the sha256-derived id. */
+const REQUIREMENT_TRACE_MARKER = "the source SHA and the target branch";
+
+/** A PR that keyword-links issue #824 (a closing keyword, not a title
+ * reference — independent of #872/#879), whose body carries one MUST
+ * acceptance line: the #584/#854 shape. */
+function requirementTracePlatform(): PlatformReadAdapter {
+  const platform = mockPlatform({ body: "Closes #824.\n\nResolve review context from the right identity.\n" });
+  platform.getIssue = async () => ({
+    ok: true,
+    data: {
+      number: 824,
+      title: "resolve review context from repository identity",
+      state: "open",
+      html_url: "https://github.com/o/r/issues/824",
+      labels: [],
+      body: `Context resolution MUST bind to the repository identity plus ${REQUIREMENT_TRACE_MARKER}.`,
+    },
+  }) as never;
+  return platform;
+}
+
+/** Find the requirement id the ledger rendered for its `- (req-...) `text``
+ * list item containing `marker` — anchored to that exact rendered shape
+ * (`renderRequirementLedgerMarkdown`), not just "an id appears somewhere
+ * near the marker text": the issue body containing the same MUST line is
+ * also quoted verbatim, earlier, inside the linked-issues section of the
+ * same request body. */
+function ledgerRequirementId(requestBody: string, marker: string): string {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(String.raw`\(req-([0-9a-f]{12})\)\s*` + "`[^`]*" + escaped + "[^`]*`");
+  const match = re.exec(requestBody);
+  assert.ok(match, `no requirement-ledger entry rendered for marker ${JSON.stringify(marker)}`);
+  return `req-${match[1]}`;
+}
+
+test("#874 malformed-location regression: a 'met' claim citing a non-existent enforcement location is downgraded, coverage goes partial", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        // No file at this path exists in the checkout at all — the
+        // malformed-location case, distinct from the real #854 shape below
+        // (where the cited line exists but only copies the value).
+        disposition: "met",
+        enforcement: [{ file: "src/context-resolution.ts", line: 42 }],
+        test: [],
+        reason: "resolveContext compares ctx.sourceSha against the pull's head",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("downgraded-no-valid-enforcement-location"));
+    assert.equal(trace.incomplete, true);
+
+    // required_checks escalated to incomplete, feeding review_result=partial
+    // (verdict_policy defaults to strict) — #873/#878 is what will later
+    // make that non-approving; this only guarantees the signal is correct.
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.equal(result.outputs.verdict, "approve");
+    const output = readFileSync(join(runDir, "gh-output.txt"), "utf8");
+    assert.match(output, /required-checks=incomplete/);
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+
+    assert.match(result.outputs.reviewMarkdown, /Requirement trace/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        // The real #854 defect: the cited line EXISTS and even names the
+        // right field, but only copies ctx.sourceSha onto the output —
+        // nothing ever compares it. Location existence must not pass this.
+        disposition: "met",
+        enforcement: [{ file: "src/context-resolution.ts", line: 5 }],
+        test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+        reason: "sourceSha is present on the resolved context object",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx) {",
+        "  const record = lookupPull(ctx);",
+        "  return {",
+        "    repo: record.repo,",
+        "    sourceSha: ctx.sourceSha,",
+        "    targetBranch: ctx.targetBranch,",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows[0]));
+    assert.equal(trace.incomplete, true);
+
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#874: an 'unmet' requirement with no finding gets a synthesized one and forces request_changes", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.match(findings[0]!.message, /source SHA/);
+
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.match(result.marker, /"review_result":"issues"/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+test("#874: verdict-policy=model — an unmet trace stops coverage and the marker never reads clean", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "verdict-policy": "model",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.match(findings[0]!.message, /source SHA/);
+
+    // The synthesized major finding is present, but the non-strict verdict
+    // mapping runs before trace enforcement and leaves the model's approve
+    // in place — which is exactly why the trace is ALSO a coverage stop:
+    // required_checks=incomplete is what withholds approval (#878 guard)
+    // and keeps the marker from reading clean under this policy.
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+test("#874: verdict-policy=findings_severity_gated — an unmet trace stops coverage and the marker never reads clean", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "verdict-policy": "findings_severity_gated",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.match(findings[0]!.message, /source SHA/);
+
+    // The synthesized major finding is present, but the non-strict verdict
+    // mapping runs before trace enforcement and leaves the model's approve
+    // in place — which is exactly why the trace is ALSO a coverage stop:
+    // required_checks=incomplete is what withholds approval (#878 guard)
+    // and keeps the marker from reading clean under this policy.
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});

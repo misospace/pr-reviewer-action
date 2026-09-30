@@ -160,6 +160,29 @@ export function applySpecialistLeadsFragment(
 }
 
 /**
+ * #874: the requirement-trace guidance, appended only when the
+ * `requirement-trace` input is enabled AND the requirement ledger is
+ * non-empty (the same presence signal `REQUIREMENT_LEDGER_GUIDANCE` gates) —
+ * a bare instruction with no ledger to trace would be dead weight. Runs
+ * alongside `applySystemPromptFragments` (same phase: both the dial and the
+ * ledger presence file exist by then); idempotent like the other appended
+ * (non-placeholder) fragments.
+ */
+export function applyRequirementTraceFragment(
+  state: SystemPromptState,
+  workspace: PromptWorkspace,
+  enabled: boolean,
+  assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
+): SystemPromptState {
+  if (!state.isDefault || !enabled) return state;
+  if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
+  const trace = bashCapture(rawFragment(assets, "requirement_trace"));
+  if (trace === "") return state;
+  if (state.systemPrompt.includes(trace)) return state;
+  return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };
+}
+
+/**
  * #812: the superseded-discussion rule, appended v3-only after the corpus's
  * discussion sections exist (never by the v2-parity fragment assembly). The
  * current PR description and linked issues are authoritative context, and a

@@ -177,6 +177,10 @@ inputs:
     description: Maximum bytes of the equivalent-paths section included in context
     required: false
     default: "6000"
+  requirement-trace:
+    description: "Require a per-requirement trace (production enforcement + regression test locations, deterministically verified against the checkout) for every acceptance/normative requirement in the ledger before crediting it; an unverifiable or missing trace marks review coverage incomplete, and an unmet requirement without a finding gets a deterministic one. Off by default: not yet measured on the real-PR corpus."
+    required: false
+    default: "false"
   linear-api-key:
     description: Optional Linear personal API key used to fetch issue/spec context from PR-title identifiers
     required: false

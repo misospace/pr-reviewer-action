@@ -428,6 +428,7 @@ Inputs with no v2 implementation.
 | v3 input | Default |
 | --- | --- |
 | `harness-obligations` | `false` |
+| `requirement-trace` | `false` |
 | `claim-falsification` | `false` |
 | `equivalent-paths` | `false` |
 | `equivalent-paths-max-bytes` | `6000` |
@@ -439,6 +440,12 @@ Outputs with no v2 implementation.
 | v3 output | Description |
 | --- | --- |
 | `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
+
+`requirement-trace` depends on a bundled prompt fragment that asks the model to
+emit the trace fields. With `system-prompt-mode=replace` that fragment is
+suppressed, so a replacement prompt that does not emit the trace fields fails
+closed: rows become `unverifiable` and coverage `incomplete` — safe but
+surprising.
 
 ## Retained outputs
 

@@ -1893,6 +1893,7 @@ def run_review_for_pr(
     review_script: Path | None = None,
     deep_execution: str = "three_call",
     claim_falsification: bool = False,
+    requirement_trace: bool = False,
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
@@ -1930,6 +1931,9 @@ def run_review_for_pr(
             the runtime's opt-in claim falsification pre-pass (#785) runs.
             The A/B knob for the pre-v3-measurement gate on that feature;
             recorded in the report metadata, not the per-run label.
+        requirement_trace: #874 A/B knob. Forwarded as REQUIREMENT_TRACE=true
+            when set (the input defaults to false in production, so a plain
+            run forwards nothing).
 
     Returns:
         ReviewRun with collected metrics.
@@ -2087,6 +2091,11 @@ def run_review_for_pr(
             env["CLAIM_FALSIFICATION"] = "true"
         else:
             env.pop("CLAIM_FALSIFICATION", None)
+        # #874 A/B: same pattern for the requirement-trace arm.
+        if requirement_trace:
+            env["REQUIREMENT_TRACE"] = "true"
+        else:
+            env.pop("REQUIREMENT_TRACE", None)
         env.update(model_config.get("extra_env") or {})
 
         # Run the review through the TypeScript runtime (the v3 `run`
@@ -2882,6 +2891,7 @@ def run_real_pr_corpus(
     runs_per_mode: int = 1,
     claim_falsification: bool = False,
     equivalent_paths: str | None = None,
+    requirement_trace: bool = False,
 ) -> dict[str, Any] | None:
     """Run every scenario in a real-PR corpus across the given modes.
 
@@ -2933,7 +2943,8 @@ def run_real_pr_corpus(
             reps: list[ReviewRun] = []
             for rep in range(runs_per_mode):
                 run = run_review_for_pr(
-                    pr_entry, mode, work_dir, model_config, claim_falsification=claim_falsification,
+                    pr_entry, mode, work_dir, model_config,
+                    claim_falsification=claim_falsification, requirement_trace=requirement_trace,
                 )
                 reps.append(run)
                 label = mode if runs_per_mode == 1 else f"{mode} {rep + 1}/{runs_per_mode}"
@@ -2960,9 +2971,11 @@ def run_real_pr_corpus(
     if context_only:
         context_report = generate_context_report(context_rows, equivalent_paths=equivalent_paths)
         context_report["metadata"]["claim_falsification"] = claim_falsification
+        context_report["metadata"]["requirement_trace"] = requirement_trace
         return context_report
     real_pr_report = generate_real_pr_report(scenario_runs, equivalent_paths=equivalent_paths)
     real_pr_report["metadata"]["claim_falsification"] = claim_falsification
+    real_pr_report["metadata"]["requirement_trace"] = requirement_trace
     return real_pr_report
 
 
@@ -3098,6 +3111,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--requirement-trace",
+        choices=["true", "false"],
+        default="false",
+        help=(
+            "#874 A/B knob: 'true' sets REQUIREMENT_TRACE=true for every run "
+            "(per-requirement enforcement/test trace, deterministically "
+            "verified, before crediting an acceptance/normative requirement). "
+            "'false' (default) matches the production default and forwards "
+            "nothing. Honored on both the real-PR-corpus and synthetic "
+            "benchmark paths."
+        ),
+    )
+    parser.add_argument(
         "--system-prompt",
         type=str,
         default=None,
@@ -3218,6 +3244,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             runs_per_mode=args.runs_per_mode,
             claim_falsification=args.claim_falsification == "true",
             equivalent_paths=args.equivalent_paths,
+            requirement_trace=args.requirement_trace == "true",
         )
 
     if args.dry_run:
@@ -3350,6 +3377,7 @@ def main() -> int:
                             pr, mode, work_dir, model_config, deep_review=deep,
                             deep_execution=args.deep_execution,
                             claim_falsification=claim_falsification,
+                            requirement_trace=args.requirement_trace == "true",
                         )
                         bm.runs.append(run)
                         base = run_label(mode, deep, args.deep_execution)
@@ -3379,6 +3407,7 @@ def main() -> int:
     report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
+    report["metadata"]["requirement_trace"] = args.requirement_trace == "true"
 
     # #840: surface timeout counts per mode prominently, so a lopsided
     # timeout loss on one arm is visible without reading the full report.

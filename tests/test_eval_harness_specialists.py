@@ -1293,6 +1293,23 @@ class TestDeepReviewCli:
                 ["--corpus", "corpus.json", "--deep-review", "sometimes"])
 
 
+class TestRequirementTraceCli:
+    def test_default_is_false(self):
+        args = build_parser().parse_args(["--corpus", "corpus.json"])
+        assert args.requirement_trace == "false"
+
+    def test_true_accepted(self):
+        args = build_parser().parse_args(
+            ["--corpus", "corpus.json", "--requirement-trace", "true"])
+        assert args.requirement_trace == "true"
+
+    def test_invalid_value_exits(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["--corpus", "corpus.json", "--requirement-trace", "sometimes"])
+
+
 # ---------------------------------------------------------------------------
 # lead_disposition: not_adopted (deep-review #610)
 # ---------------------------------------------------------------------------

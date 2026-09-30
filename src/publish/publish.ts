@@ -138,7 +138,10 @@ export function sanitizeForPublication(
  * policy, only the findings-driven states (findings/clean vs issues) are.
  * `coverageUnknown` (#838: the standalone `publish` CLI could not confirm
  * the tool-loop coverage state at all) folds into the same `partial`
- * bucket — publish never reads "I couldn't check" as "it was clean". */
+ * bucket — publish never reads "I couldn't check" as "it was clean". Since
+ * #874, a known-`unmet` requirement trace is itself a required-check
+ * coverage stop, so it lands in the same `partial` bucket under every
+ * policy. */
 export function markerReviewResult(input: {
   verdictPolicy?: string | undefined;
   verdict: string;
