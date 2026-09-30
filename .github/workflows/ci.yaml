@@ -115,17 +115,13 @@ jobs:
           path: semantic-eval-report/report.json
           if-no-files-found: warn
 
-      # Coverage is scoped to pr_reviewer/ and scripts/ — the bash test suites
-      # cover the shell side, which pytest-cov can't measure.
-      # Threshold: measured 76% pre-teardown, gated at 72. After #706 wave 1
-      # the (c) parity oracles under those trees are exercised only by the
-      # parity-harness subprocesses, which pytest-cov cannot see, so the
-      # measured baseline is 23% and the gate re-baselined to 20 to absorb
-      # small fluctuations. Ratchets back up at wave 2 when the v2 trees
-      # shrink to the (b) tooling.
+      # Coverage is scoped to pr_reviewer/ and scripts/ — the retained
+      # repository tooling (eval, harvest, fork gate, judge); the shipped
+      # runtime is TypeScript and covered by npm test. Measured 85% after
+      # the #706 wave-2 teardown; gated at 80.
       - name: Run Python tests (auto-discover)
         run: |
-          COV_FAIL_UNDER=20
+          COV_FAIL_UNDER=80
           pytest tests/ -v --tb=short \
             --cov=pr_reviewer --cov=scripts \
             --cov-report=term-missing:skip-covered \
