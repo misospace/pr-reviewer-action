@@ -2148,7 +2148,8 @@ def run_review_for_pr(
                         if separator:
                             output_lines[key] = value
                 except OSError:
-                    pass  # eval-harness-output.txt is optional; missing file just skips route/stage inference
+                    # eval-harness-output.txt is optional; a missing file just skips route/stage inference.
+                    output_lines.clear()
                 # The runtime writes kebab-case output keys; the v2
                 # orchestrator's snake_case form stays a fallback.
                 route = output_lines.get("review-route", output_lines.get("review_route", "")).strip()
