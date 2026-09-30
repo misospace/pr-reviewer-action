@@ -352,3 +352,36 @@ test("#810: control characters and NUL in coverage paths are stripped, never ren
   assert.match(notice, /`src\/ab\[31m\.ts`/);
   assert.match(notice, /`max-rounds`/);
 });
+
+// ---------------------------------------------------------------------------
+// #847: tool_budget / tool_budget_source / tool_calls in the metadata marker
+// ---------------------------------------------------------------------------
+
+test("#847: the tool-budget provenance reaches the published marker additively", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(
+    input({ toolBudget: 26, toolBudgetSource: "size-scaled", toolCalls: 12 }),
+    api,
+    { diffText: "" },
+  );
+  assert.equal(result.status, "published");
+  const body = api.sticky[0]!.body;
+  const marker = body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(marker.includes('"tool_budget":26'));
+  assert.ok(marker.includes('"tool_budget_source":"size-scaled"'));
+  assert.ok(marker.includes('"tool_calls":12'));
+  // Appended after the pre-existing keys, so a marker parser ignoring them
+  // reads exactly the pre-#847 fields.
+  assert.ok(marker.indexOf('"tool_budget"') > marker.indexOf('"cache_hit_ratio"'));
+});
+
+test("#847: without a tool harness the marker stays byte-identical to the pre-#847 shape", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input(), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  const marker = body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(!marker.includes("tool_budget"));
+  assert.ok(!marker.includes("tool_calls"));
+});

@@ -230,6 +230,50 @@ byte-identically to the pre-#810 marker; the #680 `metadata-markers` parity
 fixtures need no divergence because they never set coverage. Presentation
 beyond the notice (e.g. demoting clean approves) is #811's.
 
+### Measuring the tool budget (#847)
+
+#810's size-scaled default cannot be A/B'd from the human-findings corpus
+alone: the specialist-lead count that decides whether size scaling actually
+exceeds the tier floor is only known at run time, not from a PR's diff shape
+(see #847). Instead, every review now records the #702 budget provenance
+plus size and stop-reason telemetry, so the source/exhaustion/coverage
+relationship can be measured directly from production reviews:
+
+- **`tool-harness.json` / `tool-harness.smart.json`** (workspace artifacts):
+  `tool_budget_tier` (route), `tool_request_budget` (effective budget),
+  `tool_budget_source` (provenance: `primary-override` | `smart-override` |
+  `explicit` | `tier-default` | `size-scaled`), `tool_budget_configured`
+  (the winning explicit integer, `null` for derived defaults),
+  `tool_budget_size` (`{changed_files, changed_lines, specialist_leads}`,
+  omitted when every component was zero), `stop_reason`, and
+  `executed_request_count` (tool calls actually executed against the
+  budget). The embedded `tool_loop_telemetry.budget` object carries the same
+  source/effective/configured/size fields plus `usage.tool_calls_executed`
+  and `usage.rounds_used`.
+- **The published review's metadata marker** (`<!-- ai-pr-reviewer:{...}
+  --> `, no artifacts needed): `tool_budget` (the effective budget),
+  `tool_budget_source`, and `tool_calls` (calls executed), appended
+  additively at the end of the marker's fixed key order — a run with no tool
+  harness (`tool_mode=off`, or an abort before the budget was resolved)
+  omits all three and serializes byte-identically to the pre-#847 marker.
+
+To tally recent reviews by budget source without touching artifacts, pull
+the managed comments off recent PRs and grep the marker (`<owner>/<repo>`,
+replace with the target repo):
+
+```bash
+gh api "repos/<owner>/<repo>/issues/comments?per_page=100" \
+  --jq '.[].body' \
+  | grep -o '<!-- ai-pr-reviewer:{[^>]*} -->' \
+  | grep -o '"tool_budget_source":"[a-z-]*"' \
+  | sort | uniq -c
+```
+
+Cross-reference `tool_budget_source":"size-scaled"` runs against
+`coverage":"partial"` / `coverage_stop_reason` on the same marker line to see
+whether the scaled budget actually reduced budget-exhaustion partial
+coverage versus `tier-default` runs, per #847's proposal.
+
 ## New inputs
 
 Inputs with no v2 implementation.

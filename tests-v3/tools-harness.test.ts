@@ -430,3 +430,58 @@ test("#810: a model-chosen stop leaves no partial-coverage record", async () => 
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   assert.equal(artifact.partial_coverage, undefined);
 });
+
+test("#847: buildToolLoopTelemetry folds the #810 size signal into the budget object additively", () => {
+  const withoutSize: HarnessResult = {
+    tool_budget_tier: "primary",
+    tool_request_budget: 16,
+    tool_budget_source: "tier-default",
+    tool_budget_configured: null,
+    stop_reason: "model-stopped",
+    tool_loop_meta: { max_rounds: 5, wall_clock_sec: 1.2, requests_remaining: 15, elapsed_sec: 0.5, tool_result_bytes: 0 },
+  };
+  const withoutTelemetry = buildToolLoopTelemetry({ ...withoutSize });
+  assert.equal((withoutTelemetry!.budget as Record<string, unknown>).size, undefined);
+
+  const withSize: HarnessResult = {
+    ...withoutSize,
+    tool_budget_source: "size-scaled",
+    tool_request_budget: 26,
+    tool_budget_size: { changed_files: 54, changed_lines: 4527, specialist_leads: 0 },
+    tool_loop_meta: { max_rounds: 5, wall_clock_sec: 1.2, requests_remaining: 20, elapsed_sec: 0.5, tool_result_bytes: 0 },
+  };
+  const telemetry = buildToolLoopTelemetry(withSize);
+  const budget = telemetry!.budget as Record<string, unknown>;
+  assert.equal(budget.source, "size-scaled");
+  assert.equal(budget.effective_max_requests, 26);
+  assert.deepEqual(budget.size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+});
+
+test("#847: a size-scaled run persists route/budget/source/size, stop reason and calls used in tool-harness.json", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "pr.json"), JSON.stringify({ changedFiles: 54, additions: 4346, deletions: 181 }));
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    ...withPrompt,
+  }));
+  assert.equal(result.tool_budget_tier, "primary");
+  assert.equal(result.tool_budget_source, "size-scaled");
+  // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
+  assert.equal(result.tool_request_budget, 26);
+  assert.deepEqual(result.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.tool_budget_source, "size-scaled");
+  assert.equal(artifact.tool_request_budget, 26);
+  assert.deepEqual(artifact.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  assert.equal(artifact.executed_request_count, 1);
+  assert.equal(artifact.stop_reason ?? artifact.tool_loop_telemetry.stop_reason, "model-stopped");
+  const telemetry = artifact.tool_loop_telemetry;
+  assert.equal(telemetry.budget.source, "size-scaled");
+  assert.equal(telemetry.budget.effective_max_requests, 26);
+  assert.deepEqual(telemetry.budget.size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  assert.equal(telemetry.usage.tool_calls_executed, 1);
+});

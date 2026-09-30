@@ -857,12 +857,21 @@ export function toolResultMdLines(index: number, toolName: string, args: unknown
   return lines;
 }
 
+/**
+ * #847: fold the #810 PR-size signal into the telemetry budget object
+ * whenever it was derived (present on `result.tool_budget_size`, the same
+ * field `writeOutputs` already persists at the artifact's top level).
+ * Additive: a run with no size signal (nothing changed, or every component
+ * was zero) keeps the pre-#847 telemetry shape byte-for-byte.
+ */
 function telemetryBudgetProvenance(result: HarnessResult): Record<string, unknown> {
-  return {
+  const provenance: Record<string, unknown> = {
     source: result.tool_budget_source ?? "",
     effective_max_requests: result.tool_request_budget ?? 0,
     configured_max_requests: result.tool_budget_configured ?? null,
   };
+  if (result.tool_budget_size !== undefined) provenance.size = result.tool_budget_size;
+  return provenance;
 }
 
 function preLoopFailureKind(result: HarnessResult): string | null {

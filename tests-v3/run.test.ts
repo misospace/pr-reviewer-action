@@ -586,7 +586,7 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     const files = Array.from({ length: 54 }, (_, i) => ({
       filename: `src/f${i}.ts`, status: "modified", additions: i === 0 ? 4346 - 53 * 80 : 80, deletions: i === 0 ? 181 - 53 * 3 : 3, changes: 0,
     }));
-    await runReview({
+    const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
       inputs: {
         "github-token": "tok",
@@ -609,6 +609,11 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
     assert.equal(harness.tool_request_budget, 26);
     assert.equal(harness.tool_budget_source, "size-scaled");
+    // #847: the same provenance reaches the published metadata marker, so the
+    // size-scaled default is measurable from real reviews without artifacts.
+    assert.match(result.marker, /"tool_budget":26/);
+    assert.match(result.marker, /"tool_budget_source":"size-scaled"/);
+    assert.match(result.marker, /"tool_calls":\d+/);
   } finally {
     await server.close();
     cleanup();

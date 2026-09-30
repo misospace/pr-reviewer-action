@@ -76,6 +76,15 @@ export interface PublishInput {
    * and the metadata marker records `coverage: partial` with the stop
    * reason. Presentation beyond this notice is #811's. */
   partialCoverage?: PartialCoverage;
+  /** #847: the #810/#702 tool-loop request budget this run resolved, so the
+   * size-scaled default can be measured from published reviews alone.
+   * Omitted when no tool harness ran. */
+  toolBudget?: number;
+  /** #847: which source won ("primary-override" | "smart-override" |
+   * "explicit" | "tier-default" | "size-scaled"). */
+  toolBudgetSource?: string;
+  /** #847: tool calls the loop actually executed against that budget. */
+  toolCalls?: number;
 }
 
 export interface PublishResult {
@@ -498,6 +507,9 @@ export async function publishReview(
     escalationReason: input.escalationReason,
     cacheHitRatio: input.cacheHitRatio,
     ...(input.ciState !== undefined && input.ciState !== "" ? { ciState: input.ciState } : {}),
+    ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
+    ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
+    ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run
