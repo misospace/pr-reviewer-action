@@ -395,6 +395,167 @@ for (const withFallback of [false, true]) {
   });
 }
 
+test("#867: a non-2xx primary reply (ai-primary-retries: 0) is a transport failure, never a parse failure", async () => {
+  let calls = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    calls += 1;
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "down" }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    // ai-primary-retries: 0 used to skip the call entirely (`retries` is a
+    // total-attempt budget: `attempt <= retries`), falling through to the
+    // loop's synthetic default and misreporting the outage as
+    // "parse/validate failures exhausted" instead of ever touching the dead
+    // endpoint. #867: retries always allows at least one real attempt.
+    await assert.rejects(() => runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "0",
+        "ai-primary-retry-delay-sec": "0",
+        "on-model-failure": "fail",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      error: (line) => errors.push(line),
+      quiet: true,
+    }));
+    assert.ok(calls >= 1, "expected the primary to actually call the dead endpoint instead of skipping it");
+    const failureLine = errors.find((line) => line.includes("Primary") && line.includes("transport failures exhausted"));
+    assert.ok(failureLine, `expected a primary transport-exhausted line, got: ${JSON.stringify(errors)}`);
+    assert.match(failureLine!, /HTTP 500/);
+    assert.ok(
+      !errors.some((line) => line.includes("parse/validate failures exhausted")),
+      `the parse-retry path must not be taken for a non-2xx reply, got: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#867: a streamed non-2xx primary reply is also a transport failure, never a parse failure", async () => {
+  let calls = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    calls += 1;
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "down" }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    await assert.rejects(() => runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "true",
+        "ai-api-key": "k",
+        "ai-primary-retries": "0",
+        "ai-primary-retry-delay-sec": "0",
+        "on-model-failure": "fail",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      error: (line) => errors.push(line),
+      quiet: true,
+    }));
+    assert.ok(calls >= 1, "expected the primary to actually call the dead endpoint instead of skipping it");
+    const failureLine = errors.find((line) => line.includes("Primary") && line.includes("transport failures exhausted"));
+    assert.ok(failureLine, `expected a primary transport-exhausted line, got: ${JSON.stringify(errors)}`);
+    assert.match(failureLine!, /HTTP 500/);
+    assert.ok(
+      !errors.some((line) => line.includes("parse/validate failures exhausted")),
+      `the parse-retry path must not be taken for a non-2xx reply, got: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#867: primary and fallback both classify a non-2xx reply as transport, and on-model-failure=notice still publishes", async () => {
+  let primaryCalls = 0;
+  let fallbackCalls = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryCalls += 1;
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "down" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    fallbackCalls += 1;
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "down" }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": primaryServer.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "0",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "on-model-failure": "notice",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      error: (line) => errors.push(line),
+      quiet: true,
+    });
+    assert.ok(primaryCalls >= 1, "expected the primary to actually call its dead endpoint");
+    assert.ok(fallbackCalls >= 1, "expected the fallback to actually call its dead endpoint");
+    const primaryLine = errors.find((line) => line.includes("Primary") && line.includes("transport failures exhausted"));
+    const fallbackLine = errors.find((line) => line.includes("Fallback") && line.includes("transport failures exhausted"));
+    assert.ok(primaryLine, `expected a primary transport-exhausted line, got: ${JSON.stringify(errors)}`);
+    assert.ok(fallbackLine, `expected a fallback transport-exhausted line, got: ${JSON.stringify(errors)}`);
+    assert.match(primaryLine!, /HTTP 500/);
+    assert.match(fallbackLine!, /HTTP 500/);
+    assert.ok(
+      !errors.some((line) => line.includes("parse/validate failures exhausted")),
+      `the parse-retry path must not be taken on either route, got: ${JSON.stringify(errors)}`,
+    );
+    assert.equal(result.outputs.verdict, "request_changes");
+    const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
+    assert.equal(artifact.verdict, "request_changes");
+    assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
 test("reviewer-requested escalation publishes the smart review", async () => {
   let call = 0;
   const server = await startMockServer((_req, body, res) => {

@@ -74,6 +74,22 @@ test("transport failures consume the budget with doubling backoff capped at 120s
   assert.deepEqual(sleeps, [15, 30, 60, 120]);
 });
 
+test("#867: retries: 0 still makes one real attempt, classified as transport_exhausted (never the synthetic parse default)", async () => {
+  let calls = 0;
+  const outcome = await callModelTier(profile({ retries: 0 }), CONTEXT, {
+    sleep: async () => {},
+    call: async () => {
+      calls++;
+      return transportFailure();
+    },
+  });
+  assert.equal(calls, 1, "a configured retries of 0 must not skip the call entirely");
+  assert.equal(outcome.status, "transport_exhausted");
+  if (outcome.status === "transport_exhausted") {
+    assert.equal(outcome.failure.message, "boom");
+  }
+});
+
 test("backoff is capped at MAX_RETRY_DELAY_SEC", async () => {
   const sleeps: number[] = [];
   await callModelTier(profile({ retries: 6, retryDelaySec: 90 }), CONTEXT, {
