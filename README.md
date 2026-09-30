@@ -168,7 +168,7 @@ These checklists exist to keep weaker local models honest on high-risk PRs: the 
 
 ### 📋 Required-check completeness validation
 
-A `must_check` item is a mandatory **review question**, not automatically an implementation requirement: the model records one structured disposition per item in the verdict's `required_check_dispositions` array — `satisfied`, `not_applicable` (requires a concise rationale grounded in the actual change), or `unresolved` — echoing the check text exactly. The action folds those dispositions against the deterministic list: every check `satisfied` or grounded `not_applicable` is `complete`; missing, duplicate, unknown, or malformed dispositions fail conservatively; invented checks are dropped, never credited. When the verdict carries no structured dispositions at all, a legacy shallow keyword match against `review-markdown` still decides (temporary coexistence behavior, removed when v3 enforcement migrates). Controlled by `validate-required-checks` (`auto` = validate when must_check is non-empty) and `required-check-validation-mode`:
+A `must_check` item is a mandatory **review question**, not automatically an implementation requirement: the model records one structured disposition per item in the verdict's `required_check_dispositions` array — `satisfied`, `not_applicable` (requires a concise rationale grounded in the actual change), or `unresolved` — echoing the check text exactly. The action folds those dispositions against the deterministic list: every check `satisfied` or grounded `not_applicable` is `complete`; missing, duplicate, unknown, or malformed dispositions fail conservatively; invented checks are dropped, never credited. When the verdict carries no structured dispositions at all, a legacy shallow keyword match against `review_markdown` still decides (temporary coexistence behavior, removed when v3 enforcement migrates). Controlled by `validate-required-checks` (`auto` = validate when must_check is non-empty) and `required-check-validation-mode`:
 
 - `warn` (default): an **Unaddressed required checks** section listing the unresolved items is appended to the published review, so a human sees exactly what the model skipped or left unresolved. The verdict is not changed.
 - `fail`: additionally forces a `request_changes` verdict.
@@ -297,9 +297,9 @@ Only three inputs are required: `github-token`, `ai-base-url`, and `ai-model`. E
 |-------|-------------|----------|---------|
 | `publish-review-comment` | Publish or update a managed PR comment | No | `false` |
 | `publish-mode` | Publish mode for the review verdict: `review_comment` (non-blocking native PR review, default), `comment` (sticky PR comment), `review_verdict` (native approve/request_changes). Requires `pull-requests: write` for review_comment and review_verdict | No | `review_comment` |
-| `allow-approve` | If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
+| `allow-approve` | If true and publish-mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines. | No | `false` |
 | `allow-repo-policy-overrides` | If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only. | No | `false` |
-| `approve-forks` | If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set. | No | `false` |
+| `approve-forks` | If true and publish-mode=review_verdict with allow-approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow-approve is set. | No | `false` |
 | `cleanup-previous-native-reviews` | Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup. | No | `auto` |
 | `upstream-link-mode` | How upstream GitHub PR/issue/commit/compare URLs in the published review are handled: `inert` (default) rewrites them to plain text; `togithub` rewrites them to `https://togithub.com/...` so they stay clickable without triggering notifications or cross-repository auto-linking. Shorthand references (`owner/repo#123`, bare `#123`) are inert in both modes. | No | `inert` |
 | `comment-marker` | HTML marker for the managed PR comment | No | `<!-- ai-pr-reviewer -->` |
@@ -428,7 +428,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `ai-fallback-request-timeout-sec` | Timeout in seconds for the fallback model API request (`curl --max-time`). Defaults to `ai-request-timeout-sec` when blank. | No | `""` |
 | `ai-fallback-connect-timeout-sec` | Timeout in seconds for the fallback model API connection (`curl --connect-timeout`). Defaults to `ai-connect-timeout-sec` when blank. | No | `""` |
 | `ai-stream` | If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer) | No | `"true"` |
-| `ai-fallback-stream` | If set, overrides ai_stream for the fallback model; defaults to ai_stream value when blank | No | `""` |
+| `ai-fallback-stream` | If set, overrides ai-stream for the fallback model; defaults to ai-stream value when blank | No | `""` |
 
 </details>
 
@@ -447,8 +447,8 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `force-review` | Bypass the diff-unchanged guard and run a fresh review of the current PR even when the fingerprint matches. Set automatically by the `rereview-label`; also drivable from `workflow_dispatch`/`repository_dispatch` when the consuming workflow explicitly maps its input or payload | No | `false` |
 | `rereview-label` | Label that, when added to a PR, forces a fresh review (add `labeled` to the workflow's `pull_request` types to enable). Self-authorizing — only write/triage can label. The label is removed after, so re-adding re-triggers | No | `ai-review` |
 | `ci-status-check` | Wait for CI checks to reach a terminal state before the AI review and fold their outcomes in as evidence. Needs `checks: read`; degrades without it. | No | `true` |
-| `ci-timeout-sec` | Maximum seconds to wait for CI checks to complete when ci_status_check=true. | No | `300` |
-| `ci-interval-sec` | Seconds between CI status polls when ci_status_check=true. | No | `15` |
+| `ci-timeout-sec` | Maximum seconds to wait for CI checks to complete when ci-status-check=true. | No | `300` |
+| `ci-interval-sec` | Seconds between CI status polls when ci-status-check=true. | No | `15` |
 | `ci-skip-on-timeout` | If true, proceed with review after timeout instead of failing. | No | `true` |
 
 </details>
@@ -911,7 +911,7 @@ The model may return an optional `findings` array alongside the verdict — conc
 }
 ```
 
-Findings are normalized (severities mapped to `blocker`/`major`/`minor`/`info`, malformed entries dropped) and exposed as the `findings` output. **Absence is fine** — weaker local models that only produce `verdict`/`review-markdown` keep exactly the previous behavior.
+Findings are normalized (severities mapped to `blocker`/`major`/`minor`/`info`, malformed entries dropped) and exposed as the `findings` output. **Absence is fine** — weaker local models that only produce `verdict`/`review_markdown` keep exactly the previous behavior.
 
 With `verdict-policy: findings_severity_gated`, the policy applies one-way escalation: a model `request_changes` verdict is preserved, and `approve` is escalated to `request_changes` when any blocker-severity finding exists. Non-blocker findings never weaken a model rejection. When no findings were produced, the model's verdict stands (the `verdict-source` output tells you which path applied). Enforcement settings (`evidence-blocker-enforcement`, tool-failure enforcement) still run afterwards and can force `request_changes`.
 
@@ -1050,7 +1050,7 @@ ai-response-format: json_schema   # vLLM guided decoding, llama.cpp grammars, ne
 
 If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server does not support that mode — drop back to `json_object` or `off`. Ignored entirely for `ai-api-format: anthropic`.
 
-> **Fireworks / LiteLLM note:** grammar-constrained decoding under `json_schema` can cause some models (e.g. `glm-4p5`, `qwen3-coder`) to under-emit `\n` inside the `review-markdown` string, producing a single-line wall of bolded headings. The action validates that a payload containing multiple `## ` heading markers also contains newlines and will fail such a response into the retry path — but the reliable fix is to use `ai-response-format: json_object` for Fireworks / LiteLLM endpoints.
+> **Fireworks / LiteLLM note:** grammar-constrained decoding under `json_schema` can cause some models (e.g. `glm-4p5`, `qwen3-coder`) to under-emit `\n` inside the `review_markdown` string, producing a single-line wall of bolded headings. The action validates that a payload containing multiple `## ` heading markers also contains newlines and will fail such a response into the retry path — but the reliable fix is to use `ai-response-format: json_object` for Fireworks / LiteLLM endpoints.
 
 ### ⏱️ Timeouts, streaming, and retries
 

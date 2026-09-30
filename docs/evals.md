@@ -358,7 +358,7 @@ telemetry. The harness drives the real boundary: it passes `REPO` and
 `PR_NUMBER` to `run_review.sh`, resets stale per-run artifacts
 (`ai-output.json`, `ai-response.*.json`, `specialists.json`, …) per run,
 and loads the final review from `ai-output.json` (verdict, markdown,
-production-shape findings, `verdict-source`), with model/tokens from
+production-shape findings, `verdict_source`), with model/tokens from
 `analysis_engine.txt` and the per-tier `ai-response.*.json` usage. One
 fixture is flagged `negative_control`: it asserts a clean run invents no
 findings (`final_findings_count` / `dedupe_final_findings` max 0) while a
