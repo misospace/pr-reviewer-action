@@ -112,10 +112,24 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   is pinned normatively in AGENTS.md and by `tests-v3/transport.test.ts`
   ("the api key rides only the auth headers — never the URL, body, or
   failure diagnostics"), so no wave-2 follow-up is needed.
-- **Wave 2 — at the #681 release gate.** Freeze or retire each parity
-  boundary, then delete the (c) set, the runners, and the remaining
-  oracle-only tests. After wave 2 the **shipped action** contains no Bash and
-  no Python; the repository retains only the (b) keep-list tooling.
+- **Wave 2 — at the #681 release gate. LANDED.** Every parity boundary was
+  frozen: its v2 side recorded into `tests/fixtures/parity/goldens/` (the
+  golden run reproduced the live run for all 530 fixtures), and the harness
+  now compares v3 against the goldens (`run_new`). The #662 truncation
+  counterexample freezes both of its sides, so it keeps proving drift
+  detection. Then the whole (c) set, `tests/parity_runners/`, and the
+  oracle-only tests were deleted, along with the wave-1 holdovers
+  (`scripts/verify_pr_head.sh`, `test_verify_pr_head.sh`,
+  `test_concurrent_gating.sh`, `test_corpus_standards_survival.sh`,
+  `test_ci_api_timeout.sh`) and the `validate-bash-timeout` job.
+  Consumer moves: the semantic gate's four production dataflow checks and
+  `test_issue_662_dataflow.py` run against v3 (the preceding re-point PR);
+  `test_strip_source_text_diff.py` compares v3 with a frozen
+  `reduce_source` golden; `repo_fixture.py` moved to
+  `tests/parity_repo_fixture.py`; the judge tooling's lazy import of the
+  deleted transport (missed by this audit's static scan) was replaced by
+  `pr_reviewer/judge_http.py`. The shipped action contains no Bash and no
+  Python; the repository retains only the (b) keep-list tooling.
 
 ## (a) delete — v2 production runtime and its tests
 
@@ -277,6 +291,7 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `pr_reviewer/semantic_eval.py` | Imported by `scripts/eval_harness.py`, `scripts/run_semantic_eval_ci.py`, `scripts/live_judge_score.py`; exercised by `tests/test_issue_662_dataflow.py`. |
 | `pr_reviewer/semantic_judge.py` | Imported by `pr_reviewer/semantic_eval.py`, `scripts/live_judge_score.py`, `scripts/run_judge_calibration.py`. |
 | `pr_reviewer/metadata.py` | Imported by `scripts/harvest_human_findings.py` (also consumed by v2 precheck until wave 1). |
+| `pr_reviewer/judge_http.py` | Added in wave 2: the OpenAI-compatible chat call for `scripts/live_judge_score.py` and `scripts/run_judge_calibration.py`; `tests/test_judge_http.py`. |
 
 ### tests/
 
@@ -302,6 +317,9 @@ Preserved data (not Python/bash, listed for completeness): `tests/fixtures/`
 #662, and Forgejo qualification fixtures #706 says to preserve.
 
 ## (c) keep temporarily — parity oracles, with deletion conditions
+
+**All deleted in wave 2.** The tables below are the record of what each
+file was kept for.
 
 All of these exist after wave 1 only because the parity harness (or the
 dataflow gate) still executes them, or the Forgejo smoke / a v3 test still

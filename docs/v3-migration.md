@@ -388,6 +388,15 @@ behavior is unchanged.
 
 ## Parity harness (#673)
 
+**Frozen at the #681 release gate.** Each boundary's v2 side was recorded
+into a golden (`tests/fixtures/parity/goldens/<boundary>/<fixture>.json`,
+temp and repository paths replaced by placeholders) and the v2 runtime was
+then removed (#706 wave 2). The harness now runs only the v3 side and compares
+it with the golden under the same rules below; the golden run reproduced the
+live v2-versus-v3 run for all 530 fixtures before the removal. The v2 files
+this section names are the recorded sources of those goldens and no longer
+exist.
+
 The `tests/parity_harness.py` harness blocks the TypeScript cutover on
 observable behavior drift, not on source comparison or unit-test counts. It
 runs equivalent v2/v3 runtime stages against the same fixtures, normalizes
