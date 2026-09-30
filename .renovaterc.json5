@@ -3,7 +3,7 @@
   extends: ["github>misospace/renovate-config"],
   // Configure pip-compile to manage requirements.in → requirements.txt.
   "pip-compile": {
-    fileMatch: ["(^|/)requirements\\.txt$"],
+    managerFilePatterns: ["/(^|/)requirements\\.txt$/"],
   },
   // Disable plain pip_requirements manager to avoid conflicting with pip-compile.
   "pip_requirements": {
