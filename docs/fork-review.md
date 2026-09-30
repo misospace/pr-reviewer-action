@@ -210,10 +210,10 @@ read permissions and never sees any credential.
 Fork reviews may publish findings, inline comments, and `request_changes`.
 They must never create a native approval: `allow-approve: false` and
 `approve-forks: false` are pinned (both by the workflow and by the action's
-own fork gate in `scripts/publish.sh`).
+own fork gate in `src/publish/publish.ts`).
 
 Publication is exact-head guarded twice: `fork_review_gate.py verify` before
-model work, and `scripts/verify_pr_head.sh` inside the publish step — a push
+model work, and the head re-check inside the publish step (`src/publish/publish.ts`) — a push
 landing mid-review stops publication of the stale verdict.
 
 ## Qualification and tests

@@ -7,7 +7,7 @@ routing) consumes and #680 (enforcement migration) cuts over to.
 ## What `must_check` is
 
 `must_check` items come from the deterministic classifier
-(`pr_reviewer/classifier.py`): plain-text review questions derived from the
+(`src/classification/classify.ts`): plain-text review questions derived from the
 PR kind, risk flags, and linked-issue metadata. They are **policy the model
 does not own**:
 
@@ -82,7 +82,7 @@ a miss, never a pass.
 
 ## How deterministic completeness treats each status
 
-`pr_reviewer/completeness.py::evaluate_structured_coverage` folds the
+`src/enforcement/completeness.ts` `structuredCoverage` folds the
 dispositions against the supplied check list into the version-1 coverage
 artifact (`required-check-coverage` parity boundary, byte-identical with
 `src/enforcement/required-checks.ts`):

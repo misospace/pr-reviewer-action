@@ -8,7 +8,7 @@ This file is the durable standards context injected into every agent and reviewe
 
 `pr-reviewer-action` must remain:
 
-- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`; the v2 `scripts/platform_api.sh` / `pr_reviewer/platform.py` survive only as parity oracles pending the #706 teardown). No forge-specific logic outside the adapters.
+- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
 - **Deployment/runtime agnostic** — GitHub Actions and Forgejo Actions (composite wrapper + committed Node bundle).
@@ -60,7 +60,7 @@ GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity bou
 ## Development conventions (normative)
 
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
-- **Parity boundaries**: v3 ports must stay byte-identical to v2 at the serialization boundary. When porting a new boundary, add JSON-only fixtures under `tests/fixtures/parity/<boundary>/` and a v2 runner in `tests/parity_runners/`; pin snake_case shapes there.
+- **Parity boundaries are frozen**: `tests/parity_harness.py` compares v3 against v2 goldens recorded before v2 was removed (`tests/fixtures/parity/goldens/`). A deliberate behavior change at a boundary needs an exact entry in `tests/fixtures/parity/approved-divergences.json`; never edit a golden to make a diff pass.
 - **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
 - **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.
