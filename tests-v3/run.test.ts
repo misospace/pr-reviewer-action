@@ -89,8 +89,9 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
   const { runDir, cleanup } = withRunDir();
   try {
     const outputFile = join(runDir, "gh-output.txt");
+    const stepSummaryFile = join(runDir, "step-summary.md");
     const result = await runReview({
-      env: { GITHUB_OUTPUT: outputFile },
+      env: { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: stepSummaryFile },
       inputs: {
         "github-token": "tok",
         repo: "o/r",
@@ -111,6 +112,11 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     assert.equal(result.outputs.reviewRoute, "legacy");
     assert.equal(result.outputs.analysisEngine, "m@http://127.0.0.1:" + new URL(server.url).port + " (openai)");
     assert.match(result.outputs.analysisEngine, /^m@http/);
+    // #832: the step summary (public on the Actions run page) omits the base
+    // URL; the action output above keeps the full engine string for logs.
+    const stepSummary = readFileSync(stepSummaryFile, "utf8");
+    assert.match(stepSummary, /\| Engine \| m \(openai\) \|/);
+    assert.ok(!stepSummary.includes("127.0.0.1"));
     // Key artifacts persisted with the v2 names.
     for (const name of ["ai-output.json", "ai-request.primary.json", "ai-response.primary.json", "classification.json", "pr.json", "pr.diff", "pr.diff.truncated", "pr-files.json", "review-corpus.md", "review-corpus.truncated.md", "review-body.md", "verdict.txt"]) {
       assert.ok(existsSync(join(runDir, name)), `missing artifact ${name}`);

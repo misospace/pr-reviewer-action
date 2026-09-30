@@ -40,7 +40,7 @@ import { runSpecialistsGate } from "../gates/specialists-gate.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
@@ -1188,7 +1188,7 @@ function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
   const deepReview = ws.isFile("specialists.json") ? safeJson(ws.read("specialists.json")) : null;
 
   const table = renderStepSummary({
-    analysisEngine: input.analysisEngine,
+    analysisEngine: publicAnalysisEngine(input.analysisEngine),
     verdict: input.outputs.verdict || "unknown",
     verdictSource: input.outputs.verdictSource,
     findingsCount: findings.length,
