@@ -397,4 +397,14 @@ test("non-strict policies keep today's bodies and the binary clean/issues marker
   await publishReview(publishInput({ verdictPolicy: "findings_severity_gated", findings: [finding("minor")] }), gated, { diffText: "" });
   assert.ok(gated.sticky[0]!.body.includes('"review_result":"clean"'));
   assert.ok(!gated.sticky[0]!.body.includes("### Findings"));
+
+  // #874 fail closed across policies: an incomplete required-check state
+  // (which includes a known-`unmet` requirement trace) never reads as a
+  // clean result, even under the binary clean/issues non-strict markers.
+  for (const policy of ["model", "findings_severity_gated"]) {
+    const partial = new MockPublishApi();
+    await publishReview(publishInput({ verdictPolicy: policy, requiredChecks: "incomplete" }), partial, { diffText: "" });
+    assert.ok(partial.sticky[0]!.body.includes('"review_result":"partial"'), policy);
+    assert.ok(!partial.sticky[0]!.body.includes('"review_result":"clean"'), policy);
+  }
 });

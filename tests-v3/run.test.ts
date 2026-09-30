@@ -2450,3 +2450,125 @@ test("#874: an 'unmet' requirement with no finding gets a synthesized one and fo
     cleanup();
   }
 });
+test("#874: verdict-policy=model — an unmet trace stops coverage and the marker never reads clean", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "verdict-policy": "model",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.match(findings[0]!.message, /source SHA/);
+
+    // The synthesized major finding is present, but the non-strict verdict
+    // mapping runs before trace enforcement and leaves the model's approve
+    // in place — which is exactly why the trace is ALSO a coverage stop:
+    // required_checks=incomplete is what withholds approval (#878 guard)
+    // and keeps the marker from reading clean under this policy.
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+test("#874: verdict-policy=findings_severity_gated — an unmet trace stops coverage and the marker never reads clean", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "verdict-policy": "findings_severity_gated",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.match(findings[0]!.message, /source SHA/);
+
+    // The synthesized major finding is present, but the non-strict verdict
+    // mapping runs before trace enforcement and leaves the model's approve
+    // in place — which is exactly why the trace is ALSO a coverage stop:
+    // required_checks=incomplete is what withholds approval (#878 guard)
+    // and keeps the marker from reading clean under this policy.
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "major");
+    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});

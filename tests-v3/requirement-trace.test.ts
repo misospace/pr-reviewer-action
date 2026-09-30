@@ -318,6 +318,20 @@ test("reason regression, folded through enforcement: all not_applicable with emp
   }
 });
 
+test("a well-formed unmet requirement is a coverage stop (incomplete), not just a finding", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
+    const claims = [{ requirement_id: "req-1", disposition: "unmet", reason: "no such check exists" }];
+    const result = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0]?.disposition, "unmet");
+    assert.equal(result.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("ensureUnmetRequirementFindings: synthesizes a finding for an unmet requirement with none", () => {
   const workspace = makeWorkspace();
   try {

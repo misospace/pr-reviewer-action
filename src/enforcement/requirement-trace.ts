@@ -32,8 +32,11 @@
  * below for the exact heuristic and its documented limits. `not_applicable`,
  * `unmet`, and an explicit `unverifiable` each require a non-empty, bounded
  * `reason`; a missing one downgrades to `unverifiable`. Any downgrade or
- * missing trace marks the requirement `unverifiable`, which is the signal
- * `applyRequirementTraceEnforcement` folds into `required_checks=incomplete`.
+ * missing trace marks the requirement `unverifiable`, and a well-formed
+ * `unmet` is itself a known coverage stop; both fold into
+ * `required_checks=incomplete` via `applyRequirementTraceEnforcement`, so a
+ * known-unmet requirement can never publish a clean approval under any
+ * verdict policy.
  *
  * Scope: ledger entries of kind `acceptance` or `normative` only — the
  * explicit MUST/acceptance-criteria items. `invariant`-kind entries
@@ -74,8 +77,9 @@ export interface RequirementTraceArtifact {
   version: number;
   rows: RequirementTraceRow[];
   /** True when at least one in-scope requirement has no usable trace
-   * (missing claim, or a claim downgraded to `unverifiable`) — the signal
-   * that folds into `required_checks=incomplete` (review_result=partial). */
+   * (missing claim, a claim downgraded to `unverifiable`) or is a known
+   * gap (a well-formed `unmet`) — the signal that folds into
+   * `required_checks=incomplete` (review_result=partial). */
   incomplete: boolean;
   errors: string[];
 }
@@ -437,7 +441,13 @@ export function validateRequirementTrace(
       }
     }
 
-    if (disposition === "unverifiable") incomplete = true;
+    // #874 maintainer follow-up: a well-formed `unmet` is a KNOWN gap, not
+    // an untraceable one — it must stop coverage too (`required_checks=
+    // incomplete`), so #878's publication guard withholds approval under
+    // every verdict policy. The synthesized major finding alone reaches the
+    // non-strict verdict mapping too late to matter (strict maps after this
+    // pass; findings_severity_gated/model map before it).
+    if (disposition === "unverifiable" || disposition === "unmet") incomplete = true;
 
     rows.push({ requirement_id: entry.id, disposition, enforcement, test, reason, notes });
   }
