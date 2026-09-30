@@ -1288,10 +1288,10 @@
         "base_sha": "e03d0f97a60fdef96790a3abb13a7a0cb87724e0"
       },
       {
-        "id": "joryirving/home-ops#9075@b3d77613",
+        "id": "joryirving/home-ops#9075@935d0f80",
         "repo_full_name": "joryirving/home-ops",
         "number": 9075,
-        "head_sha": "b3d77613f68eff88127d014a5c5aa59a4dd38a84",
+        "head_sha": "935d0f80ae4f151c0cfbb87c85712b064f2547ad",
         "defect": {
           "description": "Amended: `mmproj-F16.gguf` also had to be added to `files:`. `mmproj:` only wires the projector into llama-server — the downloader works off `files:`, so a projector named there and nowhere else never lands on disk and vision fails silently while the pod still serves text. Worth noting `llama-strix` has the same latent bug (`mmproj:` set, no matching `files:` entry). It is at `replicas: 0` so it has not mattered, but it would need fixing before that manifest is ever scaled up expecting vision.",
           "file": "kubernetes/apps/base/llm/litellm/llama-nvidia.yaml",
