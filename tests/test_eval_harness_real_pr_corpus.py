@@ -10,6 +10,7 @@ No network: the checkout tests use only local, filesystem-backed git repos.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -372,7 +373,8 @@ class TestGenerateRealPRReport:
 # ---------------------------------------------------------------------------
 
 def _git(*args, cwd):
-    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True, env=env)
 
 
 def _make_origin(tmp_path: Path) -> tuple[Path, str, str]:
@@ -385,23 +387,25 @@ def _make_origin(tmp_path: Path) -> tuple[Path, str, str]:
     _git("config", "user.name", "eval", cwd=origin)
     (origin / "f.txt").write_text("one", encoding="utf-8")
     _git("add", ".", cwd=origin)
-    _git("commit", "-m", "first", cwd=origin)
+    _git("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", "first", cwd=origin)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     sha1 = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=str(origin), capture_output=True, text=True, check=True,
+        ["git", "rev-parse", "HEAD"], cwd=str(origin), capture_output=True, text=True, check=True, env=env,
     ).stdout.strip()
 
     (origin / "f.txt").write_text("two", encoding="utf-8")
     _git("add", ".", cwd=origin)
-    _git("commit", "-m", "second", cwd=origin)
+    _git("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", "second", cwd=origin)
     sha2 = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=str(origin), capture_output=True, text=True, check=True,
+        ["git", "rev-parse", "HEAD"], cwd=str(origin), capture_output=True, text=True, check=True, env=env,
     ).stdout.strip()
     return origin, sha1, sha2
 
 
 def _clone_local(origin: Path, dest: Path) -> None:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     subprocess.run(
-        ["git", "clone", str(origin), str(dest)], check=True, capture_output=True, text=True,
+        ["git", "clone", str(origin), str(dest)], check=True, capture_output=True, text=True, env=env,
     )
 
 
@@ -417,9 +421,10 @@ class TestCheckoutPinnedCommit:
         ok, sha, err = _checkout_pinned_commit(repo_path, sha1, pr_number=999)
         assert ok is True, err
         assert sha == sha1
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
         head = subprocess.run(
             ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, env=env,
         ).stdout.strip()
         assert head == sha1
 
@@ -460,7 +465,8 @@ class TestCheckoutPinnedCommit:
 
 
 def _git_in(repo, *args):
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env)
 
 
 class TestPreparePinnedWorkspace:
@@ -469,11 +475,12 @@ class TestPreparePinnedWorkspace:
         repo.mkdir()
         _git_in(repo, "init", "-q", "-b", "main")
         _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "base")
-        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, env=env).stdout.strip()
         (repo / "a.py").write_text("x = 1\n")
         _git_in(repo, "add", "a.py")
         _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "head")
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, env=env).stdout.strip()
         return repo, base, head
 
     def test_removes_a_previous_scenarios_artifacts(self, tmp_path):
@@ -536,12 +543,13 @@ class TestFilesFromPinnedDiff:
         (repo / "b.txt").write_text("b\nb\nb\nb\nb\n")
         _git_in(repo, "add", "b.txt")
         _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base")
-        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, env=env).stdout.strip()
         _git_in(repo, "mv", "b.txt", "c.txt")
         (repo / "c.txt").write_text("b\nb\nb\nb\nb\nextra\n")
         _git_in(repo, "add", "-A")
         _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "head")
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, env=env).stdout.strip()
 
         files = json.loads(_files_from_pinned_diff(repo, base, head))
         assert files == [{
