@@ -1,5 +1,27 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
+
+/** Length cap for an in-body error message, matching #862's
+ * `describeTransportFailure` (300 chars) — the message may originate from an
+ * untrusted upstream body and must never grow the log/artifact without
+ * bound. */
+const STREAM_ERROR_MAX_CHARS = 300;
+
+/**
+ * #868: the same masking `describeTransportFailure` applies to a non-2xx
+ * body (#846) — mask the operator's configured key(s) unconditionally, then
+ * `redactText`'s pattern heuristics, then cap length — applied here to a 200
+ * reply whose body itself carries an error object (including mid-stream SSE
+ * errors). `secrets` masking runs on the full untruncated text first so a
+ * secret split across the truncation boundary is never partially exposed.
+ */
+function maskStreamErrorMessage(text: string, secrets: readonly (string | null | undefined)[]): string {
+  const withoutKnownSecrets = maskKnownSecrets(text, secrets);
+  const redacted = redactText(withoutKnownSecrets);
+  const points = Array.from(redacted);
+  return points.length > STREAM_ERROR_MAX_CHARS ? `${points.slice(0, STREAM_ERROR_MAX_CHARS).join("")}...[truncated]` : redacted;
+}
 
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
@@ -487,14 +509,14 @@ function completionTokens(response: Record<string, unknown>): number | null {
   return null;
 }
 
-function surfaceStreamError(response: Record<string, unknown>): void {
+function surfaceStreamError(response: Record<string, unknown>, secrets: readonly (string | null | undefined)[]): void {
   const err = response.error;
   if (!err) return;
   let msg: string;
   if (isRecord(err)) msg = typeof err.message === "string" && err.message !== "" ? err.message : JSON.stringify(err);
   else if (typeof err === "string") msg = err;
   else msg = JSON.stringify(err) ?? String(err);
-  throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${msg}`);
+  throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${maskStreamErrorMessage(msg, secrets)}`);
 }
 
 const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2, info: 3 };
@@ -560,13 +582,17 @@ export interface ParsedResponse {
 /**
  * Parse a raw model response (already deserialized JSON) into a validated
  * review verdict. Throws VerdictParseFailure on any validation failure, with
- * v2-identical messages.
+ * v2-identical messages. `secrets` (#868) is the operator-configured model
+ * API key(s) for this call, if known to the caller — masked out of an
+ * in-body error message (`surfaceStreamError`) before it reaches the
+ * exception, so every downstream log/artifact sink inherits the masking for
+ * free. Callers with no key in scope (e.g. the parity harness) may omit it.
  */
-export function parseVerdictResponse(response: unknown): ParsedReviewVerdict {
+export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
   if (!isRecord(response)) {
     throw new VerdictParseFailure("not_object", `Expected JSON object but got ${pyTypeName(response)}`);
   }
-  surfaceStreamError(response);
+  surfaceStreamError(response, secrets);
 
   const raw = extractContent(response);
   const text = Array.isArray(raw)

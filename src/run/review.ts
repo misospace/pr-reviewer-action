@@ -1037,7 +1037,7 @@ async function callTier(
   });
   if (outcome.status === "ok") {
     log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat})`);
-    const parsed = parseVerdictResponse(outcome.rawResponse);
+    const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
     return { ok: true, artifact, rawResponse: outcome.rawResponse };
@@ -1045,7 +1045,13 @@ async function callTier(
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}`);
   } else if (outcome.status === "parse_exhausted") {
+    // #868: the raw response artifact was written before parsing could tell
+    // whether the body carried an in-body error (already-masked message
+    // below, via `parseVerdictResponse`'s `secrets` — see
+    // `surfaceStreamError`); replace it so an unmasked provider body never
+    // survives on disk, mirroring the transport-exhausted branch below.
     errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})`);
+    ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message }));
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
@@ -1077,7 +1083,7 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
     if (responseBytes !== null && responseBytes.length > 0) {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
-        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")));
+        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [profiles.primary.apiKey]);
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
@@ -1200,7 +1206,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       const responseBytes = ws.read("ai-response.smart.json");
       if (status !== "request-error" && status !== "wall-clock-exceeded" && produced && responseBytes !== null && responseBytes.length > 0) {
         try {
-          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")));
+          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [input.profiles.smart.apiKey]);
           const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
           ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
           log("Smart tool harness produced a verdict");

@@ -240,6 +240,51 @@ test("stream/endpoint errors are surfaced with the v2 message", () => {
   assert.throws(() => parseVerdictResponse({ error: "boom" }), /Model endpoint returned an error: boom/);
 });
 
+test("#868: an in-body error echoing the configured key is masked", () => {
+  const configuredKey = "sk-real-configured-secret-abc123";
+  const patShaped = "ghp_" + "a".repeat(36);
+  assert.throws(
+    () =>
+      parseVerdictResponse(
+        { error: { message: `invalid key ${configuredKey} (also saw ${patShaped})` } },
+        [configuredKey],
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof VerdictParseFailure);
+      assert.equal(error.kind, "endpoint_error");
+      assert.ok(!error.message.includes(configuredKey), error.message);
+      assert.ok(!error.message.includes(patShaped), error.message);
+      assert.match(error.message, /\[REDACTED\]/);
+      return true;
+    },
+  );
+});
+
+test("#868: an in-body error is masked even with no secrets threaded in (redactText still applies)", () => {
+  const patShaped = "ghp_" + "b".repeat(36);
+  assert.throws(
+    () => parseVerdictResponse({ error: { message: `token leaked: ${patShaped}` } }),
+    (error: unknown) => {
+      assert.ok(error instanceof VerdictParseFailure);
+      assert.ok(!error.message.includes(patShaped), error.message);
+      return true;
+    },
+  );
+});
+
+test("#868: an oversized in-body error message is capped at 300 chars, mirroring #862", () => {
+  const huge = "x".repeat(1000);
+  assert.throws(
+    () => parseVerdictResponse({ error: { message: huge } }),
+    (error: unknown) => {
+      assert.ok(error instanceof VerdictParseFailure);
+      assert.ok(error.message.length < 400, `expected a capped message, got ${error.message.length} chars`);
+      assert.ok(error.message.includes("...[truncated]"));
+      return true;
+    },
+  );
+});
+
 test("non-object payloads fail with the v2 message", () => {
   assert.throws(() => parseVerdictResponse(openaiResponse("[1,2,3]")), (error: unknown) => {
     assert.ok(error instanceof VerdictParseFailure);

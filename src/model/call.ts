@@ -128,7 +128,7 @@ export async function callModelTier(
     }
 
     try {
-      const verdict = parseVerdictResponse(outcome.raw);
+      const verdict = parseVerdictResponse(outcome.raw, [profile.apiKey]);
       return { status: "ok", verdict, rawResponse: outcome.raw, attempts: attempt };
     } catch (error) {
       if (!(error instanceof VerdictParseFailure)) throw error;
@@ -192,7 +192,7 @@ export async function produceVerdict(
       return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] }) };
     }
     try {
-      return { ok: true, verdict: parseVerdictResponse(outcome.raw), raw: outcome.raw, reason: "accepted", detail: "" };
+      return { ok: true, verdict: parseVerdictResponse(outcome.raw, [profile.apiKey]), raw: outcome.raw, reason: "accepted", detail: "" };
     } catch (error) {
       if (!(error instanceof VerdictParseFailure)) throw error;
       return {

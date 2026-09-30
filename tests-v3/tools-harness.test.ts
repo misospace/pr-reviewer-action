@@ -142,6 +142,42 @@ test("an unusable verdict body leaves the produced flag unset so the standard re
   assert.ok(fs.existsSync(path.join(root, "ai-response.primary.json")));
 });
 
+test("#868: a 200 verdict-turn reply carrying an in-body error masks the configured key everywhere it is logged or persisted", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  const apiKey = "sk-configured-real-secret-98765";
+  const patShaped = "ghp_" + "e".repeat(36);
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("summary"),
+    { error: { message: `invalid key ${apiKey} (also saw ${patShaped})` } },
+  ];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_API_KEY: apiKey },
+    transport: async () => scripted[transportCalls++],
+    log: (line: string) => logs.push(line),
+  }));
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "transport");
+  const errorField = String(result.native_loop_verdict_error ?? "");
+  assert.ok(!errorField.includes(apiKey), `telemetry field leaked the key: ${errorField}`);
+  assert.ok(!errorField.includes(patShaped), `telemetry field leaked the PAT-shaped secret: ${errorField}`);
+  for (const line of logs) {
+    assert.ok(!line.includes(apiKey), `log line leaked the key: ${line}`);
+    assert.ok(!line.includes(patShaped), `log line leaked the PAT-shaped secret: ${line}`);
+  }
+  for (const name of ["ai-response.primary.json", "tool-harness.json", "tool-harness.md"]) {
+    const file = path.join(root, name);
+    if (!fs.existsSync(file)) continue;
+    const text = fs.readFileSync(file, "utf8");
+    assert.ok(!text.includes(apiKey), `${name} leaked the key`);
+    assert.ok(!text.includes(patShaped), `${name} leaked the PAT-shaped secret`);
+  }
+});
+
 test("smart-tier tool failures fall back to the primary review without a smart verdict", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff (truncated)\n+ change\n");

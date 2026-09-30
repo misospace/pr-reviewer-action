@@ -34,7 +34,7 @@ import {
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { maskAndTruncate } from "../context/redact.js";
+import { maskAndTruncate, maskKnownSecrets } from "../context/redact.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
@@ -265,29 +265,51 @@ export type VerdictEvaluation =
   | { ok: true; reason: "accepted"; detail: "" }
   | { ok: false; reason: "transport" | "empty" | "parse"; detail: string };
 
+/** Length cap matching #862's `describeTransportFailure` (300 chars). */
+const NATIVE_VERDICT_ERROR_MAX_CHARS = 300;
+
+/**
+ * #868: mask this call's configured key(s) (unconditionally, before
+ * `redactText`'s pattern heuristics), then cap length — applied to the
+ * in-body error text this native-loop path extracts directly from the
+ * response (below), independent of `parseVerdictResponse`'s own masking,
+ * since a 200 reply carrying `{"error": ...}` never reaches the verdict
+ * parser here.
+ */
+function maskNativeVerdictError(text: string, secrets: readonly (string | null | undefined)[]): string {
+  const withoutKnownSecrets = maskKnownSecrets(text, secrets);
+  const redacted = redactText(withoutKnownSecrets);
+  const points = Array.from(redacted);
+  return points.length > NATIVE_VERDICT_ERROR_MAX_CHARS
+    ? `${points.slice(0, NATIVE_VERDICT_ERROR_MAX_CHARS).join("")}...[truncated]`
+    : redacted;
+}
+
 /**
  * Validate a verdict response with the downstream verdict contract (#637).
  * Uses `parseVerdictResponse` — the exact contract the standard review path
  * validates with — so the retry can never pass on a weaker standard than the
  * fallback it replaces. `reason` classifies the failure: "transport"
  * (missing/error body), "empty" (no completion to parse), or "parse" (body
- * present but the verdict contract rejected it).
+ * present but the verdict contract rejected it). `secrets` (#868) is the
+ * operator-configured model API key(s) for this call; masked out of the
+ * in-body error text before it reaches the caller's log/artifact sinks.
  */
-export function evaluateNativeVerdict(response: unknown): VerdictEvaluation {
+export function evaluateNativeVerdict(response: unknown, secrets: readonly (string | null | undefined)[] = []): VerdictEvaluation {
   if (response === null || typeof response !== "object") {
     return { ok: false, reason: "transport", detail: "no response body" };
   }
   const res = response as Record<string, unknown>;
   const error = res.error;
   if (error) {
-    const detail =
+    const rawDetail =
       typeof error === "object"
         ? (((error as Record<string, unknown>).message as string) ?? JSON.stringify(error))
         : String(error);
-    return { ok: false, reason: "transport", detail };
+    return { ok: false, reason: "transport", detail: maskNativeVerdictError(rawDetail, secrets) };
   }
   try {
-    parseVerdictResponse(response);
+    parseVerdictResponse(response, secrets);
     return { ok: true, reason: "accepted", detail: "" };
   } catch (exc) {
     if (!(exc instanceof VerdictParseFailure)) throw exc;
@@ -361,7 +383,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   response = firstAttempt.response;
   if (response !== null) {
     accumulateUsage(input.usageAcc, response, input.apiFormat);
-    const evaluation = evaluateNativeVerdict(response);
+    const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
     ok = evaluation.ok;
     reason = evaluation.reason;
     detail = evaluation.detail;
@@ -385,7 +407,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     response = retry.response;
     if (response !== null) {
       accumulateUsage(input.usageAcc, response, input.apiFormat);
-      const evaluation = evaluateNativeVerdict(response);
+      const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
       ok = evaluation.ok;
       reason = evaluation.reason;
       detail = evaluation.detail;
@@ -1482,8 +1504,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         // Keep the raw response as a diagnostic artifact even when it is
         // unusable, but never claim success without a reusable body (#637).
-        if (verdict.response !== null && typeof verdict.response === "object") {
+        // #868: on failure, persist the already-masked `verdict.detail`
+        // instead of the raw body — an in-body error (or an SSE stream
+        // error) can otherwise echo the configured key straight to disk.
+        if (verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(verdict.response));
+        } else if (!verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
+          deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
         } else {
           deps.deleteArtifact?.(`ai-response.${input.tier}.json`);
         }

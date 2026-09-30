@@ -393,6 +393,31 @@ test("runSpecialists: missing corpus records an input error for every selected r
   assert.equal(tests.error_kind, "input");
 });
 
+test("#868: a specialist reply carrying an in-body error masks the configured key in the artifact and aggregate", async () => {
+  const apiKey = "specialist-configured-secret-key";
+  const patShaped = "ghp_" + "f".repeat(36);
+  const result = await runSpecialists(
+    baseInput({
+      config: { ...baseInput().config, apiKey },
+      requestFn: async () => ({
+        ok: true,
+        raw: { error: { message: `invalid key ${apiKey} (also saw ${patShaped})` } },
+      }),
+    }),
+  );
+  const roles = result.aggregate.roles as Array<{ role: string; status: string; error_kind: string | null }>;
+  for (const entry of roles) {
+    assert.equal(entry.status, "error");
+    assert.equal(entry.error_kind, "transport");
+  }
+  const aggregateText = JSON.stringify(result.aggregate);
+  assert.ok(!aggregateText.includes(apiKey), `aggregate leaked the key: ${aggregateText}`);
+  assert.ok(!aggregateText.includes(patShaped), `aggregate leaked the PAT-shaped secret: ${aggregateText}`);
+  const artifactsText = JSON.stringify(result.artifacts);
+  assert.ok(!artifactsText.includes(apiKey), `per-role artifacts leaked the key: ${artifactsText}`);
+  assert.ok(!artifactsText.includes(patShaped), `per-role artifacts leaked the PAT-shaped secret: ${artifactsText}`);
+});
+
 test("runSpecialists: combined_scout splits the one shared response into per-role artifacts", async () => {
   const scoutResponse = {
     choices: [
