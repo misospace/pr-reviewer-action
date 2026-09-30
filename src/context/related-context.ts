@@ -216,12 +216,14 @@ interface GrepRow {
   changedFile?: boolean;
 }
 
-function snippetOf(value: string): string {
+function snippetOf(value: string, filePath?: string | null): string {
   // Source-safe (#876): this is a repository source line (a grep hit), not
   // untrusted prose, so it must survive structurally — only literal
   // credential values are masked, never identifier/property syntax such as
-  // `apiKey: config.apiKey,`.
-  let text = redactSourceText(value);
+  // `apiKey: config.apiKey,`. filePath (the hit's own file) selects whether
+  // an unquoted secret-named scalar is a config literal or a code
+  // expression.
+  let text = redactSourceText(value, filePath);
   text = escapeControls(text);
   if (charCount(text) > MAX_SNIPPET_CHARS) return charSlice(text, MAX_SNIPPET_CHARS - 3) + "...";
   return text;
@@ -230,7 +232,8 @@ function snippetOf(value: string): string {
 function parseGrepLine(rawLine: string): GrepRow | null {
   const match = GREP_ROW_RE.exec(rawLine);
   if (!match) return null;
-  return { path: match[1] as string, line: Number.parseInt(match[2] as string, 10), snippet: snippetOf(match[3] as string) };
+  const path = match[1] as string;
+  return { path, line: Number.parseInt(match[2] as string, 10), snippet: snippetOf(match[3] as string, path) };
 }
 
 export interface GrepResult {
@@ -700,10 +703,10 @@ function anchorCounterparts(anchorFiles: Record<string, unknown>[], deletedPaths
   return items;
 }
 
-function fileWindow(lines: string[] | null, start: number, end: number): string[] {
+function fileWindow(lines: string[] | null, start: number, end: number, filePath?: string | null): string[] {
   if (lines === null) return [];
   const total = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-  return lines.slice(Math.max(1, start) - 1, Math.min(end, total)).map((text) => snippetOf(text.replaceAll("\t", "    ")));
+  return lines.slice(Math.max(1, start) - 1, Math.min(end, total)).map((text) => snippetOf(text.replaceAll("\t", "    "), filePath));
 }
 
 function noteCap(result: RelatedContext, reason: string): void {
@@ -896,7 +899,7 @@ async function buildConsumers(
       if (windowed.has(`${index}:${position}`)) {
         if (!cache.has(row.path)) cache.set(row.path, readHeadLines(workspace, row.path));
         let start = Math.max(1, row.line - CONSUMER_CONTEXT_LINES);
-        let window = fileWindow(cache.get(row.path) ?? null, start, row.line + CONSUMER_CONTEXT_LINES);
+        let window = fileWindow(cache.get(row.path) ?? null, start, row.line + CONSUMER_CONTEXT_LINES, row.path);
         if (window.length <= row.line - start) {
           start = row.line;
           window = [row.snippet];
@@ -926,7 +929,7 @@ function buildCounterparts(result: RelatedContext, items: CounterpartItem[], wor
     const lines = cache.get(item.refPath) ?? null;
     if (lines === null || item.refLine > lines.length || !(lines[item.refLine - 1] as string).includes(item.refName)) continue;
     const end = Math.min(item.refEnd, item.refLine + MAX_COUNTERPART_LINES - 1);
-    const body = fileWindow(lines, item.refLine, end);
+    const body = fileWindow(lines, item.refLine, end, item.refPath);
     counterparts.push({
       path: item.path,
       name: item.name,
@@ -1466,9 +1469,9 @@ function location(path: unknown, line: unknown): string {
   return number ? `${rendered}:${number}` : rendered;
 }
 
-function fenced(start: unknown, lines: unknown, indent: string): string[] {
+function fenced(start: unknown, lines: unknown, indent: string, filePath?: string | null): string[] {
   const first = positive(start) || 1;
-  const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactSourceText(String(text)), MAX_SNIPPET_CHARS)}`);
+  const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactSourceText(String(text), filePath), MAX_SNIPPET_CHARS)}`);
   let longest = 0;
   for (const text of body) for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
   const fence = "`".repeat(Math.max(3, longest + 1));
@@ -1502,9 +1505,9 @@ function renderConsumerLines(artifact: Record<string, unknown>): string[] {
       const loc = `  - ${location(reference.path, reference.line)}${marker}${suffix}`;
       if (Array.isArray(reference.lines)) {
         lines.push(loc);
-        lines.push(...fenced(reference.start, reference.lines, "    "));
+        lines.push(...fenced(reference.start, reference.lines, "    ", toPath(reference.path)));
       } else {
-        lines.push(`${loc} — ${codeSpan(display(redactSourceText(String(reference.snippet ?? ""))))}`);
+        lines.push(`${loc} — ${codeSpan(display(redactSourceText(String(reference.snippet ?? ""), toPath(reference.path))))}`);
       }
     }
   }
@@ -1527,7 +1530,7 @@ function renderCounterpartLines(artifact: Record<string, unknown>): string[] {
     const own = `${codeSpan(display(String(item.name ?? "")))} in ${location(item.path, item.line)}`;
     const notes = item.ref_changed === true ? " (also changed in this PR)" : "";
     lines.push(`- ${ref} for ${own}${notes}:`);
-    lines.push(...fenced(item.ref_line, item.lines, "  "));
+    lines.push(...fenced(item.ref_line, item.lines, "  ", toPath(item.ref_path)));
     if (item.lines_truncated === true) lines.push(`  _(body cut at ${MAX_COUNTERPART_LINES} lines)_`);
   }
   lines.push("");
@@ -1564,10 +1567,11 @@ function renderLines(artifact: Record<string, unknown>): string[] {
         } else {
           lines.push(`- ${codeSpan(name)} references:`);
           for (const reference of refs) {
-            const refPath = codeSpan(display(toPath(reference.path ?? "")));
+            const rawRefPath = toPath(reference.path ?? "");
+            const refPath = codeSpan(display(rawRefPath));
             let line = reference.line;
             if (typeof line !== "number" || !Number.isInteger(line) || line < 0) line = 0;
-            const snippet = codeSpan(display(redactSourceText(String(reference.snippet ?? ""))));
+            const snippet = codeSpan(display(redactSourceText(String(reference.snippet ?? ""), rawRefPath)));
             const marker = reference.changed_file === true ? " (changed file)" : "";
             lines.push(`  - ${refPath}:${line}${marker} — ${snippet}`);
           }

@@ -50,47 +50,120 @@ export function redactText(text: string | null | undefined): string {
 export const REDACTED_SOURCE = "⟦redacted:credential⟧";
 
 // Applied to repository SOURCE content (file reads, grep matches, blame) —
-// evidence the model must be able to trust structurally. Unlike `MASKERS`,
-// these patterns only ever match a literal credential VALUE (a bare token
-// shape, or a secret-named key assigned a QUOTED STRING LITERAL). A
-// secret-named key assigned a code expression — an identifier, member
-// access, call, template literal, or env lookup, e.g. `apiKey: config.apiKey,`,
-// `token: opts.token`, `password=self.password`, `secret = getSecret()` — is
-// never touched: replacing it would destroy code structure the model relies
-// on to judge correctness (#876).
-const SOURCE_MASKERS: readonly RegExp[] = [
-  // GitHub personal access tokens (classic & fine-grained)
-  /ghp_[A-Za-z0-9]{30,}/g,
-  /github_pat_[A-Za-z0-9_]{20,}/g,
-  // Bearer / Basic auth headers and inline tokens
-  /Bearer\s+[A-Za-z0-9._-]{20,}/gi,
-  /Basic\s+[A-Za-z0-9+/=]{20,}/gi,
-  // AWS-style access keys
-  /AKIA[0-9A-Z]{16}/g,
-  // OpenAI/Anthropic-style API keys
-  /sk-[A-Za-z0-9]{20,}/g,
-  // PEM private key blocks
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-  // Kubernetes / kubeconfig credentials, value on the same line only.
-  /(client-certificate-data|client-key-data|certificate-authority-data)\s*:\s*\S+/gi,
-  // A secret-named key assigned a quoted string literal of meaningful
-  // length. Requires matching quotes and no quote inside the value, so a
-  // code expression (unquoted) never matches.
-  /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*(["'`])[^"'`]{8,}\2/gi,
-];
+// evidence the model must be able to trust structurally. Every rule below
+// replaces ONLY the credential VALUE, never a key name, delimiter, quote, or
+// surrounding punctuation: `apiKey: "hunter2hunter2",` must come out as
+// `apiKey: "⟦redacted:credential⟧",`, not `⟦redacted:credential⟧,` (the
+// #876 class again, just on the sanitizer's own output). A secret-named key
+// assigned a code expression — an identifier, member access, call, template
+// literal, or env lookup, e.g. `apiKey: config.apiKey,`, `token: opts.token`,
+// `password=self.password`, `secret = getSecret()` — is never touched:
+// replacing it would destroy code structure the model relies on to judge
+// correctness (#876).
+const SECRET_KEY_ALTERNATION = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
+
+/** A value that is a REFERENCE to a secret, not the secret itself — env-var
+ * interpolation (`${VAR}`, `$VAR`), a template placeholder (`{{ ... }}`), a
+ * CloudFormation short-form tag (`!Ref`/`!Sub`/`!GetAtt`), a 1Password
+ * reference (`op://...`), a Vault reference (`vault:...`), or an
+ * already-encrypted SOPS/ansible-vault value (`ENC[...]`). These must never
+ * be masked: they are not literal credential bytes, in code or config. */
+function isReferenceValue(value: string): boolean {
+  return (
+    /^\$\{.*\}$/.test(value) ||
+    /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value) ||
+    /^\{\{.*\}\}$/.test(value) ||
+    value.startsWith("!") ||
+    /^op:\/\//i.test(value) ||
+    /^vault:/i.test(value) ||
+    /^ENC\[.*\]$/.test(value)
+  );
+}
+
+// config-like paths where an UNQUOTED scalar after a secret-named key is a
+// literal value (YAML/.env/.ini/.cfg/.conf/.properties/.toml/.json,
+// kubeconfig, Dockerfile ENV/ARG) — as opposed to code files, where an
+// unquoted value is a code expression (#876).
+const CONFIG_EXTENSION_RE = /\.(ya?ml|ini|cfg|conf|properties|toml|json)$/i;
+const ENV_FILE_RE = /(?:^|[\\/])\.env(?:\..+)?$/i;
+const DOCKERFILE_RE = /(?:^|[\\/])dockerfile(?:\..+)?$/i;
+const KUBECONFIG_RE = /(?:^|[\\/])kubeconfig(?:\..+)?$/i;
+
+function isConfigLikePath(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  return (
+    CONFIG_EXTENSION_RE.test(filePath) ||
+    ENV_FILE_RE.test(filePath) ||
+    DOCKERFILE_RE.test(filePath) ||
+    KUBECONFIG_RE.test(filePath)
+  );
+}
 
 /** Source-safe counterpart to `redactText` (#876): masks only high-confidence
  * literal credential values, never generic identifier/property/assignment
- * syntax. Use this for repository source evidence (tool file reads, grep
+ * syntax, and never a key name or delimiter — only the value itself is ever
+ * replaced. Use this for repository source evidence (tool file reads, grep
  * matches, blame) where the model must be able to trust that what it sees is
  * byte-for-byte the committed source, modulo actual secret values. Untrusted
- * prose/log/web payloads keep using `redactText`. */
-export function redactSourceText(text: string | null | undefined): string {
+ * prose/log/web payloads keep using `redactText`.
+ *
+ * `filePath` (repo-relative, when known) selects the unquoted-literal rule:
+ * config-like files (YAML/.env/.ini/.toml/.json/kubeconfig/Dockerfile) mask
+ * an unquoted secret-named scalar as a literal; code files (and unknown
+ * paths) never do, because there an unquoted value is a code expression. A
+ * QUOTED literal is masked either way — quoting is a value-shape signal a
+ * code expression never has. */
+export function redactSourceText(text: string | null | undefined, filePath?: string | null): string {
   if (!text) return "";
   let redacted = text;
-  for (const pattern of SOURCE_MASKERS) {
-    redacted = redacted.replace(pattern, REDACTED_SOURCE);
+
+  // Bare token-shape secrets: the whole match IS the literal, nothing else
+  // to preserve.
+  redacted = redacted.replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
+  redacted = redacted.replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
+  redacted = redacted.replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
+  redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+
+  // Bearer / Basic auth headers: keep the scheme word, mask only the token.
+  redacted = redacted.replace(
+    /\b(Bearer|Basic)(\s+)([A-Za-z0-9._+/=-]{20,})/gi,
+    (_m, scheme: string, ws: string) => `${scheme}${ws}${REDACTED_SOURCE}`,
+  );
+
+  // PEM private key blocks: keep the BEGIN/END lines, mask only the body.
+  redacted = redacted.replace(
+    /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)([\s\S]*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g,
+    (_m, begin: string, _body: string, end: string) => `${begin}\n${REDACTED_SOURCE}\n${end}`,
+  );
+
+  // Kubernetes / kubeconfig credential-bearing keys: keep the key and
+  // separator, mask only the value.
+  redacted = redacted.replace(
+    /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(\S+)/gi,
+    (_m, key: string, sep: string) => `${key}${sep}${REDACTED_SOURCE}`,
+  );
+
+  // A secret-named key assigned a QUOTED string literal: keep the key,
+  // separator, and quotes; mask only the value. Requires matching quotes and
+  // no quote inside the value, so a code expression (unquoted) never
+  // matches. A quoted reference (e.g. `apiKey: "${API_KEY}"`) is left alone.
+  redacted = redacted.replace(
+    new RegExp(`(${SECRET_KEY_ALTERNATION})(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\3`, "gi"),
+    (m, key: string, sep: string, quote: string, value: string) =>
+      isReferenceValue(value) ? m : `${key}${sep}${quote}${REDACTED_SOURCE}${quote}`,
+  );
+
+  // A secret-named key assigned an UNQUOTED scalar literal: config-file-only
+  // (#876) — in a code file the same shape is a bare identifier/expression
+  // (`apiKey: config.apiKey`), which must survive untouched.
+  if (isConfigLikePath(filePath)) {
+    redacted = redacted.replace(
+      new RegExp(`(${SECRET_KEY_ALTERNATION})(\\s*[:=]\\s*)([^\\s#'"]{8,})`, "gi"),
+      (m, key: string, sep: string, value: string) =>
+        isReferenceValue(value) ? m : `${key}${sep}${REDACTED_SOURCE}`,
+    );
   }
+
   return redacted;
 }
 
@@ -192,8 +265,9 @@ export function maskAndTruncate(
 export function maskAndTruncateSource(
   text: string | null | undefined,
   maxBytes: number,
+  filePath?: string | null,
 ): { text: string; truncated: boolean } {
-  const masked = redactSourceText(text);
+  const masked = redactSourceText(text, filePath);
   const raw = Buffer.from(masked, "utf8");
   if (raw.length <= maxBytes) {
     return { text: masked, truncated: false };

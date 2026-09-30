@@ -23,7 +23,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { maskAndTruncate, maskAndTruncateSource } from "../context/redact.js";
+import { maskAndTruncate, maskAndTruncateSource, redactSourceText } from "../context/redact.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact } from "../model/conversation.js";
@@ -746,7 +746,7 @@ export function redactGrepRecord(
     return rec.line;
   }
   const err = resolveWorkspacePath(rec.path, workspaceRoot).error;
-  if (err === null) return `${rec.path}:${rec.lineno}:${rec.content}`;
+  if (err === null) return `${rec.path}:${rec.lineno}:${redactSourceText(rec.content, rec.path)}`;
   return `${rec.path}:${rec.lineno}:[redacted: sensitive path]`;
 }
 
@@ -977,7 +977,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
   // Repository source content (file reads, grep matches, blame) uses the
   // source-safe policy (#876): it must survive structurally, masking only
   // literal credential values, never identifier/property/assignment syntax.
-  const boundedSource = (s: string, n = cap) => maskAndTruncateSource(s, n).text;
+  const boundedSource = (s: string, n = cap, filePath?: string | null) => maskAndTruncateSource(s, n, filePath).text;
   try {
     let result: Obj;
     switch (tool) {
@@ -986,7 +986,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!p) throw new Error("Missing 'path' argument");
         const res = await readFile(p, ctx, optInt(args.offset), optInt(args.limit));
         if (res.error) throw new Error(res.error);
-        const text = boundedSource(maskAndTruncateSource(res.content, Number.MAX_SAFE_INTEGER).text);
+        const text = boundedSource(maskAndTruncateSource(res.content, Number.MAX_SAFE_INTEGER, p).text, cap, p);
         const payload: Obj = { content: text };
         if (res.range) payload.range = res.range;
         result = payload;
@@ -1039,7 +1039,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!p) throw new Error("Missing 'path' argument");
         const res = await gitBlame(p, ctx, optInt(args.start), optInt(args.end));
         if (res.error) throw new Error(res.error);
-        result = { blame: boundedSource(res.blame) };
+        result = { blame: boundedSource(res.blame, cap, p) };
         break;
       }
       case "git_grep": {
@@ -1058,10 +1058,11 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!repo) throw new Error("Missing 'repo' argument");
         const rawMaxEntries = args.max_entries;
         const maxEntries = rawMaxEntries === null || rawMaxEntries === undefined ? REPO_CONTENTS_DEFAULT_MAX_ENTRIES : optInt(rawMaxEntries) ?? REPO_CONTENTS_DEFAULT_MAX_ENTRIES;
-        const res = await repoContents(repo, args.path ?? "", args.ref, ctx, maxEntries);
+        const contentsPath = args.path ?? "";
+        const res = await repoContents(repo, contentsPath, args.ref, ctx, maxEntries);
         if (res.error) throw new Error(res.error);
         if (res.type === "file" && "content" in res) {
-          const clipped = maskAndTruncateSource(res.content, Math.min(cap, 12000));
+          const clipped = maskAndTruncateSource(res.content, Math.min(cap, 12000), contentsPath);
           result = { ...res, content: clipped.text, truncated: (res.truncated ?? false) || clipped.truncated };
         } else if (res.type === "directory" && cap > 0) {
           const entries: Obj[] = res.entries;
