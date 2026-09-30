@@ -39,6 +39,43 @@ export function redactText(text: string | null | undefined): string {
 }
 
 /**
+ * #846/security-review: mask every literal occurrence of a caller-supplied
+ * secret (an operator's configured model API key), plus its URL-encoded and
+ * base64 forms. This is deliberately separate from `redactText`'s
+ * pattern-based heuristics (parity-locked, see the module doc) — a known
+ * exact secret must be nuked unconditionally, even when it doesn't happen to
+ * match any heuristic pattern (e.g. an opaque key like `sk-...` echoed bare
+ * in a provider's error body, with no `key=`/`Bearer `/etc. framing).
+ * Case-sensitive substring replacement; secrets shorter than 4 characters
+ * are skipped (too likely to nuke unrelated text, and not a plausible secret
+ * length anyway). Callers must run this BEFORE any truncation, so a partial
+ * secret split across a truncation boundary is never left exposed.
+ */
+export function maskKnownSecrets(text: string, secrets: readonly (string | null | undefined)[] = []): string {
+  let masked = text;
+  for (const secret of secrets) {
+    if (!secret || secret.length < 4) continue;
+    const variants = new Set<string>([secret]);
+    try {
+      variants.add(encodeURIComponent(secret));
+    } catch {
+      // Malformed surrogate pairs etc.: skip the URL-encoded variant.
+    }
+    try {
+      variants.add(Buffer.from(secret, "utf8").toString("base64"));
+    } catch {
+      // Unreachable in practice (Buffer.from/toString don't throw here),
+      // kept for symmetry with the encodeURIComponent guard above.
+    }
+    for (const variant of variants) {
+      if (variant.length < 4) continue;
+      masked = masked.split(variant).join(REDACTED);
+    }
+  }
+  return masked;
+}
+
+/**
  * Port of `scripts/redact.py`'s `mask_and_truncate`: redact secrets, then
  * truncate to *maxBytes* UTF-8 bytes with a visible `\n[truncated]` marker.
  * Truncation happens after masking so the byte length reflects the redacted

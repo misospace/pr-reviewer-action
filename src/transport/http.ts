@@ -2,7 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
-import { redactText } from "../context/redact.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -110,17 +110,34 @@ export class TransportFailure extends Error {
  * leaving the operator to guess from a bare status code. */
 const API_FORMAT_404_HINT = "check ai-api-format for this model (openai vs anthropic)";
 
+export interface DescribeTransportFailureOptions {
+  maxBodyChars?: number;
+  /** The operator-configured model API key(s) relevant to this call (e.g.
+   * the tier's `profile.apiKey`) — masked unconditionally, in addition to
+   * (and before) `redactText`'s heuristics, since a provider echoing the
+   * literal key in prose (no `key=`/`Bearer ` framing) would otherwise pass
+   * every heuristic pattern untouched. See `maskKnownSecrets`. */
+  secrets?: readonly (string | null | undefined)[];
+}
+
 /**
  * A short, secret-redacted, length-capped detail string for a
  * `TransportFailure`, suitable for logs and error telemetry (#846):
  * `HTTP <status>: <redacted body excerpt>`, with the #846 hint appended on a
  * 404. Falls back to the bare `.message` for failure kinds that carry no
  * status/body (connect/request timeouts, network errors) — there is nothing
- * to excerpt there.
+ * to excerpt there; `secrets` is still masked out of `.message` in that case.
  */
-export function describeTransportFailure(failure: TransportFailure, maxBodyChars = 300): string {
-  if (failure.status === undefined) return failure.message;
-  const redacted = redactText((failure.body ?? "").trim());
+export function describeTransportFailure(failure: TransportFailure, options: DescribeTransportFailureOptions | number = {}): string {
+  // Backward-compatible with the original `(failure, maxBodyChars)` shape.
+  const resolved: DescribeTransportFailureOptions = typeof options === "number" ? { maxBodyChars: options } : options;
+  const maxBodyChars = resolved.maxBodyChars ?? 300;
+  const secrets = resolved.secrets ?? [];
+  if (failure.status === undefined) return maskKnownSecrets(failure.message, secrets);
+  // Known secrets are masked first, on the full untruncated body, so a
+  // secret split across the truncation boundary is never partially exposed.
+  const withoutKnownSecrets = maskKnownSecrets((failure.body ?? "").trim(), secrets);
+  const redacted = redactText(withoutKnownSecrets);
   const points = Array.from(redacted);
   const body = points.length > maxBodyChars ? `${points.slice(0, maxBodyChars).join("")}...[truncated]` : redacted;
   const hint = failure.status === 404 ? ` — ${API_FORMAT_404_HINT}` : "";

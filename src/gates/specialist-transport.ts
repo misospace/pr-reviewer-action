@@ -1,4 +1,4 @@
-import { redactText } from "../context/redact.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
 import { describeTransportFailure } from "../transport/http.js";
@@ -56,7 +56,7 @@ export function toV2Completion(response: NormalizedModelResponse): Record<string
   return result;
 }
 
-function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure" }>): { message: string; timeout: boolean; status?: number; statusDetail?: string } {
+function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure" }>, apiKey: string): { message: string; timeout: boolean; status?: number; statusDetail?: string } {
   const failure = outcome.failure;
   if (failure.kind === "connect_timeout" || failure.kind === "request_timeout") {
     return { message: "planner model request timed out", timeout: true };
@@ -65,8 +65,11 @@ function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure"
     // #846: `statusDetail` is the clean "HTTP <status>: <excerpt>[ — hint]"
     // form, carried separately for log lines/telemetry; `message` keeps the
     // v2-parity "planner model request failed with ..." phrasing used in
-    // the persisted artifact errors.
-    const statusDetail = describeTransportFailure(failure, 300);
+    // the persisted artifact errors. `secrets` masks the specialist call's
+    // configured key unconditionally, on top of `redactText`'s heuristics —
+    // a provider echoing the bare key in prose would otherwise pass every
+    // heuristic pattern untouched.
+    const statusDetail = describeTransportFailure(failure, { maxBodyChars: 300, secrets: [apiKey] });
     return { message: `planner model request failed with ${statusDetail}`, timeout: false, status: failure.status, statusDetail };
   }
   return { message: failure.message, timeout: false };
@@ -94,15 +97,16 @@ export function specialistRequestFn(config: SpecialistTransportConfig): Speciali
         ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
       });
     } catch (error) {
-      const masked = codePointSlice(redactText(error instanceof Error ? error.message : String(error)), 500);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey])), 500);
       return { ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") };
     }
     if (outcome.status === "ok") {
       const raw = payload.stream === true ? toV2Completion(outcome.response) : outcome.raw;
       return { ok: true, raw };
     }
-    const { message, timeout, status, statusDetail } = failureMessage(outcome);
-    const masked = codePointSlice(redactText(message), 500);
+    const { message, timeout, status, statusDetail } = failureMessage(outcome, config.apiKey);
+    const masked = codePointSlice(redactText(maskKnownSecrets(message, [config.apiKey])), 500);
     return {
       ok: false,
       errorMessage: masked,

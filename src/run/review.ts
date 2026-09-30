@@ -1049,8 +1049,9 @@ async function callTier(
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
-    // endpoint returned HTTP <status>" message.
-    const detail = describeTransportFailure(outcome.failure);
+    // endpoint returned HTTP <status>" message. `secrets` masks this tier's
+    // configured key unconditionally, on top of `redactText`'s heuristics.
+    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
     errorLog(`${profile.label}: transport failures exhausted (${detail})`);
     ws.write(responseArtifact, pyJsonDumps({ error: detail }));
   }

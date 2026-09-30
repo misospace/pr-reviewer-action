@@ -186,8 +186,10 @@ export async function produceVerdict(
     if (outcome.status === "failure") {
       // #846: carry the HTTP status and a redacted body excerpt (plus the
       // ai-api-format hint on a 404) instead of the bare "model endpoint
-      // returned HTTP <status>" message.
-      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure) };
+      // returned HTTP <status>" message. `secrets` masks the configured key
+      // unconditionally — a provider echoing it in bare prose would
+      // otherwise pass `redactText`'s pattern heuristics untouched.
+      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] }) };
     }
     try {
       return { ok: true, verdict: parseVerdictResponse(outcome.raw), raw: outcome.raw, reason: "accepted", detail: "" };

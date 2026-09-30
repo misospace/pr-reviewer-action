@@ -515,8 +515,9 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
-    // returned HTTP <status>" message.
-    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure));
+    // returned HTTP <status>" message. `secrets` masks the configured key
+    // unconditionally, on top of `redactText`'s heuristics.
+    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey] }));
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project

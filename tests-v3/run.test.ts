@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
-import { authoritativeBodyRevision, type PrBodyRevision } from "../src/run/stages.js";
+import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
+import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
@@ -1623,14 +1624,19 @@ test("#846: primary HTTP errors carry status, a redacted body excerpt, and the 4
     }
     res.statusCode = 404;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}` } }));
+    // The provider echoes both a PAT-shaped planted secret AND the literal
+    // configured API key bare (no "key="/"Bearer " framing that redactText's
+    // heuristics look for) — only explicit known-secret masking (#846
+    // security review) catches the latter.
+    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}; credential ${apiKey} rejected` } }));
   });
   const { runDir, cleanup } = withRunDir();
   const errors: string[] = [];
   try {
-    // Default on-model-failure=fail: runReview rejects once the primary
-    // (no fallback configured) exhausts its retries, but the transport
-    // error line is logged synchronously before that throw.
+    // on-model-failure=fail (explicit, since the action default is now
+    // "notice" per #863/#866): runReview rejects once the primary (no
+    // fallback configured) exhausts its retries, but the transport error
+    // line is logged synchronously before that throw.
     await assert.rejects(() => runReview({
       env: {},
       inputs: {
@@ -1643,6 +1649,7 @@ test("#846: primary HTTP errors carry status, a redacted body excerpt, and the 4
         "ai-api-key": apiKey,
         "ai-primary-retries": "2",
         "ai-primary-retry-delay-sec": "0",
+        "on-model-failure": "fail",
       },
       runDir,
       workspace: runDir,
@@ -1663,6 +1670,7 @@ test("#846: primary HTTP errors carry status, a redacted body excerpt, and the 4
     const responseArtifact = JSON.parse(readFileSync(join(runDir, "ai-response.primary.json"), "utf8")) as Record<string, unknown>;
     assert.match(String(responseArtifact.error), /HTTP 404/);
     assert.ok(!String(responseArtifact.error).includes(planted));
+    assert.ok(!String(responseArtifact.error).includes(apiKey), "the configured API key must not appear in the persisted response artifact");
 
     for (const line of errors) {
       assert.ok(!line.includes(apiKey), "the configured API key must never appear anywhere in logs");
@@ -1670,5 +1678,29 @@ test("#846: primary HTTP errors carry status, a redacted body excerpt, and the 4
   } finally {
     await server.close();
     cleanup();
+  }
+});
+
+test("#846 security review: harnessTransportAdapter masks the configured API key out of its thrown transport-failure message", async () => {
+  const apiKey = "harness-secret-key-value";
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { message: `no route for this model; credential ${apiKey} rejected` } }));
+  });
+  try {
+    const transport = harnessTransportAdapter({} as StageEnv);
+    await assert.rejects(
+      () => transport(server.url, "openai", { model: "m", stream: false, messages: [] }, apiKey, 5),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /HTTP 404/);
+        assert.match(error.message, /check ai-api-format for this model \(openai vs anthropic\)/);
+        assert.ok(!error.message.includes(apiKey), `expected the configured API key to be masked, got: ${error.message}`);
+        return true;
+      },
+    );
+  } finally {
+    await server.close();
   }
 });

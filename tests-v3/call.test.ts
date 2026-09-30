@@ -223,3 +223,20 @@ test("the tier loop never falls back from streamed to non-streamed", async () =>
   assert.equal(outcome.status, "transport_exhausted");
   assert.deepEqual(streams, [true, true]);
 });
+
+test("#846 security review: produceVerdict masks the tier's configured API key out of the transport-failure detail", async () => {
+  const apiKey = "produce-verdict-secret-key";
+  const outcome = await produceVerdict(profile({ stream: false, apiKey }), CONTEXT, {
+    call: async () => ({
+      status: "failure",
+      failure: new TransportFailure("http_status", "model endpoint returned HTTP 404", {
+        status: 404,
+        body: `{"error":{"message":"no route for this model; credential ${apiKey} rejected"}}`,
+      }),
+    }),
+  });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.detail, /HTTP 404/);
+  assert.match(outcome.detail, /check ai-api-format for this model \(openai vs anthropic\)/);
+  assert.ok(!outcome.detail.includes(apiKey), `expected the configured API key to be masked, got: ${outcome.detail}`);
+});

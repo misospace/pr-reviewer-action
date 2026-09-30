@@ -5,9 +5,11 @@ import {
   resolveEndpoint,
   TransportFailure,
   classifySocketError,
+  describeTransportFailure,
   DEFAULT_MAX_RESPONSE_BYTES,
   OVERSIZE_ERROR_BODY_PREFIX_BYTES,
 } from "../src/transport/http.js";
+import { maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
@@ -1184,4 +1186,70 @@ test("the clamp sits before the 429/5xx decision and does not consume its attemp
   } finally {
     await server.close();
   }
+});
+
+/** True when redactText's pattern heuristics alone would NOT catch `secret`
+ * in `body` — i.e. the gap `maskKnownSecrets` exists to close. */
+function redactTextLeaksTheSecret(body: string, secret: string): boolean {
+  return redactText(body).includes(secret);
+}
+
+test("maskKnownSecrets: exact, URL-encoded, and base64 forms of a known secret are all masked", () => {
+  const secret = "sk-primary-key-value";
+  assert.equal(maskKnownSecrets(`credential ${secret} rejected`, [secret]), "credential [REDACTED] rejected");
+  assert.equal(
+    maskKnownSecrets(`token=${encodeURIComponent(secret)}`, [secret]),
+    "token=[REDACTED]",
+  );
+  assert.equal(
+    maskKnownSecrets(`b64:${Buffer.from(secret, "utf8").toString("base64")}`, [secret]),
+    "b64:[REDACTED]",
+  );
+  // Multiple secrets, only the relevant one present; empty/short/undefined entries are skipped safely.
+  assert.equal(maskKnownSecrets(`x=${secret}`, ["", "ab", undefined, secret]), "x=[REDACTED]");
+  // No known secret present: text passes through unchanged.
+  assert.equal(maskKnownSecrets("nothing sensitive here", [secret]), "nothing sensitive here");
+});
+
+test("describeTransportFailure: a known secret echoed bare in the body is masked even though it matches no redactText pattern", () => {
+  const secret = "specialist-secret-key-value";
+  const failure = new TransportFailure("http_status", "model endpoint returned HTTP 404", {
+    status: 404,
+    body: `{"error":{"message":"no route for this model; credential ${secret} was rejected"}}`,
+  });
+  const detail = describeTransportFailure(failure, { secrets: [secret] });
+  assert.match(detail, /HTTP 404/);
+  assert.match(detail, /check ai-api-format for this model \(openai vs anthropic\)/);
+  assert.ok(!detail.includes(secret), `expected the known secret to be masked, got: ${detail}`);
+  assert.match(detail, /\[REDACTED\]/);
+
+  // Without the plain-prose framing that redactText's heuristics look for
+  // (no "key="/"Bearer "/etc.), the SAME body leaks the secret if only
+  // redactText's heuristics run — this is exactly the gap `secrets` closes.
+  assert.ok(redactTextLeaksTheSecret(failure.body!, secret), "test sanity: redactText alone must not already catch this shape");
+
+  // The legacy (failure, maxBodyChars) call shape still works.
+  const legacy = describeTransportFailure(failure, 300);
+  assert.match(legacy, /HTTP 404/);
+  assert.ok(legacy.includes(secret), "the legacy call shape has no secrets to mask (regression guard on the old signature)");
+});
+
+test("describeTransportFailure: secrets are masked before truncation, so a secret split at the boundary is never partially exposed", () => {
+  const secret = "a-secret-that-is-quite-long-1234567890";
+  const failure = new TransportFailure("http_status", "model endpoint returned HTTP 500", {
+    status: 500,
+    body: `padding-${"x".repeat(280)}-${secret}`,
+  });
+  const detail = describeTransportFailure(failure, { maxBodyChars: 300, secrets: [secret] });
+  assert.ok(!detail.includes(secret));
+  // The masked marker survives even though the raw secret would have
+  // straddled the 300-char truncation boundary.
+  assert.match(detail, /\[REDACTED\]/);
+});
+
+test("describeTransportFailure: a secret in a status-less failure's bare message is also masked", () => {
+  const secret = "fallback-tier-secret";
+  const failure = new TransportFailure("network", `model request failed: proxy rejected ${secret}`);
+  const detail = describeTransportFailure(failure, { secrets: [secret] });
+  assert.ok(!detail.includes(secret));
 });

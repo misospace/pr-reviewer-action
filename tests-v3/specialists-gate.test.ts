@@ -253,7 +253,10 @@ test("raw provider responses keep same-named integer fields; contract temperatur
 test("transport adapter: v2 message text, timeout classification, streamed turns in the v2 completion shape", async () => {
   const seen: ChatRequestInput[] = [];
   const outcomes: ChatRequestOutcome[] = [
-    { status: "failure", failure: new TransportFailure("http_status", "HTTP 401", { status: 401, body: '  {"error":"bad token=supersecretvalue"}  ' }) },
+    // The literal apiKey below is echoed bare (no "key="/"Bearer " framing),
+    // matching no redactText heuristic pattern — only the explicit
+    // known-secret masking (#846 security review) catches it.
+    { status: "failure", failure: new TransportFailure("http_status", "HTTP 401", { status: 401, body: '  {"error":"bad token=supersecretvalue and key sk-test-key leaked"}  ' }) },
     { status: "failure", failure: new TransportFailure("request_timeout", "model request timed out") },
     {
       status: "ok",
@@ -273,7 +276,7 @@ test("transport adapter: v2 message text, timeout classification, streamed turns
   const failed = await requestFn({ model: "m", stream: false }, "openai", 30);
   assert.equal(failed.ok, false);
   assert.equal(failed.timeout, false);
-  assert.equal(failed.errorMessage, 'planner model request failed with HTTP 401: {"error":"bad [REDACTED]"}');
+  assert.equal(failed.errorMessage, 'planner model request failed with HTTP 401: {"error":"bad [REDACTED] and key [REDACTED] leaked"}');
   const timedOut = await requestFn({ model: "m", stream: false }, "openai", 30);
   assert.equal(timedOut.timeout, true);
   const streamed = await requestFn({ model: "m", stream: true }, "anthropic", 12);
@@ -320,7 +323,11 @@ test("#846: a specialist role's HTTP errors carry status, a redacted body excerp
     }
     res.statusCode = 404;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}` } }));
+    // The provider echoes both a PAT-shaped planted secret AND the literal
+    // configured API key bare (no "key="/"Bearer " framing that redactText's
+    // heuristics look for) — only explicit known-secret masking (#846
+    // security review) catches the latter.
+    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}; credential ${apiKey} rejected` } }));
   });
   try {
     const requestFn = specialistRequestFn({ baseUrl: server.url, apiKey, anthropicVersion: "2023-06-01" });
@@ -356,14 +363,18 @@ test("#846: a specialist role's HTTP errors carry status, a redacted body excerp
     assert.match(testsRole.error_detail ?? "", /HTTP 404/);
     assert.match(testsRole.error_detail ?? "", /check ai-api-format for this model \(openai vs anthropic\)/);
     assert.ok(!(testsRole.error_detail ?? "").includes(planted));
+    assert.ok(!(testsRole.error_detail ?? "").includes(apiKey), "the configured API key must not appear in the specialists.json aggregate");
+    assert.ok(!result.read("specialists.json").includes(apiKey));
 
     const roleArtifact = result.read("specialist-tests.json");
     assert.match(roleArtifact, /HTTP 404/);
     assert.ok(!roleArtifact.includes(planted));
+    assert.ok(!roleArtifact.includes(apiKey), "the configured API key must not appear in the persisted role artifact");
 
     const responseArtifact = result.read("specialist-tests.response.json");
     assert.match(responseArtifact, /HTTP 404/);
     assert.ok(!responseArtifact.includes(planted));
+    assert.ok(!responseArtifact.includes(apiKey), "the configured API key must not appear in the persisted response artifact");
 
     for (const line of [...result.out, ...result.err]) {
       assert.ok(!line.includes(apiKey), "the configured API key must never appear anywhere in the log output");
