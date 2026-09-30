@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""v2-to-v3 behavioral parity harness (#673).
+"""v2-to-v3 behavioral parity harness (#673), frozen at the #681 release gate.
 
-Runs equivalent v2/v3 runtime stages against the same fixtures and reports
-observable behavior drift as a structured, machine-readable report. The
-harness never compares source code or unit-test counts: it invokes the two
-implementations and compares what consumers actually observe.
+Runs v3 runtime stages against the fixtures and compares what consumers
+observe with the recorded v2 behavior, reporting drift as a structured,
+machine-readable report. The harness never compares source code or unit-test
+counts.
 
 Structure:
 
-- Boundaries are declared in ``BOUNDARIES`` below. Each boundary knows how to
-  run one fixture through both implementations and returns their raw outputs.
+- Boundaries are declared in ``BOUNDARIES`` below. Each boundary runs one
+  fixture through the v3 side (``run_new``) and compares it with the v2
+  golden under ``tests/fixtures/parity/goldens/<boundary>/<fixture>.json``,
+  recorded from the v2 runtime before it was removed. Boundary descriptions
+  name the v2 source each golden was recorded from; those files no longer
+  exist.
 - Fixtures live under ``tests/fixtures/parity/<boundary>/*.json``. Later
   migration tickets add fixtures (JSON only); they never copy harness logic.
 - Nondeterministic values (temp paths, timestamps, durations, PIDs, request
@@ -40,13 +44,14 @@ Structure:
 
 CLI: python3 tests/parity_harness.py [--boundary ID] [--report PATH]
 [--skip-gates]. Exits nonzero on any unapproved drift or failed gate.
+``--record-goldens`` re-records goldens from a live pair and is refused for
+frozen boundaries.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import re
@@ -503,14 +508,6 @@ def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[s
     )
 
 
-def run_v2_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        ["bash", str(ROOT / "tests" / "parity_runners" / "v2_config.sh"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def run_v3_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
@@ -581,39 +578,6 @@ CONFIG_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_truncation_side(variant: str, content: str, budget: int, marker: str, workdir: Path) -> SideResult:
-    src = workdir / "input"
-    dst = workdir / f"output-{variant}"
-    src.write_text(content)
-    runner = ROOT / "tests" / "parity_runners" / "truncate_clean.sh"
-    proc = subprocess.run(
-        ["bash", str(runner), variant, str(src), str(dst), str(budget), marker],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-    )
-    if proc.returncode != 0:
-        return SideResult(ok=False, error=proc.stderr.strip())
-    output = dst.read_bytes()
-    digest = hashlib.sha256(output).hexdigest()
-    return SideResult(ok=True, raw=output, values={"output_bytes": str(len(output)), "output_sha256": digest})
-
-
-def make_truncation_runner(side: str) -> Callable[[dict[str, Any], Path], SideResult]:
-    def run(fixture: dict[str, Any], workdir: Path) -> SideResult:
-        spec = fixture["sides"][side]
-        return run_truncation_side(
-            spec["variant"],
-            fixture["content"],
-            int(fixture["budget"]),
-            fixture["marker"],
-            workdir,
-        )
-
-    return run
-
-
 TRUNCATION_BOUNDARY = Boundary(
     id="dataflow-662-corpus-truncation",
     description=(
@@ -650,15 +614,6 @@ def _normalize_selection_unavailable(fixture: dict[str, Any], result: SideResult
         values["diff_fingerprint"] = f"{match.group(1)}unavailable"
     result.values = values
     return result
-
-
-def run_v2_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    result = run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_precheck.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-    return _normalize_selection_unavailable(fixture, result)
 
 
 def run_v3_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -711,14 +666,6 @@ PRECHECK_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_request(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        ["bash", str(ROOT / "tests" / "parity_runners" / "v2_request.sh"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def _v3_parity_env() -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -767,14 +714,6 @@ VERDICT_CATEGORIES = (
 )
 
 
-def run_v2_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_verdict.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def run_v3_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
@@ -809,14 +748,6 @@ VERDICT_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 # Boundary: structured required-check coverage (#750)
 # ---------------------------------------------------------------------------
-
-
-def run_v2_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_required_checks.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
 
 
 def run_v3_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -856,14 +787,6 @@ COVERAGE_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_tool_budget.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=300,
-    )
-
-
 def run_v3_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
@@ -901,14 +824,6 @@ TOOL_BUDGET_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 # Boundary: classification + role selection (#675)
 # ---------------------------------------------------------------------------
-
-
-def run_v2_classification(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_classification.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
 
 
 def _run_v3_fixture_mode(mode_argv: list[str], fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -953,14 +868,6 @@ CLASSIFICATION_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_requirement_ledger(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_requirement_ledger.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def run_v3_requirement_ledger(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["requirement-ledger-fixture"], fixture, workdir)
 
@@ -985,14 +892,6 @@ REQUIREMENT_LEDGER_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 # Boundary: enrichment normalization (#675)
 # ---------------------------------------------------------------------------
-
-
-def run_v2_enrichment(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_enrichment.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
 
 
 def run_v3_enrichment(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -1021,17 +920,7 @@ ENRICHMENT_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-sys.path.insert(0, str(ROOT / "tests" / "parity_runners"))
-from repo_fixture import prepare_repo  # noqa: E402
-
-
-def run_v2_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    repo = prepare_repo(workdir / "repo-v2", fixture)
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_repo_map.py"), str(_fixture_path(fixture)), str(repo)],
-        workdir,
-        timeout=120,
-    )
+from parity_repo_fixture import prepare_repo  # noqa: E402
 
 
 def run_v3_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -1073,14 +962,6 @@ REPO_MAP_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_diff_priority.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def run_v3_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["diff-priority-fixture"], fixture, workdir)
 
@@ -1105,15 +986,6 @@ DIFF_PRIORITY_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_review_threads.py")],
-        workdir,
-        timeout=120,
-        stdin_text=json.dumps(fixture),
-    )
-
-
 def run_v3_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["review-threads-fixture"], fixture, workdir)
 
@@ -1134,15 +1006,6 @@ REVIEW_THREADS_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 # Boundary: outstanding human change requests
 # ---------------------------------------------------------------------------
-
-
-def run_v2_human_reviews(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_human_reviews.py")],
-        workdir,
-        timeout=120,
-        stdin_text=json.dumps(fixture),
-    )
 
 
 def run_v3_human_reviews(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -1168,18 +1031,6 @@ HUMAN_REVIEWS_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    # Fixture via stdin: these runners' fixtures carry credential-shaped
-    # inert dummies, and the v2 secret-detector treats a read of such a file
-    # as a clear-text-logging source (see the runner docstrings).
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_pr_thread.py")],
-        workdir,
-        timeout=120,
-        stdin_text=json.dumps(fixture),
-    )
-
-
 def run_v3_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["pr-thread-fixture"], fixture, workdir)
 
@@ -1203,16 +1054,6 @@ PR_THREAD_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 # Boundary: related-code context (#675)
 # ---------------------------------------------------------------------------
-
-
-def run_v2_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    repo = prepare_repo(workdir / "repo-v2", fixture)
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_related_code.py"), str(repo)],
-        workdir,
-        timeout=120,
-        stdin_text=json.dumps(fixture),
-    )
 
 
 def run_v3_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -1253,7 +1094,7 @@ RELATED_CODE_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-from repo_fixture import prepare_workspace  # noqa: E402
+from parity_repo_fixture import prepare_workspace  # noqa: E402
 
 
 def _resolve_change_anchors_fixture(fixture: dict[str, Any], workdir: Path) -> tuple[dict[str, Any], Path]:
@@ -1312,14 +1153,6 @@ CHANGE_ANCHORS_BOUNDARY = Boundary(
 # ---------------------------------------------------------------------------
 
 
-def run_v2_image_provenance(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_image_provenance.py"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=120,
-    )
-
-
 def run_v3_image_provenance(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["image-provenance-fixture"], fixture, workdir)
 
@@ -1341,14 +1174,6 @@ IMAGE_PROVENANCE_BOUNDARY = Boundary(
     fixtures_dir="image-provenance",
     run_new=run_v3_image_provenance,
 )
-
-
-def run_v2_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:
-    return run_json_runner(
-        ["bash", str(ROOT / "tests" / "parity_runners" / "v2_corpus.sh"), str(_fixture_path(fixture))],
-        workdir,
-        timeout=180,
-    )
 
 
 def run_v3_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:

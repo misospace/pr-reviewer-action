@@ -11,7 +11,7 @@ stubbed API payloads:
   never on the event payload alone;
 - a superseded head (PR advanced past the triggering CI run) is skipped;
 - the ``verify`` subcommand (pre-model-work guard) exits 0/2/3 exactly like
-  the publication guard (scripts/verify_pr_head.sh);
+  the publication guard;
 - untrusted PR title/body/branch/ref can never reach GITHUB_OUTPUT or any
   shell command: only validated integers and 40-hex SHAs are emitted.
 """

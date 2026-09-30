@@ -1,14 +1,15 @@
 """Semantic fixtures must not be reviewed as fork PRs.
 
-A fixture PR object without head/base repo identity made derive_is_fork_pr
+A fixture PR object without head/base repo identity made the fork check
 fail closed, so the tool loop was skipped ("fork-pr") on every native_loop
-run over the semantic corpus.
+run over the semantic corpus. The runtime's check (src/platform/pr.ts
+deriveIsFork) treats a PR as same-repo only when the head repo full name is
+present and equals the base repo's.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -18,16 +19,6 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from eval_harness import _fixture_pr_object, _materialize_semantic_fixture  # noqa: E402
-
-
-def _derive_is_fork(pr_object_path: Path) -> str:
-    result = subprocess.run(
-        ["bash", "-c", f'source "{SCRIPTS_DIR / "platform_api.sh"}"; derive_is_fork_pr "$1"', "_", str(pr_object_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
 
 
 def test_missing_repo_identity_defaults_to_the_scenario_repo():
@@ -55,8 +46,9 @@ def test_materialized_fixture_is_not_a_fork_for_the_pipeline(tmp_path):
     }
     _materialize_semantic_fixture(tmp_path / "repo", fixture, "owner/repo")
     written = tmp_path / "repo" / ".semantic-fixture" / "pr.json"
-    assert json.loads(written.read_text())["head"]["repo"]["full_name"] == "owner/repo"
-    assert _derive_is_fork(written) == "false"
+    pr = json.loads(written.read_text())
+    assert pr["head"]["repo"]["full_name"] == "owner/repo"
+    assert pr["base"]["repo"]["full_name"] == pr["head"]["repo"]["full_name"]
 
 
 def test_materialized_fork_fixture_stays_a_fork(tmp_path):
@@ -67,7 +59,9 @@ def test_materialized_fork_fixture_stays_a_fork(tmp_path):
         "pr_files": [],
     }
     _materialize_semantic_fixture(tmp_path / "repo", fixture, "owner/repo")
-    assert _derive_is_fork(tmp_path / "repo" / ".semantic-fixture" / "pr.json") == "true"
+    pr = json.loads((tmp_path / "repo" / ".semantic-fixture" / "pr.json").read_text())
+    assert pr["head"]["repo"]["full_name"] == "fork/repo"
+    assert pr["base"]["repo"]["full_name"] != pr["head"]["repo"]["full_name"]
 
 
 def test_review_timeout_is_configurable(monkeypatch):
