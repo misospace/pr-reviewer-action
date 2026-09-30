@@ -622,7 +622,10 @@ export function renderEquivalentPathsMarkdown(artifact: EquivalentPathsArtifact)
     "handling, limits) and check every sibling member for the same. Report " +
     "only asymmetric enforcement — a sibling missing a check the others " +
     "have — as a finding; stylistic differences between the paths are out " +
-    "of scope.",
+    "of scope. A difference the code documents as deliberate (a comment or " +
+    "docstring at the site explaining why the paths differ) is not a " +
+    "missing check — weigh it, but do not report it as asymmetric " +
+    "enforcement.",
   );
   lines.push("");
   artifact.groups.forEach((group, index) => {

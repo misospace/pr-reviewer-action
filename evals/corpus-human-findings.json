@@ -1364,6 +1364,25 @@
           "anchor_confidence": "medium",
           "needs_external_knowledge": true
         }
+      },
+      {
+        "id": "misospace/pr-reviewer-action#854@84119b04",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 854,
+        "head_sha": "84119b04c21378474f39c67fea8a9346cd4f24f9",
+        "base_sha": "aef71e39fe8394583ee9ae64e73b7a068ef6984a",
+        "defect": {
+          "description": "The canonical Tangled pull resolver builds TangledPullIdentity at two return sites — the explicit-target branch inline and the list branch via the local buildIdentity helper — and both copy sourceSha: ctx.sourceSha into the result without ever comparing it to the matched pull's head SHA, so a requirement like 'the resolved pull matches the requested source SHA' reads as satisfied while nothing enforces it. Merely preserving a field is not evidence it was validated: the two equivalent construction paths have to be compared together to see that neither enforces the comparison.",
+          "file": "src/platform/tangled-bobbin.ts",
+          "severity": "major"
+        },
+        "source": {
+          "url": "https://github.com/misospace/pr-reviewer-action/pull/854",
+          "production_bot_at_head": "APPROVED",
+          "production_bot_flagged_same": false,
+          "anchor_confidence": "high",
+          "needs_external_knowledge": false
+        }
       }
     ],
     "clean": []

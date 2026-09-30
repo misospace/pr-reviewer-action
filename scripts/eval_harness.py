@@ -2326,6 +2326,7 @@ def evaluate_live_semantics(
 def generate_report(
     results: list[BenchmarkResult],
     corpus: BenchmarkCorpus,
+    equivalent_paths: str | None = None,
 ) -> dict[str, Any]:
     """Generate the full benchmark report."""
     active_modes = set()
@@ -2607,6 +2608,9 @@ def generate_report(
             "completed_runs": completed_runs,
             "errored_runs": total_runs - completed_runs,
             "corpus_source": None,  # set by caller
+            # #875 A/B provenance: which equivalent-paths arm produced this
+            # report (None = the runtime's own default was left in force).
+            "equivalent_paths": equivalent_paths,
         },
         "mode_summary": {m: mode_metrics[m] for m in sorted(mode_metrics)},
         "per_pr_results": report_results,
@@ -2641,6 +2645,7 @@ def _new_real_pr_mode_summary() -> dict[str, Any]:
 def generate_real_pr_report(
     scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun | list[ReviewRun]]]],
     corpus_source: str | None = None,
+    equivalent_paths: str | None = None,
 ) -> dict[str, Any]:
     """Build the real-PR corpus report from every scenario's per-mode runs.
 
@@ -2792,6 +2797,9 @@ def generate_real_pr_report(
             "total_runs": total_runs,
             "completed_runs": completed_runs,
             "errored_runs": total_runs - completed_runs,
+            # #875 A/B provenance (same key as the fixture-corpus report):
+            # which equivalent-paths arm produced this report.
+            "equivalent_paths": equivalent_paths,
         },
         "mode_summary": {m: mode_summary[m] for m in sorted(mode_summary)},
         "per_scenario_results": per_scenario,
@@ -2873,6 +2881,7 @@ def run_real_pr_corpus(
     context_only: bool = False,
     runs_per_mode: int = 1,
     claim_falsification: bool = False,
+    equivalent_paths: str | None = None,
 ) -> dict[str, Any] | None:
     """Run every scenario in a real-PR corpus across the given modes.
 
@@ -2949,15 +2958,18 @@ def run_real_pr_corpus(
         scenario_runs.append((scenario, mode_runs))
 
     if context_only:
-        report = generate_context_report(context_rows)
-        report["metadata"]["claim_falsification"] = claim_falsification
-        return report
-    report = generate_real_pr_report(scenario_runs)
-    report["metadata"]["claim_falsification"] = claim_falsification
-    return report
+        context_report = generate_context_report(context_rows, equivalent_paths=equivalent_paths)
+        context_report["metadata"]["claim_falsification"] = claim_falsification
+        return context_report
+    real_pr_report = generate_real_pr_report(scenario_runs, equivalent_paths=equivalent_paths)
+    real_pr_report["metadata"]["claim_falsification"] = claim_falsification
+    return real_pr_report
 
 
-def generate_context_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def generate_context_report(
+    rows: list[dict[str, Any]],
+    equivalent_paths: str | None = None,
+) -> dict[str, Any]:
     """Summarize --context-only rows: how often the defect reached the context."""
     vulnerable = [r for r in rows if r["kind"] == "vulnerable" and r.get("context_built")]
     with_lines = [r for r in vulnerable if r.get("defect_lines")]
@@ -2967,7 +2979,8 @@ def generate_context_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return values[len(values) // 2] if values else None
     return {
         "metadata": {"mode": "context_only", "scenarios": len(rows),
-                     "context_built": sum(1 for r in rows if r.get("context_built"))},
+                     "context_built": sum(1 for r in rows if r.get("context_built")),
+                     "equivalent_paths": equivalent_paths},
         "summary": {
             "vulnerable_built": len(vulnerable),
             "defect_file_in_diff": sum(1 for r in vulnerable if r.get("defect_file_in_diff")),
@@ -3172,6 +3185,15 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         "api_key": args.api_key,
         "github_token": args.github_token,
     }
+    # #875 A/B arm: main()'s fixture-path application never runs for the
+    # real-PR split (main() dispatches here first), so the arm must be
+    # applied here too — without it both supposed A/B arms run the runtime's
+    # own default (off) on the required real-PR catch/FP measurement path.
+    if args.equivalent_paths is not None:
+        model_config["extra_env"] = {
+            **(model_config.get("extra_env") or {}),
+            "EQUIVALENT_PATHS": args.equivalent_paths,
+        }
 
     print(
         f"Loaded {len(corpus.vulnerable)} vulnerable + {len(corpus.clean)} clean "
@@ -3195,6 +3217,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             context_only=args.context_only,
             runs_per_mode=args.runs_per_mode,
             claim_falsification=args.claim_falsification == "true",
+            equivalent_paths=args.equivalent_paths,
         )
 
     if args.dry_run:
@@ -3353,7 +3376,7 @@ def main() -> int:
             results.append(bm)
 
     # Generate report
-    report = generate_report(results, corpus)
+    report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
 

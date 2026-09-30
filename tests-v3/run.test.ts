@@ -1095,6 +1095,13 @@ test("#796: harness obligations are off by default", async () => {
 });
 
 async function equivalentPathsRun(extraInputs: Record<string, string>): Promise<string> {
+  const { md } = await equivalentPathsRunWithResult(extraInputs);
+  return md;
+}
+
+async function equivalentPathsRunWithResult(
+  extraInputs: Record<string, string>,
+): Promise<{ md: string; result: Awaited<ReturnType<typeof runReview>> }> {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict()));
@@ -1143,7 +1150,7 @@ async function equivalentPathsRun(extraInputs: Record<string, string>): Promise<
       " }",
       "",
     ].join("\n");
-    await runReview({
+    const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
       inputs: { "github-token": "tok", repo: "o/r", "pr-number": "9", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k", ...extraInputs },
       runDir,
@@ -1152,7 +1159,8 @@ async function equivalentPathsRun(extraInputs: Record<string, string>): Promise<
       persistArtifacts: true,
       quiet: true,
     });
-    return existsSync(join(runDir, "equivalent-paths.md")) ? readFileSync(join(runDir, "equivalent-paths.md"), "utf8") : "";
+    const md = existsSync(join(runDir, "equivalent-paths.md")) ? readFileSync(join(runDir, "equivalent-paths.md"), "utf8") : "";
+    return { md, result };
   } finally {
     await server.close();
     cleanup();
@@ -1164,6 +1172,30 @@ test("#875: with equivalent-paths on, a return-type-sharing pair produces the 'E
   assert.match(md, /# Equivalent Paths to Compare/);
   assert.match(md, /resolveExplicit/);
   assert.match(md, /resolveFromList/);
+});
+
+test("#875: the section instructs the reviewer to weigh documented differences rather than report them as missing checks", async () => {
+  const md = await equivalentPathsRun({ "equivalent-paths": "true" });
+  assert.match(md, /documents as deliberate/);
+  assert.match(md, /not a missing check/);
+});
+
+test("#875 negative: with equivalent-paths on, grouped equivalent paths never manufacture findings — a clean review stays clean", async () => {
+  const { result } = await equivalentPathsRunWithResult({ "equivalent-paths": "true" });
+  // The hint is advisory input to the correctness specialist only: the
+  // detector and its section can never add findings, escalate the verdict,
+  // or touch required-check coverage on their own. A model that (as here)
+  // returns approve with no findings must produce exactly that — the
+  // #875 acceptance property that a deliberately documented semantic
+  // difference between grouped paths cannot become a false finding.
+  assert.equal(result.outputs.verdict, "approve");
+  assert.deepEqual(JSON.parse(result.outputs.findings) as unknown[], []);
+  // No required checks are configured in this fixture, so the honest
+  // output is "none" — the point is that the hint introduced no gap.
+  assert.equal(result.outputs.requiredChecks, "none");
+  assert.match(result.marker, /"review_result":"clean"/);
+  assert.ok(!result.marker.includes('"review_result":"partial"'));
+  assert.ok(!result.marker.includes('"review_result":"issues"'));
 });
 
 test("#875: equivalent-paths is off by default (no section written)", async () => {

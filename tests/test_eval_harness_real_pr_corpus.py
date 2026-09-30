@@ -22,6 +22,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import eval_harness
+
 from eval_harness import (
     CONTEXT_ONLY_ENV,
     REPLAY_ENV,
@@ -35,6 +37,7 @@ from eval_harness import (
     _normalize_path_for_match,
     _prepare_pinned_workspace,
     _review_timeout_sec,
+    build_parser,
     generate_context_report,
     score_context,
     generate_real_pr_report,
@@ -672,6 +675,20 @@ class TestContextOnly:
         assert len(corpus.vulnerable) >= 50 and not corpus.clean
         assert all(s.defect and s.defect.file for s in corpus.vulnerable)
 
+    def test_854_entry_pins_the_equivalent_path_resolver_shape(self):
+        """#875: the pr-reviewer-action#854 entry pins the canonical pull
+        resolver head whose two TangledPullIdentity construction sites copy
+        sourceSha without comparing it — the equivalent-paths A/B's expected
+        catch, recorded explicitly so the measurement cannot devolve into
+        'paths were grouped' while the reviewer still misses the
+        uncompared field."""
+        corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
+        entry = next(s for s in corpus.vulnerable if s.number == 854 and s.repo_full_name == "misospace/pr-reviewer-action")
+        assert entry.head_sha == "84119b04c21378474f39c67fea8a9346cd4f24f9"
+        assert entry.defect is not None
+        assert "sourceSha" in entry.defect.description
+        assert "buildIdentity" in entry.defect.description
+
     def test_9075_entry_pins_the_pre_fix_head(self):
         """#842: the joryirving/home-ops#9075 entry used to pin b3d77613,
         the commit that already added mmproj-F16.gguf to `files:` — the
@@ -788,6 +805,102 @@ class TestRunsPerModeRealPRCorpus:
         off_report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
         assert seen == [False, False]
         assert off_report["metadata"]["claim_falsification"] is False
+
+
+class TestEquivalentPathsArmRealPRPath:
+    """#875 maintainer follow-up: the --equivalent-paths A/B arm must reach
+    the real-PR corpus path. main() dispatches to _main_real_pr_corpus before
+    its fixture-path arm application runs, so the arm has to be applied (and
+    recorded as report provenance) on this path explicitly."""
+
+    def _corpus(self):
+        defect = RealPRDefect("d", "a.py", None, "major")
+        vuln = RealPRScenario(
+            id="v1", repo_full_name="acme/repo", number=1, head_sha=GOOD_SHA,
+            expected_clean=False, defect=defect,
+        )
+        clean = RealPRScenario(
+            id="c1", repo_full_name="acme/repo", number=2, head_sha=GOOD_SHA,
+            expected_clean=True, defect=None,
+        )
+        return RealPRCorpus(vulnerable=[vuln], clean=[clean])
+
+    @staticmethod
+    def _capture_arm(monkeypatch):
+        captured: list[dict] = []
+
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
+            captured.append(model_config)
+            return ReviewRun(
+                mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"],
+                findings=[], verdict="approve",
+            )
+
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
+        return captured
+
+    def test_true_arm_reaches_run_review_for_pr(self, monkeypatch, tmp_path):
+        captured = self._capture_arm(monkeypatch)
+        report = run_real_pr_corpus(
+            self._corpus(), ["tools_off"], tmp_path,
+            {"extra_env": {"EQUIVALENT_PATHS": "true"}}, equivalent_paths="true",
+        )
+        assert captured, "the real-PR path must invoke run_review_for_pr"
+        assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "true" for mc in captured)
+        assert report["metadata"]["equivalent_paths"] == "true"
+
+    def test_false_arm_propagates_false_not_true(self, monkeypatch, tmp_path):
+        captured = self._capture_arm(monkeypatch)
+        report = run_real_pr_corpus(
+            self._corpus(), ["tools_off"], tmp_path,
+            {"extra_env": {"EQUIVALENT_PATHS": "false"}}, equivalent_paths="false",
+        )
+        assert captured
+        assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "false" for mc in captured)
+        assert report["metadata"]["equivalent_paths"] == "false"
+
+    def test_arm_omitted_records_none(self, monkeypatch, tmp_path):
+        captured = self._capture_arm(monkeypatch)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
+        assert captured
+        assert all("EQUIVALENT_PATHS" not in (mc.get("extra_env") or {}) for mc in captured)
+        assert report["metadata"]["equivalent_paths"] is None
+
+    def _corpus_file(self, tmp_path):
+        corpus = {
+            "real_pr_corpus": {
+                "vulnerable": [{
+                    "id": "v1", "repo_full_name": "acme/repo", "number": 1,
+                    "head_sha": GOOD_SHA, "expected_clean": False,
+                    "defect": {"description": "d", "file": "a.py", "severity": "major"},
+                }],
+                "clean": [],
+            }
+        }
+        path = tmp_path / "corpus.json"
+        path.write_text(json.dumps(corpus), encoding="utf-8")
+        return path
+
+    def _main_args(self, tmp_path, arm):
+        return build_parser().parse_args([
+            "--corpus", str(self._corpus_file(tmp_path)),
+            "--modes", "tools_off",
+            "--equivalent-paths", arm,
+        ])
+
+    def test_main_real_pr_corpus_applies_the_true_arm(self, monkeypatch, tmp_path, capsys):
+        captured = self._capture_arm(monkeypatch)
+        rc = eval_harness._main_real_pr_corpus(self._main_args(tmp_path, "true"))
+        assert rc == 0
+        assert captured
+        assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "true" for mc in captured)
+
+    def test_main_real_pr_corpus_applies_the_false_arm(self, monkeypatch, tmp_path, capsys):
+        captured = self._capture_arm(monkeypatch)
+        rc = eval_harness._main_real_pr_corpus(self._main_args(tmp_path, "false"))
+        assert rc == 0
+        assert captured
+        assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "false" for mc in captured)
 
 
 class TestGenerateRealPRReportRunsPerMode:
