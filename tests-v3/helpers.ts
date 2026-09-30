@@ -10,11 +10,14 @@ export interface CapturedRequest {
 export interface MockServer {
   url: string;
   requests: CapturedRequest[];
+  /** Handler exceptions, kept local to the test process — never sent to the client. */
+  handlerErrors: unknown[];
   close(): Promise<void>;
 }
 
 export function startMockServer(handler: (req: IncomingMessage, body: string, res: http.ServerResponse) => void | Promise<void>): Promise<MockServer> {
   const requests: CapturedRequest[] = [];
+  const handlerErrors: unknown[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -24,11 +27,13 @@ export function startMockServer(handler: (req: IncomingMessage, body: string, re
       try {
         await handler(req, body, res);
       } catch (error) {
+        // CodeQL js/stack-trace-exposure: the exception (which may carry a
+        // stack or other diagnostic detail) stays in this process — a test
+        // can inspect `handlerErrors` — and the client only ever sees a
+        // fixed, constant body.
+        handlerErrors.push(error);
         res.statusCode = 500;
-        // CodeQL js/stack-trace-exposure: only the message, never `error`
-        // itself (which could carry a stack), reaches the localhost test
-        // client.
-        res.end(error instanceof Error ? error.message : String(error));
+        res.end("internal test helper error");
       }
     });
   });
@@ -38,6 +43,7 @@ export function startMockServer(handler: (req: IncomingMessage, body: string, re
       resolve({
         url: `http://127.0.0.1:${address.port}`,
         requests,
+        handlerErrors,
         close: () => new Promise<void>((resolveClose, rejectClose) => {
           server.close((error) => error ? rejectClose(error) : resolveClose());
         }),
