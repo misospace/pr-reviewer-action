@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -1101,3 +1103,73 @@ def test_main_requires_repos_maintainers_bots():
             assert exc.code != 0
         else:
             raise AssertionError("expected argparse to reject missing required input")
+
+
+# ---------------------------------------------------------------------------
+# GitHub client redirect safety
+# ---------------------------------------------------------------------------
+
+
+
+def test_github_client_uses_safe_opener_refuses_redirects():
+    """The GitHub client uses the safe opener that refuses redirects."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import urllib.request
+
+    SECRET = "test-gh-token"
+    target_seen = {"requests": 0}
+    origin_seen = {"requests": 0, "auth": None}
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            target_seen["requests"] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"data": "should not be reached"}).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    class OriginHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            origin_seen["requests"] += 1
+            origin_seen["auth"] = self.headers.get("Authorization")
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/api")
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    target_server = HTTPServer(("127.0.0.1", 0), TargetHandler)
+    origin_server = HTTPServer(("127.0.0.1", 0), OriginHandler)
+
+    try:
+        threading.Thread(target=target_server.serve_forever, daemon=True).start()
+        threading.Thread(target=origin_server.serve_forever, daemon=True).start()
+
+        # Direct test of the safe opener with a request that would redirect
+        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
+        
+        url = f"http://127.0.0.1:{origin_server.server_port}/test"
+        headers = {
+            "Authorization": f"Bearer {SECRET}",
+            "Accept": "application/vnd.github+json",
+        }
+        req = urllib.request.Request(url, headers=headers)
+        
+        # The safe opener should raise an error when it encounters a redirect
+        with pytest.raises(urllib.error.HTTPError):
+            OPENER_NO_REDIRECT.open(req, timeout=30)
+
+        # Verify the origin was contacted but the redirect target was not
+        assert origin_seen["requests"] == 1, "origin should have been contacted once"
+        assert target_seen["requests"] == 0, "redirect target must never be contacted"
+        assert origin_seen["auth"] == f"Bearer {SECRET}", "authorization header should be sent to origin"
+    finally:
+        origin_server.shutdown()
+        target_server.shutdown()

@@ -557,12 +557,12 @@ class TestPostIssueArgument:
         """The supplied issue number reaches the posted comment URL."""
         captured: dict[str, object] = {}
 
-        def fake_urlopen(request, timeout=None):
+        def fake_opener_open(request, timeout=None):
             captured["url"] = request.full_url
             captured["body"] = json.loads(request.data.decode("utf-8"))["body"]
             return io.BytesIO(b"{}")
 
-        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("pr_reviewer.http_safe.OPENER_NO_REDIRECT.open", fake_opener_open)
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
@@ -584,11 +584,11 @@ class TestPostIssueArgument:
         """The scheduled sweep's --post-issue 472 hits the #472 issue."""
         captured: dict[str, object] = {}
 
-        def fake_urlopen(request, timeout=None):
+        def fake_opener_open(request, timeout=None):
             captured["url"] = request.full_url
             return io.BytesIO(b"{}")
 
-        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("pr_reviewer.http_safe.OPENER_NO_REDIRECT.open", fake_opener_open)
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
@@ -616,3 +616,88 @@ class TestPostIssueArgument:
 
         assert rc == 0
         assert "skipping the" in capsys.readouterr().err
+
+    def test_post_tracking_comment_refuses_redirects(self, tmp_path, monkeypatch, capsys):
+        """The tracker comment client refuses HTTP redirects to prevent token leakage."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        SECRET = "test-gh-token"
+        target_seen = {"requests": 0}
+        origin_seen = {"requests": 0, "auth": None}
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                target_seen["requests"] += 1
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"id": "should not be reached"}).encode())
+
+            def log_message(self, *_args):
+                pass
+
+        class OriginHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                origin_seen["requests"] += 1
+                origin_seen["auth"] = self.headers.get("Authorization")
+                # Send a redirect to the target
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/redirect-target")
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_args):
+                pass
+
+        target_server = HTTPServer(("127.0.0.1", 0), TargetHandler)
+        origin_server = HTTPServer(("127.0.0.1", 0), OriginHandler)
+
+        try:
+            threading.Thread(target=target_server.serve_forever, daemon=True).start()
+            threading.Thread(target=origin_server.serve_forever, daemon=True).start()
+
+            # Mock the API URL to point to our origin server
+            monkeypatch.setenv("GITHUB_TOKEN", SECRET)
+            monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
+            monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+            # Patch the _post_tracking_comment to use our test servers
+            def fake_post_comment(body, issue_number):
+                from urllib.request import Request
+                from pr_reviewer.http_safe import OPENER_NO_REDIRECT
+
+                # Construct URL pointing to our test origin server
+                url = f"http://127.0.0.1:{origin_server.server_port}/api/repos/test/issues/{issue_number}/comments"
+                payload = json.dumps({"body": body}).encode("utf-8")
+                req = Request(
+                    url,
+                    data=payload,
+                    method="POST",
+                    headers={
+                        "Authorization": f"Bearer {SECRET}",
+                        "Accept": "application/vnd.github+json",
+                        "Content-Type": "application/json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
+                try:
+                    OPENER_NO_REDIRECT.open(req, timeout=15).read()
+                except Exception as exc:
+                    print(f"Failed to post summary: {exc}", file=sys.stderr)
+
+            monkeypatch.setattr(eval_weekly_summary, "_post_tracking_comment", fake_post_comment)
+
+            rc = eval_weekly_summary.main([
+                "--report", str(FIXTURES / "eval-report-agentic.json"),
+                "--stamp", STAMP,
+                "--post-issue", "715",
+            ])
+
+            # Verify the origin was contacted but the redirect target was not
+            assert origin_seen["requests"] == 1, "origin should have been contacted once"
+            assert target_seen.get("requests", 0) == 0, "redirect target must never be contacted"
+        finally:
+            origin_server.shutdown()
+            target_server.shutdown()

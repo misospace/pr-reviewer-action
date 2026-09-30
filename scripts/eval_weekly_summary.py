@@ -220,7 +220,18 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
     raises: a tracker outage must not fail the whole job just for the
     comment (the step summary itself is the primary surface).
     """
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
+
+    # sys.path is already set up in main() to access pr_reviewer modules
+    try:
+        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
+    except ImportError:
+        # Fallback if import fails (shouldn't happen in normal operation)
+        import sys as _sys
+        _root = Path(__file__).resolve().parent.parent
+        if str(_root) not in _sys.path:
+            _sys.path.insert(0, str(_root))
+        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
 
     token = os.environ.get("GITHUB_TOKEN", "")
     gh_repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -247,7 +258,7 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
         },
     )
     try:
-        urlopen(req, timeout=15).read()
+        OPENER_NO_REDIRECT.open(req, timeout=15).read()
         print(f"Posted regression summary to {summary_url}.")
     except Exception as exc:  # noqa: BLE001 - best-effort by contract
         print(f"Failed to post summary to {summary_url}: {exc}", file=sys.stderr)
