@@ -11,6 +11,7 @@ import { runPrecheck } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
+import { nonEmpty } from "./run-dir.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -135,8 +136,8 @@ function upstreamLinkMode(raw: string | undefined): UpstreamLinkMode {
  * caller that wants a real `run`'s artifacts must pass its `PR_REVIEWER_RUN_DIR`
  * to `publish` explicitly (the action entry does this by construction). */
 function isFileNonEmpty(env: NodeJS.ProcessEnv, name: string): boolean {
-  const runDir = env.PR_REVIEWER_RUN_DIR ?? "";
-  if (runDir === "") return false;
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return false;
   try {
     return statSync(join(runDir, name)).size > 0;
   } catch {

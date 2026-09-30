@@ -201,6 +201,114 @@ test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (c
   }
 });
 
+/** Blocker follow-up (maintainer review on #838): `PR_REVIEWER_RUN_DIR` set
+ * to an empty or whitespace-only string must normalize to absent, not
+ * survive `??` and resolve (via Node's `path` APIs) to the process cwd —
+ * silently reopening the exact checkout-as-run-dir hole the run-dir default
+ * was fixed to close. Runs the identical adversarial setup as the test
+ * above (forged pr.diff/pr-files.seed.json sitting in cwd) with an explicit
+ * but blank `PR_REVIEWER_RUN_DIR`, and asserts the platform diff/files still
+ * win and cwd is still never read from or written to. */
+async function assertBlankRunDirEnvDoesNotBypassTheFix(runDirEnvValue: string): Promise<void> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const checkout = mkdtempSync(join(tmpdir(), "v3-run-test-checkout-"));
+  const originalCwd = process.cwd();
+  try {
+    writeFileSync(
+      join(checkout, "pr.diff"),
+      "diff --git a/FORGED.md b/FORGED.md\n--- a/FORGED.md\n+++ b/FORGED.md\n@@ -1 +1 @@\n-x\n+y\n",
+    );
+    writeFileSync(
+      join(checkout, "pr-files.seed.json"),
+      JSON.stringify([{ filename: "FORGED.md", status: "modified", additions: 1, deletions: 1, changes: 2 }]),
+    );
+    process.chdir(checkout);
+    const result = await runReview({
+      env: { PR_REVIEWER_RUN_DIR: runDirEnvValue },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      platformAdapter: mockPlatform(),
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const diffArtifact = Buffer.from(result.artifacts.get("pr.diff") ?? new Uint8Array(0)).toString("utf8");
+    assert.match(diffArtifact, /README\.md/);
+    assert.doesNotMatch(diffArtifact, /FORGED\.md/);
+    const filesArtifact = Buffer.from(result.artifacts.get("pr-files.json") ?? new Uint8Array(0)).toString("utf8");
+    assert.match(filesArtifact, /README\.md/);
+    assert.doesNotMatch(filesArtifact, /FORGED\.md/);
+    assert.equal(existsSync(join(checkout, "ai-output.json")), false);
+    // The blank env value never resolves to the checkout: a fresh directory
+    // was created elsewhere instead.
+    assert.notEqual(result.runDir, checkout);
+    assert.ok(existsSync(result.runDir));
+  } finally {
+    process.chdir(originalCwd);
+    await server.close();
+    rmSync(checkout, { recursive: true, force: true });
+  }
+}
+
+test("#838 follow-up: PR_REVIEWER_RUN_DIR=\"\" does not bypass the checkout-trust fix", async () => {
+  await assertBlankRunDirEnvDoesNotBypassTheFix("");
+});
+
+test("#838 follow-up: a whitespace-only PR_REVIEWER_RUN_DIR does not bypass the checkout-trust fix", async () => {
+  await assertBlankRunDirEnvDoesNotBypassTheFix("   \t  ");
+});
+
+test("#838 follow-up: the resolved run dir is logged, returned, and written to GITHUB_OUTPUT", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const workDir = mkdtempSync(join(tmpdir(), "v3-run-test-workdir-"));
+  try {
+    const outputFile = join(workDir, "gh-output.txt");
+    const logLines: string[] = [];
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: outputFile },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      workspace: workDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logLines.push(line),
+    });
+    // No explicit runDir/PR_REVIEWER_RUN_DIR: the default created a fresh,
+    // real directory distinct from the workspace, and returned it.
+    assert.ok(result.runDir);
+    assert.notEqual(result.runDir, workDir);
+    assert.ok(existsSync(result.runDir));
+    // Logged once, so a caller with no other way to discover the anonymous
+    // default can find it.
+    assert.ok(logLines.includes(`run artifacts: ${result.runDir}`));
+    // Written to GITHUB_OUTPUT as `run-dir`, for a caller chaining steps —
+    // first, ahead of the review's own step outputs appended later.
+    const output = readFileSync(outputFile, "utf8");
+    assert.ok(output.startsWith(`run-dir=${result.runDir}\n`));
+  } finally {
+    await server.close();
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
 test("primary failure with a configured fallback publishes the fallback review", async () => {
   let dead = true;
   const deadServer = await startMockServer((_req, _body, res) => {

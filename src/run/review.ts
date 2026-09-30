@@ -22,7 +22,7 @@ import type { PlatformReadAdapter } from "../platform/types.js";
 import { buildPlatformReadAdapter } from "./platform.js";
 import { buildStageEnv, validateStageEnv, type RunContext, type StageEnv } from "./env.js";
 import { RunWorkspace } from "./workspace.js";
-import { createRunDir } from "./run-dir.js";
+import { createRunDir, nonEmpty } from "./run-dir.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
 import {
@@ -55,6 +55,7 @@ import { buildRunMetadataMarker } from "../metadata/markers.js";
 import {
   buildCacheHitRatioOutput,
   buildToolCallsOutput,
+  formatOutputAssignment,
   formatReviewStepOutputs,
   renderStepSummary,
   type ReviewStepOutputs,
@@ -135,6 +136,11 @@ export interface RunReviewOptions {
 
 export interface RunReviewResult {
   outputs: ReviewStepOutputs;
+  /** The resolved artifact directory this run wrote to (#838 follow-up): the
+   * caller's own `runDir`/`PR_REVIEWER_RUN_DIR` when given, else the fresh
+   * private temp directory the default created — also logged once (`run
+   * artifacts: <path>`) and written to `GITHUB_OUTPUT` as `run-dir`. */
+  runDir: string;
   /** The run metadata marker the publish step embeds (a shadow-comparison
    * surface; the run entry itself never publishes). */
   marker: string;
@@ -272,9 +278,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // PR checkout. Reusing checkout content as this run's own artifacts (the
   // "Reusing PR diff fetched by precheck" / pr-files.seed.json paths below)
   // would let a PR that commits pr.diff / pr-files.seed.json at its root
-  // control the diff/file list the reviewer sees.
-  const runDir = options.runDir ?? options.env.PR_REVIEWER_RUN_DIR
+  // control the diff/file list the reviewer sees. `nonEmpty` normalizes an
+  // empty/whitespace-only value to absent: `""` would otherwise survive `??`
+  // and resolve (via Node's path APIs) to the process cwd anyway — silently
+  // reopening the exact hole this default was fixed to close.
+  const runDir = nonEmpty(options.runDir) ?? nonEmpty(options.env.PR_REVIEWER_RUN_DIR)
     ?? createRunDir(options.env.RUNNER_TEMP || options.env.TMPDIR || "/tmp");
+  // The run dir is reported once — stderr for a human/log reader, and
+  // GITHUB_OUTPUT (when set) for a caller chaining `run` into a later step —
+  // since with no explicit runDir/PR_REVIEWER_RUN_DIR it is an anonymous
+  // private temp directory the caller has no other way to discover. A
+  // caller chaining `run` into `publish` should still pass PR_REVIEWER_RUN_DIR
+  // explicitly to both rather than relying on this output.
+  log(`run artifacts: ${runDir}`);
+  persistOutputs(options.env.GITHUB_OUTPUT ?? "/dev/null", formatOutputAssignment("run-dir", runDir));
   // #838: the workspace (the checkout tools read: repo map, standards file,
   // related-code context) stays GITHUB_WORKSPACE/cwd as before — only the
   // artifact run dir's default changed above. Falling back to `runDir` here
@@ -876,6 +893,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   });
   return {
     outputs,
+    runDir,
     marker,
     artifacts: ws.snapshot(),
     reviewArtifact: reviewRecord,
