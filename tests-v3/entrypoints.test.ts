@@ -197,11 +197,24 @@ test("#873: publishInputFromEnv reads the smart harness for an escalated route",
   });
 });
 
-test("#873: publishInputFromEnv omits partialCoverage without a tool-harness artifact", () => {
+test("#873/#838: an explicit run dir with a missing harness artifact fails closed (coverage unknown, never 'complete')", () => {
   withRunDir((dir) => {
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, true);
   });
+});
+
+test("#873/#838: no explicit PR_REVIEWER_RUN_DIR (absent or empty) fails closed, never falling back to cwd/GITHUB_WORKSPACE", () => {
+  for (const env of [
+    { PUBLISH_MODE: "comment" },
+    { PUBLISH_MODE: "comment", PR_REVIEWER_RUN_DIR: "" },
+    { PUBLISH_MODE: "comment", PR_REVIEWER_RUN_DIR: "   " },
+  ]) {
+    const input = publishInputFromEnv(env as NodeJS.ProcessEnv, "github");
+    assert.equal(input.partialCoverage, undefined, JSON.stringify(env));
+    assert.equal(input.coverageUnknown, true, JSON.stringify(env));
+  }
 });
 
 test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrades APPROVE to COMMENT for a partial-coverage run", async () => {
@@ -230,4 +243,93 @@ test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrade
     assert.notEqual(api.submitted[0]!.event, "APPROVE");
     assert.equal(api.submitted[0]!.event, "COMMENT");
   });
+});
+
+// ---------------------------------------------------------------------------
+// #873/#838 cross-process regression: `run` writes its coverage-gap artifact
+// into a PRIVATE run dir; the checkout (cwd) has no harness artifact at all,
+// or — the dangerous variant — a forged "complete" one an attacker-controlled
+// PR could commit at its repository root. `publish` (a separate process from
+// `run`) must read the real state only through an explicit, non-empty
+// PR_REVIEWER_RUN_DIR, and must fail closed (never APPROVE) when that isn't
+// available — never quietly trusting whatever sits in the checkout.
+// ---------------------------------------------------------------------------
+
+const FORGED_COMPLETE_HARNESS = JSON.stringify({ stop_reason: "model_stop" }); // no partial_coverage key
+
+function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): NodeJS.ProcessEnv {
+  return {
+    REVIEW_ROUTE: "primary",
+    VERDICT: "approve",
+    REQUIRED_CHECKS: "complete",
+    PUBLISH_MODE: "review_verdict",
+    ALLOW_APPROVE: "true",
+    IS_FORK_PR: "false",
+    HEAD_SHA: "a".repeat(40),
+    PR_NUMBER: "7",
+    COMMENT_MARKER: "<!-- ai-pr-review -->",
+    REVIEW_MARKDOWN: "Looks fine.",
+    ...overrides,
+  } as NodeJS.ProcessEnv;
+}
+
+test("#873/#838 regression: publish reads the real partial state from an explicit run dir, and fails closed (never APPROVE, never the checkout) without one", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "v3-run-private-"));
+  const checkoutDir = mkdtempSync(join(tmpdir(), "v3-checkout-"));
+  const originalCwd = process.cwd();
+  try {
+    // `run`'s own private artifact: a real partial-coverage tool harness.
+    writeFileSync(join(runDir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+
+    // The checkout has no harness artifact in one scenario, and a forged
+    // "complete" one (no partial_coverage key) in the other — the shape a
+    // malicious PR could commit at its repository root to fake a clean run.
+    const checkoutVariants: Array<{ name: string; seed: () => void }> = [
+      { name: "no artifact in checkout", seed: () => {} },
+      {
+        name: "forged complete artifact in checkout",
+        seed: () => writeFileSync(join(checkoutDir, "tool-harness.json"), FORGED_COMPLETE_HARNESS),
+      },
+    ];
+
+    // cwd is the checkout for the whole test: proves any accidental
+    // fallback to process.cwd() would read the forged artifact, not the
+    // real one in runDir.
+    process.chdir(checkoutDir);
+
+    // 1. Explicit PR_REVIEWER_RUN_DIR: publish reads the REAL (partial)
+    // state and never submits APPROVE.
+    {
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: runDir }), "github");
+      assert.ok(input.partialCoverage);
+      assert.equal(input.coverageUnknown, undefined);
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published");
+      assert.equal(api.submitted[0]!.event, "COMMENT");
+    }
+
+    // 2. No explicit PR_REVIEWER_RUN_DIR (absent, and the empty-string
+    // form): publish must fail closed — never APPROVE — regardless of
+    // what the checkout contains, and never read the checkout at all.
+    for (const variant of checkoutVariants) {
+      variant.seed();
+      for (const runDirValue of [undefined, ""]) {
+        const env = publishVerdictEnv(runDirValue === undefined ? {} : { PR_REVIEWER_RUN_DIR: runDirValue });
+        const input = publishInputFromEnv(env, "github");
+        assert.equal(input.partialCoverage, undefined, variant.name);
+        assert.equal(input.coverageUnknown, true, variant.name);
+        const api = new MinimalPublishApi("a".repeat(40));
+        const result = await publishReview(input, api, { diffText: "" });
+        assert.equal(result.status, "published", variant.name);
+        assert.notEqual(api.submitted[0]!.event, "APPROVE", variant.name);
+        assert.equal(api.submitted[0]!.event, "COMMENT", variant.name);
+        assert.match(api.submitted[0]!.body, /could not be verified/, variant.name);
+      }
+    }
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
 });

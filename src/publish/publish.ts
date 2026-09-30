@@ -76,6 +76,14 @@ export interface PublishInput {
    * and the metadata marker records `coverage: partial` with the stop
    * reason. Presentation beyond this notice is #811's. */
   partialCoverage?: PartialCoverage;
+  /** #873/#838: true when the caller could not determine the tool-loop
+   * coverage state at all (the standalone `publish` CLI path: no explicit,
+   * non-empty `PR_REVIEWER_RUN_DIR`, or its harness artifact was missing or
+   * unreadable — never a fallback to the checkout). Distinct from
+   * `partialCoverage` being absent (a confirmed-complete run): this means
+   * publish could not confirm completeness, so it fails closed exactly like
+   * a confirmed gap — see `markerReviewResult`. */
+  coverageUnknown?: boolean;
   /** #847: the #810/#702 tool-loop request budget this run resolved, so the
    * size-scaled default can be measured from published reviews alone.
    * Omitted when no tool harness ran. */
@@ -127,21 +135,26 @@ export function sanitizeForPublication(
  * request_changes` vs everything else, but (#873) still reports `partial`
  * rather than `clean` when required-check coverage is incomplete or the
  * tool loop stopped short — coverage honesty is not opt-in to a verdict
- * policy, only the findings-driven states (findings/clean vs issues) are. */
+ * policy, only the findings-driven states (findings/clean vs issues) are.
+ * `coverageUnknown` (#838: the standalone `publish` CLI could not confirm
+ * the tool-loop coverage state at all) folds into the same `partial`
+ * bucket — publish never reads "I couldn't check" as "it was clean". */
 export function markerReviewResult(input: {
   verdictPolicy?: string | undefined;
   verdict: string;
   findings?: unknown;
   requiredChecks: string;
   partialCoverage?: PartialCoverage | undefined;
+  coverageUnknown?: boolean | undefined;
 }): string {
-  const coverageIncomplete = input.requiredChecks === "incomplete" || Boolean(input.partialCoverage);
+  const coverageGap = Boolean(input.partialCoverage) || Boolean(input.coverageUnknown);
+  const coverageIncomplete = input.requiredChecks === "incomplete" || coverageGap;
   if (input.verdictPolicy !== "strict") {
     if (input.verdict === "request_changes") return "issues";
     return coverageIncomplete ? "partial" : "clean";
   }
   const result = strictReviewResult(input.verdict, input.findings, input.requiredChecks);
-  return input.partialCoverage && result !== "issues" ? "partial" : result;
+  return coverageGap && result !== "issues" ? "partial" : result;
 }
 
 /** (#873) True when the review's own coverage signals say it did not
@@ -539,6 +552,11 @@ export async function publishReview(
     // serializes byte-identically to the pre-#810 marker.
     markerContext.coverage = "partial";
     markerContext.coverageStopReason = input.partialCoverage.stop_reason;
+  } else if (input.coverageUnknown) {
+    // #873/#838: distinct from a confirmed #810 gap — the standalone
+    // `publish` CLI had no explicit run dir (or an unreadable harness) and
+    // so could not confirm coverage at all. No stop reason to report.
+    markerContext.coverage = "unknown";
   }
   const metadataMarker = buildRunMetadataMarker(markerContext);
   const markers = emitReviewMarkers((() => {
@@ -665,6 +683,13 @@ export async function publishReview(
           messages.push(
             `Withholding native approval for #${input.prNumber} (allow_approve=${input.allowApprove}, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? input.isForkPr})`,
           );
+        } else if (input.coverageUnknown) {
+          // #873/#838: the standalone publish path had no explicit run dir
+          // (or an unreadable harness artifact) and so could not confirm
+          // whether the tool-loop investigation finished — fail closed
+          // rather than guess it was clean.
+          body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an advisory comment rather than an approval.\n`;
+          messages.push(`Withholding native approval for #${input.prNumber} (review coverage unknown)`);
         } else {
           // #873: the guardrails would allow it, but the review's own
           // coverage signals say it did not finish — fail closed rather
