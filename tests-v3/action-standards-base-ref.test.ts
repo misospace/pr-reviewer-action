@@ -114,16 +114,47 @@ test("#885: actionMain wires precheck's base SHA into the review stage — stand
 
     github = await startGithubMock(baseSha, headSha);
 
-    const exitCode = await actionMain({
-      ...process.env,
+    // A synthetic pull_request event for PR #7, matching the mocked PR
+    // object above — never the real runner's event (see the hermetic env
+    // note below).
+    const eventPath = join(runnerTemp, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "opened",
+      pull_request: { number: 7, head: { sha: headSha } },
+    }));
+
+    // Deliberately NOT `{ ...process.env, ... }`: when this test itself runs
+    // inside a GitHub Actions job (as it does in this repo's own CI), the
+    // real runner sets GITHUB_EVENT_PATH/GITHUB_EVENT_NAME/GITHUB_REF/etc. to
+    // THIS repo's own PR event — spreading process.env would leak that real
+    // event into actionMain, which would then read a different PR number/SHA
+    // than the mocked #7 fixture, take a different precheck path, and the
+    // run-dir/standards assertions below would fail nondeterministically
+    // depending on what CI happened to be reviewing. Every GITHUB_*/runner
+    // field actionMain or its precheck path consults is set explicitly here
+    // instead, from a minimal base (PATH/HOME only), so the test's outcome
+    // never depends on the ambient environment it happens to run in.
+    const env: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "pull_request",
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_REF: "refs/pull/7/merge",
+      GITHUB_HEAD_REF: "feature",
+      GITHUB_BASE_REF: "main",
+      GITHUB_SHA: headSha,
       GITHUB_REPOSITORY: "o/r",
       GITHUB_SERVER_URL: "https://github.com",
       GITHUB_API_URL: github.url,
       GITHUB_WORKSPACE: workspace,
       RUNNER_TEMP: runnerTemp,
-      // No GITHUB_EVENT_PATH and no PR_REVIEWER_BASE_REF: this test asserts
-      // actionMain derives the base ref itself from precheck, the way the
-      // real composite action runs — never set by the caller/test.
+      GITHUB_OUTPUT: join(runnerTemp, "gh-output.txt"),
+      GITHUB_STEP_SUMMARY: join(runnerTemp, "step-summary.md"),
+      PR_NUMBER: "7",
+      // No PR_REVIEWER_BASE_REF: this test asserts actionMain derives the
+      // base ref itself from precheck, the way the real composite action
+      // runs — never set by the caller/test.
       "INPUT_GITHUB-TOKEN": "tok",
       "INPUT_PR-NUMBER": "7",
       "INPUT_AI-BASE-URL": model.url,
@@ -136,7 +167,8 @@ test("#885: actionMain wires precheck's base SHA into the review stage — stand
       // Keep this test to precheck+review only: "comment" mode with
       // publish-review-comment left at its default "false" never publishes.
       "INPUT_PUBLISH-MODE": "comment",
-    });
+    };
+    const exitCode = await actionMain(env);
     assert.equal(exitCode, 0);
 
     const runDirs = readdirSync(runnerTemp).filter((name) => name.startsWith("v3-review-run-"));

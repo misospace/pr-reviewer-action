@@ -98,9 +98,6 @@ function runGit(args: string[], workspace: string, timeoutSec: number): Buffer |
   }
 }
 
-/** `-z` (NUL-separated entries, no C-quoting of unusual path bytes) so a
- * path with a tab, newline, or non-ASCII byte is parsed exactly, never
- * re-escaped or split on the wrong character. */
 /** Whether `ref` resolves to a real commit in this repository — distinct
  * from "a candidate path is absent at a valid ref". A ref that cannot be
  * resolved (unknown/garbage ref, or `workspace` is not a git repository at
@@ -127,6 +124,10 @@ function verifyRef(ref: string, workspace: string, timeoutSec: number): boolean 
   }
 }
 
+/** Parses `git ls-tree -z` output: `-z` NUL-separates entries and disables
+ * C-quoting of unusual path bytes, so a path with a tab, newline, or
+ * non-ASCII byte is parsed exactly, never re-escaped or split on the wrong
+ * character. */
 function parseLsTree(stdout: Buffer): RefEntry[] {
   const text = stdout.toString("utf8");
   const entries: RefEntry[] = [];
