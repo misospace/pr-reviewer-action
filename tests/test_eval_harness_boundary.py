@@ -257,9 +257,10 @@ def _write_fake_script(
 
 def _git(path: Path, *args: str) -> str:
     """Run a git command in `path`; return stripped stdout (checked)."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     result = subprocess.run(
         ["git", "-C", str(path), *args],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=env,
     )
     return result.stdout.strip()
 
@@ -284,13 +285,13 @@ def _init_origin_repo(
     _git(origin, "config", "user.name", "eval")
     (origin / "marker.txt").write_text("base\n", encoding="utf-8")
     _git(origin, "add", "marker.txt")
-    _git(origin, "commit", "-m", "base")
+    _git(origin, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", "base")
     base_sha = _git(origin, "rev-parse", "HEAD")
     shas: dict[int, str] = {}
     for pr in prs:
         (origin / "marker.txt").write_text(f"{pr}\n", encoding="utf-8")
         _git(origin, "add", "marker.txt")
-        _git(origin, "commit", "-m", f"pr {pr}")
+        _git(origin, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", f"pr {pr}")
         sha = _git(origin, "rev-parse", "HEAD")
         _git(origin, "update-ref", f"refs/pull/{pr}/head", sha)
         # Keep main parked at the base: the PR commit is reachable ONLY via

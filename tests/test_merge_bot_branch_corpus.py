@@ -11,6 +11,7 @@ tests/test_push_harvest_branch.sh.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,8 +42,9 @@ def _fake_run_sequence(*results: subprocess.CompletedProcess):
 
 
 def _git(cwd: Path, *args: str) -> str:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, env=env
     )
     assert result.returncode == 0, f"git {args} failed: {result.stderr}"
     return result.stdout
@@ -334,7 +336,7 @@ def test_atomicity_branch_moves_between_ls_remote_and_fetch_merges_s1_exactly(
     _git(seed, "config", "user.name", "Test Seed")
     (seed / "README.md").write_text("seed\n", encoding="utf-8")
     _git(seed, "add", "README.md")
-    _git(seed, "commit", "-q", "-m", "init")
+    _git(seed, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "init")
     _git(seed, "remote", "add", "origin", str(remote))
     _git(seed, "push", "-q", "origin", "main")
     _git(seed, "checkout", "-q", "-b", "bot/x")
@@ -342,7 +344,7 @@ def test_atomicity_branch_moves_between_ls_remote_and_fetch_merges_s1_exactly(
         '{"real_pr_corpus": {"vulnerable": [{"id": "s1"}]}}', encoding="utf-8"
     )
     _git(seed, "add", "corpus.json")
-    _git(seed, "commit", "-q", "-m", "S1")
+    _git(seed, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "S1")
     _git(seed, "push", "-q", "origin", "bot/x")
 
     ours = tmp_path / "ours"
@@ -364,7 +366,7 @@ def test_atomicity_branch_moves_between_ls_remote_and_fetch_merges_s1_exactly(
         '{"real_pr_corpus": {"vulnerable": [{"id": "s2"}]}}', encoding="utf-8"
     )
     _git(concurrent, "add", "corpus.json")
-    _git(concurrent, "commit", "-q", "-m", "S2")
+    _git(concurrent, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "S2")
     _git(concurrent, "push", "-q", "--force", "origin", "bot/x")
 
     data = mbc.fetch_bot_branch_corpus_at("bot/x", s1_sha, "corpus.json")
