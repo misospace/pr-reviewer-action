@@ -105,11 +105,28 @@ export function decisionToOutputs(decision: ReviewDecision): { shouldReview: boo
   return { shouldReview: true, skipReason: "" };
 }
 
+/** A `labeled` event's label as GitHub/Forgejo actually send it: an object
+ * with a `name` field. A bare string is also accepted (normalized producers
+ * such as `readEvent` already resolve to this), but the type itself must
+ * not hide the object shape the way a plain `string` field did (#892). */
+export type PrecheckEventLabel = string | { name?: string | null } | null | undefined;
+
 export interface PrecheckEvent {
   name?: string;
   action?: string;
-  label?: string;
+  label?: PrecheckEventLabel;
 }
+
+/** The label a `labeled` event carries, normalized to its name string
+ * (GitHub/Forgejo send `{ name, color, ... }`, never a bare string). */
+export function eventLabelName(label: PrecheckEventLabel | unknown): string {
+  if (typeof label === "string") return label;
+  if (label !== null && typeof label === "object" && typeof (label as { name?: unknown }).name === "string") {
+    return (label as { name: string }).name;
+  }
+  return "";
+}
+
 
 export interface PrecheckSpec {
   env: Record<string, string>;
@@ -230,7 +247,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   let forceReview = envFlag(env, "FORCE_REVIEW", false);
   const event = spec.event;
   if (event && event.name === "pull_request" && event.action === "labeled") {
-    if (event.label === rereviewLabel) {
+    if (eventLabelName(event.label) === rereviewLabel) {
       forceReview = true;
     } else {
       return platformOutputs(

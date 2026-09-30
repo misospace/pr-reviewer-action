@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
@@ -533,5 +533,78 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
     process.chdir(originalCwd);
     rmSync(runDir, { recursive: true, force: true });
     rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+// ── #892: readEvent's event.name / event.label normalization ─────────────
+
+test("readEvent populates event.name from GITHUB_EVENT_NAME — the real GitHub payload has no top-level name", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    // The real GitHub `labeled` payload shape: no top-level `name`, and
+    // `label` is an object, not a string.
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 1, name: "ai-review", color: "00ff00" },
+      pull_request: { number: 7, head: { sha: "a".repeat(40) } },
+    }));
+    const { event } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "pull_request",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "pull_request");
+    assert.equal(event?.action, "labeled");
+    assert.equal(event?.label, "ai-review");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent normalizes a Forgejo-shaped labeled event (act_runner also sets GITHUB_EVENT_NAME)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-forgejo-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 3, name: "ai-review", color: "ededed" },
+      pull_request: { number: 12, head: { sha: "b".repeat(40) } },
+      number: 12,
+    }));
+    const { event } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "pull_request",
+      FORGEJO_API_URL: "https://forge.example.invalid",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "pull_request");
+    assert.equal(event?.label, "ai-review");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent normalizes a bare-string label too (never regress the existing string path)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-string-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ action: "labeled", label: "ai-review" }));
+    const { event } = readEvent({ GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: "pull_request" } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.label, "ai-review");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent never sets event.label for a non-labeled event (no stray empty label)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-nolabel-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ action: "synchronize", pull_request: { number: 7, head: { sha: "a".repeat(40) } } }));
+    const { event } = readEvent({ GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: "pull_request" } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "pull_request");
+    assert.equal(event?.action, "synchronize");
+    assert.equal("label" in (event ?? {}), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -3,13 +3,13 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
-import { runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
-import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent } from "./entrypoints.js";
+import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
 
@@ -44,14 +44,11 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
   if (text !== "") appendFileSync(file, text);
 }
 
-/** The label a `labeled` event carries (GitHub sends `{ name }`). */
-export function eventLabelName(label: unknown): string {
-  if (typeof label === "string") return label;
-  if (label !== null && typeof label === "object" && typeof (label as { name?: unknown }).name === "string") {
-    return (label as { name: string }).name;
-  }
-  return "";
-}
+/** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
+ * `precheck/decide.ts` (#892) so both `decide.ts`'s label gate and this
+ * cleanup path normalize the same way; re-exported here for callers (and
+ * tests) that already import it from this module. */
+export { eventLabelName };
 
 /** The stage environment every ported stage reads: the typed config
  * projected to its SCREAMING_SNAKE ABI plus the derived runner context the
@@ -97,6 +94,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
   if (pre.should_review !== "true") {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
+    await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }
 
@@ -138,8 +136,12 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       VERDICT_POLICY: review.verdictPolicy,
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
+    // The event-gated maybeClearRereviewLabel below owns label cleanup here;
+    // publish's own rerunLabel strip would fire on every run, not just
+    // label-triggered ones.
+    const { rerunLabel: _rerunLabel, ...publishInput } = publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform);
     const input = {
-      ...publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform),
+      ...publishInput,
       // The #810 coverage notice and the #812 CI conclusion reach the
       // published marker and body only through these.
       ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
@@ -154,10 +156,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   }
 
   // ── Re-review label ───────────────────────────────────────────────────
-  const label = eventLabelName(event?.label);
-  if (event?.action === "labeled" && label !== "" && label === stage.REREVIEW_LABEL) {
-    await clearRereviewLabel(stage).catch(() => undefined);
-  }
+  await maybeClearRereviewLabel(stage, event);
 
   const gate = failOnRequestChanges(stage, review.outputs.verdict);
   return publishFailed ? Math.max(gate, 1) : gate;
@@ -171,6 +170,19 @@ function failOnRequestChanges(stage: Env, verdict: string): number {
   }
   process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
   return 0;
+}
+
+/** Clears the rerun label whenever this run was actually triggered by it —
+ * an event `action === "labeled"` whose label name matches `REREVIEW_LABEL`
+ * — regardless of whether the run went on to review or skip (#892: the
+ * skip branch used to `return` before this ran at all, stranding the
+ * label). Never clears on any other trigger (push, `synchronize`, an
+ * unrelated label, etc). */
+async function maybeClearRereviewLabel(stage: Env, event: StepEvent | undefined): Promise<void> {
+  const label = eventLabelName(event?.label);
+  if (event?.action === "labeled" && label !== "" && label === stage.REREVIEW_LABEL) {
+    await clearRereviewLabel(stage).catch(() => undefined);
+  }
 }
 
 async function clearRereviewLabel(stage: Env): Promise<void> {

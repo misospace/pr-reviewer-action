@@ -364,6 +364,82 @@ def test_score_rejects_null_fp_label_on_blocker_major_non_catch(tmp_path, synthe
         )
 
 
+def test_pack_scenarios_same_head_different_ids(tmp_path):
+    """Two scenarios with the same repo/number/head_sha but different corpus ids
+    (e.g., multiple defects at one PR head) must pack as distinct scenarios with
+    distinct roster entries, not collide on the same key."""
+    report = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "first defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "first finding")]}},
+            ),
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "second defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "second finding")]}},
+            ),
+        ]
+    }
+    # Manually assign distinct ids to both scenarios (simulating corpus structure
+    # where multiple defects at one head have ids like `...@head` and `...@head-2`)
+    report["per_scenario_results"][0]["id"] = "acme/widgets#1@aaaaaaaa"
+    report["per_scenario_results"][1]["id"] = "acme/widgets#1@aaaaaaaa-2"
+
+    path = tmp_path / "report.json"
+    _write(path, report)
+
+    out_dir = tmp_path / "packets"
+    ea.main(
+        [
+            "pack",
+            "--arm", f"on={path}",
+            "--packets", "1",
+            "--out-dir", str(out_dir),
+        ]
+    )
+
+    roster = json.loads((out_dir / "roster.json").read_text())
+    unblind_key = json.loads((out_dir / "unblind-key.json").read_text())
+    packet = json.loads((out_dir / "packet1.json").read_text())
+
+    # Both scenarios should be present in the packet with their distinct ids
+    assert len(packet) == 2, f"expected 2 scenario groups, got {len(packet)}"
+    ids = {g["meta"]["id"] for g in packet}
+    assert ids == {"acme/widgets#1@aaaaaaaa", "acme/widgets#1@aaaaaaaa-2"}, f"got ids {ids}"
+
+    # Each scenario has 1 finding
+    all_findings = [f for group in packet for f in group["findings"]]
+    assert len(all_findings) == 2
+    assert {f["message"] for f in all_findings} == {"first finding", "second finding"}
+
+    # Both scenarios should be in the roster with distinct scenario ids (not the same PR key)
+    assert len(roster) == 2
+    assert all(r["arm"] == "on" for r in roster)
+    prs = [r["pr"] for r in roster]
+    assert len(set(prs)) == 2, f"expected distinct scenario ids, got {prs}"
+    assert set(prs) == {"acme/widgets#1@aaaaaaaa", "acme/widgets#1@aaaaaaaa-2"}
+
+    # Score it: both scenarios caught their respective defects and both should be counted
+    verdicts = [_fake_verdict(fid, "yes") for fid in unblind_key]
+    verdicts_path = tmp_path / "verdicts.json"
+    _write(verdicts_path, verdicts)
+    summary_path = tmp_path / "summary.json"
+    ea.main(
+        [
+            "score",
+            "--packets", str(out_dir / "packet1.json"),
+            "--unblind-key", str(out_dir / "unblind-key.json"),
+            "--verdicts", str(verdicts_path),
+            "--runs", str(out_dir / "roster.json"),
+            "--out-summary", str(summary_path),
+        ]
+    )
+    summary = json.loads(summary_path.read_text())
+    assert summary["totals"]["on"]["runs"] == 2
+    assert summary["totals"]["on"]["semantic_catch"] == 2
+    assert summary["totals"]["on"]["blocker_major"] == 2
+
+
 def test_pack_multiple_files_same_arm_same_pr_distinct_runs(tmp_path):
     """Two report files both tagged as the "on" arm, both containing the
     same PR/mode, must produce two distinct runs -- not collide on the same
@@ -518,3 +594,41 @@ def test_reproduces_796_adjudicated_totals(tmp_path):
     paired = out["paired"]["metrics"]
     assert paired["catch"]["prs_on_better"] == expected["prs_on_better"] == 8
     assert paired["catch"]["prs_on_worse"] == expected["prs_on_worse"] == 9
+
+
+def test_pack_rejects_mixed_identity_schemas(tmp_path):
+    """One arm with corpus ids and one without would key the same scenario two
+    ways and silently drop the pair; pack must fail closed instead."""
+    with_id = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "finding")]}},
+            )
+        ]
+    }
+    with_id["per_scenario_results"][0]["id"] = "acme/widgets#1@aaaaaaaa"
+    without_id = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "finding")]}},
+            )
+        ]
+    }
+    without_id["per_scenario_results"][0].pop("id", None)
+    on_path = tmp_path / "on.json"
+    off_path = tmp_path / "off.json"
+    _write(on_path, with_id)
+    _write(off_path, without_id)
+
+    with pytest.raises(SystemExit, match="mixed scenario identity schemas"):
+        ea.main(
+            [
+                "pack",
+                "--arm", f"on={on_path}",
+                "--arm", f"off={off_path}",
+                "--packets", "1",
+                "--out-dir", str(tmp_path / "packets"),
+            ]
+        )
