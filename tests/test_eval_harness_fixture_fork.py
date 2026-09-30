@@ -68,10 +68,10 @@ def test_review_timeout_is_configurable(monkeypatch):
     from eval_harness import _review_timeout_sec
 
     monkeypatch.delenv("EVAL_REVIEW_TIMEOUT_SEC", raising=False)
-    assert _review_timeout_sec() == 300
+    assert _review_timeout_sec() == 1200
     monkeypatch.setenv("EVAL_REVIEW_TIMEOUT_SEC", "900")
     assert _review_timeout_sec() == 900
     monkeypatch.setenv("EVAL_REVIEW_TIMEOUT_SEC", "5")
     assert _review_timeout_sec() == 30
     monkeypatch.setenv("EVAL_REVIEW_TIMEOUT_SEC", "junk")
-    assert _review_timeout_sec() == 300
+    assert _review_timeout_sec() == 1200

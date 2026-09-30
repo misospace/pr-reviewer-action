@@ -20,6 +20,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import eval_harness
 from eval_harness import (
     RealPRCorpus,
     RealPRDefect,
@@ -29,6 +30,7 @@ from eval_harness import (
     _files_from_pinned_diff,
     _normalize_path_for_match,
     _prepare_pinned_workspace,
+    _review_timeout_sec,
     generate_context_report,
     score_context,
     generate_real_pr_report,
@@ -594,3 +596,184 @@ class TestContextOnly:
         corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
         assert len(corpus.vulnerable) >= 50 and not corpus.clean
         assert all(s.defect and s.defect.file for s in corpus.vulnerable)
+
+    def test_9075_entry_pins_the_pre_fix_head(self):
+        """#842: the joryirving/home-ops#9075 entry used to pin b3d77613,
+        the commit that already added mmproj-F16.gguf to `files:` — the
+        defect the human flagged. It must now pin the commit before that
+        fix (935d0f80), which still has mmproj set without a matching
+        files: entry."""
+        corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
+        entry = next(s for s in corpus.vulnerable if s.number == 9075 and s.repo_full_name == "joryirving/home-ops")
+        assert entry.head_sha == "935d0f80ae4f151c0cfbb87c85712b064f2547ad"
+        assert entry.head_sha != "b3d77613f68eff88127d014a5c5aa59a4dd38a84"
+
+
+# ---------------------------------------------------------------------------
+# --runs-per-mode for real-PR corpora (#839)
+# ---------------------------------------------------------------------------
+
+
+class TestRunsPerModeRealPRCorpus:
+    def _corpus(self):
+        defect = RealPRDefect("d", "a.py", None, "major")
+        vuln = RealPRScenario(
+            id="v1", repo_full_name="acme/repo", number=1, head_sha=GOOD_SHA,
+            expected_clean=False, defect=defect,
+        )
+        clean = RealPRScenario(
+            id="c1", repo_full_name="acme/repo", number=2, head_sha=GOOD_SHA,
+            expected_clean=True, defect=None,
+        )
+        return RealPRCorpus(vulnerable=[vuln], clean=[clean])
+
+    def test_dry_run_shows_the_repeat_suffix(self, capsys):
+        run_real_pr_corpus(self._corpus(), ["tools_off"], Path("/tmp"), {}, dry_run=True, runs_per_mode=3)
+        out = capsys.readouterr().out
+        assert "x3" in out
+
+    def test_default_dry_run_has_no_repeat_suffix(self, capsys):
+        run_real_pr_corpus(self._corpus(), ["tools_off"], Path("/tmp"), {}, dry_run=True)
+        out = capsys.readouterr().out
+        assert out.strip().splitlines()[0].endswith("[tools_off]")
+
+    def test_runs_each_scenario_mode_n_times(self, monkeypatch, tmp_path):
+        calls: list[str] = []
+
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
+            calls.append(f"{pr_entry['repo_full_name']}#{pr_entry['number']}:{mode}")
+            return ReviewRun(
+                mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"],
+                findings=[_finding("a.py")], verdict="request_changes",
+            )
+
+        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, runs_per_mode=3)
+
+        assert calls == ["acme/repo#1:tools_off"] * 3 + ["acme/repo#2:tools_off"] * 3
+        mm = report["mode_summary"]["tools_off"]
+        # 3 reps of the one vulnerable scenario, 3 reps of the one clean one.
+        assert mm["vulnerable_total"] == 3
+        assert mm["clean_total"] == 3
+        assert report["metadata"]["total_runs"] == 6
+
+    def test_per_scenario_runs_is_a_list_of_n_when_n_greater_than_one(self, monkeypatch, tmp_path):
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
+            return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
+
+        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, runs_per_mode=2)
+        vuln_entry = next(e for e in report["per_scenario_results"] if e["id"] == "v1")
+        assert isinstance(vuln_entry["runs"]["tools_off"], list)
+        assert len(vuln_entry["runs"]["tools_off"]) == 2
+        assert vuln_entry["runs_aggregate"]["tools_off"]["runs"] == 2
+
+    def test_n_equals_1_keeps_the_pre_839_single_dict_shape(self, monkeypatch, tmp_path):
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
+            return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
+
+        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})  # runs_per_mode default = 1
+        vuln_entry = next(e for e in report["per_scenario_results"] if e["id"] == "v1")
+        assert isinstance(vuln_entry["runs"]["tools_off"], dict)
+        assert "runs_aggregate" not in vuln_entry
+
+    def test_context_only_ignores_runs_per_mode(self, monkeypatch, tmp_path):
+        calls: list[str] = []
+
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
+            calls.append(mode)
+            return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
+
+        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        run_real_pr_corpus(
+            self._corpus(), ["tools_off"], tmp_path, {}, context_only=True, runs_per_mode=5,
+        )
+        # 2 scenarios, 1 mode ("tools_off" is forced under context_only), no
+        # x5 repetition: context assembly for a pinned head is deterministic.
+        assert len(calls) == 2
+
+
+class TestGenerateRealPRReportRunsPerMode:
+    """generate_real_pr_report accepts either a single ReviewRun per mode
+    (pre-#839 shape) or a list[ReviewRun] (N repeats) interchangeably."""
+
+    def test_list_of_runs_aggregates_into_mode_summary(self):
+        defect = RealPRDefect("d", "a.py", (10, 20), "major")
+        vuln = _scenario(id="v1", defect=defect)
+        runs = [
+            _run([_finding("a.py", line=15)], verdict="request_changes"),
+            _run([], verdict="approve"),
+            _run([], error="boom"),
+        ]
+        scenario_runs = [(vuln, {"tools_off": runs})]
+        report = generate_real_pr_report(scenario_runs)
+        mm = report["mode_summary"]["tools_off"]
+        assert mm["vulnerable_total"] == 3
+        assert mm["hits"] == 1
+        assert mm["vulnerable_errors"] == 1
+        assert report["metadata"]["total_runs"] == 3
+        assert report["metadata"]["completed_runs"] == 2
+
+        entry = report["per_scenario_results"][0]
+        assert len(entry["runs"]["tools_off"]) == 3
+        assert entry["runs_aggregate"]["tools_off"] == {
+            "runs": 3, "errors": 1, "timeouts": 0,
+            "hits": 1, "file_only_hits": 1, "request_changes": 1,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Timeout accounting (#840)
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutAccounting:
+    def test_default_timeout_is_1200s(self, monkeypatch):
+        monkeypatch.delenv("EVAL_REVIEW_TIMEOUT_SEC", raising=False)
+        assert _review_timeout_sec() == 1200
+
+    def test_env_override_still_works(self, monkeypatch):
+        monkeypatch.setenv("EVAL_REVIEW_TIMEOUT_SEC", "45")
+        assert _review_timeout_sec() == 45
+
+    def test_score_vulnerable_run_carries_timed_out(self):
+        defect = RealPRDefect("d", "a.py", None, "major")
+        run = ReviewRun(
+            mode="tools_off", pr_number=1, repo_full_name="acme/repo",
+            error="Review timed out after 1200s", timed_out=True,
+        )
+        score = score_vulnerable_run(run, defect)
+        assert score["errored"] is True
+        assert score["timed_out"] is True
+
+    def test_score_clean_run_carries_timed_out(self):
+        run = ReviewRun(
+            mode="tools_off", pr_number=1, repo_full_name="acme/repo",
+            error="Review timed out after 1200s", timed_out=True,
+        )
+        score = score_clean_run(run)
+        assert score["timed_out"] is True
+
+    def test_non_timeout_error_is_not_flagged_as_timeout(self):
+        defect = RealPRDefect("d", "a.py", None, "major")
+        run = _run([], error="Review failed (exit 1): boom")
+        score = score_vulnerable_run(run, defect)
+        assert score["errored"] is True
+        assert score["timed_out"] is False
+
+    def test_mode_summary_counts_timeouts_separately_from_other_errors(self):
+        defect = RealPRDefect("d", "a.py", None, "major")
+        vuln_timeout = _scenario(id="v1", defect=defect)
+        vuln_other_error = _scenario(id="v2", defect=defect)
+        scenario_runs = [
+            (vuln_timeout, {"tools_off": _run([], error="timed out", verdict=None)}),
+            (vuln_other_error, {"tools_off": _run([], error="boom", verdict=None)}),
+        ]
+        # Mark only the first run as a genuine timeout.
+        scenario_runs[0][1]["tools_off"].timed_out = True
+
+        report = generate_real_pr_report(scenario_runs)
+        mm = report["mode_summary"]["tools_off"]
+        assert mm["vulnerable_errors"] == 2
+        assert mm["vulnerable_timeouts"] == 1

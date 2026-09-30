@@ -125,6 +125,10 @@ class ReviewRun:
     findings: list[dict[str, Any]] = field(default_factory=list)
     review_markdown: str = ""
     error: str | None = None
+    # Set only when the run's error is a wall-clock timeout (#840): kept
+    # distinct from other error causes so a lopsided timeout loss on one
+    # arm/mode is visible in the report instead of blending into "errors".
+    timed_out: bool = False
     model_used: str = ""
     # Structured trace from tool-harness.json: each is {tool, args, status}.
     # Populated for native_loop (and any harness mode that emits tool_calls);
@@ -163,6 +167,7 @@ class ReviewRun:
             "tool_calls": self.tool_calls,
             "tool_stop_reason": self.tool_stop_reason,
             "error": self.error,
+            "timed_out": self.timed_out,
             "model_used": self.model_used,
             "deep_review": self.deep_review,
             "specialists": self.specialists,
@@ -471,6 +476,7 @@ def score_vulnerable_run(
     return {
         "errored": bool(run.error),
         "error": run.error,
+        "timed_out": run.timed_out,
         "hit": hit,
         "file_only_hit": file_only_hit,
         "has_line_anchor": defect.line_range is not None,
@@ -497,6 +503,7 @@ def score_clean_run(run: ReviewRun) -> dict[str, Any]:
     return {
         "errored": bool(run.error),
         "error": run.error,
+        "timed_out": run.timed_out,
         "any_finding_count": len(findings),
         "blocker_major_finding_count": len(blocker_major),
         "false_positive": len(findings) > 0,
@@ -1537,13 +1544,15 @@ def _load_semantic_fixture(corpus: SemanticCorpus, fixture_ref: dict[str, Any]) 
 
 
 def _review_timeout_sec() -> int:
-    """Per-review wall clock (EVAL_REVIEW_TIMEOUT_SEC, default 300s). Slow
+    """Per-review wall clock (EVAL_REVIEW_TIMEOUT_SEC, default 1200s). Slow
     local models need longer; a timed-out run is scored as an error, which
-    silently drops the longest reviews from an A/B."""
+    silently drops the longest reviews from an A/B (#840: 300s dropped every
+    early native_loop+deep-review run against a hosted model in the #796
+    launch, so the default now covers a production-default review)."""
     try:
-        return max(30, int(os.getenv("EVAL_REVIEW_TIMEOUT_SEC", "300")))
+        return max(30, int(os.getenv("EVAL_REVIEW_TIMEOUT_SEC", "1200")))
     except ValueError:
-        return 300
+        return 1200
 
 
 def _fixture_pr_object(pr_json: dict[str, Any], repo_full_name: str | None) -> dict[str, Any]:
@@ -2078,6 +2087,7 @@ def run_review_for_pr(
     except subprocess.TimeoutExpired:
         run.wall_clock_sec = time.monotonic() - start
         run.error = f"Review timed out after {_review_timeout_sec()}s"
+        run.timed_out = True
     except Exception as exc:
         run.wall_clock_sec = time.monotonic() - start
         run.error = f"Review error: {exc}"
@@ -2258,6 +2268,10 @@ def generate_report(
             # headline number for the home-ops#7462-style regression.
             "capability_runs": 0,
             "capability_passes": 0,
+            # #840: timeouts are a subset of `errors`, counted separately so
+            # a lopsided timeout loss on one mode/arm doesn't blend into
+            # generic error noise.
+            "timeouts": 0,
             # Specialist checks (deep-review #610), split by grading scope so
             # the comparable A/B subset stays visible per mode label:
             # effectiveness checks grade on standard AND deep runs; lead
@@ -2338,6 +2352,8 @@ def generate_report(
                     )
             else:
                 mm["errors"] += 1
+                if run.timed_out:
+                    mm["timeouts"] += 1
 
             cap = evaluate_capability(run, expected_evidence)
             if cap is not None:
@@ -2530,11 +2546,13 @@ def _new_real_pr_mode_summary() -> dict[str, Any]:
     return {
         "vulnerable_total": 0,
         "vulnerable_errors": 0,
+        "vulnerable_timeouts": 0,
         "hits": 0,
         "file_only_hits": 0,
         "vulnerable_request_changes": 0,
         "clean_total": 0,
         "clean_errors": 0,
+        "clean_timeouts": 0,
         "any_finding_false_positives": 0,
         "blocker_major_false_positives": 0,
         "clean_request_changes": 0,
@@ -2542,15 +2560,23 @@ def _new_real_pr_mode_summary() -> dict[str, Any]:
 
 
 def generate_real_pr_report(
-    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]],
+    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun | list[ReviewRun]]]],
     corpus_source: str | None = None,
 ) -> dict[str, Any]:
     """Build the real-PR corpus report from every scenario's per-mode runs.
 
-    ``scenario_runs`` is a list of (scenario, {mode: ReviewRun}) pairs — one
-    entry per corpus scenario actually run, each carrying exactly one run
-    per mode (the real-PR path does not currently support runs-per-mode
-    repetition).
+    ``scenario_runs`` is a list of (scenario, {mode: run_or_runs}) pairs —
+    one entry per corpus scenario actually run. Each mode's value is either
+    a single ``ReviewRun`` (the pre-#839 shape, still accepted so existing
+    callers with N=1 need no change) or a ``list[ReviewRun]`` of N runs
+    (``--runs-per-mode N``, #839): every run in the list is scored
+    individually and folded into the same ``mode_summary`` counters, so a
+    mode run 3x contributes 3x to ``vulnerable_total``/``clean_total`` and
+    the rates below are per-RUN pass rates across all repetitions, not
+    per-scenario. The per-scenario ``runs[mode]`` entry mirrors this: a
+    single scored run dict when N=1 (unchanged shape), or a list of N
+    scored run dicts when N>1, plus a small ``aggregate`` block summarizing
+    that scenario's own repeats.
 
     Rates are DELIBERATELY denominated differently by design, both spelled
     out in each mode block so a reader never has to guess:
@@ -2570,6 +2596,9 @@ def generate_real_pr_report(
     mode_summary: dict[str, dict[str, Any]] = {}
     modes_seen: set[str] = set()
 
+    def _as_list(value: ReviewRun | list[ReviewRun]) -> list[ReviewRun]:
+        return value if isinstance(value, list) else [value]
+
     for scenario, mode_runs in scenario_runs:
         kind = "clean" if scenario.expected_clean is True else "vulnerable"
         entry: dict[str, Any] = {
@@ -2587,35 +2616,65 @@ def generate_real_pr_report(
                 "severity": scenario.defect.severity,
             }
         runs_out: dict[str, Any] = {}
-        for mode, run in mode_runs.items():
+        runs_aggregate: dict[str, Any] = {}
+        for mode, run_or_runs in mode_runs.items():
+            runs = _as_list(run_or_runs)
             modes_seen.add(mode)
             mm = mode_summary.setdefault(mode, _new_real_pr_mode_summary())
-            run_dict = run.to_dict()
-            if kind == "vulnerable" and scenario.defect is not None:
-                score = score_vulnerable_run(run, scenario.defect)
-                mm["vulnerable_total"] += 1
-                if score["errored"]:
-                    mm["vulnerable_errors"] += 1
-                if score["hit"]:
-                    mm["hits"] += 1
-                if score["file_only_hit"]:
-                    mm["file_only_hits"] += 1
-                if score["request_changes"]:
-                    mm["vulnerable_request_changes"] += 1
+            scored_dicts: list[dict[str, Any]] = []
+            agg = {"runs": len(runs), "errors": 0, "timeouts": 0}
+            if kind == "vulnerable":
+                agg.update(hits=0, file_only_hits=0, request_changes=0)
             else:
-                score = score_clean_run(run)
-                mm["clean_total"] += 1
-                if score["errored"]:
-                    mm["clean_errors"] += 1
-                if score["false_positive"]:
-                    mm["any_finding_false_positives"] += 1
-                if score["blocker_major_false_positive"]:
-                    mm["blocker_major_false_positives"] += 1
-                if score["request_changes"]:
-                    mm["clean_request_changes"] += 1
-            run_dict["score"] = score
-            runs_out[mode] = run_dict
+                agg.update(false_positives=0, blocker_major_false_positives=0, request_changes=0)
+            for run in runs:
+                run_dict = run.to_dict()
+                if kind == "vulnerable" and scenario.defect is not None:
+                    score = score_vulnerable_run(run, scenario.defect)
+                    mm["vulnerable_total"] += 1
+                    if score["errored"]:
+                        mm["vulnerable_errors"] += 1
+                        agg["errors"] += 1
+                    if score["timed_out"]:
+                        mm["vulnerable_timeouts"] += 1
+                        agg["timeouts"] += 1
+                    if score["hit"]:
+                        mm["hits"] += 1
+                        agg["hits"] += 1
+                    if score["file_only_hit"]:
+                        mm["file_only_hits"] += 1
+                        agg["file_only_hits"] += 1
+                    if score["request_changes"]:
+                        mm["vulnerable_request_changes"] += 1
+                        agg["request_changes"] += 1
+                else:
+                    score = score_clean_run(run)
+                    mm["clean_total"] += 1
+                    if score["errored"]:
+                        mm["clean_errors"] += 1
+                        agg["errors"] += 1
+                    if score["timed_out"]:
+                        mm["clean_timeouts"] += 1
+                        agg["timeouts"] += 1
+                    if score["false_positive"]:
+                        mm["any_finding_false_positives"] += 1
+                        agg["false_positives"] += 1
+                    if score["blocker_major_false_positive"]:
+                        mm["blocker_major_false_positives"] += 1
+                        agg["blocker_major_false_positives"] += 1
+                    if score["request_changes"]:
+                        mm["clean_request_changes"] += 1
+                        agg["request_changes"] += 1
+                run_dict["score"] = score
+                scored_dicts.append(run_dict)
+            # Backward-compatible shape (#839): a single run stays a single
+            # dict, exactly as before; only N>1 introduces the list form.
+            runs_out[mode] = scored_dicts[0] if len(scored_dicts) == 1 else scored_dicts
+            if len(scored_dicts) > 1:
+                runs_aggregate[mode] = agg
         entry["runs"] = runs_out
+        if runs_aggregate:
+            entry["runs_aggregate"] = runs_aggregate
         per_scenario.append(entry)
 
     def _rate(numer: int, denom: int) -> float | None:
@@ -2638,9 +2697,9 @@ def generate_real_pr_report(
         )
         mm["verdict_agreement_rate"] = _rate(agreeing, total_scenarios)
 
-    total_runs = sum(len(runs) for _s, runs in scenario_runs)
+    total_runs = sum(len(_as_list(r)) for _s, runs in scenario_runs for r in runs.values())
     completed_runs = sum(
-        1 for _s, runs in scenario_runs for r in runs.values() if not r.error
+        1 for _s, runs in scenario_runs for r in runs.values() for run in _as_list(r) if not run.error
     )
     return {
         "metadata": {
@@ -2730,6 +2789,7 @@ def run_real_pr_corpus(
     max_entries: int | None = None,
     dry_run: bool = False,
     context_only: bool = False,
+    runs_per_mode: int = 1,
 ) -> dict[str, Any] | None:
     """Run every scenario in a real-PR corpus across the given modes.
 
@@ -2738,20 +2798,28 @@ def run_real_pr_corpus(
     the shape the #779 smoke test needs — rather than truncating the
     concatenated list and starving the clean side.
 
+    ``runs_per_mode`` (#839) repeats each (scenario, mode) N times, like the
+    fixture-corpus path, so repeated-run measurements (e.g. a 3-runs-per-arm
+    A/B) no longer need an external loop. Ignored under ``--context-only``:
+    context assembly for a pinned head is deterministic, so repeating it
+    only wastes clone/checkout time.
+
     Returns None (having printed the planned runs) in dry-run mode instead
     of a report.
     """
     vulnerable = corpus.vulnerable[:max_entries] if max_entries else corpus.vulnerable
     clean = corpus.clean[:max_entries] if max_entries else corpus.clean
     scenarios = [*vulnerable, *clean]
+    runs_per_mode = max(1, runs_per_mode) if not context_only else 1
 
     if dry_run:
+        suffix = f" x{runs_per_mode}" if runs_per_mode > 1 else ""
         for scenario in scenarios:
             kind = "clean" if scenario.expected_clean is True else "vulnerable"
             for mode in modes:
                 print(
                     f"  Would run: [{kind}] {scenario.repo_full_name}#{scenario.number} "
-                    f"@{scenario.head_sha[:12]} [{mode}]"
+                    f"@{scenario.head_sha[:12]} [{mode}]{suffix}"
                 )
         return None
 
@@ -2760,7 +2828,7 @@ def run_real_pr_corpus(
     if context_only:
         modes = ["tools_off"]
     context_rows: list[dict[str, Any]] = []
-    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun]]] = []
+    scenario_runs: list[tuple[RealPRScenario, dict[str, ReviewRun | list[ReviewRun]]]] = []
     for i, scenario in enumerate(scenarios, 1):
         kind = "clean" if scenario.expected_clean is True else "vulnerable"
         print(
@@ -2768,25 +2836,30 @@ def run_real_pr_corpus(
             file=sys.stderr,
         )
         pr_entry = scenario.to_pr_entry()
-        mode_runs: dict[str, ReviewRun] = {}
+        mode_runs: dict[str, ReviewRun | list[ReviewRun]] = {}
         for mode in modes:
-            run = run_review_for_pr(pr_entry, mode, work_dir, model_config)
-            mode_runs[mode] = run
-            if context_only:
-                repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
-                row = {"id": scenario.id, "kind": kind, **score_context(repo_path, scenario)}
-                context_rows.append(row)
-                print(f"    [context] {json.dumps(row)}", file=sys.stderr)
-                continue
-            if run.error:
-                print(f"    [{mode}] ERROR: {run.error}", file=sys.stderr)
-            else:
-                findings = run.findings if isinstance(run.findings, list) else []
-                print(
-                    f"    [{mode}] verdict={run.verdict} findings={len(findings)} "
-                    f"commit={run.commit_sha} wall={run.wall_clock_sec:.1f}s",
-                    file=sys.stderr,
-                )
+            reps: list[ReviewRun] = []
+            for rep in range(runs_per_mode):
+                run = run_review_for_pr(pr_entry, mode, work_dir, model_config)
+                reps.append(run)
+                label = mode if runs_per_mode == 1 else f"{mode} {rep + 1}/{runs_per_mode}"
+                if context_only:
+                    repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
+                    row = {"id": scenario.id, "kind": kind, **score_context(repo_path, scenario)}
+                    context_rows.append(row)
+                    print(f"    [context] {json.dumps(row)}", file=sys.stderr)
+                    continue
+                if run.error:
+                    tag = "TIMEOUT" if run.timed_out else "ERROR"
+                    print(f"    [{label}] {tag}: {run.error}", file=sys.stderr)
+                else:
+                    findings = run.findings if isinstance(run.findings, list) else []
+                    print(
+                        f"    [{label}] verdict={run.verdict} findings={len(findings)} "
+                        f"commit={run.commit_sha} wall={run.wall_clock_sec:.1f}s",
+                        file=sys.stderr,
+                    )
+            mode_runs[mode] = reps[0] if runs_per_mode == 1 else reps
         scenario_runs.append((scenario, mode_runs))
 
     if context_only:
@@ -2959,7 +3032,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Repeat each mode N times per PR and report capability pass RATE. "
             "Use >=10 for the agentic-evidence-chain criterion — a single run "
-            "is noise at the fast tier's reliability (Tau2 ~68%%)."
+            "is noise at the fast tier's reliability (Tau2 ~68%%). Also "
+            "honored for real-PR corpora (#839: N runs per scenario/mode, "
+            "each recorded plus per-mode aggregates); ignored under "
+            "--context-only, which is deterministic per pinned head."
         ),
     )
     return parser
@@ -2990,6 +3066,8 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
     )
     print(f"Modes: {args.modes}", file=sys.stderr)
     print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+    if args.runs_per_mode > 1:
+        print(f"Runs per mode: {args.runs_per_mode}", file=sys.stderr)
 
     with tempfile.TemporaryDirectory(prefix="eval-harness-realpr-") as tmpdir:
         report = run_real_pr_corpus(
@@ -3000,10 +3078,22 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             max_entries=args.max_prs,
             dry_run=args.dry_run,
             context_only=args.context_only,
+            runs_per_mode=args.runs_per_mode,
         )
 
     if args.dry_run:
         return 0
+
+    # #840: surface timeout counts per mode prominently.
+    timeout_lines = [
+        f"    {mode}: {mm['vulnerable_timeouts'] + mm['clean_timeouts']} timeout(s)"
+        for mode, mm in report.get("mode_summary", {}).items()
+        if mm.get("vulnerable_timeouts") or mm.get("clean_timeouts")
+    ]
+    if timeout_lines:
+        print("Timeouts:", file=sys.stderr)
+        for line in timeout_lines:
+            print(line, file=sys.stderr)
 
     output_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     if args.output:
@@ -3122,7 +3212,8 @@ def main() -> int:
                             else f"{base} {rep + 1}/{runs_per_mode}"
                         )
                     if run.error:
-                        print(f"    [{label}] ERROR: {run.error}", file=sys.stderr)
+                        tag = "TIMEOUT" if run.timed_out else "ERROR"
+                        print(f"    [{label}] {tag}: {run.error}", file=sys.stderr)
                     else:
                         findings = extract_findings_from_review(run)
                         print(
@@ -3140,6 +3231,18 @@ def main() -> int:
     # Generate report
     report = generate_report(results, corpus)
     report["metadata"]["corpus_source"] = str(args.corpus)
+
+    # #840: surface timeout counts per mode prominently, so a lopsided
+    # timeout loss on one arm is visible without reading the full report.
+    timeout_lines = [
+        f"    {mode}: {mm['timeouts']} timeout(s) of {mm['runs']} run(s)"
+        for mode, mm in report["mode_summary"].items()
+        if mm.get("timeouts")
+    ]
+    if timeout_lines:
+        print("Timeouts:", file=sys.stderr)
+        for line in timeout_lines:
+            print(line, file=sys.stderr)
 
     output_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
 
