@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,23 +36,79 @@ DETERMINISTIC_SCENARIOS = frozenset(
 )
 
 
-def run_dataflow_checks() -> list[dict[str, object]]:
-    """Include real production-boundary checks in the historical report."""
-    env = dict(os.environ)
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    checks = (
-        ("github-label-routing", ["bash", str(ROOT / "tests/test_linked_issue_classification.sh")]),
-        ("linear-composite-precheck", ["bash", str(ROOT / "tests/test_precheck_linear_fingerprint.sh")]),
-        ("corpus-evidence-and-broken-arrow", [sys.executable, "-m", "pytest", "tests/test_issue_662_dataflow.py", "-q"]),
-        # #749: the PR #748 path-classification false positive cannot return.
-        ("path-classification-untrusted-surface", [sys.executable, "-m", "pytest", "tests/test_issue_749_path_classification.py", "-q"]),
+DATAFLOW_GATE_TEST_FILE = ".test-build/tests-v3/qualification-dataflow.test.js"
+
+# Common absolute node install locations, probed only when `node` is not on
+# PATH: this gate must also run credential-free with a minimal PATH (see
+# tests/test_semantic_eval.py::test_offline_runner_writes_report_without_credentials),
+# which strips the Homebrew/nvm/hostedtoolcache directories node usually
+# lives in on a dev machine or a GitHub-hosted runner.
+_NODE_FALLBACK_PATHS = (
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+)
+
+
+def _resolve_node() -> str | None:
+    node = os.environ.get("PR_REVIEWER_NODE") or shutil.which("node")
+    if node:
+        return node
+    for candidate in _NODE_FALLBACK_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _ensure_dataflow_gate_built(node: str) -> str | None:
+    """Build .test-build (tsc -p tsconfig.test.json), like `npm test` does
+    before `node --test`, so the gate can run against the compiled v3
+    runtime without depending on a prior `npm test` invocation. Returns an
+    error string on failure, None on success."""
+    if (ROOT / DATAFLOW_GATE_TEST_FILE).is_file():
+        return None
+    tsc = ROOT / "node_modules/typescript/bin/tsc"
+    if not tsc.is_file():
+        return f"{tsc} not found; run `npm ci` first"
+    completed = subprocess.run(
+        [node, str(tsc), "-p", "tsconfig.test.json"], cwd=ROOT, capture_output=True, text=True, timeout=180, check=False,
     )
+    if completed.returncode != 0 or not (ROOT / DATAFLOW_GATE_TEST_FILE).is_file():
+        return (completed.stdout + completed.stderr)[-2000:] or "tsc did not produce " + DATAFLOW_GATE_TEST_FILE
+    return None
+
+
+def run_dataflow_checks() -> list[dict[str, object]]:
+    """Include real production-boundary checks in the historical report.
+
+    Each check runs its named test group against the built v3 runtime
+    (#681): the semantic gate no longer executes any v2 script or Python
+    module for these four production-boundary properties."""
+    checks = (
+        "github-label-routing",
+        "linear-composite-precheck",
+        "corpus-evidence-and-broken-arrow",
+        # #749: the PR #748 path-classification false positive cannot return.
+        "path-classification-untrusted-surface",
+    )
+    node = _resolve_node()
+    build_error = None if node is None else _ensure_dataflow_gate_built(node)
+    error = "node executable not found (set PR_REVIEWER_NODE or install Node >= 24)" if node is None else build_error
     results = []
-    for name, argv in checks:
+    for name in checks:
+        if error is not None:
+            results.append({"name": name, "passed": False, "detail": error})
+            continue
+        argv = [node, "--test", "--test-name-pattern", name, DATAFLOW_GATE_TEST_FILE]
         try:
-            completed = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
-            results.append({"name": name, "passed": completed.returncode == 0 and "SKIP:" not in completed.stdout + completed.stderr,
-                            "detail": (completed.stdout + completed.stderr)[-2000:] if completed.returncode else ""})
+            completed = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+            # `--test-name-pattern` exits 0 even when it matches zero tests
+            # (the file-level suite formality still "passes"); require at
+            # least one of this check's own named tests to have actually run.
+            ran_named_test = f"✔ {name}:" in completed.stdout
+            passed = completed.returncode == 0 and ran_named_test
+            results.append({"name": name, "passed": passed,
+                            "detail": (completed.stdout + completed.stderr)[-2000:] if not passed else ""})
         except (OSError, subprocess.TimeoutExpired) as exc:
             results.append({"name": name, "passed": False, "detail": str(exc)})
     return results

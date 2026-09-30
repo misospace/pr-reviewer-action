@@ -94,8 +94,10 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   live consumers outside the (a) set — they stay until wave 2 unless their
   consumers move first: `tests/test_issue_749_path_classification.py`,
   `tests/test_linked_issue_classification.sh` and
-  `tests/test_precheck_linear_fingerprint.sh` (executed by the kept
-  `scripts/run_semantic_eval_ci.py` dataflow gates), `tests/test_concurrent_gating.sh`
+  `tests/test_precheck_linear_fingerprint.sh` — the #681 dataflow gates in
+  `scripts/run_semantic_eval_ci.py` no longer execute these three (re-pointed
+  at `tests-v3/qualification-dataflow.test.ts`), so they are now genuinely
+  unreferenced and ready for wave 2. `tests/test_concurrent_gating.sh`
   (the semantic gate's scenario 6548 greps it as evidence; it runs under
   `validate-bash` auto-discovery meanwhile), and `scripts/verify_pr_head.sh`
   + `tests/test_verify_pr_head.sh` (`scripts/publish.sh:25`, (c), executes
@@ -138,8 +140,10 @@ port is self-contained, its importers are wave-2 (c) files, so it moves to
 the (c) table below — deleting it at wave 1 would break the wave-2 oracle
 runs.
 
-`scripts/sections/gating.sh` is deliberately **not** in this table: the
-dataflow-qualification gate reads it, so it is (c) until wave 2 (see below).
+`scripts/sections/gating.sh` is deliberately **not** in this table: it is
+listed in the (c) table below, though the #681 dataflow-qualification gate no
+longer reads it (re-pointed at `tests-v3/qualification-dataflow.test.ts`) —
+it is now unreferenced and ready for wave 2.
 
 ### pr_reviewer/
 
@@ -338,7 +342,7 @@ deleted together with the runner.
 | `scripts/sections/context.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_platform_normalization.py`. | Freeze the context-producers/platform boundaries. |
 | `scripts/sections/corpus.sh` | `tests/parity_runners/v2_corpus.sh` + `v2_corpus_slicer.py`, `v2_context_producers.py`. | Freeze the corpus boundary. |
 | `scripts/sections/review.sh` | `tests/parity_runners/v2_prompt_assembly.py`. | Freeze the prompt-assembly boundary. |
-| `scripts/sections/gating.sh` | `tests/test_issue_662_dataflow.py:131` reads it directly for the harness's `dataflow-qualification-698` gate. | Re-point or retire the dataflow gate, then wave 2. |
+| `scripts/sections/gating.sh` | None as of #681 — `tests/test_issue_662_dataflow.py` no longer reads it (re-pointed at `tests-v3/qualification-dataflow.test.ts`). | Unreferenced; ready for wave 2. |
 
 ### pr_reviewer/
 
@@ -396,7 +400,7 @@ eval-pipeline consumers disappeared in the wave-0 re-point). `pr_reviewer/__init
 | `test_platform_normalization_goldens.py` | Executes `tests/parity_runners/v2_platform_normalization.py`. | Freeze the platform-normalization boundary. |
 | `test_corpus_body_fence_truncation.py` | Executes `tests/parity_runners/v2_corpus.sh` (#791 fence-truncation regression over the corpus fixtures). | Freeze the corpus boundary. |
 | `test_strip_source_text_diff.py` | Dual-side goldens: v2 `scripts/strip_source_text.py` vs `node dist/index.js strip-source-text-fixture`. | Freeze the linked-sources boundary; keep the v3-only goldens. |
-| `test_issue_662_dataflow.py` | The parity harness's `dataflow-qualification-698` gate; imports `pr_reviewer/semantic_eval.py`; reads `scripts/sections/{config,corpus,gating}.sh`. | The #662 fixtures are on the preserve list — when the gate retires, keep the fixtures and re-home the test v3-only. |
+| `test_issue_662_dataflow.py` | The parity harness's `dataflow-qualification-698` gate; imports `pr_reviewer/semantic_eval.py`. As of #681 it no longer reads `scripts/sections/{config,corpus,gating}.sh` — the #681 semantic gate's corpus-evidence-and-broken-arrow check now exercises that wiring v3-only (`tests-v3/qualification-dataflow.test.ts`), and this file only pins the ported source still carries the relevant strings. | The #662 fixtures are on the preserve list — when the gate retires, keep the fixtures. This file is already v3-only; drop it (or fold its scenario-family assertions into `tests-v3/`) whenever the parity harness's `dataflow-qualification-698` gate itself retires. |
 
 ## CI jobs that become dead
 
