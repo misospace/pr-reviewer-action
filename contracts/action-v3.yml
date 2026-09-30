@@ -272,7 +272,7 @@ inputs:
     v2_id: system_prompt_file
     required: false
     default: ""
-    description: "Optional file path in the reviewed repository to use as the system prompt. When both this and system_prompt are set, the file content is read first and the inline system_prompt is appended (separated by two newlines)."
+    description: "Optional file path in the reviewed repository to use as the system prompt, read from the PR's base ref (like the standards file) so a PR cannot rewrite the prompt that reviews it. When both this and system_prompt are set, the file content is read first and the inline system_prompt is appended (separated by two newlines)."
   - id: system-prompt-mode
     v2_id: system_prompt_mode
     required: false
