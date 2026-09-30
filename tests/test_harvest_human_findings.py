@@ -1152,21 +1152,19 @@ def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
         threading.Thread(target=target_server.serve_forever, daemon=True).start()
         threading.Thread(target=origin_server.serve_forever, daemon=True).start()
 
-        # Create a GitHubClient and monkeypatch its URL construction to use test server
-        # We patch at the Request URL level to exercise the real _request() code path
+        # Create a GitHubClient
         client = hhf.GitHubClient(token=SECRET, use_gh_cli=False)
 
-        # Patch urllib.request.Request to use the test origin server
-        import urllib.request as urllib_req_module
-        original_request = urllib_req_module.Request
+        # Patch urllib.request.Request in the harvest_human_findings module where it's imported
+        from urllib.request import Request as OriginalRequest
 
         def patched_request(url, *args, **kwargs):
             # Replace api.github.com with our test origin server
             if "api.github.com" in url:
                 url = url.replace("https://api.github.com", f"http://127.0.0.1:{origin_server.server_port}")
-            return original_request(url, *args, **kwargs)
+            return OriginalRequest(url, *args, **kwargs)
 
-        monkeypatch.setattr(urllib_req_module, "Request", patched_request)
+        monkeypatch.setattr("harvest_human_findings.Request", patched_request)
 
         # Call the real _request() method which should refuse the redirect
         with pytest.raises(hhf.GitHubAPIError):
