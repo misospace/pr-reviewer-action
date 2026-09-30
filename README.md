@@ -1004,23 +1004,23 @@ The action is designed local-model-first (ollama, llama.cpp, vLLM, or anything b
 
 ### 🌐 Base URL examples
 
-`ai-base-url` must point at the **OpenAI-compatible base** (the action appends `/chat/completions`, or `/messages` for `ai_api_format: anthropic`):
+`ai-base-url` must point at the **OpenAI-compatible base** (the action appends `/chat/completions`, or `/messages` for `ai-api-format: anthropic`):
 
 ```yaml
 # ollama on the same runner/host (note the /v1 — ollama's native API is not OpenAI-compatible)
-ai_base_url: http://localhost:11434/v1
+ai-base-url: http://localhost:11434/v1
 
 # ollama on another host on your network
-ai_base_url: http://192.168.1.50:11434/v1
+ai-base-url: http://192.168.1.50:11434/v1
 
 # llama.cpp llama-server
-ai_base_url: http://llama-server.internal:8080/v1
+ai-base-url: http://llama-server.internal:8080/v1
 
 # vLLM
-ai_base_url: http://vllm.internal:8000/v1
+ai-base-url: http://vllm.internal:8000/v1
 
-# LiteLLM proxy (set ai_api_format to match the route's format; openai is typical)
-ai_base_url: http://litellm.internal:4000/v1
+# LiteLLM proxy (set ai-api-format to match the route's format; openai is typical)
+ai-base-url: http://litellm.internal:4000/v1
 ```
 
 Self-hosted runners must be able to reach the endpoint — GitHub-hosted runners cannot reach `localhost` or LAN addresses on your network. Leave `ai-api-key` unset if the endpoint is unauthenticated; nothing is sent in that case.
@@ -1032,8 +1032,8 @@ The named `context-limit-mode` budgets assume large cloud-model windows (`normal
 Set `model-context-tokens` to the window you actually serve the model with (e.g. ollama's `num_ctx`, llama.cpp's `--ctx-size`, vLLM's `--max-model-len`):
 
 ```yaml
-model_context_tokens: "16384"   # derive corpus/diff/file budgets from the real window
-ai_max_tokens: "2048"           # reserved for the model's reply within that window
+model-context-tokens: "16384"   # derive corpus/diff/file budgets from the real window
+ai-max-tokens: "2048"           # reserved for the model's reply within that window
 ```
 
 The action reserves `ai-max-tokens` plus prompt headroom and converts the rest to byte budgets conservatively (~3 bytes/token). Check the run's step summary: it shows the active budget and whether the diff/corpus were truncated.
@@ -1043,9 +1043,9 @@ The action reserves `ai-max-tokens` plus prompt headroom and converts the rest t
 Small models often wrap their JSON in prose or markdown fences. The parser tolerates a lot, but structured output is more reliable when the server supports it:
 
 ```yaml
-ai_response_format: json_object   # broad support: ollama, vLLM, llama.cpp server, LiteLLM
+ai-response-format: json_object   # broad support: ollama, vLLM, llama.cpp server, LiteLLM
 # or, where supported (enforces the exact verdict/review_markdown schema):
-ai_response_format: json_schema   # vLLM guided decoding, llama.cpp grammars, newer servers
+ai-response-format: json_schema   # vLLM guided decoding, llama.cpp grammars, newer servers
 ```
 
 If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server does not support that mode — drop back to `json_object` or `off`. Ignored entirely for `ai_api_format: anthropic`.
@@ -1061,10 +1061,10 @@ If the endpoint rejects the request after enabling this (HTTP 400 mentioning `re
 - **Don't burn 10 minutes on a dead endpoint**: the defaults (`ai_primary_retries: "8"`, 15s delay with backoff, 300s request timeout) are tuned for flaky-but-alive endpoints and can spend ~10 minutes before giving up. If your endpoint is either up or down (typical homelab), use a low-retry profile:
 
 ```yaml
-ai_primary_retries: "2"
-ai_primary_retry_delay_sec: "5"
-ai_connect_timeout_sec: "10"
-on_model_failure: notice   # visible explanation instead of a long red check
+ai-primary-retries: "2"
+ai-primary-retry-delay-sec: "5"
+ai-connect-timeout-sec: "10"
+on-model-failure: notice   # visible explanation instead of a long red check
 ```
 
 ### 🩺 Quick symptom table
