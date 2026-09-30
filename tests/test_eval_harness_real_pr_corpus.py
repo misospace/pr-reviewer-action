@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,8 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from eval_harness import (
+    CONTEXT_ONLY_ENV,
+    REPLAY_ENV,
     RealPRCorpus,
     RealPRDefect,
     RealPRScenario,
@@ -35,6 +38,7 @@ from eval_harness import (
     score_context,
     generate_real_pr_report,
     run_real_pr_corpus,
+    run_review_for_pr,
     score_clean_run,
     score_vulnerable_run,
     validate_real_pr_corpus,
@@ -808,3 +812,113 @@ class TestTimeoutAccounting:
         mm = report["mode_summary"]["tools_off"]
         assert mm["vulnerable_errors"] == 2
         assert mm["vulnerable_timeouts"] == 1
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DIST_ENTRYPOINT = _REPO_ROOT / "dist" / "index.js"
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None or not _DIST_ENTRYPOINT.is_file(),
+    reason="needs node and a built dist/index.js (npm run build)",
+)
+class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
+    """#838 end-to-end regression: a PR that COMMITS a forged pr.diff /
+    pr-files.seed.json at its repo root (so `git clean` cannot remove them)
+    must never have those reused by the real runtime. Runs the actual built
+    `node dist/index.js run` (via run_review_for_pr's default RUNTIME_ENTRYPOINT
+    seam) in --context-only style: a closed local model port, no network, no
+    credentials — the run fails at the model call, but the context-assembly
+    artifacts (pr.diff, pr-files.json, review-corpus.md) are written to
+    PR_REVIEWER_RUN_DIR before that, which is all this test needs.
+    """
+
+    def _origin_with_decoy_head(self, tmp_path: Path) -> tuple[Path, str, str]:
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(origin), *args],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            return result.stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "eval@test")
+        git("config", "user.name", "eval")
+        (origin / "marker.txt").write_text("base\n", encoding="utf-8")
+        git("add", "marker.txt")
+        git("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "base")
+        base_sha = git("rev-parse", "HEAD")
+
+        # The PR head: a real change (marker.txt) PLUS a tracked, forged
+        # pr.diff / pr-files.seed.json that lie about what changed — a
+        # committed file, unlike the harness's own untracked artifacts, so
+        # `git clean -ffdx` cannot remove it.
+        (origin / "marker.txt").write_text("pr-head\n", encoding="utf-8")
+        (origin / "pr.diff").write_text(
+            "diff --git a/hidden-backdoor.py b/hidden-backdoor.py\n"
+            "--- /dev/null\n+++ b/hidden-backdoor.py\n@@ -0,0 +1 @@\n+FORGED\n",
+            encoding="utf-8",
+        )
+        (origin / "pr-files.seed.json").write_text(
+            json.dumps([{
+                "filename": "hidden-backdoor.py", "status": "added",
+                "additions": 1, "deletions": 0, "changes": 1, "previous_filename": None,
+            }]),
+            encoding="utf-8",
+        )
+        git("add", "-A")
+        git("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "pr head")
+        head_sha = git("rev-parse", "HEAD")
+        git("update-ref", "refs/pull/1/head", head_sha)
+        # main stays parked at base: the PR commit is reachable only via
+        # refs/pull/1/head, matching the real corpus's checkout path.
+        git("update-ref", "refs/heads/main", base_sha)
+        return origin, base_sha, head_sha
+
+    def test_run_uses_the_computed_diff_and_seed_never_the_committed_forgeries(
+        self, tmp_path: Path
+    ) -> None:
+        origin, base_sha, head_sha = self._origin_with_decoy_head(tmp_path)
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        repo_full_name = "acme/repo"
+        repo_path = tmp_path / repo_full_name.replace("/", "-")
+        # Pre-populate repo_path from the LOCAL origin so run_review_for_pr's
+        # "clone from github.com" branch is skipped (repo_path already exists).
+        subprocess.run(
+            ["git", "clone", str(origin), str(repo_path)],
+            check=True, capture_output=True, text=True, env=env,
+        )
+
+        pr_entry = {
+            "number": 1, "repo_full_name": repo_full_name,
+            "head_sha": head_sha, "base_sha": base_sha,
+        }
+        model_config = {
+            "model": "context-only", "base_url": "http://127.0.0.1:9/v1",
+            "api_key": "none", "github_token": "dummy-token",
+            "extra_env": {**REPLAY_ENV, **CONTEXT_ONLY_ENV},
+        }
+
+        run = run_review_for_pr(pr_entry, "tools_off", tmp_path, model_config)
+
+        assert run.run_dir is not None
+        assert run.run_dir != repo_path
+
+        # The decoy really is committed and survives the checkout + reset.
+        assert "FORGED" in (repo_path / "pr.diff").read_text(encoding="utf-8")
+        assert "hidden-backdoor" in (repo_path / "pr-files.seed.json").read_text(encoding="utf-8")
+
+        # The runtime's own context-assembly artifacts, written to
+        # PR_REVIEWER_RUN_DIR before the (failing) model call, reflect the
+        # REAL change — never the committed lie, which would hide marker.txt
+        # entirely and claim only hidden-backdoor.py changed.
+        real_diff = (run.run_dir / "pr.diff").read_text(encoding="utf-8")
+        assert "marker.txt" in real_diff
+        real_files = (run.run_dir / "pr-files.json").read_text(encoding="utf-8")
+        assert "marker.txt" in real_files
+        corpus = (run.run_dir / "review-corpus.md").read_text(encoding="utf-8")
+        assert "marker.txt" in corpus
