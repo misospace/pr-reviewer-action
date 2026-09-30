@@ -118,6 +118,27 @@ test("parseTangledAtUri: malformed shapes are invalid-uri", () => {
   }
 });
 
+test("parseTangledAtUri: only a single non-empty ?cid= query is accepted", () => {
+  const rejected = [
+    `${PULL_URI}?cid=bafy123&foo=bar`, // extra parameter
+    `${PULL_URI}?cid=a?b`, // stray second ?
+    `${PULL_URI}?foo=1&cid=a`, // wrong key / ordering
+    `${PULL_URI}?cid=a&cid=b`, // duplicate cid
+    `${PULL_URI}?cid=`, // empty cid value
+    `${PULL_URI}?`, // empty query (bare ?)
+    `${PULL_URI}?CID=bafy123`, // uppercase key must not be accepted as cid
+  ];
+  for (const uri of rejected) {
+    assert.throws(
+      () => parseTangledAtUri(uri),
+      (e: unknown) => e instanceof TangledResolverError && e.kind === "invalid-uri",
+      uri,
+    );
+  }
+  const ok = parseTangledAtUri(`${PULL_URI}?cid=bafy123`);
+  assert.equal(ok.cid, "bafy123");
+});
+
 // ── config failures ───────────────────────────────────────────────────────
 
 test("resolveTangledPull: missing bobbinUrl is a config error", async () => {
@@ -162,7 +183,7 @@ test("resolveTangledPull: explicit pullUri resolves the full identity", async ()
   assert.equal(identity.sourceBranch, "feat/x");
   assert.equal(identity.sourceRepoDid, undefined);
   assert.equal(identity.state, undefined);
-  assert.equal(identity.sourceSha, ctx.sourceSha);
+  assert.equal("sourceSha" in identity, false, "identity must not carry an unverifiable sourceSha");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.nsid, "sh.tangled.repo.getPull");
   assert.equal(calls[0]!.query.pull, PULL_URI);
@@ -336,6 +357,91 @@ test("resolveTangledPull (list): two open matches on the same branches are ambig
       e.message.includes("at://did:plc:author/sh.tangled.repo.pull/3mxb") &&
       e.message.includes("at://did:plc:author/sh.tangled.repo.pull/3mxc"),
     "expected the ambiguous message to name both uris",
+  );
+});
+
+test("resolveTangledPull (list): same-branch pulls are ambiguous because no source commit is derivable read-side", async () => {
+  // ctx.sourceSha is set, but neither the pull record nor listPulls/getPull
+  // expose a head commit, so the resolver cannot pick between two same-branch
+  // open pulls and must fail closed instead of trusting one.
+  const body = {
+    items: [
+      listItem("at://did:plc:author/sh.tangled.repo.pull/3mxb", "bafyrei2", "open", "main", "feat/x"),
+      listItem("at://did:plc:author/sh.tangled.repo.pull/3mxc", "bafyrei3", "open", "main", "feat/x"),
+    ],
+    cursor: null,
+  };
+  const { fetchImpl } = makeFetch(() => json(body));
+  await assert.rejects(
+    resolveTangledPull(makeCtx({ sourceSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "ambiguous",
+    "expected ambiguous fail-closed regardless of ctx.sourceSha",
+  );
+});
+
+test("resolveTangledPull (list): a foreign-repo candidate with colliding branches never matches", async () => {
+  const foreign = {
+    uri: "at://did:plc:eve/sh.tangled.repo.pull/3evil",
+    cid: "bafyrei-evil",
+    state: "open",
+    value: { target: { branch: "main", repo: "did:plc:other" }, source: { branch: "feat/x" } },
+    commentCount: 0,
+  };
+  const body = { items: [foreign], cursor: null };
+  const { fetchImpl } = makeFetch(() => json(body));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "no-match",
+    "a candidate for another repo must fail closed as no-match",
+  );
+});
+
+test("resolveTangledPull (list): a foreign-repo decoy does not block the correct same-repo match", async () => {
+  const foreign = {
+    uri: "at://did:plc:eve/sh.tangled.repo.pull/3evil",
+    cid: "bafyrei-evil",
+    state: "open",
+    value: { target: { branch: "main", repo: "did:plc:other" }, source: { branch: "feat/x" } },
+    commentCount: 0,
+  };
+  const body = { items: [foreign, listItem("at://did:plc:author/sh.tangled.repo.pull/3mxb", "bafyrei2", "open", "main", "feat/x")], cursor: null };
+  const { fetchImpl } = makeFetch(() => json(body));
+  const identity = await resolveTangledPull(makeCtx(), { fetchImpl });
+  assert.equal(identity.rkey, "3mxb");
+  assert.equal(identity.repoDid, "did:plc:repo");
+});
+
+test("resolveTangledPull (list): a candidate missing value.target.repo is excluded as no-match", async () => {
+  const noRepo = {
+    uri: "at://did:plc:author/sh.tangled.repo.pull/3mxb",
+    cid: "bafyrei2",
+    state: "open",
+    value: { target: { branch: "main" }, source: { branch: "feat/x" } },
+    commentCount: 0,
+  };
+  const body = { items: [noRepo], cursor: null };
+  const { fetchImpl } = makeFetch(() => json(body));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "no-match",
+    "a candidate without a verifiable repo binding must fail closed",
+  );
+});
+
+test("resolveTangledPull (list): a candidate with a null value.target is excluded as no-match", async () => {
+  const nullTarget = {
+    uri: "at://did:plc:author/sh.tangled.repo.pull/3mxb",
+    cid: "bafyrei2",
+    state: "open",
+    value: { target: null, source: { branch: "feat/x" } },
+    commentCount: 0,
+  };
+  const body = { items: [nullTarget], cursor: null };
+  const { fetchImpl } = makeFetch(() => json(body));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "no-match",
+    "a candidate with a null target must fail closed as no-match",
   );
 });
 

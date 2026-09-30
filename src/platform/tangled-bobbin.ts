@@ -37,6 +37,13 @@ const XRPC_GET_PULL = "sh.tangled.repo.getPull";
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 50;
 
+/**
+ * The resolved pull's identity. It intentionally carries NO source
+ * commit/SHA: Tangled pull records and the read XRPC outputs
+ * (`getPull`/`listPulls`) expose no head commit — it lives only inside a
+ * round's gzipped patch blob, which a later ticket (#586) decodes. The
+ * identity therefore binds only URI + CID + rkey + the branch tuple + state.
+ */
 export interface TangledPullIdentity {
   uri: string;
   cid: string;
@@ -48,7 +55,6 @@ export interface TangledPullIdentity {
   sourceBranch: string | undefined;
   sourceRepoDid: string | undefined;
   state: string | undefined;
-  sourceSha: string | undefined;
 }
 
 export type TangledResolverFailure =
@@ -103,16 +109,29 @@ export function parseTangledAtUri(uri: string): ParsedAtUri {
   }
   let remainder = uri.slice("at://".length);
   let cid: string | undefined;
-  const queryAt = remainder.lastIndexOf("?");
+  const queryAt = remainder.indexOf("?");
   if (queryAt !== -1) {
     const query = remainder.slice(queryAt + 1);
-    if (!query.startsWith("cid=") || query.length === "cid=".length) {
+    // A canonical pull AT-URI carries at most a single `?cid=<v>`: no extra
+    // parameters, no bare or repeated `?`, no separators inside the value.
+    // Fail closed so a returned CID can never absorb `&other=…` or a second
+    // `?` segment.
+    const eqAt = query.indexOf("=");
+    const key = eqAt === -1 ? query : query.slice(0, eqAt);
+    const value = eqAt === -1 ? "" : query.slice(eqAt + 1);
+    if (
+      key !== "cid" ||
+      value === "" ||
+      query.includes("?") ||
+      value.includes("&") ||
+      value.includes("=")
+    ) {
       throw new TangledResolverError(
         "invalid-uri",
         `unsupported AT-URI query (only "?cid=<v>" is accepted): ${query}`,
       );
     }
-    cid = query.slice("cid=".length);
+    cid = value;
     remainder = remainder.slice(0, queryAt);
   }
   const parts = remainder.split("/");
@@ -259,7 +278,6 @@ export async function resolveTangledPull(
       sourceBranch: source === undefined ? undefined : str(source.branch),
       sourceRepoDid: source === undefined ? undefined : str(source.repo),
       state: str(record.state),
-      sourceSha: ctx.sourceSha,
     };
   }
 
@@ -336,13 +354,18 @@ export async function resolveTangledPull(
         throw new TangledResolverError("invalid-response", "listPulls item has no value object");
       }
       const itemTarget = asRecord(itemValue.target);
+      // `subject=<repoDid>` is only a query hint: a hostile/foreign response
+      // with colliding branch names must not match, so the candidate's
+      // value.target.repo is bound to the context repo before it can match.
+      const itemRepoDid = itemTarget === undefined ? undefined : str(itemTarget.repo);
       const itemTargetBranch = itemTarget === undefined ? undefined : str(itemTarget.branch);
       const itemSource = asRecord(itemValue.source);
       const itemSourceBranch = itemSource === undefined ? undefined : str(itemSource.branch);
+      const matchesRepo = itemRepoDid !== undefined && itemRepoDid === ctx.repoDid;
       const matchesBranches =
         (ctx.targetBranch === undefined || itemTargetBranch === ctx.targetBranch) &&
         (ctx.sourceBranch === undefined || itemSourceBranch === ctx.sourceBranch);
-      if (matchesBranches && !matched.some((m) => m.uri === itemUri)) {
+      if (matchesRepo && matchesBranches && !matched.some((m) => m.uri === itemUri)) {
         matched.push({
           uri: itemUri,
           cid: str(itemRecord.cid),
@@ -363,6 +386,12 @@ export async function resolveTangledPull(
     if (repoDid === undefined) {
       throw new TangledResolverError("invalid-response", `matching pull ${m.uri} is missing value.target.repo`);
     }
+    if (repoDid !== ctx.repoDid) {
+      throw new TangledResolverError(
+        "invalid-response",
+        `matching pull ${m.uri} targets repo ${repoDid}, not context repo ${ctx.repoDid}`,
+      );
+    }
     const source = asRecord(m.value.source);
     const cid = m.cid ?? "";
     if (cid === "") {
@@ -380,7 +409,6 @@ export async function resolveTangledPull(
       sourceBranch: source === undefined ? undefined : str(source.branch),
       sourceRepoDid: source === undefined ? undefined : str(source.repo),
       state: m.state,
-      sourceSha: ctx.sourceSha,
     };
   };
 
