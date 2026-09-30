@@ -128,7 +128,7 @@ fi
 
 python3 - <<'PY'
 import json, os
-snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE", "GITHUB_WORKSPACE", "PR_REVIEWER_RUN_DIR")}
+snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE", "GITHUB_WORKSPACE", "PR_REVIEWER_RUN_DIR", "CLAIM_FALSIFICATION")}
 with open("env-snapshot.json", "w", encoding="utf-8") as f:
     json.dump(snap, f)
 PY
@@ -361,6 +361,34 @@ class TestRunReviewForPrBoundary:
         assert run.deep_review is False
         # No specialist artifacts were written: telemetry stays None.
         assert run.specialists is None
+
+    def test_claim_falsification_env_set_when_enabled_absent_when_disabled(self, tmp_path: Path) -> None:
+        """#785 A/B knob: CLAIM_FALSIFICATION is exported to the review
+        subprocess only when the harness caller opts in; the default leaves
+        it unset like every other opt-in review env var."""
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_run_review.sh", deep=False)
+
+        on = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            claim_falsification=True, review_script=script,
+        )
+        assert on.error is None
+        assert _read_snapshot(repo_path)["CLAIM_FALSIFICATION"] == "true"
+
+        off = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG,
+            claim_falsification=False, review_script=script,
+        )
+        assert off.error is None
+        assert _read_snapshot(repo_path)["CLAIM_FALSIFICATION"] in (None, "")
+
+        # Default (parameter omitted entirely) matches explicit False.
+        default = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, MODEL_CONFIG, review_script=script,
+        )
+        assert default.error is None
+        assert _read_snapshot(repo_path)["CLAIM_FALSIFICATION"] in (None, "")
 
     def test_ai_output_planted_in_the_checkout_is_never_read(self, tmp_path: Path) -> None:
         """#838: an ai-output.json in the checkout root (what a prior local

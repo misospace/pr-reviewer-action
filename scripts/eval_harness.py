@@ -1892,6 +1892,7 @@ def run_review_for_pr(
     deep_review: bool = False,
     review_script: Path | None = None,
     deep_execution: str = "three_call",
+    claim_falsification: bool = False,
 ) -> ReviewRun:
     """Execute one review mode for a single PR.
 
@@ -1925,6 +1926,10 @@ def run_review_for_pr(
             "three_call" (production default), "combined_scout", or
             "prime_then_fanout". Forwarded as DEEP_REVIEW_EXECUTION and
             reflected in the run label; ignored when deep_review is False.
+        claim_falsification: When True, exports CLAIM_FALSIFICATION=true so
+            the runtime's opt-in claim falsification pre-pass (#785) runs.
+            The A/B knob for the pre-v3-measurement gate on that feature;
+            recorded in the report metadata, not the per-run label.
 
     Returns:
         ReviewRun with collected metrics.
@@ -2073,6 +2078,14 @@ def run_review_for_pr(
         else:
             env.pop("DEEP_REVIEW", None)
             env.pop("DEEP_REVIEW_EXECUTION", None)
+        # #785 A/B: the contract input projects to this exact env key
+        # (src/run/env.ts stageEnvFromConfig: `claim-falsification` ->
+        # `CLAIM_FALSIFICATION`); only "true" enables the pre-pass, matching
+        # the runtime's own case-sensitive gate.
+        if claim_falsification:
+            env["CLAIM_FALSIFICATION"] = "true"
+        else:
+            env.pop("CLAIM_FALSIFICATION", None)
         env.update(model_config.get("extra_env") or {})
 
         # Run the review through the TypeScript runtime (the v3 `run`
@@ -2858,6 +2871,7 @@ def run_real_pr_corpus(
     dry_run: bool = False,
     context_only: bool = False,
     runs_per_mode: int = 1,
+    claim_falsification: bool = False,
 ) -> dict[str, Any] | None:
     """Run every scenario in a real-PR corpus across the given modes.
 
@@ -2908,7 +2922,9 @@ def run_real_pr_corpus(
         for mode in modes:
             reps: list[ReviewRun] = []
             for rep in range(runs_per_mode):
-                run = run_review_for_pr(pr_entry, mode, work_dir, model_config)
+                run = run_review_for_pr(
+                    pr_entry, mode, work_dir, model_config, claim_falsification=claim_falsification,
+                )
                 reps.append(run)
                 label = mode if runs_per_mode == 1 else f"{mode} {rep + 1}/{runs_per_mode}"
                 if context_only:
@@ -2932,8 +2948,12 @@ def run_real_pr_corpus(
         scenario_runs.append((scenario, mode_runs))
 
     if context_only:
-        return generate_context_report(context_rows)
-    return generate_real_pr_report(scenario_runs)
+        report = generate_context_report(context_rows)
+        report["metadata"]["claim_falsification"] = claim_falsification
+        return report
+    report = generate_real_pr_report(scenario_runs)
+    report["metadata"]["claim_falsification"] = claim_falsification
+    return report
 
 
 def generate_context_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3051,6 +3071,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--claim-falsification",
+        choices=["false", "true"],
+        default="false",
+        help=(
+            "Claim falsification pre-pass A/B (#785, the gate for shipping "
+            "it on by default): 'true' exports CLAIM_FALSIFICATION=true for "
+            "every review run (real-PR and fixture corpora alike); 'false' "
+            "(default) leaves it unset. Recorded in the report metadata so "
+            "runs from the two arms are distinguishable; run the same "
+            "corpus once per value and diff the reports for the A/B."
+        ),
+    )
+    parser.add_argument(
         "--system-prompt",
         type=str,
         default=None,
@@ -3135,6 +3168,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
     )
     print(f"Modes: {args.modes}", file=sys.stderr)
     print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+    print(f"Claim falsification: {args.claim_falsification}", file=sys.stderr)
     if args.runs_per_mode > 1:
         print(f"Runs per mode: {args.runs_per_mode}", file=sys.stderr)
 
@@ -3148,6 +3182,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             context_only=args.context_only,
             runs_per_mode=args.runs_per_mode,
+            claim_falsification=args.claim_falsification == "true",
         )
 
     if args.dry_run:
@@ -3234,7 +3269,9 @@ def main() -> int:
     print(f"Modes: {args.modes}", file=sys.stderr)
     print(f"Deep review: {args.deep_review}", file=sys.stderr)
     print(f"Deep execution: {args.deep_execution}", file=sys.stderr)
+    print(f"Claim falsification: {args.claim_falsification}", file=sys.stderr)
     print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+    claim_falsification = args.claim_falsification == "true"
 
     runs_per_mode = max(1, args.runs_per_mode)
     deep_variants = (
@@ -3272,6 +3309,7 @@ def main() -> int:
                         run = run_review_for_pr(
                             pr, mode, work_dir, model_config, deep_review=deep,
                             deep_execution=args.deep_execution,
+                            claim_falsification=claim_falsification,
                         )
                         bm.runs.append(run)
                         base = run_label(mode, deep, args.deep_execution)
@@ -3300,6 +3338,7 @@ def main() -> int:
     # Generate report
     report = generate_report(results, corpus)
     report["metadata"]["corpus_source"] = str(args.corpus)
+    report["metadata"]["claim_falsification"] = claim_falsification
 
     # #840: surface timeout counts per mode prominently, so a lopsided
     # timeout loss on one arm is visible without reading the full report.

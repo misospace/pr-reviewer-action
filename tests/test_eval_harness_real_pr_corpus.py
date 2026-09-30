@@ -768,6 +768,27 @@ class TestRunsPerModeRealPRCorpus:
         # x5 repetition: context assembly for a pinned head is deterministic.
         assert len(calls) == 2
 
+    def test_claim_falsification_threads_to_every_run_and_the_report_metadata(self, monkeypatch, tmp_path):
+        """#785 A/B knob: the flag reaches every run_review_for_pr call (real-PR
+        corpus path) and is recorded in the report metadata so a true-arm and
+        false-arm report over the same corpus are distinguishable."""
+        seen: list[bool] = []
+
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, claim_falsification=False, **kwargs):
+            seen.append(claim_falsification)
+            return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
+
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
+
+        on_report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, claim_falsification=True)
+        assert seen == [True, True]
+        assert on_report["metadata"]["claim_falsification"] is True
+
+        seen.clear()
+        off_report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
+        assert seen == [False, False]
+        assert off_report["metadata"]["claim_falsification"] is False
+
 
 class TestGenerateRealPRReportRunsPerMode:
     """generate_real_pr_report accepts either a single ReviewRun per mode
