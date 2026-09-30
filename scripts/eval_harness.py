@@ -2971,9 +2971,11 @@ def run_real_pr_corpus(
     if context_only:
         context_report = generate_context_report(context_rows, equivalent_paths=equivalent_paths)
         context_report["metadata"]["claim_falsification"] = claim_falsification
+        context_report["metadata"]["requirement_trace"] = requirement_trace
         return context_report
     real_pr_report = generate_real_pr_report(scenario_runs, equivalent_paths=equivalent_paths)
     real_pr_report["metadata"]["claim_falsification"] = claim_falsification
+    real_pr_report["metadata"]["requirement_trace"] = requirement_trace
     return real_pr_report
 
 
@@ -3405,6 +3407,7 @@ def main() -> int:
     report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
+    report["metadata"]["requirement_trace"] = args.requirement_trace == "true"
 
     # #840: surface timeout counts per mode prominently, so a lopsided
     # timeout loss on one arm is visible without reading the full report.

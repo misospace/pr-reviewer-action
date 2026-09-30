@@ -2262,16 +2262,16 @@ function ledgerRequirementId(requestBody: string, marker: string): string {
   return `req-${match[1]}`;
 }
 
-test("#874 #854-reproduction: a 'met' claim citing a non-existent enforcement location is downgraded, coverage goes partial", async () => {
+test("#874 malformed-location regression: a 'met' claim citing a non-existent enforcement location is downgraded, coverage goes partial", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict({
       requirement_coverage: [{
         requirement_id: reqId,
-        // The #854 failure exactly: the model claims the requirement is
-        // met, citing a line nothing in this checkout actually contains —
-        // no file at that path exists at all.
+        // No file at this path exists in the checkout at all — the
+        // malformed-location case, distinct from the real #854 shape below
+        // (where the cited line exists but only copies the value).
         disposition: "met",
         enforcement: [{ file: "src/context-resolution.ts", line: 42 }],
         test: [],
@@ -2321,6 +2321,80 @@ test("#874 #854-reproduction: a 'met' claim citing a non-existent enforcement lo
     assert.match(result.marker, /"review_result":"partial"/);
 
     assert.match(result.outputs.reviewMarkdown, /Requirement trace/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        // The real #854 defect: the cited line EXISTS and even names the
+        // right field, but only copies ctx.sourceSha onto the output —
+        // nothing ever compares it. Location existence must not pass this.
+        disposition: "met",
+        enforcement: [{ file: "src/context-resolution.ts", line: 5 }],
+        test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+        reason: "sourceSha is present on the resolved context object",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx) {",
+        "  const record = lookupPull(ctx);",
+        "  return {",
+        "    repo: record.repo,",
+        "    sourceSha: ctx.sourceSha,",
+        "    targetBranch: ctx.targetBranch,",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows[0]));
+    assert.equal(trace.incomplete, true);
+
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"review_result":"partial"/);
   } finally {
     await server.close();
     cleanup();

@@ -901,6 +901,42 @@ class TestEquivalentPathsArmRealPRPath:
         assert rc == 0
         assert captured
         assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "false" for mc in captured)
+class TestRequirementTraceMetadata:
+    """#874: metadata.requirement_trace distinguishes the A/B arm on every
+    report shape run_real_pr_corpus can produce, like corpus_source does for
+    the synthetic-benchmark path (main())."""
+
+    def _corpus(self):
+        vuln = RealPRScenario(
+            id="v1", repo_full_name="acme/repo", number=1, head_sha=GOOD_SHA,
+            expected_clean=False, defect=None,
+        )
+        return RealPRCorpus(vulnerable=[vuln], clean=[])
+
+    def _stub(self, monkeypatch):
+        monkeypatch.setattr(
+            "eval_harness.run_review_for_pr",
+            lambda pr_entry, mode, work_dir, model_config, **kwargs: ReviewRun(
+                mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"],
+            ),
+        )
+
+    def test_default_false(self, monkeypatch, tmp_path):
+        self._stub(monkeypatch)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
+        assert report["metadata"]["requirement_trace"] is False
+
+    def test_true_when_enabled(self, monkeypatch, tmp_path):
+        self._stub(monkeypatch)
+        report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, requirement_trace=True)
+        assert report["metadata"]["requirement_trace"] is True
+
+    def test_context_only_report_also_carries_it(self, monkeypatch, tmp_path):
+        self._stub(monkeypatch)
+        report = run_real_pr_corpus(
+            self._corpus(), ["tools_off"], tmp_path, {}, context_only=True, requirement_trace=True,
+        )
+        assert report["metadata"]["requirement_trace"] is True
 
 
 class TestGenerateRealPRReportRunsPerMode:
