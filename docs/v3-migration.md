@@ -1,10 +1,153 @@
 # Migrating from v2 to v3
 
 The v3 public Action API uses kebab-case IDs. The canonical, machine-readable
-contract is [`../contracts/action-v3.yml`](../contracts/action-v3.yml). This
-contract documents the future API; the production `action.yml` remains on the
-v2 snake_case IDs until the atomic cutover in #681. Do not use v3 IDs before
-that cutover.
+contract is [`../contracts/action-v3.yml`](../contracts/action-v3.yml), and
+the root `action.yml` shipped to consumers is generated from it (`npm run
+build` / `scripts/generate-action-yml.mjs`) — the live action already is the
+v3 contract; there is no separate pre-cutover snake_case metadata left in
+this repository.
+
+## Upgrading from v2
+
+This section is for a consumer updating an existing workflow from v2 to v3,
+in the order to do it. Everything it references is documented in full below;
+follow the links for the complete tables and rationale.
+
+### 1. Prerequisites
+
+v3 is a JavaScript action (`runs.using: node24`, `main: dist/index.js`):
+
+- **GitHub-hosted runners** need nothing installed — the runner provides
+  Node.
+- **Forgejo** runners need **runner 9 or newer** with a job image that has
+  **Node 22+** and `git` (Forgejo executes `node24`-declared actions with the
+  job image's own Node; runners 6.3.1, 7 and 8 fail to load the action at
+  all). See the [Forgejo compatibility table](../README.md#-how-it-works)
+  and requirements in the README for the full platform support matrix.
+
+### 2. Point the workflow at v3
+
+Change `@v2` to `@v3` (or pin an exact `vX.Y.Z` tag/SHA — see
+[Versioning](#6-versioning-floating-vs-pinned) below).
+
+### 3. Rename inputs and outputs to kebab-case
+
+Every v2 `snake_case` input and output has a v3 `kebab-case` counterpart with
+identical behavior. Rename them per the [Retained inputs](#retained-inputs)
+and [Retained outputs](#retained-outputs) tables. Nothing else changes for a
+retained field: same semantics, same default, same type.
+
+### 4. Drop removed inputs and outputs
+
+A small set of v2 fields have no v3 equivalent — mostly incremental-review
+state (see [#614 below](#5-the-full-review-only-change-614)) and inputs that
+were already dead in v2. Remove them; see
+[Removed fields](#removed-fields) for the complete list and the
+migration action for each one.
+
+### 5. The full-review-only change (#614)
+
+v3 removes incremental PR review as a concept (#614/#615-#619). v2 could
+review just the range since the last push (`review_scope:
+auto|incremental|full`, with carried findings, `needs_full_review`, and
+dirty-baseline escalation); v3 has exactly one review path: **an unchanged
+diff/config still skips the model call for zero tokens, and anything changed
+gets a full review of the current PR.**
+
+Concretely:
+
+- Remove `review_scope` — there is no replacement input; every changed
+  review is a full review.
+- Remove `escalate_on_dirty_baseline` — dirty-baseline escalation no longer
+  exists.
+- Stop reading `effective_review_scope`, `previous_head_sha`,
+  `previous_base_sha`, and `baseline_clean` — none of this incremental
+  baseline state is exposed anymore.
+- Keep `skip-if-diff-unchanged` (v2: `skip_if_diff_unchanged`) for the
+  zero-token unchanged-diff skip; it still carries the prior overall verdict
+  forward. The `ai-review` label and `force-review: "true"` still force a
+  fresh full review.
+- Previous findings and evidence are not carried into a new review — a
+  changed PR always gets a fresh, fully-informed review rather than a
+  patched-together incremental one.
+
+### 6. Review the defaults that changed on purpose
+
+Most v3 defaults are unchanged from v2. A handful changed because the v3
+recommended setup is meant to be a better out-of-the-box experience; set the
+input explicitly to keep the old behavior. See
+[Runtime and recommended defaults](#runtime-and-recommended-defaults-706)
+for the full table, and [the strict verdict default](#the-strict-verdict-default-811)
+for the most consequential one:
+
+- **`verdict-policy`** defaults to `strict` (v2: `model`) — the published
+  verdict becomes a deterministic function of the still-open findings and
+  required-check coverage, instead of a passthrough of the model's own
+  verdict. Set `verdict-policy: model` to keep v2's passthrough behavior.
+- **`publish-mode`** defaults to `review_comment` (v2: `comment`) — reviews
+  publish as a native GitHub review by default instead of a sticky issue
+  comment.
+- **`tool-mode`** defaults to `native_loop` (v2: `off`) — the model can use
+  read-only tools during review by default.
+- **`deep-review`** defaults to `auto` (v2: `false`) — specialist review
+  passes run automatically for PRs the deterministic classifier flags as
+  worth it.
+- **`ci-status-check`** defaults to `true` (v2: `false`) — the review waits
+  for CI by default; grant the workflow `checks: read`.
+- **`on-model-failure`** defaults to `notice` (v2: `fail`) — a model failure
+  posts a notice instead of failing the job.
+- **`inline-findings`** defaults to `true` (v2: `false`) — findings get
+  line-anchored inline comments by default.
+
+Set any of these explicitly to reproduce v2 behavior exactly; the parity
+harness pins each one as an approved, intentional divergence.
+
+### 7. Before/after example
+
+```yaml
+# v2
+- uses: misospace/pr-reviewer-action@v2
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    ai_base_url: ${{ vars.LITELLM_URL }}
+    review_routing_mode: smart
+```
+
+```yaml
+# v3
+- uses: misospace/pr-reviewer-action@v3
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-base-url: ${{ vars.LITELLM_URL }}
+    review-routing-mode: smart
+```
+
+Reading an output the same way, only the ID changed (hyphens are valid in
+GitHub expression property dereferences):
+
+```yaml
+# v2
+- if: steps.review.outputs.verdict == 'request_changes'
+  env:
+    REVIEW_MARKDOWN: ${{ steps.review.outputs.review_markdown }}
+```
+
+```yaml
+# v3
+- if: steps.review.outputs.verdict == 'request_changes'
+  env:
+    REVIEW_MARKDOWN: ${{ steps.review.outputs.review-markdown }}
+```
+
+### 8. Versioning: floating vs pinned
+
+`@v3` is a floating major tag that always points at the latest `v3.Y.Z`
+release; it is a convenient shorthand but not reproducible across time.
+Production workflows should pin to a specific release tag (`@v3.0.0`) or a
+commit SHA instead. See
+[Version pinning and releases](../README.md#-version-pinning-and-releases)
+in the README for the full versioning policy (what counts as a patch, minor,
+or major bump) and how to subscribe to new releases.
 
 ## Runtime and recommended defaults (#706)
 
@@ -385,6 +528,15 @@ The publish-side rendering and the marker states are v3-only behavior
 covered by `tests-v3/strict-verdict.test.ts`; no parity fixture exercises
 them, because the enforcement-pipeline boundary pins the v2 policies, whose
 behavior is unchanged.
+
+## Contributor notes: migration history
+
+Everything below this point is contributor-facing history of the v2 → v3
+TypeScript port itself (parity boundaries, port-by-port notes, the removed
+shadow-comparison tooling, and the teardown sequencing). It is not needed to
+upgrade a workflow — see [Upgrading from v2](#upgrading-from-v2) above for
+that. It is kept for anyone auditing how a specific behavior was proven
+equivalent, or bisecting a regression back to its port.
 
 ## Parity harness (#673)
 
@@ -1000,18 +1152,15 @@ kebab-case contract inputs as `INPUT_*` environment variables (the shape the
 v3 action metadata will export) plus the ambient runner context
 (`PR_HEAD_SHA`, `IS_FORK_PR`, `PLATFORM`, ...).
 
-### Shadow mode (#809)
+### Shadow mode (#809) — historical, removed
 
-The dogfood workflow runs the v3 entry beside v2 on every same-repo PR
-(Build/Run/Compare/Upload steps in `.github/workflows/ai-pr-review.yaml`,
-driven by `scripts/v3_shadow_run.mjs` — dogfood-only tooling, not part of the
-shipped runtime). The shadow never publishes; it writes its artifacts to a
-scratch `PR_REVIEWER_RUN_DIR`, diffs verdict, verdict source, route,
-escalation reason, required checks, analysis engine, cache-hit ratio and the
-findings count against the v2 step's outputs, and uploads the report as a
-workflow artifact. Every difference observed across the qualification PRs
-must be fixed or pinned as an approved divergence before the #681 release
-gate.
+During the migration the dogfood workflow ran the v3 entry beside v2 on
+every same-repo PR and diffed their outputs (`scripts/v3_shadow_run.mjs`),
+to catch behavior drift before the cutover. The comparison is no longer part
+of the repository: v2 has been fully removed, so there is nothing left to
+shadow against. The script and its test were deleted in the #706 wave-1
+teardown; see [`docs/v3-teardown-audit.md`](v3-teardown-audit.md) for the
+disposition record.
 
 ## The verification ledger (#796)
 
@@ -1034,71 +1183,25 @@ of runs on vs 24.3% off (paired delta -2.7pp, 95% CI -12.6 to +7.2), with
 0.42 vs 0.39 blocker/major false positives per run. Evidence:
 `evals/reports/harness-obligations/`.
 
-## Workflow examples
+## Historical: the repository's own v2 → v3 cutover and teardown
 
-```yaml
-# v2
-- uses: misospace/pr-reviewer-action@v2
-  with:
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    ai_base_url: ${{ vars.LITELLM_URL }}
-    review_routing_mode: smart
-```
+These notes describe how this repository migrated *itself* onto v3 — its own
+dogfood workflow and the retirement of the v2 runtime. They predate the
+cutover and are kept only for that history; a consumer upgrading a workflow
+needs [Upgrading from v2](#upgrading-from-v2) above, not this section.
 
-```yaml
-# v3 (after the #681 cutover)
-- uses: misospace/pr-reviewer-action@v3
-  with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-    ai-base-url: ${{ vars.LITELLM_URL }}
-    review-routing-mode: smart
-```
+Kebab-case renaming (the retained-input map above) and the root `action.yml`
+regeneration from `contracts/action-v3.yml` both landed as part of the
+cutover (#815/#829/#830). Kebab-case is limited to the project-owned public
+Action API: internal TypeScript properties use camelCase; external payloads,
+environment variables, and existing versioned machine schemas keep their
+established names.
 
-```yaml
-# v2 output
-- name: Enforce review verdict
-  if: steps.review.outputs.verdict == 'request_changes'
-```
-
-```yaml
-# v3 output; hyphens are valid in GitHub expression property dereferences
-- name: Enforce review verdict
-  if: steps.review.outputs.verdict == 'request_changes'
-- name: Publish review text
-  env:
-    REVIEW_MARKDOWN: ${{ steps.review.outputs.review-markdown }}
-```
-
-## Repository dogfood cutover checklist for #681
-
-Do not migrate these files before the root metadata cutover. In the atomic #681
-change:
-
-1. Rename every action-owned key under `with:` in
-   `.github/workflows/ai-pr-review.yaml` using the retained-input map above;
-   leave expressions, secrets, vars, and external action input names alone.
-2. Search repository workflow/config examples and tests for action invocations
-   and action output references, then rename only project-owned Action IDs.
-   Keep step outputs such as `steps.app-token.outputs.token` unchanged.
-3. Keep process environment variables (for example `AI_BASE_URL`) and payload,
-   persisted diagnostic, and versioned JSON schema fields as they are.
-4. Materialize and validate root `action.yml` from this contract in the same
-   cutover; do not ship a partially renamed metadata/runtime boundary.
-5. Confirm no underscore aliases remain in the v3 public input/output IDs.
-
-Kebab-case is limited to the project-owned public Action API. Internal
-TypeScript properties should use camelCase; external payloads, environment
-variables, and existing versioned machine schemas retain their established
-names.
-
-## Teardown status (#706)
-
-Wave 0 of the #706 teardown has landed: `scripts/eval_harness.py` drives the
-v3 runtime (`node dist/index.js run`, fixture mode served by the
-`SemanticFixtureAdapter` through the same platform seam), the Forgejo E2E
-smoke exercises the v3 precheck / `gate-ci` / publish entries, the strict
-verdict-schema pin is inlined in `tests-v3/request.test.ts`, and the
-docs describe v3 as the authoritative runtime. Nothing is deleted yet: the
-v2 trees remain as parity/eval oracles per
-[`docs/v3-teardown-audit.md`](v3-teardown-audit.md) — wave 1 deletes the v2
-runtime and its tests, wave 2 (at #681) freezes the parity boundaries.
+Teardown then proceeded in waves per
+[`docs/v3-teardown-audit.md`](v3-teardown-audit.md): wave 0 re-pointed
+`scripts/eval_harness.py` and the Forgejo E2E smoke at the v3 runtime; wave 1
+deleted the v2 production runtime and its tests; wave 2 froze the parity
+boundaries on recorded goldens and deleted the remaining v2 code. All three
+waves are complete — the "Parity harness" and per-boundary sections above
+describe what was proven equivalent before each deletion, not a live v2
+runtime.
