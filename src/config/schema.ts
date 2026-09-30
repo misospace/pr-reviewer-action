@@ -56,7 +56,7 @@ export const SECRET_INPUTS = new Set([
 ]);
 
 export const POSITIVE_INTEGER_INPUTS = new Set([
-  "ai-max-tokens", "inline-findings-max", "related-code-max-bytes", "linear-issue-timeout-sec",
+  "ai-max-tokens", "inline-findings-max", "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec",
   "model-context-tokens", "primary-model-context-tokens", "smart-model-context-tokens",
   "deep-review-timeout-sec", "deep-review-max-tokens",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",

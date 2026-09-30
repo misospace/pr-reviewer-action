@@ -55,6 +55,19 @@ test("a secret input is never repo-configurable even if named in the file", () =
   assert.equal(resolution.raw["github-token"], operatorRaw["github-token"]);
 });
 
+test("#875: equivalent-paths-max-bytes is a positive integer — repo config zero/negative is rejected", () => {
+  // Matches related-code-max-bytes: a repo-side 0 or negative must never
+  // narrow the value (0 would silently become the 6000 default; a negative
+  // would make the clipped hint empty) — it is rejected and the operator
+  // default governs.
+  for (const bad of ["0", "-1"]) {
+    const resolution = applyRepositoryConfig(contract, baseOperatorRaw(), fileOf(`equivalent-paths-max-bytes: ${bad}\n`));
+    assert.equal(resolution.appliedKeys.length, 0, bad);
+    assert.match(resolution.warnings[0]!, /must be at least 1/, bad);
+    assert.equal(resolution.raw["equivalent-paths-max-bytes"], "6000", bad);
+  }
+});
+
 test("bounded numeric input: repo may narrow below the operator's explicit ceiling, never exceed it", () => {
   const operatorRaw = baseOperatorRaw();
   operatorRaw["inline-findings-max"] = "20";
