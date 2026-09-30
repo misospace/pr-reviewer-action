@@ -22,13 +22,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-# Both import styles are intentional: the module object is needed to
-# monkeypatch `eval_harness.run_review_for_pr` and reach the private
-# `_main_real_pr_corpus`; the from-imports keep the long-standing call
-# sites readable.
-import eval_harness
-
 from eval_harness import (
+    _main_real_pr_corpus,
+
     CONTEXT_ONLY_ENV,
     REPLAY_ENV,
     RealPRCorpus,
@@ -894,14 +890,14 @@ class TestEquivalentPathsArmRealPRPath:
 
     def test_main_real_pr_corpus_applies_the_true_arm(self, monkeypatch, tmp_path, capsys):
         captured = self._capture_arm(monkeypatch)
-        rc = eval_harness._main_real_pr_corpus(self._main_args(tmp_path, "true"))
+        rc = _main_real_pr_corpus(self._main_args(tmp_path, "true"))
         assert rc == 0
         assert captured
         assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "true" for mc in captured)
 
     def test_main_real_pr_corpus_applies_the_false_arm(self, monkeypatch, tmp_path, capsys):
         captured = self._capture_arm(monkeypatch)
-        rc = eval_harness._main_real_pr_corpus(self._main_args(tmp_path, "false"))
+        rc = _main_real_pr_corpus(self._main_args(tmp_path, "false"))
         assert rc == 0
         assert captured
         assert all(mc.get("extra_env", {}).get("EQUIVALENT_PATHS") == "false" for mc in captured)

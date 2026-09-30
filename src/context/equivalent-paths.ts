@@ -410,12 +410,24 @@ function toMember(c: Candidate): EquivalentPathMember {
 
 /** Group changed functions/methods into bounded "equivalent implementation
  * path" groups. Every rule requires >=2 distinct members before it forms a
- * group; a symbol already claimed by an earlier (higher-priority) group is
- * not reused by a later rule, so one asymmetry is not reported twice under
- * two different labels. Rule priority: return_type, then adapter_family,
- * then privileged_operation — a shared declared type is the strongest,
- * most specific signal; a shared privileged call target is the weakest
- * (most likely to be incidental) and is capped hardest. */
+ * group; a candidate already claimed by an earlier (higher-priority) rule
+ * is not reused by a later rule, so the same asymmetry is not reported
+ * twice under two different labels. Rule priority: return_type, then
+ * same_constructor, then adapter_family, then privileged_operation — a
+ * shared declared type is the strongest, most specific signal; a shared
+ * privileged call target is the weakest (most likely to be incidental) and
+ * is capped hardest.
+ *
+ * Claimed-key granularity (deliberate): the declaration-keyed rules
+ * (return_type, adapter_family, privileged_operation) claim and consult a
+ * candidate's *declaration* line, while same_constructor claims its
+ * *return-site* lines — its members are sites inside one or more enclosing
+ * declarations, and claiming those declarations wholesale would suppress a
+ * genuinely different declaration-level asymmetry about the same function.
+ * A function can therefore legitimately appear in a same_constructor group
+ * AND a later declaration-level group when both asymmetries are real; what
+ * the contract guarantees is that no single rule re-reports, and no
+ * declaration is duplicated by another declaration-keyed rule. */
 export function detectEquivalentPathGroups(
   anchors: ChangeAnchorsArtifact | null | undefined,
   sourceRoot: string | null | undefined,
