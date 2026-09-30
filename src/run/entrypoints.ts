@@ -169,46 +169,56 @@ interface CoverageResolution {
   unknown: boolean;
 }
 
-/** Mirrors review.ts's own `(env.TOOL_MODE ?? "off").toLowerCase()`
- * normalization exactly (any value other than "native_loop" — including
- * empty, a stale planner-mode value, or an unset var — is "off"), so
- * `publish` and `run` agree on whether a tool harness was ever expected to
- * exist. There is no run artifact recording this independently: `run`
- * simply never writes tool-harness.json when tools are off, which is the
- * one signal ambient TOOL_MODE lets publish tell apart from "the harness
- * ran and its artifact went missing". */
-function toolLoopExpected(env: NodeJS.ProcessEnv): boolean {
-  return (env.TOOL_MODE ?? "off").trim().toLowerCase() === "native_loop";
+/** Validates one field of #873's authoritative `review-coverage.json`
+ * artifact (see the write site in `review.ts`) — the same shape check
+ * `partialCoverageOf` applies to a raw harness's `partial_coverage` field,
+ * reused here since the artifact stores the identical structure directly. */
+function parsePartialCoverageField(value: unknown): PartialCoverage | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && typeof (value as { stop_reason?: unknown }).stop_reason === "string"
+    ? value as PartialCoverage
+    : undefined;
 }
 
-/** #873/#838: the `publish` CLI subcommand is a separate process from
- * `run`, so it cannot hold the tool harness in memory — it reads the same
- * persisted artifact `runReview` wrote, from the same explicit, non-empty
- * `PR_REVIEWER_RUN_DIR` `isFileNonEmpty` above already requires (never
- * `GITHUB_WORKSPACE`/the process cwd — the reviewed checkout, per #838:
- * a PR could otherwise forge or hide a "complete" tool-harness.json at its
- * repository root). The harness filename mirrors review.ts's own
- * `enforcementHarness` selection: an escalated run publishes the smart
- * harness, everything else the primary one.
+/** #873 maintainer follow-up: the `publish` CLI subcommand is a separate
+ * process from `run`, so it cannot hold `toolMode`/`enforcementHarness` in
+ * memory — and re-deriving them from ambient `TOOL_MODE`/`REVIEW_ROUTE`
+ * stage env is exactly the hole this closes: either var can be omitted,
+ * stale, or simply wrong for the run actually being published, letting a
+ * partial run read as clean (or a clean run's harness never get
+ * consulted). `run` (`review.ts`) instead writes its own authoritative
+ * `review-coverage.json` — the one file that always reflects what THIS
+ * run actually did — and `publish` reads only that, from the same
+ * explicit, non-empty `PR_REVIEWER_RUN_DIR` `isFileNonEmpty` above already
+ * requires (never `GITHUB_WORKSPACE`/the process cwd — the reviewed
+ * checkout, per #838).
  *
  * Three states, not two:
- * - no explicit run dir at all: UNKNOWN — publish cannot check anything.
- * - an explicit run dir, but tools were never expected (tool-mode=off, or
- *   any value review.ts itself treats as off): no harness is ever written
- *   by design, so its absence is NOT a gap — coverage from the tool loop
- *   simply doesn't apply, and a tools-off review can still approve.
- * - an explicit run dir, tools expected, but the harness artifact is
- *   missing or fails to parse: UNKNOWN — the loop should have left a
- *   record and didn't, so publish fails closed exactly like a confirmed
- *   #810 gap, never reading the silence as "it was clean". */
+ * - no explicit run dir, or the artifact is missing/unparseable/
+ *   structurally unrecognizable: UNKNOWN — `run` should always have
+ *   written this file; publish fails closed rather than guess.
+ * - `tool_loop_ran: false` (tool-mode was off for this run): no harness
+ *   was ever expected, so there is no gap — a tools-off review can still
+ *   approve.
+ * - `tool_loop_ran: true`: use the artifact's own recorded
+ *   `partial_coverage`, and — belt-and-braces — also re-derive from the
+ *   named `enforcement_harness` file if that disagrees (reports a gap the
+ *   artifact's own field didn't capture), never the other way around. */
 function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
   if (runDir === undefined) return { partialCoverage: undefined, unknown: true };
-  if (!toolLoopExpected(env)) return { partialCoverage: undefined, unknown: false };
-  const harnessName = env.REVIEW_ROUTE === "escalated" ? "tool-harness.smart.json" : "tool-harness.json";
-  const harness = readJsonObject(join(runDir, harnessName));
-  if (harness === null) return { partialCoverage: undefined, unknown: true };
-  return { partialCoverage: partialCoverageOf(harness), unknown: false };
+  const artifact = readJsonObject(join(runDir, "review-coverage.json"));
+  if (artifact === null || artifact.version !== 1 || typeof artifact.tool_loop_ran !== "boolean") {
+    return { partialCoverage: undefined, unknown: true };
+  }
+  if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false };
+  let partialCoverage = parsePartialCoverageField(artifact.partial_coverage);
+  const harnessName = typeof artifact.enforcement_harness === "string" ? artifact.enforcement_harness : undefined;
+  if (partialCoverage === undefined && harnessName !== undefined) {
+    const harness = readJsonObject(join(runDir, harnessName));
+    if (harness !== null) partialCoverage = partialCoverageOf(harness);
+  }
+  return { partialCoverage, unknown: false };
 }
 
 /** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */

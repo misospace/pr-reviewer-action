@@ -828,6 +828,25 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const partialCoverage = partialCoverageOf(harnessForMarker);
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
+  // #873 maintainer follow-up: the standalone `publish` CLI is a separate
+  // process that cannot see `toolMode`/`enforcementHarness` — trusting the
+  // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
+  // spoofable/stale (a caller that omits or forges either one can make a
+  // partial run read as clean, or a clean run's harness never get read at
+  // all). This run writes its OWN authoritative record of what actually
+  // happened — never derived from anything `publish` could independently
+  // guess — so `publish` only ever needs to read one file, never reason
+  // about tool-mode or route itself. Written for every run, including
+  // tools-off (tool_loop_ran: false, enforcement_harness: null).
+  const reviewCoverage = {
+    version: 1,
+    tool_loop_ran: toolMode === "native_loop",
+    enforcement_harness: toolMode === "native_loop" ? enforcementHarness : null,
+    route: env.REVIEW_ROUTE ?? "legacy",
+    partial_coverage: partialCoverage ?? null,
+    required_checks: outputRequiredChecks,
+  };
+  ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),

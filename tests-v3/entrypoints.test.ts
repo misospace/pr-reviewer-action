@@ -157,71 +157,88 @@ async function withRunDirAsync<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-const PARTIAL_COVERAGE_HARNESS = JSON.stringify({
-  stop_reason: "tool-call-budget-exhausted",
-  partial_coverage: {
-    stop_reason: "tool-call-budget-exhausted",
-    changed_files_total: 2,
-    unread_files: ["a.ts"],
-    leads_total: 0,
-    unresolved_leads: [],
-  },
-});
+// ---------------------------------------------------------------------------
+// #873 maintainer follow-up: coverage truth must come from the run being
+// published, not from ambient TOOL_MODE/REVIEW_ROUTE stage env (either can
+// be omitted, stale, or simply wrong for the run actually sitting in the
+// run dir — trusting them let a partial run read as clean, or a clean
+// run's harness never get read at all). `run` now writes its own
+// authoritative `review-coverage.json`; `publish` reads only that.
+// ---------------------------------------------------------------------------
 
-test("#873: publishInputFromEnv reads partial coverage from the run dir's tool-harness artifact", () => {
+const PARTIAL_COVERAGE = {
+  stop_reason: "tool-call-budget-exhausted",
+  changed_files_total: 2,
+  unread_files: ["a.ts"],
+  leads_total: 0,
+  unresolved_leads: [],
+};
+
+const PARTIAL_COVERAGE_HARNESS = JSON.stringify({ stop_reason: "tool-call-budget-exhausted", partial_coverage: PARTIAL_COVERAGE });
+const COMPLETE_HARNESS = JSON.stringify({ stop_reason: "model_stop" }); // no partial_coverage key
+
+/** Writes the authoritative artifact `review.ts` produces, with sensible
+ * "nothing happened" defaults an override can narrow. */
+function writeCoverageArtifact(dir: string, overrides: Partial<{
+  version: number;
+  tool_loop_ran: boolean;
+  enforcement_harness: string | null;
+  route: string;
+  partial_coverage: unknown;
+  required_checks: string;
+}> = {}): void {
+  const artifact = {
+    version: 1,
+    tool_loop_ran: false,
+    enforcement_harness: null,
+    route: "primary",
+    partial_coverage: null,
+    required_checks: "complete",
+    ...overrides,
+  };
+  writeFileSync(join(dir, "review-coverage.json"), JSON.stringify(artifact));
+}
+
+test("#873: publishInputFromEnv reads partial coverage straight from the artifact's own partial_coverage field", () => {
   withRunDir((dir) => {
-    writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
-    const input = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
-      "github",
-    );
+    writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.ok(input.partialCoverage);
     assert.equal(input.partialCoverage?.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(input.coverageUnknown, undefined);
   });
 });
 
-test("#873: publishInputFromEnv reads the smart harness for an escalated route", () => {
+test("#873: tool_loop_ran:false is not a coverage gap, even with a stray partial-coverage harness file sitting in the run dir", () => {
   withRunDir((dir) => {
-    writeFileSync(join(dir, "tool-harness.smart.json"), PARTIAL_COVERAGE_HARNESS);
-    const input = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "escalated", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
-      "github",
-    );
-    assert.ok(input.partialCoverage);
-    // The primary harness is never consulted on an escalated route.
-    const primaryOnly = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
-      "github",
-    );
-    assert.equal(primaryOnly.partialCoverage, undefined);
-  });
-});
-
-test("#873/#838: an explicit run dir with tools expected but a missing harness artifact fails closed (coverage unknown, never 'complete')", () => {
-  withRunDir((dir) => {
-    const input = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
-      "github",
-    );
+    writeCoverageArtifact(dir, { tool_loop_ran: false });
+    // A leftover/unrelated file from a prior run, or a red herring: must
+    // never be consulted when the artifact itself says tools didn't run.
+    writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
     assert.equal(input.partialCoverage, undefined);
-    assert.equal(input.coverageUnknown, true);
+    assert.equal(input.coverageUnknown, undefined);
   });
 });
 
-test("#873/#838: tool-mode=off with an explicit run dir and no harness artifact is NOT a coverage gap", () => {
+test("#873: a missing, empty, or structurally unrecognizable review-coverage.json fails closed (coverage unknown)", () => {
   withRunDir((dir) => {
-    // tool-mode=off never writes a harness artifact by design: its
-    // absence here must not be confused with "the loop ran and its record
-    // went missing" — every stale/off-ish value review.ts itself treats
-    // as off behaves the same way.
-    for (const toolMode of [undefined, "off", "OFF", "", "plan_execute_loop"]) {
-      const input = publishInputFromEnv(
-        { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", ...(toolMode !== undefined ? { TOOL_MODE: toolMode } : {}) } as NodeJS.ProcessEnv,
-        "github",
-      );
-      assert.equal(input.partialCoverage, undefined, String(toolMode));
-      assert.equal(input.coverageUnknown, undefined, String(toolMode));
-    }
+    // No artifact at all.
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").coverageUnknown, true);
+  });
+  withRunDir((dir) => {
+    writeFileSync(join(dir, "review-coverage.json"), "not json");
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").coverageUnknown, true);
+  });
+  withRunDir((dir) => {
+    // Right shape, wrong version — never silently upgrade a future schema.
+    writeFileSync(join(dir, "review-coverage.json"), JSON.stringify({ version: 2, tool_loop_ran: false }));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").coverageUnknown, true);
+  });
+  withRunDir((dir) => {
+    // Missing the one field this whole decision hinges on.
+    writeFileSync(join(dir, "review-coverage.json"), JSON.stringify({ version: 1 }));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").coverageUnknown, true);
   });
 });
 
@@ -239,12 +256,10 @@ test("#873/#838: no explicit PR_REVIEWER_RUN_DIR (absent or empty) fails closed,
 
 test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrades APPROVE to COMMENT for a partial-coverage run", async () => {
   await withRunDirAsync(async (dir) => {
-    writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+    writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
     const head = "a".repeat(40);
     const env = {
       PR_REVIEWER_RUN_DIR: dir,
-      REVIEW_ROUTE: "primary",
-      TOOL_MODE: "native_loop",
       VERDICT: "approve",
       REQUIRED_CHECKS: "complete",
       PUBLISH_MODE: "review_verdict",
@@ -266,22 +281,8 @@ test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrade
   });
 });
 
-// ---------------------------------------------------------------------------
-// #873/#838 cross-process regression: `run` writes its coverage-gap artifact
-// into a PRIVATE run dir; the checkout (cwd) has no harness artifact at all,
-// or — the dangerous variant — a forged "complete" one an attacker-controlled
-// PR could commit at its repository root. `publish` (a separate process from
-// `run`) must read the real state only through an explicit, non-empty
-// PR_REVIEWER_RUN_DIR, and must fail closed (never APPROVE) when that isn't
-// available — never quietly trusting whatever sits in the checkout.
-// ---------------------------------------------------------------------------
-
-const FORGED_COMPLETE_HARNESS = JSON.stringify({ stop_reason: "model_stop" }); // no partial_coverage key
-
 function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): NodeJS.ProcessEnv {
   return {
-    REVIEW_ROUTE: "primary",
-    TOOL_MODE: "native_loop",
     VERDICT: "approve",
     REQUIRED_CHECKS: "complete",
     PUBLISH_MODE: "review_verdict",
@@ -295,23 +296,90 @@ function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): Nod
   } as NodeJS.ProcessEnv;
 }
 
-test("#873/#838 regression: publish reads the real partial state from an explicit run dir, and fails closed (never APPROVE, never the checkout) without one", async () => {
+test("#873/#838 regression: a partial primary harness is never hidden by an omitted or stale-'off' ambient TOOL_MODE", async () => {
+  // The exact maintainer-flagged bug: the artifact itself records the real
+  // partial run; ambient TOOL_MODE — which `publish` no longer consults at
+  // all for this decision — is omitted in one case and actively lies
+  // ("off") in the other.
+  for (const toolModeOverride of [{}, { TOOL_MODE: "off" }]) {
+    await withRunDirAsync(async (dir) => {
+      writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir, ...toolModeOverride }), "github");
+      assert.ok(input.partialCoverage, JSON.stringify(toolModeOverride));
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", JSON.stringify(toolModeOverride));
+      assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(toolModeOverride));
+    });
+  }
+});
+
+test("#873/#838 regression: a complete primary harness never hides a partial smart harness behind an omitted or stale ambient REVIEW_ROUTE", async () => {
+  // The other maintainer-flagged bug: the escalated run's artifact names
+  // the SMART harness as its enforcement_harness (and, belt-and-braces,
+  // the smart file on disk reports the real gap); a stray complete
+  // PRIMARY harness sits alongside it, and ambient REVIEW_ROUTE — no
+  // longer consulted at all — is omitted in one case and actively lies
+  // ("primary") in the other.
+  for (const routeOverride of [{}, { REVIEW_ROUTE: "primary" }]) {
+    await withRunDirAsync(async (dir) => {
+      writeFileSync(join(dir, "tool-harness.json"), COMPLETE_HARNESS);
+      writeFileSync(join(dir, "tool-harness.smart.json"), PARTIAL_COVERAGE_HARNESS);
+      // The artifact's own partial_coverage field is left null here on
+      // purpose, to prove the belt-and-braces re-derivation from the
+      // named harness — not just the artifact's own field — closes the gap.
+      writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.smart.json", route: "escalated" });
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir, ...routeOverride }), "github");
+      assert.ok(input.partialCoverage, JSON.stringify(routeOverride));
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", JSON.stringify(routeOverride));
+      assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(routeOverride));
+    });
+  }
+});
+
+test("#873/#838 regression: a tools-off run (artifact says tool_loop_ran:false) still APPROVEs", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeCoverageArtifact(dir, { tool_loop_ran: false });
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, undefined);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.equal(api.submitted[0]!.event, "APPROVE");
+  });
+});
+
+test("#873/#838 regression: a missing review-coverage.json withholds APPROVE (COMMENT)", async () => {
+  await withRunDirAsync(async (dir) => {
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, true);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.notEqual(api.submitted[0]!.event, "APPROVE");
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /could not be verified/);
+  });
+});
+
+test("#873/#838 cross-process regression: publish reads the real state from an explicit run dir, and fails closed without one — the checkout is never consulted", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-private-"));
   const checkoutDir = mkdtempSync(join(tmpdir(), "v3-checkout-"));
   const originalCwd = process.cwd();
   try {
-    // `run`'s own private artifact: a real partial-coverage tool harness.
-    writeFileSync(join(runDir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+    // `run`'s own private artifact: a real partial-coverage record.
+    writeCoverageArtifact(runDir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
 
-    // The checkout has no harness artifact in one scenario, and a forged
-    // "complete" one (no partial_coverage key) in the other — the shape a
-    // malicious PR could commit at its repository root to fake a clean run.
+    // The checkout has no artifact at all in one scenario, and a forged
+    // "complete" one in the other — the shape a malicious PR could commit
+    // at its repository root to fake a clean run.
     const checkoutVariants: Array<{ name: string; seed: () => void }> = [
       { name: "no artifact in checkout", seed: () => {} },
-      {
-        name: "forged complete artifact in checkout",
-        seed: () => writeFileSync(join(checkoutDir, "tool-harness.json"), FORGED_COMPLETE_HARNESS),
-      },
+      { name: "forged complete artifact in checkout", seed: () => writeCoverageArtifact(checkoutDir, { tool_loop_ran: false }) },
     ];
 
     // cwd is the checkout for the whole test: proves any accidental
@@ -354,38 +422,4 @@ test("#873/#838 regression: publish reads the real partial state from an explici
     rmSync(runDir, { recursive: true, force: true });
     rmSync(checkoutDir, { recursive: true, force: true });
   }
-});
-
-test("#873/#838 regression: tool-mode=off with an explicit run dir and no harness artifact still APPROVEs (no tool-loop gap, given no other gap)", async () => {
-  await withRunDirAsync(async (dir) => {
-    // No tool-harness.json written at all — exactly what a tool-mode=off
-    // run leaves behind. Must not be confused with a native_loop run whose
-    // harness went missing.
-    const input = publishInputFromEnv(
-      publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir, TOOL_MODE: "off" }),
-      "github",
-    );
-    assert.equal(input.partialCoverage, undefined);
-    assert.equal(input.coverageUnknown, undefined);
-    const api = new MinimalPublishApi("a".repeat(40));
-    const result = await publishReview(input, api, { diffText: "" });
-    assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");
-  });
-});
-
-test("#873/#838 regression: tool-mode=native_loop with an explicit run dir and a missing harness artifact withholds APPROVE", async () => {
-  await withRunDirAsync(async (dir) => {
-    // TOOL_MODE defaults to native_loop in publishVerdictEnv: the loop was
-    // expected to run and leave tool-harness.json, and didn't.
-    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
-    assert.equal(input.partialCoverage, undefined);
-    assert.equal(input.coverageUnknown, true);
-    const api = new MinimalPublishApi("a".repeat(40));
-    const result = await publishReview(input, api, { diffText: "" });
-    assert.equal(result.status, "published");
-    assert.notEqual(api.submitted[0]!.event, "APPROVE");
-    assert.equal(api.submitted[0]!.event, "COMMENT");
-    assert.match(api.submitted[0]!.body, /could not be verified/);
-  });
 });
