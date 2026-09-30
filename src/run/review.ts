@@ -14,6 +14,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
+import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import type { FetchLike } from "../platform/http.js";
@@ -1149,7 +1150,7 @@ function resolveStandards(
   try {
     const { resolved, content } = readStandardsFileAtRef({
       standardsFile: env.STANDARDS_FILE ?? "",
-      candidates: env.STANDARDS_FILE_CANDIDATES || "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt",
+      candidates: env.STANDARDS_FILE_CANDIDATES || DEFAULT_STANDARDS_FILE_CANDIDATES,
       ref: baseRef,
       workspace,
     });
