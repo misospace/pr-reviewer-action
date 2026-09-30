@@ -428,6 +428,7 @@ Inputs with no v2 implementation.
 | v3 input | Default |
 | --- | --- |
 | `harness-obligations` | `false` |
+| `claim-falsification` | `false` |
 
 ## Retained outputs
 

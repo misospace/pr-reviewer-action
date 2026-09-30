@@ -153,6 +153,12 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   if ((env.REVIEW_VERBOSITY ?? "").toLowerCase() === "concise") {
     lines.push("REVIEW_VERBOSITY=concise");
   }
+  // CLAIM_FALSIFICATION (#785): only an enabled pre-pass changes the corpus,
+  // so only "true" contributes and the default leaves existing fingerprints
+  // valid.
+  if ((env.CLAIM_FALSIFICATION ?? "").trim().toLowerCase() === "true") {
+    lines.push("CLAIM_FALSIFICATION=true");
+  }
 
   const filePaths = CONFIG_FILE_VARS
     .map((name) => env[name])

@@ -5,7 +5,7 @@ export const BOOLEAN_INPUTS = new Set([
   "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
   "tool-enable-for-forks", "forgejo-skip-permission-preflight", "skip-if-diff-unchanged", "force-review",
-  "ci-status-check", "ci-skip-on-timeout",
+  "ci-status-check", "ci-skip-on-timeout", "claim-falsification",
 ]);
 
 export const INTEGER_INPUTS = new Set([

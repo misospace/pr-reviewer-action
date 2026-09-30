@@ -301,6 +301,10 @@ inputs:
     description: Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000.
     required: false
     default: "48000"
+  claim-falsification:
+    description: "Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; falls back to one bounded model call on the primary route only when that scan finds nothing. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy."
+    required: false
+    default: "false"
   enrichment-budget-sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false

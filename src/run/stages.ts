@@ -455,6 +455,7 @@ export function assembleCorpus(
       prFilesTruncatedJson: ws.read("pr-files.truncated.json"),
       standardsContextMd: ws.read("standards-context.md"),
       requirementLedgerMd: ws.read("requirement-ledger.md"),
+      claimFalsificationMd: ws.read("claim-falsification.md"),
       specialistsMd: ws.read("specialists.md"),
       requirementLedgerPresent: ws.read("requirement-ledger-present.txt"),
       specialistLeadsPresent: ws.read("specialist-leads-present.txt"),

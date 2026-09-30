@@ -71,6 +71,11 @@ export interface CorpusWorkspace {
   prFilesTruncatedJson: Uint8Array | null;
   standardsContextMd: Uint8Array | null;
   requirementLedgerMd: Uint8Array | null;
+  /** #785: the "Claims to Falsify" section rendered by the claim
+   * falsification pre-pass (empty/absent unless `claim_falsification` is
+   * enabled and the pass produced at least one claim). Optional so existing
+   * fixtures need no update: an absent field behaves like `null`. */
+  claimFalsificationMd?: Uint8Array | null;
   specialistsMd: Uint8Array | null;
   requirementLedgerPresent: Uint8Array | null;
   specialistLeadsPresent: Uint8Array | null;
@@ -420,42 +425,60 @@ export function buildReviewCorpus(
       : new Uint8Array(0),
   );
 
+  // ── Claims to Falsify (#785) — reserved, between ledger and leads ───────
+  // claim-falsification.md is empty unless claim_falsification is on and the
+  // pre-pass produced at least one claim, so a disabled run is byte-identical
+  // to a pre-#785 build. Same fits-sanity as the ledger: a section that
+  // cannot fit a sane reservation is dropped rather than truncated.
+  let claimsBytes = 0;
+  if (nonEmpty(ws.claimFalsificationMd)) {
+    const candidate = bytes(ws.claimFalsificationMd).length;
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - BODY_FLOOR) {
+      claimsBytes = candidate;
+    }
+  }
+
   // ── Specialist Review Leads (#609) — reserved, but LAST ─────────────────
   // Advisory leads appended after the truncated body and after the ledger,
   // never truncated themselves (whole-section granularity). Authority order
-  // is deliberate: standards (first) > explicit requirement ledger >
-  // advisory leads (last), so specialist content can never evict
-  // higher-authority standards/ledger material. The same fits-sanity the
-  // ledger applies (drop when it cannot fit a sane reservation) keeps this
-  // assembly and the specialist runner's presence signal in lockstep.
+  // is deliberate: standards (first) > explicit requirement ledger > claims
+  // to falsify > advisory leads (last), so specialist content can never
+  // evict higher-authority standards/ledger/claims material. The same
+  // fits-sanity the ledger applies (drop when it cannot fit a sane
+  // reservation) keeps this assembly and the specialist runner's presence
+  // signal in lockstep.
   let specialistBytes = 0;
   if (nonEmpty(ws.specialistsMd)) {
     const candidate = bytes(ws.specialistsMd).length;
-    if (candidate < maxCorpus - standardsBytes - ledgerBytes - BODY_FLOOR) {
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - BODY_FLOOR) {
       specialistBytes = candidate;
     }
   }
 
   // The header and separators are outside the truncated body; reserve their
-  // exact bytes, including the newline after an appended specialist section.
+  // exact bytes, including the newline after an appended claims/specialist
+  // section.
   const framingBytes =
     Buffer.byteLength(`# Repository Standards and Conventions (${opts.standardsFile})\n\n`, "utf8") +
+    (claimsBytes > 0 ? 1 : 0) +
     (specialistBytes > 0 ? 1 : 0);
-  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - specialistBytes - framingBytes;
+  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - claimsBytes - specialistBytes - framingBytes;
   if (bodyBudget < 0) bodyBudget = 0;
   const bodyTruncated = truncateClean(bodyMd, bodyBudget, BODY_MARKER);
   write("review-corpus.body.truncated.md", bodyTruncated);
 
   // Prepend the (capped) standards section — first and highest-authority,
   // truncation-exempt — then the truncated body, then the reserved ledger
-  // block, then the reserved specialist-lead block (#609) last: lowest
-  // authority, appended after everything, never sliced by truncation.
+  // block, then the reserved claims-to-falsify block, then the reserved
+  // specialist-lead block (#609) last: lowest authority, appended after
+  // everything, never sliced by truncation.
   const output = concat(
     enc(`# Repository Standards and Conventions (${opts.standardsFile})\n`),
     artifacts.get("standards-context.capped.md")!,
     enc("\n"),
     bodyTruncated,
     artifacts.get("requirement-ledger.section.md")!,
+    claimsBytes > 0 ? concat(bytes(ws.claimFalsificationMd), enc("\n")) : new Uint8Array(0),
     specialistBytes > 0 ? concat(bytes(ws.specialistsMd), enc("\n")) : new Uint8Array(0),
   );
   write(outputName, output);

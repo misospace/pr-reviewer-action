@@ -39,6 +39,9 @@ import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
 import { ciGateBranch } from "../gates/workloads.js";
 import { runSpecialistsGate } from "../gates/specialists-gate.js";
+import { specialistRequestFn } from "../gates/specialist-transport.js";
+import { runClaimFalsificationPass } from "../claims/pass.js";
+import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
@@ -619,6 +622,72 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   let corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
   ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
 
+  // ── Claim falsification pre-pass (#785), in flight with the other gates ──
+  // Fail-soft: any failure leaves claim-falsification.md empty and the
+  // review proceeds unchanged. Deterministic scan first; the bounded model
+  // call on the primary route runs only when that scan finds nothing.
+  ws.write("claim-falsification.md", new Uint8Array(0));
+  let claimsPromise: Promise<void> = Promise.resolve();
+  if ((env.CLAIM_FALSIFICATION ?? "false").toLowerCase() === "true") {
+    const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
+    const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
+    const claimsTimeoutSec = Math.min(
+      Number(env.CLAIM_FALSIFICATION_TIMEOUT_SEC ?? "180") || 180,
+      Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
+    );
+    claimsPromise = runClaimFalsificationPass({
+      title: String(pr.title ?? ""),
+      body: String(pr.body ?? ""),
+      files: safeJson(ws.read("pr-files.json")),
+      diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      model:
+        profiles.primary.baseUrl && profiles.primary.model
+          ? {
+              config: {
+                apiFormat: profiles.primary.apiFormat,
+                model: profiles.primary.model,
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                maxTokens: Number(env.CLAIM_FALSIFICATION_MAX_TOKENS ?? "4096") || 4096,
+                temperature,
+                responseFormat: env.AI_RESPONSE_FORMAT ?? "off",
+                tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
+                stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+                timeoutSec: claimsTimeoutSec,
+                inputMaxBytes: Number(env.CLAIM_FALSIFICATION_INPUT_MAX_BYTES ?? "48000") || 48000,
+              },
+              requestFn: specialistRequestFn({
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+              }),
+            }
+          : undefined,
+    })
+      .then((result) => {
+        const section =
+          result.status === "ok"
+            ? renderClaimsSection(result.artifact, Number(env.CLAIMS_SECTION_MAX_BYTES ?? "8000") || 8000)
+            : "";
+        const record = {
+          status: result.status,
+          error_kind: result.errorKind,
+          error: result.error,
+          method: result.artifact.method,
+          claims: result.artifact.claims,
+          truncated: result.artifact.truncated,
+          errors: result.artifact.errors,
+          section_bytes: Buffer.byteLength(section, "utf8"),
+        };
+        ws.write("claim-falsification.json", Buffer.from(`${pyJsonDumps(record)}\n`, "utf8"));
+        ws.write("claim-falsification.md", Buffer.from(section, "utf8"));
+      })
+      .catch((cause: unknown) => {
+        log(`WARNING: claim falsification pre-pass failed; continuing without claims: ${cause instanceof Error ? cause.message : String(cause)}`);
+        ws.write("claim-falsification.md", new Uint8Array(0));
+      });
+  }
+
   // ── Gates: advisory specialists (in-process) + CI join (#634) ────────
   const deepMode = (env.DEEP_REVIEW ?? "false").toLowerCase();
   let specialistOutcome: GateOutcome = NO_GATE_OUTCOME("specialists");
@@ -644,6 +713,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     }, { scope });
     specialistOutcome = await specialistFork.join();
   }
+  await claimsPromise;
   if (ciFork !== null) {
     const outcome = await ciFork.join();
     env.CI_GATE_ACTIVE = outcome.ran ? "true" : "false";
@@ -683,7 +753,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
 
   // Rebuild the corpus with both branches resolved (finalized CI evidence
   // + any rendered specialist leads + refreshed PR metadata).
-  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md")) {
+  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md") || ws.isNonEmpty("claim-falsification.md")) {
     log("review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads");
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));

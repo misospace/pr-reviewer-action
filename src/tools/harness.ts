@@ -453,7 +453,7 @@ const CORPUS_TITLES = new Set([
   "PR Files (truncated)", "Version Hints from Diff", "PR Diff (truncated)",
   "Tool Harness Findings", "Evidence Providers", "CI Check Results",
   "Image Digest Provenance", "Linked Sources", "Repository Impact Scan",
-  "Repository History", "Specialist Review Leads",
+  "Repository History", "Claims to Falsify", "Specialist Review Leads",
 ]);
 
 /** Corpus-section regions for the planning context (the same level-1 ATX
@@ -476,7 +476,7 @@ export function extractCorpusRegions(corpusText: string): Record<string, string>
   const bounds = [...starts, lines.length];
   for (let i = 0; i < starts.length; i++) {
     const title = (lines[starts[i]!] ?? "").slice(2).trim();
-    if (["PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads"].includes(title)) {
+    if (["PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files (truncated)", "Version Hints from Diff", "Specialist Review Leads", "Claims to Falsify"].includes(title)) {
       if (regions[title] === undefined) {
         regions[title] = lines.slice(starts[i]!, bounds[i + 1] ?? lines.length).join("\n").replace(/\s+$/, "");
       }
@@ -674,6 +674,26 @@ export function buildPlanningContext(
     anyClipped = true;
     return final;
   };
+
+  // ── Claims to Falsify (#785): whole section, ahead of everything else ──
+  // The loop is what opens consumers outside the diff, so the claims must be
+  // in the FIRST planning turn. The region comes from this run's freshly
+  // assembled corpus; it is embedded whole or not at all (never sliced).
+  const clRoom = maxBytes - used() - PLANNING_RESERVE;
+  const clCap = envIntBounded(deps.env, "CLAIMS_SECTION_MAX_BYTES", 8000, 1, 200000) + 2;
+  let clSection: string | null = regions["Claims to Falsify"] ?? null;
+  if (clSection !== null && Buffer.byteLength(clSection, "utf8") + 2 > Math.min(clCap, Math.max(clRoom, 0))) {
+    clSection = null;
+  }
+  if (clSection === null) {
+    const body = readStripped("claim-falsification.md");
+    if (body !== null && Buffer.byteLength(body, "utf8") + 2 <= Math.min(clCap, Math.max(clRoom, 0))) {
+      clSection = body;
+    }
+  }
+  if (clSection !== null && clRoom >= 400) {
+    sections.push(clSection);
+  }
 
   // ── Specialist Review Leads: reserved FIRST for first-turn visibility ──
   // The advisory leads must already be in the context when the native loop
