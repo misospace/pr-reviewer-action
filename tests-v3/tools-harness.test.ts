@@ -6,6 +6,7 @@ import path from "node:path";
 import { runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
+import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -210,7 +211,10 @@ test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdic
     const isLongKey = apiKey.length > 1;
     const includesLeak = (text: string) => (isLongKey ? text.includes(apiKey) : text.includes(leakSignature));
     assert.ok(!includesLeak(errorField), `[key=${apiKey}] telemetry field leaked the key: ${errorField}`);
-    assert.match(errorField, /\[REDACTED\]/, `[key=${apiKey}] telemetry field was not masked at all: ${errorField}`);
+    assert.ok(
+      errorField.includes(KNOWN_SECRET_REDACTED),
+      `[key=${apiKey}] telemetry field was not masked at all: ${errorField}`,
+    );
     for (const line of logs) {
       assert.ok(!includesLeak(line), `[key=${apiKey}] log line leaked the key: ${line}`);
     }

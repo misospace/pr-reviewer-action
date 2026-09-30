@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { VerdictParseFailure } from "../src/model/types.js";
+import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
 
 function openaiResponse(content: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -283,9 +284,9 @@ test("#868: a one-character configured key is masked everywhere it occurs, inclu
     (error: unknown) => {
       assert.ok(error instanceof VerdictParseFailure);
       // Every literal "e" is gone — including from the static prefix —
-      // while the uppercase "E" inside "[REDACTED]" is untouched.
+      // while the non-alphanumeric known-secret marker is untouched.
       assert.ok(!error.message.includes("e"), `expected every "e" to be masked, got: ${error.message}`);
-      assert.match(error.message, /\[REDACTED\]/);
+      assert.ok(error.message.includes(KNOWN_SECRET_REDACTED));
       return true;
     },
   );
@@ -316,16 +317,16 @@ test("#868 maintainer follow-up: EVERY VerdictParseFailure kind is masked, not j
       assert.ok(error instanceof VerdictParseFailure);
       assert.equal(error.kind, "invalid_verdict");
       assert.ok(!error.message.includes(configuredKey), `invalid_verdict leaked the key: ${error.message}`);
-      assert.match(error.message, /\[REDACTED\]/);
+      assert.ok(error.message.includes(KNOWN_SECRET_REDACTED));
       return true;
     },
   );
-  // Same regression, a one-character key. (Deliberately not one of
-  // "REDACTED"'s own letters: masking a secret that coincides with a
-  // character inside the "[REDACTED]" marker itself is a separate,
-  // pathological property of substring masking — every pass that inserts a
-  // fresh marker introduces new copies of that letter — and is exercised on
-  // its own below, not conflated with this regression.)
+  // Same regression, a one-character key. Before #882, a key equal to one of
+  // "[REDACTED]"'s own letters (R/E/D/A/C/T) was a separate, pathological
+  // collision — every pass that inserted a fresh marker reintroduced that
+  // letter — exercised on its own in redact.test.ts; the known-secret marker
+  // is now non-alphanumeric so any alphanumeric key, including "k", masks
+  // cleanly here too.
   assert.throws(
     () => parseVerdictResponse(openaiResponse(JSON.stringify({ verdict: "k", review_markdown: "x" })), ["k"]),
     (error: unknown) => {

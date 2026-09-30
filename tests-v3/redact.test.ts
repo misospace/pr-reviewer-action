@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { REDACTED_SOURCE, maskAndTruncateSource, redactSourceText, redactText } from "../src/context/redact.js";
+import {
+  KNOWN_SECRET_REDACTED,
+  REDACTED_SOURCE,
+  maskAndTruncateSource,
+  maskDiagnostic,
+  maskKnownSecrets,
+  redactSourceText,
+  redactText,
+} from "../src/context/redact.js";
+import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
 
 // #876: repository SOURCE content (tool reads, grep matches, blame, related-code
 // snippets) must survive structurally under redaction — every rule replaces
@@ -216,4 +225,47 @@ test("#876: PR #862 regression shape — a full property block survives", () => 
     "  };",
   ].join("\n");
   assert.equal(redactSourceText(snippet, "src/model/call.ts"), snippet);
+});
+
+// #882: a one-character (or other short) configured key equal to a letter of
+// the known-secret marker's OWN text ("R", "E", "D", "A", "C", "T", case-
+// sensitive) used to survive every masking pass, because each pass's freshly
+// inserted `[REDACTED]` reintroduced the very letter it just removed. The
+// marker used for known-secret masking (`KNOWN_SECRET_REDACTED`) now
+// contains no alphanumeric characters, so this can no longer happen for any
+// alphanumeric key. These tests exercise all three call sites that apply it
+// (`maskKnownSecrets` directly, `maskDiagnostic`, and
+// `describeTransportFailure`) with keys drawn from the old marker's letters,
+// plus a two-character key, and confirm the heuristic `[REDACTED]` marker
+// (used only by `redactText`, unrelated to this bug) is untouched.
+
+test("#882: maskKnownSecrets fully removes configured keys 'E', 'R', 'A', 'ED'", () => {
+  for (const key of ["E", "R", "A", "ED"]) {
+    const masked = maskKnownSecrets(`credential ${key} rejected`, [key]);
+    assert.ok(!masked.includes(key), `key ${JSON.stringify(key)} survived: ${masked}`);
+    assert.equal(masked, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+  }
+});
+
+test("#882: maskDiagnostic fully removes configured keys 'E', 'R', 'A', 'ED', leaving redactText's own [REDACTED] marker unaffected", () => {
+  for (const key of ["E", "R", "A", "ED"]) {
+    const result = maskDiagnostic(`token: ${key} leaked`, [key]);
+    assert.ok(!result.includes(key), `key ${JSON.stringify(key)} survived: ${result}`);
+    assert.ok(result.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${result}`);
+  }
+  // redactText's heuristic marker is a separate, unrelated string and is
+  // still produced by maskDiagnostic for text that matches its patterns.
+  assert.equal(maskDiagnostic("apiKey: config.apiKey,"), "[REDACTED]");
+});
+
+test("#882: describeTransportFailure fully removes configured keys 'E', 'R', 'A', 'ED'", () => {
+  for (const key of ["E", "R", "A", "ED"]) {
+    const failure = new TransportFailure("http_status", "model endpoint returned HTTP 500", {
+      status: 500,
+      body: `credential ${key} rejected`,
+    });
+    const detail = describeTransportFailure(failure, { secrets: [key] });
+    assert.ok(!detail.includes(key), `key ${JSON.stringify(key)} survived: ${detail}`);
+    assert.ok(detail.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${detail}`);
+  }
 });
