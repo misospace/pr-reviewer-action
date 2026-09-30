@@ -141,9 +141,11 @@ the (c) table below — deleting it at wave 1 would break the wave-2 oracle
 runs.
 
 `scripts/sections/gating.sh` is deliberately **not** in this table: it is
-listed in the (c) table below, though the #681 dataflow-qualification gate no
-longer reads it (re-pointed at `tests-v3/qualification-dataflow.test.ts`) —
-it is now unreferenced and ready for wave 2.
+listed in the (c) table below. The #681 semantic gate no longer reads it
+(re-pointed at `tests-v3/qualification-dataflow.test.ts`), but it stays a
+live test oracle — `tests/test_concurrent_gating.sh` still sources it and
+`tests-v3/gates.test.ts` still reads its `_CI_GATE_ENV_KEYS` block for exact
+parity with `CI_GATE_ENV_KEYS` — so it is (c) until those consumers move.
 
 ### pr_reviewer/
 
@@ -342,7 +344,7 @@ deleted together with the runner.
 | `scripts/sections/context.sh` | `tests/parity_runners/v2_context_producers.py`, `v2_platform_normalization.py`. | Freeze the context-producers/platform boundaries. |
 | `scripts/sections/corpus.sh` | `tests/parity_runners/v2_corpus.sh` + `v2_corpus_slicer.py`, `v2_context_producers.py`. | Freeze the corpus boundary. |
 | `scripts/sections/review.sh` | `tests/parity_runners/v2_prompt_assembly.py`. | Freeze the prompt-assembly boundary. |
-| `scripts/sections/gating.sh` | None as of #681 — `tests/test_issue_662_dataflow.py` no longer reads it (re-pointed at `tests-v3/qualification-dataflow.test.ts`). | Unreferenced; ready for wave 2. |
+| `scripts/sections/gating.sh` | `tests/test_concurrent_gating.sh` (sources it directly) and `tests-v3/gates.test.ts` (reads its `_CI_GATE_ENV_KEYS` block for exact parity with `CI_GATE_ENV_KEYS`). As of #681 the semantic gate no longer reads it — `tests/test_issue_662_dataflow.py` is no longer a consumer (re-pointed at `tests-v3/qualification-dataflow.test.ts`). | Freeze the CI-gating boundary (retire `test_concurrent_gating.sh`'s bash-side assertions and `gates.test.ts`'s parity read), then wave 2. |
 
 ### pr_reviewer/
 

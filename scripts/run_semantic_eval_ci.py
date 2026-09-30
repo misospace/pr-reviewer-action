@@ -38,35 +38,18 @@ DETERMINISTIC_SCENARIOS = frozenset(
 
 DATAFLOW_GATE_TEST_FILE = ".test-build/tests-v3/qualification-dataflow.test.js"
 
-# Common absolute node install locations, probed only when `node` is not on
-# PATH: this gate must also run credential-free with a minimal PATH (see
-# tests/test_semantic_eval.py::test_offline_runner_writes_report_without_credentials),
-# which strips the Homebrew/nvm/hostedtoolcache directories node usually
-# lives in on a dev machine or a GitHub-hosted runner.
-_NODE_FALLBACK_PATHS = (
-    "/opt/homebrew/bin/node",
-    "/usr/local/bin/node",
-    "/usr/bin/node",
-)
-
 
 def _resolve_node() -> str | None:
-    node = os.environ.get("PR_REVIEWER_NODE") or shutil.which("node")
-    if node:
-        return node
-    for candidate in _NODE_FALLBACK_PATHS:
-        if Path(candidate).is_file():
-            return candidate
-    return None
+    return os.environ.get("PR_REVIEWER_NODE") or shutil.which("node")
 
 
 def _ensure_dataflow_gate_built(node: str) -> str | None:
     """Build .test-build (tsc -p tsconfig.test.json), like `npm test` does
     before `node --test`, so the gate can run against the compiled v3
-    runtime without depending on a prior `npm test` invocation. Returns an
-    error string on failure, None on success."""
-    if (ROOT / DATAFLOW_GATE_TEST_FILE).is_file():
-        return None
+    runtime without depending on a prior `npm test` invocation. Always
+    recompiles: `.test-build` is gitignored and can persist locally between
+    runs, so trusting a pre-existing copy risks a stale-JS false green.
+    Returns an error string on failure, None on success."""
     tsc = ROOT / "node_modules/typescript/bin/tsc"
     if not tsc.is_file():
         return f"{tsc} not found; run `npm ci` first"

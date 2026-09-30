@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -347,12 +348,17 @@ def test_aggregation_reports_quality_cost_and_escalation() -> None:
     assert summary["routes"] == ["primary", "primary+escalation"]
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node for the #681 production dataflow checks")
 def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> None:
     report = tmp_path / "semantic-report.json"
     result = subprocess.run(
         [sys.executable, str(RUNNER), "--corpus", str(CORPUS), "--report", str(report)],
         cwd=ROOT,
-        env={"PATH": "/usr/bin:/bin"},
+        # Credential-free (#845): the environment carries no PATH-resolvable
+        # secrets or tools, only an explicit, already-resolved node binary —
+        # the gate's own credential-free contract does not extend to needing
+        # `node` reachable via a bare PATH lookup.
+        env={"PATH": "/usr/bin:/bin", "PR_REVIEWER_NODE": shutil.which("node") or ""},
         capture_output=True,
         text=True,
         check=False,
@@ -393,6 +399,34 @@ def test_production_check_failure_fails_historical_gate(monkeypatch, tmp_path: P
     assert not payload["passed"]
     assert payload["summary"]["pass_rate"] == 1.0
     assert payload["production_dataflow_checks"][0]["detail"] == "wrong artifact"
+
+
+def test_ensure_dataflow_gate_built_always_recompiles_even_when_test_build_exists(tmp_path: Path, monkeypatch) -> None:
+    """`.test-build` is gitignored and can persist locally between runs;
+    trusting a pre-existing copy risks a stale-JS false green (#852 review).
+    Uses a tmp ROOT so this never touches the real project's `.test-build`."""
+    import scripts.run_semantic_eval_ci as runner
+
+    stale = tmp_path / runner.DATAFLOW_GATE_TEST_FILE
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("stale bogus content a false green would reuse\n", encoding="utf-8")
+    tsc = tmp_path / "node_modules/typescript/bin/tsc"
+    tsc.parent.mkdir(parents=True, exist_ok=True)
+    tsc.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        stale.write_text("export {};\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    error = runner._ensure_dataflow_gate_built("node")
+    assert error is None
+    assert len(calls) == 1, "the gate must recompile even though the target file already existed"
+    assert stale.read_text(encoding="utf-8") == "export {};\n"
 
 
 def test_evaluator_reports_only_negative_control_false_positive_rate() -> None:
