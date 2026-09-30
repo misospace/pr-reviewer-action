@@ -1083,6 +1083,7 @@ class TestReviewRunToDict:
                             "status": "ok"}],
             "tool_stop_reason": "model-stopped",
             "error": None,
+            "timed_out": False,
             "model_used": "model-x",
             "deep_review": False,
             "specialists": None,

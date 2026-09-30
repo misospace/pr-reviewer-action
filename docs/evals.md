@@ -180,7 +180,7 @@ git worktree add /tmp/757-baseline main
   printf '%s' "$SYSTEM_PROMPT" > /tmp/baseline-prompt.txt )
 git worktree remove /tmp/757-baseline
 export AI_API_KEY=... GITHUB_TOKEN=...   # read by the harness; never pass on argv
-export EVAL_REVIEW_TIMEOUT_SEC=900         # slow local models overrun the 300s default
+export EVAL_REVIEW_TIMEOUT_SEC=1800        # slow local models overrun the 1200s default
 # arm A
 python scripts/eval_harness.py --corpus evals/corpus-historical-dogfood.json \
     --modes tools_off --runs-per-mode 1 --model "$AI_MODEL" --base-url "$AI_BASE_URL" \
@@ -471,7 +471,7 @@ as the arm-comparison runbook above:
 
 ```bash
 export AI_API_KEY=...    GITHUB_TOKEN=...      # read by the harness; never pass on argv
-export EVAL_REVIEW_TIMEOUT_SEC=900             # slow local models overrun the 300s default
+export EVAL_REVIEW_TIMEOUT_SEC=1800             # slow local models overrun the 1200s default
 python scripts/eval_harness.py \
     --corpus evals/corpus-real-prs.json \
     --modes tools_off native_loop \
@@ -483,10 +483,16 @@ python scripts/eval_harness.py \
 first N of each), unlike the other corpora where it truncates one
 concatenated list — `--max-prs 1` gives exactly one vulnerable and one clean
 scenario, useful for a smoke test that shouldn't burn a full sweep on a busy
-local model. `--runs-per-mode`, `--deep-review`, and the system-prompt A/B
-flags are not wired into this path (single run per mode per scenario); the
+local model. `--runs-per-mode N` (#839) repeats each scenario/mode N times,
+same as the fixture path; each run is scored and recorded individually
+under `per_scenario_results[*].runs[mode]` (a list of N when N>1, unchanged
+single-dict shape at N=1) with a `runs_aggregate[mode]` summary alongside,
+and `mode_summary` folds every run in, not just one per scenario. `--deep-review`
+and the system-prompt A/B flags are still not wired into this path; the
 report's `mode_summary` and `per_scenario_results` are the two things to
 diff week-over-week, same spirit as `mode_summary` for the other corpora.
+Timeout counts (`vulnerable_timeouts`/`clean_timeouts`, #840) are broken out
+in `mode_summary` separately from other errors.
 
 ### Replaying historical heads
 
