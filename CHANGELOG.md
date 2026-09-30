@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.0.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.0.0...source-v3.0.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **release:** track a source-vX.Y.Z anchor so release-please finds the last release ([#907](https://github.com/misospace/pr-reviewer-action/issues/907)) ([443bf19](https://github.com/misospace/pr-reviewer-action/commit/443bf1998d61b87c47070103ccd84bee4582af5e))
+* **v3:** read system-prompt-file from the base ref, not the run artifact dir ([#905](https://github.com/misospace/pr-reviewer-action/issues/905)) ([de5c628](https://github.com/misospace/pr-reviewer-action/commit/de5c628a9a73ce9cf27a5999e8f62be76364d33d))
+
 ## [3.0.0](https://github.com/misospace/pr-reviewer-action/compare/v2.5.0...v3.0.0) (2026-09-30)
 
 
