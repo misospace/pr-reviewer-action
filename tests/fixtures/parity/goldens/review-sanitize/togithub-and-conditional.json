@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "strip-empty-linked-section": "## Summary\n\nKeep this.\n\n## Next Steps\nKeep this too.",
+  "togithub-urls-and-inert-refs": "https://togithub.com/acme/app/pull/1 https://togithub.com/acme/app/issues/2 https://togithub.com/acme/app/commit/deadbee https://togithub.com/acme/app/compare/v1...v2 acme/app PR 123 PR 456"
+ }
+}

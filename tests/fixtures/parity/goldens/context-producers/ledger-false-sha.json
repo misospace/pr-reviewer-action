@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:requirement-ledger-present.txt": "1\n",
+  "file:requirement-ledger.json": "{\"sha\": false}",
+  "file:requirement-ledger.md": "- [R1] Must validate input\n- [R2] Must log errors\n",
+  "file:requirement-ledger.section.md": ""
+ }
+}

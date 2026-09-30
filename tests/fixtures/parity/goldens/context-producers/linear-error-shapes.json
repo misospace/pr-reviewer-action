@@ -1,0 +1,14 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:linear-issues.json": "[]\n",
+  "file:linear-issues.md": "## Linear issue A-1\n(Could not fetch Linear issue A-1: Linear HTTP error 404)\n\n## Linear issue A-2\n(Could not fetch Linear issue A-2: Linear returned invalid JSON)\n\n## Linear issue A-3\n(Could not fetch Linear issue A-3: Linear returned an invalid response shape)\n\n## Linear issue A-4\n(Could not fetch Linear issue A-4: Linear issue A-4 was not found)\n\n## Linear issue A-5\n(Could not fetch Linear issue A-5: Linear GraphQL request failed)\n",
+  "file:linked-issues.json": "[]\n",
+  "file:linked-issues.md": "## Linear issue A-1\n(Could not fetch Linear issue A-1: Linear HTTP error 404)\n\n## Linear issue A-2\n(Could not fetch Linear issue A-2: Linear returned invalid JSON)\n\n## Linear issue A-3\n(Could not fetch Linear issue A-3: Linear returned an invalid response shape)\n\n## Linear issue A-4\n(Could not fetch Linear issue A-4: Linear issue A-4 was not found)\n\n## Linear issue A-5\n(Could not fetch Linear issue A-5: Linear GraphQL request failed)\n",
+  "file:linked-metadata-status.json": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [],\n  \"linear_fetch_failures\": [\n    \"A-1\",\n    \"A-2\",\n    \"A-3\",\n    \"A-4\",\n    \"A-5\"\n  ],\n  \"linear_known_disabled\": false\n}\n"
+ }
+}

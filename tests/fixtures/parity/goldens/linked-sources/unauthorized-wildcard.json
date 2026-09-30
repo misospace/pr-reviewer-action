@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "budget_warnings": "0",
+  "markdown": "## Source 1\nURL: https://github.com/any/repo/releases/tag/v1\n\n### Fetched Content (truncated)\n(Skipped non-allowlisted URL: github.com)\n\n### GitHub Release Metadata: any/repo@v1\n```json\n{\n  \"tag_name\": \"v1\",\n  \"name\": \"one\"\n}\n\n```\n\n\n### GitHub Releases Enrichment: any/repo\n(Could not fetch releases list for any/repo)\n",
+  "requests": "[\"GET https://api.github.com/repos/any/repo/releases/tags/v1 auth=0\",\"GET https://api.github.com/repos/any/repo/releases?per_page=30 auth=0\"]"
+ }
+}

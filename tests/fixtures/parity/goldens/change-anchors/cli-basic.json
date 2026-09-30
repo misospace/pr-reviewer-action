@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "exit_code": "0",
+  "output:out/deep/change-anchors.json": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/cli_mod.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"cli_function\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"high\",\n          \"line\": 1\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          2,\n          2\n        ]\n      ]\n    },\n    {\n      \"path\": \"docs/readme.md\",\n      \"language\": \"non_source\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    },\n    {\n      \"path\": \"src/caf\\u00e9.py\",\n      \"language\": \"python\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/cli_mod.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/cli_mod.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"cli_function\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/cli_mod.py\",\n      \"confidence\": \"high\"\n    },\n    {\n      \"value\": \"src/caf\\u00e9.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/caf\\u00e9.py\",\n      \"confidence\": \"low\"\n    }\n  ],\n  \"truncated\": false\n}\n",
+  "stderr": ""
+ }
+}

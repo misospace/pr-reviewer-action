@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json_document": "{\n  \"version\": 1,\n  \"files\": [],\n  \"truncated\": true,\n  \"errors\": [\n    \"change-anchor artifact is not a JSON object\"\n  ],\n  \"truncation\": {\n    \"truncated\": true,\n    \"reasons\": [\n      \"invalid_input\"\n    ],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n",
+  "markdown": "# Related Code (v1)\n\n_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._\n\n## Changed Files\n\n_(none)_\n## Scanner Errors\n\n- `change-anchor artifact is not a JSON object`\n\n## Bounds\n\n_Output is bounded and incomplete (invalid_input)._\n",
+  "related": "{\"errors\": [\"change-anchor artifact is not a JSON object\"], \"files\": [], \"truncated\": true, \"truncation\": {\"omitted_manifests\": 0, \"omitted_output_bytes\": 0, \"omitted_references\": 0, \"omitted_symbols\": 0, \"omitted_tests\": 0, \"reasons\": [\"invalid_input\"], \"truncated\": true}, \"version\": 1}"
+ }
+}

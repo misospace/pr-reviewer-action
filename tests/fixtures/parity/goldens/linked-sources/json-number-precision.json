@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "budget_warnings": "0",
+  "markdown": "## Source 1\nURL: https://github.com/o/r/releases/tag/v1\n\n### Fetched Content (truncated)\n(Skipped non-allowlisted URL: github.com)\n\n### GitHub Release Metadata: o/r@v1\n```json\n{\n  \"tag_name\": \"v1\",\n  \"body\": {\n    \"float_int\": 1.0,\n    \"exp\": 100000.0,\n    \"big\": 12345678901234567,\n    \"keys\": {\n      \"b\": 1,\n      \"10\": 2,\n      \"a\": 3,\n      \"2\": 4\n    },\n    \"frac\": 2.5\n  }\n}\n\n```\n### Recent Releases\n```json\n[\n  {\n    \"tag_name\": \"v1\"\n  }\n]\n\n```\n\n\n### GitHub Releases Enrichment: o/r\n#### Recent Releases (tags)\n```json\n[\n  {\n    \"tag_name\": \"v1\"\n  }\n]\n\n```\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/releases/tags/v1 auth=0\",\"GET https://api.github.com/repos/o/r/releases?per_page=30 auth=0\"]"
+ }
+}

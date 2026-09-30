@@ -1,0 +1,33 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "result": {
+   "errors": [],
+   "leads": [
+    {
+     "category": "",
+     "file": "src/😀😀😀.ts",
+     "line": null,
+     "message": "😀😀😀😀😀😀😀😀ta",
+     "severity": "major"
+    }
+   ],
+   "role": "tests",
+   "truncated": true,
+   "truncation": {
+    "omitted_errors": 0,
+    "omitted_leads": 0,
+    "omitted_message_chars": 7,
+    "reasons": [
+     "message_chars_cap"
+    ],
+    "truncated": true
+   },
+   "version": 1
+  }
+ }
+}

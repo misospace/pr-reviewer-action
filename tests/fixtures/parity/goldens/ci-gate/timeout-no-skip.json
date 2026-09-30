@@ -1,0 +1,17 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "checks_file": "<absent>",
+  "elapsed": "30",
+  "exit_code": "2",
+  "leftovers": "[]",
+  "outputs": "ci_status_skipped=true\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]",
+  "stderr": "[CI-status] 00:00:30 ERROR: Timeout reached and ci_skip_on_timeout=false — aborting review",
+  "stdout": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=30s, interval=10s, own run=999)...\n[CI-status] 00:00:00 Pending: 1/1 external check(s) — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:10 Pending: 1/1 external check(s) — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:20 Pending: 1/1 external check(s) — waiting (clamped to the outer deadline)...\n[CI-status] 00:00:30 Timeout reached after 30s"
+ }
+}

@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "classification": "{\"changed_files_summary\": [\"AGENTS.md\", \"src/evidence/index.ts\", \"src/evidence/providers.ts\", \"src/gates/env.ts\", \"src/gates/gates.ts\", \"src/gates/index.ts\", \"src/runtime/env.ts\", \"src/runtime/index.ts\", \"src/runtime/platform.ts\", \"src/runtime/process-tree.ts\", \"src/runtime/signals.ts\", \"src/runtime/subprocess.ts\", \"tests-v3/evidence.test.ts\", \"tests-v3/gates.test.ts\", \"tests-v3/runtime.test.ts\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",
+  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: correctness-lane signals matched: pr_kind=app_code\", \"role\": \"correctness\", \"selected\": true, \"signals\": [\"pr_kind=app_code\"]}, {\"reason\": \"skipped: no security-lane signal in classification (pr_kind=app_code; risk_flags=none)\", \"role\": \"security\", \"selected\": false, \"signals\": []}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=app_code; risk_flags=none)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"app_code\", \"risk_flags\": [], \"selected_roles\": [\"correctness\"], \"skipped_roles\": [\"security\", \"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
+ }
+}

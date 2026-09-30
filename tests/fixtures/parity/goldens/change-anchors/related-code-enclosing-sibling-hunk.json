@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/jwt_cache.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"fetch_integration_jwt\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"high\",\n          \"line\": 7\n        },\n        {\n          \"name\": \"get_cached_jwt\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"high\",\n          \"line\": 15\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          4,\n          4\n        ],\n        [\n          10,\n          11\n        ],\n        [\n          16,\n          17\n        ]\n      ]\n    },\n    {\n      \"path\": \"src/widget.js\",\n      \"language\": \"javascript\",\n      \"symbols\": [\n        {\n          \"name\": \"renderWidget\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"medium\",\n          \"line\": 1\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          3,\n          3\n        ]\n      ]\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/jwt_cache.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/jwt_cache.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"fetch_integration_jwt\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/jwt_cache.py\",\n      \"confidence\": \"high\"\n    },\n    {\n      \"value\": \"get_cached_jwt\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/jwt_cache.py\",\n      \"confidence\": \"high\"\n    },\n    {\n      \"value\": \"src/widget.js\",\n      \"kind\": \"file\",\n      \"source\": \"src/widget.js\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"renderWidget\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/widget.js\",\n      \"confidence\": \"medium\"\n    }\n  ],\n  \"truncated\": false\n}\n",
+  "matches_expected_anchors": "true"
+ }
+}

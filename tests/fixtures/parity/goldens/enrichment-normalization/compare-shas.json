@@ -1,0 +1,17 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "allowed_hosts": "[]",
+  "compare_shas": "null",
+  "ghcr_images": "[]",
+  "normalized_urls": "[]",
+  "target_version": "\"2024.09.13\"",
+  "url_classes": "[]",
+  "urls": "[]",
+  "version_hints": "[\"- tag: app@sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222\", \"+ tag: app@sha256:ffff6666eeee5555dddd4444cccc3333bbbb2222aaaa1111ffff6666eeee5555\", \"+ version: 2024.09.13\"]"
+ }
+}

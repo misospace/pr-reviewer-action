@@ -1,0 +1,18 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "result": {
+   "escalate": true,
+   "low_confidence": true,
+   "reason": "Need another look",
+   "reasons": [
+    "fast_low_confidence"
+   ],
+   "requested": true
+  }
+ }
+}

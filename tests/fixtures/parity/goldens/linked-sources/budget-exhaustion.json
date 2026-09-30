@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "budget_warnings": "1",
+  "markdown": "## Source 1\nURL: https://artifacthub.io/a\n\n### Fetched Content (truncated)\n```text\nalpha\n\n```\n\n## Source 2\nURL: https://github.com/o/r/releases/tag/v1\n\n### Fetched Content (truncated)\n(Raw HTML fetch skipped for github.com — structured release/compare metadata is captured below when available)\n\n### GitHub Release Metadata: o/r@v1\n```json\n{\n  \"tag_name\": \"v1\"\n}\n\n```\n### Recent Releases\n```json\n[\n  {\n    \"tag_name\": \"v1\"\n  }\n]\n\n```\n\n## Source 3\nURL: https://github.com/x/y/compare/a...b\n\n### Fetched Content (truncated)\n(Raw HTML fetch skipped for github.com — structured release/compare metadata is captured below when available)\n\n### GitHub Compare Metadata: x/y@a...b\n(Could not fetch compare metadata for x/y@a...b)\n\n### Not Authorized for Enrichment\n\nThese repos were linked from the PR body but are not the repo under review (and were not listed in `TOOL_ALLOWED_GH_API_REPOS`), so the action did not query them with the operator token:\n\n- `o/img`\n- `x/y`\n\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/releases/tags/v1 auth=0\",\"GET https://api.github.com/repos/o/r/releases?per_page=30 auth=0\",\"GET https://artifacthub.io/a\",\"GET https://artifacthub.io/b\"]"
+ }
+}

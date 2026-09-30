@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_external-checks_text": "[{\"name\":\"build\",\"state\":\"success\"}]",
+  "c01_external-checks_text": "[]",
+  "requests": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/cccccccccccccccccccccccccccccccccccccccc/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/cccccccccccccccccccccccccccccccccccccccc/status auth=1\"]"
+ }
+}

@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:repo-history.truncated.md": "## Term: 0.1.0\n\n### git log context\n```text\n```\n\n## Term: alpha.beta\n\n### git log context\n```text\n```\n\n## Term: chi-psi\n\n### git log context\n```text\n```\n\n## Term: dots\n\n### git log context\n```text\n```\n\n## Term: gamma_delta\n\n### git log context\n```text\n```\n\n## Term: github.com/owner/repo\n\n### git log context\n```text\n```\n\n## Term: kappa\n\n### git log context\n```text\n13ac9f8 (HEAD -> main) null handling for kappa\n```\n\n## Term: lambda-mu\n\n### git log context\n```text\n```\n\n## Term: lib\n\n### git log context\n```text\n```\n\n## Term: nu.xi\n\n### git log context\n```text\n```\n\n## Term: null\n\n### git log context\n```text\n13ac9f8 (HEAD -> main) null handling for kappa\n```\n\n## Term: omega/psi\n\n### git log context\n```text\n```\n\n## Term: omicron\n\n### git log context\n```text\n```\n\n## Term: phi\n\n### git log context\n```text\n```\n\n",
+  "file:repo-impact.truncated.md": "## Term: 0.1.0\n\n### git grep hits\n```text\n```\n\n## Term: alpha.beta\n\n### git grep hits\n```text\n```\n\n## Term: chi-psi\n\n### git grep hits\n```text\n```\n\n## Term: dots\n\n### git grep hits\n```text\n```\n\n## Term: gamma_delta\n\n### git grep hits\n```text\n```\n\n## Term: github.com/owner/repo\n\n### git grep hits\n```text\n```\n\n## Term: kappa\n\n### git grep hits\n```text\nsrc/a.txt:1:kappa sigma\n```\n\n## Term: lambda-mu\n\n### git grep hits\n```text\n```\n\n## Term: lib\n\n### git grep hits\n```text\n```\n\n## Term: nu.xi\n\n### git grep hits\n```text\n```\n\n## Term: null\n\n### git grep hits\n```text\nsrc/a.txt:2:null pointer\n```\n\n## Term: omega/psi\n\n### git grep hits\n```text\n```\n\n## Term: omicron\n\n### git grep hits\n```text\n```\n\n## Term: phi\n\n### git grep hits\n```text\n```\n\n",
+  "file:terms.all.txt": "0.1.0\nalpha.beta\nchi-psi\ndots\ngamma_delta\ngithub.com/owner/repo\nkappa\nlambda-mu\nlib\nnu.xi\nnull\nomega/psi\nomicron\nphi\npi-rho\nsigma\nslash/path\ntau-upsilon\nunder\nvet\nzeta-9\n",
+  "file:terms.txt": "0.1.0\nalpha.beta\nchi-psi\ndots\ngamma_delta\ngithub.com/owner/repo\nkappa\nlambda-mu\nlib\nnu.xi\nnull\nomega/psi\nomicron\nphi\n"
+ }
+}

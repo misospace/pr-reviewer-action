@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "applied": "1",
+  "artifact": "{\"findings\": [{\"category\": \"other\", \"file\": \"src/app.py\", \"line\": 20, \"message\": \"Covered by the new helper\", \"severity\": \"minor\"}, {\"category\": \"other\", \"file\": \"src/db.py\", \"line\": 5, \"message\": \"Migration is not idempotent (review thread T200: open)\", \"severity\": \"major\", \"thread_id\": \"T200\"}, {\"category\": \"other\", \"file\": \"src/api.py\", \"line\": 9, \"message\": \"Consider pagination here (review thread T300: disputed)\", \"severity\": \"info\", \"thread_id\": \"T300\"}], \"required_checks\": \"none\", \"review_markdown\": \"## Review\\n\\nThreads listed below were dispositioned.\\n\\n## Unresolved Review Threads\\n\\n- `T100`: fixed\\n- `T200`: open — fixed without evidence citing current code\\n- `T300`: disputed\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"thread_dispositions\": [{\"disposition\": \"fixed\", \"evidence\": \"src/app.py:20 now clamps the offset\", \"thread_id\": \"T100\"}, {\"disposition\": \"open\", \"enforced\": \"fixed without evidence citing current code\", \"evidence\": \"I believe this was handled in the refactor\", \"thread_id\": \"T200\"}, {\"disposition\": \"disputed\", \"evidence\": null, \"thread_id\": \"T300\"}], \"verdict\": \"approve\", \"verdict_source\": \"model\"}",
+  "completeness_result": "{\"addressed\": [], \"missing\": [], \"mode\": \"warn\", \"status\": \"none\"}",
+  "required_checks": "none"
+ }
+}

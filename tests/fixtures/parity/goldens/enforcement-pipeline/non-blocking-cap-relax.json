@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "applied": "0",
+  "artifact": "{\"findings\": [{\"capped_from\": \"major\", \"category\": \"tests\", \"file\": \"tests/app_test.py\", \"line\": 3, \"message\": \"No test for the retry path\", \"severity\": \"minor\"}, {\"capped_from\": \"major\", \"category\": \"docs\", \"file\": null, \"line\": null, \"message\": \"Changelog entry missing\", \"severity\": \"minor\"}, {\"category\": \"bug\", \"file\": \"src/app.py\", \"line\": 8, \"message\": \"Log message typo\", \"severity\": \"minor\"}], \"required_checks\": \"none\", \"review_markdown\": \"## Review\\n\\nA few asks below.\\n\\nRecommendation: Request changes\\n\\n_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): every blocking finding was in a category this repository marks non-blocking (non_blocking_finding_categories); they remain listed above._\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\", \"verdict_source\": \"findings\"}",
+  "completeness_result": "{\"addressed\": [], \"missing\": [], \"mode\": \"warn\", \"status\": \"none\"}",
+  "required_checks": "none"
+ }
+}

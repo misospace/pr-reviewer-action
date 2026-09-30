@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/run_test.go\\n\",\n      \"language\": \"unknown\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          2,\n          2\n        ]\n      ]\n    },\n    {\n      \"path\": \"src/run_live.go\\n\",\n      \"language\": \"unknown\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          2,\n          2\n        ]\n      ],\n      \"keys\": [\n        {\n          \"name\": \"REVIEW_QUEUE_DEPTH\",\n          \"kind\": \"env\",\n          \"line\": 2\n        }\n      ]\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/run_test.go\\n\",\n      \"kind\": \"file\",\n      \"source\": \"src/run_test.go\\n\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"src/run_live.go\\n\",\n      \"kind\": \"file\",\n      \"source\": \"src/run_live.go\\n\",\n      \"confidence\": \"low\"\n    }\n  ],\n  \"truncated\": false\n}\n"
+ }
+}

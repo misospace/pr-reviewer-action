@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json": "{\n  \"configured\": true,\n  \"config_path\": \"providers.json\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": [\n    {\n      \"id\": \"slow\",\n      \"status\": \"timeout\",\n      \"command\": \"printf 'partial before timeout\\\\n'; sleep 6\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": null,\n      \"provider_severity\": \"info\",\n      \"findings\": [],\n      \"stdout\": \"partial before timeout\\n\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"output_format\": \"text\"\n    },\n    {\n      \"id\": \"fast\",\n      \"status\": \"ok\",\n      \"command\": \"printf done\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": 0,\n      \"provider_severity\": \"info\",\n      \"findings\": [],\n      \"stdout\": \"done\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"output_format\": \"text\"\n    }\n  ],\n  \"provider_count\": 2\n}\n",
+  "markdown": "Evidence providers executed before final review synthesis.\n\n## slow\n- status: timeout; severity: info; exit_code: None; duration_sec: 0.0\n- command: `printf 'partial before timeout\\n'; sleep 6`\n- stdout:\n```text\npartial before timeout\n```\n\n## fast\n- status: ok; severity: info; exit_code: 0; duration_sec: 0.0\n- command: `printf done`\n- stdout:\n```text\ndone\n```\n"
+ }
+}

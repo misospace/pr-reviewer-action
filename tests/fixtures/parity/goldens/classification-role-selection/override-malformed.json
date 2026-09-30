@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "classification": "{\"changed_files_summary\": [], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",
+  "role_selection": "{\"classification_available\": false, \"decisions\": [{\"reason\": \"selected: classification unavailable — defaulting to all roles (conservative fallback: no deterministic basis to skip a role)\", \"role\": \"correctness\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: classification unavailable — defaulting to all roles (conservative fallback: no deterministic basis to skip a role)\", \"role\": \"security\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: classification unavailable — defaulting to all roles (conservative fallback: no deterministic basis to skip a role)\", \"role\": \"tests\", \"selected\": true, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"\", \"risk_flags\": [], \"selected_roles\": [\"correctness\", \"security\", \"tests\"], \"skipped_roles\": [], \"version\": 1, \"zero_selection_reason\": \"\"}"
+ }
+}

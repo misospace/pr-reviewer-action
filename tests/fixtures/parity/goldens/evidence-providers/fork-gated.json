@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json": "{\"configured\": false, \"has_blocker\": false, \"providers\": [], \"skipped\": true, \"skip_reason\": \"fork-pr\"}\n",
+  "markdown": "Evidence providers were skipped for a cross-repository pull request. Set evidence_enable_for_forks=true to override.\n"
+ }
+}

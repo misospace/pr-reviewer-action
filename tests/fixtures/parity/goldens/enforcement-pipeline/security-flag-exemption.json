@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "applied": "0",
+  "artifact": "{\"findings\": [{\"category\": \"tests\", \"file\": \"tests/auth_test.py\", \"line\": 3, \"message\": \"No test for the new session path\", \"severity\": \"major\"}, {\"category\": \"docs\", \"file\": null, \"line\": null, \"message\": \"Docstring stale\", \"severity\": \"minor\"}], \"required_checks\": \"none\", \"review_markdown\": \"## Review\\n\\nAuth surface changed; findings below.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\", \"verdict_source\": \"model\"}",
+  "completeness_result": "{\"addressed\": [], \"missing\": [], \"mode\": \"warn\", \"status\": \"none\"}",
+  "required_checks": "none"
+ }
+}

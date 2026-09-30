@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:repo-history.truncated.md": "No candidate dependency terms extracted.\n",
+  "file:repo-impact.truncated.md": "No candidate dependency terms extracted.\n",
+  "file:terms.all.txt": "",
+  "file:terms.txt": ""
+ }
+}

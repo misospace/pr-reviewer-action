@@ -1,0 +1,8 @@
+{
+ "error": "git ls-files exited 128: fatal: not a git repository (or any of the parent directories): .git",
+ "ok": false,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {}
+}

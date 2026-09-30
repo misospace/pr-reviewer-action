@@ -1,0 +1,28 @@
+{
+ "error": "[2026-09-29T21:05:27-0600] ERROR: Missing required environment variables: REPO, PR_NUMBER, AI_BASE_URL, or AI_MODEL\n",
+ "ok": false,
+ "pre": {},
+ "raw": null,
+ "unresolved": [
+  "ANALYSIS_ENGINE",
+  "BASE_SHA",
+  "BROAD_FINGERPRINT",
+  "CACHE_HIT_RATIO",
+  "CI_CHECKS_FILE",
+  "ESCALATION_REASON",
+  "FINAL_VERDICT",
+  "FINDINGS",
+  "FORGEJO_API_URL",
+  "HEAD_SHA",
+  "IS_FORK_PR",
+  "LINEAR_API_KEY_CONFIGURED",
+  "PLATFORM",
+  "PR_HEAD_SHA",
+  "REQUIRED_CHECKS",
+  "REVIEW_MARKDOWN",
+  "REVIEW_ROUTE",
+  "SHARED_ENV_FILE",
+  "VERDICT"
+ ],
+ "values": {}
+}

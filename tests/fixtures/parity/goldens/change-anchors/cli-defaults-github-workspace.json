@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "exit_code": "0",
+  "output:change-anchors.json": "{\n  \"version\": 1,\n  \"files\": [],\n  \"anchors\": [],\n  \"truncated\": false\n}\n",
+  "stderr": ""
+ }
+}

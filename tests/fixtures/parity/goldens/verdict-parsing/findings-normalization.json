@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "parsed": "{\"confidence\": 0.8, \"findings\": [{\"category\": \"security\", \"file\": \"src/a.py\", \"line\": 12, \"message\": \"boom\", \"preliminary_finding\": 3, \"severity\": \"blocker\"}, {\"category\": \"other\", \"file\": \"src/b.py\", \"line\": 7, \"message\": \"hi\", \"severity\": \"major\"}, {\"category\": \"style\", \"file\": \"d.py\", \"line\": null, \"message\": \"half-line\", \"severity\": \"minor\"}, {\"category\": \"other\", \"file\": \"e.py\", \"line\": null, \"message\": \"path-key\", \"severity\": \"minor\"}, {\"category\": \"bug\", \"file\": \"c.py\", \"line\": null, \"message\": \"bool-line\", \"severity\": \"info\"}, {\"category\": \"other\", \"file\": null, \"line\": null, \"message\": \"summary-key message\", \"severity\": \"info\"}], \"review_markdown\": \"## Findings\\n\\nBody.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\"}"
+ }
+}

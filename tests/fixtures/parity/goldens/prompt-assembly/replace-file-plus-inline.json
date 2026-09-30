@@ -1,0 +1,18 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "engine_annotations": [],
+  "failure_notices": [],
+  "system_prompt": "Static conventions.\n\nPer-PR steering: focus on migrations.\n",
+  "system_prompt_assembled": "Static conventions.\n\nPer-PR steering: focus on migrations.\n",
+  "system_prompt_is_default": "0",
+  "system_prompt_resolved": "Static conventions.\n\nPer-PR steering: focus on migrations.\n",
+  "system_prompt_sha256": "496ea84ca4fe574ad52dafd2cb21d57f5889bea6378e2a6b3f9bda31d4f69a84",
+  "user_message": "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.",
+  "user_message_sha256": "d0ee917ead7d5c2f37cfd6475be12669e2861a3f6da81a1639d474e92cf2aa91"
+ }
+}

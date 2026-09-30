@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "budget_warnings": "0",
+  "markdown": "(1 source skipped — non-allowlisted or non-fetchable hosts: example.org)\n\n\n### GitHub Release Lookup via ghcr.io Path: o/app\n(TARGET_VERSION not set; skipping release lookup for o/app)\n",
+  "requests": "[\"GET https://api.github.com/repos/o/app/compare/abc1234...def5678 auth=0\"]"
+ }
+}

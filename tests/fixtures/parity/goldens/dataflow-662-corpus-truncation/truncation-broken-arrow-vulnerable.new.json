@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": "Cm92ZXJzaXplZCBtYXJrZXIK",
+ "unresolved": [],
+ "values": {
+  "output_bytes": "18",
+  "output_sha256": "768a074f1b83eadee13eac33417b2c87618148b3124a085f7075a305d859c3de"
+ }
+}

@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json": "{\n  \"configured\": true,\n  \"config_path\": \"providers.json\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": [],\n  \"provider_count\": 0\n}\n",
+  "markdown": "Evidence providers executed before final review synthesis.\n\nNo providers were configured in the config file.\n"
+ }
+}

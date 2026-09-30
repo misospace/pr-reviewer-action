@@ -1,0 +1,19 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "exit_code": "0",
+  "file:specialist-correctness.json": "{\n  \"version\": 1,\n  \"role\": \"correctness\",\n  \"leads\": [],\n  \"truncated\": false,\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_leads\": 0,\n    \"omitted_message_chars\": 0,\n    \"omitted_errors\": 0\n  },\n  \"errors\": [\n    \"input: corpus not found: specialist-corpus.md\"\n  ]\n}\n",
+  "file:specialist-leads-present.txt": "",
+  "file:specialist-security.json": "{\n  \"version\": 1,\n  \"role\": \"security\",\n  \"leads\": [],\n  \"truncated\": false,\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_leads\": 0,\n    \"omitted_message_chars\": 0,\n    \"omitted_errors\": 0\n  },\n  \"errors\": [\n    \"input: corpus not found: specialist-corpus.md\"\n  ]\n}\n",
+  "file:specialist-tests.json": "{\n  \"version\": 1,\n  \"role\": \"tests\",\n  \"leads\": [],\n  \"truncated\": false,\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_leads\": 0,\n    \"omitted_message_chars\": 0,\n    \"omitted_errors\": 0\n  },\n  \"errors\": [\n    \"input: corpus not found: specialist-corpus.md\"\n  ]\n}\n",
+  "file:specialists.json": "{\n  \"version\": 1,\n  \"enabled\": true,\n  \"deep_review_mode\": \"true\",\n  \"execution\": \"three_call\",\n  \"request_count\": 0,\n  \"request_bytes\": 0,\n  \"usage_totals\": null,\n  \"model\": \"fixture-model@http://127.0.0.1:<PORT>/v1 (openai)\",\n  \"aggregate_elapsed_sec\": \"<ELAPSED>\",\n  \"specialist_corpus_bytes\": 0,\n  \"adversarial_correctness_active\": false,\n  \"adversarial_corpus_bytes\": null,\n  \"specialist_max_tokens\": 4096,\n  \"total_leads\": 0,\n  \"any_errors\": true,\n  \"roles\": [\n    {\n      \"role\": \"correctness\",\n      \"status\": \"error\",\n      \"error_kind\": \"input\",\n      \"elapsed_sec\": \"<ELAPSED>\",\n      \"lead_count\": 0,\n      \"errors_count\": 1,\n      \"usage\": null,\n      \"request_bytes\": null,\n      \"overrun_retry\": false,\n      \"retry_max_tokens\": null\n    },\n    {\n      \"role\": \"security\",\n      \"status\": \"error\",\n      \"error_kind\": \"input\",\n      \"elapsed_sec\": \"<ELAPSED>\",\n      \"lead_count\": 0,\n      \"errors_count\": 1,\n      \"usage\": null,\n      \"request_bytes\": null,\n      \"overrun_retry\": false,\n      \"retry_max_tokens\": null\n    },\n    {\n      \"role\": \"tests\",\n      \"status\": \"error\",\n      \"error_kind\": \"input\",\n      \"elapsed_sec\": \"<ELAPSED>\",\n      \"lead_count\": 0,\n      \"errors_count\": 1,\n      \"usage\": null,\n      \"request_bytes\": null,\n      \"overrun_retry\": false,\n      \"retry_max_tokens\": null\n    }\n  ]\n}\n",
+  "file:specialists.md": "",
+  "requests": "{}",
+  "stderr": "",
+  "stdout": "specialist corpus: 0 bytes; specialist max_tokens: 4096\nspecialist correctness: error (input) — 0 lead(s), 1 error(s), <ELAPSED>s\nspecialist security: error (input) — 0 lead(s), 1 error(s), <ELAPSED>s\nspecialist tests: error (input) — 0 lead(s), 1 error(s), <ELAPSED>s\ndeep review complete: 0 lead(s) across 3 roles in <ELAPSED>s"
+ }
+}

@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_forgejo-enrich-release": "{\"ok\":true,\"data\":{\"tag_name\":\"v1.0.0+build.5\",\"name\":\"Release \\ud83d\\ude80\",\"published_at\":\"2026-09-01T00:00:00Z\",\"html_url\":\"https://forgejo.example/api/v1/repos/up/stream/releases/1\",\"body\":\"notes caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\"}}",
+  "c01_forgejo-enrich-compare": "{\"ok\":true,\"data\":{\"total_commits\":1,\"commits\":[{\"sha\":\"4444444444444444444444444444444444444444\",\"commit\":{\"message\":\"feat: \\u00e9\"}}],\"files\":[{\"filename\":\"a.go\",\"status\":\"modified\"}]}}",
+  "c02_forgejo-enrich-release": "{\"ok\":false,\"data\":null}",
+  "requests": "[\"GET https://forgejo.example/api/v1/repos/up/stream/releases/tags/v1.0.0%2Bbuild.5 auth=1\",\"GET https://codeberg.org/api/v1/repos/ext/lib/compare/v1...v2 auth=0\",\"GET https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v3 auth=0\"]"
+ }
+}

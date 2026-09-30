@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "benign-review": "## Review\n\nThe change keeps validation close to the request boundary.\n\n## Tests\n\n- Unit tests cover the new branch."
+ }
+}

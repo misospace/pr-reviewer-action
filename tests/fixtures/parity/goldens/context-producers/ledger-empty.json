@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:requirement-ledger-present.txt": "",
+  "file:requirement-ledger.json": "",
+  "file:requirement-ledger.md": "",
+  "file:requirement-ledger.section.md": ""
+ }
+}

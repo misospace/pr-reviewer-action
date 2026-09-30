@@ -1,0 +1,18 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "engine_annotations": [],
+  "failure_notices": [],
+  "system_prompt": "You are a strict reviewer. |{{VERSION_BUMP_GUIDANCE}}|||{{VERBOSITY_GUIDANCE}}|{{RELATED_CODE_GUIDANCE}}\n",
+  "system_prompt_assembled": "You are a strict reviewer. |{{VERSION_BUMP_GUIDANCE}}|||{{VERBOSITY_GUIDANCE}}|{{RELATED_CODE_GUIDANCE}}\n",
+  "system_prompt_is_default": "0",
+  "system_prompt_resolved": "You are a strict reviewer. {{VERSION_BUMP_GUIDANCE}}|{{VERSION_BUMP_GUIDANCE}}|{{IMAGE_DIGEST_GUIDANCE}}|{{RELEASE_NOTES_GUIDANCE}}|{{VERBOSITY_GUIDANCE}}|{{RELATED_CODE_GUIDANCE}}\n",
+  "system_prompt_sha256": "d140439b246e6be1f18c0bbb64725d3b5f4b0c6a7da21ce51ce640c4c3fe3467",
+  "user_message": "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.\nPR kind (deterministic classification): k8s_manifest.",
+  "user_message_sha256": "bb9cf598c655c5554509ba586931568c692f34c5f89b0cf4b6506281292b2019"
+ }
+}

@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:manifest-context.md": "# Changed Manifest Context (modified files only)\n\n## File: k/kustomization.yaml (1 lines)\n```yaml\nresources:\n  - a.yaml```\n\n"
+ }
+}

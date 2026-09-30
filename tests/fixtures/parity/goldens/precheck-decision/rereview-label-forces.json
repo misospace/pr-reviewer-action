@@ -1,0 +1,17 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "base_sha": "base-abc",
+  "diff_fingerprint": "3be6193409646aae05d5319a7ed87a0531aaec5f32783eba9661e926299cc474|cfg:dd7c82b6b211fa0ef17693822887e061aa6a94ce03645cb7e9b88ac6dcc60f4b",
+  "effective_forgejo_api_url": "",
+  "head_sha": "head-abc",
+  "is_fork_pr": "false",
+  "resolved_platform": "github",
+  "should_review": "true",
+  "skip_reason": ""
+ }
+}

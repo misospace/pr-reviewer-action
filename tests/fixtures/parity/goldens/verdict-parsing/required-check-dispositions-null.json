@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "parsed": "{\"findings\": [], \"required_check_dispositions\": null, \"review_markdown\": \"## Review\\n\\nBody.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\"}"
+ }
+}

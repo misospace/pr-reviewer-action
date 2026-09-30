@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"action.yml\",\n      \"language\": \"non_source\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          2,\n          2\n        ]\n      ]\n    },\n    {\n      \"path\": \"contracts/action-v3.yml\",\n      \"language\": \"non_source\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          7,\n          7\n        ]\n      ],\n      \"keys\": [\n        {\n          \"name\": \"evidence-providers-file\",\n          \"kind\": \"entity\",\n          \"line\": 7\n        }\n      ]\n    },\n    {\n      \"path\": \"scripts/platform_api.sh\",\n      \"language\": \"unsupported\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          3,\n          5\n        ]\n      ],\n      \"keys\": [\n        {\n          \"name\": \"TANGLED_REPO_DID\",\n          \"kind\": \"env\",\n          \"line\": 3\n        },\n        {\n          \"name\": \"PLATFORM\",\n          \"kind\": \"branch\",\n          \"line\": 3\n        }\n      ]\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"scripts/platform_api.sh\",\n      \"kind\": \"file\",\n      \"source\": \"scripts/platform_api.sh\",\n      \"confidence\": \"low\"\n    }\n  ],\n  \"truncated\": false\n}\n",
+  "matches_expected_anchors": "true"
+ }
+}

@@ -1,0 +1,35 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "result": {
+   "errors": [
+    "boundaries_challenged is only meaningful with no leads; dropping it because leads exist"
+   ],
+   "leads": [
+    {
+     "category": "",
+     "consequence": "c",
+     "file": null,
+     "line": null,
+     "message": "cosmetic issue",
+     "severity": "minor",
+     "trigger": "t"
+    }
+   ],
+   "role": "correctness",
+   "truncated": false,
+   "truncation": {
+    "omitted_errors": 0,
+    "omitted_leads": 0,
+    "omitted_message_chars": 0,
+    "reasons": [],
+    "truncated": false
+   },
+   "version": 1
+  }
+ }
+}

@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "budget_warnings": "0",
+  "markdown": "(3 sources skipped — non-allowlisted or non-fetchable hosts: github.com)\n\n\n### GitHub Releases Enrichment: o/r\n#### Recent Releases (tags)\n```json\n[\n  {\n    \"tag_name\": \"v1.0.0\",\n    \"name\": \"one\"\n  },\n  {\n    \"tag_name\": \"v0.9.0\",\n    \"name\": \"nine 9.9 no\"\n  }\n]\n\n```\n(No release tags matched target version 9.9.9 in o/r)\n#### Recent Tags\n```json\n[\n  {\n    \"name\": \"v1.0.0\",\n    \"commit\": {\n      \"sha\": \"dddddddddddddddddddddddddddddddddddddddd\",\n      \"url\": \"u\"\n    }\n  },\n  {\n    \"name\": \"v0.9.0\"\n  }\n]\n\n```\n\n### GitHub Releases Enrichment: o/other\n#### Recent Releases (tags)\n```json\n[]\n\n```\n(No release tags matched target version 9.9.9 in o/other)\n(Could not fetch tags list for o/other)\n\n### GitHub Releases Enrichment: o/nothing\n(Could not fetch releases list for o/nothing)\n",
+  "requests": "[\"GET https://api.github.com/repos/o/nothing/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/other/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/other/tags?per_page=50 auth=0\",\"GET https://api.github.com/repos/o/r/releases?per_page=30 auth=0\",\"GET https://api.github.com/repos/o/r/tags?per_page=50 auth=0\"]"
+ }
+}

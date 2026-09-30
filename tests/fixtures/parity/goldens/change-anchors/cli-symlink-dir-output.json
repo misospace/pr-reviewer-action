@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "exit_code": "0",
+  "output:realdir/anchors.json": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/cli_mod.py\",\n      \"language\": \"python\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/cli_mod.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/cli_mod.py\",\n      \"confidence\": \"low\"\n    }\n  ],\n  \"truncated\": false\n}\n",
+  "stderr": ""
+ }
+}

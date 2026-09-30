@@ -1,0 +1,17 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "allowed_hosts": "[\"ghcr.io\", \"github.com\"]",
+  "compare_shas": "null",
+  "ghcr_images": "[\"k8s-apps/metrics\", \"k8s-apps/metrics\\nsome\"]",
+  "normalized_urls": "[\"https://github.com/k8s-apps/metrics/compare/v1.2.2...v1.2.3\", \"https://github.com/k8s-apps/metrics/releases/tag/v1.2.3\"]",
+  "target_version": "\"1.2.3\"",
+  "url_classes": "[{\"owner\": \"k8s-apps\", \"repo\": \"metrics\", \"tag\": \"v1.2.3\", \"type\": \"github_release\"}, {\"compare_spec\": \"v1.2.2...v1.2.3\", \"owner\": \"k8s-apps\", \"repo\": \"metrics\", \"type\": \"github_compare\"}, {\"host\": \"git.example.com\", \"owner\": \"o\", \"repo\": \"p\", \"tag\": \"2.0\", \"type\": \"forgejo_release\"}, {\"compare_spec\": \"1.0...2.0\", \"host\": \"git.example.com\", \"owner\": \"o\", \"repo\": \"p\", \"type\": \"forgejo_compare\"}, null]",
+  "urls": "[\"https://github.com/k8s-apps/metrics/compare/v1.2.2...v1.2.3\", \"https://github.com/k8s-apps/metrics/releases/tag/v1.2.3\"]",
+  "version_hints": "[\"+ image: ghcr.io/k8s-apps/metrics:v1.2.3@sha256:0abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890\", \"+ tag: 1.2.3\", \"- tag: 1.2.2\"]"
+ }
+}

@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_review-threads": "{\"ok\":true,\"data\":[{\"thread_id\":\"PRRT_1\",\"path\":\"src/app.py\",\"line\":42,\"original_line\":40,\"resolved\":false,\"outdated\":false,\"comments\":[{\"id\":101,\"user\":\"pr-reviewer[bot]\",\"created_at\":\"2026-09-01T00:00:00Z\",\"updated_at\":\"2026-09-01T00:00:00Z\",\"body\":\"**major** finding \\u2014 caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\"},{\"id\":102,\"user\":\"alice\",\"created_at\":\"2026-09-01T01:00:00Z\",\"updated_at\":\"2026-09-01T01:00:00Z\",\"body\":\"Disagree \\ud83e\\udd14\"}]},{\"thread_id\":\"PRRT_2\",\"path\":\"docs/readme.md\",\"line\":null,\"original_line\":7,\"resolved\":true,\"outdated\":true,\"comments\":[{\"id\":103,\"user\":\"\",\"created_at\":\"2026-09-02T00:00:00Z\",\"updated_at\":\"2026-09-02T00:00:00Z\",\"body\":\"\"}]},{\"thread_id\":\"PRRT_3\",\"path\":\"\",\"line\":null,\"original_line\":null,\"resolved\":false,\"outdated\":false,\"comments\":[]}]}",
+  "requests": "[\"POST https://api.github.com/graphql auth=1 {\\\"query\\\":\\\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { databaseId body createdAt updatedAt author { login } } } } } } } }\\\",\\\"variables\\\":{\\\"name\\\":\\\"r\\\",\\\"number\\\":7,\\\"owner\\\":\\\"o\\\"}}\"]"
+ }
+}

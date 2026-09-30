@@ -1,0 +1,27 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "result": {
+   "max_completion_tokens": 8000,
+   "messages": [
+    {
+     "content": "You are a tests specialist.",
+     "role": "system"
+    },
+    {
+     "content": "corpus text",
+     "role": "user"
+    }
+   ],
+   "model": "gpt-test",
+   "stream": true,
+   "stream_options": {
+    "include_usage": true
+   }
+  }
+ }
+}

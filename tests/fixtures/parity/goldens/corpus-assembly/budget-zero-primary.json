@@ -1,0 +1,8 @@
+{
+ "error": "[2026-09-29T21:06:24-0600] ERROR: Invalid PRIMARY_MODEL_CONTEXT_TOKENS: expected a positive integer",
+ "ok": false,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {}
+}

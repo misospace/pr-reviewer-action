@@ -1,0 +1,25 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "result": {
+   "errors": [
+    "unknown specialist role: 'bogus'; expected one of ['correctness', 'security', 'tests']"
+   ],
+   "leads": [],
+   "role": "",
+   "truncated": false,
+   "truncation": {
+    "omitted_errors": 0,
+    "omitted_leads": 0,
+    "omitted_message_chars": 0,
+    "reasons": [],
+    "truncated": false
+   },
+   "version": 1
+  }
+ }
+}

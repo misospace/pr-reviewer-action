@@ -1,0 +1,8 @@
+{
+ "error": "jq: parse error: Invalid numeric literal at line 1, column 5",
+ "ok": false,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {}
+}

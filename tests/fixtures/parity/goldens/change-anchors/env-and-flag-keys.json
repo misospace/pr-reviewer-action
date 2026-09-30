@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"scripts/run.sh\",\n      \"language\": \"unsupported\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          4,\n          7\n        ]\n      ],\n      \"keys\": [\n        {\n          \"name\": \"REVIEW_TIMEOUT_SECONDS\",\n          \"kind\": \"env\",\n          \"line\": 4\n        },\n        {\n          \"name\": \"--max-retry-count\",\n          \"kind\": \"flag\",\n          \"line\": 5\n        },\n        {\n          \"name\": \"--new-flag-name\",\n          \"kind\": \"flag\",\n          \"line\": 5\n        }\n      ]\n    },\n    {\n      \"path\": \"app/settings.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"settings\",\n          \"kind\": \"function\",\n          \"confidence\": \"high\",\n          \"line\": 4\n        }\n      ],\n      \"imports\": [\n        \"os\"\n      ],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          1,\n          5\n        ]\n      ],\n      \"keys\": [\n        {\n          \"name\": \"PR_REVIEWER_MODE_NAME\",\n          \"kind\": \"env\",\n          \"line\": 5\n        },\n        {\n          \"name\": \"--fallback-mode-flag\",\n          \"kind\": \"flag\",\n          \"line\": 5\n        }\n      ]\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"scripts/run.sh\",\n      \"kind\": \"file\",\n      \"source\": \"scripts/run.sh\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"app/settings.py\",\n      \"kind\": \"file\",\n      \"source\": \"app/settings.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"settings\",\n      \"kind\": \"symbol\",\n      \"source\": \"app/settings.py\",\n      \"confidence\": \"high\"\n    },\n    {\n      \"value\": \"os\",\n      \"kind\": \"import\",\n      \"source\": \"app/settings.py\",\n      \"confidence\": \"medium\"\n    }\n  ],\n  \"truncated\": false\n}\n"
+ }
+}

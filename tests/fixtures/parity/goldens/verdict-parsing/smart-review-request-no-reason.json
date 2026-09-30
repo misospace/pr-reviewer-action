@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "parsed": "{\"confidence\": null, \"findings\": [], \"review_markdown\": \"## Recommendation\\nApprove.\\n\\nConflicting evidence requires a stronger synthesis pass.\", \"smart_review_reason\": null, \"smart_review_requested\": true, \"verdict\": \"approve\"}"
+ }
+}

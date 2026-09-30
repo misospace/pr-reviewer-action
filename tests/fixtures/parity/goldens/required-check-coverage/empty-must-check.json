@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "coverage": "{\"checks\": [], \"dropped_unknown\": [], \"status\": \"none\", \"structured\": true, \"version\": 1}"
+ }
+}

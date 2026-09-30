@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json": "{\n  \"configured\": true,\n  \"config_path\": \"providers.json\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": [\n    {\n      \"id\": \"a\",\n      \"status\": \"ok\",\n      \"command\": \"printf a\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": 0,\n      \"provider_severity\": \"info\",\n      \"findings\": [],\n      \"stdout\": \"a\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"output_format\": \"text\"\n    },\n    {\n      \"id\": \"b\",\n      \"status\": \"ok\",\n      \"command\": \"printf b\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": 0,\n      \"provider_severity\": \"info\",\n      \"findings\": [],\n      \"stdout\": \"b\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"output_format\": \"text\"\n    }\n  ],\n  \"provider_count\": 2\n}\n",
+  "markdown": "Evidence providers executed before final review synthesis.\n\n## a\n- status: ok; severity: info; exit_code: 0; duration_sec: 0.0\n- command: `printf a`\n- stdout:\n```text\na\n```\n\n## b\n- status: ok; severity: info; exit_code: 0; duration_sec: 0.0\n- command: `printf b`\n- stdout:\n```text\nb\n```\n"
+ }
+}

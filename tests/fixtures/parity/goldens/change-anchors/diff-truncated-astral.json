@@ -1,0 +1,10 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/head.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"keep_me\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"high\",\n          \"line\": 1\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": []\n    },\n    {\n      \"path\": \"pad/emoji.txt\",\n      \"language\": \"non_source\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    },\n    {\n      \"path\": \"src/tail.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"before_cut\",\n          \"kind\": \"function\",\n          \"confidence\": \"high\",\n          \"line\": 1\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": []\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/head.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/head.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"keep_me\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/head.py\",\n      \"confidence\": \"high\"\n    },\n    {\n      \"value\": \"src/tail.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/tail.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"before_cut\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/tail.py\",\n      \"confidence\": \"high\"\n    }\n  ],\n  \"truncated\": true\n}\n"
+ }
+}

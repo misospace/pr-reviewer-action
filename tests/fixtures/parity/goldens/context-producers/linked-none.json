@@ -1,0 +1,14 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:linear-issues.json": "[]\n",
+  "file:linear-issues.md": "",
+  "file:linked-issues.json": "[]\n",
+  "file:linked-issues.md": "",
+  "file:linked-metadata-status.json": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [],\n  \"linear_fetch_failures\": [],\n  \"linear_known_disabled\": false\n}\n"
+ }
+}

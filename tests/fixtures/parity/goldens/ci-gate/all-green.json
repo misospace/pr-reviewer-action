@@ -1,0 +1,17 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "checks_file": "_CI reached a terminal state before this review began (overall: success). These results are from the CI status API for commit 0123456789abcdef0123456789abcdef01234567 and are authoritative evidence of which checks ran and how they concluded._\n\n| Check | State |\n| --- | --- |\n| build | success |\n| lint | success |\n| ci/legacy | success |\n",
+  "elapsed": "0",
+  "exit_code": "0",
+  "leftovers": "[]",
+  "outputs": "ci_status_final=success\nci_status_skipped=false\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\"]",
+  "stderr": "",
+  "stdout": "[CI-status] 00:00:00 Polling CI checks for 0123456789abcdef0123456789abcdef01234567 (timeout=300s, interval=10s, own run=999)...\n[CI-status] 00:00:00 CI checks finalized: success (3 external check(s))"
+ }
+}

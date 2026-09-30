@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_pr-files": "{\"ok\":true,\"data\":[]}",
+  "c00_pr-files_text": "[]\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/pulls/9/files?per_page=100 auth=1\"]"
+ }
+}

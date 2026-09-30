@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "classification": "{\"changed_files_summary\": [\"package-lock.json\", \"pnpm-lock.yaml\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"check for breaking API changes in updated dependencies\", \"run full test suite after upgrade\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": [\"dependency_upgrade\"]}",
+  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"skipped: no correctness-lane signal in classification (pr_kind=dependency_upgrade; risk_flags=none)\", \"role\": \"correctness\", \"selected\": false, \"signals\": []}, {\"reason\": \"skipped: no security-lane signal in classification (pr_kind=dependency_upgrade; risk_flags=none)\", \"role\": \"security\", \"selected\": false, \"signals\": []}, {\"reason\": \"selected: tests-lane signals matched: pr_kind=dependency_upgrade\", \"role\": \"tests\", \"selected\": true, \"signals\": [\"pr_kind=dependency_upgrade\"]}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [], \"selected_roles\": [\"tests\"], \"skipped_roles\": [\"correctness\", \"security\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
+ }
+}

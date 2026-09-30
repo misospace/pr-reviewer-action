@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_pr-files": "{\"ok\":true,\"data\":[{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"filename\":\"a.txt\",\"status\":\"modified\",\"additions\":1,\"deletions\":0,\"changes\":1,\"blob_url\":\"https://github.com/o/r/blob/x/a.txt\",\"patch\":\"@@ -1 +1 @@\"},{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"filename\":\"b.txt\",\"status\":\"removed\",\"additions\":0,\"deletions\":4,\"changes\":4,\"blob_url\":\"https://github.com/o/r/blob/x/b.txt\",\"patch\":\"@@ -1 +1 @@\"}]}",
+  "c00_pr-files_text": "[{\"filename\":\"a.txt\",\"status\":\"modified\",\"additions\":1,\"deletions\":0,\"changes\":1,\"previous_filename\":null},{\"filename\":\"b.txt\",\"status\":\"removed\",\"additions\":0,\"deletions\":4,\"changes\":4,\"previous_filename\":null},{\"note\":\"file list truncated to first 100 of 250 changed files\"}]\n",
+  "requests": "[\"GET https://api.github.com/repos/o/r/pulls/8/files?per_page=100 auth=1\"]"
+ }
+}

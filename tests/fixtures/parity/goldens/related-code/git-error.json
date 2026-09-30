@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "json_document": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/app.py\",\n      \"symbols\": [\n        {\n          \"name\": \"x\",\n          \"references\": []\n        }\n      ],\n      \"tests\": [],\n      \"manifests\": []\n    }\n  ],\n  \"truncated\": true,\n  \"errors\": [\n    \"git ls-files exited 128: fatal: not a git repository (or any of the parent directories): .git\"\n  ],\n  \"truncation\": {\n    \"truncated\": true,\n    \"reasons\": [\n      \"git_error\"\n    ],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n",
+  "markdown": "# Related Code (v1)\n\n_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._\n\n## Changed Files\n\n### `src/app.py`\n\n- `x`: no references\n- Tests: none\n- Manifests: none\n\n## Scanner Errors\n\n- `git ls-files exited 128: fatal: not a git repository (or any of the parent directories): .git`\n\n## Bounds\n\n_Output is bounded and incomplete (git_error)._\n",
+  "related": "{\"errors\": [\"git ls-files exited 128: fatal: not a git repository (or any of the parent directories): .git\"], \"files\": [{\"manifests\": [], \"path\": \"src/app.py\", \"symbols\": [{\"name\": \"x\", \"references\": []}], \"tests\": []}], \"truncated\": true, \"truncation\": {\"omitted_manifests\": 0, \"omitted_output_bytes\": 0, \"omitted_references\": 0, \"omitted_symbols\": 0, \"omitted_tests\": 0, \"reasons\": [\"git_error\"], \"truncated\": true}, \"version\": 1}"
+ }
+}

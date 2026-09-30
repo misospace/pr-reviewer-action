@@ -1,0 +1,13 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "file:repo-history.truncated.md": "## Term: upgrade\n\n### git log context\n```text\n```\n\n## Term: widget-core\n\n### git log context\n```text\n```\n\n",
+  "file:repo-impact.truncated.md": "## Term: upgrade\n\n### git grep hits\n```text\n```\n\n## Term: widget-core\n\n### git grep hits\n```text\n```\n\n",
+  "file:terms.all.txt": "upgrade\nwidget-core\n",
+  "file:terms.txt": "upgrade\nwidget-core\n"
+ }
+}

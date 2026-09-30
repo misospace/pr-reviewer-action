@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_external-checks_text": "[{\"name\":\"(combined)\",\"state\":\"failure\"}]",
+  "c01_external-checks_text": "[]",
+  "requests": "[\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/status auth=1\",\"GET https://api.github.com/repos/o/r/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/check-runs?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/status auth=1\"]"
+ }
+}

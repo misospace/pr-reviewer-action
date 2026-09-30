@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_conversation-comments": "{\"ok\":true,\"data\":[]}",
+  "requests": "[\"POST https://api.github.com/graphql auth=1 {\\\"query\\\":\\\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }\\\",\\\"variables\\\":{\\\"name\\\":\\\"r\\\",\\\"number\\\":7,\\\"owner\\\":\\\"o\\\"}}\"]"
+ }
+}

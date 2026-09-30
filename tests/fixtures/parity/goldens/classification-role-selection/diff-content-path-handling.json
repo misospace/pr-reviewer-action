@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "classification": "{\"changed_files_summary\": [\"src/app/store.py\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"review for path traversal vulnerabilities\", \"test with edge-case paths (null bytes, symlinks)\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": true, \"signals\": [{\"files\": [\"src/app/store.py\"], \"samples\": [\"+        raise ValueError('traversal: ../ denied')\"], \"signal\": \"traversal_literal\", \"source\": \"diff\"}, {\"files\": [\"src/app/store.py\"], \"samples\": [\"+    target = os.path.join(base, request.args.get('p'))\"], \"signal\": \"untrusted_source_join\", \"source\": \"diff\"}]}, \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"risk_flags_with_files\": {\"path_handling_changes\": []}, \"route_signals\": []}",
+  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"skipped: no correctness-lane signal in classification (pr_kind=path_handling_changes; risk_flags=path_handling_changes)\", \"role\": \"correctness\", \"selected\": false, \"signals\": []}, {\"reason\": \"selected: security-lane signals matched: pr_kind=path_handling_changes, risk_flag=path_handling_changes\", \"role\": \"security\", \"selected\": true, \"signals\": [\"pr_kind=path_handling_changes\", \"risk_flag=path_handling_changes\"]}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=path_handling_changes; risk_flags=path_handling_changes)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"selected_roles\": [\"security\"], \"skipped_roles\": [\"correctness\", \"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
+ }
+}

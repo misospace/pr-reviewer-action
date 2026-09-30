@@ -1,0 +1,12 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_pr-files": "{\"ok\":true,\"data\":[{\"filename\":\"src/main.go\",\"status\":\"changed\",\"additions\":5,\"deletions\":1,\"changes\":6,\"patch\":\"\",\"previous_filename\":null},{\"filename\":\"docs/\\u00e9t\\u00e9 \\ud83d\\ude00.md\",\"status\":\"added\",\"additions\":2,\"deletions\":0,\"changes\":0,\"patch\":\"\",\"previous_filename\":null},{\"filename\":\"moved.txt\",\"status\":\"renamed\",\"additions\":0,\"deletions\":0,\"changes\":0,\"patch\":\"\",\"previous_filename\":\"orig.txt\"}]}",
+  "c00_pr-files_text": "[{\"filename\":\"src/main.go\",\"status\":\"changed\",\"additions\":5,\"deletions\":1,\"changes\":6,\"previous_filename\":null},{\"filename\":\"docs/été 😀.md\",\"status\":\"added\",\"additions\":2,\"deletions\":0,\"changes\":0,\"previous_filename\":null},{\"filename\":\"moved.txt\",\"status\":\"renamed\",\"additions\":0,\"deletions\":0,\"changes\":0,\"previous_filename\":\"orig.txt\"}]\n",
+  "requests": "[\"GET https://forgejo.example/api/v1/repos/o/r/pulls/5/files auth=1\"]"
+ }
+}

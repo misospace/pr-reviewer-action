@@ -1,0 +1,11 @@
+{
+ "error": null,
+ "ok": true,
+ "pre": {},
+ "raw": null,
+ "unresolved": [],
+ "values": {
+  "c00_reviews-paginated": "{\"ok\":true,\"data\":[{\"id\":1,\"node_id\":\"PRR_1\",\"user\":{\"login\":\"alice\",\"type\":\"User\"},\"body\":\"Please fix caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"state\":\"CHANGES_REQUESTED\",\"html_url\":\"https://github.com/o/r/pull/7#pullrequestreview-1\",\"submitted_at\":\"2026-09-01T00:00:00Z\",\"commit_id\":\"cccccccccccccccccccccccccccccccccccccccc\"},{\"id\":2,\"node_id\":\"PRR_2\",\"user\":{\"login\":\"bob\",\"type\":\"User\"},\"body\":\"\",\"state\":\"COMMENTED\",\"html_url\":\"https://github.com/o/r/pull/7#pullrequestreview-2\",\"submitted_at\":\"2026-09-01T01:00:00Z\",\"commit_id\":\"cccccccccccccccccccccccccccccccccccccccc\"},{\"id\":3,\"node_id\":\"PRR_3\",\"user\":{\"login\":\"pr-reviewer[bot]\",\"type\":\"User\"},\"body\":\"<!-- ai-pr-reviewer -->\\nmanaged\",\"state\":\"COMMENTED\",\"html_url\":\"https://github.com/o/r/pull/7#pullrequestreview-3\",\"submitted_at\":\"2026-09-02T00:00:00Z\",\"commit_id\":\"cccccccccccccccccccccccccccccccccccccccc\"},{\"id\":4,\"node_id\":\"PRR_4\",\"user\":{\"login\":\"alice\",\"type\":\"User\"},\"body\":\"LGTM \\ud83d\\udc4d\",\"state\":\"APPROVED\",\"html_url\":\"https://github.com/o/r/pull/7#pullrequestreview-4\",\"submitted_at\":\"2026-09-03T00:00:00Z\",\"commit_id\":\"cccccccccccccccccccccccccccccccccccccccc\"},{\"id\":5,\"node_id\":\"PRR_5\",\"user\":{\"login\":\"carol\",\"type\":\"User\"},\"body\":\"stale\",\"state\":\"DISMISSED\",\"html_url\":\"https://github.com/o/r/pull/7#pullrequestreview-5\",\"submitted_at\":\"2026-09-04T00:00:00Z\",\"commit_id\":\"cccccccccccccccccccccccccccccccccccccccc\"}]}",
+  "requests": "[\"GET https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100 auth=1\",\"GET https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=2 auth=1\",\"GET https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=3 auth=1\"]"
+ }
+}
