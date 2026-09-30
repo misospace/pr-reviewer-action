@@ -1044,7 +1044,6 @@ def _route_matches(actual: str | None, expected: str) -> bool:
 
 def _collect_signals_from_run(run: Any) -> list[ReviewSignal]:
     stage = _run_stage(run)
-    finding_stage = _run_finding_stage(run)
     signals: list[ReviewSignal] = []
     review = _run_value(run, "review_markdown", "") or ""
     if review:

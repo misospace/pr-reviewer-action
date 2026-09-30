@@ -231,13 +231,10 @@ function pyStr(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** Python-style repr() for the values that can reach a message. */
-function pyRepr(value: unknown): string {
-  if (value === null || value === undefined) return "None";
-  if (typeof value === "string") return `'${value}'`;
-  if (typeof value === "boolean") return value ? "True" : "False";
-  if (typeof value === "number") return String(value);
-  return JSON.stringify(value);
+/** Python-style repr() for the finish-reason values that can reach a message. */
+function pyRepr(value: string | null): string {
+  if (value === null) return "None";
+  return `'${value}'`;
 }
 
 /** Python type() name for a decoded JSON value, for parse-failure messages. */

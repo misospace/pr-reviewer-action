@@ -25,7 +25,10 @@ export function startMockServer(handler: (req: IncomingMessage, body: string, re
         await handler(req, body, res);
       } catch (error) {
         res.statusCode = 500;
-        res.end(String(error));
+        // CodeQL js/stack-trace-exposure: only the message, never `error`
+        // itself (which could carry a stack), reaches the localhost test
+        // client.
+        res.end(error instanceof Error ? error.message : String(error));
       }
     });
   });

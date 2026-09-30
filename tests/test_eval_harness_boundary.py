@@ -412,7 +412,7 @@ class TestRunReviewForPrBoundary:
         assert run.verdict_source == "findings_severity_gated"
 
     def test_missing_ai_output_falls_back_to_stdout(self, tmp_path: Path) -> None:
-        repo_path = _work_dir_with_repo(tmp_path)
+        _work_dir_with_repo(tmp_path)
         script = _write_fake_script(
             tmp_path / "fake_run_review.sh", deep=True, write_output=False
         )
@@ -458,7 +458,7 @@ class TestRunReviewForPrBoundary:
         assert not (repo_path / "ai-output.json").is_symlink()
 
     def test_null_bytes_and_control_chars_in_findings_content_fail_soft(self, tmp_path: Path) -> None:
-        repo_path = _work_dir_with_repo(tmp_path)
+        _work_dir_with_repo(tmp_path)
         script = _write_fake_script(
             tmp_path / "fake_run_review.sh", deep=True,
             ai_output=NUL_OUTPUT_PAYLOAD,
@@ -499,7 +499,7 @@ class TestRunReviewForPrBoundary:
         assert evaluate_specialist_expectations(run, expectations) == scored
 
     def test_symlinked_specialists_artifact_malformed_target_fail_soft(self, tmp_path: Path) -> None:
-        repo_path = _work_dir_with_repo(tmp_path)
+        _work_dir_with_repo(tmp_path)
         script = _write_fake_script(
             tmp_path / "fake_run_review.sh", deep=True,
             specialists_payload=MALFORMED_AGGREGATE_PAYLOAD,
@@ -531,7 +531,7 @@ class TestRunReviewForPrBoundary:
         assert security["lead_count"] == 1
 
     def test_path_like_needles_do_not_escape_workspace(self, tmp_path: Path) -> None:
-        repo_path = _work_dir_with_repo(tmp_path)
+        _work_dir_with_repo(tmp_path)
         script = _write_fake_script(
             tmp_path / "fake_run_review.sh", deep=False,
             ai_output=ESCAPING_OUTPUT_PAYLOAD,

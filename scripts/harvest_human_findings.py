@@ -49,7 +49,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent

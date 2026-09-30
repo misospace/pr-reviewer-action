@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { classificationFromArtifact, selectionToArtifact, selectSpecialistRoles } from "../classification/role-selection.js";
 import { pyJsonDump } from "../context/py-json.js";

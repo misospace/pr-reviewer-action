@@ -49,7 +49,6 @@ _ATTEMPT_BACKOFF_SEC = (2.0, 5.0)
 JudgeCall = Callable[[list[dict], int], str]
 
 _VULNERABLE = "vulnerable"
-_CONTROL = "negative_control"
 
 
 def _answer_key_index(corpus: dict) -> dict[int, dict]:

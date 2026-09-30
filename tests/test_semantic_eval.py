@@ -605,19 +605,18 @@ def test_normal_benchmark_entries_do_not_require_semantic_fixture(tmp_path: Path
 
 
 def test_fixture_run_materializes_pre_fix_files_without_pr_head_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import eval_harness
     from eval_harness import BenchmarkCorpus, run_review_for_pr
 
     entry = BenchmarkCorpus.from_file(CORPUS).prs[0]
     commands: list[list[str]] = []
-    real_run = eval_harness.subprocess.run
+    real_run = subprocess.run
 
     def recording_run(command, *args, **kwargs):
         if isinstance(command, (list, tuple)):
             commands.append([str(item) for item in command])
         return real_run(command, *args, **kwargs)
 
-    monkeypatch.setattr(eval_harness.subprocess, "run", recording_run)
+    monkeypatch.setattr("eval_harness.subprocess.run", recording_run)
     script = tmp_path / "fixture-run.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"

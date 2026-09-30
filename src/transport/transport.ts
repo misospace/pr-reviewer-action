@@ -258,7 +258,7 @@ export function normalizeNonStreamedResponse(parsed: unknown): NormalizedModelRe
 
   let content = "";
   let toolCalls: NormalizedModelResponse["toolCalls"] = [];
-  let finishReason = "stop";
+  let finishReason: string;
   if (Array.isArray(record.choices)) {
     const first = typeof record.choices[0] === "object" && record.choices[0] !== null
       ? record.choices[0] as Record<string, unknown>

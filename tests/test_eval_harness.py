@@ -12,17 +12,18 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pytest
-import eval_harness
 from eval_harness import (
     BenchmarkCorpus,
     BenchmarkResult,
     KnownFinding,
     ReviewRun,
     compute_precision_recall,
+    count_completed_runs,
     evaluate_capability,
     extract_findings_from_review,
     generate_report,
     load_known_findings,
+    main,
 )
 
 
@@ -718,14 +719,14 @@ class TestCompletedRunCounts:
                 "native_loop": {"successful_runs": 0},
             },
         }
-        assert eval_harness.count_completed_runs(report) == 3
+        assert count_completed_runs(report) == 3
 
     def test_count_completed_runs_prefers_metadata(self):
         report = {
             "metadata": {"completed_runs": 5},
             "mode_summary": {"tools_off": {"successful_runs": 1}},
         }
-        assert eval_harness.count_completed_runs(report) == 5
+        assert count_completed_runs(report) == 5
 
 
 class TestMainExitCode:
@@ -752,7 +753,7 @@ class TestMainExitCode:
                 error=next(calls),
             )
 
-        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
         monkeypatch.setattr(sys, "argv", [
             "eval_harness.py",
             "--corpus", str(corpus_path),
@@ -760,7 +761,7 @@ class TestMainExitCode:
             "--runs-per-mode", "1",
             "--output", str(output_path),
         ])
-        exit_code = eval_harness.main()
+        exit_code = main()
         return exit_code, output_path
 
     def test_all_runs_errored_fails_but_writes_report(self, monkeypatch, tmp_path):

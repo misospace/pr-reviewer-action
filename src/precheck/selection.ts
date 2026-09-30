@@ -24,8 +24,6 @@ import { createHash } from "node:crypto";
  * fresh review; a persistently unfetchable linked issue re-reviews every
  * run — by design. */
 
-const REQUEST_TIMEOUT_SEC = 10;
-
 function unwrap(response: unknown): unknown {
   if (typeof response === "object" && response !== null && !Array.isArray(response)) {
     const record = response as Record<string, unknown>;
