@@ -36,16 +36,23 @@ const TITLE_TRAILING_ISSUE_REF_PATTERN = /\(((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+
 /** Extract linked-issue references from a PR title and body, deduplicated
  * in order of appearance (max 8): first the title's trailing `(#N)`
  * convention, then closing-keyword body references, then non-closing
- * implementation body references. A bare `#N` uses the default repo. */
+ * implementation body references. A bare `#N` uses the default repo.
+ * Dedupe is a merge, not a first-write-wins: if a ref first appears in a
+ * non-closing form and a later occurrence is a closing-keyword form, the
+ * existing entry is upgraded to `closing: true` in place — the returned
+ * list's order (position of first occurrence) never changes. */
 export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title?: string): LinkedIssueRef[] {
   const repo = defaultRepo ?? "";
-  const seen = new Set<string>();
+  const byRef = new Map<string, LinkedIssueRef>();
   const items: LinkedIssueRef[] = [];
 
   const add = (ref: string, closing: boolean): void => {
+    const existing = byRef.get(ref);
+    if (existing) {
+      if (closing) existing.closing = true;
+      return;
+    }
     if (items.length >= MAX_LINKED_ISSUES) return;
-    if (seen.has(ref)) return;
-    seen.add(ref);
     let repoName: string;
     let issueNumber: string;
     if (ref.includes("/")) {
@@ -58,7 +65,9 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
     }
     const number = Number.parseInt(issueNumber, 10);
     if (Number.isNaN(number)) return;
-    items.push({ ref, repo: repoName, number, closing });
+    const item: LinkedIssueRef = { ref, repo: repoName, number, closing };
+    byRef.set(ref, item);
+    items.push(item);
   };
 
   const titleMatch = TITLE_TRAILING_ISSUE_REF_PATTERN.exec((title ?? "").trim());

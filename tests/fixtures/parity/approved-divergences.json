@@ -827,7 +827,7 @@
         "old": "",
         "new": "## #9\n(Could not fetch issue #9 from owner/repo)\n\n"
       },
-      "reason": "#872: same root cause as the linked-issues.json divergence on this fixture — Refs #9 now links, and the fixture has no issues map entry for #9 so the fetch fails and renders the failure notice."
+      "reason": "#872: same root cause as the linked-issues.json divergence on this fixture \u2014 Refs #9 now links, and the fixture has no issues map entry for #9 so the fetch fails and renders the failure notice."
     },
     {
       "boundary": "context-producers",
@@ -839,7 +839,31 @@
         "old": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [],\n  \"linear_fetch_failures\": [],\n  \"linear_known_disabled\": false\n}\n",
         "new": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [\n    \"#9\"\n  ],\n  \"linear_fetch_failures\": [],\n  \"linear_known_disabled\": false\n}\n"
       },
-      "reason": "#872: same root cause — Refs #9 now links and its (fixture-unmodeled) fetch fails, so github_fetch_failures now records #9 instead of staying empty."
+      "reason": "#872: same root cause \u2014 Refs #9 now links and its (fixture-unmodeled) fetch fails, so github_fetch_failures now records #9 instead of staying empty."
+    },
+    {
+      "boundary": "platform-normalization",
+      "fixtures": [
+        "forgejo-issues"
+      ],
+      "key": "c00_issue",
+      "expected": {
+        "old": "{\"ok\":true,\"data\":{\"body\":\"Details \\ud83d\\ude00\",\"title\":\"Issue caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"state\":\"open\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\"}}",
+        "new": "{\"ok\":true,\"data\":{\"body\":\"Details \\ud83d\\ude00\",\"title\":\"Issue caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"state\":\"open\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"pull_request\":null}}"
+      },
+      "reason": "#872: normalizeForgejoIssue now passes through the raw pull_request field (previously always absent from the normalized shape) so isPullRequestPayload can reject a non-closing linked ref that actually names a pull request. Additive-only key; every v2-parity consumer (projectLinkedIssue) whitelists its own fields and ignores it."
+    },
+    {
+      "boundary": "platform-normalization",
+      "fixtures": [
+        "forgejo-issues"
+      ],
+      "key": "c01_issue",
+      "expected": {
+        "old": "{\"ok\":true,\"data\":{\"body\":\"\",\"title\":\"No body key\",\"state\":\"closed\",\"created_at\":\"\",\"updated_at\":\"\"}}",
+        "new": "{\"ok\":true,\"data\":{\"body\":\"\",\"title\":\"No body key\",\"state\":\"closed\",\"created_at\":\"\",\"updated_at\":\"\",\"pull_request\":null}}"
+      },
+      "reason": "#872: normalizeForgejoIssue now passes through the raw pull_request field (previously always absent from the normalized shape) so isPullRequestPayload can reject a non-closing linked ref that actually names a pull request. Additive-only key; every v2-parity consumer (projectLinkedIssue) whitelists its own fields and ignores it."
     }
   ]
 }

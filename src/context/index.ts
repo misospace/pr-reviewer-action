@@ -183,6 +183,7 @@ export {
   LINKED_ISSUE_EMBED_BYTES,
   LinkedIssueProjectionError,
   buildLinkedIssueContext,
+  isPullRequestPayload,
   projectLinkedIssue,
   pyInt,
   pyParseInt,

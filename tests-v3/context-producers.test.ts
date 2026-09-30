@@ -108,6 +108,40 @@ test("a title-only (#N) reference links the issue (#872)", async () => {
   assert.match(text(result.artifacts.get("linked-issues.md")), /## #584/);
 });
 
+test("a title (#N) that actually names a pull request is rejected, not fed to the ledger (#872)", async () => {
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 12, pull_request: { url: "https://example/pulls/12" }, body: "The resolver MUST do the thing" },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: thing (#12)", body: "no closing keyword here" },
+    repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.doesNotMatch(md, /MUST do the thing/, "the PR's body must not land in linked-issues.md");
+  assert.match(md, /\(Skipped issue #12 from o\/r: linked object is a pull request\)/);
+  assert.deepEqual(result.linkedIssues, [{ ref: "#12", repo: "o/r", number: 12 }]);
+  assert.deepEqual(result.githubPullRequestSkips, ["#12"]);
+  assert.deepEqual(result.githubFetchFailures, [], "a rejected pull request is not a fetch failure");
+  const status = JSON.parse(text(result.artifacts.get("linked-metadata-status.json"))) as { github_pull_request_skips?: string[] };
+  assert.deepEqual(status.github_pull_request_skips, ["#12"]);
+});
+
+test("a CLOSING keyword ref that names a pull request is fetched unchanged (#872 parity)", async () => {
+  // Closing-keyword behavior must stay exactly as before #872: no rejection.
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 12, pull_request: { url: "https://example/pulls/12" }, labels: [], body: "The resolver MUST do the thing" },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Closes #12" },
+    repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.match(md, /MUST do the thing/);
+  assert.deepEqual(result.githubPullRequestSkips, []);
+});
+
 test("a string label aborts the linked-issue projection", async () => {
   const getIssue = async (): Promise<ReadResult<unknown>> => ({ ok: true, data: { labels: ["security"] } });
   await assert.rejects(

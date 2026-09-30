@@ -230,6 +230,21 @@ test("linked issue refs: title and body forms combine, deduped, capped at 8", ()
   assert.deepEqual(refs.map((ref) => ref.ref), ["#584", "#7"], "title ref deduped against body ref");
 });
 
+test("linked issue refs: a later closing occurrence upgrades an earlier non-closing dedupe entry", () => {
+  // Regression: a title `(#N)` convention is non-closing; if the body ALSO
+  // closes the same issue, the merged entry must end up closing:true — the
+  // ref must not stay stuck at whichever form was seen first.
+  const refs = extractLinkedIssueRefs("Closes #584", "o/r", "feat: thing (#584)");
+  assert.deepEqual(refs.map((ref) => ref.ref), ["#584"], "still one merged entry, in first-occurrence order");
+  assert.equal(refs[0]!.closing, true, "the later closing keyword upgrades the entry");
+
+  // The reverse order (closing keyword first, non-closing form second) must
+  // never downgrade an already-closing entry.
+  const reordered = extractLinkedIssueRefs("Refs #9\nCloses #9", "o/r");
+  assert.equal(reordered.length, 1);
+  assert.equal(reordered[0]!.closing, true);
+});
+
 test("linear prefixes and identifiers parse conservatively", () => {
   assert.deepEqual(parsePrefixes("eng, Ops, ENG"), ["ENG", "OPS"]);
   assert.throws(() => parsePrefixes("1bad"), /invalid Linear issue prefix/);

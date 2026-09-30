@@ -18,7 +18,15 @@
  *   `LinkedIssueProjectionError`;
  * - a failed fetch renders a notice and records the ref; Linear lookups that
  *   fail per identifier, or an adapter that cannot run at all, are
- *   uncertainty, while the fork gate is known-disabled state. */
+ *   uncertainty, while the fork gate is known-disabled state.
+ * - (#872) a non-closing ref (title `(#N)` convention, or a body
+ *   `Implements`/`Part of`/`Refs` reference) whose fetched object is a pull
+ *   request is rejected before projection: it renders a skip notice instead
+ *   of the issue's content, is recorded in `linked-metadata-status.json` as
+ *   a skip (not a failure — it never marks linked-metadata uncertain), and
+ *   never reaches the requirement ledger. Closing-keyword refs (`Closes`/
+ *   `Fixes`/`Resolves`) are unaffected — parity with the pre-#872 fetch
+ *   behavior is preserved for them. */
 
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqError } from "../platform/jq.js";
@@ -34,6 +42,19 @@ export const LINEAR_ADAPTER_FAILED = "linear-adapter-failed";
 export class LinkedIssueProjectionError extends Error {}
 
 const enc = (text: string): Buffer => Buffer.from(text, "utf8");
+
+/** True when a fetched GitHub/Forgejo "issue" payload is actually a pull
+ * request (#872): both platforms' issue-fetch APIs return PRs through the
+ * same endpoint, distinguished only by a `pull_request` object on the raw
+ * payload (GitHub natively; Forgejo's normalized shape passes it through —
+ * see `normalizeForgejoIssue`). A trailing `(#N)` on a squash-merge or
+ * automation-authored title very often names the PR that produced it, not
+ * an issue, and that PR's own body must never masquerade as issue guidance
+ * in `linked-issues.md` / the requirement ledger. */
+export function isPullRequestPayload(data: unknown): boolean {
+  return typeof data === "object" && data !== null && !Array.isArray(data)
+    && (data as Record<string, unknown>).pull_request != null;
+}
 
 /** `jq '{number,title,state,html_url,labels:[.labels[]?.name],body}'`. */
 export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
@@ -119,6 +140,10 @@ export interface LinkedIssueContextResult {
   /** The final `linked-issues.json` value (what classification reads). */
   linkedIssues: unknown[];
   githubFetchFailures: string[];
+  /** Non-closing refs (#872) whose fetched object was a pull request,
+   * rejected before projection — never a failure (the fetch succeeded), so
+   * these never feed `linkedMetadataUncertainty`. */
+  githubPullRequestSkips: string[];
   linearFetchFailures: string[];
   linearKnownDisabled: boolean;
 }
@@ -160,11 +185,14 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
   const artifacts = new Map<string, Uint8Array>();
   const body = `${jqRaw(jqAlt(jqField(input.pr, "body"), ""))}\n`;
   const title = pyStr(pyOr(isPlainObject(input.pr) ? input.pr.title : undefined, ""));
-  const refs = extractLinkedIssueRefs(body, input.repo, title).map((item) => ({ ref: item.ref, repo: item.repo, number: item.number }));
+  const refItems = extractLinkedIssueRefs(body, input.repo, title);
+  const closingByRef = new Map(refItems.map((item) => [item.ref, item.closing]));
+  const refs = refItems.map((item) => ({ ref: item.ref, repo: item.repo, number: item.number }));
   let linkedJson: Buffer = enc(`${pyJsonDumpsLine(refs)}\n`);
   let linked: unknown[] = refs;
   const md: Buffer[] = [];
   const githubFailures: string[] = [];
+  const pullRequestSkips: string[] = [];
 
   if (refs.length > 0) {
     const labelsByRef = new Map<string, unknown[]>();
@@ -172,7 +200,10 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
     for (const item of refs) {
       md.push(enc(`## ${item.ref}\n`));
       const fetched = await input.adapter.getIssue(item.repo, String(item.number));
-      if (fetched.ok) {
+      if (fetched.ok && !closingByRef.get(item.ref) && isPullRequestPayload(fetched.data)) {
+        md.push(enc(`(Skipped issue ${item.ref} from ${item.repo}: linked object is a pull request)\n`));
+        pullRequestSkips.push(item.ref);
+      } else if (fetched.ok) {
         const filtered = projectLinkedIssue(fetched.data);
         labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
         anyLabels = true;
@@ -218,11 +249,17 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
     github_fetch_failures: githubFailures,
     linear_fetch_failures: linearFailures,
     linear_known_disabled: linearKnownDisabled,
+    // Additive (#872): only present when non-empty, so a review with no
+    // rejected pull-request refs keeps the pre-#872 byte-identical status
+    // artifact. A skip is a deliberate rejection, not a failure — it is
+    // never folded into `linkedMetadataUncertainty`.
+    ...(pullRequestSkips.length > 0 ? { github_pull_request_skips: pullRequestSkips } : {}),
   })}\n`));
   return {
     artifacts,
     linkedIssues: linked,
     githubFetchFailures: githubFailures,
+    githubPullRequestSkips: pullRequestSkips,
     linearFetchFailures: linearFailures,
     linearKnownDisabled,
   };

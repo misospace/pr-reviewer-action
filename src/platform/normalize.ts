@@ -89,6 +89,12 @@ export function normalizeForgejoIssue(data: unknown): unknown {
     state: pyGet(issue, "state", "open"),
     created_at: pyGet(issue, "created_at", ""),
     updated_at: pyGet(issue, "updated_at", ""),
+    // Passed through, not part of the v2 shape (#872): Forgejo/Gitea's
+    // issues API returns pull requests through this same endpoint, marked
+    // by a `pull_request` object — `isPullRequestPayload` reads it to reject
+    // a non-closing linked ref that actually names a PR. Ignored by every
+    // v2-parity consumer (`projectLinkedIssue` whitelists its own fields).
+    pull_request: pyGet(issue, "pull_request", null),
   };
 }
 

@@ -1410,6 +1410,65 @@ test("#872: a title-only (#N) reference feeds the fetched issue's acceptance cri
   }
 });
 
+test("#872: a title-only (#N) reference that actually names a pull request never reaches the requirement ledger", async () => {
+  // A trailing "(#N)" on a squash-merge/automation title very often names
+  // the PR that produced it, not an issue. If getIssue's payload is a PR
+  // (GitHub/Forgejo mark this with a `pull_request` object on the same
+  // issues endpoint), it must be rejected before its body can masquerade as
+  // issue guidance in the ledger.
+  const platform = mockPlatform({
+    title: "feat: thing (#12)",
+    body: "No closing keyword mentions #12 here.",
+  });
+  platform.getIssue = async () => ({
+    ok: true,
+    data: {
+      number: 12,
+      pull_request: { url: "https://forge.example/o/r/pulls/12" },
+      labels: [],
+      body: "The resolver MUST do the thing that PR #12 itself implements",
+    },
+  }) as never;
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const linkedMd = readFileSync(join(runDir, "linked-issues.md"), "utf8");
+    assert.doesNotMatch(linkedMd, /MUST do the thing/, "the PR's body must not land in linked-issues.md");
+    assert.match(linkedMd, /\(Skipped issue #12 from o\/r: linked object is a pull request\)/);
+    const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as {
+      requirements: Array<{ text: string; provenance: Array<{ source: string; ref: string }> }>;
+    };
+    const linked = ledger.requirements.filter((entry) => entry.provenance.some((p) => p.source === "linked_issues" && p.ref === "#12"));
+    assert.deepEqual(linked, [], "the rejected pull request must never reach the requirement ledger");
+    const status = JSON.parse(readFileSync(join(runDir, "linked-metadata-status.json"), "utf8")) as { github_pull_request_skips?: string[] };
+    assert.deepEqual(status.github_pull_request_skips, ["#12"], "the skip must be visible in linked-metadata status");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#812: unresolved bot threads re-emit with their original severity and Minor/Info alone approves", async () => {
   // The #814 shape: 10 unresolved bot-managed threads, 9 Minor/Info + 1 Major
   // the model resolved with code-citing evidence. The re-emitted findings must
