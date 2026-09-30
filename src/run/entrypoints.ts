@@ -11,6 +11,7 @@ import { runPrecheck } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
+import { nonEmpty } from "./run-dir.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -125,8 +126,18 @@ function upstreamLinkMode(raw: string | undefined): UpstreamLinkMode {
   return "inert";
 }
 
+/** #838: `publish` reads a previous `run`'s artifacts only from an explicit
+ * `PR_REVIEWER_RUN_DIR` — never from `GITHUB_WORKSPACE`/the process cwd,
+ * which is the reviewed checkout. Falling back to the checkout would let a
+ * PR that commits `linked-issues.md` / `evidence-providers.md` /
+ * `standards-present.txt` / `tool-harness.json` / `tool-harness.md` at its
+ * repository root forge the `conditionalPresence` flags the published review
+ * renders. With no run dir given, every conditional reads as absent; a
+ * caller that wants a real `run`'s artifacts must pass its `PR_REVIEWER_RUN_DIR`
+ * to `publish` explicitly (the action entry does this by construction). */
 function isFileNonEmpty(env: NodeJS.ProcessEnv, name: string): boolean {
-  const runDir = env.PR_REVIEWER_RUN_DIR ?? env.GITHUB_WORKSPACE ?? process.cwd();
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return false;
   try {
     return statSync(join(runDir, name)).size > 0;
   } catch {

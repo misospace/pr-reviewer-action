@@ -144,6 +144,11 @@ class ReviewRun:
     # refs/pull/<PR>/head); None when the run errored before/without
     # materializing the PR head.
     commit_sha: str | None = None
+    # #838: the private artifact directory this run's review wrote to
+    # (PR_REVIEWER_RUN_DIR) — never the reviewed checkout. Internal
+    # bookkeeping only (a caller that needs a run's artifacts after the
+    # fact, e.g. score_context, reads through this); not part of to_dict.
+    run_dir: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"mode": self.mode, "pr_number": self.pr_number}
@@ -1097,7 +1102,7 @@ def evaluate_specialist_expectations(
 
 
 def populate_tool_trace(run: ReviewRun, repo_path: Path) -> None:
-    """Read tool-harness.json (left in the run cwd) into the ReviewRun.
+    """Read tool-harness.json (the run's PR_REVIEWER_RUN_DIR) into the ReviewRun.
 
     The native_loop harness emits a `tool_calls` array ({tool, args, status});
     older planner modes emit only `tool_results` (tool + status, no args), so
@@ -1484,8 +1489,8 @@ def _load_review_artifact_findings(path: Path) -> list[dict[str, Any]]:
 def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
     """Read a run's review artifacts into the ReviewRun. Never raises.
 
-    The validated review artifact is ai-output.json in the run cwd
-    (workspace root) — verdict.json is not a pipeline output. A missing or
+    The validated review artifact is ai-output.json in the run's private
+    artifact directory (PR_REVIEWER_RUN_DIR) — verdict.json is not a pipeline output. A missing or
     malformed ai-output.json leaves the run's fields at their defaults.
     Findings are normalized to the production five-key shape. The model
     string comes from analysis_engine.txt; token usage from the first
@@ -1752,21 +1757,24 @@ def _files_from_pinned_diff(repo_path: Path, base_sha: str, head_sha: str) -> st
 
 
 def _prepare_pinned_workspace(
-    repo_path: Path, head_sha: str, base_sha: str | None = None,
+    repo_path: Path, artifact_dir: Path, head_sha: str, base_sha: str | None = None,
 ) -> tuple[bool, str]:
-    """Reset a reused clone so no prior scenario's artifacts leak in.
+    """Reset a reused clone, and seed the pinned diff outside it (#838).
 
-    The clone is shared by every scenario of a repo, and the review reuses a
-    non-empty ``pr.diff`` it finds there, so a stale one would review the
-    wrong PR. Removes every untracked/ignored file, then, when ``base_sha`` is
-    given, writes ``pr.diff`` as ``base...head`` so the review sees the diff as
-    it was at that head rather than the PR's current state, and seeds
-    ``pr-files.seed.json`` with that same diff's file manifest so the runtime's
-    file list and size totals match the diff instead of the PR's live,
-    possibly-since-changed file list. The manifest is part of the pinned
-    replay's identity, not best-effort: a manifest derivation failure fails
-    the whole prepare, exactly like a diff failure, rather than leaving the
-    review to fall back to the live file list. Returns (ok, error).
+    The clone is shared by every scenario of a repo, so a stale untracked
+    file from a previous scenario must never linger; this removes every
+    untracked/ignored file from ``repo_path`` first. When ``base_sha`` is
+    given, it then writes ``pr.diff`` as ``base...head`` — so the review sees
+    the diff as it was at that head rather than the PR's current state — and
+    ``pr-files.seed.json`` with that same diff's file manifest — so the
+    runtime's file list and size totals match the diff instead of the PR's
+    live, possibly-since-changed file list. Both are written to
+    ``artifact_dir`` (the run's private ``PR_REVIEWER_RUN_DIR``), never into
+    ``repo_path``: the reviewed checkout must never be able to seed its own
+    review artifacts. The manifest is part of the pinned replay's identity,
+    not best-effort: a manifest derivation failure fails the whole prepare,
+    exactly like a diff failure, rather than leaving the review to fall back
+    to the live file list. Returns (ok, error).
     """
     result = subprocess.run(
         ["git", "-C", str(repo_path), "clean", "-ffdxq"],
@@ -1790,11 +1798,12 @@ def _prepare_pinned_workspace(
     )
     if result.returncode != 0 or not result.stdout:
         return False, f"diff {base_sha[:12]}...{head_sha[:12]} failed: {result.stderr[:300]}"
-    (repo_path / "pr.diff").write_text(result.stdout, encoding="utf-8")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "pr.diff").write_text(result.stdout, encoding="utf-8")
     files_json = _files_from_pinned_diff(repo_path, base_sha, head_sha)
     if files_json is None:
         return False, f"file manifest {base_sha[:12]}...{head_sha[:12]} could not be derived"
-    (repo_path / "pr-files.seed.json").write_text(files_json, encoding="utf-8")
+    (artifact_dir / "pr-files.seed.json").write_text(files_json, encoding="utf-8")
     return True, ""
 
 
@@ -1894,6 +1903,10 @@ def run_review_for_pr(
     responses, so they never fetch a live PR head. The orchestrator's
     GITHUB_WORKSPACE is pinned to the run's repo clone, because the
     production helpers resolve their workspace from it, never from cwd.
+    Its artifacts (pinned pr.diff/pr-files.seed.json in, ai-output.json/
+    review-corpus.md/tool-harness.json/etc. out) live in a separate, fresh
+    directory the harness passes as PR_REVIEWER_RUN_DIR (#838) — the
+    reviewed checkout is never treated as this run's own artifact store.
 
     Args:
         pr_entry: Corpus entry for one PR (with url, number, repo_full_name).
@@ -1957,6 +1970,15 @@ def run_review_for_pr(
                 run.error = f"Repo {repo_full_name} not available locally"
                 return run
 
+        # #838: every artifact this run's review produces or is seeded with
+        # (the pinned pr.diff/pr-files.seed.json below, and everything the
+        # runtime itself writes) lives in a private directory outside the
+        # checkout, fresh per invocation — never repo_path, which a corpus
+        # entry's own commits could otherwise seed to control what the
+        # reviewer sees.
+        run_dir = Path(tempfile.mkdtemp(prefix=f"artifacts-{pr_number}-", dir=work_dir))
+        run.run_dir = run_dir
+
         # Materialize the corpus PR's exact head revision (detached) before
         # any context is read: a cloned/reused repo_path sits on the
         # default branch until we check the PR head out, and every
@@ -1970,15 +1992,17 @@ def run_review_for_pr(
             else:
                 ok, sha, err = _checkout_pr_head(repo_path, pr_number)
             if ok:
-                ok, err = _prepare_pinned_workspace(repo_path, sha, pr_entry.get("base_sha"))
+                ok, err = _prepare_pinned_workspace(repo_path, run_dir, sha, pr_entry.get("base_sha"))
             if not ok:
                 run.error = f"PR head not materialized: {err}"
                 run.wall_clock_sec = time.monotonic() - start
                 return run
             run.commit_sha = sha
 
-        # Drop stale run artifacts so a reused workspace can never present a
-        # prior run's verdict/tool trace/specialists as this run's.
+        # Drop stale run artifacts so a reused run_dir can never present a
+        # prior run's verdict/tool trace/specialists as this run's. run_dir is
+        # freshly created above, so this is defensive (never a no-op today),
+        # not load-bearing.
         stale_artifacts = (
             [
                 "ai-output.json", "ai-output.primary.json",
@@ -1996,7 +2020,7 @@ def run_review_for_pr(
             ]
         )
         for name in stale_artifacts:
-            (repo_path / name).unlink(missing_ok=True)
+            (run_dir / name).unlink(missing_ok=True)
 
         # Set environment for the review run. REPO + PR_NUMBER are required
         # by the runtime's env validation (it exits without them); AI_* are
@@ -2027,7 +2051,10 @@ def run_review_for_pr(
         # run's temp clone so an ambient Actions value cannot steer the
         # orchestrator at the workflow checkout.
         env["GITHUB_WORKSPACE"] = str(repo_path)
-        env["GITHUB_OUTPUT"] = str(repo_path / "eval-harness-output.txt")
+        # #838: the runtime's own artifact directory, explicit and private —
+        # never left to default to GITHUB_WORKSPACE/cwd (the checkout).
+        env["PR_REVIEWER_RUN_DIR"] = str(run_dir)
+        env["GITHUB_OUTPUT"] = str(run_dir / "eval-harness-output.txt")
         if semantic_fixture is not None:
             env["SEMANTIC_FIXTURE_DIR"] = str(repo_path)
             env["SEMANTIC_FIXTURE_MODE"] = "true"
@@ -2049,8 +2076,8 @@ def run_review_for_pr(
         env.update(model_config.get("extra_env") or {})
 
         # Run the review through the TypeScript runtime (the v3 `run`
-        # entrypoint: same env contract, same artifact names in the run
-        # cwd). By default that is the built bundle next to this harness
+        # entrypoint: same env contract, same artifact names in run_dir).
+        # By default that is the built bundle next to this harness
         # (resolved relative to this script, so the harness is not pinned
         # to one machine's checkout path); `review_script` is the test seam
         # that substitutes a fake orchestrator and is used verbatim when
@@ -2082,17 +2109,18 @@ def run_review_for_pr(
             run.wall_clock_sec = time.monotonic() - start
 
             # Parse outputs. The validated review artifact is ai-output.json
-            # (the run cwd), not verdict.json.
+            # in the run's private artifact directory (PR_REVIEWER_RUN_DIR),
+            # not verdict.json and never repo_path.
             if result.returncode == 0:
-                populate_review_output(run, repo_path)
-                run.primary_findings = _load_review_artifact_findings(repo_path / "ai-output.primary.json")
+                populate_review_output(run, run_dir)
+                run.primary_findings = _load_review_artifact_findings(run_dir / "ai-output.primary.json")
                 if not run.review_markdown:
                     run.review_markdown = result.stdout[:2000] if result.stdout else ""
 
-                populate_tool_trace(run, repo_path)
+                populate_tool_trace(run, run_dir)
                 output_lines: dict[str, str] = {}
                 try:
-                    for line in (repo_path / "eval-harness-output.txt").read_text(encoding="utf-8").splitlines():
+                    for line in (run_dir / "eval-harness-output.txt").read_text(encoding="utf-8").splitlines():
                         key, separator, value = line.partition("=")
                         if separator:
                             output_lines[key] = value
@@ -2110,7 +2138,7 @@ def run_review_for_pr(
                 else:
                     run.stage = "unknown"
                 if deep_review:
-                    run.specialists = load_specialist_telemetry(repo_path)
+                    run.specialists = load_specialist_telemetry(run_dir)
                     if run.specialists:
                         run.specialist_leads = [
                             lead
@@ -2785,19 +2813,22 @@ CONTEXT_ONLY_ENV = {
 }
 
 
-def score_context(repo_path: Path, scenario: RealPRScenario) -> dict[str, Any]:
+def score_context(repo_path: Path, run_dir: Path, scenario: RealPRScenario) -> dict[str, Any]:
     """Whether a vulnerable scenario's defect reached the assembled context.
 
     Reads the review corpus the pipeline wrote and reports: its size, whether
     the defect file is in the PR diff, and, when the defect has a line range,
     how many of those (non-trivial) head lines appear in the corpus and how
-    far into the corpus the first one sits.
+    far into the corpus the first one sits. ``review-corpus.md`` and
+    ``pr.diff`` are the run's own artifacts (#838: read from ``run_dir``, the
+    run's private ``PR_REVIEWER_RUN_DIR`` — never from the reviewed checkout);
+    ``repo_path`` is used only for the checkout's `git show` below.
     """
-    corpus_path = repo_path / "review-corpus.md"
+    corpus_path = run_dir / "review-corpus.md"
     if not corpus_path.is_file():
         return {"context_built": False}
     corpus = corpus_path.read_text(encoding="utf-8", errors="replace")
-    diff = (repo_path / "pr.diff").read_text(encoding="utf-8", errors="replace") if (repo_path / "pr.diff").is_file() else ""
+    diff = (run_dir / "pr.diff").read_text(encoding="utf-8", errors="replace") if (run_dir / "pr.diff").is_file() else ""
     out: dict[str, Any] = {"context_built": True, "corpus_bytes": len(corpus.encode("utf-8"))}
     defect = scenario.defect
     if defect is None:
@@ -2882,7 +2913,8 @@ def run_real_pr_corpus(
                 label = mode if runs_per_mode == 1 else f"{mode} {rep + 1}/{runs_per_mode}"
                 if context_only:
                     repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
-                    row = {"id": scenario.id, "kind": kind, **score_context(repo_path, scenario)}
+                    run_artifact_dir = run.run_dir if run.run_dir is not None else repo_path
+                    row = {"id": scenario.id, "kind": kind, **score_context(repo_path, run_artifact_dir, scenario)}
                     context_rows.append(row)
                     print(f"    [context] {json.dumps(row)}", file=sys.stderr)
                     continue

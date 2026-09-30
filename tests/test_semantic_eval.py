@@ -626,7 +626,7 @@ def test_fixture_run_materializes_pre_fix_files_without_pr_head_checkout(tmp_pat
         "test \"${SKIP_IF_DIFF_UNCHANGED:-}\" = false\n"
         "test -f scripts/sections/corpus.sh\n"
         "grep -F 'run_tool_harness' scripts/sections/corpus.sh\n"
-        "printf '%s\\n' '{\"verdict\":\"request_changes\",\"review_markdown\":\"fixture\",\"findings\":[]}' > ai-output.json\n",
+        "printf '%s\\n' '{\"verdict\":\"request_changes\",\"review_markdown\":\"fixture\",\"findings\":[]}' > \"$PR_REVIEWER_RUN_DIR/ai-output.json\"\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
