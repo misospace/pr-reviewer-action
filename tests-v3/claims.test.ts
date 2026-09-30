@@ -45,6 +45,68 @@ test("#854: a docstring 'only ?cid=' claim over an added comment is anchored to 
   assert.equal(claim!.items[0], "src/tangled.ts:parseTangledAtUri");
 });
 
+test("hunk boundary: a claim comment inside an existing function is anchored via its own hunk's header, never a later hunk's new declaration", () => {
+  const diffText = [
+    "diff --git a/src/pulls.ts b/src/pulls.ts",
+    "@@ -40,6 +40,7 @@ function existingA() {",
+    "   doWork();",
+    "+  // existingA only ever returns a validated, non-null result here.",
+    "   return compute();",
+    " }",
+    "@@ -80,3 +81,6 @@ function unrelated() {",
+    "   return unrelated;",
+    " }",
+    "+",
+    "+function newlyAddedB() {",
+    "+  return null;",
+    "+}",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /existingA only ever returns/.test(c.claim));
+  assert.ok(claim, "expected the in-hunk-1 claim to be extracted");
+  assert.deepEqual(claim!.items, ["src/pulls.ts:existingA"]);
+  assert.ok(!claim!.items.some((item) => item.includes("newlyAddedB")));
+});
+
+test("hunk boundary: with no header function context, an in-function claim falls back to file:L<n>, never a later hunk's declaration", () => {
+  const diffText = [
+    "diff --git a/src/pulls.ts b/src/pulls.ts",
+    "@@ -40,6 +40,7 @@",
+    "   doWork();",
+    "+  // existingA only ever returns a validated, non-null result here.",
+    "   return compute();",
+    " }",
+    "@@ -80,3 +81,6 @@",
+    "   return unrelated;",
+    " }",
+    "+",
+    "+function newlyAddedB() {",
+    "+  return null;",
+    "+}",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /existingA only ever returns/.test(c.claim));
+  assert.ok(claim, "expected the in-hunk-1 claim to be extracted");
+  assert.equal(claim!.items.length, 1);
+  assert.match(claim!.items[0]!, /^src\/pulls\.ts:L\d+$/);
+  assert.ok(!claim!.items.some((item) => item.includes("newlyAddedB")));
+});
+
+test("a leading docstring directly above a new function anchors to that function even when the hunk header names an enclosing scope", () => {
+  const diffText = [
+    "diff --git a/src/widget.ts b/src/widget.ts",
+    "@@ -10,2 +10,7 @@ class Widget {",
+    "+  // render always returns a non-empty string for a mounted widget.",
+    "+  function render(): string {",
+    "+    return this.html;",
+    "+  }",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /render always returns/.test(c.claim));
+  assert.ok(claim, "expected the leading-docstring claim to be extracted");
+  assert.deepEqual(claim!.items, ["src/widget.ts:render"]);
+});
+
 test("PR-body 'cross-checked against ctx.repoDid' claim resolves items from every added-line occurrence", () => {
   const prBody =
     "This PR resolves pulls from repository identity: the explicit `getPull` path is " +
@@ -90,6 +152,29 @@ test("extraction finds nothing when neither the body nor the diff assert anythin
   });
   assert.equal(result.claims.length, 0);
   assert.equal(result.method, "none");
+});
+
+test("HTML comment claims strip both the '-->' and the '--!>' terminator some parsers also accept", () => {
+  const arrow = extractClaimsDeterministic({
+    prBody: "",
+    diffText: [
+      "diff --git a/tmpl.html b/tmpl.html",
+      "@@ -1,1 +1,2 @@",
+      "+<!-- only admins may ever see this block -->",
+    ].join("\n"),
+  });
+  const bang = extractClaimsDeterministic({
+    prBody: "",
+    diffText: [
+      "diff --git a/tmpl.html b/tmpl.html",
+      "@@ -1,1 +1,2 @@",
+      "+<!-- only admins may ever see this block --!>",
+    ].join("\n"),
+  });
+  assert.equal(arrow.claims.length, 1);
+  assert.equal(bang.claims.length, 1);
+  assert.equal(arrow.claims[0]!.claim, "only admins may ever see this block");
+  assert.equal(bang.claims[0]!.claim, "only admins may ever see this block");
 });
 
 // ── rendering ────────────────────────────────────────────────────────────

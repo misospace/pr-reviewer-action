@@ -54,27 +54,69 @@ interface DiffLine {
   text: string;
 }
 
-interface RawLine {
-  path: string;
+interface HunkLineEntry {
   newLine: number;
   text: string;
+  isAdded: boolean;
   /** Symbol this line itself declares (`function foo`, `def foo`, ...), when
-   * it is a signature line; `null` otherwise. */
+   * it is a signature line (context or added); `null` otherwise. */
   declares: string | null;
 }
 
-/** First pass: walk a unified diff and collect every ADDED line with its
- * file path, new-file line number, and (when the line itself is a function/
- * class/const signature) the symbol it declares. */
-function collectAddedLines(diffText: string): RawLine[] {
-  const lines: RawLine[] = [];
+interface HunkGroup {
+  path: string;
+  /** The enclosing symbol git's own hunk-header heuristic reports after the
+   * second `@@` (e.g. `@@ -10,6 +10,7 @@ function existingA() {`), or `null`
+   * when git printed no context or none of it looks like a declaration. */
+  headerSymbol: string | null;
+  /** Context + added lines only, in original order, hunk-local (a removed
+   * line carries no new-file position and is never a candidate anchor). */
+  lines: HunkLineEntry[];
+}
+
+const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@[ \t]?(.*)$/;
+const HUNK_HEADER_CALL_RE = /([A-Za-z_$][\w$]*)\s*\(/g;
+const HUNK_HEADER_TYPE_RE = /\b(?:class|struct|interface|impl|enum|namespace|module|trait)\s+([A-Za-z_$][\w$]*)/;
+
+/** Best-effort symbol from git's hunk-header context text. Prefers a full
+ * signature match (git often prints the exact signature line minus its
+ * trailing brace), then a type/class-like declaration, then the last
+ * `name(` call-shaped token in the context, so callers get *a* concrete
+ * enclosing symbol wherever git's own heuristic found one. */
+function hunkHeaderSymbol(context: string): string | null {
+  const trimmed = context.trim();
+  if (!trimmed) return null;
+  const sig = FUNCTION_SIGNATURE_RE.exec(trimmed);
+  if (sig) return sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? null;
+  const typeMatch = HUNK_HEADER_TYPE_RE.exec(trimmed);
+  if (typeMatch) return typeMatch[1] ?? null;
+  const calls = [...trimmed.matchAll(HUNK_HEADER_CALL_RE)];
+  if (calls.length > 0) return calls[calls.length - 1]![1] ?? null;
+  return null;
+}
+
+/** Walk a unified diff into per-hunk groups, each carrying its own header
+ * symbol and its own context/added lines — hunk boundaries are never
+ * crossed downstream, so a claim can only be anchored to a declaration git
+ * itself associates with that exact hunk (an explicit line inside it, or
+ * git's own funcname heuristic), never to an unrelated declaration added in
+ * a later hunk of the same file. */
+function collectHunks(diffText: string): HunkGroup[] {
+  const hunks: HunkGroup[] = [];
   let path = "";
   let newLine = 0;
+  let current: HunkGroup | null = null;
+
+  const declaresOf = (text: string): string | null => {
+    const sig = FUNCTION_SIGNATURE_RE.exec(text.trimStart());
+    return sig ? (sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? null) : null;
+  };
 
   for (const raw of diffText.split("\n")) {
     if (raw.startsWith("diff --git ")) {
       const match = / b\/(.+)$/.exec(raw);
       path = match ? match[1]! : "";
+      current = null;
       continue;
     }
     if (raw.startsWith("+++ ")) {
@@ -83,55 +125,78 @@ function collectAddedLines(diffText: string): RawLine[] {
       continue;
     }
     if (raw.startsWith("--- ") || raw.startsWith("index ") || raw.startsWith("similarity index")) continue;
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    const hunk = HUNK_HEADER_RE.exec(raw);
     if (hunk) {
       newLine = Number(hunk[1]);
+      current = { path, headerSymbol: hunkHeaderSymbol(hunk[2] ?? ""), lines: [] };
+      hunks.push(current);
       continue;
     }
+    if (current === null) continue; // no hunk opened yet for this file
     if (raw.startsWith("+")) {
       const text = raw.slice(1);
-      const sig = FUNCTION_SIGNATURE_RE.exec(text.trimStart());
-      const declares = sig ? (sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? null) : null;
-      lines.push({ path, newLine, text, declares });
+      current.lines.push({ newLine, text, isAdded: true, declares: declaresOf(text) });
       newLine += 1;
       continue;
     }
     if (raw.startsWith("-")) continue; // removed line: no new-file line number
-    if (raw.startsWith(" ")) newLine += 1; // context line only advances the counter
+    if (raw.startsWith(" ")) {
+      const text = raw.slice(1);
+      current.lines.push({ newLine, text, isAdded: false, declares: declaresOf(text) });
+      newLine += 1;
+    }
   }
-  return lines;
+  return hunks;
 }
 
-/** Second pass: resolve each line's enclosing symbol — the nearest signature
- * at or after the line within the same contiguous file run (a comment
- * conventionally precedes what it documents), falling back to the nearest
- * signature before it (the line sits inside a function body). */
+function isBlankOrComment(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === "" || COMMENT_LINE_RE.test(trimmed) || /^\*\/?/.test(trimmed);
+}
+
+/** Resolve one hunk-local line's enclosing symbol, hunk-scoped only:
+ *
+ * 1. A leading comment/docstring immediately (no non-comment/blank line in
+ *    between) followed by a declaration further down THIS hunk binds to
+ *    that declaration — the strongest, most local signal (a docstring
+ *    always describes the thing directly under it, even inside a class/
+ *    namespace the hunk header would otherwise attribute it to).
+ * 2. Otherwise, the nearest declaration line (context or added) ABOVE this
+ *    line within the same hunk.
+ * 3. Otherwise, git's own hunk-header function context — the declaration
+ *    isn't visible in the hunk body at all (the signature sits outside the
+ *    diff context window), but git's heuristic still names it.
+ * 4. Otherwise `null`: the caller falls back to a plain `file:L<n>` anchor.
+ *
+ * Never looks outside `hunk.lines` — a declaration added in a later hunk of
+ * the same file is invisible here. */
+function resolveHunkSymbol(hunk: HunkGroup, index: number): string | null {
+  const line = hunk.lines[index]!;
+  // A declaration line is its own anchor (e.g. a PR-body identifier match on
+  // the signature line itself, not just on lines inside its body).
+  if (line.declares) return line.declares;
+  if (isBlankOrComment(line.text)) {
+    for (let k = index + 1; k < hunk.lines.length; k++) {
+      const next = hunk.lines[k]!;
+      if (next.declares) return next.declares;
+      if (!isBlankOrComment(next.text)) break;
+    }
+  }
+  for (let k = index - 1; k >= 0; k--) {
+    if (hunk.lines[k]!.declares) return hunk.lines[k]!.declares;
+  }
+  return hunk.headerSymbol;
+}
+
+/** Flatten every hunk's ADDED lines (only) into the shape the claim
+ * extractors consume, each resolved to its hunk-scoped enclosing symbol. */
 function walkAddedLines(diffText: string): Array<DiffLine & { symbol: string | null }> {
-  const lines = collectAddedLines(diffText);
   const out: Array<DiffLine & { symbol: string | null }> = [];
-  let runStart = 0;
-  for (let i = 0; i <= lines.length; i++) {
-    if (i === lines.length || (i > 0 && lines[i]!.path !== lines[i - 1]!.path)) {
-      for (let j = runStart; j < i; j++) {
-        let symbol: string | null = null;
-        for (let k = j; k < i; k++) {
-          if (lines[k]!.declares) {
-            symbol = lines[k]!.declares;
-            break;
-          }
-        }
-        if (symbol === null) {
-          for (let k = j; k >= runStart; k--) {
-            if (lines[k]!.declares) {
-              symbol = lines[k]!.declares;
-              break;
-            }
-          }
-        }
-        const { path, newLine, text } = lines[j]!;
-        out.push({ path, newLine, text, symbol });
-      }
-      runStart = i;
+  for (const hunk of collectHunks(diffText)) {
+    for (let i = 0; i < hunk.lines.length; i++) {
+      const line = hunk.lines[i]!;
+      if (!line.isAdded) continue;
+      out.push({ path: hunk.path, newLine: line.newLine, text: line.text, symbol: resolveHunkSymbol(hunk, i) });
     }
   }
   return out;
@@ -148,7 +213,10 @@ function extractDiffCommentClaims(diffText: string): Claim[] {
   for (const line of walkAddedLines(diffText)) {
     const trimmed = line.text.trim();
     if (!COMMENT_LINE_RE.test(trimmed)) continue;
-    const stripped = trimmed.replace(/^(\/\/|\/\*\*?|\*\/?|#|"""|'''|--|<!--)\s?/, "").replace(/\*\/\s*$/, "").replace(/-->\s*$/, "").trim();
+    // HTML comment terminators: both `-->` and the `--!>` form some HTML
+    // parsers also accept as a valid comment close (CodeQL: incomplete
+    // multi-character sanitization).
+    const stripped = trimmed.replace(/^(\/\/|\/\*\*?|\*\/?|#|"""|'''|--|<!--)\s?/, "").replace(/\*\/\s*$/, "").replace(/--!?>\s*$/, "").trim();
     if (!stripped || !CLAIM_KEYWORDS_RE.test(stripped)) continue;
     const anchor = `${line.path}:${line.symbol ?? `L${line.newLine}`}`;
     const key = clip(stripped, MAX_CLAIM_CHARS).toLowerCase();
