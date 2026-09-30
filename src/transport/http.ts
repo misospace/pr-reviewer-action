@@ -141,7 +141,13 @@ export function describeTransportFailure(failure: TransportFailure, options: Des
   const points = Array.from(redacted);
   const body = points.length > maxBodyChars ? `${points.slice(0, maxBodyChars).join("")}...[truncated]` : redacted;
   const hint = failure.status === 404 ? ` — ${API_FORMAT_404_HINT}` : "";
-  return `HTTP ${failure.status}${body ? `: ${body}` : ""}${hint}`;
+  // A second, whole-string mask pass: a very short configured key (down to
+  // one character, since ai-api-key has no minimum length) can coincide
+  // with ordinary letters in the static "HTTP <status>"/hint text (e.g. the
+  // 'k' in "check"), which the body-only pass above never touches.
+  // Over-redacting a few incidental letters is an acceptable cost next to
+  // ever leaking the credential.
+  return maskKnownSecrets(`HTTP ${failure.status}${body ? `: ${body}` : ""}${hint}`, secrets);
 }
 
 function oversizeFailure(

@@ -1205,10 +1205,23 @@ test("maskKnownSecrets: exact, URL-encoded, and base64 forms of a known secret a
     maskKnownSecrets(`b64:${Buffer.from(secret, "utf8").toString("base64")}`, [secret]),
     "b64:[REDACTED]",
   );
-  // Multiple secrets, only the relevant one present; empty/short/undefined entries are skipped safely.
-  assert.equal(maskKnownSecrets(`x=${secret}`, ["", "ab", undefined, secret]), "x=[REDACTED]");
+  // Multiple secrets, only the relevant one present; empty/undefined entries are skipped safely.
+  assert.equal(maskKnownSecrets(`x=${secret}`, ["", undefined, secret]), "x=[REDACTED]");
   // No known secret present: text passes through unchanged.
   assert.equal(maskKnownSecrets("nothing sensitive here", [secret]), "nothing sensitive here");
+});
+
+test("maskKnownSecrets: a configured key of any length is masked — ai-api-key has no minimum", () => {
+  // A one-character key: every literal occurrence is masked. Chosen against
+  // surrounding words with no incidental match, so the exact-equality
+  // assertion is unambiguous; a separate case below shows over-redaction
+  // (an accepted cost) when the letter also appears elsewhere.
+  assert.equal(maskKnownSecrets("credential k rejected", ["k"]), "credential [REDACTED] rejected");
+  assert.equal(maskKnownSecrets("token k rejected", ["k"]).includes("k"), false);
+  // A three-character key.
+  assert.equal(maskKnownSecrets("credential abc was rejected", ["abc"]), "credential [REDACTED] was rejected");
+  // Only an empty string is skipped; a merely-short one is still masked.
+  assert.equal(maskKnownSecrets("abc stays abc", ["abc", ""]), "[REDACTED] stays [REDACTED]");
 });
 
 test("describeTransportFailure: a known secret echoed bare in the body is masked even though it matches no redactText pattern", () => {

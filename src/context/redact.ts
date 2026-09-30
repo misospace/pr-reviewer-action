@@ -46,15 +46,19 @@ export function redactText(text: string | null | undefined): string {
  * exact secret must be nuked unconditionally, even when it doesn't happen to
  * match any heuristic pattern (e.g. an opaque key like `sk-...` echoed bare
  * in a provider's error body, with no `key=`/`Bearer `/etc. framing).
- * Case-sensitive substring replacement; secrets shorter than 4 characters
- * are skipped (too likely to nuke unrelated text, and not a plausible secret
- * length anyway). Callers must run this BEFORE any truncation, so a partial
- * secret split across a truncation boundary is never left exposed.
+ * Case-sensitive substring replacement; every non-empty secret is masked
+ * regardless of length — `ai-api-key` has no configured minimum, a
+ * one-character local key is plausible, and over-redaction in a diagnostic
+ * string is an acceptable cost next to leaking a credential. Only an empty
+ * string (nothing to mask) is skipped; the same rule applies to each
+ * variant (a variant is skipped only if it comes out empty). Callers must
+ * run this BEFORE any truncation, so a partial secret split across a
+ * truncation boundary is never left exposed.
  */
 export function maskKnownSecrets(text: string, secrets: readonly (string | null | undefined)[] = []): string {
   let masked = text;
   for (const secret of secrets) {
-    if (!secret || secret.length < 4) continue;
+    if (!secret) continue;
     const variants = new Set<string>([secret]);
     try {
       variants.add(encodeURIComponent(secret));
@@ -68,7 +72,7 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
       // kept for symmetry with the encodeURIComponent guard above.
     }
     for (const variant of variants) {
-      if (variant.length < 4) continue;
+      if (variant === "") continue;
       masked = masked.split(variant).join(REDACTED);
     }
   }

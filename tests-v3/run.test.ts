@@ -1704,3 +1704,48 @@ test("#846 security review: harnessTransportAdapter masks the configured API key
     await server.close();
   }
 });
+
+test("#846 security review: a one-character or three-character configured API key is masked in the primary error log and artifact", async () => {
+  for (const apiKey of ["k", "abc"]) {
+    const server = await startMockServer((_req, _body, res) => {
+      res.statusCode = 404;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: `no route for this model; credential ${apiKey} rejected` } }));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const errors: string[] = [];
+    try {
+      await assert.rejects(() => runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": server.url,
+          "ai-model": "m",
+          "ai-stream": "false",
+          "ai-api-key": apiKey,
+          "ai-primary-retries": "1",
+          "ai-primary-retry-delay-sec": "0",
+          "on-model-failure": "fail",
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        sleep: async () => {},
+        error: (line) => errors.push(line),
+        quiet: true,
+      }));
+      const failureLine = errors.find((line) => line.includes("transport failures exhausted"));
+      assert.ok(failureLine, `apiKey=${JSON.stringify(apiKey)}: expected a transport-exhausted error line, got: ${JSON.stringify(errors)}`);
+      for (const line of errors) {
+        assert.ok(!line.includes(apiKey), `apiKey=${JSON.stringify(apiKey)} must not appear in error log line: ${line}`);
+      }
+      const responseArtifact = JSON.parse(readFileSync(join(runDir, "ai-response.primary.json"), "utf8")) as Record<string, unknown>;
+      assert.ok(!String(responseArtifact.error).includes(apiKey), `apiKey=${JSON.stringify(apiKey)} must not appear in the persisted response artifact`);
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  }
+});

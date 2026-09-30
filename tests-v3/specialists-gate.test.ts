@@ -384,3 +384,43 @@ test("#846: a specialist role's HTTP errors carry status, a redacted body excerp
     await server.close();
   }
 });
+
+test("#846 security review: a one-character or three-character configured API key is masked in a specialist role's log/artifacts", async () => {
+  for (const apiKey of ["k", "abc"]) {
+    const server = await startMockServer((_req, _body, res) => {
+      res.statusCode = 404;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: `no route for this model; credential ${apiKey} rejected` } }));
+    });
+    try {
+      const requestFn = specialistRequestFn({ baseUrl: server.url, apiKey, anthropicVersion: "2023-06-01" });
+      const result = await run(
+        { DEEP_REVIEW: "auto", AI_STREAM: "false" },
+        {
+          requestFn,
+          sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Math.max(0, seconds))),
+          setup: (root) => writeFileSync(join(root, "classification.json"), JSON.stringify({ pr_kind: "dependency_upgrade", risk_flags: [], changed_files_summary: ["package.json"] })),
+        },
+      );
+      assert.equal(result.code, 0);
+      const roleLine = result.out.find((line) => line.startsWith("specialist tests:"));
+      assert.ok(roleLine, `apiKey=${JSON.stringify(apiKey)}: expected a "specialist tests:" log line, got: ${JSON.stringify(result.out)}`);
+      assert.ok(!roleLine!.includes(apiKey), `apiKey=${JSON.stringify(apiKey)} must not appear in the role log line: ${roleLine}`);
+      // A single-character key can legitimately coincide with an unrelated
+      // letter elsewhere in the run's output (e.g. "risk_flags"/"pr_kind" in
+      // a SKIPPED role's classification-derived reason text), so check the
+      // "tests" role's own masked fields specifically rather than the whole
+      // aggregate/output for the short-key cases.
+      const aggregate = JSON.parse(result.read("specialists.json")) as { roles: { role: string; error_detail?: string }[] };
+      const testsRole = aggregate.roles.find((role) => role.role === "tests")!;
+      assert.ok(!(testsRole.error_detail ?? "").includes(apiKey), `apiKey=${JSON.stringify(apiKey)} must not appear in the tests role's error_detail`);
+      const roleArtifact = JSON.parse(result.read("specialist-tests.json")) as { errors: string[] };
+      assert.ok(!roleArtifact.errors.some((error) => error.includes(apiKey)), `apiKey=${JSON.stringify(apiKey)} must not appear in the persisted role artifact's errors`);
+      const responseArtifact = JSON.parse(result.read("specialist-tests.response.json")) as { error?: string };
+      assert.ok(!(responseArtifact.error ?? "").includes(apiKey), `apiKey=${JSON.stringify(apiKey)} must not appear in the persisted response artifact`);
+      rmSync(result.root, { recursive: true, force: true });
+    } finally {
+      await server.close();
+    }
+  }
+});
