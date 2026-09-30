@@ -1,10 +1,12 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["github>misospace/renovate-config"],
-  // Enable pip-compile manager to auto-regenerate requirements.txt from requirements.in.
-  // Disable the plain pip_requirements manager to avoid duplicate updates.
-  enabledManagers: ["npm", "pip-compile"],
+  // Configure pip-compile to manage requirements.in → requirements.txt.
   "pip-compile": {
-    fileMatch: ["(^|/)requirements\\.in$"],
+    fileMatch: ["(^|/)requirements\\.txt$"],
+  },
+  // Disable plain pip_requirements manager to avoid conflicting with pip-compile.
+  "pip_requirements": {
+    enabled: false,
   },
 }
