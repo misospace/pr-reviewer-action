@@ -365,3 +365,78 @@ test("disabled/empty: no anchors, no source root, or an unreadable file yields n
   const noRoot = detectEquivalentPathGroups(anchors([file("a.ts", "typescript", [])]), null);
   assert.equal(noRoot.groups.length, 0);
 });
+
+test("render: backticks and CR/LF in repo-derived values never break a code span (#252)", () => {
+  const { root, cleanup } = withRoot();
+  try {
+    // A return_type group whose symbol names carry hostile backtick/CR
+    // characters (anchor names are diff-derived and attacker-influenced).
+    write(
+      root,
+      "src/evil.ts",
+      [
+        "export function one(): Shared {",
+        "  return shared();",
+        "}",
+        "",
+        "export function two(): Shared {",
+        "  return shared();",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const a = anchors([
+      file("src/evil.ts", "typescript", [
+        { name: "na`me", kind: "function", confidence: "high", line: 1 },
+        { name: "na\rme", kind: "function", confidence: "high", line: 5 },
+      ]),
+    ]);
+    const md = renderEquivalentPathsMarkdown(detectEquivalentPathGroups(a, root));
+    const memberLines = md.split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(memberLines.length, 2);
+    // Each member line is exactly two well-formed code spans: a backtick in
+    // a value cannot close the span early, and CR/LF cannot split the line.
+    for (const line of memberLines) assert.match(line, /^- `[^`]*:\d+` `[^`]*`$/);
+    assert.ok(memberLines.every((l) => l.endsWith("`name`")));
+
+    // A same_constructor group whose object-literal key carries a backtick
+    // (a quoted key passes the key-extraction regex verbatim). The #854
+    // shape — a shared builder called from two sites — because a function
+    // whose only top-level statement is `return { ... }` is itself a
+    // builder, not a site.
+    write(
+      root,
+      "src/keys.ts",
+      [
+        "const buildThing = (x) => {",
+        "  return {",
+        '    "ke`y": x,',
+        "    b: x,",
+        "    c: x,",
+        "  };",
+        "}",
+        "",
+        "export function first() {",
+        "  return buildThing(1);",
+        "}",
+        "",
+        "export function second() {",
+        "  return buildThing(2);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const b = anchors([file("src/keys.ts", "typescript", [])]);
+    const resultB = detectEquivalentPathGroups(b, root);
+    const group = resultB.groups.find((g) => g.rule === "same_constructor");
+    assert.ok(group, "expected a same_constructor group");
+    const heading = renderEquivalentPathsMarkdown(resultB)
+      .split("\n")
+      .find((l) => l.startsWith("## Group 1:"))!;
+    // The shared-key label is one well-formed span with the backtick stripped.
+    assert.equal((heading.match(/`/g) ?? []).length, 2);
+    assert.ok(heading.includes("`b, c, key`"));
+  } finally {
+    cleanup();
+  }
+});

@@ -168,8 +168,8 @@ export interface SpecialistRunInput {
    * compact "Equivalent Paths to Compare" section appended to the
    * CORRECTNESS role's user message only, never security/tests. Not
    * supported in `combined_scout` (one shared message for every role) —
-   * a set `equivalentPaths` in that mode is silently ignored, matching
-   * the pre-#875 combined_scout corpus exactly. */
+   * a set `equivalentPaths` in that mode is dropped, with a warning noting
+   * the drop, matching the pre-#875 combined_scout corpus exactly. */
   equivalentPaths?: {
     section: string;
   };
@@ -188,7 +188,8 @@ export interface SpecialistRunResult {
   specialistsMd: string;
   specialistLeadsPresent: string;
   /** Fail-soft advisory notices (e.g. the combined_scout→three_call
-   * adversarial downgrade); never affects the exit status. */
+   * adversarial downgrade, the dropped combined_scout equivalent-paths
+   * hint); never affects the exit status. */
   warnings: string[];
 }
 
@@ -677,6 +678,13 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     const userMessage = `${USER_PREFIX}\n\n${input.corpus}`;
 
     if (execution === "combined_scout") {
+      // #875: the equivalent-paths hint is correctness-only and the scout
+      // shares ONE user message across roles, so a set hint is dropped here
+      // (matching the pre-#875 combined_scout corpus exactly); note the
+      // drop rather than failing silently.
+      if (input.equivalentPaths?.section) {
+        warnings.push("equivalent-paths hint is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; dropping it");
+      }
       const scout = await runSpecialistScout(
         input.rolesToRun,
         userMessage,

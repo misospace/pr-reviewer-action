@@ -508,6 +508,7 @@ export function detectEquivalentPathGroups(
     for (const g of constructorGroups) {
       if (groups.length >= MAX_GROUPS) break;
       groups.push(g);
+      for (const m of g.members) claimed.add(`${m.path}\0${m.line}`);
     }
   }
 
@@ -606,6 +607,17 @@ const RULE_LABEL: Readonly<Record<EquivalentPathRule, string>> = {
   privileged_operation: "call the same privileged operation",
 };
 
+/** Repo-derived values (diff-sourced paths, symbol names, object-literal
+ * keys) are data, never markdown: a backtick inside a value would close
+ * the surrounding code span early and let the rest of the line render as
+ * markdown, and a CR/LF would split the member line in two (#252
+ * adversarial boundary). Stripped before interpolation so every span stays
+ * well formed — a mangled hostile value is acceptable here, since these
+ * are pointer labels, not content. */
+function sanitizeCodeSpan(value: string): string {
+  return value.replace(/[`\r\n]/g, "");
+}
+
 /** Renders the "Equivalent paths to compare" section, or "" when there are
  * no groups (callers should treat "" as "omit the section"). */
 export function renderEquivalentPathsMarkdown(artifact: EquivalentPathsArtifact): string {
@@ -629,9 +641,9 @@ export function renderEquivalentPathsMarkdown(artifact: EquivalentPathsArtifact)
   );
   lines.push("");
   artifact.groups.forEach((group, index) => {
-    lines.push(`## Group ${index + 1}: ${RULE_LABEL[group.rule]} (\`${group.shared}\`)`);
+    lines.push(`## Group ${index + 1}: ${RULE_LABEL[group.rule]} (\`${sanitizeCodeSpan(group.shared)}\`)`);
     for (const member of group.members) {
-      lines.push(`- \`${member.path}:${member.line}\` \`${member.name}\``);
+      lines.push(`- \`${sanitizeCodeSpan(member.path)}:${member.line}\` \`${sanitizeCodeSpan(member.name)}\``);
     }
     lines.push("");
   });

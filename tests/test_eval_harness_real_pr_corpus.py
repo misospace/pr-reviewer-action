@@ -22,6 +22,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Both import styles are intentional: the module object is needed to
+# monkeypatch `eval_harness.run_review_for_pr` and reach the private
+# `_main_real_pr_corpus`; the from-imports keep the long-standing call
+# sites readable.
 import eval_harness
 
 from eval_harness import (

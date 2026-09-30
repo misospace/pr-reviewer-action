@@ -501,6 +501,42 @@ test("runSpecialists: #758 adversarial arm runs correctness blinded and forces t
   assert.equal(roles.find((r) => r.role === "security")!.corpus_source, "standard");
 });
 
+test("runSpecialists: #875 a set equivalent-paths hint is dropped with a warning only under combined_scout", async () => {
+  const seen: string[] = [];
+  const requestFn = async (payload: Record<string, unknown>): Promise<SpecialistTransportOutcome> => {
+    const messages = payload.messages as Array<{ role: string; content: string }>;
+    seen.push(messages.find((m) => m.role === "user")!.content);
+    return { ok: true, raw: { choices: [{ message: { content: "{\"leads\":[]}" }, finish_reason: "stop" }] } };
+  };
+  // combined_scout + hint set: the hint never reaches the one shared user
+  // message, and the drop is noted.
+  const scout = await runSpecialists(
+    baseInput({
+      config: { ...baseInput().config, execution: "combined_scout" },
+      requestFn,
+      equivalentPaths: { section: "# Equivalent Paths to Compare" },
+    }),
+  );
+  assert.deepEqual(scout.warnings, [
+    "equivalent-paths hint is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; dropping it",
+  ]);
+  assert.ok(seen.every((user) => !user.includes("Equivalent Paths to Compare")));
+
+  // three_call + hint set: injected into the correctness message, no warning.
+  seen.length = 0;
+  const threeCall = await runSpecialists(
+    baseInput({ requestFn, equivalentPaths: { section: "# Equivalent Paths to Compare" } }),
+  );
+  assert.deepEqual(threeCall.warnings, []);
+  assert.equal(seen.filter((user) => user.includes("Equivalent Paths to Compare")).length, 1);
+
+  // combined_scout without the hint: pre-#875 behavior, no warning.
+  const scoutNoHint = await runSpecialists(
+    baseInput({ config: { ...baseInput().config, execution: "combined_scout" }, requestFn }),
+  );
+  assert.deepEqual(scoutNoHint.warnings, []);
+});
+
 test("fitToBytes keeps whole code points and never splits a surrogate pair", () => {
   const text = "ab\u{1F600}\u{1F600}";
   assert.equal(fitToBytes(text, 5), "ab");
