@@ -127,13 +127,6 @@ export function eventLabelName(label: PrecheckEventLabel | unknown): string {
   return "";
 }
 
-/** `pull_request_target` carries the same PR-event shape as `pull_request`
- * (#892): the fork-review workflow's `ai-review-fork` label gate
- * (`docs/fork-review.md`) fires on `pull_request_target`, so the
- * label-driven re-review gate below must treat both as a PR event. */
-function isPullRequestEvent(name: string | undefined): boolean {
-  return name === "pull_request" || name === "pull_request_target";
-}
 
 export interface PrecheckSpec {
   env: Record<string, string>;
@@ -253,7 +246,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   const rereviewLabel = env.REREVIEW_LABEL || "ai-review";
   let forceReview = envFlag(env, "FORCE_REVIEW", false);
   const event = spec.event;
-  if (event && isPullRequestEvent(event.name) && event.action === "labeled") {
+  if (event && event.name === "pull_request" && event.action === "labeled") {
     if (eventLabelName(event.label) === rereviewLabel) {
       forceReview = true;
     } else {

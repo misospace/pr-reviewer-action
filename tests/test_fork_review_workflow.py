@@ -278,6 +278,13 @@ def test_fork_review_publishes_no_native_approval(fork_text) -> None:
     assert values.get("approve-forks") == "false"
 
 
+def test_fork_authorization_label_is_never_the_rereview_label(fork_text) -> None:
+    """ai-review-fork authorizes every later push; as the rereview label the
+    action would strip it after the first review and revoke authorization."""
+    values = _extract_with_block(REVIEW_STEP, fork_text)
+    assert values.get("rereview-label", "ai-review") != "ai-review-fork"
+
+
 def test_fork_deep_review_is_bounded_auto(fork_text) -> None:
     values = _extract_with_block(REVIEW_STEP, fork_text)
     assert values.get("deep-review") == "auto"

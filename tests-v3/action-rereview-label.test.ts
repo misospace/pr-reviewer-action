@@ -101,6 +101,7 @@ function baseEnv(options: {
   githubUrl: string;
   modelUrl: string;
   workspace: string;
+  eventName?: string;
 }): NodeJS.ProcessEnv {
   // Deliberately NOT `{ ...process.env, ... }` (the #890 CI lesson: this
   // repo's own CI runs these tests inside a real GitHub Actions job, so
@@ -112,7 +113,7 @@ function baseEnv(options: {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     GITHUB_ACTIONS: "true",
-    GITHUB_EVENT_NAME: "pull_request",
+    GITHUB_EVENT_NAME: options.eventName ?? "pull_request",
     GITHUB_EVENT_PATH: options.eventPath,
     GITHUB_REF: "refs/pull/7/merge",
     GITHUB_HEAD_REF: "feature",
@@ -181,15 +182,7 @@ test("#892: the ai-review label (real object shape) forces a fresh review and cl
     assert.equal(outputs["should-review"], "true");
     assert.equal(outputs["skip-reason"], "");
 
-    // Two DELETEs are expected on this branch, not one: `publishReview`
-    // already unconditionally strips `REREVIEW_LABEL` after any successful
-    // publish (`src/publish/publish.ts`'s `input.rerunLabel` handling,
-    // pre-existing and out of scope for #892), and `action.ts`'s own
-    // event-gated cleanup this fix restores runs right after. Both target
-    // the same idempotent DELETE endpoint, so the duplicate is harmless —
-    // what matters here is that the SECOND (gated) call fires at all, which
-    // it never did before this fix reached the review branch.
-    assert.equal(github.deleteCalls.length, 2, "both the publish-side and the event-gated cleanup should fire on this branch");
+    assert.equal(github.deleteCalls.length, 1, "the label is cleared exactly once, by the event-gated cleanup");
     for (const call of github.deleteCalls) assert.match(call, /\/repos\/o\/r\/issues\/7\/labels\/ai-review$/);
   } finally {
     await model.close();
@@ -271,6 +264,45 @@ test("#892: an unrelated label never forces a review and never clears the ai-rev
     assert.equal(outputs["should-review"], "false");
     assert.equal(outputs["skip-reason"], "unrelated-label");
     assert.equal(github.deleteCalls.length, 0, "an unrelated label must never be cleared");
+  } finally {
+    await model.close();
+    await github?.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#892: the fork workflow's pull_request_target ai-review-fork label reviews and keeps the authorization label", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "action-rereview-workspace-fork-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "action-rereview-runner-temp-fork-"));
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  let github: Awaited<ReturnType<typeof startGithubMock>> | undefined;
+  try {
+    const baseSha = "b".repeat(40);
+    const headSha = "a".repeat(40);
+    github = await startGithubMock({ baseSha, headSha });
+
+    const eventPath = join(runnerTemp, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 3, name: "ai-review-fork", color: "0000ff" },
+      pull_request: { number: 7, head: { sha: headSha } },
+    }));
+
+    const env = baseEnv({ eventPath, runnerTemp, githubUrl: github.url, modelUrl: model.url, workspace, eventName: "pull_request_target" });
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0);
+
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    assert.equal(outputs["should-review"], "true");
+    assert.equal(outputs["skip-reason"], "");
+    // ai-review-fork authorizes every later push (docs/fork-review.md); the
+    // reviewer must never strip it, and a non-label-triggered publish must
+    // not DELETE the rereview label either.
+    assert.equal(github.deleteCalls.length, 0, "no label may be removed on the fork path");
   } finally {
     await model.close();
     await github?.close();

@@ -94,9 +94,6 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
   if (pre.should_review !== "true") {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
-    // #892: the label-cleanup call below this skip branch never ran because
-    // this was a `return`. A label-triggered run that still ends up
-    // skipping (e.g. a genuinely empty diff) must not strand the label.
     await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }
@@ -139,8 +136,12 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       VERDICT_POLICY: review.verdictPolicy,
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
+    // The event-gated maybeClearRereviewLabel below owns label cleanup here;
+    // publish's own rerunLabel strip would fire on every run, not just
+    // label-triggered ones.
+    const { rerunLabel: _rerunLabel, ...publishInput } = publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform);
     const input = {
-      ...publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform),
+      ...publishInput,
       // The #810 coverage notice and the #812 CI conclusion reach the
       // published marker and body only through these.
       ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),

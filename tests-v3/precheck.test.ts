@@ -593,9 +593,7 @@ test("precheck fails loudly on a resolved tangled platform before any backend op
   assert.equal(adapterCalls, 0, "no backend operation may run for tangled");
 });
 
-// ── #892: the label gate normalizes the real object label shape and also
-// treats pull_request_target as a PR event (the fork-review workflow's
-// ai-review-fork label gate fires on pull_request_target; docs/fork-review.md) ──
+// ── #892: the label gate normalizes the real object label shape ──
 
 test("eventLabelName normalizes both the real {name} object shape and a bare string", () => {
   assert.equal(eventLabelName({ name: "ai-review", color: "00ff00" }), "ai-review");
@@ -620,24 +618,15 @@ test("runPrecheck forces a review from the real {name} object label shape on a p
   assert.equal(output.skip_reason, "");
 });
 
-test("runPrecheck forces a review the same way on pull_request_target (the fork-review ai-review-fork label gate)", async () => {
-  const fx = fixture("rereview-label-forces");
-  const output = await runPrecheck({
-    env: fx.env,
-    adapter: new FixtureAdapter("github", fx.platform),
-    event: { ...fx.event, name: "pull_request_target" },
-  });
-  assert.equal(output.should_review, "true");
-  assert.equal(output.skip_reason, "");
-});
-
-test("runPrecheck still no-ops an unrelated object-shaped label on pull_request_target", async () => {
+test("runPrecheck never treats the fork workflow's pull_request_target ai-review-fork label as an unrelated label", async () => {
+  // ai-review-fork is the fork workflow's authorization label, checked by
+  // scripts/fork_review_gate.py, not a re-review label: the event must fall
+  // through to the normal precheck path rather than skip.
   const fx = fixture("unrelated-label-noop");
   const output = await runPrecheck({
     env: fx.env,
     adapter: new FixtureAdapter("github", fx.platform),
-    event: { ...fx.event, name: "pull_request_target" },
+    event: { name: "pull_request_target", action: "labeled", label: { name: "ai-review-fork" } },
   });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "unrelated-label");
+  assert.notEqual(output.skip_reason, "unrelated-label");
 });
