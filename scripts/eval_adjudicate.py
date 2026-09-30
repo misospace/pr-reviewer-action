@@ -74,7 +74,15 @@ VALID_FP_LABEL = {"real", "false_positive", "unverifiable"}
 # shared helpers
 
 
-def _pr_id(scenario: dict[str, Any]) -> str:
+def _scenario_id(scenario: dict[str, Any]) -> str:
+    """Return the unique identifier for a scenario.
+
+    Uses the scenario's 'id' field if present (unique per corpus entry),
+    otherwise falls back to repo#number@head_sha for older reports. cmd_pack
+    refuses to mix the two schemas, since one scenario would get two keys.
+    """
+    if "id" in scenario and scenario["id"]:
+        return scenario["id"]
     return f"{scenario['repo_full_name']}#{scenario['number']}@{scenario['head_sha']}"
 
 
@@ -146,20 +154,28 @@ def cmd_pack(args: argparse.Namespace) -> int:
     # (e.g. two shards of the same sweep) would each restart their run
     # counter at 1 and collide on the same (arm, pr, rep) key.
     raw_runs: list[tuple[str, str, str, dict[str, Any]]] = []
+    id_schema: dict[bool, str] = {}
     for arm_label, paths in arms:
         for path in paths:
             report = _load_json(path)
             for scenario in report.get("per_scenario_results", []):
-                pr = _pr_id(scenario)
+                id_schema.setdefault(bool(scenario.get("id")), path)
+                if len(id_schema) > 1:
+                    raise SystemExit(
+                        "pack: mixed scenario identity schemas -- "
+                        f"{id_schema[True]} has corpus ids, {id_schema[False]} does not; "
+                        "re-run the older report so every scenario carries an id"
+                    )
+                scenario_key = _scenario_id(scenario)
                 meta = _scenario_meta(scenario)
-                group = pr_groups.setdefault(pr, {"meta": meta, "findings": []})
+                group = pr_groups.setdefault(scenario_key, {"meta": meta, "findings": []})
                 if group["meta"] != meta:
                     raise SystemExit(
-                        f"pack: conflicting metadata for {pr} between reports "
+                        f"pack: conflicting metadata for {scenario_key} between reports "
                         f"({group['meta']!r} vs {meta!r})"
                     )
                 for mode, _idx, run in _iter_runs(scenario.get("runs", {})):
-                    raw_runs.append((arm_label, pr, mode, run))
+                    raw_runs.append((arm_label, scenario_key, mode, run))
 
     modes_by_arm_pr: dict[tuple[str, str], set[str]] = {}
     for arm_label, pr, mode, _run in raw_runs:
