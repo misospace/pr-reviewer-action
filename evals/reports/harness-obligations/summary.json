@@ -704,5 +704,44 @@
     "tool_calls": 28
    }
   }
+ },
+ "adjudicated": {
+  "totals": {
+   "on": {
+    "runs": 111,
+    "semantic_catch": 24,
+    "catch_incl_partial": 38,
+    "blocker_major": 146,
+    "bm_false_positive": 47,
+    "bm_real_other": 59,
+    "runs_with_bm_fp": 25
+   },
+   "off": {
+    "runs": 111,
+    "semantic_catch": 27,
+    "catch_incl_partial": 33,
+    "blocker_major": 138,
+    "bm_false_positive": 43,
+    "bm_real_other": 59,
+    "runs_with_bm_fp": 21
+   }
+  },
+  "paired_semantic_catch_delta": {
+   "mean": -0.027,
+   "lo": -0.126,
+   "hi": 0.072
+  },
+  "paired_bm_fp_per_run_delta": {
+   "mean": 0.036,
+   "lo": -0.144,
+   "hi": 0.216
+  },
+  "prs_on_better": 8,
+  "prs_on_worse": 9,
+  "paired_catch_incl_partial_delta": {
+   "mean": 0.045,
+   "lo": -0.027,
+   "hi": 0.117
+  }
  }
 }
